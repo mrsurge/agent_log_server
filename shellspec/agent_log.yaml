@@ -1,0 +1,13 @@
+version: "1"
+shells:
+  agent_log:
+    backend: proc
+    cwd: .
+    subgroups: ["agent_log", "coordination"]
+    command:
+      - python
+      - server.py
+      - --log
+      - agent_chat.log.jsonl
+      - --port
+      - "12356"

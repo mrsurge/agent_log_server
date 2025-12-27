@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Agent Log</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="wrap main-wrap">
+    <header>
+      <div class="header-top">
+        <h1>Agent Log</h1>
+        <span id="status" class="status"></span>
+      </div>
+      <div class="row tiny">
+        <label>
+          <span>Pseudonym</span>
+          <input id="who" type="text" placeholder="agent-alpha" />
+        </label>
+        <div class="controls">
+          <button id="refresh">Refresh</button>
+          <button id="quit" class="danger">Quit Server</button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <div id="chat" class="chat" aria-live="polite"></div>
+    </main>
+
+    <footer>
+      <div class="input-area">
+        <textarea id="msg" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="send">Send</button>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
