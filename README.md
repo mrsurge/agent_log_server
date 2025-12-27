@@ -52,3 +52,7 @@ python -m framework_shells.cli.main up shellspec/agent_log.yaml
 The Framework Shells docs describe the shellspec YAML format and the `cli.main up <spec>` pattern.  fileciteturn1file0L11-L20 fileciteturn1file3L28-L40
 
 > Note: if your Framework Shells runtime requires auth, set `FRAMEWORK_SHELLS_SECRET` per your normal workflow.
+
+## License
+
+GPL-3.0 (see `LICENSE`).
