@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "updatedAt": "2025-12-28T03:41:23.391828Z",
+  "generated": false,
+  "workers": [
+    {
+      "id": "root",
+      "root": ".",
+      "enabled": true,
+      "pyright_project": "pyrightconfig.json"
+    }
+  ]
+}
