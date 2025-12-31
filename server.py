@@ -40,6 +40,8 @@ _appserver_ws_clients_ui: List[WebSocket] = []
 _appserver_ws_clients_raw: List[WebSocket] = []
 _appserver_turn_state: Dict[str, Dict[str, Any]] = {}
 _appserver_item_state: Dict[str, Dict[str, Any]] = {}
+_appserver_raw_buffer: List[str] = []
+_appserver_rpc_waiters: Dict[str, asyncio.Future] = {}
 DEBUG_MODE = False
 CODEX_AGENT_THEME_COLOR = "#0d0f13"
 CODEX_AGENT_ICON_PATH = "/static/codexas-icon.svg"
@@ -687,6 +689,9 @@ async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
 
 
 async def _broadcast_appserver_raw(message: str) -> None:
+    _appserver_raw_buffer.append(message)
+    if len(_appserver_raw_buffer) > 500:
+        _appserver_raw_buffer[:] = _appserver_raw_buffer[-500:]
     if not _appserver_ws_clients_raw:
         return
     stale: List[WebSocket] = []
@@ -1049,6 +1054,9 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
                         "id": parsed.get("id"),
                         "result": result,
                     })
+                waiter = _appserver_rpc_waiters.pop(str(parsed.get("id")), None)
+                if waiter and not waiter.done():
+                    waiter.set_result(parsed)
                 continue
 
             label = None
@@ -1469,7 +1477,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     Small("Single-session mode"),
                                     cls="brand"
                                 ),
-                                Button("Back", id="conversation-back", cls="btn ghost"),
+                                Div(
+                                    Button("Settings", id="conversation-settings", cls="btn"),
+                                    Button("Back", id="conversation-back", cls="btn ghost"),
+                                    cls="drawer-actions"
+                                ),
                                 cls="drawer-header"
                             ),
                             Div(
@@ -1526,6 +1538,101 @@ async def codex_agent_ui() -> FastHTMLResponse:
                             id="conversation-drawer"
                         ),
                         cls="grid"
+                    ),
+                    Div(
+                        Div(
+                            Div(
+                                H3("Conversation Settings"),
+                                Button("×", id="settings-close", cls="btn ghost"),
+                                cls="settings-header"
+                            ),
+                            Div(
+                                Label(
+                                    Span("CWD"),
+                                    Div(
+                                        Input(type="text", id="settings-cwd", placeholder="~/project"),
+                                        Button("Browse", id="settings-cwd-browse", cls="btn ghost"),
+                                        cls="settings-row"
+                                    ),
+                                ),
+                                Label(
+                                    Span("Approval Policy"),
+                                    Div(
+                                        Input(type="text", id="settings-approval", placeholder="on-failure"),
+                                        Button("▾", id="settings-approval-toggle", cls="btn ghost dropdown-toggle"),
+                                        Div(id="settings-approval-options", cls="dropdown-list"),
+                                        cls="dropdown-field"
+                                    ),
+                                ),
+                                Label(
+                                    Span("Sandbox Policy"),
+                                    Div(
+                                        Input(type="text", id="settings-sandbox", placeholder="workspaceWrite"),
+                                        Button("▾", id="settings-sandbox-toggle", cls="btn ghost dropdown-toggle"),
+                                        Div(id="settings-sandbox-options", cls="dropdown-list"),
+                                        cls="dropdown-field"
+                                    ),
+                                ),
+                                Label(
+                                    Span("Model"),
+                                    Div(
+                                        Input(type="text", id="settings-model", placeholder="gpt-5.1-codex"),
+                                        Button("▾", id="settings-model-toggle", cls="btn ghost dropdown-toggle"),
+                                        Div(id="settings-model-options", cls="dropdown-list"),
+                                        cls="dropdown-field"
+                                    ),
+                                ),
+                                Label(
+                                    Span("Effort"),
+                                    Div(
+                                        Input(type="text", id="settings-effort", placeholder="medium"),
+                                        Button("▾", id="settings-effort-toggle", cls="btn ghost dropdown-toggle"),
+                                        Div(id="settings-effort-options", cls="dropdown-list"),
+                                        cls="dropdown-field"
+                                    ),
+                                ),
+                                Label(
+                                    Span("Summary"),
+                                    Div(
+                                        Input(type="text", id="settings-summary", placeholder="concise"),
+                                        Button("▾", id="settings-summary-toggle", cls="btn ghost dropdown-toggle"),
+                                        Div(id="settings-summary-options", cls="dropdown-list"),
+                                        cls="dropdown-field"
+                                    ),
+                                ),
+                                cls="settings-body"
+                            ),
+                            Div(
+                                Button("Cancel", id="settings-cancel", cls="btn ghost"),
+                                Button("Save", id="settings-save", cls="btn primary"),
+                                cls="settings-footer"
+                            ),
+                            cls="settings-dialog"
+                        ),
+                        cls="settings-overlay hidden",
+                        id="settings-modal"
+                    ),
+                    Div(
+                        Div(
+                            Div(
+                                H3("Pick CWD"),
+                                Button("×", id="picker-close", cls="btn ghost"),
+                                cls="picker-header"
+                            ),
+                            Div(
+                                Div(id="picker-path", cls="picker-path"),
+                                Div(id="picker-list", cls="picker-list"),
+                                cls="picker-body"
+                            ),
+                            Div(
+                                Button("Up", id="picker-up", cls="btn ghost"),
+                                Button("Select Current", id="picker-select", cls="btn primary"),
+                                cls="picker-footer"
+                            ),
+                            cls="picker-dialog"
+                        ),
+                        cls="picker-overlay hidden",
+                        id="cwd-picker"
                     ),
                     cls="appshell"
                 )
@@ -1595,7 +1702,12 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
     settings = payload.get("settings")
     if isinstance(settings, dict):
         meta_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
-        meta_settings.update(settings)
+        for key, value in settings.items():
+            if value is None or value == "":
+                if key in meta_settings:
+                    meta_settings.pop(key, None)
+            else:
+                meta_settings[key] = value
         meta["settings"] = meta_settings
     thread_id = payload.get("thread_id")
     if thread_id and not meta.get("thread_id"):
@@ -1667,7 +1779,11 @@ async def api_appserver_conversation_select(payload: Dict[str, Any] = Body(...))
         cfg = _load_appserver_config()
         _add_conversation_to_config(convo_id, cfg)
         cfg["conversation_id"] = convo_id
-        cfg["active_view"] = "conversation"
+        view = payload.get("view")
+        if view in {"splash", "conversation"}:
+            cfg["active_view"] = view
+        else:
+            cfg["active_view"] = "conversation"
         if meta.get("thread_id") and not cfg.get("thread_id"):
             cfg["thread_id"] = meta.get("thread_id")
         _save_appserver_config(cfg)
@@ -1719,6 +1835,50 @@ async def api_appserver_set_view(payload: Dict[str, Any] = Body(...)):
         cfg["active_view"] = view
         _save_appserver_config(cfg)
         return cfg
+
+
+@app.get("/api/fs/list")
+async def api_fs_list(path: Optional[str] = Query(None)):
+    target = path or "~"
+    try:
+        resolved = Path(os.path.expanduser(target)).resolve()
+    except Exception:
+        resolved = Path(os.path.expanduser("~")).resolve()
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+    if not resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+    items: List[Dict[str, Any]] = []
+    try:
+        with os.scandir(resolved) as it:
+            for entry in it:
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    is_file = entry.is_file(follow_symlinks=False)
+                    is_link = entry.is_symlink()
+                except Exception:
+                    is_dir = False
+                    is_file = False
+                    is_link = False
+                if is_dir:
+                    entry_type = "directory"
+                elif is_file:
+                    entry_type = "file"
+                elif is_link:
+                    entry_type = "symlink"
+                else:
+                    entry_type = "other"
+                items.append({
+                    "name": entry.name,
+                    "path": str(Path(resolved) / entry.name),
+                    "type": entry_type,
+                })
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to list directory")
+
+    items.sort(key=lambda item: (0 if item["type"] == "directory" else 1, item["name"].lower()))
+    parent = str(resolved.parent) if resolved.parent != resolved else None
+    return {"path": str(resolved), "parent": parent, "items": items}
 
 
 @app.get("/api/appserver/transcript")
@@ -1853,6 +2013,50 @@ async def api_appserver_initialize():
         "params": {}
     })
     return {"ok": True}
+
+
+async def _rpc_request(method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 6.0) -> Dict[str, Any]:
+    req_id = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    future: asyncio.Future = asyncio.get_event_loop().create_future()
+    _appserver_rpc_waiters[req_id] = future
+    payload = {"id": int(req_id), "method": method}
+    if params is not None:
+        payload["params"] = params
+    await _write_appserver(payload)
+    try:
+        result = await asyncio.wait_for(future, timeout=timeout)
+    finally:
+        _appserver_rpc_waiters.pop(req_id, None)
+    if isinstance(result, dict):
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=result.get("error"))
+        return result
+    raise HTTPException(status_code=500, detail="Invalid RPC response")
+
+
+@app.get("/api/appserver/models")
+async def api_appserver_models():
+    response = await _rpc_request("model/list", params={})
+    return response
+
+
+@app.get("/api/appserver/debug/raw")
+async def api_appserver_debug_raw(limit: int = Query(200, gt=0, le=500)):
+    return {"items": _appserver_raw_buffer[-limit:]}
+
+
+@app.get("/api/appserver/debug/state")
+async def api_appserver_debug_state():
+    async with _config_lock:
+        cfg = _load_appserver_config()
+    convo_id = cfg.get("conversation_id")
+    meta = _load_conversation_meta(convo_id) if convo_id and _conversation_meta_path(convo_id).exists() else None
+    return {
+        "config": cfg,
+        "conversation": meta,
+        "shell_id": _appserver_shell_id,
+        "reader_task": _appserver_reader_task is not None and not _appserver_reader_task.done(),
+    }
 
 @app.get("/api/messages")
 async def get_messages(limit: int = Query(None, gt=0)):

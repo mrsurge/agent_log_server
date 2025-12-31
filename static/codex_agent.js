@@ -17,6 +17,34 @@ document.addEventListener('DOMContentLoaded', () => {
   const conversationListEl = document.getElementById('conversation-list');
   const conversationCreateBtn = document.getElementById('conversation-create');
   const conversationBackBtn = document.getElementById('conversation-back');
+  const conversationSettingsBtn = document.getElementById('conversation-settings');
+  const settingsModalEl = document.getElementById('settings-modal');
+  const settingsCloseBtn = document.getElementById('settings-close');
+  const settingsCancelBtn = document.getElementById('settings-cancel');
+  const settingsSaveBtn = document.getElementById('settings-save');
+  const settingsCwdEl = document.getElementById('settings-cwd');
+  const settingsApprovalEl = document.getElementById('settings-approval');
+  const settingsSandboxEl = document.getElementById('settings-sandbox');
+  const settingsModelEl = document.getElementById('settings-model');
+  const settingsEffortEl = document.getElementById('settings-effort');
+  const settingsSummaryEl = document.getElementById('settings-summary');
+  const settingsApprovalToggle = document.getElementById('settings-approval-toggle');
+  const settingsSandboxToggle = document.getElementById('settings-sandbox-toggle');
+  const settingsModelToggle = document.getElementById('settings-model-toggle');
+  const settingsEffortToggle = document.getElementById('settings-effort-toggle');
+  const settingsSummaryToggle = document.getElementById('settings-summary-toggle');
+  const settingsApprovalOptions = document.getElementById('settings-approval-options');
+  const settingsSandboxOptions = document.getElementById('settings-sandbox-options');
+  const settingsModelOptions = document.getElementById('settings-model-options');
+  const settingsEffortOptions = document.getElementById('settings-effort-options');
+  const settingsSummaryOptions = document.getElementById('settings-summary-options');
+  const settingsCwdBrowseBtn = document.getElementById('settings-cwd-browse');
+  const pickerOverlayEl = document.getElementById('cwd-picker');
+  const pickerCloseBtn = document.getElementById('picker-close');
+  const pickerPathEl = document.getElementById('picker-path');
+  const pickerListEl = document.getElementById('picker-list');
+  const pickerUpBtn = document.getElementById('picker-up');
+  const pickerSelectBtn = document.getElementById('picker-select');
 
   localStorage.setItem('last_tab', 'codex-agent');
 
@@ -27,6 +55,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentThreadId = null;
   let lastEventType = null;
   let lastReasoningKey = null;
+  let pickerPath = null;
+  let openDropdownEl = null;
   let initialized = false;
   let wsOpen = false;
   let wsReadyResolve = null;
@@ -88,6 +118,149 @@ document.addEventListener('DOMContentLoaded', () => {
     activeConversationEl.textContent = label;
   }
 
+  function openSettingsModal() {
+    if (!settingsModalEl) return;
+    if (settingsCwdEl) settingsCwdEl.value = conversationSettings?.cwd || '';
+    if (settingsApprovalEl) settingsApprovalEl.value = conversationSettings?.approvalPolicy || '';
+    if (settingsSandboxEl) settingsSandboxEl.value = conversationSettings?.sandboxPolicy || '';
+    if (settingsModelEl) settingsModelEl.value = conversationSettings?.model || '';
+    if (settingsEffortEl) settingsEffortEl.value = conversationSettings?.effort || '';
+    if (settingsSummaryEl) settingsSummaryEl.value = conversationSettings?.summary || '';
+    settingsModalEl.classList.remove('hidden');
+  }
+
+  function closeSettingsModal() {
+    if (!settingsModalEl) return;
+    settingsModalEl.classList.add('hidden');
+  }
+
+  function openPicker(startPath) {
+    if (!pickerOverlayEl) return;
+    pickerPath = startPath || settingsCwdEl?.value || '~';
+    pickerOverlayEl.classList.remove('hidden');
+    fetchPicker(pickerPath);
+  }
+
+  function closePicker() {
+    if (!pickerOverlayEl) return;
+    pickerOverlayEl.classList.add('hidden');
+  }
+
+  function buildDropdown(listEl, options, inputEl) {
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    options.forEach((opt) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dropdown-item';
+      btn.textContent = opt;
+      btn.addEventListener('click', () => {
+        if (inputEl) inputEl.value = opt;
+        closeDropdown(listEl);
+      });
+      listEl.appendChild(btn);
+    });
+  }
+
+  function updateDropdownOptions(listEl, options, inputEl) {
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    const values = Array.from(new Set(options.filter(Boolean)));
+    buildDropdown(listEl, values, inputEl);
+  }
+
+  async function loadModelOptions() {
+    try {
+      const r = await fetch('/api/appserver/models', { cache: 'no-store' });
+      if (!r.ok) return;
+      const data = await r.json();
+      const items = data?.result?.data || data?.result?.models || data?.result || [];
+      const names = [];
+      if (Array.isArray(items)) {
+        items.forEach((item) => {
+          if (typeof item === 'string') names.push(item);
+          else if (item && typeof item === 'object') {
+            if (item.id) names.push(item.id);
+            else if (item.name) names.push(item.name);
+          }
+        });
+      }
+      if (names.length) {
+        updateDropdownOptions(settingsModelOptions, names, settingsModelEl);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function openDropdownMenu(listEl) {
+    if (!listEl) return;
+    if (openDropdownEl && openDropdownEl !== listEl) {
+      closeDropdownMenu(openDropdownEl);
+    }
+    listEl.classList.add('open');
+    openDropdownEl = listEl;
+  }
+
+  function closeDropdownMenu(listEl) {
+    if (!listEl) return;
+    listEl.classList.remove('open');
+    if (openDropdownEl === listEl) openDropdownEl = null;
+  }
+
+  function toggleDropdownMenu(listEl) {
+    if (!listEl) return;
+    if (listEl.classList.contains('open')) {
+      closeDropdownMenu(listEl);
+    } else {
+      openDropdownMenu(listEl);
+    }
+  }
+
+  function setupDropdown(inputEl, toggleEl, listEl, options) {
+    if (!listEl || !inputEl) return;
+    buildDropdown(listEl, options, inputEl);
+    toggleEl?.addEventListener('click', (evt) => {
+      evt.preventDefault();
+      toggleDropdownMenu(listEl);
+    });
+  }
+
+  async function fetchPicker(path) {
+    try {
+      const url = `/api/fs/list?path=${encodeURIComponent(path || '~')}`;
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) return;
+      const data = await r.json();
+      pickerPath = data?.path || path || '~';
+      if (pickerPathEl) pickerPathEl.textContent = pickerPath;
+      renderPickerList(data?.items || []);
+    } catch {
+      // ignore
+    }
+  }
+
+  function renderPickerList(items) {
+    if (!pickerListEl) return;
+    pickerListEl.innerHTML = '';
+    items.forEach((item) => {
+      if (!item) return;
+      const row = document.createElement('div');
+      row.className = 'picker-item';
+      const icon = document.createElement('span');
+      icon.textContent = item.type === 'directory' ? '📁' : '📄';
+      const name = document.createElement('span');
+      name.textContent = item.name || item.path;
+      row.append(icon, name);
+      row.addEventListener('click', () => {
+        if (item.type === 'directory') {
+          fetchPicker(item.path);
+        }
+      });
+      pickerListEl.appendChild(row);
+    });
+  }
+
   function renderConversationList(items, activeId) {
     if (!conversationListEl) return;
     conversationListEl.innerHTML = '';
@@ -122,11 +295,18 @@ document.addEventListener('DOMContentLoaded', () => {
       openBtn.className = 'btn tiny primary';
       openBtn.textContent = 'Open';
       openBtn.addEventListener('click', () => selectConversation(meta.conversation_id));
+      const settingsBtn = document.createElement('button');
+      settingsBtn.className = 'btn tiny';
+      settingsBtn.textContent = 'Settings';
+      settingsBtn.addEventListener('click', async () => {
+        await selectConversationWithView(meta.conversation_id, 'splash');
+        openSettingsModal();
+      });
       const deleteBtn = document.createElement('button');
       deleteBtn.className = 'btn tiny decline';
       deleteBtn.textContent = 'Delete';
       deleteBtn.addEventListener('click', () => deleteConversation(meta.conversation_id));
-      actions.append(openBtn, deleteBtn);
+      actions.append(openBtn, settingsBtn, deleteBtn);
 
       row.append(info, actions);
       conversationListEl.appendChild(row);
@@ -493,13 +673,17 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function selectConversation(conversationId) {
+    return selectConversationWithView(conversationId, 'conversation');
+  }
+
+  async function selectConversationWithView(conversationId, view) {
     if (!conversationId) return;
     resetTimeline();
-    await postJson('/api/appserver/conversations/select', { conversation_id: conversationId });
+    await postJson('/api/appserver/conversations/select', { conversation_id: conversationId, view });
     await fetchConversation();
     await fetchConversations();
     await replayTranscript();
-    setDrawerOpen(true);
+    setDrawerOpen(view === 'conversation');
   }
 
   async function createConversation() {
@@ -509,6 +693,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await fetchConversations();
     await replayTranscript();
     setDrawerOpen(true);
+    openSettingsModal();
   }
 
   async function deleteConversation(conversationId) {
@@ -520,6 +705,21 @@ document.addEventListener('DOMContentLoaded', () => {
       setDrawerOpen(false);
       await setActiveView('splash');
     }
+  }
+
+  async function saveSettings() {
+    const settings = {
+      cwd: settingsCwdEl?.value?.trim() || null,
+      approvalPolicy: settingsApprovalEl?.value?.trim() || null,
+      sandboxPolicy: settingsSandboxEl?.value?.trim() || null,
+      model: settingsModelEl?.value?.trim() || null,
+      effort: settingsEffortEl?.value?.trim() || null,
+      summary: settingsSummaryEl?.value?.trim() || null,
+    };
+    await postJson('/api/appserver/conversation', { settings });
+    closeSettingsModal();
+    await fetchConversation();
+    await fetchConversations();
   }
 
   function nextRpcId() {
@@ -816,6 +1016,34 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   fetchStatus();
 
+  setupDropdown(settingsApprovalEl, settingsApprovalToggle, settingsApprovalOptions, [
+    'never',
+    'on-failure',
+    'unlessTrusted',
+  ]);
+  setupDropdown(settingsSandboxEl, settingsSandboxToggle, settingsSandboxOptions, [
+    'workspaceWrite',
+    'readOnly',
+    'dangerFullAccess',
+    'externalSandbox',
+  ]);
+  setupDropdown(settingsModelEl, settingsModelToggle, settingsModelOptions, [
+    'gpt-5.1-codex',
+    'gpt-5-codex',
+    'gpt-4.1-codex',
+  ]);
+  setupDropdown(settingsEffortEl, settingsEffortToggle, settingsEffortOptions, [
+    'low',
+    'medium',
+    'high',
+  ]);
+  setupDropdown(settingsSummaryEl, settingsSummaryToggle, settingsSummaryOptions, [
+    'concise',
+    'detailed',
+    'auto',
+  ]);
+  loadModelOptions();
+
   startBtn?.addEventListener('click', async () => {
     await postJson('/api/appserver/start', null);
     fetchStatus();
@@ -833,6 +1061,39 @@ document.addEventListener('DOMContentLoaded', () => {
   conversationBackBtn?.addEventListener('click', async () => {
     await setActiveView('splash');
     setDrawerOpen(false);
+  });
+
+  conversationSettingsBtn?.addEventListener('click', () => {
+    openSettingsModal();
+  });
+
+  settingsCloseBtn?.addEventListener('click', closeSettingsModal);
+  settingsCancelBtn?.addEventListener('click', closeSettingsModal);
+  settingsSaveBtn?.addEventListener('click', async () => {
+    await saveSettings();
+  });
+  settingsCwdBrowseBtn?.addEventListener('click', () => {
+    openPicker(settingsCwdEl?.value || '~');
+  });
+
+  pickerCloseBtn?.addEventListener('click', closePicker);
+  pickerUpBtn?.addEventListener('click', () => {
+    if (!pickerPath) return;
+    const parent = pickerPath.split('/').slice(0, -1).join('/') || '/';
+    fetchPicker(parent);
+  });
+  pickerSelectBtn?.addEventListener('click', () => {
+    if (settingsCwdEl && pickerPath) settingsCwdEl.value = pickerPath;
+    closePicker();
+  });
+
+  document.addEventListener('click', (evt) => {
+    if (!openDropdownEl) return;
+    const target = evt.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (openDropdownEl.contains(target)) return;
+    if (target.classList.contains('dropdown-toggle')) return;
+    closeDropdownMenu(openDropdownEl);
   });
 
   sendBtn?.addEventListener('click', async () => {
