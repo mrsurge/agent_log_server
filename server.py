@@ -13,13 +13,14 @@ import secrets
 import uuid
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from framework_shells import get_manager as get_framework_shell_manager
+from framework_shells.api import fws_ui
 from framework_shells.orchestrator import Orchestrator
 
 from fasthtml.common import (
@@ -29,6 +30,7 @@ from fasthtml.common import (
 )
 
 app = FastAPI()
+app.include_router(fws_ui.router, dependencies=[Depends(lambda: _ensure_framework_shells_secret())])
 
 # --- Config & State ---
 LOG_PATH: Optional[Path] = None
@@ -42,6 +44,7 @@ _appserver_turn_state: Dict[str, Dict[str, Any]] = {}
 _appserver_item_state: Dict[str, Dict[str, Any]] = {}
 _appserver_raw_buffer: List[str] = []
 _appserver_rpc_waiters: Dict[str, asyncio.Future] = {}
+_appserver_initialized = False
 DEBUG_MODE = False
 CODEX_AGENT_THEME_COLOR = "#0d0f13"
 CODEX_AGENT_ICON_PATH = "/static/codexas-icon.svg"
@@ -650,6 +653,7 @@ async def _get_or_start_appserver_shell() -> Dict[str, Any]:
 async def _stop_appserver_shell() -> None:
     global _appserver_shell_id
     global _appserver_reader_task
+    global _appserver_initialized
     _ensure_framework_shells_secret()
     if not _appserver_shell_id:
         cfg = _load_appserver_config()
@@ -671,6 +675,7 @@ async def _stop_appserver_shell() -> None:
         cfg["shell_id"] = None
         _save_appserver_config(cfg)
     _appserver_shell_id = None
+    _appserver_initialized = False
 
 
 async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
@@ -1115,6 +1120,35 @@ async def _write_appserver(payload: Dict[str, Any]) -> None:
     line = json.dumps(payload, ensure_ascii=False)
     state.process.stdin.write((line + "\n").encode("utf-8"))
     await state.process.stdin.drain()
+
+
+async def _ensure_appserver_initialized() -> None:
+    global _appserver_initialized
+    if _appserver_initialized:
+        return
+    try:
+        await _write_appserver({
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "agent_log_server",
+                    "title": "Agent Log Server",
+                    "version": "0.1.0"
+                }
+            }
+        })
+        await _write_appserver({
+            "method": "initialized",
+            "params": {}
+        })
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        if isinstance(detail, dict) and detail.get("message") == "Already initialized":
+            _appserver_initialized = True
+            return
+        raise
+    _appserver_initialized = True
 
 class ConnectionManager:
     def __init__(self):
@@ -1997,21 +2031,7 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
 
 @app.post("/api/appserver/initialize")
 async def api_appserver_initialize():
-    await _write_appserver({
-        "id": 0,
-        "method": "initialize",
-        "params": {
-            "clientInfo": {
-                "name": "agent_log_server",
-                "title": "Agent Log Server",
-                "version": "0.1.0"
-            }
-        }
-    })
-    await _write_appserver({
-        "method": "initialized",
-        "params": {}
-    })
+    await _ensure_appserver_initialized()
     return {"ok": True}
 
 
@@ -2036,6 +2056,9 @@ async def _rpc_request(method: str, params: Optional[Dict[str, Any]] = None, tim
 
 @app.get("/api/appserver/models")
 async def api_appserver_models():
+    info = await _get_or_start_appserver_shell()
+    await _ensure_appserver_reader(info["shell_id"])
+    await _ensure_appserver_initialized()
     response = await _rpc_request("model/list", params={})
     return response
 
