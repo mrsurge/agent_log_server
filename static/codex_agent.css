@@ -344,30 +344,21 @@ textarea {
 }
 
 .diff-line {
-  display: grid;
-  grid-template-columns: 88px 18px 1fr;
-  gap: 1px;
-  align-items: start;
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
   margin: 0;
-  padding: 0 1px;
+  padding: 0;
   line-height: 1;
   color: #ffffff;
   background: #000;
 }
 .diff-gutter {
-  text-align: center;
+  white-space: pre;
   color: #ffffff;
+  margin: 0;
+  padding: 0;
 }
-.diff-lineno {
-  display: grid;
-  grid-template-columns: 1fr 6px 1fr;
-  gap: 1px;
-  font-size: 11px;
-  color: #b8c7d9;
-}
-.diff-lineno .old { text-align: right; }
-.diff-lineno .new { text-align: left; }
-.diff-lineno .sep { text-align: center; color: #5b6472; }
 .diff-text {
   white-space: pre-wrap;
   word-break: break-all;
@@ -376,7 +367,7 @@ textarea {
 .diff-line {
   color: #ffffff;
   background: #000;
-  padding: 2px 6px;
+  padding: 0;
 }
 .diff-add { background: #0f3d1f; }
 .diff-del { background: #4a1515; }

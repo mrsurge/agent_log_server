@@ -342,6 +342,19 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!text) return '';
     let oldLine = 0;
     let newLine = 0;
+    let maxOld = 0;
+    let maxNew = 0;
+    text.split('\n').forEach((line) => {
+      if (line.startsWith('@@')) {
+        const match = line.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+        if (match) {
+          const oldStart = parseInt(match[1], 10);
+          const newStart = parseInt(match[3], 10);
+          maxOld = Math.max(maxOld, String(oldStart).length);
+          maxNew = Math.max(maxNew, String(newStart).length);
+        }
+      }
+    });
     return text.split('\n').map((line) => {
       let cls = 'diff-context';
       let display = line;
@@ -392,9 +405,11 @@ document.addEventListener('DOMContentLoaded', () => {
         newLine += 1;
         display = line.slice(1);
       }
-
-      const sep = oldNo || newNo ? '|' : '';
-      return `<span class=\"diff-line ${cls}\"><span class=\"diff-lineno\"><span class=\"ln old\">${escapeHtml(oldNo)}</span><span class=\"ln sep\">${escapeHtml(sep)}</span><span class=\"ln new\">${escapeHtml(newNo)}</span></span><span class=\"diff-gutter\">${escapeHtml(gutter)}</span><span class=\"diff-text\">${escapeHtml(display)}</span></span>`;
+      const padOld = oldNo ? oldNo.padStart(maxOld, ' ') : ''.padStart(maxOld, ' ');
+      const padNew = newNo ? newNo.padStart(maxNew, ' ') : ''.padStart(maxNew, ' ');
+      const sep = oldNo || newNo ? '|' : ' ';
+      const gutterText = `${padOld}${sep}${padNew}${gutter}`;
+      return `<span class=\"diff-line ${cls}\"><span class=\"diff-gutter\">${escapeHtml(gutterText)}</span><span class=\"diff-text\">${escapeHtml(display)}</span></span>`;
     }).join('');
   }
 
