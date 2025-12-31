@@ -1,0 +1,10 @@
+version: "1"
+shells:
+  app_server:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["app_server", "codex"]
+    command:
+      - ${APP_SERVER_COMMAND}
+    labels:
+      app: "codex-app-server"

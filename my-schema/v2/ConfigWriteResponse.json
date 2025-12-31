@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConfigWriteResponse",
+  "type": "object",
+  "required": [
+    "filePath",
+    "status",
+    "version"
+  ],
+  "properties": {
+    "filePath": {
+      "description": "Canonical path to the config file that was written.",
+      "type": "string"
+    },
+    "overriddenMetadata": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/OverriddenMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "$ref": "#/definitions/WriteStatus"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ConfigLayerMetadata": {
+      "type": "object",
+      "required": [
+        "name",
+        "source",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/ConfigLayerName"
+        },
+        "source": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "ConfigLayerName": {
+      "type": "string",
+      "enum": [
+        "mdm",
+        "system",
+        "sessionFlags",
+        "user"
+      ]
+    },
+    "OverriddenMetadata": {
+      "type": "object",
+      "required": [
+        "effectiveValue",
+        "message",
+        "overridingLayer"
+      ],
+      "properties": {
+        "effectiveValue": true,
+        "message": {
+          "type": "string"
+        },
+        "overridingLayer": {
+          "$ref": "#/definitions/ConfigLayerMetadata"
+        }
+      }
+    },
+    "WriteStatus": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "okOverridden"
+      ]
+    }
+  }
+}
