@@ -205,8 +205,9 @@ body.drawer-open {
 
 .conversation-actions {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
 }
 
 .conversation-drawer {
@@ -357,10 +358,28 @@ body.drawer-open {
 .settings-footer,
 .picker-footer {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 8px;
   padding: 12px 14px;
   border-top: 1px solid var(--border);
+}
+
+.picker-footer-left {
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+
+.picker-footer-right {
+  display: flex;
+  gap: 8px;
+}
+
+.picker-footer-left input {
+  width: 100%;
 }
 
 .picker-path {
@@ -447,7 +466,7 @@ label {
   color: var(--muted);
 }
 
-input, textarea {
+input, textarea, .prompt-input {
   border: 1px solid var(--border);
   background: #0f121a;
   color: var(--text);
@@ -460,6 +479,17 @@ input, textarea {
 textarea {
   min-height: 120px;
   resize: vertical;
+}
+
+.prompt-input {
+  min-height: 120px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.prompt-input:empty:before {
+  content: attr(data-placeholder);
+  color: var(--muted);
 }
 
 .row {
@@ -534,6 +564,11 @@ textarea {
   font-size: 14px;
 }
 
+.timeline-spacer {
+  height: 0;
+  flex-shrink: 0;
+}
+
 .timeline-row {
   border-top: 1px solid #202634;
   border-bottom: 1px solid #12151d;
@@ -554,6 +589,18 @@ textarea {
   border-left: 4px solid #7f6ae6;
   background: #000;
   padding: 0;
+}
+
+.timeline-row.tool {
+  border-left: 4px solid #4fc3f7;
+  background: #0b111b;
+}
+
+.tool-block {
+  white-space: pre-wrap;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  color: #b8c7d9;
 }
 
 .timeline-row.message {
@@ -718,10 +765,47 @@ textarea {
   padding: 12px;
 }
 
-.composer textarea { flex: 1; }
-.composer textarea {
+.composer textarea,
+.composer .prompt-input { flex: 1; }
+.composer textarea,
+.composer .prompt-input {
   border: none;
   background: transparent;
+}
+
+.mention-token {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  margin: 0 2px;
+  border-radius: 6px;
+  background: #c7cbd1;
+  color: #000;
+  font-size: 12px;
+}
+
+.mention-tip {
+  position: fixed;
+  z-index: 120;
+  padding: 6px 8px;
+  background: #0f121a;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  border-radius: 6px;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+
+.mention-tip.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.ws-indicator .pill {
+  font-size: 11px;
 }
 
 .thread-list {

@@ -11,6 +11,8 @@ import hashlib
 import re
 import secrets
 import uuid
+import subprocess
+import socketio
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException, Depends
@@ -40,6 +42,18 @@ async def _lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=_lifespan)
+socketio_server = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+socketio_app = socketio.ASGIApp(socketio_server, other_asgi_app=app)
+
+
+@socketio_server.on("connect", namespace="/appserver")
+async def _appserver_connect(sid, environ):
+    return None
+
+
+@socketio_server.on("disconnect", namespace="/appserver")
+async def _appserver_disconnect(sid):
+    return None
 app.include_router(fws_ui.router, dependencies=[Depends(lambda: _ensure_framework_shells_secret())])
 
 # --- Config & State ---
@@ -53,6 +67,8 @@ _appserver_ws_clients_raw: List[WebSocket] = []
 _appserver_turn_state: Dict[str, Dict[str, Any]] = {}
 _appserver_item_state: Dict[str, Dict[str, Any]] = {}
 _appserver_raw_buffer: List[str] = []
+_approval_item_cache: Dict[str, Dict[str, Any]] = {}
+_approval_request_map: Dict[str, str] = {}
 _appserver_rpc_waiters: Dict[str, asyncio.Future] = {}
 _appserver_initialized = False
 DEBUG_MODE = False
@@ -627,6 +643,13 @@ def _get_turn_state(thread_id: Optional[str], turn_id: Optional[str]) -> Dict[st
     return state
 
 
+def _tool_event_id(label: str, payload: Dict[str, Any], thread_id: Optional[str], turn_id: Optional[str]) -> str:
+    base = payload.get("itemId") or payload.get("item_id") or payload.get("id") or payload.get("call_id") or payload.get("tool_call_id") or payload.get("command_id")
+    if base:
+        return str(base)
+    return f"{label}:{thread_id or 'unknown'}:{turn_id or 'unknown'}"
+
+
 def _get_state_for_item(thread_id: Optional[str], turn_id: Optional[str], item_id: Optional[str]) -> Dict[str, Any]:
     if item_id and item_id in _appserver_item_state:
         return _appserver_item_state[item_id]
@@ -863,6 +886,11 @@ async def _stop_appserver_shell() -> None:
 
 async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
     if not _appserver_ws_clients_ui:
+        # still try socket.io
+        try:
+            await socketio_server.emit("appserver_event", event, namespace="/appserver")
+        except Exception:
+            pass
         return
     data = json.dumps(event, ensure_ascii=False)
     stale: List[WebSocket] = []
@@ -874,6 +902,10 @@ async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
     for ws in stale:
         with suppress(Exception):
             _appserver_ws_clients_ui.remove(ws)
+    try:
+        await socketio_server.emit("appserver_event", event, namespace="/appserver")
+    except Exception:
+        pass
 
 
 async def _broadcast_appserver_raw(message: str) -> None:
@@ -928,13 +960,20 @@ async def _route_appserver_event(
     # Approvals
     if "commandexecution/requestapproval" in label_lower:
         if isinstance(payload, dict):
+            item_id = payload.get("itemId") or payload.get("item_id") or payload.get("id")
+            if item_id and request_id:
+                _approval_request_map[str(item_id)] = str(request_id)
+            resolved_id = request_id or payload.get("_request_id")
+            if not resolved_id and item_id:
+                resolved_id = _approval_request_map.get(str(item_id))
+            cached = _approval_item_cache.get(str(item_id)) if item_id else {}
             events.append({
                 "type": "approval",
                 "kind": "command",
-                "id": request_id or payload.get("_request_id") or payload.get("id"),
+                "id": resolved_id,
                 "payload": {
-                    "command": payload.get("command") or payload.get("parsedCmd") or payload.get("cmd"),
-                    "cwd": payload.get("cwd"),
+                    "command": payload.get("command") or payload.get("parsedCmd") or payload.get("cmd") or cached.get("command"),
+                    "cwd": payload.get("cwd") or cached.get("cwd"),
                     "reason": payload.get("reason"),
                     "risk": payload.get("risk"),
                 },
@@ -944,10 +983,16 @@ async def _route_appserver_event(
 
     if "filechange/requestapproval" in label_lower or "applypatchapproval" in label_lower:
         if isinstance(payload, dict):
+            item_id = payload.get("itemId") or payload.get("item_id") or payload.get("id")
+            if item_id and request_id:
+                _approval_request_map[str(item_id)] = str(request_id)
+            resolved_id = request_id or payload.get("_request_id")
+            if not resolved_id and item_id:
+                resolved_id = _approval_request_map.get(str(item_id))
             events.append({
                 "type": "approval",
                 "kind": "diff",
-                "id": request_id or payload.get("_request_id") or payload.get("id"),
+                "id": resolved_id,
                 "payload": {
                     "diff": payload.get("diff") or payload.get("patch") or payload.get("unified_diff"),
                     "changes": payload.get("changes"),
@@ -990,8 +1035,23 @@ async def _route_appserver_event(
             total = payload["usage"].get("total") or payload["usage"].get("total_tokens")
         if total is None and isinstance(payload.get("tokenUsage"), dict):
             total = payload["tokenUsage"].get("total") or payload["tokenUsage"].get("total_tokens")
+        context_window = None
+        if isinstance(payload.get("info"), dict):
+            info = payload["info"]
+            usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
+            if isinstance(usage, dict):
+                context_window = usage.get("model_context_window")
+            if context_window is None:
+                context_window = info.get("model_context_window")
+        if context_window is None and isinstance(payload.get("tokenUsage"), dict):
+            context_window = payload["tokenUsage"].get("modelContextWindow") or payload["tokenUsage"].get("model_context_window")
+        if context_window is None:
+            context_window = payload.get("model_context_window") or payload.get("modelContextWindow")
         if isinstance(total, (int, float)):
-            events.append({"type": "token_count", "total": int(total)})
+            event = {"type": "token_count", "total": int(total)}
+            if isinstance(context_window, (int, float)):
+                event["context_window"] = int(context_window)
+            events.append(event)
         return events
 
     # Suppress noisy events
@@ -1033,6 +1093,22 @@ async def _route_appserver_event(
             if diff:
                 await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item.get("id"), events)
             return events
+        if item_type == "commandexecution":
+            if item.get("id"):
+                _approval_item_cache[str(item.get("id"))] = {
+                    "command": item.get("command") or item.get("cmd") or item.get("argv"),
+                    "cwd": item.get("cwd"),
+                }
+            events.append({
+                "type": "tool_begin",
+                "id": item.get("id"),
+                "tool": "command",
+                "payload": {
+                    "command": item.get("command") or item.get("cmd") or item.get("argv"),
+                    "cwd": item.get("cwd"),
+                },
+            })
+            return events
         if item_type in {"agentmessage", "assistantmessage", "assistant"}:
             state["msg_source"] = state["msg_source"] or "item"
             if item.get("id"):
@@ -1072,6 +1148,17 @@ async def _route_appserver_event(
             diff = _extract_diff_text(item)
             if diff:
                 await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item.get("id"), events)
+            return events
+        if item_type == "commandexecution":
+            events.append({
+                "type": "tool_end",
+                "id": item.get("id"),
+                "tool": "command",
+                "payload": {
+                    "exit_code": item.get("exitCode") or item.get("exit_code"),
+                    "duration_ms": item.get("durationMs") or item.get("duration_ms"),
+                },
+            })
             return events
         return events
 
@@ -1184,6 +1271,85 @@ async def _route_appserver_event(
                 "event": "agent_reasoning",
             })
         events.append({"type": "activity", "label": "idle", "active": False})
+        return events
+
+    # Tooling / command execution events
+    if label_lower in {"exec_command_begin", "exec_command_output_delta", "exec_command_end"} and isinstance(payload, dict):
+        tool_id = _tool_event_id(label_lower, payload, thread_id, turn_id)
+        if label_lower == "exec_command_begin":
+            events.append({
+                "type": "tool_begin",
+                "id": tool_id,
+                "tool": "command",
+                "payload": {
+                    "command": payload.get("command"),
+                    "cwd": payload.get("cwd"),
+                    "origin": payload.get("origin"),
+                },
+            })
+        elif label_lower == "exec_command_output_delta":
+            delta = payload.get("delta") or payload.get("output")
+            if isinstance(delta, str):
+                events.append({
+                    "type": "tool_delta",
+                    "id": tool_id,
+                    "tool": "command",
+                    "delta": delta,
+                })
+        elif label_lower == "exec_command_end":
+            events.append({
+                "type": "tool_end",
+                "id": tool_id,
+                "tool": "command",
+                "payload": {
+                    "command": payload.get("command"),
+                    "cwd": payload.get("cwd"),
+                    "exit_code": payload.get("exit_code"),
+                    "duration_ms": payload.get("duration_ms"),
+                },
+            })
+        return events
+
+    if label_lower in {"item/commandexecution/outputdelta", "item/commandexecution/terminalinteraction"} and isinstance(payload, dict):
+        tool_id = _tool_event_id(label_lower, payload, thread_id, turn_id)
+        if label_lower.endswith("outputdelta"):
+            delta = payload.get("delta") or payload.get("output") or payload.get("stdout") or ""
+            if isinstance(delta, str) and delta:
+                events.append({
+                    "type": "tool_delta",
+                    "id": tool_id,
+                    "tool": "command",
+                    "delta": delta,
+                })
+        else:
+            events.append({
+                "type": "tool_interaction",
+                "id": tool_id,
+                "tool": "command",
+                "payload": {
+                    "stdin": payload.get("stdin"),
+                    "stdout": payload.get("stdout"),
+                    "pid": payload.get("pid"),
+                },
+            })
+        return events
+
+    if label_lower in {"mcp_tool_call_begin", "mcp_tool_call_end"} and isinstance(payload, dict):
+        tool_id = _tool_event_id(label_lower, payload, thread_id, turn_id)
+        if label_lower.endswith("begin"):
+            events.append({
+                "type": "tool_begin",
+                "id": tool_id,
+                "tool": payload.get("tool") or "mcp",
+                "payload": payload.get("args") or payload.get("arguments") or payload,
+            })
+        else:
+            events.append({
+                "type": "tool_end",
+                "id": tool_id,
+                "tool": payload.get("tool") or "mcp",
+                "payload": payload.get("result") or payload.get("output") or payload,
+            })
         return events
 
     return events
@@ -1442,6 +1608,7 @@ async def appserver_ui() -> FastHTMLResponse:
             Head(
                 Link(rel="stylesheet", href=_asset("/static/appserver.css")),
                 Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
+                Script(src=_asset("/static/vendor/socket.io/socket.io.min.js"), defer=True),
                 Script(src=_asset("/static/appserver.js"), defer=True),
             ),
             Body(
@@ -1666,11 +1833,7 @@ self.addEventListener('fetch', (event) => {{
 @app.get("/codex-agent")
 @app.get("/codex-agent/")
 async def codex_agent_ui() -> FastHTMLResponse:
-    js_pill = (
-        Div(Span("JS"), Span("pending", id="js-status", cls="pill warn"), cls="status-pill footer-cell")
-        if DEBUG_MODE
-        else Div(Span("JS"), Span("—", cls="pill"), cls="status-pill footer-cell placeholder")
-    )
+    js_pill = Div(Span("JS"), Span("pending", id="js-status", cls="pill warn"), cls="status-pill footer-cell") if DEBUG_MODE else None
     version = _codex_agent_version()
     return FastHTMLResponse(
         to_xml(
@@ -1683,9 +1846,12 @@ async def codex_agent_ui() -> FastHTMLResponse:
                 Link(rel="stylesheet", href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap"),
                 Link(rel="stylesheet", href=_asset("/static/codex_agent.css")),
                 Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
+                Script(src=_asset("/static/vendor/socket.io/socket.io.min.js")),
+                Script("window.addEventListener('load', () => console.log('socket.io', typeof io));", defer=True),
                 Script(src=_asset("/static/modals/settings_modal.js"), defer=True),
                 Script(src=_asset("/static/modals/cwd_picker.js"), defer=True),
                 Script(src=_asset("/static/modals/rollout_picker.js"), defer=True),
+                Script(src=_asset("/static/modals/warning_modal.js"), defer=True),
                 Script(src=_asset("/static/ui/conversation_drawer.js"), defer=True),
                 Script(src=_asset("/static/codex_agent.js"), defer=True),
             ),
@@ -1735,6 +1901,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     cls="brand"
                                 ),
                                 Div(
+                                    Span("disconnected", id="agent-ws", cls="pill warn"),
                                     Button("Settings", id="conversation-settings", cls="btn"),
                                     Button("Back", id="conversation-back", cls="btn ghost"),
                                     cls="drawer-actions"
@@ -1750,9 +1917,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 cls="timeline-wrap"
                             ),
                             Div(
-                                Textarea(
+                                Div(
                                     id="agent-prompt",
-                                    placeholder="Message to Codex… (Shift+Enter for newline)",
+                                    contenteditable="true",
+                                    cls="prompt-input",
+                                    **{"data-placeholder": "Message to Codex… (Shift+Enter for newline)"},
                                 ),
                                 Button("Send", id="agent-send", cls="btn primary"),
                                 cls="composer"
@@ -1768,8 +1937,8 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     cls="status-pill footer-cell"
                                 ),
                                 Div(
-                                    Span("WS"),
-                                    Span("idle", id="agent-ws", cls="pill"),
+                                    Span("context:"),
+                                    Span("—", id="context-remaining", cls="pill"),
                                     cls="status-pill footer-cell"
                                 ),
                                 Div(
@@ -1783,7 +1952,10 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     Button("Pinned", id="scroll-pin", cls="btn tiny toggle active"),
                                     cls="status-pill footer-cell"
                                 ),
-                                js_pill,
+                                Div(
+                                    Span("mention", id="mention-pill", cls="pill"),
+                                    cls="status-pill footer-cell"
+                                ),
                                 Div(
                                     Span("Tokens"),
                                     Span("0", id="counter-tokens", cls="pill"),
@@ -1889,7 +2061,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                     Div(
                         Div(
                             Div(
-                                H3("Pick CWD"),
+                                H3("Pick CWD", id="picker-title"),
                                 Button("×", id="picker-close", cls="btn ghost"),
                                 cls="picker-header"
                             ),
@@ -1899,8 +2071,15 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 cls="picker-body"
                             ),
                             Div(
-                                Button("Up", id="picker-up", cls="btn ghost"),
-                                Button("Select Current", id="picker-select", cls="btn primary"),
+                                Div(
+                                    Input(type="text", id="picker-filter", placeholder="filter (regex)..."),
+                                    cls="picker-footer-left"
+                                ),
+                                Div(
+                                    Button("Up", id="picker-up", cls="btn ghost"),
+                                    Button("Select Current", id="picker-select", cls="btn primary"),
+                                    cls="picker-footer-right"
+                                ),
                                 cls="picker-footer"
                             ),
                             cls="picker-dialog"
@@ -1923,6 +2102,27 @@ async def codex_agent_ui() -> FastHTMLResponse:
                         ),
                         cls="picker-overlay hidden",
                         id="rollout-picker"
+                    ),
+                    Div(
+                        Div(
+                            Div(
+                                H3("Confirm"),
+                                Button("×", id="warning-close", cls="btn ghost"),
+                                cls="settings-header"
+                            ),
+                            Div(
+                                P("Are you sure?", id="warning-body"),
+                                cls="settings-body"
+                            ),
+                            Div(
+                                Button("Cancel", id="warning-cancel", cls="btn ghost"),
+                                Button("Continue", id="warning-confirm", cls="btn danger"),
+                                cls="settings-footer"
+                            ),
+                            cls="settings-dialog"
+                        ),
+                        cls="settings-overlay hidden",
+                        id="warning-modal"
                     ),
                     cls="appshell"
                 )
@@ -2085,11 +2285,9 @@ async def api_appserver_conversation_bind_rollout(payload: Dict[str, Any] = Body
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
     rollout_id = payload.get("rollout_id")
-    items = payload.get("items")
     if not isinstance(rollout_id, str) or not rollout_id.strip():
         raise HTTPException(status_code=400, detail="Missing rollout_id")
-    if not isinstance(items, list):
-        raise HTTPException(status_code=400, detail="Missing items")
+    items = payload.get("items")
     convo_id = await _ensure_conversation()
     meta = _load_conversation_meta(convo_id)
     meta["thread_id"] = rollout_id
@@ -2102,7 +2300,14 @@ async def api_appserver_conversation_bind_rollout(payload: Dict[str, Any] = Body
         cfg = _load_appserver_config()
         cfg["thread_id"] = rollout_id
         _save_appserver_config(cfg)
-    await _write_transcript_entries(convo_id, items)
+    if isinstance(items, list):
+        await _write_transcript_entries(convo_id, items)
+    else:
+        path = _find_rollout_path(_sanitize_conversation_id(rollout_id))
+        if not path:
+            raise HTTPException(status_code=404, detail="Rollout not found")
+        preview = _rollout_preview_entries(path, limit=200000)
+        await _write_transcript_entries(convo_id, preview.get("items", []))
     return {"ok": True, "conversation_id": convo_id, "thread_id": rollout_id}
 
 
@@ -2153,6 +2358,33 @@ async def api_appserver_set_view(payload: Dict[str, Any] = Body(...)):
         return cfg
 
 
+def _detect_repo_root(start: Path) -> Path:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        root = result.stdout.strip()
+        if root:
+            return Path(root)
+    except Exception:
+        pass
+    return start
+
+
+def _rg_list_files(root: Path) -> List[str]:
+    result = subprocess.run(
+        ["rg", "--files", "--glob", "!.git/*"],
+        cwd=str(root),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line for line in result.stdout.splitlines() if line]
+
+
 @app.get("/api/fs/list")
 async def api_fs_list(path: Optional[str] = Query(None)):
     target = path or "~"
@@ -2197,6 +2429,59 @@ async def api_fs_list(path: Optional[str] = Query(None)):
     return {"path": str(resolved), "parent": parent, "items": items}
 
 
+@app.get("/api/fs/search")
+async def api_fs_search(query: str = Query(...), root: Optional[str] = Query(None), limit: int = Query(200, gt=0)):
+    if not query.strip():
+        return {"root": None, "items": []}
+    try:
+        pattern = re.compile(query, re.IGNORECASE)
+    except re.error:
+        raise HTTPException(status_code=400, detail="Invalid regex")
+    async with _config_lock:
+        cfg = _load_appserver_config()
+    base = root or cfg.get("cwd") or os.getcwd()
+    try:
+        resolved = Path(os.path.expanduser(base)).resolve()
+    except Exception:
+        resolved = Path(os.getcwd()).resolve()
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="Root not found")
+    if not resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Root is not a directory")
+    repo_root = _detect_repo_root(resolved)
+    try:
+        files = _rg_list_files(repo_root)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to search repo")
+    items: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for rel in files:
+        full = str((repo_root / rel).resolve())
+        if pattern.search(rel) or pattern.search(full):
+            if full not in seen:
+                seen.add(full)
+                items.append({"name": Path(rel).name, "path": full, "type": "file"})
+                if len(items) >= limit:
+                    break
+        parts = Path(rel).parents
+        for parent in parts:
+            if parent == Path("."):
+                continue
+            parent_rel = str(parent)
+            parent_full = str((repo_root / parent_rel).resolve())
+            if parent_full in seen:
+                continue
+            if pattern.search(parent_rel) or pattern.search(parent_full):
+                seen.add(parent_full)
+                items.append({"name": Path(parent_rel).name, "path": parent_full, "type": "directory"})
+                if len(items) >= limit:
+                    break
+        if len(items) >= limit:
+            break
+    items.sort(key=lambda item: (0 if item["type"] == "directory" else 1, item["name"].lower()))
+    return {"root": str(repo_root), "items": items}
+
+
 @app.get("/api/appserver/transcript")
 async def api_appserver_transcript(conversation_id: Optional[str] = Query(None)):
     cfg = _load_appserver_config()
@@ -2221,6 +2506,59 @@ async def api_appserver_transcript(conversation_id: Optional[str] = Query(None))
     except Exception:
         return {"conversation_id": str(convo_id), "items": []}
     return {"conversation_id": str(convo_id), "items": items}
+
+
+@app.get("/api/appserver/transcript/range")
+async def api_appserver_transcript_range(
+    conversation_id: Optional[str] = Query(None),
+    offset: int = Query(0),
+    limit: int = Query(120, gt=0, le=500),
+):
+    cfg = _load_appserver_config()
+    convo_id = conversation_id or cfg.get("conversation_id")
+    if not convo_id:
+        return {"conversation_id": None, "total": 0, "offset": 0, "items": []}
+    path = _transcript_path(str(convo_id))
+    if not path.exists():
+        return {"conversation_id": str(convo_id), "total": 0, "offset": 0, "items": []}
+    total = 0
+    items: List[Dict[str, Any]] = []
+    if offset < 0:
+        from collections import deque
+        buf: deque = deque(maxlen=limit)
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                total += 1
+                buf.append(record)
+        items = list(buf)
+        offset = max(0, total - len(items))
+    else:
+        start = max(0, offset)
+        end = start + limit
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if total >= start and total < end:
+                    items.append(record)
+                total += 1
+                if total >= end and total >= start and len(items) >= limit:
+                    # still count total by continuing
+                    continue
+        offset = start
+    return {"conversation_id": str(convo_id), "total": total, "offset": offset, "items": items}
 
 
 @app.get("/api/appserver/rollouts")
@@ -2367,6 +2705,30 @@ async def api_appserver_interrupt():
     return {"ok": True, "thread_id": thread_id, "turn_id": turn_id}
 
 
+@app.post("/api/appserver/compact")
+async def api_appserver_compact():
+    info = await _get_or_start_appserver_shell()
+    await _ensure_appserver_reader(info["shell_id"])
+    await _ensure_appserver_initialized()
+    cfg = _load_appserver_config()
+    thread_id = cfg.get("thread_id")
+    if not thread_id:
+        raise HTTPException(status_code=409, detail="No active thread to compact")
+    await _rpc_request("thread/compact", params={"threadId": thread_id})
+    return {"ok": True, "thread_id": thread_id}
+
+
+@app.post("/api/appserver/mention")
+async def api_appserver_mention(payload: Dict[str, Any] = Body(...)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    path = payload.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise HTTPException(status_code=400, detail="Missing or invalid 'path'")
+    await _broadcast_appserver_ui({"type": "mention_insert", "path": path})
+    return {"ok": True}
+
+
 @app.post("/api/appserver/initialize")
 async def api_appserver_initialize():
     await _ensure_appserver_initialized()
@@ -2485,6 +2847,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=12356)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--debug", action="store_true")
+    p.add_argument("--broadcast-all", action="store_true", help="Bind to 0.0.0.0 for LAN access")
     return p.parse_args()
 
 def main():
@@ -2492,6 +2855,8 @@ def main():
     global LOG_PATH
     args = parse_args()
     DEBUG_MODE = bool(args.debug)
+    if args.broadcast_all:
+        args.host = "0.0.0.0"
     
     log_p = Path(args.log)
     if not log_p.is_absolute():
@@ -2506,7 +2871,7 @@ def main():
     except Exception:
         pass
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(socketio_app, host=args.host, port=args.port)
 
 if __name__ == "__main__":
     main()

@@ -14,6 +14,12 @@ window.CodexAgentModules.push((ctx) => {
   });
   pickerSelectBtn?.addEventListener('click', () => {
     const pickerPath = ctx.helpers.getPickerPath();
+    const mode = ctx.helpers.getPickerMode ? ctx.helpers.getPickerMode() : 'cwd';
+    if (mode === 'mention') {
+      if (pickerPath) ctx.helpers.insertMention(pickerPath);
+      ctx.helpers.closePicker();
+      return;
+    }
     if (settingsCwdEl && pickerPath) settingsCwdEl.value = pickerPath;
     ctx.helpers.closePicker();
   });

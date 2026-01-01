@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const interruptBtn = document.getElementById('turn-interrupt');
   const counterMessagesEl = document.getElementById('counter-messages');
   const counterTokensEl = document.getElementById('counter-tokens');
+  const contextRemainingEl = document.getElementById('context-remaining');
   const scrollBtn = document.getElementById('scroll-pin');
   const activeConversationEl = document.getElementById('active-conversation');
   const splashViewEl = document.getElementById('splash-view');
@@ -53,9 +54,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const pickerListEl = document.getElementById('picker-list');
   const pickerUpBtn = document.getElementById('picker-up');
   const pickerSelectBtn = document.getElementById('picker-select');
+  const pickerTitleEl = document.getElementById('picker-title');
+  const pickerFilterEl = document.getElementById('picker-filter');
   const rolloutOverlayEl = document.getElementById('rollout-picker');
   const rolloutCloseBtn = document.getElementById('rollout-close');
   const rolloutListEl = document.getElementById('rollout-list');
+  const mentionPillEl = document.getElementById('mention-pill');
 
   localStorage.setItem('last_tab', 'codex-agent');
   const mobileParam = new URLSearchParams(window.location.search).get('mobile');
@@ -78,6 +82,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastEventType = null;
   let lastReasoningKey = null;
   let pickerPath = null;
+  let pickerMode = 'cwd';
+  let pickerItems = [];
+  let filterTimer = null;
   let openDropdownEl = null;
   let initialized = false;
   let wsOpen = false;
@@ -91,13 +98,26 @@ document.addEventListener('DOMContentLoaded', () => {
   const assistantRows = new Map();
   const reasoningRows = new Map();
   const diffRows = new Map();
+  const toolRows = new Map();
   let activityRow = null;
   let activityTextEl = null;
   let activityLineEl = null;
+  let topSpacerEl = null;
+  let bottomSpacerEl = null;
   let placeholderCleared = false;
   let messageCount = 0;
   let tokenCount = 0;
+  let contextWindow = null;
   let autoScroll = true;
+  let normalizeTimer = null;
+  let isNormalizing = false;
+  let mentionTriggered = false;
+  let transcriptTotal = 0;
+  let transcriptStart = 0;
+  let transcriptEnd = 0;
+  let transcriptLimit = 120;
+  let transcriptLoading = false;
+  let estimatedRowHeight = 28;
 
   function setPill(el, text, cls) {
     if (!el) return;
@@ -120,6 +140,153 @@ document.addEventListener('DOMContentLoaded', () => {
     return String(s).replace(/[&<>"']/g, (c) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     }[c]));
+  }
+
+  function appendTextWithBreaks(parent, text) {
+    if (!parent || text === null || text === undefined) return;
+    const parts = String(text).split('\n');
+    parts.forEach((part, idx) => {
+      if (part) parent.appendChild(document.createTextNode(part));
+      if (idx < parts.length - 1) parent.appendChild(document.createElement('br'));
+    });
+  }
+
+  function createMentionToken(path) {
+    const span = document.createElement('span');
+    span.className = 'mention-token';
+    span.dataset.path = path;
+    const display = String(path || '').split('/').filter(Boolean).pop() || path;
+    span.textContent = display;
+    span.title = path;
+    span.setAttribute('contenteditable', 'false');
+    return span;
+  }
+
+  function renderPromptFromText(text) {
+    if (!promptEl) return;
+    promptEl.innerHTML = '';
+    const parts = String(text || '').split(/(`[^`]+`)/g);
+    parts.forEach((part) => {
+      if (!part) return;
+      if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+        const path = part.slice(1, -1);
+        promptEl.appendChild(createMentionToken(path));
+      } else {
+        appendTextWithBreaks(promptEl, part);
+      }
+    });
+  }
+
+  function serializePromptNode(node) {
+    if (!node) return '';
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    const el = node;
+    if (el.classList.contains('mention-token')) {
+      const path = el.dataset.path || el.textContent || '';
+      return path ? `\`${path}\`` : '';
+    }
+    if (el.tagName === 'BR') return '\n';
+    let out = '';
+    el.childNodes.forEach((child) => { out += serializePromptNode(child); });
+    if (el.tagName === 'DIV' || el.tagName === 'P') out += '\n';
+    return out;
+  }
+
+  function getPromptText() {
+    if (!promptEl) return '';
+    let text = '';
+    promptEl.childNodes.forEach((child) => { text += serializePromptNode(child); });
+    return text;
+  }
+
+  function clearPrompt() {
+    if (!promptEl) return;
+    promptEl.innerHTML = '';
+  }
+
+  function normalizeMentions() {
+    if (!promptEl || isNormalizing) return;
+    const text = getPromptText();
+    if (!text.includes('`')) return;
+    isNormalizing = true;
+    renderPromptFromText(text);
+    if (promptEl instanceof HTMLElement) {
+      moveCaretToEnd();
+    }
+    isNormalizing = false;
+  }
+
+  function moveCaretToEnd() {
+    if (!promptEl) return;
+    promptEl.focus();
+    const range = document.createRange();
+    range.selectNodeContents(promptEl);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }
+
+  function detectMentionTrigger() {
+    if (!promptEl) return false;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return false;
+    const range = selection.getRangeAt(0);
+    if (!promptEl.contains(range.commonAncestorContainer)) return false;
+    const text = getPromptText();
+    return /\s@$/.test(text);
+  }
+
+  function insertMention(path) {
+    if (!promptEl || !path) return;
+    const token = createMentionToken(path);
+    const selection = window.getSelection();
+    const useSelection = selection && selection.rangeCount &&
+      promptEl.contains(selection.getRangeAt(0).commonAncestorContainer);
+    if (useSelection) {
+      const range = selection.getRangeAt(0);
+      range.deleteContents();
+      range.insertNode(token);
+      const space = document.createTextNode(' ');
+      range.setStartAfter(token);
+      range.insertNode(space);
+      range.setStartAfter(space);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } else {
+      promptEl.appendChild(token);
+      promptEl.appendChild(document.createTextNode(' '));
+    }
+    promptEl.focus();
+    showTapTip(path);
+    if (mentionTriggered) {
+      const text = getPromptText().replace(/\s@$/, ' ');
+      renderPromptFromText(text);
+      moveCaretToEnd();
+      mentionTriggered = false;
+    } else {
+      moveCaretToEnd();
+    }
+  }
+
+  function showTapTip(text) {
+    if (!text || !promptEl) return;
+    if (!('ontouchstart' in window)) return;
+    let tip = document.getElementById('mention-tip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.id = 'mention-tip';
+      tip.className = 'mention-tip';
+      document.body.appendChild(tip);
+    }
+    tip.textContent = text;
+    const rect = promptEl.getBoundingClientRect();
+    tip.style.left = `${rect.left + 12}px`;
+    tip.style.top = `${rect.top - 32}px`;
+    tip.classList.add('show');
+    setTimeout(() => tip.classList.remove('show'), 2000);
   }
 
   function clearPlaceholder() {
@@ -188,24 +355,49 @@ document.addEventListener('DOMContentLoaded', () => {
     settingsModalEl.classList.add('hidden');
   }
 
+  function normalizeApprovalValue(value) {
+    if (!value) return value;
+    if (value === 'unlessTrusted') return 'untrusted';
+    return value;
+  }
+
   async function saveApprovalQuick(value) {
-    const approval = value?.trim();
+    const approval = normalizeApprovalValue(value?.trim());
     if (!approval) return;
     await postJson('/api/appserver/conversation', { settings: { approvalPolicy: approval } });
     conversationSettings.approvalPolicy = approval;
     if (footerApprovalValue) footerApprovalValue.textContent = approval;
   }
 
-  function openPicker(startPath) {
+  function openPicker(startPath, mode = 'cwd') {
     if (!pickerOverlayEl) return;
+    pickerMode = mode || 'cwd';
+    if (pickerTitleEl) {
+      pickerTitleEl.textContent = pickerMode === 'mention' ? 'Mentioning' : 'Pick CWD';
+    }
     pickerPath = startPath || settingsCwdEl?.value || '~';
     pickerOverlayEl.classList.remove('hidden');
     fetchPicker(pickerPath);
+    if (pickerFilterEl) {
+      pickerFilterEl.value = '';
+      setTimeout(() => pickerFilterEl.focus(), 0);
+    }
   }
 
   function closePicker() {
     if (!pickerOverlayEl) return;
     pickerOverlayEl.classList.add('hidden');
+    pickerMode = 'cwd';
+  }
+
+  function bindPickerFilter() {
+    if (!pickerFilterEl) return;
+    pickerFilterEl.addEventListener('input', () => {
+      if (filterTimer) clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        applyPickerFilter();
+      }, 150);
+    });
   }
 
   function openRolloutPicker() {
@@ -272,30 +464,12 @@ document.addEventListener('DOMContentLoaded', () => {
   async function loadRolloutPreview(rolloutId) {
     if (!rolloutId) return;
     try {
-      setActivity('loading rollout', true);
       const r = await fetch(`/api/appserver/rollouts/${encodeURIComponent(rolloutId)}/preview`, { cache: 'no-store' });
       if (!r.ok) throw new Error('failed to load rollout preview');
       const data = await r.json();
-      resetTimeline();
       const items = Array.isArray(data?.items) ? data.items : [];
-      items.forEach((entry) => {
-        if (!entry || !entry.role || !entry.text) return;
-        if (entry.role === 'reasoning') {
-          appendReasoningDelta(entry.item_id || 'reasoning', entry.text + '\n');
-          return;
-        }
-        if (entry.role === 'diff') {
-          addDiff(entry.item_id || 'diff', entry.text || '');
-          return;
-        }
-        addMessage(entry.role, entry.text);
-      });
-      if (Number.isFinite(data?.token_total)) {
-        updateTokens(data.token_total);
-      }
       pendingRollout = { id: rolloutId, items, token_total: data?.token_total ?? null };
       if (settingsRolloutEl) settingsRolloutEl.value = rolloutId;
-      setActivity('rollout loaded', false);
       closeRolloutPicker();
     } catch (err) {
       console.warn('rollout preview failed', err);
@@ -390,11 +564,53 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!r.ok) return;
       const data = await r.json();
       pickerPath = data?.path || path || '~';
+      pickerItems = Array.isArray(data?.items) ? data.items : [];
       if (pickerPathEl) pickerPathEl.textContent = pickerPath;
-      renderPickerList(data?.items || []);
+      applyPickerFilter();
     } catch {
       // ignore
     }
+  }
+
+  async function fetchPickerSearch(query) {
+    try {
+      const root = conversationSettings?.cwd || settingsCwdEl?.value || pickerPath || '~';
+      const url = `/api/fs/search?query=${encodeURIComponent(query)}&root=${encodeURIComponent(root)}`;
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) return [];
+      const data = await r.json();
+      return Array.isArray(data?.items) ? data.items : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function applyPickerFilter() {
+    if (!pickerFilterEl) {
+      renderPickerList(pickerItems || []);
+      return;
+    }
+    const raw = pickerFilterEl.value || '';
+    if (!raw.trim()) {
+      renderPickerList(pickerItems || []);
+      return;
+    }
+    if (pickerMode === 'mention') {
+      fetchPickerSearch(raw).then(renderPickerList);
+      return;
+    }
+    let regex = null;
+    try {
+      regex = new RegExp(raw, 'i');
+    } catch {
+      renderPickerList([]);
+      return;
+    }
+    const items = (pickerItems || []).filter((item) => {
+      const target = `${item?.name || ''} ${item?.path || ''}`;
+      return regex.test(target);
+    });
+    renderPickerList(items);
   }
 
   function renderPickerList(items) {
@@ -412,6 +628,11 @@ document.addEventListener('DOMContentLoaded', () => {
       row.addEventListener('click', () => {
         if (item.type === 'directory') {
           fetchPicker(item.path);
+          return;
+        }
+        if (pickerMode === 'mention') {
+          insertMention(item.path || item.name || '');
+          closePicker();
         }
       });
       pickerListEl.appendChild(row);
@@ -469,7 +690,20 @@ document.addEventListener('DOMContentLoaded', () => {
       const deleteBtn = document.createElement('button');
       deleteBtn.className = 'btn tiny decline';
       deleteBtn.textContent = 'Delete';
-      deleteBtn.addEventListener('click', () => deleteConversation(meta.conversation_id));
+      deleteBtn.addEventListener('click', () => {
+        if (window.CodexAgent?.helpers?.openWarningModal) {
+          window.CodexAgent.helpers.openWarningModal({
+            title: 'Delete conversation?',
+            body: 'This permanently removes the conversation and its transcript.',
+            confirmText: 'Delete',
+            onConfirm: async () => {
+              await deleteConversation(meta.conversation_id);
+            },
+          });
+        } else {
+          deleteConversation(meta.conversation_id);
+        }
+      });
       actions.append(openBtn, settingsBtn, deleteBtn);
 
       row.append(info, actions);
@@ -523,9 +757,13 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll(true);
   }
 
-  function insertRow(row) {
+  function insertRow(row, beforeEl) {
     clearPlaceholder();
-    if (activityRow && activityRow.parentElement === timelineEl) {
+    if (beforeEl && beforeEl.parentElement === timelineEl) {
+      timelineEl.insertBefore(row, beforeEl);
+    } else if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
+      timelineEl.insertBefore(row, bottomSpacerEl);
+    } else if (activityRow && activityRow.parentElement === timelineEl) {
       timelineEl.insertBefore(row, activityRow);
     } else {
       timelineEl.appendChild(row);
@@ -533,7 +771,7 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
-  function createRow(kind, title) {
+  function buildRow(kind, title) {
     const row = document.createElement('div');
     row.className = `timeline-row ${kind || ''}`.trim();
     const meta = document.createElement('div');
@@ -542,7 +780,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const body = document.createElement('div');
     body.className = 'body';
     row.append(meta, body);
-    insertRow(row);
+    return { row, body };
+  }
+
+  function createRow(kind, title, beforeEl) {
+    const { row, body } = buildRow(kind, title);
+    insertRow(row, beforeEl);
     return { row, body };
   }
 
@@ -567,6 +810,19 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!Number.isFinite(total)) return;
     tokenCount = Number(total);
     setCounter(counterTokensEl, tokenCount);
+    if (Number.isFinite(contextWindow)) {
+      updateContextRemaining(tokenCount, contextWindow);
+    }
+  }
+
+  function updateContextRemaining(total, windowSize) {
+    if (!contextRemainingEl) return;
+    if (!Number.isFinite(total) || !Number.isFinite(windowSize)) {
+      contextRemainingEl.textContent = '—';
+      return;
+    }
+    const remaining = Math.max(0, Number(windowSize) - Number(total));
+    contextRemainingEl.textContent = String(remaining);
   }
 
   function resetTimeline() {
@@ -575,23 +831,44 @@ document.addEventListener('DOMContentLoaded', () => {
     assistantRows.clear();
     reasoningRows.clear();
     diffRows.clear();
+    toolRows.clear();
     activityRow = null;
     activityTextEl = null;
     activityLineEl = null;
+    topSpacerEl = document.createElement('div');
+    topSpacerEl.className = 'timeline-spacer';
+    bottomSpacerEl = document.createElement('div');
+    bottomSpacerEl.className = 'timeline-spacer';
     placeholderCleared = false;
     messageCount = 0;
     tokenCount = 0;
+    transcriptTotal = 0;
+    transcriptStart = 0;
+    transcriptEnd = 0;
     lastEventType = null;
     lastReasoningKey = null;
     setCounter(counterMessagesEl, messageCount);
     setCounter(counterTokensEl, tokenCount);
+    if (contextRemainingEl) contextRemainingEl.textContent = '—';
+    timelineEl.appendChild(topSpacerEl);
     const placeholder = document.createElement('div');
     placeholder.id = 'timeline-placeholder';
     placeholder.className = 'timeline-row muted';
     placeholder.textContent = 'Waiting for events...';
     timelineEl.appendChild(placeholder);
+    timelineEl.appendChild(bottomSpacerEl);
     ensureActivityRow();
     maybeAutoScroll(true);
+  }
+
+  async function requestContextCompact() {
+    try {
+      await postJson('/api/appserver/compact', null);
+      setActivity('compact requested', true);
+    } catch (err) {
+      console.warn('compact failed', err);
+      setActivity('compact failed', true);
+    }
   }
 
   function addMessage(role, text) {
@@ -602,6 +879,65 @@ document.addEventListener('DOMContentLoaded', () => {
     body.append(pre);
     incrementMessages();
     lastEventType = 'message';
+  }
+
+  function updateSpacerHeights() {
+    if (!topSpacerEl || !bottomSpacerEl) return;
+    const above = Math.max(0, transcriptStart);
+    const below = Math.max(0, transcriptTotal - transcriptEnd);
+    topSpacerEl.style.height = `${Math.max(0, above * estimatedRowHeight)}px`;
+    bottomSpacerEl.style.height = `${Math.max(0, below * estimatedRowHeight)}px`;
+  }
+
+  function measureRowHeight() {
+    const rows = Array.from(timelineEl.querySelectorAll('.timeline-row'))
+      .filter((row) => !row.classList.contains('activity') && !row.classList.contains('muted'));
+    if (!rows.length) return;
+    const total = rows.reduce((sum, row) => sum + row.getBoundingClientRect().height, 0);
+    if (total > 0) {
+      estimatedRowHeight = total / rows.length;
+    }
+  }
+
+  function renderTranscriptEntries(items, opts = {}) {
+    if (!items || !items.length || !timelineEl) return;
+    const fragment = document.createDocumentFragment();
+    items.forEach((entry) => {
+      if (!entry || !entry.role) return;
+      if (entry.role === 'reasoning') {
+        const { row, body } = buildRow('reasoning', 'reasoning');
+        const pre = document.createElement('pre');
+        pre.textContent = entry.text || '';
+        body.append(pre);
+        fragment.appendChild(row);
+        return;
+      }
+      if (entry.role === 'diff') {
+        const { row, body } = buildRow('diff', 'diff');
+        const pre = document.createElement('pre');
+        pre.className = 'diff-block';
+        pre.innerHTML = formatDiff(entry.text || '');
+        body.append(pre);
+        fragment.appendChild(row);
+        return;
+      }
+      const label = entry.role === 'assistant' ? 'assistant' : entry.role;
+      const { row, body } = buildRow('message', label);
+      const pre = document.createElement('pre');
+      pre.textContent = entry.text || '';
+      body.append(pre);
+      fragment.appendChild(row);
+      incrementMessages();
+    });
+    clearPlaceholder();
+    const insertBefore = opts.prepend ? topSpacerEl?.nextSibling : bottomSpacerEl;
+    if (insertBefore && insertBefore.parentElement === timelineEl) {
+      timelineEl.insertBefore(fragment, insertBefore);
+    } else {
+      timelineEl.appendChild(fragment);
+    }
+    measureRowHeight();
+    updateSpacerHeights();
   }
 
   function getAssistantRow(id) {
@@ -673,6 +1009,73 @@ document.addEventListener('DOMContentLoaded', () => {
       diffRows.set(key, entry);
     }
     return entry;
+  }
+
+  function getToolRow(id, label) {
+    const key = id || `tool:${label || 'tool'}`;
+    let entry = toolRows.get(key);
+    if (!entry) {
+      const { body } = createRow('tool', label || 'tool');
+      const pre = document.createElement('pre');
+      pre.className = 'tool-block';
+      pre.textContent = '';
+      body.append(pre);
+      entry = { pre };
+      toolRows.set(key, entry);
+    }
+    return entry;
+  }
+
+  function renderToolBegin(evt) {
+    const toolName = evt.tool || 'tool';
+    const entry = getToolRow(evt.id, `tool:${toolName}`);
+    const payload = evt.payload || {};
+    const cmd = payload.command || payload.cmd || payload.args;
+    const cwd = payload.cwd;
+    const parts = [];
+    if (cmd) parts.push(String(cmd));
+    if (cwd) parts.push(`cwd=${cwd}`);
+    if (parts.length) {
+      entry.pre.textContent += `[begin] ${parts.join(' ')}\n`;
+    } else {
+      entry.pre.textContent += '[begin]\n';
+    }
+    lastEventType = 'tool';
+  }
+
+  function renderToolDelta(evt) {
+    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`);
+    const delta = evt.delta || '';
+    if (delta) {
+      entry.pre.textContent += delta;
+    }
+    lastEventType = 'tool';
+    maybeAutoScroll();
+  }
+
+  function renderToolEnd(evt) {
+    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`);
+    const payload = evt.payload || {};
+    const exitCode = payload.exit_code ?? payload.exitCode;
+    const duration = payload.duration_ms ?? payload.durationMs;
+    const parts = [];
+    if (exitCode !== undefined && exitCode !== null) parts.push(`exit=${exitCode}`);
+    if (duration !== undefined && duration !== null) parts.push(`duration=${duration}ms`);
+    entry.pre.textContent += `[end] ${parts.join(' ')}\n`;
+    lastEventType = 'tool';
+  }
+
+  function renderToolInteraction(evt) {
+    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`);
+    const payload = evt.payload || {};
+    const stdin = payload.stdin ? `stdin: ${payload.stdin}` : '';
+    const stdout = payload.stdout ? `stdout: ${payload.stdout}` : '';
+    const pid = payload.pid ? `pid=${payload.pid}` : '';
+    const parts = [pid, stdin, stdout].filter(Boolean);
+    if (parts.length) {
+      entry.pre.textContent += `[io] ${parts.join(' ')}\n`;
+    }
+    lastEventType = 'tool';
   }
 
   function addDiff(id, text) {
@@ -879,7 +1282,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const settings = {
       cwd,
-      approvalPolicy: settingsApprovalEl?.value?.trim() || null,
+      approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
       sandboxPolicy: settingsSandboxEl?.value?.trim() || null,
       model: settingsModelEl?.value?.trim() || null,
       effort: settingsEffortEl?.value?.trim() || null,
@@ -895,11 +1298,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     await postJson('/api/appserver/conversation', { settings });
     if (pendingRollout?.id && Array.isArray(pendingRollout.items)) {
+      setActivity('loading rollout', true);
       await postJson('/api/appserver/conversations/bind-rollout', {
         rollout_id: pendingRollout.id,
-        items: pendingRollout.items,
       });
       pendingRollout = null;
+      setActivity('rollout loaded', false);
     }
     closeSettingsModal();
     await fetchConversation();
@@ -1102,24 +1506,45 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  async function fetchTranscriptRange(offset, limit) {
+    const url = `/api/appserver/transcript/range?offset=${offset}&limit=${limit}`;
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) return null;
+    return r.json();
+  }
+
+  async function loadOlderTranscript() {
+    if (transcriptLoading) return;
+    if (transcriptStart <= 0) return;
+    transcriptLoading = true;
+    try {
+      const prevOffset = Math.max(0, transcriptStart - transcriptLimit);
+      const beforeHeight = scrollContainer?.scrollHeight || 0;
+      const data = await fetchTranscriptRange(prevOffset, transcriptStart - prevOffset);
+      if (data && Array.isArray(data.items)) {
+        transcriptTotal = data.total || transcriptTotal;
+        transcriptStart = data.offset ?? prevOffset;
+        renderTranscriptEntries(data.items, { prepend: true });
+        transcriptEnd = Math.max(transcriptEnd, transcriptStart + (data.items?.length || 0));
+        const afterHeight = scrollContainer?.scrollHeight || 0;
+        if (scrollContainer) {
+          scrollContainer.scrollTop += (afterHeight - beforeHeight);
+        }
+      }
+    } finally {
+      transcriptLoading = false;
+    }
+  }
+
   async function replayTranscript() {
     try {
-      const r = await fetch('/api/appserver/transcript', { cache: 'no-store' });
-      if (!r.ok) return;
-      const data = await r.json();
+      const data = await fetchTranscriptRange(-1, transcriptLimit);
       if (!data || !Array.isArray(data.items)) return;
-      data.items.forEach((entry) => {
-        if (!entry || !entry.role || !entry.text) return;
-        if (entry.role === 'reasoning') {
-          appendReasoningDelta(entry.item_id || 'reasoning', entry.text + '\n');
-          return;
-        }
-        if (entry.role === 'diff') {
-          addDiff(entry.item_id || 'diff', entry.text || '');
-          return;
-        }
-        addMessage(entry.role, entry.text);
-      });
+      transcriptTotal = data.total || 0;
+      transcriptStart = data.offset || 0;
+      transcriptEnd = transcriptStart + (data.items?.length || 0);
+      renderTranscriptEntries(data.items, { prepend: false });
+      transcriptEnd = transcriptStart + (data.items?.length || 0);
       lastEventType = null;
       maybeAutoScroll(true);
     } catch {
@@ -1157,9 +1582,30 @@ document.addEventListener('DOMContentLoaded', () => {
         lastEventType = 'approval';
         renderApproval(evt);
         return;
+      case 'tool_begin':
+        renderToolBegin(evt);
+        return;
+      case 'tool_delta':
+        renderToolDelta(evt);
+        return;
+      case 'tool_end':
+        renderToolEnd(evt);
+        return;
+      case 'tool_interaction':
+        renderToolInteraction(evt);
+        return;
       case 'token_count':
         lastEventType = 'token';
+        if (Number.isFinite(evt.context_window)) {
+          contextWindow = Number(evt.context_window);
+        }
         updateTokens(evt.total);
+        if (Number.isFinite(evt.context_window)) {
+          updateContextRemaining(evt.total, evt.context_window);
+        }
+        return;
+      case 'mention_insert':
+        insertMention(evt.path || '');
         return;
       case 'rpc_response': {
         const entry = pending.get(evt.id);
@@ -1189,31 +1635,33 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function connectWS() {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${window.location.host}/ws/appserver`;
-    const ws = new WebSocket(wsUrl);
+    if (typeof io === 'undefined') {
+      setPill(wsStatusEl, 'no-io', 'err');
+      return;
+    }
     setPill(wsStatusEl, 'connecting', 'warn');
-    ws.onopen = () => {
+    const socket = io('/appserver', {
+      transports: ['websocket'],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 5000,
+    });
+    socket.on('connect', () => {
       markWsOpen();
       setPill(wsStatusEl, 'connected', 'ok');
-    };
-    ws.onclose = () => {
+    });
+    socket.on('disconnect', () => {
       resetWsReady();
-      setPill(wsStatusEl, 'closed', 'err');
-      scheduleReconnect();
-    };
-    ws.onerror = () => {
+      setPill(wsStatusEl, 'disconnected', 'err');
+    });
+    socket.on('connect_error', () => {
+      resetWsReady();
       setPill(wsStatusEl, 'error', 'err');
-      scheduleReconnect();
-    };
-    ws.onmessage = (evt) => {
-      try {
-        const data = JSON.parse(evt.data);
-        handleEvent(data);
-      } catch {
-        // ignore malformed
-      }
-    };
+    });
+    socket.on('appserver_event', (data) => {
+      handleEvent(data);
+    });
   }
 
   setPill(statusEl, 'idle', 'warn');
@@ -1223,6 +1671,7 @@ document.addEventListener('DOMContentLoaded', () => {
   updateScrollButton();
   resetWsReady();
   connectWS();
+  bindPickerFilter();
   fetchConversation().then(async () => {
     await fetchConversations();
     if (activeView === 'conversation') {
@@ -1237,7 +1686,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupDropdown(settingsApprovalEl, settingsApprovalToggle, settingsApprovalOptions, [
     'never',
     'on-failure',
-    'unlessTrusted',
+    'untrusted',
   ]);
   setupDropdown(settingsSandboxEl, settingsSandboxToggle, settingsSandboxOptions, [
     'workspaceWrite',
@@ -1279,8 +1728,11 @@ document.addEventListener('DOMContentLoaded', () => {
       fetchPicker,
       fetchRollouts,
       setActivity,
+      insertMention,
       getPickerPath: () => pickerPath,
       setPickerPath: (val) => { pickerPath = val; },
+      getPickerMode: () => pickerMode,
+      setPickerMode: (val) => { pickerMode = val || 'cwd'; },
       saveApprovalQuick,
     },
     state: {
@@ -1315,19 +1767,64 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   sendBtn?.addEventListener('click', async () => {
-    const text = promptEl?.value?.trim();
+    const text = getPromptText().trim();
     if (!text) return;
-    if (promptEl) promptEl.value = '';
+    clearPrompt();
     await sendUserMessage(text);
   });
 
   promptEl?.addEventListener('keydown', async (evt) => {
     if (evt.key === 'Enter' && !evt.shiftKey) {
       evt.preventDefault();
-      const text = promptEl.value.trim();
+      const text = getPromptText().trim();
       if (!text) return;
-      promptEl.value = '';
+      clearPrompt();
       await sendUserMessage(text);
+      return;
+    }
+    if (evt.key === 'Enter' && evt.shiftKey) {
+      evt.preventDefault();
+      document.execCommand('insertLineBreak');
+    }
+  });
+
+  promptEl?.addEventListener('input', () => {
+    if (normalizeTimer) clearTimeout(normalizeTimer);
+    normalizeTimer = setTimeout(normalizeMentions, 200);
+    if (detectMentionTrigger()) {
+      const text = getPromptText().replace(/\s@$/, ' ');
+      renderPromptFromText(text);
+      moveCaretToEnd();
+      const startPath = conversationSettings?.cwd || settingsCwdEl?.value || '~';
+      mentionTriggered = true;
+      openPicker(startPath, 'mention');
+    }
+  });
+
+  promptEl?.addEventListener('click', (evt) => {
+    const target = evt.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.classList.contains('mention-token')) {
+      const path = target.dataset.path || target.textContent || '';
+      showTapTip(path);
+    }
+  });
+
+  mentionPillEl?.addEventListener('click', () => {
+    const startPath = conversationSettings?.cwd || settingsCwdEl?.value || '~';
+    openPicker(startPath, 'mention');
+  });
+
+  contextRemainingEl?.addEventListener('click', () => {
+    if (window.CodexAgent?.helpers?.openWarningModal) {
+      window.CodexAgent.helpers.openWarningModal({
+        title: 'Compact context?',
+        body: 'This will summarize the current conversation history to save context window.',
+        confirmText: 'Compact',
+        onConfirm: async () => {
+          await requestContextCompact();
+        },
+      });
     }
   });
 
@@ -1336,10 +1833,11 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   scrollContainer?.addEventListener('scroll', () => {
-    const nearBottom = isNearBottom();
-    if (autoScroll !== nearBottom) {
-      autoScroll = nearBottom;
-      updateScrollButton();
+    if (scrollContainer) {
+      const topSpacerHeight = topSpacerEl ? topSpacerEl.getBoundingClientRect().height : 0;
+      if (scrollContainer.scrollTop <= topSpacerHeight + 120) {
+        loadOlderTranscript();
+      }
     }
   });
 

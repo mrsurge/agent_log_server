@@ -32,7 +32,7 @@ window.CodexAgentModules.push((ctx) => {
   };
   footerApprovalValue?.addEventListener('click', toggleFooterApproval);
   if (footerApprovalOptions && footerApprovalOptions.childElementCount === 0) {
-    ['never', 'on-failure', 'unlessTrusted'].forEach((opt) => {
+    ['never', 'on-failure', 'untrusted'].forEach((opt) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'dropdown-item';
