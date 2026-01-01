@@ -6,7 +6,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from contextlib import suppress
+from contextlib import suppress, asynccontextmanager
 import hashlib
 import re
 import secrets
@@ -29,7 +29,17 @@ from fasthtml.common import (
     Span, Input, Textarea, Label, Small, A, Ul, Li, Code, Script, Link, Meta, to_xml
 )
 
-app = FastAPI()
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    try:
+        info = await _get_or_start_appserver_shell()
+        await _ensure_appserver_reader(info["shell_id"])
+        await _ensure_appserver_initialized()
+    except Exception:
+        pass
+    yield
+
+app = FastAPI(lifespan=_lifespan)
 app.include_router(fws_ui.router, dependencies=[Depends(lambda: _ensure_framework_shells_secret())])
 
 # --- Config & State ---
@@ -75,6 +85,7 @@ def _default_appserver_config() -> Dict[str, Any]:
     return {
         "cwd": None,
         "thread_id": None,
+        "turn_id": None,
         "conversation_id": None,
         "conversations": [],
         "active_view": "splash",
@@ -289,6 +300,13 @@ async def _set_thread_id(thread_id: str) -> None:
             _save_appserver_config(cfg)
 
 
+async def _set_turn_id(turn_id: Optional[str]) -> None:
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        cfg["turn_id"] = turn_id
+        _save_appserver_config(cfg)
+
+
 def _sanitize_conversation_id(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
     return safe or "unknown"
@@ -297,6 +315,171 @@ def _sanitize_conversation_id(value: str) -> str:
 def _transcript_path(conversation_id: str) -> Path:
     return _conversation_transcript_path(conversation_id)
 
+
+async def _write_transcript_entries(conversation_id: str, items: List[Dict[str, Any]]) -> None:
+    if not conversation_id:
+        return
+    path = _transcript_path(conversation_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with _transcript_lock:
+        with path.open("w", encoding="utf-8") as f:
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                record = {"ts": utc_ts(), **entry}
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+def _rollout_sessions_dir() -> Path:
+    return Path(os.path.expanduser("~/.codex/sessions"))
+
+
+def _find_rollout_path(rollout_id: str) -> Optional[Path]:
+    safe = _sanitize_conversation_id(rollout_id)
+    if not safe:
+        return None
+    base = _rollout_sessions_dir()
+    if not base.exists():
+        return None
+    for path in base.rglob(f"*{safe}*.jsonl"):
+        if path.is_file():
+            return path
+    return None
+
+
+def _parse_rollout_timestamp(ts: Optional[str]) -> Optional[int]:
+    if not ts:
+        return None
+    try:
+        return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return None
+
+
+def _rollout_content_text(payload: Dict[str, Any]) -> Optional[str]:
+    content = payload.get("content")
+    parts: List[str] = []
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+    if not parts and isinstance(payload.get("text"), str):
+        parts.append(payload["text"])
+    if not parts and isinstance(payload.get("message"), str):
+        parts.append(payload["message"])
+    text = "\n".join(parts).strip()
+    return text or None
+
+
+def _rollout_reasoning_text(payload: Dict[str, Any]) -> Optional[str]:
+    summary = payload.get("summary")
+    parts: List[str] = []
+    if isinstance(summary, list):
+        for item in summary:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("summary_text")
+                if isinstance(text, str):
+                    parts.append(text)
+    if not parts and isinstance(payload.get("text"), str):
+        parts.append(payload["text"])
+    text = "\n".join(parts).strip()
+    return text or None
+
+
+def _rollout_extract_diff(payload: Any) -> Optional[str]:
+    if isinstance(payload, dict):
+        for key in ("diff", "unified_diff", "patch"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        for value in payload.values():
+            diff = _rollout_extract_diff(value)
+            if diff:
+                return diff
+    if isinstance(payload, list):
+        for value in payload:
+            diff = _rollout_extract_diff(value)
+            if diff:
+                return diff
+    return None
+
+
+def _rollout_preview_entries(path: Path, limit: int = 400) -> Dict[str, Any]:
+    items: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, Optional[int]]] = set()
+    token_total: Optional[int] = None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if len(items) >= limit:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                ts_bucket = _parse_rollout_timestamp(rec.get("timestamp"))
+                rtype = rec.get("type")
+                payload = rec.get("payload") if isinstance(rec, dict) else None
+                if rtype == "response_item" and isinstance(payload, dict):
+                    ptype = payload.get("type")
+                    if ptype == "message":
+                        role = payload.get("role")
+                        if role in {"user", "assistant"}:
+                            text = _rollout_content_text(payload)
+                            if text:
+                                key = (role, text, ts_bucket)
+                                if key not in seen:
+                                    seen.add(key)
+                                    items.append({"role": role, "text": text, "ts": rec.get("timestamp")})
+                    elif ptype == "reasoning":
+                        text = _rollout_reasoning_text(payload)
+                        if text:
+                            key = ("reasoning", text, ts_bucket)
+                            if key not in seen:
+                                seen.add(key)
+                                items.append({"role": "reasoning", "text": text, "ts": rec.get("timestamp")})
+                elif rtype == "event_msg" and isinstance(payload, dict):
+                    ptype = payload.get("type")
+                    if ptype == "user_message":
+                        text = payload.get("message")
+                        if isinstance(text, str) and text.strip():
+                            key = ("user", text, ts_bucket)
+                            if key not in seen:
+                                seen.add(key)
+                                items.append({"role": "user", "text": text.strip(), "ts": rec.get("timestamp")})
+                    elif ptype == "agent_message":
+                        text = payload.get("message")
+                        if isinstance(text, str) and text.strip():
+                            key = ("assistant", text, ts_bucket)
+                            if key not in seen:
+                                seen.add(key)
+                                items.append({"role": "assistant", "text": text.strip(), "ts": rec.get("timestamp")})
+                    elif ptype == "agent_reasoning":
+                        text = payload.get("text")
+                        if isinstance(text, str) and text.strip():
+                            key = ("reasoning", text, ts_bucket)
+                            if key not in seen:
+                                seen.add(key)
+                                items.append({"role": "reasoning", "text": text.strip(), "ts": rec.get("timestamp")})
+                    elif ptype == "token_count":
+                        info = payload.get("info")
+                        if isinstance(info, dict):
+                            usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
+                            if isinstance(usage, dict) and isinstance(usage.get("total_tokens"), (int, float)):
+                                token_total = int(usage["total_tokens"])
+                diff = _rollout_extract_diff(payload)
+                if diff:
+                    key = ("diff", diff, ts_bucket)
+                    if key not in seen:
+                        seen.add(key)
+                        items.append({"role": "diff", "text": diff, "ts": rec.get("timestamp")})
+    except Exception:
+        return {"items": [], "token_total": None}
+    return {"items": items, "token_total": token_total}
 
 def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
     raw_type = str(item.get("type") or "")
@@ -780,6 +963,10 @@ async def _route_appserver_event(
         return events
 
     if label_lower in {"turn/started", "turn/completed"}:
+        if label_lower == "turn/started":
+            await _set_turn_id(turn_id)
+        else:
+            await _set_turn_id(None)
         events.append({"type": "activity", "label": "turn started" if label_lower == "turn/started" else "idle", "active": label_lower == "turn/started"})
         return events
 
@@ -1013,13 +1200,14 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
         if not state or not state.process.stdout:
             return
         pending_label: Optional[str] = None
-        while True:
-            line = await state.process.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace").strip()
+        buffer = b""
+        max_buffer = 4_000_000
+
+        async def _process_line(text: str) -> None:
+            nonlocal pending_label
+            text = text.strip()
             if not text:
-                continue
+                return
             await _broadcast_appserver_raw(text)
 
             # Handle label + JSON on same line.
@@ -1029,13 +1217,12 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
                     pending_label = prefix.strip()
                     text = "{" + rest
 
-            parsed = None
             try:
                 parsed = json.loads(text)
             except Exception:
                 if "/" in text or text.endswith("started") or text.endswith("completed"):
                     pending_label = text
-                continue
+                return
 
             # JSON-RPC response (result/error) - forward as UI event
             if isinstance(parsed, dict) and "id" in parsed and ("result" in parsed or "error" in parsed) and "method" not in parsed:
@@ -1062,7 +1249,7 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
                 waiter = _appserver_rpc_waiters.pop(str(parsed.get("id")), None)
                 if waiter and not waiter.done():
                     waiter.set_result(parsed)
-                continue
+                return
 
             label = None
             payload: Any = parsed
@@ -1102,6 +1289,30 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
             events = await _route_appserver_event(label, payload, conversation_id, request_id)
             for event in events:
                 await _broadcast_appserver_ui(event)
+
+        try:
+            while True:
+                chunk = await state.process.stdout.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                if len(buffer) > max_buffer and b"\n" not in buffer:
+                    await _broadcast_appserver_raw("[warn] dropping oversized line")
+                    buffer = b""
+                    continue
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    try:
+                        await _process_line(line.decode("utf-8", errors="replace"))
+                    except Exception:
+                        continue
+            if buffer:
+                try:
+                    await _process_line(buffer.decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+        except Exception:
+            return
 
     _appserver_reader_task = asyncio.create_task(_reader(), name="appserver-stdout-reader")
 
@@ -1461,19 +1672,24 @@ async def codex_agent_ui() -> FastHTMLResponse:
         to_xml(
             Html(
             Head(
+                Meta(name="viewport", content="width=device-width, initial-scale=1, viewport-fit=cover"),
                 Link(rel="manifest", href=f"/codex-agent/manifest.json?v={version}"),
                 Meta(name="theme-color", content=CODEX_AGENT_THEME_COLOR),
                 Link(rel="icon", type="image/svg+xml", href=_asset(CODEX_AGENT_ICON_PATH)),
                 Link(rel="stylesheet", href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap"),
                 Link(rel="stylesheet", href=_asset("/static/codex_agent.css")),
                 Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
+                Script(src=_asset("/static/modals/settings_modal.js"), defer=True),
+                Script(src=_asset("/static/modals/cwd_picker.js"), defer=True),
+                Script(src=_asset("/static/modals/rollout_picker.js"), defer=True),
+                Script(src=_asset("/static/ui/conversation_drawer.js"), defer=True),
                 Script(src=_asset("/static/codex_agent.js"), defer=True),
             ),
             Body(
                 Div(
                     Header(
                         Div(
-                            H1("Codex Agent"),
+                            H1("CodexAS-Extension"),
                             Small("App-Server JSON-RPC • Unified Timeline"),
                             cls="brand"
                         ),
@@ -1498,8 +1714,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                             Div(
                                 P("Pick or create a conversation", cls="muted"),
                                 Div(id="conversation-list", cls="conversation-list"),
-                                Button("New Conversation", id="conversation-create", cls="btn primary"),
                                 cls="splash-body"
+                            ),
+                            Footer(
+                                Button("New Conversation", id="conversation-create", cls="btn primary"),
+                                cls="splash-footer"
                             ),
                             cls="splash-view",
                             id="splash-view"
@@ -1508,7 +1727,6 @@ async def codex_agent_ui() -> FastHTMLResponse:
                             Div(
                                 Div(
                                     H2("Conversation"),
-                                    Small("Single-session mode"),
                                     cls="brand"
                                 ),
                                 Div(
@@ -1562,8 +1780,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 ),
                                 js_pill or "",
                                 Div(
-                                    Span("Mode"),
-                                    Span("portrait-friendly", cls="pill ok"),
+                                    Button("Interrupt", id="turn-interrupt", cls="btn danger"),
                                     cls="status-pill"
                                 ),
                                 cls="footer"
@@ -1634,6 +1851,15 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                         cls="dropdown-field"
                                     ),
                                 ),
+                                Label(
+                                    Span("Rollout"),
+                                    Div(
+                                        Input(type="text", id="settings-rollout", placeholder="(unselected)", readonly=True),
+                                        Button("Pick", id="settings-rollout-browse", cls="btn ghost"),
+                                        cls="settings-row"
+                                    ),
+                                    id="settings-rollout-row",
+                                ),
                                 cls="settings-body"
                             ),
                             Div(
@@ -1667,6 +1893,22 @@ async def codex_agent_ui() -> FastHTMLResponse:
                         ),
                         cls="picker-overlay hidden",
                         id="cwd-picker"
+                    ),
+                    Div(
+                        Div(
+                            Div(
+                                H3("Pick Rollout"),
+                                Button("×", id="rollout-close", cls="btn ghost"),
+                                cls="picker-header"
+                            ),
+                            Div(
+                                Div(id="rollout-list", cls="picker-list"),
+                                cls="picker-body"
+                            ),
+                            cls="picker-dialog"
+                        ),
+                        cls="picker-overlay hidden",
+                        id="rollout-picker"
                     ),
                     cls="appshell"
                 )
@@ -1824,6 +2066,32 @@ async def api_appserver_conversation_select(payload: Dict[str, Any] = Body(...))
     return meta
 
 
+@app.post("/api/appserver/conversations/bind-rollout")
+async def api_appserver_conversation_bind_rollout(payload: Dict[str, Any] = Body(...)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    rollout_id = payload.get("rollout_id")
+    items = payload.get("items")
+    if not isinstance(rollout_id, str) or not rollout_id.strip():
+        raise HTTPException(status_code=400, detail="Missing rollout_id")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="Missing items")
+    convo_id = await _ensure_conversation()
+    meta = _load_conversation_meta(convo_id)
+    meta["thread_id"] = rollout_id
+    meta["status"] = "active"
+    meta_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+    meta_settings["rolloutId"] = rollout_id
+    meta["settings"] = meta_settings
+    _save_conversation_meta(convo_id, meta)
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        cfg["thread_id"] = rollout_id
+        _save_appserver_config(cfg)
+    await _write_transcript_entries(convo_id, items)
+    return {"ok": True, "conversation_id": convo_id, "thread_id": rollout_id}
+
+
 @app.delete("/api/appserver/conversations/{conversation_id}")
 async def api_appserver_conversation_delete(conversation_id: str):
     if not conversation_id:
@@ -1941,6 +2209,47 @@ async def api_appserver_transcript(conversation_id: Optional[str] = Query(None))
     return {"conversation_id": str(convo_id), "items": items}
 
 
+@app.get("/api/appserver/rollouts")
+async def api_appserver_rollouts():
+    info = await _get_or_start_appserver_shell()
+    await _ensure_appserver_reader(info["shell_id"])
+    await _ensure_appserver_initialized()
+    try:
+        response = await _rpc_request("thread/list", params={"limit": 200}, timeout=15.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="thread/list timed out")
+    data = response.get("result") if isinstance(response, dict) else None
+    items_raw = []
+    if isinstance(data, dict):
+        items_raw = data.get("data") or []
+    items: List[Dict[str, Any]] = []
+    for item in items_raw:
+        if not isinstance(item, dict):
+            continue
+        rid = str(item.get("id") or "")
+        preview = str(item.get("preview") or "")
+        cwd = item.get("cwd")
+        items.append({
+            "id": rid,
+            "short_id": rid[-8:] if len(rid) > 8 else rid,
+            "preview": preview,
+            "cwd": cwd,
+        })
+    return {"items": items}
+
+
+@app.get("/api/appserver/rollouts/{rollout_id}/preview")
+async def api_appserver_rollout_preview(rollout_id: str):
+    safe = _sanitize_conversation_id(rollout_id)
+    if not safe:
+        raise HTTPException(status_code=400, detail="Invalid rollout id")
+    path = _find_rollout_path(safe)
+    if not path:
+        raise HTTPException(status_code=404, detail="Rollout not found")
+    preview = _rollout_preview_entries(path)
+    return {"items": preview.get("items", []), "token_total": preview.get("token_total")}
+
+
 @app.post("/api/appserver/config")
 async def api_appserver_config_update(payload: Dict[str, Any] = Body(...)):
     if not isinstance(payload, dict):
@@ -1990,6 +2299,7 @@ async def api_appserver_thread_kill():
     async with _config_lock:
         cfg = _load_appserver_config()
         cfg["thread_id"] = None
+        cfg["turn_id"] = None
         _save_appserver_config(cfg)
         return {"ok": True}
 
@@ -2027,6 +2337,20 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
     await _write_appserver(payload)
     return {"ok": True}
+
+
+@app.post("/api/appserver/interrupt")
+async def api_appserver_interrupt():
+    info = await _get_or_start_appserver_shell()
+    await _ensure_appserver_reader(info["shell_id"])
+    await _ensure_appserver_initialized()
+    cfg = _load_appserver_config()
+    thread_id = cfg.get("thread_id")
+    turn_id = cfg.get("turn_id")
+    if not thread_id or not turn_id:
+        raise HTTPException(status_code=409, detail="No active turn to interrupt")
+    await _rpc_request("turn/interrupt", params={"threadId": thread_id, "turnId": turn_id})
+    return {"ok": True, "thread_id": thread_id, "turn_id": turn_id}
 
 
 @app.post("/api/appserver/initialize")

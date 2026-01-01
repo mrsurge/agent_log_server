@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const stopBtn = document.getElementById('agent-stop');
   const promptEl = document.getElementById('agent-prompt');
   const sendBtn = document.getElementById('agent-send');
+  const interruptBtn = document.getElementById('turn-interrupt');
   const counterMessagesEl = document.getElementById('counter-messages');
   const counterTokensEl = document.getElementById('counter-tokens');
   const scrollBtn = document.getElementById('scroll-pin');
@@ -28,6 +29,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsModelEl = document.getElementById('settings-model');
   const settingsEffortEl = document.getElementById('settings-effort');
   const settingsSummaryEl = document.getElementById('settings-summary');
+  const settingsRolloutEl = document.getElementById('settings-rollout');
+  const settingsRolloutRowEl = document.getElementById('settings-rollout-row');
   const settingsApprovalToggle = document.getElementById('settings-approval-toggle');
   const settingsSandboxToggle = document.getElementById('settings-sandbox-toggle');
   const settingsModelToggle = document.getElementById('settings-model-toggle');
@@ -39,20 +42,35 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsEffortOptions = document.getElementById('settings-effort-options');
   const settingsSummaryOptions = document.getElementById('settings-summary-options');
   const settingsCwdBrowseBtn = document.getElementById('settings-cwd-browse');
+  const settingsRolloutBrowseBtn = document.getElementById('settings-rollout-browse');
   const pickerOverlayEl = document.getElementById('cwd-picker');
   const pickerCloseBtn = document.getElementById('picker-close');
   const pickerPathEl = document.getElementById('picker-path');
   const pickerListEl = document.getElementById('picker-list');
   const pickerUpBtn = document.getElementById('picker-up');
   const pickerSelectBtn = document.getElementById('picker-select');
+  const rolloutOverlayEl = document.getElementById('rollout-picker');
+  const rolloutCloseBtn = document.getElementById('rollout-close');
+  const rolloutListEl = document.getElementById('rollout-list');
 
   localStorage.setItem('last_tab', 'codex-agent');
+  const mobileParam = new URLSearchParams(window.location.search).get('mobile');
+  if (mobileParam === '1' || mobileParam === 'true') {
+    localStorage.setItem('codex_mobile_scale', '1');
+  } else if (mobileParam === '0' || mobileParam === 'false') {
+    localStorage.setItem('codex_mobile_scale', '0');
+  }
+  const storedMobile = localStorage.getItem('codex_mobile_scale');
+  const enableMobileScale = storedMobile === '1';
+  document.body.classList.toggle('mobile-scale', enableMobileScale);
 
   let conversationMeta = {};
   let conversationSettings = {};
   let conversationList = [];
   let activeView = 'splash';
   let currentThreadId = null;
+  let pendingNewConversation = false;
+  let pendingRollout = null;
   let lastEventType = null;
   let lastReasoningKey = null;
   let pickerPath = null;
@@ -61,6 +79,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let wsOpen = false;
   let wsReadyResolve = null;
   let wsReadyPromise = new Promise((resolve) => { wsReadyResolve = resolve; });
+  let wsReconnectTimer = null;
+  let wsReconnectDelay = 1000;
   let rpcId = 1;
   const pending = new Map();
 
@@ -120,17 +140,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function openSettingsModal() {
     if (!settingsModalEl) return;
-    if (settingsCwdEl) settingsCwdEl.value = conversationSettings?.cwd || '';
-    if (settingsApprovalEl) settingsApprovalEl.value = conversationSettings?.approvalPolicy || '';
-    if (settingsSandboxEl) settingsSandboxEl.value = conversationSettings?.sandboxPolicy || '';
-    if (settingsModelEl) settingsModelEl.value = conversationSettings?.model || '';
-    if (settingsEffortEl) settingsEffortEl.value = conversationSettings?.effort || '';
-    if (settingsSummaryEl) settingsSummaryEl.value = conversationSettings?.summary || '';
+    if (pendingNewConversation) {
+      if (settingsCwdEl) settingsCwdEl.value = '';
+      if (settingsApprovalEl) settingsApprovalEl.value = '';
+      if (settingsSandboxEl) settingsSandboxEl.value = '';
+      if (settingsModelEl) settingsModelEl.value = '';
+      if (settingsEffortEl) settingsEffortEl.value = '';
+      if (settingsSummaryEl) settingsSummaryEl.value = '';
+      if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || '';
+    } else {
+      if (settingsCwdEl) settingsCwdEl.value = conversationSettings?.cwd || '';
+      if (settingsApprovalEl) settingsApprovalEl.value = conversationSettings?.approvalPolicy || '';
+      if (settingsSandboxEl) settingsSandboxEl.value = conversationSettings?.sandboxPolicy || '';
+      if (settingsModelEl) settingsModelEl.value = conversationSettings?.model || '';
+      if (settingsEffortEl) settingsEffortEl.value = conversationSettings?.effort || '';
+      if (settingsSummaryEl) settingsSummaryEl.value = conversationSettings?.summary || '';
+      if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || conversationSettings?.rolloutId || '';
+    }
+    if (settingsRolloutRowEl) {
+      const hasSavedSettings = !pendingNewConversation && conversationMeta?.settings && Object.values(conversationMeta.settings).some((v) => v);
+      const allowRollout = !hasSavedSettings;
+      settingsRolloutRowEl.style.display = allowRollout ? 'block' : 'none';
+    }
     settingsModalEl.classList.remove('hidden');
   }
 
   function closeSettingsModal() {
     if (!settingsModalEl) return;
+    const cwdOk = Boolean(settingsCwdEl?.value?.trim());
+    if (!cwdOk) {
+      setActivity('CWD required', true);
+      return;
+    }
+    pendingNewConversation = false;
     settingsModalEl.classList.add('hidden');
   }
 
@@ -144,6 +186,101 @@ document.addEventListener('DOMContentLoaded', () => {
   function closePicker() {
     if (!pickerOverlayEl) return;
     pickerOverlayEl.classList.add('hidden');
+  }
+
+  function openRolloutPicker() {
+    if (!rolloutOverlayEl) return;
+    const cwdOk = Boolean(settingsCwdEl?.value?.trim());
+    if (!cwdOk) {
+      setActivity('select CWD first', true);
+      return;
+    }
+    rolloutOverlayEl.classList.remove('hidden');
+    fetchRollouts();
+  }
+
+  function closeRolloutPicker() {
+    if (!rolloutOverlayEl) return;
+    rolloutOverlayEl.classList.add('hidden');
+  }
+
+  function renderRolloutList(items) {
+    if (!rolloutListEl) return;
+    rolloutListEl.innerHTML = '';
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'picker-item';
+      empty.textContent = 'No rollouts found';
+      rolloutListEl.appendChild(empty);
+      return;
+    }
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'picker-item rollout-item';
+      row.dataset.rolloutId = item?.id || '';
+      const idSpan = document.createElement('span');
+      idSpan.className = 'rollout-id';
+      idSpan.textContent = item?.short_id || item?.id || '';
+      const previewSpan = document.createElement('span');
+      previewSpan.className = 'rollout-preview';
+      previewSpan.textContent = item?.preview || '';
+      row.append(idSpan, previewSpan);
+      rolloutListEl.appendChild(row);
+    });
+  }
+
+  async function fetchRollouts() {
+    try {
+      const r = await fetch('/api/appserver/rollouts', { cache: 'no-store' });
+      if (!r.ok) throw new Error('failed to load rollouts');
+      const data = await r.json();
+      let items = Array.isArray(data?.items) ? data.items : [];
+      const cwd = settingsCwdEl?.value?.trim();
+      if (cwd) {
+        items = items.filter((item) => {
+          if (!item || !item.cwd) return false;
+          return String(item.cwd) === cwd;
+        });
+      }
+      renderRolloutList(items);
+    } catch (err) {
+      console.warn('rollout list failed', err);
+      renderRolloutList([]);
+    }
+  }
+
+  async function loadRolloutPreview(rolloutId) {
+    if (!rolloutId) return;
+    try {
+      setActivity('loading rollout', true);
+      const r = await fetch(`/api/appserver/rollouts/${encodeURIComponent(rolloutId)}/preview`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('failed to load rollout preview');
+      const data = await r.json();
+      resetTimeline();
+      const items = Array.isArray(data?.items) ? data.items : [];
+      items.forEach((entry) => {
+        if (!entry || !entry.role || !entry.text) return;
+        if (entry.role === 'reasoning') {
+          appendReasoningDelta(entry.item_id || 'reasoning', entry.text + '\n');
+          return;
+        }
+        if (entry.role === 'diff') {
+          addDiff(entry.item_id || 'diff', entry.text || '');
+          return;
+        }
+        addMessage(entry.role, entry.text);
+      });
+      if (Number.isFinite(data?.token_total)) {
+        updateTokens(data.token_total);
+      }
+      pendingRollout = { id: rolloutId, items, token_total: data?.token_total ?? null };
+      if (settingsRolloutEl) settingsRolloutEl.value = rolloutId;
+      setActivity('rollout loaded', false);
+      closeRolloutPicker();
+    } catch (err) {
+      console.warn('rollout preview failed', err);
+      setActivity('rollout failed', true);
+    }
   }
 
   function buildDropdown(listEl, options, inputEl) {
@@ -282,12 +419,16 @@ document.addEventListener('DOMContentLoaded', () => {
       info.className = 'conversation-meta';
       const title = document.createElement('div');
       title.textContent = meta.conversation_id || 'conversation';
-      const sub = document.createElement('div');
       const threadText = meta.thread_id ? `thread: ${meta.thread_id}` : 'thread: (none)';
       const cwdText = meta.settings && meta.settings.cwd ? `cwd: ${meta.settings.cwd}` : 'cwd: (default)';
       const statusText = meta.status ? `status: ${meta.status}` : 'status: none';
-      sub.textContent = `${threadText} • ${cwdText} • ${statusText}`;
-      info.append(title, sub);
+      const threadRow = document.createElement('div');
+      threadRow.textContent = threadText;
+      const cwdRow = document.createElement('div');
+      cwdRow.textContent = cwdText;
+      const statusRow = document.createElement('div');
+      statusRow.textContent = statusText;
+      info.append(title, threadRow, cwdRow, statusRow);
 
       const actions = document.createElement('div');
       actions.className = 'conversation-actions';
@@ -708,18 +849,39 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function saveSettings() {
+    const cwd = settingsCwdEl?.value?.trim();
+    if (!cwd) {
+      setActivity('CWD required', true);
+      return;
+    }
     const settings = {
-      cwd: settingsCwdEl?.value?.trim() || null,
+      cwd,
       approvalPolicy: settingsApprovalEl?.value?.trim() || null,
       sandboxPolicy: settingsSandboxEl?.value?.trim() || null,
       model: settingsModelEl?.value?.trim() || null,
       effort: settingsEffortEl?.value?.trim() || null,
       summary: settingsSummaryEl?.value?.trim() || null,
     };
+    if (pendingNewConversation || !conversationMeta?.conversation_id) {
+      const meta = await postJson('/api/appserver/conversations', {});
+      if (meta?.conversation_id) {
+        await postJson('/api/appserver/conversations/select', { conversation_id: meta.conversation_id, view: 'conversation' });
+      }
+      pendingNewConversation = false;
+    }
     await postJson('/api/appserver/conversation', { settings });
+    if (pendingRollout?.id && Array.isArray(pendingRollout.items)) {
+      await postJson('/api/appserver/conversations/bind-rollout', {
+        rollout_id: pendingRollout.id,
+        items: pendingRollout.items,
+      });
+      pendingRollout = null;
+    }
     closeSettingsModal();
     await fetchConversation();
     await fetchConversations();
+    await replayTranscript();
+    setDrawerOpen(true);
   }
 
   function nextRpcId() {
@@ -763,6 +925,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function markWsOpen() {
     wsOpen = true;
+    wsReconnectDelay = 1000;
     if (wsReadyResolve) {
       wsReadyResolve(true);
       wsReadyResolve = null;
@@ -835,6 +998,15 @@ document.addEventListener('DOMContentLoaded', () => {
     initialized = true;
   }
 
+  function scheduleReconnect() {
+    if (wsReconnectTimer) return;
+    wsReconnectTimer = setTimeout(() => {
+      wsReconnectTimer = null;
+      wsReconnectDelay = Math.min(wsReconnectDelay * 1.6, 8000);
+      connectWS();
+    }, wsReconnectDelay);
+  }
+
   async function ensureThread() {
     await fetchConversation();
     if (currentThreadId) {
@@ -876,6 +1048,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function sendUserMessage(text) {
     if (!text) return;
+    if (!conversationMeta?.conversation_id) {
+      setActivity('save settings first', true);
+      return;
+    }
     setActivity('sending', true);
     await ensureInitialized();
     const threadId = await ensureThread();
@@ -886,6 +1062,17 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     Object.assign(params, settings);
     await sendRpc('turn/start', params);
+  }
+
+  async function interruptTurn() {
+    try {
+      setActivity('interrupt', true);
+      await postJson('/api/appserver/interrupt', null);
+      setActivity('interrupt sent', true);
+    } catch (err) {
+      console.warn('interrupt failed', err);
+      setActivity('interrupt failed', true);
+    }
   }
 
   async function replayTranscript() {
@@ -986,8 +1173,12 @@ document.addEventListener('DOMContentLoaded', () => {
     ws.onclose = () => {
       resetWsReady();
       setPill(wsStatusEl, 'closed', 'err');
+      scheduleReconnect();
     };
-    ws.onerror = () => setPill(wsStatusEl, 'error', 'err');
+    ws.onerror = () => {
+      setPill(wsStatusEl, 'error', 'err');
+      scheduleReconnect();
+    };
     ws.onmessage = (evt) => {
       try {
         const data = JSON.parse(evt.data);
@@ -1044,6 +1235,35 @@ document.addEventListener('DOMContentLoaded', () => {
   ]);
   loadModelOptions();
 
+  window.CodexAgent = {
+    helpers: {
+      openSettingsModal,
+      closeSettingsModal,
+      saveSettings,
+      openPicker,
+      closePicker,
+      openRolloutPicker,
+      closeRolloutPicker,
+      loadRolloutPreview,
+      setActiveView,
+      setDrawerOpen,
+      setPendingNewConversation: (val) => { pendingNewConversation = Boolean(val); },
+      setPendingRollout: (val) => { pendingRollout = val; },
+      fetchPicker,
+      fetchRollouts,
+      setActivity,
+      getPickerPath: () => pickerPath,
+      setPickerPath: (val) => { pickerPath = val; },
+    },
+    state: {
+      get pendingNewConversation() { return pendingNewConversation; },
+      set pendingNewConversation(val) { pendingNewConversation = Boolean(val); },
+      get pendingRollout() { return pendingRollout; },
+      get conversationMeta() { return conversationMeta; },
+      get conversationSettings() { return conversationSettings; },
+    },
+  };
+
   startBtn?.addEventListener('click', async () => {
     await postJson('/api/appserver/start', null);
     fetchStatus();
@@ -1053,38 +1273,8 @@ document.addEventListener('DOMContentLoaded', () => {
     await postJson('/api/appserver/stop', null);
     fetchStatus();
   });
-
-  conversationCreateBtn?.addEventListener('click', async () => {
-    await createConversation();
-  });
-
-  conversationBackBtn?.addEventListener('click', async () => {
-    await setActiveView('splash');
-    setDrawerOpen(false);
-  });
-
-  conversationSettingsBtn?.addEventListener('click', () => {
-    openSettingsModal();
-  });
-
-  settingsCloseBtn?.addEventListener('click', closeSettingsModal);
-  settingsCancelBtn?.addEventListener('click', closeSettingsModal);
-  settingsSaveBtn?.addEventListener('click', async () => {
-    await saveSettings();
-  });
-  settingsCwdBrowseBtn?.addEventListener('click', () => {
-    openPicker(settingsCwdEl?.value || '~');
-  });
-
-  pickerCloseBtn?.addEventListener('click', closePicker);
-  pickerUpBtn?.addEventListener('click', () => {
-    if (!pickerPath) return;
-    const parent = pickerPath.split('/').slice(0, -1).join('/') || '/';
-    fetchPicker(parent);
-  });
-  pickerSelectBtn?.addEventListener('click', () => {
-    if (settingsCwdEl && pickerPath) settingsCwdEl.value = pickerPath;
-    closePicker();
+  (window.CodexAgentModules || []).forEach((fn) => {
+    try { fn(window.CodexAgent); } catch (err) { console.warn('module init failed', err); }
   });
 
   document.addEventListener('click', (evt) => {
@@ -1111,6 +1301,10 @@ document.addEventListener('DOMContentLoaded', () => {
       promptEl.value = '';
       await sendUserMessage(text);
     }
+  });
+
+  interruptBtn?.addEventListener('click', async () => {
+    await interruptTurn();
   });
 
   scrollContainer?.addEventListener('scroll', () => {
