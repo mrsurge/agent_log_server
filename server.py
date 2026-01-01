@@ -1666,7 +1666,11 @@ self.addEventListener('fetch', (event) => {{
 @app.get("/codex-agent")
 @app.get("/codex-agent/")
 async def codex_agent_ui() -> FastHTMLResponse:
-    js_pill = Div(Span("JS"), Span("pending", id="js-status", cls="pill warn"), cls="status-pill") if DEBUG_MODE else None
+    js_pill = (
+        Div(Span("JS"), Span("pending", id="js-status", cls="pill warn"), cls="status-pill footer-cell")
+        if DEBUG_MODE
+        else Div(Span("JS"), Span("—", cls="pill"), cls="status-pill footer-cell placeholder")
+    )
     version = _codex_agent_version()
     return FastHTMLResponse(
         to_xml(
@@ -1727,6 +1731,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                             Div(
                                 Div(
                                     H2("Conversation"),
+                                    Div("—", id="conversation-label", cls="conversation-label"),
                                     cls="brand"
                                 ),
                                 Div(
@@ -1754,34 +1759,39 @@ async def codex_agent_ui() -> FastHTMLResponse:
                             ),
                             Footer(
                                 Div(
-                                    Span("Conv"),
-                                    Span("-", id="active-conversation", cls="pill"),
-                                    cls="status-pill"
+                                    Span("Approval"),
+                                    Div(
+                                        Span("default", id="footer-approval-value", cls="pill"),
+                                        Div(id="footer-approval-options", cls="dropdown-list"),
+                                        cls="footer-dropdown"
+                                    ),
+                                    cls="status-pill footer-cell"
                                 ),
                                 Div(
                                     Span("WS"),
                                     Span("idle", id="agent-ws", cls="pill"),
-                                    cls="status-pill"
+                                    cls="status-pill footer-cell"
                                 ),
                                 Div(
                                     Span("Msgs"),
                                     Span("0", id="counter-messages", cls="pill"),
-                                    cls="status-pill"
+                                    cls="status-pill footer-cell"
                                 ),
-                                Div(
-                                    Span("Tokens"),
-                                    Span("0", id="counter-tokens", cls="pill"),
-                                    cls="status-pill"
-                                ),
+                                Div(cls="footer-cell footer-empty"),
                                 Div(
                                     Span("Scroll"),
                                     Button("Pinned", id="scroll-pin", cls="btn tiny toggle active"),
-                                    cls="status-pill"
+                                    cls="status-pill footer-cell"
                                 ),
-                                js_pill or "",
+                                js_pill,
+                                Div(
+                                    Span("Tokens"),
+                                    Span("0", id="counter-tokens", cls="pill"),
+                                    cls="status-pill footer-cell"
+                                ),
                                 Div(
                                     Button("Interrupt", id="turn-interrupt", cls="btn danger"),
-                                    cls="status-pill"
+                                    cls="status-pill footer-cell footer-end"
                                 ),
                                 cls="footer"
                             ),
@@ -1850,6 +1860,10 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                         Div(id="settings-summary-options", cls="dropdown-list"),
                                         cls="dropdown-field"
                                     ),
+                                ),
+                                Label(
+                                    Span("Conversation Label"),
+                                    Input(type="text", id="settings-label", placeholder="label"),
                                 ),
                                 Label(
                                     Span("Rollout"),

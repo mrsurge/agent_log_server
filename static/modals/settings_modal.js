@@ -23,4 +23,31 @@ window.CodexAgentModules.push((ctx) => {
   settingsRolloutBrowseBtn?.addEventListener('click', () => {
     ctx.helpers.openRolloutPicker();
   });
+
+  const footerApprovalValue = document.getElementById('footer-approval-value');
+  const footerApprovalOptions = document.getElementById('footer-approval-options');
+  const toggleFooterApproval = (evt) => {
+    evt?.preventDefault();
+    footerApprovalOptions?.classList.toggle('open');
+  };
+  footerApprovalValue?.addEventListener('click', toggleFooterApproval);
+  if (footerApprovalOptions && footerApprovalOptions.childElementCount === 0) {
+    ['never', 'on-failure', 'unlessTrusted'].forEach((opt) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dropdown-item';
+      btn.textContent = opt;
+      footerApprovalOptions.appendChild(btn);
+    });
+  }
+  footerApprovalOptions?.addEventListener('click', (evt) => {
+    const target = evt.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (!target.classList.contains('dropdown-item')) return;
+    const value = target.textContent?.trim();
+    if (!value) return;
+    if (footerApprovalValue) footerApprovalValue.textContent = value;
+    footerApprovalOptions.classList.remove('open');
+    ctx.helpers.saveApprovalQuick(value);
+  });
 });

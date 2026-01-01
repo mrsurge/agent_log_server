@@ -29,6 +29,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsModelEl = document.getElementById('settings-model');
   const settingsEffortEl = document.getElementById('settings-effort');
   const settingsSummaryEl = document.getElementById('settings-summary');
+  const settingsLabelEl = document.getElementById('settings-label');
+  const footerApprovalValue = document.getElementById('footer-approval-value');
+  const footerApprovalToggle = document.getElementById('footer-approval-toggle');
+  const footerApprovalOptions = document.getElementById('footer-approval-options');
   const settingsRolloutEl = document.getElementById('settings-rollout');
   const settingsRolloutRowEl = document.getElementById('settings-rollout-row');
   const settingsApprovalToggle = document.getElementById('settings-approval-toggle');
@@ -134,8 +138,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateActiveConversationLabel() {
     if (!activeConversationEl) return;
-    const label = conversationMeta?.conversation_id || 'none';
-    activeConversationEl.textContent = label;
+    activeConversationEl.textContent = '';
+  }
+
+  function updateConversationHeaderLabel() {
+    const el = document.getElementById('conversation-label');
+    if (!el) return;
+    const label = conversationSettings?.label || '—';
+    el.textContent = label;
   }
 
   function openSettingsModal() {
@@ -147,6 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsModelEl) settingsModelEl.value = '';
       if (settingsEffortEl) settingsEffortEl.value = '';
       if (settingsSummaryEl) settingsSummaryEl.value = '';
+      if (settingsLabelEl) settingsLabelEl.value = '';
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || '';
     } else {
       if (settingsCwdEl) settingsCwdEl.value = conversationSettings?.cwd || '';
@@ -155,6 +166,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsModelEl) settingsModelEl.value = conversationSettings?.model || '';
       if (settingsEffortEl) settingsEffortEl.value = conversationSettings?.effort || '';
       if (settingsSummaryEl) settingsSummaryEl.value = conversationSettings?.summary || '';
+      if (settingsLabelEl) settingsLabelEl.value = conversationSettings?.label || '';
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || conversationSettings?.rolloutId || '';
     }
     if (settingsRolloutRowEl) {
@@ -174,6 +186,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     pendingNewConversation = false;
     settingsModalEl.classList.add('hidden');
+  }
+
+  async function saveApprovalQuick(value) {
+    const approval = value?.trim();
+    if (!approval) return;
+    await postJson('/api/appserver/conversation', { settings: { approvalPolicy: approval } });
+    conversationSettings.approvalPolicy = approval;
+    if (footerApprovalValue) footerApprovalValue.textContent = approval;
   }
 
   function openPicker(startPath) {
@@ -417,6 +437,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const info = document.createElement('div');
       info.className = 'conversation-meta';
+      const labelRow = document.createElement('div');
+      labelRow.className = 'conversation-label-line';
+      labelRow.textContent = (meta.settings && meta.settings.label) ? meta.settings.label : '';
       const title = document.createElement('div');
       title.textContent = meta.conversation_id || 'conversation';
       const threadText = meta.thread_id ? `thread: ${meta.thread_id}` : 'thread: (none)';
@@ -428,7 +451,7 @@ document.addEventListener('DOMContentLoaded', () => {
       cwdRow.textContent = cwdText;
       const statusRow = document.createElement('div');
       statusRow.textContent = statusText;
-      info.append(title, threadRow, cwdRow, statusRow);
+      info.append(labelRow, title, threadRow, cwdRow, statusRow);
 
       const actions = document.createElement('div');
       actions.className = 'conversation-actions';
@@ -861,6 +884,7 @@ document.addEventListener('DOMContentLoaded', () => {
       model: settingsModelEl?.value?.trim() || null,
       effort: settingsEffortEl?.value?.trim() || null,
       summary: settingsSummaryEl?.value?.trim() || null,
+      label: settingsLabelEl?.value?.trim() || null,
     };
     if (pendingNewConversation || !conversationMeta?.conversation_id) {
       const meta = await postJson('/api/appserver/conversations', {});
@@ -882,6 +906,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await fetchConversations();
     await replayTranscript();
     setDrawerOpen(true);
+    updateConversationHeaderLabel();
   }
 
   function nextRpcId() {
@@ -952,6 +977,7 @@ document.addEventListener('DOMContentLoaded', () => {
       activeView = conversationMeta?.active_view || 'splash';
       setDrawerOpen(activeView === 'conversation');
       updateActiveConversationLabel();
+      if (footerApprovalValue) footerApprovalValue.textContent = conversationSettings?.approvalPolicy || 'default';
       if (conversationMeta && conversationMeta.thread_id) {
         currentThreadId = conversationMeta.thread_id;
         setPill(statusEl, 'pinned', 'ok');
@@ -962,6 +988,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch {
       setPill(statusEl, 'error', 'err');
     }
+    updateConversationHeaderLabel();
   }
 
   async function fetchStatus() {
@@ -1254,6 +1281,7 @@ document.addEventListener('DOMContentLoaded', () => {
       setActivity,
       getPickerPath: () => pickerPath,
       setPickerPath: (val) => { pickerPath = val; },
+      saveApprovalQuick,
     },
     state: {
       get pendingNewConversation() { return pendingNewConversation; },
