@@ -8,30 +8,30 @@ The Codex Agent Server is a FastHTML-based Python server that acts as a **bridge
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         Web Browser (Frontend)                       │
+│                         Web Browser (Frontend)                      │
 │  ┌─────────────────────────────────────────────────────────────────┐│
-│  │                    codex_agent.js                                ││
-│  │  - Dumb renderer (displays what backend tells it)                ││
-│  │  - WebSocket client for real-time updates                        ││
-│  │  - REST client for actions (send message, approve, etc.)         ││
+│  │                    codex_agent.js                               ││
+│  │  - Dumb renderer (displays what backend tells it)               ││
+│  │  - WebSocket client for real-time updates                       ││
+│  │  - REST client for actions (send message, approve, etc.)        ││
 │  └─────────────────────────────────────────────────────────────────┘│
 └──────────────────────────────┬──────────────────────────────────────┘
                                │ WebSocket (events) + REST (actions)
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Python Server (server.py)                         │
+│                    Python Server (server.py)                        │
 │  ┌─────────────────────────────────────────────────────────────────┐│
-│  │  FastAPI + SocketIO                                              ││
-│  │  - Translates codex events → frontend-friendly format            ││
-│  │  - Manages conversation state (SSOT sidecar)                     ││
-│  │  - Stores internal transcript (richer than rollout)              ││
-│  │  - Handles approvals, settings, conversation switching           ││
+│  │  FastAPI + SocketIO                                             ││
+│  │  - Translates codex events → frontend-friendly format           ││
+│  │  - Manages conversation state (SSOT sidecar)                    ││
+│  │  - Stores internal transcript (richer than rollout)             ││
+│  │  - Handles approvals, settings, conversation switching          ││
 │  └─────────────────────────────────────────────────────────────────┘│
 └──────────────────────────────┬──────────────────────────────────────┘
                                │ stdin/stdout (JSON-RPC)
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    codex-app-server (Rust binary)                    │
+│                    codex-app-server (Rust binary)                   │
 │  - Manages conversations with OpenAI API                            │
 │  - Executes tools (shell commands, file edits)                      │
 │  - Emits events via stdout (JSON-RPC notifications)                 │
@@ -300,14 +300,14 @@ Main JavaScript file handling all frontend logic:
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  Transcript Area (scrollable)                                   │
-│  ┌───────────────────────────────────────────────────────────┐ │
-│  │ [User Message Card]                                        │ │
-│  │ [Reasoning Card] - collapsible                            │ │
-│  │ [Agent Message Card]                                       │ │
-│  │ [Command Card] - with output, duration                    │ │
-│  │ [Diff Card] - syntax highlighted                          │ │
-│  │ [Approval Card] - Accept/Decline buttons                  │ │
-│  └───────────────────────────────────────────────────────────┘ │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ [User Message Card]                                       │  │
+│  │ [Reasoning Card] - collapsible                            │  │
+│  │ [Agent Message Card]                                      │  │
+│  │ [Command Card] - with output, duration                    │  │
+│  │ [Diff Card] - syntax highlighted                          │  │
+│  │ [Approval Card] - Accept/Decline buttons                  │  │
+│  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │
 │  [Activity Ribbon] - current streaming content                  │
 │                                                                 │
@@ -467,10 +467,162 @@ Diffs are parsed and rendered with syntax highlighting:
 
 Output is truncated to `command_output_lines` setting (default: 20 lines).
 
+## Recent Changes & Fixes
+
+### Diff Handling (Implemented)
+
+**Problem:** codex-app-server emits ~5 diffs per file change:
+- 2 short diffs (from `item/started` and `item/completed` fileChange)
+- 2 long diffs (from `turn_diff` / `turn/diff/updated`)
+- 1 approval diff (from `apply_patch_approval_request`)
+
+**Solution:**
+- Only render `turn_diff` events (long diffs with context)
+- Skip short diffs from `item/fileChange` events
+- Deduplicate by content hash (`seenDiffs` Set)
+- Extract filename from `--- a/filename` header or `path` field
+- Show relative paths, strip git prefixes
+
+### Approval Flow (Implemented)
+
+**Problem:** Approval would hang after clicking Accept.
+
+**Solution:**
+- Fixed JSON-RPC response format to match request ID
+- Remove approval card from DOM after decision
+- Record approval status to transcript: `{"role": "approval", "status": "accepted|declined", ...}`
+- Declined approvals show with red left border accent
+
+### Reasoning Streaming (Implemented)
+
+**Problem:** Reasoning was rendering in multiple separate boxes and not being stored correctly.
+
+**Solution:** 
+- Made reasoning work exactly like messaging:
+  - Stream deltas to frontend via `appendToActivityRibbon()`
+  - Store complete reasoning text to transcript on `item/completed`
+  - Single reasoning card per reasoning block
+  - Replay from transcript shows complete reasoning text
+
+### Command Output (Implemented)
+
+- Edge-to-edge rendering (no card wrapper)
+- Command header: gray background
+- Output area: **black background**, white text, no rounded corners
+- Duration footer: gray
+- Purple left border accent
+- Configurable truncation (`command_output_lines` setting, default: 20)
+- Output stored in transcript for replay
+
+### Server Status (Fixed)
+
+**Problem:** Status pill showed wrong values ("draft", "pinned" instead of "running"/"idle")
+
+**Solution:** Separated concerns - server status only shows codex-app-server state, not conversation state.
+
+### Conversation Switching (Fixed)
+
+**Problem:** Creating new conversation would show old transcript.
+
+**Solution:** Clear transcript state and DOM before loading new conversation data.
+
+### Activity Ribbon Scroll (Fixed)
+
+**Problem:** On page load with drawer open, activity ribbon appeared at top instead of bottom.
+
+**Solution:** Start drawer closed, wait for transcript render, then open and scroll.
+
+## Framework Shells (FWS) Integration
+
+The server uses **Framework Shells** (`framework_shells` package) as an orchestration layer for managing the codex-app-server process.
+
+### What is Framework Shells?
+
+Framework Shells is a Python library that provides:
+- **Declarative shell/process management** via YAML specs
+- **Process lifecycle management** (start, stop, restart, health checks)
+- **stdin/stdout streaming** with async support
+- **Multiplexed shell sessions** with unique IDs
+- **Web UI endpoints** for shell management (logs, status)
+
+### How It's Used
+
+```python
+# Imports
+from framework_shells import get_manager as get_framework_shell_manager
+from framework_shells.api import fws_ui
+from framework_shells.orchestrator import Orchestrator
+
+# Router included for web UI endpoints
+app.include_router(fws_ui.router, dependencies=[Depends(lambda: _ensure_framework_shells_secret())])
+```
+
+### Shell Management Flow
+
+```
+1. _ensure_framework_shells_secret()
+   │  - Creates stable secret based on repo fingerprint
+   │  - Sets environment variables:
+   │    - FRAMEWORK_SHELLS_SECRET
+   │    - FRAMEWORK_SHELLS_REPO_FINGERPRINT  
+   │    - FRAMEWORK_SHELLS_BASE_DIR (~/.cache/framework_shells)
+   │
+2. _get_or_start_appserver_shell()
+   │  - Gets shell manager: mgr = await get_framework_shell_manager()
+   │  - Checks if existing shell is running
+   │  - If not, starts via Orchestrator:
+   │    │
+   │    └─> orch = Orchestrator(mgr)
+   │        await orch.start_from_ref(
+   │            "shellspec/app_server.yaml#app_server",
+   │            ctx={"CWD": cwd, "APP_SERVER_COMMAND": command},
+   │            label="app-server:codex"
+   │        )
+   │
+3. Shell spec (shellspec/app_server.yaml) defines:
+   │  - Command template: ${APP_SERVER_COMMAND} --json-rpc
+   │  - Working directory: ${CWD}
+   │  - stdin/stdout handling
+   │
+4. _stop_appserver_shell()
+   │  - Cancels reader task
+   │  - Calls mgr.terminate_shell(shell_id, force=True)
+   │  - Clears state
+```
+
+### FWS Web UI Endpoints
+
+The `fws_ui.router` provides endpoints for shell management:
+- `/fws/shells` - List all shells
+- `/fws/shell/{id}` - Get shell details
+- `/fws/shell/{id}/logs` - Stream shell logs
+- `/fws/logs` - WebSocket for live log streaming
+
+### Why FWS?
+
+Using Framework Shells instead of raw `subprocess`:
+1. **Structured process management** - Specs define behavior declaratively
+2. **Persistence** - Shell IDs survive server restarts
+3. **Multiplexing** - Can manage multiple shell instances
+4. **Async-first** - Native asyncio support for stdin/stdout
+5. **Health monitoring** - Built-in status checks
+6. **Web UI** - Free logging/management endpoints
+
+### Configuration Storage
+
+FWS stores its data in `~/.cache/framework_shells/`:
+```
+~/.cache/framework_shells/
+├── runtimes/
+│   └── <fingerprint>/
+│       ├── secret          # Auth secret
+│       └── shells/         # Shell state
+```
+
+The `fingerprint` is derived from the repository/working directory path, ensuring isolation between different projects.
+
 ## Future Considerations
 
-1. **Diff deduplication** - codex emits multiple diffs per change
-2. **Long diff handling** - Only keep contextual (long) diffs
-3. **Approval UX** - Remove approval card after decision, show status
-4. **Session recovery** - Better handling of corrupted rollouts
-5. **Multi-agent** - Agent log server for inter-agent communication
+1. **Session recovery** - Better handling of corrupted rollouts
+2. **Multi-agent** - Agent log server for inter-agent communication
+3. **Consecutive reasoning merge** - Merge multiple consecutive reasoning blocks into one display card
