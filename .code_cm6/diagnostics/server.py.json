@@ -1,0 +1,2917 @@
+{
+  "exported_at": "2026-01-02T00:26:27.316Z",
+  "project_root": "/data/data/com.termux/files/home/downloads/agent_log_server",
+  "file_path": "/data/data/com.termux/files/home/downloads/agent_log_server/server.py",
+  "dump": {
+    "exported_at": "2026-01-02T00:26:22.406Z",
+    "uri": "file:///data/data/com.termux/files/home/downloads/agent_log_server/server.py",
+    "lsp_language_id": "python",
+    "lsp_file_uri": "file:///data/data/com.termux/files/home/downloads/agent_log_server/server.py",
+    "counts": {
+      "errors": 60,
+      "warnings": 0
+    },
+    "total": 60,
+    "activeIndex": 0,
+    "rawDiagnostics": [
+      {
+        "range": {
+          "start": {
+            "line": 48,
+            "character": 1
+          },
+          "end": {
+            "line": 48,
+            "character": 54
+          }
+        },
+        "message": "Object of type \"None\" cannot be called",
+        "severity": 1,
+        "code": "reportOptionalCall",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalCall"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 53,
+            "character": 1
+          },
+          "end": {
+            "line": 53,
+            "character": 57
+          }
+        },
+        "message": "Object of type \"None\" cannot be called",
+        "severity": 1,
+        "code": "reportOptionalCall",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalCall"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 296,
+            "character": 35
+          },
+          "end": {
+            "line": 296,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 298,
+            "character": 28
+          },
+          "end": {
+            "line": 298,
+            "character": 36
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 306,
+            "character": 35
+          },
+          "end": {
+            "line": 306,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 310,
+            "character": 32
+          },
+          "end": {
+            "line": 310,
+            "character": 40
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 974,
+            "character": 114
+          },
+          "end": {
+            "line": 974,
+            "character": 117
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 975,
+            "character": 56
+          },
+          "end": {
+            "line": 975,
+            "character": 59
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1014,
+            "character": 113
+          },
+          "end": {
+            "line": 1014,
+            "character": 116
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1015,
+            "character": 64
+          },
+          "end": {
+            "line": 1015,
+            "character": 67
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1091,
+            "character": 39
+          },
+          "end": {
+            "line": 1091,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_item_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1096,
+            "character": 36
+          },
+          "end": {
+            "line": 1096,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1100,
+            "character": 77
+          },
+          "end": {
+            "line": 1100,
+            "character": 80
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1104,
+            "character": 20
+          },
+          "end": {
+            "line": 1104,
+            "character": 23
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1105,
+            "character": 45
+          },
+          "end": {
+            "line": 1105,
+            "character": 48
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1106,
+            "character": 42
+          },
+          "end": {
+            "line": 1106,
+            "character": 45
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1110,
+            "character": 20
+          },
+          "end": {
+            "line": 1110,
+            "character": 23
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1113,
+            "character": 36
+          },
+          "end": {
+            "line": 1113,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1111,
+            "character": 46
+          },
+          "end": {
+            "line": 1111,
+            "character": 49
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1116,
+            "character": 87
+          },
+          "end": {
+            "line": 1116,
+            "character": 90
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1119,
+            "character": 20
+          },
+          "end": {
+            "line": 1119,
+            "character": 23
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1121,
+            "character": 36
+          },
+          "end": {
+            "line": 1121,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1121,
+            "character": 59
+          },
+          "end": {
+            "line": 1121,
+            "character": 62
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1121,
+            "character": 78
+          },
+          "end": {
+            "line": 1121,
+            "character": 81
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1122,
+            "character": 32
+          },
+          "end": {
+            "line": 1122,
+            "character": 35
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1120,
+            "character": 46
+          },
+          "end": {
+            "line": 1120,
+            "character": 49
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1126,
+            "character": 27
+          },
+          "end": {
+            "line": 1126,
+            "character": 30
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1129,
+            "character": 36
+          },
+          "end": {
+            "line": 1129,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1129,
+            "character": 59
+          },
+          "end": {
+            "line": 1129,
+            "character": 62
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1129,
+            "character": 78
+          },
+          "end": {
+            "line": 1129,
+            "character": 81
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1130,
+            "character": 32
+          },
+          "end": {
+            "line": 1130,
+            "character": 35
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1136,
+            "character": 20
+          },
+          "end": {
+            "line": 1136,
+            "character": 23
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1137,
+            "character": 45
+          },
+          "end": {
+            "line": 1137,
+            "character": 48
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1138,
+            "character": 42
+          },
+          "end": {
+            "line": 1138,
+            "character": 45
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1146,
+            "character": 39
+          },
+          "end": {
+            "line": 1146,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_item_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1151,
+            "character": 36
+          },
+          "end": {
+            "line": 1151,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1155,
+            "character": 72
+          },
+          "end": {
+            "line": 1155,
+            "character": 75
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1155,
+            "character": 168
+          },
+          "end": {
+            "line": 1155,
+            "character": 171
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1159,
+            "character": 46
+          },
+          "end": {
+            "line": 1159,
+            "character": 50
+          }
+        },
+        "message": "Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_reasoning_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1164,
+            "character": 36
+          },
+          "end": {
+            "line": 1164,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1172,
+            "character": 87
+          },
+          "end": {
+            "line": 1172,
+            "character": 90
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1177,
+            "character": 27
+          },
+          "end": {
+            "line": 1177,
+            "character": 30
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1180,
+            "character": 38
+          },
+          "end": {
+            "line": 1180,
+            "character": 41
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1180,
+            "character": 62
+          },
+          "end": {
+            "line": 1180,
+            "character": 65
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1181,
+            "character": 40
+          },
+          "end": {
+            "line": 1181,
+            "character": 43
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1181,
+            "character": 66
+          },
+          "end": {
+            "line": 1181,
+            "character": 69
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1946,
+            "character": 38
+          },
+          "end": {
+            "line": 1946,
+            "character": 105
+          }
+        },
+        "message": "Argument of type \"str\" cannot be assigned to parameter \"hx_validate\" of type \"Literal['true', 'false'] | None\" in function \"Div\"\n  Type \"str\" is not assignable to type \"Literal['true', 'false'] | None\"\n    \"str\" is not assignable to \"None\"\n    \"str\" is not assignable to type \"Literal['true']\"\n    \"str\" is not assignable to type \"Literal['false']\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2213,
+            "character": 35
+          },
+          "end": {
+            "line": 2213,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2220,
+            "character": 34
+          },
+          "end": {
+            "line": 2220,
+            "character": 37
+          }
+        },
+        "message": "\"pop\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2222,
+            "character": 16
+          },
+          "end": {
+            "line": 2222,
+            "character": 29
+          }
+        },
+        "message": "Object of type \"None\" is not subscriptable",
+        "severity": 1,
+        "code": "reportOptionalSubscript",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalSubscript"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2228,
+            "character": 28
+          },
+          "end": {
+            "line": 2228,
+            "character": 36
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2231,
+            "character": 36
+          },
+          "end": {
+            "line": 2231,
+            "character": 44
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_add_conversation_to_config\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2313,
+            "character": 35
+          },
+          "end": {
+            "line": 2313,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2317,
+            "character": 4
+          },
+          "end": {
+            "line": 2317,
+            "character": 17
+          }
+        },
+        "message": "Object of type \"None\" is not subscriptable",
+        "severity": 1,
+        "code": "reportOptionalSubscript",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalSubscript"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2319,
+            "character": 28
+          },
+          "end": {
+            "line": 2319,
+            "character": 36
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2325,
+            "character": 40
+          },
+          "end": {
+            "line": 2325,
+            "character": 48
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_write_transcript_entries\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2331,
+            "character": 40
+          },
+          "end": {
+            "line": 2331,
+            "character": 48
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_write_transcript_entries\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2649,
+            "character": 35
+          },
+          "end": {
+            "line": 2649,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2651,
+            "character": 4
+          },
+          "end": {
+            "line": 2651,
+            "character": 12
+          }
+        },
+        "message": "Object of type \"None\" is not subscriptable",
+        "severity": 1,
+        "code": "reportOptionalSubscript",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalSubscript"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2653,
+            "character": 28
+          },
+          "end": {
+            "line": 2653,
+            "character": 36
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      }
+    ],
+    "filteredDiagnostics": [
+      {
+        "range": {
+          "start": {
+            "line": 48,
+            "character": 1
+          },
+          "end": {
+            "line": 48,
+            "character": 54
+          }
+        },
+        "message": "Object of type \"None\" cannot be called",
+        "severity": 1,
+        "code": "reportOptionalCall",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalCall"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 53,
+            "character": 1
+          },
+          "end": {
+            "line": 53,
+            "character": 57
+          }
+        },
+        "message": "Object of type \"None\" cannot be called",
+        "severity": 1,
+        "code": "reportOptionalCall",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalCall"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 296,
+            "character": 35
+          },
+          "end": {
+            "line": 296,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 298,
+            "character": 28
+          },
+          "end": {
+            "line": 298,
+            "character": 36
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 306,
+            "character": 35
+          },
+          "end": {
+            "line": 306,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 310,
+            "character": 32
+          },
+          "end": {
+            "line": 310,
+            "character": 40
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 974,
+            "character": 114
+          },
+          "end": {
+            "line": 974,
+            "character": 117
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 975,
+            "character": 56
+          },
+          "end": {
+            "line": 975,
+            "character": 59
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1014,
+            "character": 113
+          },
+          "end": {
+            "line": 1014,
+            "character": 116
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1015,
+            "character": 64
+          },
+          "end": {
+            "line": 1015,
+            "character": 67
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1091,
+            "character": 39
+          },
+          "end": {
+            "line": 1091,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_item_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1096,
+            "character": 36
+          },
+          "end": {
+            "line": 1096,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1100,
+            "character": 77
+          },
+          "end": {
+            "line": 1100,
+            "character": 80
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1104,
+            "character": 20
+          },
+          "end": {
+            "line": 1104,
+            "character": 23
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1105,
+            "character": 45
+          },
+          "end": {
+            "line": 1105,
+            "character": 48
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1106,
+            "character": 42
+          },
+          "end": {
+            "line": 1106,
+            "character": 45
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1110,
+            "character": 20
+          },
+          "end": {
+            "line": 1110,
+            "character": 23
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1113,
+            "character": 36
+          },
+          "end": {
+            "line": 1113,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1111,
+            "character": 46
+          },
+          "end": {
+            "line": 1111,
+            "character": 49
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1116,
+            "character": 87
+          },
+          "end": {
+            "line": 1116,
+            "character": 90
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1119,
+            "character": 20
+          },
+          "end": {
+            "line": 1119,
+            "character": 23
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1121,
+            "character": 36
+          },
+          "end": {
+            "line": 1121,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1121,
+            "character": 59
+          },
+          "end": {
+            "line": 1121,
+            "character": 62
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1121,
+            "character": 78
+          },
+          "end": {
+            "line": 1121,
+            "character": 81
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1122,
+            "character": 32
+          },
+          "end": {
+            "line": 1122,
+            "character": 35
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1120,
+            "character": 46
+          },
+          "end": {
+            "line": 1120,
+            "character": 49
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1126,
+            "character": 27
+          },
+          "end": {
+            "line": 1126,
+            "character": 30
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1129,
+            "character": 36
+          },
+          "end": {
+            "line": 1129,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1129,
+            "character": 59
+          },
+          "end": {
+            "line": 1129,
+            "character": 62
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1129,
+            "character": 78
+          },
+          "end": {
+            "line": 1129,
+            "character": 81
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1130,
+            "character": 32
+          },
+          "end": {
+            "line": 1130,
+            "character": 35
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1136,
+            "character": 20
+          },
+          "end": {
+            "line": 1136,
+            "character": 23
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1137,
+            "character": 45
+          },
+          "end": {
+            "line": 1137,
+            "character": 48
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1138,
+            "character": 42
+          },
+          "end": {
+            "line": 1138,
+            "character": 45
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1146,
+            "character": 39
+          },
+          "end": {
+            "line": 1146,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_item_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1151,
+            "character": 36
+          },
+          "end": {
+            "line": 1151,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1155,
+            "character": 72
+          },
+          "end": {
+            "line": 1155,
+            "character": 75
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1155,
+            "character": 168
+          },
+          "end": {
+            "line": 1155,
+            "character": 171
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1159,
+            "character": 46
+          },
+          "end": {
+            "line": 1159,
+            "character": 50
+          }
+        },
+        "message": "Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_reasoning_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1164,
+            "character": 36
+          },
+          "end": {
+            "line": 1164,
+            "character": 39
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1172,
+            "character": 87
+          },
+          "end": {
+            "line": 1172,
+            "character": 90
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1177,
+            "character": 27
+          },
+          "end": {
+            "line": 1177,
+            "character": 30
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1180,
+            "character": 38
+          },
+          "end": {
+            "line": 1180,
+            "character": 41
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1180,
+            "character": 62
+          },
+          "end": {
+            "line": 1180,
+            "character": 65
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1181,
+            "character": 40
+          },
+          "end": {
+            "line": 1181,
+            "character": 43
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1181,
+            "character": 66
+          },
+          "end": {
+            "line": 1181,
+            "character": 69
+          }
+        },
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 1946,
+            "character": 38
+          },
+          "end": {
+            "line": 1946,
+            "character": 105
+          }
+        },
+        "message": "Argument of type \"str\" cannot be assigned to parameter \"hx_validate\" of type \"Literal['true', 'false'] | None\" in function \"Div\"\n  Type \"str\" is not assignable to type \"Literal['true', 'false'] | None\"\n    \"str\" is not assignable to \"None\"\n    \"str\" is not assignable to type \"Literal['true']\"\n    \"str\" is not assignable to type \"Literal['false']\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2213,
+            "character": 35
+          },
+          "end": {
+            "line": 2213,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2220,
+            "character": 34
+          },
+          "end": {
+            "line": 2220,
+            "character": 37
+          }
+        },
+        "message": "\"pop\" is not a known attribute of \"None\"",
+        "severity": 1,
+        "code": "reportOptionalMemberAccess",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalMemberAccess"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2222,
+            "character": 16
+          },
+          "end": {
+            "line": 2222,
+            "character": 29
+          }
+        },
+        "message": "Object of type \"None\" is not subscriptable",
+        "severity": 1,
+        "code": "reportOptionalSubscript",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalSubscript"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2228,
+            "character": 28
+          },
+          "end": {
+            "line": 2228,
+            "character": 36
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2231,
+            "character": 36
+          },
+          "end": {
+            "line": 2231,
+            "character": 44
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_add_conversation_to_config\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2313,
+            "character": 35
+          },
+          "end": {
+            "line": 2313,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2317,
+            "character": 4
+          },
+          "end": {
+            "line": 2317,
+            "character": 17
+          }
+        },
+        "message": "Object of type \"None\" is not subscriptable",
+        "severity": 1,
+        "code": "reportOptionalSubscript",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalSubscript"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2319,
+            "character": 28
+          },
+          "end": {
+            "line": 2319,
+            "character": 36
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2325,
+            "character": 40
+          },
+          "end": {
+            "line": 2325,
+            "character": 48
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_write_transcript_entries\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2331,
+            "character": 40
+          },
+          "end": {
+            "line": 2331,
+            "character": 48
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_write_transcript_entries\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2649,
+            "character": 35
+          },
+          "end": {
+            "line": 2649,
+            "character": 43
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2651,
+            "character": 4
+          },
+          "end": {
+            "line": 2651,
+            "character": 12
+          }
+        },
+        "message": "Object of type \"None\" is not subscriptable",
+        "severity": 1,
+        "code": "reportOptionalSubscript",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportOptionalSubscript"
+        }
+      },
+      {
+        "range": {
+          "start": {
+            "line": 2653,
+            "character": 28
+          },
+          "end": {
+            "line": 2653,
+            "character": 36
+          }
+        },
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "severity": 1,
+        "code": "reportArgumentType",
+        "source": "Pyright",
+        "codeDescription": {
+          "href": "https://github.com/microsoft/pyright/blob/main/docs/configuration.md#reportArgumentType"
+        }
+      }
+    ],
+    "flat": [
+      {
+        "bucket": "error",
+        "message": "Object of type \"None\" cannot be called",
+        "source": "Pyright",
+        "code": "reportOptionalCall",
+        "sig": "Pyright|reportOptionalCall|1|Object of type \"None\" cannot be called",
+        "startLine": 49,
+        "startChar": 1,
+        "endChar": 54
+      },
+      {
+        "bucket": "error",
+        "message": "Object of type \"None\" cannot be called",
+        "source": "Pyright",
+        "code": "reportOptionalCall",
+        "sig": "Pyright|reportOptionalCall|1|Object of type \"None\" cannot be called",
+        "startLine": 54,
+        "startChar": 1,
+        "endChar": 57
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 297,
+        "startChar": 35,
+        "endChar": 43
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 299,
+        "startChar": 28,
+        "endChar": 36
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 307,
+        "startChar": 35,
+        "endChar": 43
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 311,
+        "startChar": 32,
+        "endChar": 40
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 975,
+        "startChar": 114,
+        "endChar": 117
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 976,
+        "startChar": 56,
+        "endChar": 59
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1015,
+        "startChar": 113,
+        "endChar": 116
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1016,
+        "startChar": 64,
+        "endChar": 67
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_item_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_item_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "startLine": 1092,
+        "startChar": 39,
+        "endChar": 43
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1097,
+        "startChar": 36,
+        "endChar": 39
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1101,
+        "startChar": 77,
+        "endChar": 80
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1105,
+        "startChar": 20,
+        "endChar": 23
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1106,
+        "startChar": 45,
+        "endChar": 48
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1107,
+        "startChar": 42,
+        "endChar": 45
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1111,
+        "startChar": 20,
+        "endChar": 23
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1112,
+        "startChar": 46,
+        "endChar": 49
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1114,
+        "startChar": 36,
+        "endChar": 39
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1117,
+        "startChar": 87,
+        "endChar": 90
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1120,
+        "startChar": 20,
+        "endChar": 23
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1121,
+        "startChar": 46,
+        "endChar": 49
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1122,
+        "startChar": 36,
+        "endChar": 39
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1122,
+        "startChar": 59,
+        "endChar": 62
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1122,
+        "startChar": 78,
+        "endChar": 81
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1123,
+        "startChar": 32,
+        "endChar": 35
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1127,
+        "startChar": 27,
+        "endChar": 30
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1130,
+        "startChar": 36,
+        "endChar": 39
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1130,
+        "startChar": 59,
+        "endChar": 62
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1130,
+        "startChar": 78,
+        "endChar": 81
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1131,
+        "startChar": 32,
+        "endChar": 35
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1137,
+        "startChar": 20,
+        "endChar": 23
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1138,
+        "startChar": 45,
+        "endChar": 48
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1139,
+        "startChar": 42,
+        "endChar": 45
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_item_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_item_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "startLine": 1147,
+        "startChar": 39,
+        "endChar": 43
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1152,
+        "startChar": 36,
+        "endChar": 39
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1156,
+        "startChar": 72,
+        "endChar": 75
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1156,
+        "startChar": 168,
+        "endChar": 171
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_reasoning_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"dict[Unknown, Unknown] | Unknown | None\" cannot be assigned to parameter \"item\" of type \"Dict[str, Any]\" in function \"_extract_reasoning_text\"\n  Type \"dict[Unknown, Unknown] | Unknown | None\" is not assignable to type \"Dict[str, Any]\"\n    \"None\" is not assignable to \"Dict[str, Any]\"",
+        "startLine": 1160,
+        "startChar": 46,
+        "endChar": 50
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1165,
+        "startChar": 36,
+        "endChar": 39
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1173,
+        "startChar": 87,
+        "endChar": 90
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1178,
+        "startChar": 27,
+        "endChar": 30
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1181,
+        "startChar": 38,
+        "endChar": 41
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1181,
+        "startChar": 62,
+        "endChar": 65
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1182,
+        "startChar": 40,
+        "endChar": 43
+      },
+      {
+        "bucket": "error",
+        "message": "\"get\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"get\" is not a known attribute of \"None\"",
+        "startLine": 1182,
+        "startChar": 66,
+        "endChar": 69
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str\" cannot be assigned to parameter \"hx_validate\" of type \"Literal['true', 'false'] | None\" in function \"Div\"\n  Type \"str\" is not assignable to type \"Literal['true', 'false'] | None\"\n    \"str\" is not assignable to \"None\"\n    \"str\" is not assignable to type \"Literal['true']\"\n    \"str\" is not assignable to type \"Literal['false']\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str\" cannot be assigned to parameter \"hx_validate\" of type \"Literal['true', 'false'] | None\" in function \"Div\"\n  Type \"str\" is not assignable to type \"Literal['true', 'false'] | None\"\n    \"str\" is not assignable to \"None\"\n    \"str\" is not assignable to type \"Literal['true']\"\n    \"str\" is not assignable to type \"Literal['false']\"",
+        "startLine": 1947,
+        "startChar": 38,
+        "endChar": 105
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 2214,
+        "startChar": 35,
+        "endChar": 43
+      },
+      {
+        "bucket": "error",
+        "message": "\"pop\" is not a known attribute of \"None\"",
+        "source": "Pyright",
+        "code": "reportOptionalMemberAccess",
+        "sig": "Pyright|reportOptionalMemberAccess|1|\"pop\" is not a known attribute of \"None\"",
+        "startLine": 2221,
+        "startChar": 34,
+        "endChar": 37
+      },
+      {
+        "bucket": "error",
+        "message": "Object of type \"None\" is not subscriptable",
+        "source": "Pyright",
+        "code": "reportOptionalSubscript",
+        "sig": "Pyright|reportOptionalSubscript|1|Object of type \"None\" is not subscriptable",
+        "startLine": 2223,
+        "startChar": 16,
+        "endChar": 29
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 2229,
+        "startChar": 28,
+        "endChar": 36
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_add_conversation_to_config\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_add_conversation_to_config\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 2232,
+        "startChar": 36,
+        "endChar": 44
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 2314,
+        "startChar": 35,
+        "endChar": 43
+      },
+      {
+        "bucket": "error",
+        "message": "Object of type \"None\" is not subscriptable",
+        "source": "Pyright",
+        "code": "reportOptionalSubscript",
+        "sig": "Pyright|reportOptionalSubscript|1|Object of type \"None\" is not subscriptable",
+        "startLine": 2318,
+        "startChar": 4,
+        "endChar": 17
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 2320,
+        "startChar": 28,
+        "endChar": 36
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_write_transcript_entries\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_write_transcript_entries\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 2326,
+        "startChar": 40,
+        "endChar": 48
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_write_transcript_entries\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_write_transcript_entries\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 2332,
+        "startChar": 40,
+        "endChar": 48
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_load_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 2650,
+        "startChar": 35,
+        "endChar": 43
+      },
+      {
+        "bucket": "error",
+        "message": "Object of type \"None\" is not subscriptable",
+        "source": "Pyright",
+        "code": "reportOptionalSubscript",
+        "sig": "Pyright|reportOptionalSubscript|1|Object of type \"None\" is not subscriptable",
+        "startLine": 2652,
+        "startChar": 4,
+        "endChar": 12
+      },
+      {
+        "bucket": "error",
+        "message": "Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "source": "Pyright",
+        "code": "reportArgumentType",
+        "sig": "Pyright|reportArgumentType|1|Argument of type \"str | None\" cannot be assigned to parameter \"conversation_id\" of type \"str\" in function \"_save_conversation_meta\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\"",
+        "startLine": 2654,
+        "startChar": 28,
+        "endChar": 36
+      }
+    ],
+    "suppressed": [],
+    "lsp_stats": {
+      "broker": {
+        "requestsSent": 1,
+        "requestsDropped": 0,
+        "requestsCoalesced": 0,
+        "responsesReceived": 1,
+        "responsesStale": 0
+      },
+      "didChangeExplicit": 0,
+      "didChangeSentTotal": 1,
+      "diagnosticsReceived": 2,
+      "documentVersion": 2
+    }
+  }
+}

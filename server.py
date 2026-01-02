@@ -961,10 +961,10 @@ async def _route_appserver_event(
     if "commandexecution/requestapproval" in label_lower:
         if isinstance(payload, dict):
             item_id = payload.get("itemId") or payload.get("item_id") or payload.get("id")
-            if item_id and request_id:
+            if item_id and request_id is not None:
                 _approval_request_map[str(item_id)] = str(request_id)
-            resolved_id = request_id or payload.get("_request_id")
-            if not resolved_id and item_id:
+            resolved_id = request_id if request_id is not None else payload.get("_request_id")
+            if resolved_id is None and item_id:
                 resolved_id = _approval_request_map.get(str(item_id))
             cached = _approval_item_cache.get(str(item_id)) if item_id else {}
             events.append({
@@ -981,21 +981,39 @@ async def _route_appserver_event(
             events.append({"type": "activity", "label": "approval", "active": True})
         return events
 
+    # Legacy apply_patch_approval_request - cache the diff by call_id for later approval
+    if "apply_patch_approval_request" in label_lower:
+        if isinstance(payload, dict):
+            call_id = payload.get("call_id")
+            changes = payload.get("changes")
+            if call_id and changes:
+                # Extract unified diff from changes dict
+                diff_parts = []
+                for path, change in changes.items():
+                    if isinstance(change, dict) and change.get("unified_diff"):
+                        diff_parts.append(f"--- {path}\n+++ {path}\n{change.get('unified_diff')}")
+                _approval_item_cache[str(call_id)] = {
+                    "diff": "\n".join(diff_parts) if diff_parts else None,
+                    "changes": changes,
+                }
+        # Don't return - let it fall through to filechange/requestapproval handler if also matches
+
     if "filechange/requestapproval" in label_lower or "applypatchapproval" in label_lower:
         if isinstance(payload, dict):
-            item_id = payload.get("itemId") or payload.get("item_id") or payload.get("id")
-            if item_id and request_id:
+            item_id = payload.get("itemId") or payload.get("item_id") or payload.get("call_id") or payload.get("id")
+            if item_id and request_id is not None:
                 _approval_request_map[str(item_id)] = str(request_id)
-            resolved_id = request_id or payload.get("_request_id")
-            if not resolved_id and item_id:
+            resolved_id = request_id if request_id is not None else payload.get("_request_id")
+            if resolved_id is None and item_id:
                 resolved_id = _approval_request_map.get(str(item_id))
+            cached = _approval_item_cache.get(str(item_id)) if item_id else {}
             events.append({
                 "type": "approval",
                 "kind": "diff",
                 "id": resolved_id,
                 "payload": {
-                    "diff": payload.get("diff") or payload.get("patch") or payload.get("unified_diff"),
-                    "changes": payload.get("changes"),
+                    "diff": payload.get("diff") or payload.get("patch") or payload.get("unified_diff") or cached.get("diff"),
+                    "changes": payload.get("changes") or cached.get("changes"),
                     "reason": payload.get("reason"),
                 },
             })
@@ -1090,6 +1108,11 @@ async def _route_appserver_event(
             return events
         if item_type == "filechange":
             diff = _extract_diff_text(item)
+            if item.get("id"):
+                _approval_item_cache[str(item.get("id"))] = {
+                    "diff": diff,
+                    "changes": item.get("changes"),
+                }
             if diff:
                 await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item.get("id"), events)
             return events
@@ -1495,8 +1518,10 @@ async def _write_appserver(payload: Dict[str, Any]) -> None:
     if not state or not state.process.stdin:
         raise HTTPException(status_code=409, detail="app-server pipe not available")
     line = json.dumps(payload, ensure_ascii=False)
+    print(f"[DEBUG] Writing to appserver stdin: {line[:200]}...")
     state.process.stdin.write((line + "\n").encode("utf-8"))
     await state.process.stdin.drain()
+    print(f"[DEBUG] Write complete")
 
 
 async def _ensure_appserver_initialized() -> None:
@@ -2274,8 +2299,7 @@ async def api_appserver_conversation_select(payload: Dict[str, Any] = Body(...))
             cfg["active_view"] = view
         else:
             cfg["active_view"] = "conversation"
-        if meta.get("thread_id") and not cfg.get("thread_id"):
-            cfg["thread_id"] = meta.get("thread_id")
+        cfg["thread_id"] = meta.get("thread_id")
         _save_appserver_config(cfg)
     return meta
 
@@ -2685,6 +2709,7 @@ async def api_appserver_status():
 
 @app.post("/api/appserver/rpc")
 async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
+    print(f"[DEBUG] /api/appserver/rpc received: {payload}")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
     await _write_appserver(payload)

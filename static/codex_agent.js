@@ -1341,8 +1341,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function respondApproval(requestId, decision) {
     if (requestId === null || requestId === undefined) return;
+    // Ensure ID is sent as integer if it looks like one (JSON-RPC requires matching type)
+    let id = requestId;
+    if (typeof id === 'string' && /^\d+$/.test(id)) {
+      id = parseInt(id, 10);
+    }
     await postJson('/api/appserver/rpc', {
-      id: requestId,
+      jsonrpc: '2.0',
+      id: id,
       result: { decision },
     });
   }
@@ -1384,13 +1390,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (footerApprovalValue) footerApprovalValue.textContent = conversationSettings?.approvalPolicy || 'default';
       if (conversationMeta && conversationMeta.thread_id) {
         currentThreadId = conversationMeta.thread_id;
-        setPill(statusEl, 'pinned', 'ok');
       } else {
         currentThreadId = null;
-        setPill(statusEl, 'draft', 'warn');
       }
     } catch {
-      setPill(statusEl, 'error', 'err');
+      // Don't touch statusEl here - it's for server status only
     }
     updateConversationHeaderLabel();
   }
@@ -1453,7 +1457,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const threadId = result?.thread?.id;
     if (threadId) {
       currentThreadId = threadId;
-      setPill(statusEl, 'pinned', 'ok');
       return threadId;
     }
     throw new Error('thread/start failed');
