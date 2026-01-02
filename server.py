@@ -72,6 +72,7 @@ _approval_request_map: Dict[str, str] = {}
 _appserver_rpc_waiters: Dict[str, asyncio.Future] = {}
 _appserver_initialized = False
 DEBUG_MODE = False
+DEBUG_RAW_LOG_PATH: Optional[Path] = None
 CODEX_AGENT_THEME_COLOR = "#0d0f13"
 CODEX_AGENT_ICON_PATH = "/static/codexas-icon.svg"
 CODEX_AGENT_START_URL = "/codex-agent/"
@@ -688,6 +689,9 @@ def _get_turn_id(payload: Any) -> Optional[str]:
         for key in ("turnId", "turn_id"):
             if payload.get(key):
                 return str(payload[key])
+        # Check nested turn object (turn/completed format)
+        if isinstance(payload.get("turn"), dict) and payload["turn"].get("id"):
+            return str(payload["turn"]["id"])
         if payload.get("id") and payload.get("status") is not None:
             return str(payload.get("id"))
     return None
@@ -716,6 +720,7 @@ def _get_turn_state(thread_id: Optional[str], turn_id: Optional[str]) -> Dict[st
             "reasoning_buffer": "",
             "diff_hashes": set(),
             "diff_seen": False,
+            "plan_steps": [],  # Accumulate plan steps during turn
         }
         _appserver_turn_state[key] = state
     return state
@@ -972,6 +977,13 @@ async def _broadcast_appserver_raw(message: str) -> None:
     _appserver_raw_buffer.append(message)
     if len(_appserver_raw_buffer) > 500:
         _appserver_raw_buffer[:] = _appserver_raw_buffer[-500:]
+    # Write to debug log file if enabled
+    if DEBUG_MODE and DEBUG_RAW_LOG_PATH:
+        try:
+            with DEBUG_RAW_LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(message + "\n")
+        except Exception:
+            pass
     if not _appserver_ws_clients_raw:
         return
     stale: List[WebSocket] = []
@@ -1090,6 +1102,22 @@ async def _route_appserver_event(
             await _set_turn_id(turn_id)
         else:
             await _set_turn_id(None)
+            # On turn completion, write accumulated plan to transcript if any steps exist
+            plan_steps = state.get("plan_steps", [])
+            if plan_steps and convo_id:
+                await _append_transcript_entry(convo_id, {
+                    "role": "plan",
+                    "steps": plan_steps,
+                    "turn_id": turn_id,
+                    "event": "turn/completed",
+                })
+                # Also emit to frontend for live display
+                events.append({
+                    "type": "plan",
+                    "steps": plan_steps,
+                })
+            # Clear plan state for next turn
+            state["plan_steps"] = []
         events.append({"type": "activity", "label": "turn started" if label_lower == "turn/started" else "idle", "active": label_lower == "turn/started"})
         return events
 
@@ -1132,6 +1160,35 @@ async def _route_appserver_event(
             events.append(event)
         return events
 
+    # Error events - capture and display
+    if label_lower in {"codex/event/error", "error"} and isinstance(payload, dict):
+        error_obj = payload.get("error") or payload
+        message = error_obj.get("message") or str(error_obj)
+        # Store to transcript
+        if convo_id:
+            await _append_transcript_entry(convo_id, {
+                "role": "error",
+                "text": message,
+                "event": label_lower,
+            })
+        # Emit to frontend
+        events.append({
+            "type": "error",
+            "message": message,
+        })
+        events.append({"type": "activity", "label": "error", "active": False})
+        return events
+
+    # Warning events
+    if label_lower == "codex/event/warning" and isinstance(payload, dict):
+        message = payload.get("message") or payload.get("msg", {}).get("message") or ""
+        if message:
+            events.append({
+                "type": "warning",
+                "message": message,
+            })
+        return events
+
     # Suppress noisy events
     if label_lower in {
         "codex/event/item_started",
@@ -1144,38 +1201,57 @@ async def _route_appserver_event(
     }:
         return events
 
-    # Plan update events (todo list)
+    # Plan update events (codex/event/plan_update - array of steps)
     if label_lower == "codex/event/plan_update" and isinstance(payload, dict):
-        plan = payload.get("plan")
-        if isinstance(plan, dict):
-            step = plan.get("step")
-            status = plan.get("status")  # pending, in_progress, completed
-            if step:
-                events.append({
-                    "type": "plan_update",
-                    "step": step,
-                    "status": status or "pending",
-                })
+        plan_steps = payload.get("plan")
+        if isinstance(plan_steps, list):
+            # Replace entire plan state with latest update
+            normalized_steps = []
+            for step_obj in plan_steps:
+                if isinstance(step_obj, dict):
+                    step = step_obj.get("step")
+                    status = step_obj.get("status")  # pending, in_progress, completed
+                    if step:
+                        normalized_steps.append({
+                            "step": step,
+                            "status": status or "pending",
+                        })
+                        # Emit for live overlay
+                        events.append({
+                            "type": "plan_update",
+                            "step": step,
+                            "status": status or "pending",
+                        })
+            state["plan_steps"] = normalized_steps
         return events
 
     # turn/plan/updated - array of plan steps from v2 protocol
+    # Emit plan_update events for live overlay AND accumulate for transcript on turn/completed
     if label_lower == "turn/plan/updated" and isinstance(payload, dict):
         plan_steps = payload.get("plan")
         if isinstance(plan_steps, list):
+            # Replace entire plan state with latest update
+            normalized_steps = []
             for step_obj in plan_steps:
                 if isinstance(step_obj, dict):
                     step = step_obj.get("step")
                     status = step_obj.get("status")  # pending, inProgress, completed
                     if step:
-                        # Normalize status to match frontend expectations
+                        # Normalize status
                         normalized_status = status
                         if status == "inProgress":
                             normalized_status = "in_progress"
+                        normalized_steps.append({
+                            "step": step,
+                            "status": normalized_status or "pending",
+                        })
+                        # Emit for live overlay
                         events.append({
                             "type": "plan_update",
                             "step": step,
                             "status": normalized_status or "pending",
                         })
+            state["plan_steps"] = normalized_steps
         return events
 
     # Item events
@@ -2818,6 +2894,47 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
     print(f"[DEBUG] /api/appserver/rpc received: {payload}")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    
+    # Intercept thread/resume, thread/start, turn/start to inject settings from SSOT
+    method = payload.get("method", "")
+    if method in ("thread/resume", "thread/start", "turn/start"):
+        async with _config_lock:
+            cfg = _load_appserver_config()
+        convo_id = cfg.get("conversation_id")
+        if convo_id:
+            meta = _load_conversation_meta(convo_id)
+            settings = meta.get("settings", {})
+            params = payload.get("params", {})
+            
+            # Different params supported by different methods:
+            # thread/resume: model, cwd, approvalPolicy, sandbox (NOT reasoningEffort)
+            # thread/start: model, cwd, approvalPolicy, sandbox, reasoningEffort
+            # turn/start: model, cwd, approvalPolicy, sandboxPolicy, effort, summary
+            
+            if method == "turn/start":
+                # turn/start uses 'effort' not 'reasoningEffort'
+                for key in ("model", "cwd", "approvalPolicy", "sandboxPolicy", "summary"):
+                    if key in settings and settings[key] and key not in params:
+                        params[key] = settings[key]
+                # Map our 'effort' setting to turn/start's 'effort' param
+                if "effort" in settings and settings["effort"] and "effort" not in params:
+                    params["effort"] = settings["effort"]
+            elif method == "thread/start":
+                # thread/start uses 'reasoningEffort'
+                for key in ("model", "cwd", "approvalPolicy", "sandbox"):
+                    if key in settings and settings[key] and key not in params:
+                        params[key] = settings[key]
+                if "effort" in settings and settings["effort"] and "reasoningEffort" not in params:
+                    params["reasoningEffort"] = settings["effort"]
+            else:  # thread/resume
+                # thread/resume does NOT support reasoningEffort - only model, cwd, approvalPolicy, sandbox
+                for key in ("model", "cwd", "approvalPolicy", "sandbox"):
+                    if key in settings and settings[key] and key not in params:
+                        params[key] = settings[key]
+            
+            payload["params"] = params
+            print(f"[DEBUG] SSOT injection for {method}: {params}")
+    
     await _write_appserver(payload)
     return {"ok": True}
 
@@ -2943,7 +3060,26 @@ async def api_appserver_debug_state():
         "conversation": meta,
         "shell_id": _appserver_shell_id,
         "reader_task": _appserver_reader_task is not None and not _appserver_reader_task.done(),
+        "debug_mode": DEBUG_MODE,
+        "debug_raw_log_path": str(DEBUG_RAW_LOG_PATH) if DEBUG_RAW_LOG_PATH else None,
     }
+
+
+@app.post("/api/appserver/debug/toggle")
+async def api_appserver_debug_toggle(enabled: bool = Body(..., embed=True)):
+    """Toggle debug mode and raw event logging."""
+    global DEBUG_MODE, DEBUG_RAW_LOG_PATH
+    DEBUG_MODE = enabled
+    if enabled and not DEBUG_RAW_LOG_PATH:
+        cache_dir = Path.home() / ".cache" / "agent_log_server"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        DEBUG_RAW_LOG_PATH = cache_dir / "debug_raw.jsonl"
+        DEBUG_RAW_LOG_PATH.write_text("")
+    return {
+        "debug_mode": DEBUG_MODE,
+        "debug_raw_log_path": str(DEBUG_RAW_LOG_PATH) if DEBUG_RAW_LOG_PATH else None,
+    }
+
 
 @app.get("/api/messages")
 async def get_messages(limit: int = Query(None, gt=0)):
@@ -3017,6 +3153,7 @@ def parse_args() -> argparse.Namespace:
 def main():
     global DEBUG_MODE
     global LOG_PATH
+    global DEBUG_RAW_LOG_PATH
     args = parse_args()
     DEBUG_MODE = bool(args.debug)
     if args.broadcast_all:
@@ -3027,6 +3164,14 @@ def main():
         log_p = Path.cwd() / log_p
     ensure_log_file(log_p)
     LOG_PATH = log_p
+
+    # Set up debug raw log in .cache directory
+    if DEBUG_MODE:
+        cache_dir = Path.home() / ".cache" / "agent_log_server"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        DEBUG_RAW_LOG_PATH = cache_dir / "debug_raw.jsonl"
+        # Clear previous debug log on startup
+        DEBUG_RAW_LOG_PATH.write_text("")
 
     try:
         with LOG_PATH.open("a", encoding="utf-8") as f:

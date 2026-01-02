@@ -346,6 +346,8 @@ agent_log_server/
 {"role": "diff", "diff": "unified diff text", "path": "file.py", "timestamp": "ISO"}
 {"role": "command", "command": "ls -la", "output": "...", "duration_ms": 52, "exit_code": 0, "timestamp": "ISO"}
 {"role": "approval", "status": "accepted|declined", "diff": "...", "path": "...", "timestamp": "ISO"}
+{"role": "plan", "steps": [{"step": "Step description", "status": "completed|in_progress|pending"}], "turn_id": "...", "timestamp": "ISO"}
+{"role": "error", "text": "error message", "event": "codex/event/error", "timestamp": "ISO"}
 ```
 
 ## Configuration
@@ -415,6 +417,16 @@ Controls how much "thinking" the model does:
 | `/api/appserver/start` | POST | Start codex-app-server |
 | `/api/appserver/stop` | POST | Stop codex-app-server |
 
+### Debug
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/appserver/debug/raw` | GET | Get raw event buffer (last N items) |
+| `/api/appserver/debug/state` | GET | Get server debug state |
+| `/api/appserver/debug/toggle` | POST | Toggle debug mode (`{"enabled": true}`) |
+
+When debug mode is enabled (`--debug` flag or via toggle endpoint), raw events are written to `~/.cache/agent_log_server/debug_raw.jsonl`.
+
 ## WebSocket Events
 
 ### Server → Client
@@ -424,6 +436,9 @@ Controls how much "thinking" the model does:
 | `codex_event` | `{type, data}` | Generic codex event |
 | `server_status` | `{status}` | Server state change |
 | `approval_request` | `{requestId, diff, path}` | Needs user approval |
+| `plan` | `{steps: [{step, status}]}` | Completed plan from turn |
+| `error` | `{message}` | Error from codex-app-server |
+| `warning` | `{message}` | Warning from codex-app-server |
 
 ### Client → Server
 
@@ -620,6 +635,27 @@ FWS stores its data in `~/.cache/framework_shells/`:
 ```
 
 The `fingerprint` is derived from the repository/working directory path, ensuring isolation between different projects.
+
+### Plan Transcript (Implemented)
+
+**Problem:** Plan updates from `turn/plan/updated` were being rendered in a sticky overlay that was removed. Plans weren't being persisted.
+
+**Solution:**
+- Accumulate plan steps in turn state during `turn/plan/updated` events
+- On `turn/completed`, write completed plan to transcript as `{"role": "plan", "steps": [...], ...}`
+- Emit `plan` event to frontend for live display
+- Frontend renders plan as a card with checkboxes showing step status (pending ☐, in_progress ◐, completed ☑)
+- Plan cards persist in transcript for replay
+
+### SSOT Settings Injection (Implemented)
+
+**Problem:** When resuming a thread, the frontend wasn't sending model/settings from the SSOT, causing codex-app-server to fall back to defaults from `config.toml`.
+
+**Solution:**
+- Backend intercepts `thread/resume`, `thread/start`, and `turn/start` RPC methods
+- Injects settings (`model`, `cwd`, `approvalPolicy`, `effort`, etc.) from the conversation's SSOT meta before forwarding to codex-app-server
+- Frontend no longer responsible for sending settings - only validates conversation ID matches (guards against stale tabs/multi-device conflicts)
+- Clean separation: backend owns SSOT and enforces settings, frontend only guards against conflicts
 
 ## Future Considerations
 

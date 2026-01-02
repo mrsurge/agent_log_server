@@ -1053,3 +1053,123 @@ textarea {
   background: #1a1a1a;
   border-radius: 0;
 }
+
+/* Plan Card Styles */
+.timeline-row.plan {
+  background: var(--surface-secondary, #1e2130);
+  border: none;
+  border-radius: 0;
+  border-left: 4px solid #6366f1;
+}
+
+.timeline-row.plan .meta {
+  display: none;
+}
+
+.timeline-row.plan .body {
+  padding: 12px 14px;
+}
+
+.plan-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--foreground, #d4d4d8);
+  margin-bottom: 8px;
+}
+
+.timeline-row.plan .plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plan-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: var(--surface, #16181f);
+}
+
+.plan-checkbox {
+  font-size: 15px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.plan-item.pending .plan-checkbox {
+  color: var(--muted, #71717a);
+}
+
+.plan-item.in_progress .plan-checkbox {
+  color: #f59e0b;
+}
+
+.plan-item.completed .plan-checkbox {
+  color: #22c55e;
+}
+
+.plan-item.completed .plan-text {
+  text-decoration: line-through;
+  color: var(--muted, #71717a);
+}
+
+.plan-text {
+  color: var(--foreground, #d4d4d8);
+}
+
+/* Error Card Styles */
+.timeline-row.error {
+  background: #2d1b1b;
+  border: none;
+  border-radius: 0;
+  border-left: 4px solid #ef4444;
+}
+
+.timeline-row.error .meta {
+  display: none;
+}
+
+.timeline-row.error .body {
+  padding: 12px 14px;
+}
+
+.error-text {
+  color: #fca5a5;
+  font-family: monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+/* Warning Card Styles */
+.timeline-row.warning {
+  background: #2d2617;
+  border: none;
+  border-radius: 0;
+  border-left: 4px solid #f59e0b;
+}
+
+.timeline-row.warning .meta {
+  display: none;
+}
+
+.timeline-row.warning .body {
+  padding: 12px 14px;
+}
+
+.warning-text {
+  color: #fcd34d;
+  font-family: monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}

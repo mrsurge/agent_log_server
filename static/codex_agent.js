@@ -1102,6 +1102,69 @@ document.addEventListener('DOMContentLoaded', () => {
         fragment.appendChild(row);
         return;
       }
+      // Plan entries (completed plan from turn) - collapsible
+      if (entry.role === 'plan') {
+        const { row, body } = buildRow('plan', 'plan');
+        
+        // Collapsible header
+        const header = document.createElement('div');
+        header.className = 'plan-card-header';
+        let collapsed = false;
+        
+        const toggleBtn = document.createElement('span');
+        toggleBtn.className = 'plan-toggle';
+        toggleBtn.textContent = '[-]';
+        
+        const title = document.createElement('span');
+        title.className = 'plan-title';
+        title.textContent = 'Plan';
+        
+        header.append(toggleBtn, title);
+        body.appendChild(header);
+        
+        const list = document.createElement('div');
+        list.className = 'plan-list';
+        const steps = entry.steps || [];
+        steps.forEach((item) => {
+          const stepEl = document.createElement('div');
+          stepEl.className = `plan-item ${item.status || 'pending'}`;
+          const checkbox = document.createElement('span');
+          checkbox.className = 'plan-checkbox';
+          if (item.status === 'completed') {
+            checkbox.textContent = '☑';
+          } else if (item.status === 'in_progress') {
+            checkbox.textContent = '◐';
+          } else {
+            checkbox.textContent = '☐';
+          }
+          const text = document.createElement('span');
+          text.className = 'plan-text';
+          text.textContent = item.step || '';
+          stepEl.append(checkbox, text);
+          list.appendChild(stepEl);
+        });
+        body.appendChild(list);
+        
+        // Toggle collapse
+        toggleBtn.addEventListener('click', () => {
+          collapsed = !collapsed;
+          toggleBtn.textContent = collapsed ? '[+]' : '[-]';
+          list.style.display = collapsed ? 'none' : 'flex';
+        });
+        
+        fragment.appendChild(row);
+        return;
+      }
+      // Error entries
+      if (entry.role === 'error') {
+        const { row, body } = buildRow('error', 'error');
+        const pre = document.createElement('pre');
+        pre.className = 'error-text';
+        pre.textContent = entry.text || '';
+        body.appendChild(pre);
+        fragment.appendChild(row);
+        return;
+      }
       const label = entry.role === 'assistant' ? 'assistant' : entry.role;
       const { row, body } = buildRow('message', label);
       const pre = document.createElement('pre');
@@ -1267,6 +1330,115 @@ document.addEventListener('DOMContentLoaded', () => {
       entry.pre.textContent += `[io] ${parts.join(' ')}\n`;
     }
     lastEventType = 'tool';
+  }
+
+  // Render a plan card (completed plan from turn) - collapsible
+  function renderPlanCard(steps) {
+    if (!steps || !steps.length) return;
+    
+    const { row, body } = createRow('plan', 'plan');
+    
+    // Collapsible header
+    const header = document.createElement('div');
+    header.className = 'plan-card-header';
+    let collapsed = false;
+    
+    const toggleBtn = document.createElement('span');
+    toggleBtn.className = 'plan-toggle';
+    toggleBtn.textContent = '[-]';
+    
+    const title = document.createElement('span');
+    title.className = 'plan-title';
+    title.textContent = 'Plan';
+    
+    header.append(toggleBtn, title);
+    body.appendChild(header);
+    
+    const list = document.createElement('div');
+    list.className = 'plan-list';
+    
+    steps.forEach((item) => {
+      const stepEl = document.createElement('div');
+      stepEl.className = `plan-item ${item.status || 'pending'}`;
+      
+      const checkbox = document.createElement('span');
+      checkbox.className = 'plan-checkbox';
+      if (item.status === 'completed') {
+        checkbox.textContent = '☑';
+      } else if (item.status === 'in_progress') {
+        checkbox.textContent = '◐';
+      } else {
+        checkbox.textContent = '☐';
+      }
+      
+      const text = document.createElement('span');
+      text.className = 'plan-text';
+      text.textContent = item.step || '';
+      
+      stepEl.append(checkbox, text);
+      list.appendChild(stepEl);
+    });
+    
+    body.appendChild(list);
+    
+    // Toggle collapse on header click
+    toggleBtn.addEventListener('click', () => {
+      collapsed = !collapsed;
+      toggleBtn.textContent = collapsed ? '[+]' : '[-]';
+      list.style.display = collapsed ? 'none' : 'flex';
+    });
+    
+    // Insert before bottom spacer
+    if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
+      timelineEl.insertBefore(row, bottomSpacerEl);
+    } else {
+      timelineEl.appendChild(row);
+    }
+    
+    lastEventType = 'plan';
+    maybeAutoScroll();
+  }
+
+  // Render error card
+  function renderErrorCard(message) {
+    if (!message) return;
+    clearPlaceholder();
+    
+    const { row, body } = createRow('error', 'error');
+    const pre = document.createElement('pre');
+    pre.className = 'error-text';
+    pre.textContent = message;
+    body.appendChild(pre);
+    
+    if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
+      timelineEl.insertBefore(row, bottomSpacerEl);
+    } else {
+      timelineEl.appendChild(row);
+    }
+    
+    lastEventType = 'error';
+    maybeAutoScroll();
+  }
+
+  // Render warning card
+  function renderWarningCard(message) {
+    if (!message) return;
+    clearPlaceholder();
+    
+    const { row, body } = createRow('warning', 'warning');
+    const pre = document.createElement('pre');
+    pre.className = 'warning-text';
+    pre.textContent = message;
+    body.appendChild(pre);
+    
+    if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
+      timelineEl.insertBefore(row, bottomSpacerEl);
+    } else {
+      timelineEl.appendChild(row);
+    }
+    
+    lastEventType = 'warning';
+    maybeAutoScroll();
   }
 
   function renderCommandResult(evt) {
@@ -1764,8 +1936,7 @@ document.addEventListener('DOMContentLoaded', () => {
         currentThreadId = null;
       }
     }
-    const params = buildCodexSettings();
-    const result = await sendRpc('thread/start', params);
+    const result = await sendRpc('thread/start', {});
     const threadId = result?.thread?.id;
     if (threadId) {
       currentThreadId = threadId;
@@ -1774,22 +1945,23 @@ document.addEventListener('DOMContentLoaded', () => {
     throw new Error('thread/start failed');
   }
 
-  function buildCodexSettings() {
-    const settings = {};
-    const allowed = [
-      'cwd',
-      'approvalPolicy',
-      'sandboxPolicy',
-      'model',
-      'effort',
-      'summary',
-    ];
-    allowed.forEach((key) => {
-      if (conversationSettings && conversationSettings[key] !== undefined && conversationSettings[key] !== null && conversationSettings[key] !== '') {
-        settings[key] = conversationSettings[key];
+  // Validate conversation ID matches before sending RPC (guards against stale tabs/multi-device)
+  async function validateConversationId() {
+    try {
+      const r = await fetch('/api/appserver/conversation', { cache: 'no-store' });
+      if (!r.ok) return false;
+      const serverMeta = await r.json();
+      const serverConvoId = serverMeta?.conversation_id;
+      const localConvoId = conversationMeta?.conversation_id;
+      if (serverConvoId && localConvoId && serverConvoId !== localConvoId) {
+        console.warn('Conversation ID mismatch - server:', serverConvoId, 'local:', localConvoId);
+        setActivity('conversation changed - refresh', false);
+        return false;
       }
-    });
-    return settings;
+      return true;
+    } catch {
+      return true; // Allow on network error
+    }
   }
 
   async function sendUserMessage(text) {
@@ -1798,15 +1970,17 @@ document.addEventListener('DOMContentLoaded', () => {
       setActivity('save settings first', true);
       return;
     }
+    // Guard against stale tabs / multi-device conflicts
+    if (!await validateConversationId()) {
+      return;
+    }
     setActivity('sending', true);
     await ensureInitialized();
     const threadId = await ensureThread();
-    const settings = buildCodexSettings();
     const params = {
       threadId,
       input: [{ type: 'text', text }],
     };
-    Object.assign(params, settings);
     await sendRpc('turn/start', params);
   }
 
@@ -1881,6 +2055,14 @@ document.addEventListener('DOMContentLoaded', () => {
           finalizePlanToTranscript();
         }
         return;
+      case 'error':
+        lastEventType = 'error';
+        renderErrorCard(evt.message || 'Unknown error');
+        return;
+      case 'warning':
+        lastEventType = 'warning';
+        renderWarningCard(evt.message || '');
+        return;
       case 'message':
         lastEventType = 'message';
         addMessage(evt.role || 'message', evt.text || '');
@@ -1931,6 +2113,11 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'plan_update':
         lastEventType = 'plan';
         updatePlanItem(evt.step, evt.status);
+        return;
+      case 'plan':
+        lastEventType = 'plan';
+        renderPlanCard(evt.steps || []);
+        clearPlanOverlay();
         return;
       case 'token_count':
         lastEventType = 'token';
