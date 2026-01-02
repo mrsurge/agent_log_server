@@ -2508,8 +2508,9 @@ async def api_fs_search(query: str = Query(...), root: Optional[str] = Query(Non
 
 @app.get("/api/appserver/transcript")
 async def api_appserver_transcript(conversation_id: Optional[str] = Query(None)):
-    cfg = _load_appserver_config()
-    convo_id = conversation_id or cfg.get("conversation_id")
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        convo_id = conversation_id or cfg.get("conversation_id")
     if not convo_id:
         return {"conversation_id": None, "items": []}
     path = _transcript_path(str(convo_id))
@@ -2538,8 +2539,9 @@ async def api_appserver_transcript_range(
     offset: int = Query(0),
     limit: int = Query(120, gt=0, le=500),
 ):
-    cfg = _load_appserver_config()
-    convo_id = conversation_id or cfg.get("conversation_id")
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        convo_id = conversation_id or cfg.get("conversation_id")
     if not convo_id:
         return {"conversation_id": None, "total": 0, "offset": 0, "items": []}
     path = _transcript_path(str(convo_id))

@@ -1254,10 +1254,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function createConversation() {
-    resetTimeline();
     await postJson('/api/appserver/conversations', {});
     await fetchConversation();
     await fetchConversations();
+    resetTimeline();
     await replayTranscript();
     setDrawerOpen(true);
     openSettingsModal();
@@ -1289,7 +1289,8 @@ document.addEventListener('DOMContentLoaded', () => {
       summary: settingsSummaryEl?.value?.trim() || null,
       label: settingsLabelEl?.value?.trim() || null,
     };
-    if (pendingNewConversation || !conversationMeta?.conversation_id) {
+    const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
+    if (isNewConversation) {
       const meta = await postJson('/api/appserver/conversations', {});
       if (meta?.conversation_id) {
         await postJson('/api/appserver/conversations/select', { conversation_id: meta.conversation_id, view: 'conversation' });
@@ -1308,6 +1309,9 @@ document.addEventListener('DOMContentLoaded', () => {
     closeSettingsModal();
     await fetchConversation();
     await fetchConversations();
+    if (isNewConversation) {
+      resetTimeline(); // Clear old transcript when switching to new conversation
+    }
     await replayTranscript();
     setDrawerOpen(true);
     updateConversationHeaderLabel();
@@ -1549,7 +1553,10 @@ document.addEventListener('DOMContentLoaded', () => {
       renderTranscriptEntries(data.items, { prepend: false });
       transcriptEnd = transcriptStart + (data.items?.length || 0);
       lastEventType = null;
-      maybeAutoScroll(true);
+      // Delay scroll to ensure DOM is fully rendered
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => maybeAutoScroll(true));
+      });
     } catch {
       // ignore replay failures
     }
@@ -1668,20 +1675,25 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   setPill(statusEl, 'idle', 'warn');
-  ensureActivityRow();
   setCounter(counterMessagesEl, messageCount);
   setCounter(counterTokensEl, tokenCount);
   updateScrollButton();
   resetWsReady();
   connectWS();
   bindPickerFilter();
+  setDrawerOpen(false); // Start closed to avoid race conditions
   fetchConversation().then(async () => {
     await fetchConversations();
     if (activeView === 'conversation') {
+      resetTimeline(); // Reset timeline to ensure proper DOM order
       await replayTranscript();
-      setDrawerOpen(true);
+      // Small delay to ensure DOM is ready before opening and scrolling
+      setTimeout(() => {
+        setDrawerOpen(true);
+        maybeAutoScroll(true);
+      }, 50);
     } else {
-      setDrawerOpen(false);
+      ensureActivityRow(); // Only create activity row for non-conversation view
     }
   });
   fetchStatus();
