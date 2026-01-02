@@ -5,7 +5,7 @@ import os
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from contextlib import suppress, asynccontextmanager
 import hashlib
 import re
@@ -578,6 +578,84 @@ def _extract_diff_text(payload: Any) -> Optional[str]:
     return None
 
 
+def _extract_diff_with_path(payload: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Extract diff text and file path from payload. Returns (diff_text, path)."""
+    if not isinstance(payload, dict):
+        return None, None
+    path = None
+    # Direct diff/patch
+    diff = payload.get("diff") or payload.get("patch") or payload.get("unified_diff")
+    if isinstance(diff, str) and diff.strip():
+        path = payload.get("path")
+        # If no path in payload, try to extract from diff headers
+        if not path:
+            path = _extract_path_from_diff(diff)
+        return diff, path
+    # Changes array
+    changes = payload.get("changes")
+    if isinstance(changes, list):
+        chunks: List[str] = []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            text = change.get("diff")
+            if isinstance(text, str) and text.strip():
+                chunks.append(text)
+                if not path:
+                    path = change.get("path")
+        if chunks:
+            combined = "\n".join(chunks)
+            if not path:
+                path = _extract_path_from_diff(combined)
+            return combined, path
+    # FileChanges dict
+    file_changes = payload.get("fileChanges")
+    if isinstance(file_changes, dict):
+        chunks = []
+        for fpath, change in file_changes.items():
+            if isinstance(change, dict):
+                text = change.get("diff") or change.get("patch")
+                if isinstance(text, str) and text.strip():
+                    chunks.append(text)
+                    if not path:
+                        path = fpath
+        if chunks:
+            return "\n".join(chunks), path
+    return None, None
+
+
+def _extract_path_from_diff(diff_text: str) -> Optional[str]:
+    """Extract file path from diff headers like '--- a/README.md' or 'diff --git a/README.md b/README.md'."""
+    if not diff_text:
+        return None
+    for line in diff_text.splitlines():
+        # Try diff --git header first
+        if line.startswith("diff --git "):
+            # Format: diff --git a/path b/path
+            parts = line.split()
+            if len(parts) >= 4:
+                # Get the b/path part (the destination)
+                bpath = parts[3]
+                if bpath.startswith("b/"):
+                    return bpath[2:]
+                return bpath
+        # Try +++ header (new file path)
+        if line.startswith("+++ "):
+            path = line[4:].strip()
+            if path.startswith("b/"):
+                return path[2:]
+            if path != "/dev/null":
+                return path
+        # Try --- header as fallback
+        if line.startswith("--- "):
+            path = line[4:].strip()
+            if path.startswith("a/"):
+                return path[2:]
+            if path != "/dev/null":
+                return path
+    return None
+
+
 def _diff_signature(diff_text: str) -> str:
     if not diff_text:
         return "empty"
@@ -670,6 +748,7 @@ async def _emit_diff_event(
     item_id: Optional[str],
     events: List[Dict[str, Any]],
     record_transcript: bool = True,
+    path: Optional[str] = None,
 ) -> None:
     if not diff:
         return
@@ -688,11 +767,12 @@ async def _emit_diff_event(
         diff_id = f"item:{item_id}:{diff_hash[:12]}"
     else:
         diff_id = f"diff:{diff_hash[:12]}"
-    events.append({"type": "diff", "id": diff_id, "text": diff_text})
+    events.append({"type": "diff", "id": diff_id, "text": diff_text, "path": path})
     if record_transcript and conversation_id:
         await _append_transcript_entry(conversation_id, {
             "role": "diff",
             "text": diff_text,
+            "path": path,
             "item_id": diff_id,
             "event": "turn_diff",
         })
@@ -1035,15 +1115,15 @@ async def _route_appserver_event(
 
     # Unified diff
     if label_lower == "turn/diff/updated" and isinstance(payload, dict):
-        diff = _extract_diff_text(payload)
+        diff, path = _extract_diff_with_path(payload)
         if diff:
-            await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item_id, events)
+            await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item_id, events, path=path)
         return events
 
     if label_lower == "codex/event/turn_diff" and isinstance(payload, dict):
-        diff = _extract_diff_text(payload)
+        diff, path = _extract_diff_with_path(payload)
         if diff:
-            await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item_id, events)
+            await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item_id, events, path=path)
         return events
 
     # Token counts
@@ -1107,14 +1187,14 @@ async def _route_appserver_event(
                 _register_item_state(item.get("id"), state)
             return events
         if item_type == "filechange":
-            diff = _extract_diff_text(item)
+            diff, path = _extract_diff_with_path(item)
             if item.get("id"):
                 _approval_item_cache[str(item.get("id"))] = {
                     "diff": diff,
                     "changes": item.get("changes"),
+                    "path": path,
                 }
-            if diff:
-                await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item.get("id"), events)
+            # Don't emit diff here - wait for turn_diff which has full context
             return events
         if item_type == "commandexecution":
             # Just cache the command info for later, emit activity
@@ -1161,9 +1241,15 @@ async def _route_appserver_event(
             events.append({"type": "activity", "label": "idle", "active": False})
             return events
         if item_type == "filechange":
-            diff = _extract_diff_text(item)
-            if diff:
-                await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item.get("id"), events)
+            # Don't emit diff here - wait for turn_diff which has full context
+            # Just cache the data for approval tracking
+            diff, path = _extract_diff_with_path(item)
+            if item.get("id") and diff:
+                _approval_item_cache[str(item.get("id"))] = {
+                    "diff": diff,
+                    "changes": item.get("changes"),
+                    "path": path,
+                }
             return events
         if item_type == "commandexecution":
             command = item.get("command") or item.get("cmd") or item.get("argv") or ""
@@ -2705,6 +2791,39 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
     await _write_appserver(payload)
+    return {"ok": True}
+
+
+@app.post("/api/appserver/approval_record")
+async def api_appserver_approval_record(payload: Dict[str, Any] = Body(...)):
+    """Record an approval decision to the transcript."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    status = payload.get("status")  # "accepted" or "declined"
+    diff = payload.get("diff")
+    path = payload.get("path")
+    item_id = payload.get("item_id")
+    if status not in ("accepted", "declined"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    cfg = _load_appserver_config()
+    convo_id = cfg.get("conversation_id")
+    if convo_id:
+        await _append_transcript_entry(convo_id, {
+            "role": "approval",
+            "status": status,
+            "diff": diff,
+            "path": path,
+            "item_id": item_id,
+            "event": "approval_decision",
+        })
+    # If declined, broadcast a declined diff event to the UI
+    if status == "declined" and diff:
+        await _broadcast_appserver_ui({
+            "type": "diff_declined",
+            "id": item_id,
+            "text": diff,
+            "path": path,
+        })
     return {"ok": True}
 
 

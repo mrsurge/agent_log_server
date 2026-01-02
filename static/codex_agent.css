@@ -591,6 +591,32 @@ textarea {
   padding: 0;
 }
 
+.timeline-row.diff.declined {
+  border-left: 4px solid #e53935;
+}
+
+.timeline-row.diff.declined .declined-label {
+  background: #2d1515;
+  color: #ff6b6b;
+  padding: 8px 14px;
+  font-size: 0.85em;
+}
+
+.diff-path-label {
+  padding: 6px 14px;
+  font-size: 0.85em;
+  color: #e0e0e0;
+  border-bottom: 1px solid #333;
+}
+
+.diff-path {
+  padding: 6px 14px;
+  font-size: 0.85em;
+  color: #e0e0e0;
+  border-bottom: 1px solid #333;
+  font-weight: bold;
+}
+
 .timeline-row.tool {
   border-left: 4px solid #4fc3f7;
   background: #0b111b;

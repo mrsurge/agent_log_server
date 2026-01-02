@@ -120,6 +120,23 @@ document.addEventListener('DOMContentLoaded', () => {
   let transcriptLoading = false;
   let estimatedRowHeight = 28;
 
+  // Convert absolute path to relative path based on cwd
+  function toRelativePath(absPath) {
+    if (!absPath) return '';
+    const cwd = conversationSettings.cwd || conversationMeta.cwd || '';
+    if (cwd && absPath.startsWith(cwd)) {
+      let rel = absPath.slice(cwd.length);
+      if (rel.startsWith('/')) rel = rel.slice(1);
+      return rel || absPath;
+    }
+    // Try to extract just the filename if path is too long
+    const parts = absPath.split('/');
+    if (parts.length > 3) {
+      return parts.slice(-2).join('/');
+    }
+    return absPath;
+  }
+
   function setPill(el, text, cls) {
     if (!el) return;
     el.textContent = text;
@@ -918,6 +935,13 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       if (entry.role === 'diff') {
         const { row, body } = buildRow('diff', 'diff');
+        // Show file path if available
+        if (entry.path) {
+          const pathDiv = document.createElement('div');
+          pathDiv.className = 'diff-path';
+          pathDiv.textContent = toRelativePath(entry.path);
+          body.append(pathDiv);
+        }
         const pre = document.createElement('pre');
         pre.className = 'diff-block';
         pre.innerHTML = formatDiff(entry.text || '');
@@ -1048,11 +1072,17 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
-  function getDiffRow(id) {
+  function getDiffRow(id, path) {
     const key = id || 'diff';
     let entry = diffRows.get(key);
     if (!entry) {
       const { body } = createRow('diff', 'diff');
+      if (path) {
+        const pathLabel = document.createElement('div');
+        pathLabel.className = 'diff-path-label';
+        pathLabel.innerHTML = `<strong>${escapeHtml(toRelativePath(path))}</strong>`;
+        body.append(pathLabel);
+      }
       const pre = document.createElement('pre');
       pre.className = 'diff-block';
       body.append(pre);
@@ -1207,9 +1237,26 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
-  function addDiff(id, text) {
-    const entry = getDiffRow(id);
+  function addDiff(id, text, path) {
+    const entry = getDiffRow(id, path);
     entry.pre.innerHTML = formatDiff(text || '');
+    lastEventType = 'diff';
+    maybeAutoScroll();
+  }
+
+  function addDeclinedDiff(id, text, path) {
+    const { row, body } = createRow('diff', 'diff-declined');
+    row.classList.add('declined');
+    if (path) {
+      const pathLabel = document.createElement('div');
+      pathLabel.className = 'declined-label';
+      pathLabel.innerHTML = `<strong>DECLINED:</strong> ${escapeHtml(toRelativePath(path))}`;
+      body.appendChild(pathLabel);
+    }
+    const pre = document.createElement('pre');
+    pre.className = 'diff-block';
+    pre.innerHTML = formatDiff(text || '');
+    body.appendChild(pre);
     lastEventType = 'diff';
     maybeAutoScroll();
   }
@@ -1256,11 +1303,9 @@ document.addEventListener('DOMContentLoaded', () => {
           oldLine = oldStart;
           newLine = newStart;
         }
-      } else if (line.startsWith('+++') || line.startsWith('---')) {
-        cls = 'diff-file';
-        display = `File: ${line.replace(/^(\+\+\+|---)\s+/, '')}`;
-      } else if (line.startsWith('diff --git')) {
-        cls = 'diff-meta';
+      } else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git')) {
+        // Skip diff headers entirely - filename shown separately
+        return '';
       } else if (line.startsWith('+') && !line.startsWith('+++')) {
         cls = 'diff-add';
         gutter = '+';
@@ -1286,13 +1331,16 @@ document.addEventListener('DOMContentLoaded', () => {
       const sep = oldNo || newNo ? '|' : ' ';
       const gutterText = `${padOld}${sep}${padNew}${gutter}`;
       return `<span class=\"diff-line ${cls}\"><span class=\"diff-gutter\">${escapeHtml(gutterText)}</span><span class=\"diff-text\">${escapeHtml(display)}</span></span>`;
-    }).join('');
+    }).filter(line => line !== '').join('');
   }
 
   function renderApproval(evt) {
-    const { body } = createRow(evt.kind === 'diff' ? 'diff' : 'approval', 'approval');
+    const { row, body } = createRow(evt.kind === 'diff' ? 'diff' : 'approval', 'approval');
+    row.dataset.approvalId = evt.id;
     const payload = evt.payload || {};
     const lines = [];
+    let diffText = null;
+    let filePath = null;
     if (payload.command) {
       lines.push(`<div><strong>Command:</strong> ${escapeHtml(Array.isArray(payload.command) ? payload.command.join(' ') : String(payload.command))}</div>`);
     }
@@ -1300,12 +1348,15 @@ document.addEventListener('DOMContentLoaded', () => {
       lines.push(`<div><strong>CWD:</strong> ${escapeHtml(String(payload.cwd))}</div>`);
     }
     if (payload.diff) {
+      diffText = payload.diff;
       lines.push(`<pre class="diff-block">${formatDiff(payload.diff)}</pre>`);
     }
     if (payload.changes && Array.isArray(payload.changes)) {
       payload.changes.forEach((change) => {
         if (change && change.diff) {
-          lines.push(`<div><strong>${escapeHtml(change.path || 'file')}</strong></div><pre class="diff-block">${formatDiff(change.diff)}</pre>`);
+          diffText = diffText || change.diff;
+          filePath = filePath || change.path;
+          lines.push(`<div><strong>${escapeHtml(toRelativePath(change.path) || 'file')}</strong></div><pre class="diff-block">${formatDiff(change.diff)}</pre>`);
         }
       });
     }
@@ -1321,11 +1372,27 @@ document.addEventListener('DOMContentLoaded', () => {
     decline.textContent = 'Decline';
     accept.addEventListener('click', async () => {
       await respondApproval(evt.id, 'accept');
-      actions.remove();
+      // Record to transcript
+      await postJson('/api/appserver/approval_record', {
+        status: 'accepted',
+        diff: diffText,
+        path: filePath,
+        item_id: evt.id,
+      });
+      // Remove the approval card
+      row.remove();
     });
     decline.addEventListener('click', async () => {
       await respondApproval(evt.id, 'decline');
-      actions.remove();
+      // Record to transcript (will also broadcast diff_declined)
+      await postJson('/api/appserver/approval_record', {
+        status: 'declined',
+        diff: diffText,
+        path: filePath,
+        item_id: evt.id,
+      });
+      // Remove the approval card
+      row.remove();
     });
     actions.append(accept, decline);
     body.append(actions);
@@ -1717,7 +1784,11 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       case 'diff':
         lastEventType = 'diff';
-        addDiff(evt.id, evt.text || '');
+        addDiff(evt.id, evt.text || '', evt.path || '');
+        return;
+      case 'diff_declined':
+        lastEventType = 'diff';
+        addDeclinedDiff(evt.id, evt.text || '', evt.path || '');
         return;
       case 'approval':
         lastEventType = 'approval';

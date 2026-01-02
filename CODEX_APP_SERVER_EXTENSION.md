@@ -1,316 +1,476 @@
-# Codex App Server Extension
+# Codex Agent Server - Deep Dive Technical Documentation
 
-This document is a technical deep dive into the **Codex App Server Extension** side of the project. It is intentionally separate from the **Agent Log Server** concerns, even though both live in the same repo. Think of them as opposite sides of the same coin:
+## Overview
 
-- **Agent Log Server** = persistent “message board” for humans/agents.
-- **Codex App Server Extension** = live JSON‑RPC bridge + UI contract for Codex app‑server.
+The Codex Agent Server is a FastHTML-based Python server that acts as a **bridge and UI layer** between the OpenAI Codex CLI (`codex-app-server` binary) and a web-based frontend. It provides a rich conversational interface for interacting with AI coding agents.
 
-Source of truth for this doc is the repo code (`server.py`, `static/codex_agent.js`, `static/codex_agent.css`) and the local `codex-app-server_README.md` + `fws_README.md`.
+### Core Architecture
 
----
-
-## 1) High‑Level Architecture
-
-**Codex app‑server** speaks **JSON‑RPC 2.0 over stdio** (JSONL) but omits the `jsonrpc` header. This extension:
-
-1. **Spawns** `codex app-server` via **Framework Shells** using the **pipe backend**.
-2. **Reads stdout** line‑by‑line (JSONL) from the pipe.
-3. **Parses, routes, and sanitizes** server events into UI‑friendly events.
-4. **Writes JSON‑RPC requests** to the same pipe (stdin).
-5. **Persists** the conversation transcript in `~/.cache/app_server/transcripts/<thread_id>.jsonl`.
-6. **Replays** transcript entries on UI refresh.
-
-The UI (codex agent tab) is **dumb** by design: it only receives sanitized events and never needs to parse raw JSON‑RPC. This keeps frontend logic simple and stable.
-
----
-
-## 2) Framework Shells Role (Process Orchestration)
-
-The extension uses **Framework Shells** (FWS) as the process manager. Key points:
-
-- **Backend:** `pipe` (stdin/stdout)
-- **Shellspec:** `shellspec/app_server.yaml`
-- **Lifecycle:** the shell is started/stopped by the server, not the UI
-- **Isolation:** shells are namespaced by repo fingerprint + secret (see `fws_README.md`)
-
-Shellspec (current):
 ```
-version: "1"
-shells:
-  app_server:
-    backend: pipe
-    cwd: ${CWD}
-    subgroups: ["app_server", "codex"]
-    command:
-      - ${APP_SERVER_COMMAND}
-    labels:
-      app: "codex-app-server"
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Web Browser (Frontend)                       │
+│  ┌─────────────────────────────────────────────────────────────────┐│
+│  │                    codex_agent.js                                ││
+│  │  - Dumb renderer (displays what backend tells it)                ││
+│  │  - WebSocket client for real-time updates                        ││
+│  │  - REST client for actions (send message, approve, etc.)         ││
+│  └─────────────────────────────────────────────────────────────────┘│
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ WebSocket (events) + REST (actions)
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Python Server (server.py)                         │
+│  ┌─────────────────────────────────────────────────────────────────┐│
+│  │  FastAPI + SocketIO                                              ││
+│  │  - Translates codex events → frontend-friendly format            ││
+│  │  - Manages conversation state (SSOT sidecar)                     ││
+│  │  - Stores internal transcript (richer than rollout)              ││
+│  │  - Handles approvals, settings, conversation switching           ││
+│  └─────────────────────────────────────────────────────────────────┘│
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ stdin/stdout (JSON-RPC)
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    codex-app-server (Rust binary)                    │
+│  - Manages conversations with OpenAI API                            │
+│  - Executes tools (shell commands, file edits)                      │
+│  - Emits events via stdout (JSON-RPC notifications)                 │
+│  - Receives commands via stdin (JSON-RPC requests)                  │
+│  - Writes rollout logs to ~/.codex/sessions/                        │
+│  - Handles multiplexing (multiple conversations)                    │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Why pipe backend?
-Pipe gives direct access to stdin/stdout with **JSONL streaming**, which matches codex app‑server’s protocol. PTY/dtach aren’t required for JSON‑RPC and add extra complexity.
+## Key Concepts
 
-### Secret + runtime ID
-Framework Shells needs `FRAMEWORK_SHELLS_SECRET` to calculate the runtime ID. If missing, the manager raises:
-```
-RuntimeError: FRAMEWORK_SHELLS_SECRET is required
-```
-Make sure the secret is set or stored so the same runtime can be recovered across restarts.
+### 1. SSOT Conversation Configuration Sidecar
 
----
+The **Single Source of Truth (SSOT)** sidecar is a JSON file that stores the current conversation's configuration. Located at `conversations/<id>/conversation_meta.json`.
 
-## 3) App‑Server Process Lifecycle
-
-**Server endpoints (FastAPI)**
-
-- `POST /api/appserver/start`
-  - Starts or reuses the app‑server shell.
-  - Spawns reader task for stdout.
-- `POST /api/appserver/stop`
-  - Terminates the shell.
-- `GET /api/appserver/status`
-  - Returns `running` + shell details.
-- `POST /api/appserver/rpc`
-  - Sends arbitrary JSON‑RPC payload to stdin.
-- `POST /api/appserver/initialize`
-  - Sends `initialize` + `initialized`.
-
-**Process start flow**
-1. `_get_or_start_appserver_shell()` loads config for `cwd` and `app_server_command`.
-2. Framework Shells `Orchestrator` starts the pipe backend shell.
-3. `_ensure_appserver_reader()` attaches to stdout and begins the JSONL read loop.
-
-**Process shutdown**
-- Calls Framework Shells terminate APIs.
-- Should also be tied into app shutdown hooks to avoid orphaned shells.
-
----
-
-## 4) Transport & Message Parsing
-
-### Raw JSONL stdout
-Each line is either:
-
-1. **A label line** (e.g., `turn/started`)
-2. **A JSON object** line
-3. **A combined label + JSON** line (prefix + JSON)
-4. **A JSON‑RPC response** with `id`
-
-The reader keeps a `pending_label` so it can associate label lines with the following JSON payload.
-
-### JSON‑RPC Request/Response
-Requests are sent **without** the `jsonrpc` header (per `codex-app-server_README.md`).
-Responses are recognized as `{id: ..., result: ...}` or `{id: ..., error: ...}`.
-
-**UI events emitted for responses:**
-- `rpc_response`
-- `rpc_error`
-
-These are used to resolve client‑side pending requests.
-
----
-
-## 5) Message Router (Core Logic)
-
-The router lives in `_route_appserver_event()` and is responsible for:
-
-- **Filtering noise** (startup, rateLimits, item started/completed that aren’t user‑facing)
-- **Routing deltas** (assistant and reasoning)
-- **Finalizing** assistant + reasoning items
-- **Capturing diffs & approvals**
-- **Maintaining state** per thread + turn + item
-
-### Turn/Item State
-State is tracked per `(thread_id, turn_id)`:
-```
-msg_source, reason_source
-assistant_id, reasoning_id
-assistant_started, reasoning_started
-assistant_buffer, reasoning_buffer
-diff_hashes, diff_seen
-```
-This allows the router to:
-1) decide which event stream to trust (`item/*` vs `codex/event/*`)
-2) de‑dupe diffs and deltas
-3) assemble streaming output into a single UI row
-
----
-
-## 6) Single‑Conversation Mode (Current Behavior)
-
-This repo is intentionally **single‑conversation only** for now:
-
-- Once `thread_id` is set, it is **never overwritten**.
-- The UI only ever calls `thread/resume` for that pinned `thread_id`.
-- `/api/appserver/transcript` falls back to the most recent transcript file and **pins** it.
-
-This prevents new conversation IDs from being created while testing and keeps the UI stable.
-
----
-
-## 7) Transcript SSOT (Single Source of Truth)
-
-Transcript files are stored under:
-```
-~/.cache/app_server/transcripts/<thread_id>.jsonl
-```
-
-Each entry has:
-```
+```json
 {
-  "ts": "<iso>",
-  "role": "user" | "assistant" | "reasoning" | "diff",
-  "text": "...",
-  "item_id": "...",
-  "event": "item/completed" | "turn_diff" | ...
+  "conversation_id": "uuid",
+  "thread_id": "codex-thread-id",    // null if draft
+  "label": "user-friendly name",
+  "model": "gpt-5.2-codex",
+  "approval": "never|always|unlessTrusted",
+  "reasoning_effort": "low|medium|high",
+  "rollout_path": "/path/to/rollout.jsonl",
+  "cwd": "/working/directory",
+  "created_at": "ISO timestamp",
+  "pinned": false,
+  "command_output_lines": 20
 }
 ```
 
-### What is recorded
-- **User messages** (`item/started` userMessage)
-- **Assistant messages** (finalized)
-- **Reasoning summaries** (finalized)
-- **Diffs** (turn‑level unified diff)
+### 2. Draft vs Active Conversations
 
-### What is NOT recorded
-- Streaming deltas (those are UI‑only)
-- Low‑level status noise
+- **Draft**: A conversation that hasn't received a `thread_id` from codex yet. Fresh conversations start as drafts.
+- **Active**: Has a `thread_id` (either from first turn response, or loaded from a rollout).
 
-### Replay
-UI calls `/api/appserver/transcript` and replays into the timeline:
-- `reasoning` → appended as a reasoning block
-- `diff` → rendered as diff row
-- `user` / `assistant` → standard message rows
+When loading a rollout, the `thread_id` is extracted and set immediately, so rollout-loaded conversations are never drafts.
 
----
+### 3. Internal Transcript vs Rollout
 
-## 8) Diff Handling (De‑dupe + Identity)
+**Rollout** (`~/.codex/sessions/.../rollout-*.jsonl`):
+- Raw log from codex-app-server
+- Very noisy (multiple events per action)
+- Used for session recovery
 
-Diffs arrive from multiple event types (e.g. `turn/diff/updated`, `codex/event/turn_diff`, fileChange items). The router:
+**Internal Transcript** (`conversations/<id>/transcript.jsonl`):
+- Curated by our server
+- Cleaner, richer format
+- Stores: user messages, agent messages, reasoning, diffs, commands, approvals
 
-1. Extracts the unified diff text.
-2. Builds a **signature hash** using:
-   - file header lines (`+++`, `---`)
-   - hunk headers (`@@`)
-   - full diff body
-3. Uses the hash to **de‑duplicate** identical diffs.
-4. Emits an event with `diff_id = thread:turn:hash`.
+## Server Startup Flow
 
-This means:
-- Same diff repeated → ignored.
-- Same file re‑edited → new diff row.
-- Multiple diffs per turn → separate rows.
-
-Diffs are rendered with dark background + green insertions / red deletions.
-
----
-
-## 9) Approvals (Commands + File Changes)
-
-The app-server sends **server-initiated JSON-RPC requests** when approval is needed.
-
-### Command approvals
-Sequence (simplified):
-1. `item/started` with `commandExecution`
-2. `item/commandExecution/requestApproval`
-3. Client replies `{ decision: "accept" | "decline" }`
-4. `item/completed` with final status and output
-
-### File change approvals
-Sequence (simplified):
-1. `item/started` with `fileChange`
-2. `item/fileChange/requestApproval`
-3. Client replies `{ decision: "accept" | "decline" }`
-4. `item/completed` with final status
-
-The extension renders approvals inline in the timeline and issues the response via
-`/api/appserver/rpc` to the app-server.
-
----
-
-## 10) UI Contract (Codex Agent Tab)
-
-The UI only consumes **sanitized events** from the backend via `/ws/appserver`:
-
-Event types emitted:
-- `activity` (updates the pinned activity line)
-- `message` (user or assistant message)
-- `assistant_delta` (streaming assistant tokens)
-- `assistant_finalize` (final assistant message)
-- `reasoning_delta` (streaming reasoning summary)
-- `diff` (unified diff)
-- `approval` (command or diff approval)
-- `token_count` (counters)
-- `rpc_response` / `rpc_error`
-
-The activity line is pinned to the bottom of the timeline and stays visible.
-Auto-scroll can be released via a "Pinned/Free" toggle.
-
-### UI guarantees
-- Raw JSON-RPC never reaches the browser.
-- Deltas are assembled into single rows (assistant + reasoning).
-- Diff rows are edge-to-edge and de-duplicated.
-- Transcript replay hydrates the timeline on page refresh.
-
----
-
-## 11) Configuration & REST Knobs
-
-Configuration is stored at:
 ```
-~/.cache/app_server/app_server_config.json
+1. Python server starts (uvicorn)
+   │
+2. @app.on_event("startup")
+   │  - Calls start_appserver_process()
+   │
+3. start_appserver_process()
+   │  - Spawns: codex-app-server --json-rpc
+   │  - Stores process handle in global APP_SERVER_PROC
+   │  - Starts stdout reader task (_appserver_reader)
+   │
+4. _appserver_reader() [async background task]
+   │  - Continuously reads lines from stdout
+   │  - Parses JSON-RPC messages
+   │  - Routes to appropriate handlers
+   │  - Emits SocketIO events to frontend
+   │
+5. Server ready on port 12359
 ```
 
-Fields:
-- `cwd`: project root for app-server
-- `thread_id`: pinned conversation id (single-conversation mode)
-- `app_server_command`: optional override for command
-- `shell_id`: last known shell id
+## Message Flows
 
-REST endpoints:
-- `GET /api/appserver/config`
-- `POST /api/appserver/config`
-- `POST /api/appserver/cwd`
-- `GET /api/appserver/transcript`
-- `POST /api/appserver/start`
-- `POST /api/appserver/stop`
-- `POST /api/appserver/rpc`
-- `POST /api/appserver/initialize`
+### A. User Sends a Message
 
-These are intentionally kept even though WebSocket is the main transport, because
-they enable automated smoke tests and external tooling.
+```
+Frontend                    Python Server                 codex-app-server
+   │                              │                              │
+   │ POST /api/appserver/rpc      │                              │
+   │ {method: "turn/submit",      │                              │
+   │  params: {message: "..."}}   │                              │
+   │─────────────────────────────>│                              │
+   │                              │                              │
+   │                              │ Write JSON + newline         │
+   │                              │ to stdin                     │
+   │                              │─────────────────────────────>│
+   │                              │                              │
+   │                              │ stdout: turn/started         │
+   │                              │<─────────────────────────────│
+   │                              │                              │
+   │ WS: turn/started             │                              │
+   │<─────────────────────────────│                              │
+   │                              │                              │
+   │                              │ stdout: item/started         │
+   │                              │ (reasoning, message, etc)    │
+   │                              │<─────────────────────────────│
+   │                              │                              │
+   │ WS: codex_event (deltas)     │                              │
+   │<─────────────────────────────│                              │
+   │                              │                              │
+   │                              │ stdout: turn/completed       │
+   │                              │<─────────────────────────────│
+   │                              │                              │
+   │ WS: turn/completed           │                              │
+   │<─────────────────────────────│                              │
+```
 
----
+### B. File Change Approval Flow
 
-## 12) Failure Modes & Observability
+```
+codex-app-server              Python Server                    Frontend
+      │                              │                              │
+      │ item/fileChange/             │                              │
+      │ requestApproval              │                              │
+      │ {id: 0, itemId: "call_xxx",  │                              │
+      │  changes: [...]}             │                              │
+      │─────────────────────────────>│                              │
+      │                              │                              │
+      │                              │ WS: approval_request         │
+      │                              │ {requestId: 0, diff: "..."}  │
+      │                              │─────────────────────────────>│
+      │                              │                              │
+      │                              │      [User clicks Accept]    │
+      │                              │                              │
+      │                              │ POST /api/appserver/rpc      │
+      │                              │ {id: 0, result:              │
+      │                              │  {decision: "accept"}}       │
+      │                              │<─────────────────────────────│
+      │                              │                              │
+      │ stdin: JSON-RPC response     │                              │
+      │ {id: 0, result:              │                              │
+      │  {decision: "accept"}}       │                              │
+      │<─────────────────────────────│                              │
+      │                              │                              │
+      │ [applies patch]              │                              │
+      │                              │                              │
+      │ item/completed               │                              │
+      │ {type: "fileChange",         │                              │
+      │  status: "completed"}        │                              │
+      │─────────────────────────────>│                              │
+      │                              │                              │
+      │                              │ POST /approval_record        │
+      │                              │ (records to transcript)      │
+      │                              │<─────────────────────────────│
+      │                              │                              │
+      │                              │ WS: item/completed           │
+      │                              │─────────────────────────────>│
+```
 
-### Common failure cases
-- **Missing `FRAMEWORK_SHELLS_SECRET`**: FWS manager errors before shell spawn.
-- **App-server stdout not connected**: no events stream to UI.
-- **Thread ID mismatch**: transcript replay returns empty if configured ID has no file.
+### C. Conversation Switching
 
-### Observability
-- Raw stdout is available via `/ws/appserver?mode=raw` for debugging.
-- Sanitized events are on `/ws/appserver`.
-- FWS logs are stored under `~/.cache/framework_shells/.../logs`.
+```
+Frontend                    Python Server                 codex-app-server
+   │                              │                              │
+   │ POST /conversations/select   │                              │
+   │ {id: "new-convo-id"}         │                              │
+   │─────────────────────────────>│                              │
+   │                              │                              │
+   │                              │ Load conversation_meta.json  │
+   │                              │ from conversations/<id>/     │
+   │                              │                              │
+   │                              │ If has rollout_path:         │
+   │                              │   Parse rollout, extract     │
+   │                              │   thread_id                  │
+   │                              │                              │
+   │ 200 OK                       │                              │
+   │<─────────────────────────────│                              │
+   │                              │                              │
+   │ GET /conversation            │                              │
+   │─────────────────────────────>│                              │
+   │                              │                              │
+   │ {meta + rollout_entries}     │                              │
+   │<─────────────────────────────│                              │
+   │                              │                              │
+   │ GET /transcript/range        │                              │
+   │─────────────────────────────>│                              │
+   │                              │                              │
+   │ [transcript entries]         │                              │
+   │<─────────────────────────────│                              │
+```
 
----
+### D. Creating a New Conversation
 
-## 13) Relationship to Agent Log Server
+```
+Frontend                    Python Server
+   │                              │
+   │ POST /conversations          │
+   │ {label: "My Convo",          │
+   │  model: "gpt-5.2-codex",     │
+   │  ...}                        │
+   │─────────────────────────────>│
+   │                              │
+   │                              │ Generate UUID
+   │                              │ Create conversations/<id>/
+   │                              │ Write conversation_meta.json
+   │                              │ Create empty transcript.jsonl
+   │                              │
+   │ {id: "new-uuid"}             │
+   │<─────────────────────────────│
+   │                              │
+   │ POST /conversations/select   │
+   │ {id: "new-uuid"}             │
+   │─────────────────────────────>│
+   │                              │
+   │                              │ [switches active conversation]
+```
 
-This extension intentionally does **not** replace the agent log:
+## Event Types from codex-app-server
 
-- Agent log is a **shared message board**.
-- App server extension is **live streaming + SSOT transcript** for Codex app-server.
+### Notifications (method field)
 
-They are separate, but the same UI can embed both (e.g., agent log in one tab,
-codex app-server in another).
+| Method | Description | Key Data |
+|--------|-------------|----------|
+| `turn/started` | Turn begins | `threadId`, `turnId` |
+| `turn/completed` | Turn ends | `status`, `error` |
+| `item/started` | Item begins | `type` (userMessage, reasoning, agentMessage, commandExecution, fileChange) |
+| `item/completed` | Item ends | Full item data |
+| `item/agentMessage/delta` | Streaming text | `delta` (text chunk) |
+| `item/reasoning/summaryTextDelta` | Reasoning stream | `delta` |
+| `item/fileChange/requestApproval` | Needs approval | `itemId`, changes, diff |
+| `thread/started` | New thread created | `thread` object with `id` |
+| `thread/tokenUsage/updated` | Token counts | Usage stats |
+| `account/rateLimits/updated` | Rate limit info | Percentages, reset times |
 
----
+### Codex-specific Events (codex/event/*)
 
-## 14) Next Steps (Future Work)
+| Event Type | Description |
+|------------|-------------|
+| `task_started` | Agent begins processing |
+| `task_complete` | Agent finished |
+| `agent_message_delta` | Text streaming |
+| `agent_reasoning_delta` | Thinking streaming |
+| `exec_command_begin` | Shell command starting |
+| `exec_command_end` | Shell command finished |
+| `apply_patch_approval_request` | File change needs approval |
 
-- Multi-conversation support (thread list + resume UI)
-- App-server config editor UI
-- Unified diff rendering enhancements (file headers -> readable labels)
-- Streaming tool output rendering (command stdout/stderr panels)
+## Frontend Components
+
+### codex_agent.js
+
+Main JavaScript file handling all frontend logic:
+
+**Key Functions:**
+- `initSocketIO()` - Establishes WebSocket connection
+- `sendRpc(method, params)` - Sends JSON-RPC to backend
+- `respondApproval(requestId, decision)` - Handles approval buttons
+- `renderDiff(diffText)` - Parses and renders unified diffs
+- `renderTranscriptEntries(entries)` - Renders transcript items
+- `replayTranscript()` - Loads and displays conversation history
+- `fetchConversation()` - Gets current conversation state
+- `createConversation(meta)` - Creates new conversation
+- `saveSettings(settings)` - Saves conversation settings
+
+**State Management:**
+- `transcriptEl` - DOM element for transcript display
+- `activityRibbon` - Shows current activity
+- `statusDot` - Server connection status
+- `pinned` - Whether auto-scroll is enabled
+
+### UI Structure
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Header: Model selector, Settings button                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Transcript Area (scrollable)                                   │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │ [User Message Card]                                        │ │
+│  │ [Reasoning Card] - collapsible                            │ │
+│  │ [Agent Message Card]                                       │ │
+│  │ [Command Card] - with output, duration                    │ │
+│  │ [Diff Card] - syntax highlighted                          │ │
+│  │ [Approval Card] - Accept/Decline buttons                  │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  [Activity Ribbon] - current streaming content                  │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│ Input Area: Textarea + Send button                              │
+└─────────────────────────────────────────────────────────────────┘
+
+[Drawer] - Slide-out panel showing full transcript
+```
+
+## Data Storage
+
+### Directory Structure
+
+```
+agent_log_server/
+├── server.py                 # Main server
+├── static/
+│   ├── codex_agent.js       # Frontend logic
+│   └── codex_agent.css      # Styles
+├── templates/
+│   └── codex_agent.html     # Main page template
+├── conversations/           # Conversation data
+│   └── <uuid>/
+│       ├── conversation_meta.json
+│       └── transcript.jsonl
+└── my-schema/              # JSON schemas for validation
+```
+
+### Transcript Entry Format
+
+```jsonl
+{"role": "user", "content": "message text", "timestamp": "ISO"}
+{"role": "assistant", "content": "response text", "timestamp": "ISO"}
+{"role": "reasoning", "content": "thinking...", "timestamp": "ISO"}
+{"role": "diff", "diff": "unified diff text", "path": "file.py", "timestamp": "ISO"}
+{"role": "command", "command": "ls -la", "output": "...", "duration_ms": 52, "exit_code": 0, "timestamp": "ISO"}
+{"role": "approval", "status": "accepted|declined", "diff": "...", "path": "...", "timestamp": "ISO"}
+```
+
+## Configuration
+
+### Approval Modes
+
+| Mode | Behavior |
+|------|----------|
+| `never` | Auto-approve everything (YOLO mode) |
+| `always` | Require approval for all changes |
+| `unlessTrusted` | Approve trusted commands, ask for others |
+
+### Reasoning Effort
+
+Controls how much "thinking" the model does:
+- `low` - Fast, less thorough
+- `medium` - Balanced
+- `high` - Slower, more thorough
+
+## Error Handling
+
+### Common Issues
+
+1. **Socket disconnects immediately**
+   - Check ping/pong intervals
+   - Ensure no conflicting transports
+
+2. **Approval hangs**
+   - Verify JSON-RPC response format: `{"jsonrpc": "2.0", "id": <same-id>, "result": {"decision": "accept"}}`
+   - Check stdin write is flushed
+
+3. **Rollout corrupted**
+   - Failed approvals can leave rollout in bad state
+   - codex-app-server may panic on reload
+   - Solution: Start fresh conversation
+
+4. **Draft conversation won't send**
+   - Check server status isn't showing wrong value
+   - Ensure WebSocket is connected
+
+## API Endpoints
+
+### Conversation Management
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/appserver/conversations` | GET | List all conversations |
+| `/api/appserver/conversations` | POST | Create new conversation |
+| `/api/appserver/conversations/select` | POST | Switch active conversation |
+| `/api/appserver/conversation` | GET | Get current conversation |
+| `/api/appserver/conversation` | POST | Update conversation meta |
+
+### Transcript
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/appserver/transcript/range` | GET | Get transcript entries (paginated) |
+| `/api/appserver/transcript/append` | POST | Add entry to transcript |
+| `/api/appserver/approval_record` | POST | Record approval decision |
+
+### RPC & Server
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/appserver/rpc` | POST | Send JSON-RPC to codex |
+| `/api/appserver/status` | GET | Server status |
+| `/api/appserver/start` | POST | Start codex-app-server |
+| `/api/appserver/stop` | POST | Stop codex-app-server |
+
+## WebSocket Events
+
+### Server → Client
+
+| Event | Data | Description |
+|-------|------|-------------|
+| `codex_event` | `{type, data}` | Generic codex event |
+| `server_status` | `{status}` | Server state change |
+| `approval_request` | `{requestId, diff, path}` | Needs user approval |
+
+### Client → Server
+
+The client primarily uses REST endpoints, not WebSocket for sending data.
+
+## Diff Rendering
+
+Diffs are parsed and rendered with syntax highlighting:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ main.cpp                                         [filepath] │
+├─────────────────────────────────────────────────────────────┤
+│ Lines 6-8 → 6-8                            [hunk header]    │
+│  6│ 6   std::cout << "Number Guessing Game\n";              │
+│  7│  -  std::cout << "1 to 100.\n";         [deletion]      │
+│   │ 7+  std::cout << "1 to 50.\n";          [addition]      │
+│  8│ 8   std::cout << "Type a guess...\n";                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- Red background: Deletions
+- Green background: Additions  
+- Gray: Context lines
+- Left accent border: Purple (normal), Red (declined approval)
+
+## Command Output Rendering
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Command                                                      │
+├─────────────────────────────────────────────────────────────┤
+│ /bin/sh -lc "cat file.txt"                    [command]     │
+├─────────────────────────────────────────────────────────────┤
+│ file contents here...                         [output]      │
+│ (black background, white text)                              │
+├─────────────────────────────────────────────────────────────┤
+│ Duration: 52ms                                [footer]      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Output is truncated to `command_output_lines` setting (default: 20 lines).
+
+## Future Considerations
+
+1. **Diff deduplication** - codex emits multiple diffs per change
+2. **Long diff handling** - Only keep contextual (long) diffs
+3. **Approval UX** - Remove approval card after decision, show status
+4. **Session recovery** - Better handling of corrupted rollouts
+5. **Multi-agent** - Agent log server for inter-agent communication
