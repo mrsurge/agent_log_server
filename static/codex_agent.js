@@ -81,7 +81,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let pendingNewConversation = false;
   let pendingRollout = null;
   let lastEventType = null;
-  let lastReasoningKey = null;
   let pickerPath = null;
   let pickerMode = 'cwd';
   let pickerItems = [];
@@ -114,6 +113,10 @@ document.addEventListener('DOMContentLoaded', () => {
   let isNormalizing = false;
   let mentionTriggered = false;
   let transcriptTotal = 0;
+  let planOverlayEl = null;
+  let planListEl = null;
+  let planCollapsed = false;
+  const planItems = new Map();
   let transcriptStart = 0;
   let transcriptEnd = 0;
   let transcriptLimit = 120;
@@ -816,6 +819,106 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
+  // Plan overlay (todo list) functions
+  function ensurePlanOverlay() {
+    if (planOverlayEl) return;
+    if (!timelineEl) return;
+    
+    planOverlayEl = document.createElement('div');
+    planOverlayEl.className = 'plan-overlay';
+    planOverlayEl.style.display = 'none';
+    
+    const header = document.createElement('div');
+    header.className = 'plan-header';
+    
+    const toggleBtn = document.createElement('span');
+    toggleBtn.className = 'plan-toggle';
+    toggleBtn.textContent = '[-]';
+    toggleBtn.addEventListener('click', () => {
+      planCollapsed = !planCollapsed;
+      toggleBtn.textContent = planCollapsed ? '[+]' : '[-]';
+      if (planListEl) planListEl.style.display = planCollapsed ? 'none' : 'block';
+    });
+    
+    const title = document.createElement('span');
+    title.className = 'plan-title';
+    title.textContent = 'Plan';
+    
+    header.append(toggleBtn, title);
+    
+    planListEl = document.createElement('div');
+    planListEl.className = 'plan-list';
+    
+    planOverlayEl.append(header, planListEl);
+    
+    // Insert at top of timeline (after spacer if present)
+    if (topSpacerEl && topSpacerEl.parentElement === timelineEl) {
+      timelineEl.insertBefore(planOverlayEl, topSpacerEl.nextSibling);
+    } else {
+      timelineEl.prepend(planOverlayEl);
+    }
+  }
+
+  function updatePlanItem(step, status) {
+    ensurePlanOverlay();
+    if (!planListEl) return;
+    
+    let itemEl = planItems.get(step);
+    if (!itemEl) {
+      itemEl = document.createElement('div');
+      itemEl.className = 'plan-item';
+      
+      const checkbox = document.createElement('span');
+      checkbox.className = 'plan-checkbox';
+      
+      const text = document.createElement('span');
+      text.className = 'plan-text';
+      text.textContent = step;
+      
+      itemEl.append(checkbox, text);
+      itemEl._checkbox = checkbox;
+      planListEl.appendChild(itemEl);
+      planItems.set(step, itemEl);
+    }
+    
+    // Update status
+    itemEl.classList.remove('pending', 'in_progress', 'completed');
+    itemEl.classList.add(status || 'pending');
+    
+    const checkbox = itemEl._checkbox;
+    if (checkbox) {
+      if (status === 'completed') {
+        checkbox.textContent = '☑';
+      } else if (status === 'in_progress') {
+        checkbox.textContent = '◐';
+      } else {
+        checkbox.textContent = '☐';
+      }
+    }
+    
+    // Show overlay
+    if (planOverlayEl) planOverlayEl.style.display = 'block';
+  }
+
+  function clearPlanOverlay() {
+    planItems.clear();
+    if (planListEl) planListEl.innerHTML = '';
+    if (planOverlayEl) planOverlayEl.style.display = 'none';
+  }
+
+  function finalizePlanToTranscript() {
+    // Store completed plan to transcript if there are items
+    if (planItems.size === 0) return;
+    const items = [];
+    planItems.forEach((el, step) => {
+      const status = el.classList.contains('completed') ? 'completed' :
+                     el.classList.contains('in_progress') ? 'in_progress' : 'pending';
+      items.push({ step, status });
+    });
+    // Could POST to backend here if needed
+    clearPlanOverlay();
+  }
+
   function setCounter(el, value) {
     if (!el) return;
     el.textContent = String(value);
@@ -855,6 +958,9 @@ document.addEventListener('DOMContentLoaded', () => {
     activityRow = null;
     activityTextEl = null;
     activityLineEl = null;
+    planOverlayEl = null;
+    planListEl = null;
+    planItems.clear();
     topSpacerEl = document.createElement('div');
     topSpacerEl.className = 'timeline-spacer';
     bottomSpacerEl = document.createElement('div');
@@ -866,7 +972,6 @@ document.addEventListener('DOMContentLoaded', () => {
     transcriptStart = 0;
     transcriptEnd = 0;
     lastEventType = null;
-    lastReasoningKey = null;
     setCounter(counterMessagesEl, messageCount);
     setCounter(counterTokensEl, tokenCount);
     if (contextRemainingEl) contextRemainingEl.textContent = '—';
@@ -875,6 +980,7 @@ document.addEventListener('DOMContentLoaded', () => {
     placeholder.id = 'timeline-placeholder';
     placeholder.className = 'timeline-row muted';
     placeholder.textContent = 'Waiting for events...';
+    timelineEl.appendChild(placeholder);
     timelineEl.appendChild(placeholder);
     timelineEl.appendChild(bottomSpacerEl);
     ensureActivityRow();
@@ -1063,13 +1169,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function appendReasoningDelta(id, delta) {
     if (delta === undefined || delta === null) return;
-    const useLast = lastEventType === 'reasoning' && lastReasoningKey;
-    const key = useLast ? lastReasoningKey : (id || 'reasoning');
-    const entry = getReasoningRow(key);
+    const entry = getReasoningRow(id);
     entry.pre.textContent += delta;
-    lastReasoningKey = key;
     lastEventType = 'reasoning';
     maybeAutoScroll();
+  }
+
+  function finalizeReasoning(id, text) {
+    const key = id || 'reasoning';
+    const entry = reasoningRows.get(key);
+    if (!entry) return;
+    if (text) entry.pre.textContent = text;
   }
 
   function getDiffRow(id, path) {
@@ -1766,6 +1876,10 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'activity':
         lastEventType = 'activity';
         setActivity(evt.label || 'idle', Boolean(evt.active));
+        // Clear plan overlay when turn ends (idle state)
+        if (!evt.active && evt.label === 'idle') {
+          finalizePlanToTranscript();
+        }
         return;
       case 'message':
         lastEventType = 'message';
@@ -1780,7 +1894,12 @@ document.addEventListener('DOMContentLoaded', () => {
         finalizeAssistant(evt.id, evt.text || '');
         return;
       case 'reasoning_delta':
+        lastEventType = 'reasoning';
         appendReasoningDelta(evt.id, evt.delta || '');
+        return;
+      case 'reasoning_finalize':
+        lastEventType = 'reasoning';
+        finalizeReasoning(evt.id, evt.text || '');
         return;
       case 'diff':
         lastEventType = 'diff';
@@ -1808,6 +1927,10 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       case 'tool_interaction':
         renderToolInteraction(evt);
+        return;
+      case 'plan_update':
+        lastEventType = 'plan';
+        updatePlanItem(evt.step, evt.status);
         return;
       case 'token_count':
         lastEventType = 'token';

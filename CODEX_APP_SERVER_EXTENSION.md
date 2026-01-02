@@ -454,7 +454,7 @@ Diffs are parsed and rendered with syntax highlighting:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Command                                                      │
+│ Command                                                     │
 ├─────────────────────────────────────────────────────────────┤
 │ /bin/sh -lc "cat file.txt"                    [command]     │
 ├─────────────────────────────────────────────────────────────┤
@@ -508,7 +508,7 @@ Output is truncated to `command_output_lines` setting (default: 20 lines).
 
 - Edge-to-edge rendering (no card wrapper)
 - Command header: gray background
-- Output area: **black background**, white text, no rounded corners
+- Output area: black background, white text
 - Duration footer: gray
 - Purple left border accent
 - Configurable truncation (`command_output_lines` setting, default: 20)

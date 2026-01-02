@@ -833,17 +833,7 @@ async def _maybe_capture_transcript(
                 "item_id": item.get("id"),
                 "event": label_norm,
             })
-        # Capture reasoning summary on completion
-        item_type = str(item.get("type") or "").lower()
-        if item_type == "reasoning":
-            summary = item.get("summary") or item.get("text") or ""
-            if isinstance(summary, str) and summary.strip():
-                await _append_transcript_entry(conversation_id, {
-                    "role": "reasoning",
-                    "text": summary.strip(),
-                    "item_id": item.get("id"),
-                    "event": "reasoning_completed",
-                })
+        # Reasoning is stored via codex/event/agent_reasoning (like messages via agent_message)
         return
     if label_norm.startswith("codex/event/"):
         event_type = label_norm.split("codex/event/", 1)[-1]
@@ -858,17 +848,7 @@ async def _maybe_capture_transcript(
                         "item_id": item_payload.get("id"),
                         "event": event_type,
                     })
-                # Capture reasoning summary from codex events
-                item_type = str(item_payload.get("type") or "").lower()
-                if event_type == "item_completed" and item_type == "reasoning":
-                    summary = item_payload.get("summary") or item_payload.get("text") or ""
-                    if isinstance(summary, str) and summary.strip():
-                        await _append_transcript_entry(conversation_id, {
-                            "role": "reasoning",
-                            "text": summary.strip(),
-                            "item_id": item_payload.get("id"),
-                            "event": "reasoning_completed",
-                        })
+                # Reasoning is stored via codex/event/agent_reasoning (like messages via agent_message)
 
 
 def _ensure_framework_shells_secret() -> None:
@@ -1164,6 +1144,40 @@ async def _route_appserver_event(
     }:
         return events
 
+    # Plan update events (todo list)
+    if label_lower == "codex/event/plan_update" and isinstance(payload, dict):
+        plan = payload.get("plan")
+        if isinstance(plan, dict):
+            step = plan.get("step")
+            status = plan.get("status")  # pending, in_progress, completed
+            if step:
+                events.append({
+                    "type": "plan_update",
+                    "step": step,
+                    "status": status or "pending",
+                })
+        return events
+
+    # turn/plan/updated - array of plan steps from v2 protocol
+    if label_lower == "turn/plan/updated" and isinstance(payload, dict):
+        plan_steps = payload.get("plan")
+        if isinstance(plan_steps, list):
+            for step_obj in plan_steps:
+                if isinstance(step_obj, dict):
+                    step = step_obj.get("step")
+                    status = step_obj.get("status")  # pending, inProgress, completed
+                    if step:
+                        # Normalize status to match frontend expectations
+                        normalized_status = status
+                        if status == "inProgress":
+                            normalized_status = "in_progress"
+                        events.append({
+                            "type": "plan_update",
+                            "step": step,
+                            "status": normalized_status or "pending",
+                        })
+        return events
+
     # Item events
     if label_lower == "item/started" and isinstance(payload, dict):
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
@@ -1230,15 +1244,27 @@ async def _route_appserver_event(
             events.append({"type": "activity", "label": "idle", "active": False})
             return events
         if item_type == "reasoning":
-            summary = _extract_reasoning_text(item, state.get("reasoning_buffer"))
-            if summary and convo_id:
+            # Extract reasoning text from summary array
+            summary = item.get("summary") or item.get("summary_text") or []
+            if isinstance(summary, list) and summary:
+                text = " ".join(str(s) for s in summary if s).strip()
+            else:
+                text = str(summary).strip() if summary else ""
+            # Store to transcript
+            if text and convo_id:
                 await _append_transcript_entry(convo_id, {
                     "role": "reasoning",
-                    "text": summary,
+                    "text": text,
                     "item_id": item.get("id"),
-                    "event": "reasoning/completed",
+                    "event": "item/completed",
                 })
-            events.append({"type": "activity", "label": "idle", "active": False})
+            # Send finalize event to frontend
+            if state.get("reason_source") in {None, "item"} and state.get("reasoning_started"):
+                events.append({"type": "reasoning_finalize", "id": item.get("id") or state.get("reasoning_id") or "reasoning", "text": text})
+                state["reasoning_started"] = False
+                state["reasoning_buffer"] = ""
+                state["reasoning_id"] = None
+            # Don't set idle here - keep spinner going until turn/completed
             return events
         if item_type == "filechange":
             # Don't emit diff here - wait for turn_diff which has full context
@@ -1281,7 +1307,8 @@ async def _route_appserver_event(
                 "exit_code": exit_code,
                 "duration_ms": duration_ms,
             })
-            events.append({"type": "activity", "label": "idle", "active": False})
+            # Don't set idle here - keep spinner going until turn/completed
+            events.append({"type": "activity", "label": "processing", "active": True})
             return events
         return events
 
@@ -1354,7 +1381,7 @@ async def _route_appserver_event(
             })
         if state.get("msg_source") in {None, "codex"} and state.get("assistant_started"):
             events.append({"type": "assistant_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("assistant_id") or "assistant", "text": text})
-        events.append({"type": "activity", "label": "idle", "active": False})
+        # Don't set idle here - wait for turn/completed to stop spinner
         return events
 
     if label_lower in {"codex/event/agent_reasoning_delta", "codex/event/reasoning_content_delta", "codex/event/reasoning_summary_delta"} and isinstance(payload, dict):
@@ -1386,14 +1413,15 @@ async def _route_appserver_event(
 
     if label_lower == "codex/event/agent_reasoning" and isinstance(payload, dict):
         text = payload.get("text") or payload.get("message")
-        if isinstance(text, str) and convo_id:
-            await _append_transcript_entry(convo_id, {
-                "role": "reasoning",
-                "text": text.strip(),
-                "item_id": payload.get("item_id") or payload.get("itemId"),
-                "event": "agent_reasoning",
-            })
-        events.append({"type": "activity", "label": "idle", "active": False})
+        # Don't store to transcript here - item/completed handles storage
+        # Just send finalize event to frontend if needed
+        if state.get("reason_source") in {None, "codex"} and state.get("reasoning_started"):
+            events.append({"type": "reasoning_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("reasoning_id") or "reasoning", "text": text})
+            # Reset reasoning state for next reasoning block
+            state["reasoning_started"] = False
+            state["reasoning_buffer"] = ""
+            state["reasoning_id"] = None
+        # Don't set idle here - wait for turn/completed to stop spinner
         return events
 
     # Tooling / command execution events (legacy protocol - just show activity)
@@ -1401,7 +1429,7 @@ async def _route_appserver_event(
         if label_lower == "exec_command_begin":
             events.append({"type": "activity", "label": "running command", "active": True})
         elif label_lower == "exec_command_end":
-            events.append({"type": "activity", "label": "idle", "active": False})
+            events.append({"type": "activity", "label": "processing", "active": True})
         # exec_command_output_delta is ignored - output comes with item/completed
         return events
 
