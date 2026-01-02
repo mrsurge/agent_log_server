@@ -1117,20 +1117,13 @@ async def _route_appserver_event(
                 await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item.get("id"), events)
             return events
         if item_type == "commandexecution":
+            # Just cache the command info for later, emit activity
             if item.get("id"):
                 _approval_item_cache[str(item.get("id"))] = {
                     "command": item.get("command") or item.get("cmd") or item.get("argv"),
                     "cwd": item.get("cwd"),
                 }
-            events.append({
-                "type": "tool_begin",
-                "id": item.get("id"),
-                "tool": "command",
-                "payload": {
-                    "command": item.get("command") or item.get("cmd") or item.get("argv"),
-                    "cwd": item.get("cwd"),
-                },
-            })
+            events.append({"type": "activity", "label": "running command", "active": True})
             return events
         if item_type in {"agentmessage", "assistantmessage", "assistant"}:
             state["msg_source"] = state["msg_source"] or "item"
@@ -1173,15 +1166,36 @@ async def _route_appserver_event(
                 await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item.get("id"), events)
             return events
         if item_type == "commandexecution":
+            command = item.get("command") or item.get("cmd") or item.get("argv") or ""
+            cwd = item.get("cwd") or ""
+            output = item.get("aggregatedOutput") or item.get("output") or item.get("stdout") or ""
+            exit_code = item.get("exitCode") if item.get("exitCode") is not None else item.get("exit_code")
+            duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
+            # Clean up output (remove \r\n -> \n)
+            if isinstance(output, str):
+                output = output.replace("\r\n", "\n").replace("\r", "\n")
+            # Record to transcript
+            if convo_id:
+                await _append_transcript_entry(convo_id, {
+                    "role": "command",
+                    "command": command,
+                    "cwd": cwd,
+                    "output": output,
+                    "exit_code": exit_code,
+                    "duration_ms": duration_ms,
+                    "item_id": item.get("id"),
+                    "event": "item/completed",
+                })
             events.append({
-                "type": "tool_end",
+                "type": "command_result",
                 "id": item.get("id"),
-                "tool": "command",
-                "payload": {
-                    "exit_code": item.get("exitCode") or item.get("exit_code"),
-                    "duration_ms": item.get("durationMs") or item.get("duration_ms"),
-                },
+                "command": command,
+                "cwd": cwd,
+                "output": output,
+                "exit_code": exit_code,
+                "duration_ms": duration_ms,
             })
+            events.append({"type": "activity", "label": "idle", "active": False})
             return events
         return events
 
@@ -1296,41 +1310,13 @@ async def _route_appserver_event(
         events.append({"type": "activity", "label": "idle", "active": False})
         return events
 
-    # Tooling / command execution events
+    # Tooling / command execution events (legacy protocol - just show activity)
     if label_lower in {"exec_command_begin", "exec_command_output_delta", "exec_command_end"} and isinstance(payload, dict):
-        tool_id = _tool_event_id(label_lower, payload, thread_id, turn_id)
         if label_lower == "exec_command_begin":
-            events.append({
-                "type": "tool_begin",
-                "id": tool_id,
-                "tool": "command",
-                "payload": {
-                    "command": payload.get("command"),
-                    "cwd": payload.get("cwd"),
-                    "origin": payload.get("origin"),
-                },
-            })
-        elif label_lower == "exec_command_output_delta":
-            delta = payload.get("delta") or payload.get("output")
-            if isinstance(delta, str):
-                events.append({
-                    "type": "tool_delta",
-                    "id": tool_id,
-                    "tool": "command",
-                    "delta": delta,
-                })
+            events.append({"type": "activity", "label": "running command", "active": True})
         elif label_lower == "exec_command_end":
-            events.append({
-                "type": "tool_end",
-                "id": tool_id,
-                "tool": "command",
-                "payload": {
-                    "command": payload.get("command"),
-                    "cwd": payload.get("cwd"),
-                    "exit_code": payload.get("exit_code"),
-                    "duration_ms": payload.get("duration_ms"),
-                },
-            })
+            events.append({"type": "activity", "label": "idle", "active": False})
+        # exec_command_output_delta is ignored - output comes with item/completed
         return events
 
     if label_lower in {"item/commandexecution/outputdelta", "item/commandexecution/terminalinteraction"} and isinstance(payload, dict):
@@ -2061,6 +2047,10 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 Label(
                                     Span("Conversation Label"),
                                     Input(type="text", id="settings-label", placeholder="label"),
+                                ),
+                                Label(
+                                    Span("Command Output Lines"),
+                                    Input(type="number", id="settings-command-lines", placeholder="20", value="20", min="1", max="500"),
                                 ),
                                 Label(
                                     Span("Rollout"),

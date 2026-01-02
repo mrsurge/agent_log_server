@@ -31,6 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsEffortEl = document.getElementById('settings-effort');
   const settingsSummaryEl = document.getElementById('settings-summary');
   const settingsLabelEl = document.getElementById('settings-label');
+  const settingsCommandLinesEl = document.getElementById('settings-command-lines');
   const footerApprovalValue = document.getElementById('footer-approval-value');
   const footerApprovalToggle = document.getElementById('footer-approval-toggle');
   const footerApprovalOptions = document.getElementById('footer-approval-options');
@@ -325,6 +326,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsEffortEl) settingsEffortEl.value = '';
       if (settingsSummaryEl) settingsSummaryEl.value = '';
       if (settingsLabelEl) settingsLabelEl.value = '';
+      if (settingsCommandLinesEl) settingsCommandLinesEl.value = '20';
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || '';
     } else {
       if (settingsCwdEl) settingsCwdEl.value = conversationSettings?.cwd || '';
@@ -334,6 +336,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsEffortEl) settingsEffortEl.value = conversationSettings?.effort || '';
       if (settingsSummaryEl) settingsSummaryEl.value = conversationSettings?.summary || '';
       if (settingsLabelEl) settingsLabelEl.value = conversationSettings?.label || '';
+      if (settingsCommandLinesEl) settingsCommandLinesEl.value = conversationSettings?.commandOutputLines || '20';
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || conversationSettings?.rolloutId || '';
     }
     if (settingsRolloutRowEl) {
@@ -902,6 +905,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderTranscriptEntries(items, opts = {}) {
     if (!items || !items.length || !timelineEl) return;
     const fragment = document.createDocumentFragment();
+    const truncateLines = conversationSettings?.commandOutputLines || 20;
     items.forEach((entry) => {
       if (!entry || !entry.role) return;
       if (entry.role === 'reasoning') {
@@ -918,6 +922,53 @@ document.addEventListener('DOMContentLoaded', () => {
         pre.className = 'diff-block';
         pre.innerHTML = formatDiff(entry.text || '');
         body.append(pre);
+        fragment.appendChild(row);
+        return;
+      }
+      if (entry.role === 'command') {
+        const row = document.createElement('div');
+        row.className = 'timeline-row command-result';
+        const body = document.createElement('div');
+        body.className = 'body';
+        // Command ribbon
+        const cmdRibbon = document.createElement('div');
+        cmdRibbon.className = 'command-ribbon';
+        let cmdText = entry.command || '';
+        if (entry.cwd) cmdText += `\ncwd: ${entry.cwd}`;
+        cmdRibbon.textContent = cmdText;
+        body.appendChild(cmdRibbon);
+        // Output
+        if (entry.output) {
+          const lines = entry.output.split('\n');
+          let displayOutput = entry.output;
+          let truncated = false;
+          if (lines.length > truncateLines) {
+            displayOutput = lines.slice(0, truncateLines).join('\n');
+            truncated = true;
+          }
+          const outputPre = document.createElement('pre');
+          outputPre.className = 'command-output';
+          outputPre.textContent = displayOutput;
+          if (truncated) {
+            outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
+          }
+          body.appendChild(outputPre);
+        }
+        // Footer
+        const footer = document.createElement('div');
+        footer.className = 'command-footer';
+        const parts = [];
+        if (entry.exit_code !== undefined && entry.exit_code !== null && entry.exit_code !== 0) {
+          parts.push(`Exit: ${entry.exit_code}`);
+        }
+        if (entry.duration_ms !== undefined && entry.duration_ms !== null) {
+          parts.push(`Duration: ${entry.duration_ms}ms`);
+        }
+        if (parts.length) {
+          footer.textContent = parts.join(' | ');
+          body.appendChild(footer);
+        }
+        row.appendChild(body);
         fragment.appendChild(row);
         return;
       }
@@ -1078,6 +1129,84 @@ document.addEventListener('DOMContentLoaded', () => {
     lastEventType = 'tool';
   }
 
+  function renderCommandResult(evt) {
+    const command = evt.command || '';
+    const cwd = evt.cwd || '';
+    const output = evt.output || '';
+    const exitCode = evt.exit_code;
+    const durationMs = evt.duration_ms;
+    
+    // Get truncation limit from settings (default 20 lines)
+    const truncateLines = conversationSettings?.commandOutputLines || 20;
+    
+    // Truncate output if needed
+    let displayOutput = output;
+    let truncated = false;
+    if (output) {
+      const lines = output.split('\n');
+      if (lines.length > truncateLines) {
+        displayOutput = lines.slice(0, truncateLines).join('\n');
+        truncated = true;
+      }
+    }
+    
+    // Build the row
+    clearPlaceholder();
+    const row = document.createElement('div');
+    row.className = 'timeline-row command-result';
+    
+    // Body column (full width, no meta)
+    const body = document.createElement('div');
+    body.className = 'body';
+    
+    // Command ribbon (black background, white text)
+    const cmdRibbon = document.createElement('div');
+    cmdRibbon.className = 'command-ribbon';
+    // Just show the command, cwd on separate line if present
+    let cmdText = command;
+    if (cwd) cmdText += `\ncwd: ${cwd}`;
+    cmdRibbon.textContent = cmdText;
+    body.appendChild(cmdRibbon);
+    
+    // Output block (if any)
+    if (displayOutput) {
+      const outputPre = document.createElement('pre');
+      outputPre.className = 'command-output';
+      outputPre.textContent = displayOutput;
+      if (truncated) {
+        outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
+      }
+      body.appendChild(outputPre);
+    }
+    
+    // Duration footer
+    const footer = document.createElement('div');
+    footer.className = 'command-footer';
+    const parts = [];
+    if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
+      parts.push(`Exit: ${exitCode}`);
+    }
+    if (durationMs !== undefined && durationMs !== null) {
+      parts.push(`Duration: ${durationMs}ms`);
+    }
+    if (parts.length) {
+      footer.textContent = parts.join(' | ');
+      body.appendChild(footer);
+    }
+    
+    row.appendChild(body);
+    
+    // Insert before activity row
+    if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
+      timelineEl.insertBefore(row, bottomSpacerEl);
+    } else {
+      timelineEl.appendChild(row);
+    }
+    
+    lastEventType = 'command';
+    maybeAutoScroll();
+  }
+
   function addDiff(id, text) {
     const entry = getDiffRow(id);
     entry.pre.innerHTML = formatDiff(text || '');
@@ -1171,12 +1300,12 @@ document.addEventListener('DOMContentLoaded', () => {
       lines.push(`<div><strong>CWD:</strong> ${escapeHtml(String(payload.cwd))}</div>`);
     }
     if (payload.diff) {
-      lines.push(`<pre>${escapeHtml(payload.diff)}</pre>`);
+      lines.push(`<pre class="diff-block">${formatDiff(payload.diff)}</pre>`);
     }
     if (payload.changes && Array.isArray(payload.changes)) {
       payload.changes.forEach((change) => {
         if (change && change.diff) {
-          lines.push(`<div><strong>${escapeHtml(change.path || 'file')}</strong></div><pre>${escapeHtml(change.diff)}</pre>`);
+          lines.push(`<div><strong>${escapeHtml(change.path || 'file')}</strong></div><pre class="diff-block">${formatDiff(change.diff)}</pre>`);
         }
       });
     }
@@ -1280,6 +1409,7 @@ document.addEventListener('DOMContentLoaded', () => {
       setActivity('CWD required', true);
       return;
     }
+    const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || '20', 10);
     const settings = {
       cwd,
       approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
@@ -1288,6 +1418,7 @@ document.addEventListener('DOMContentLoaded', () => {
       effort: settingsEffortEl?.value?.trim() || null,
       summary: settingsSummaryEl?.value?.trim() || null,
       label: settingsLabelEl?.value?.trim() || null,
+      commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
     };
     const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
     if (isNewConversation) {
@@ -1591,6 +1722,9 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'approval':
         lastEventType = 'approval';
         renderApproval(evt);
+        return;
+      case 'command_result':
+        renderCommandResult(evt);
         return;
       case 'tool_begin':
         renderToolBegin(evt);

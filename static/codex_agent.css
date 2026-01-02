@@ -648,7 +648,7 @@ textarea {
 
 .diff-block {
   font-size: 12px;
-  line-height: 1;
+  line-height: 1.1;
   white-space: pre-wrap;
   word-break: break-all;
   overflow-wrap: anywhere;
@@ -660,7 +660,7 @@ textarea {
   gap: 0;
   margin: 0;
   padding: 0;
-  line-height: 1;
+  line-height: 1.1;
   color: #ffffff;
   background: #000;
 }
@@ -891,4 +891,59 @@ textarea {
 @media (max-width: 480px) {
   .composer { flex-direction: column; }
   .btn { width: 100%; text-align: center; }
+}
+
+/* Command Result Styling */
+.timeline-row.command-result {
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  border-left: 4px solid #344146;
+}
+
+.timeline-row.command-result .meta {
+  display: none;
+}
+
+.timeline-row.command-result .body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+}
+
+.command-ribbon {
+  background: #1a1a1a;
+  color: #f0f0f0;
+  padding: 10px 14px;
+  font-family: monospace;
+  font-size: 0.9em;
+  word-break: break-all;
+  white-space: pre-wrap;
+  margin: 0;
+  border-radius: 0;
+}
+
+.timeline-row.command-result pre.command-output {
+  background: #000;
+  color: #c9d1d9;
+  padding: 10px 14px;
+  margin: 0;
+  font-family: monospace;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 400px;
+  overflow-y: auto;
+  border-radius: 0;
+  border: none;
+}
+
+.command-footer {
+  color: var(--muted);
+  font-size: 0.8em;
+  padding: 8px 14px;
+  background: #1a1a1a;
+  border-radius: 0;
 }
