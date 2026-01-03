@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import argparse
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -71,6 +72,8 @@ _approval_item_cache: Dict[str, Dict[str, Any]] = {}
 _approval_request_map: Dict[str, str] = {}
 _appserver_rpc_waiters: Dict[str, asyncio.Future] = {}
 _appserver_initialized = False
+_model_list_cache: Optional[List[Dict[str, Any]]] = None
+_model_list_cache_time: float = 0
 DEBUG_MODE = False
 DEBUG_RAW_LOG_PATH: Optional[Path] = None
 CODEX_AGENT_THEME_COLOR = "#0d0f13"
@@ -1136,27 +1139,45 @@ async def _route_appserver_event(
 
     # Token counts
     if label_lower in {"codex/event/token_count", "thread/tokenusage/updated"} and isinstance(payload, dict):
-        total = payload.get("total") or payload.get("total_tokens") or payload.get("tokenCount") or payload.get("tokens")
-        if total is None and isinstance(payload.get("usage"), dict):
-            total = payload["usage"].get("total") or payload["usage"].get("total_tokens")
-        if total is None and isinstance(payload.get("tokenUsage"), dict):
-            total = payload["tokenUsage"].get("total") or payload["tokenUsage"].get("total_tokens")
+        total = None
         context_window = None
+        
+        # Handle codex/event/token_count format: { info: { total_token_usage: {..., total_tokens}, model_context_window } }
         if isinstance(payload.get("info"), dict):
             info = payload["info"]
-            usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
+            usage = info.get("total_token_usage") or {}
             if isinstance(usage, dict):
-                context_window = usage.get("model_context_window")
-            if context_window is None:
-                context_window = info.get("model_context_window")
-        if context_window is None and isinstance(payload.get("tokenUsage"), dict):
-            context_window = payload["tokenUsage"].get("modelContextWindow") or payload["tokenUsage"].get("model_context_window")
+                total = usage.get("total_tokens")
+            context_window = info.get("model_context_window")
+        
+        # Handle thread/tokenUsage/updated format: { tokenUsage: { total: {totalTokens}, modelContextWindow } }
+        if total is None and isinstance(payload.get("tokenUsage"), dict):
+            token_usage = payload["tokenUsage"]
+            total_breakdown = token_usage.get("total") or {}
+            if isinstance(total_breakdown, dict):
+                total = total_breakdown.get("totalTokens") or total_breakdown.get("total_tokens")
+            context_window = token_usage.get("modelContextWindow") or token_usage.get("model_context_window")
+        
+        # Fallback to direct fields
+        if total is None:
+            total = payload.get("total") or payload.get("total_tokens") or payload.get("tokenCount")
         if context_window is None:
             context_window = payload.get("model_context_window") or payload.get("modelContextWindow")
+        
         if isinstance(total, (int, float)):
-            event = {"type": "token_count", "total": int(total)}
+            total_int = int(total)
+            event = {"type": "token_count", "total": total_int}
             if isinstance(context_window, (int, float)):
-                event["context_window"] = int(context_window)
+                context_window_int = int(context_window)
+                event["context_window"] = context_window_int
+                # Save to transcript for replay
+                if convo_id:
+                    await _append_transcript_entry(convo_id, {
+                        "role": "token_usage",
+                        "total": total_int,
+                        "context_window": context_window_int,
+                        "event": label_lower,
+                    })
             events.append(event)
         return events
 
@@ -2045,16 +2066,21 @@ async def codex_agent_ui() -> FastHTMLResponse:
                 Meta(name="theme-color", content=CODEX_AGENT_THEME_COLOR),
                 Link(rel="icon", type="image/svg+xml", href=_asset(CODEX_AGENT_ICON_PATH)),
                 Link(rel="stylesheet", href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap"),
+                Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"),
+                Link(rel="stylesheet", href=_asset("/static/vendor/tribute.css")),
                 Link(rel="stylesheet", href=_asset("/static/codex_agent.css")),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"),
                 Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
                 Script(src=_asset("/static/vendor/socket.io/socket.io.min.js")),
+                Script(src=_asset("/static/vendor/tribute.min.js")),
+                Script(src="https://cdn.jsdelivr.net/npm/streaming-markdown/smd.min.js", type="module"),
                 Script("window.addEventListener('load', () => console.log('socket.io', typeof io));", defer=True),
                 Script(src=_asset("/static/modals/settings_modal.js"), defer=True),
                 Script(src=_asset("/static/modals/cwd_picker.js"), defer=True),
                 Script(src=_asset("/static/modals/rollout_picker.js"), defer=True),
                 Script(src=_asset("/static/modals/warning_modal.js"), defer=True),
                 Script(src=_asset("/static/ui/conversation_drawer.js"), defer=True),
-                Script(src=_asset("/static/codex_agent.js"), defer=True),
+                Script(src=_asset("/static/codex_agent.js"), type="module"),
             ),
             Body(
                 Div(
@@ -2102,6 +2128,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     cls="brand"
                                 ),
                                 Div(
+                                    Label(
+                                        Input(type="checkbox", id="markdown-toggle", checked=True),
+                                        Span("MD"),
+                                        cls="toggle-label"
+                                    ),
                                     Span("disconnected", id="agent-ws", cls="pill warn"),
                                     Button("Settings", id="conversation-settings", cls="btn"),
                                     Button("Back", id="conversation-back", cls="btn ghost"),
@@ -2250,6 +2281,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                         cls="settings-row"
                                     ),
                                     id="settings-rollout-row",
+                                ),
+                                Label(
+                                    Span("Render Markdown"),
+                                    Input(type="checkbox", id="settings-markdown", checked=True),
+                                    cls="settings-checkbox-row"
                                 ),
                                 cls="settings-body"
                             ),
@@ -3037,11 +3073,24 @@ async def _rpc_request(method: str, params: Optional[Dict[str, Any]] = None, tim
 
 @app.get("/api/appserver/models")
 async def api_appserver_models():
+    global _model_list_cache, _model_list_cache_time
+    # Cache for 5 minutes
+    if _model_list_cache is not None and (time.time() - _model_list_cache_time) < 300:
+        return {"data": _model_list_cache}
+    
     info = await _get_or_start_appserver_shell()
     await _ensure_appserver_reader(info["shell_id"])
     await _ensure_appserver_initialized()
     response = await _rpc_request("model/list", params={})
-    return response
+    
+    # Extract model list from response
+    result = response.get("result", {})
+    models = result.get("data", [])
+    if isinstance(models, list):
+        _model_list_cache = models
+        _model_list_cache_time = time.time()
+    
+    return {"data": models}
 
 
 @app.get("/api/appserver/debug/raw")

@@ -249,6 +249,45 @@ body.drawer-open {
   align-items: center;
 }
 
+/* Markdown toggle in header */
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #8b949e;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #161b22;
+  border: 1px solid #30363d;
+}
+
+.toggle-label:hover {
+  background: #21262d;
+}
+
+.toggle-label input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* Settings checkbox row */
+.settings-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.settings-checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
 .settings-overlay,
 .picker-overlay {
   position: fixed;
@@ -721,6 +760,138 @@ textarea {
   margin: 0;
 }
 
+/* Markdown body styles (streaming-markdown) */
+.markdown-body {
+  font-size: 13px;
+  line-height: 1.6;
+  word-wrap: break-word;
+}
+
+.markdown-body p {
+  margin: 0 0 8px 0;
+}
+
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body h1, .markdown-body h2, .markdown-body h3,
+.markdown-body h4, .markdown-body h5, .markdown-body h6 {
+  margin: 16px 0 8px 0;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.markdown-body h1 { font-size: 1.5em; }
+.markdown-body h2 { font-size: 1.3em; }
+.markdown-body h3 { font-size: 1.1em; }
+
+.markdown-body code {
+  background: #161b22;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+}
+
+.markdown-body pre {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px;
+  margin: 8px 0;
+  overflow-x: auto;
+}
+
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.markdown-body pre code.hljs {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-body ul, .markdown-body ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+.markdown-body li {
+  margin: 4px 0;
+}
+
+.markdown-body blockquote {
+  margin: 8px 0;
+  padding: 0 12px;
+  border-left: 3px solid #30363d;
+  color: #8b949e;
+}
+
+.markdown-body strong, .markdown-body b {
+  font-weight: 600;
+}
+
+.markdown-body em, .markdown-body i {
+  font-style: italic;
+}
+
+.markdown-body a {
+  color: #58a6ff;
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid #30363d;
+  margin: 16px 0;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+
+.markdown-body th, .markdown-body td {
+  border: 1px solid #30363d;
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.markdown-body th {
+  background: #161b22;
+  font-weight: 600;
+}
+
+/* Code blocks inside messages (from highlight.js) */
+.timeline-row.message pre pre,
+.timeline-row.message pre code {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px;
+  margin: 8px 0;
+  display: block;
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.timeline-row.message pre code.hljs {
+  background: #0d1117;
+  padding: 12px;
+}
+
 /* Plan Overlay (Todo List) */
 .plan-overlay {
   position: sticky;
@@ -951,6 +1122,13 @@ textarea {
 .pill.warn { color: #f2cc60; border-color: #d29922; }
 .pill.err { color: #ff7b72; border-color: #f85149; }
 
+/* Context usage indicator */
+#context-remaining {
+  cursor: pointer;
+}
+#context-remaining.warn { color: #f2cc60; }
+#context-remaining.critical { color: #ff7b72; }
+
 .muted { color: var(--muted); }
 
 .footer {
@@ -1172,4 +1350,32 @@ textarea {
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0;
+}
+
+/* Tribute.js mention dropdown */
+.tribute-container {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  max-height: 200px;
+  overflow-y: auto;
+}
+.tribute-container ul {
+  background: transparent;
+  margin: 0;
+  padding: 4px;
+}
+.tribute-container li {
+  padding: 8px 12px;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+}
+.tribute-container li.highlight {
+  background: var(--highlight);
+}
+.tribute-container li.tribute-no-match {
+  color: var(--muted);
+  font-style: italic;
 }

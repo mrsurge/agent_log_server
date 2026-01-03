@@ -1,3 +1,5 @@
+import * as smd from "https://cdn.jsdelivr.net/npm/streaming-markdown/smd.min.js";
+
 document.addEventListener('DOMContentLoaded', () => {
   const statusEl = document.getElementById('agent-status');
   const wsStatusEl = document.getElementById('agent-ws');
@@ -32,6 +34,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsSummaryEl = document.getElementById('settings-summary');
   const settingsLabelEl = document.getElementById('settings-label');
   const settingsCommandLinesEl = document.getElementById('settings-command-lines');
+  const settingsMarkdownEl = document.getElementById('settings-markdown');
+  const markdownToggleEl = document.getElementById('markdown-toggle');
   const footerApprovalValue = document.getElementById('footer-approval-value');
   const footerApprovalToggle = document.getElementById('footer-approval-toggle');
   const footerApprovalOptions = document.getElementById('footer-approval-options');
@@ -93,7 +97,13 @@ document.addEventListener('DOMContentLoaded', () => {
   let wsReconnectTimer = null;
   let wsReconnectDelay = 1000;
   let rpcId = 1;
+  let modelList = []; // Cached model list with supportedReasoningEfforts
+  let markdownEnabled = true; // Toggle for markdown rendering
   const pending = new Map();
+
+  // Detect mobile for input behavior
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+                   ('ontouchstart' in window && window.innerWidth < 768);
 
   const assistantRows = new Map();
   const reasoningRows = new Map();
@@ -111,7 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let autoScroll = true;
   let normalizeTimer = null;
   let isNormalizing = false;
-  let mentionTriggered = false;
+  let tributeInstance = null;
   let transcriptTotal = 0;
   let planOverlayEl = null;
   let planListEl = null;
@@ -122,6 +132,75 @@ document.addEventListener('DOMContentLoaded', () => {
   let transcriptLimit = 120;
   let transcriptLoading = false;
   let estimatedRowHeight = 28;
+
+  function isMarkdownEnabled() {
+    return markdownEnabled;
+  }
+
+  function setMarkdownEnabled(enabled) {
+    markdownEnabled = enabled;
+    if (markdownToggleEl) markdownToggleEl.checked = enabled;
+    if (settingsMarkdownEl) settingsMarkdownEl.checked = enabled;
+  }
+
+  // Strip OpenAI citation markers like 'citeturn1file0L11-L26'
+  function stripCitations(text) {
+    if (!text) return text;
+    // Match patterns like 'citeturn0file0' or 'citeturn1file0L11-L26'
+    return text.replace(/'citeturn\d+file\d+(?:L\d+(?:-L\d+)?)?'/g, '');
+  }
+
+  // Render text with code block highlighting
+  function renderWithHighlighting(container, text) {
+    if (!text) return;
+    text = stripCitations(text);
+    
+    // Check if text contains code blocks
+    const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
+    let lastIndex = 0;
+    let match;
+    let hasCodeBlocks = false;
+    
+    while ((match = codeBlockRegex.exec(text)) !== null) {
+      hasCodeBlocks = true;
+      // Add text before code block
+      if (match.index > lastIndex) {
+        const textBefore = text.slice(lastIndex, match.index);
+        const span = document.createElement('span');
+        span.textContent = textBefore;
+        container.appendChild(span);
+      }
+      
+      // Add code block
+      const lang = match[1] || '';
+      const code = match[2];
+      const pre = document.createElement('pre');
+      const codeEl = document.createElement('code');
+      if (lang) codeEl.className = `language-${lang}`;
+      codeEl.textContent = code;
+      pre.appendChild(codeEl);
+      container.appendChild(pre);
+      
+      // Highlight if hljs available
+      if (typeof hljs !== 'undefined') {
+        hljs.highlightElement(codeEl);
+      }
+      
+      lastIndex = match.index + match[0].length;
+    }
+    
+    // Add remaining text
+    if (hasCodeBlocks) {
+      if (lastIndex < text.length) {
+        const span = document.createElement('span');
+        span.textContent = text.slice(lastIndex);
+        container.appendChild(span);
+      }
+    } else {
+      // No code blocks, just set text content
+      container.textContent = text;
+    }
+  }
 
   // Convert absolute path to relative path based on cwd
   function toRelativePath(absPath) {
@@ -227,15 +306,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function normalizeMentions() {
-    if (!promptEl || isNormalizing) return;
-    const text = getPromptText();
-    if (!text.includes('`')) return;
-    isNormalizing = true;
-    renderPromptFromText(text);
-    if (promptEl instanceof HTMLElement) {
-      moveCaretToEnd();
-    }
-    isNormalizing = false;
+    // No longer needed with Tribute - kept as no-op for compatibility
   }
 
   function moveCaretToEnd() {
@@ -249,23 +320,76 @@ document.addEventListener('DOMContentLoaded', () => {
     sel?.addRange(range);
   }
 
-  function detectMentionTrigger() {
-    if (!promptEl) return false;
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) return false;
-    const range = selection.getRangeAt(0);
-    if (!promptEl.contains(range.commonAncestorContainer)) return false;
-    const text = getPromptText();
-    return /\s@$/.test(text);
+  // Get relative path from CWD
+  function getRelativePath(absolutePath, cwd) {
+    if (!absolutePath || !cwd) return absolutePath;
+    const cwdNorm = cwd.endsWith('/') ? cwd : cwd + '/';
+    if (absolutePath.startsWith(cwdNorm)) {
+      return absolutePath.slice(cwdNorm.length);
+    }
+    return absolutePath;
   }
 
+  // Initialize Tribute.js for @ mentions
+  function initTribute() {
+    if (!promptEl || typeof Tribute === 'undefined') return;
+    if (tributeInstance) {
+      tributeInstance.detach(promptEl);
+    }
+    
+    tributeInstance = new Tribute({
+      trigger: '@',
+      allowSpaces: false,
+      menuShowMinLength: 1, // Need at least 1 char to search
+      noMatchTemplate: '<li class="tribute-no-match">No files found</li>',
+      selectTemplate: function(item) {
+        if (!item) return '';
+        const cwd = conversationSettings?.cwd || '';
+        const relPath = getRelativePath(item.original.path, cwd);
+        return '<span class="mention-token" contenteditable="false" data-path="' + 
+               relPath + '" title="' + item.original.path + '">' + 
+               item.original.name + '</span> ';
+      },
+      menuItemTemplate: function(item) {
+        const icon = item.original.type === 'directory' ? '📁' : '📄';
+        return icon + ' ' + item.original.name;
+      },
+      values: async function(text, cb) {
+        if (!text || !text.trim()) { cb([]); return; }
+        try {
+          const cwd = conversationSettings?.cwd || '~';
+          const res = await fetch(`/api/fs/search?query=${encodeURIComponent(text)}&root=${encodeURIComponent(cwd)}&limit=20`);
+          if (!res.ok) { cb([]); return; }
+          const data = await res.json();
+          cb(data.items || []);
+        } catch (e) {
+          console.warn('Tribute fetch error:', e);
+          cb([]);
+        }
+      },
+      lookup: 'name',
+      fillAttr: 'path',
+    });
+    
+    tributeInstance.attach(promptEl);
+  }
+
+  // Insert mention via button (manual insertion)
   function insertMention(path) {
     if (!promptEl || !path) return;
-    const token = createMentionToken(path);
+    const cwd = conversationSettings?.cwd || '';
+    const relPath = getRelativePath(path, cwd);
+    const display = String(relPath || '').split('/').filter(Boolean).pop() || relPath;
+    
+    const token = document.createElement('span');
+    token.className = 'mention-token';
+    token.contentEditable = 'false';
+    token.dataset.path = relPath;
+    token.title = path;
+    token.textContent = display;
+    
     const selection = window.getSelection();
-    const useSelection = selection && selection.rangeCount &&
-      promptEl.contains(selection.getRangeAt(0).commonAncestorContainer);
-    if (useSelection) {
+    if (selection && selection.rangeCount > 0 && promptEl.contains(selection.getRangeAt(0).commonAncestorContainer)) {
       const range = selection.getRangeAt(0);
       range.deleteContents();
       range.insertNode(token);
@@ -279,35 +403,9 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       promptEl.appendChild(token);
       promptEl.appendChild(document.createTextNode(' '));
+      moveCaretToEnd();
     }
     promptEl.focus();
-    showTapTip(path);
-    if (mentionTriggered) {
-      const text = getPromptText().replace(/\s@$/, ' ');
-      renderPromptFromText(text);
-      moveCaretToEnd();
-      mentionTriggered = false;
-    } else {
-      moveCaretToEnd();
-    }
-  }
-
-  function showTapTip(text) {
-    if (!text || !promptEl) return;
-    if (!('ontouchstart' in window)) return;
-    let tip = document.getElementById('mention-tip');
-    if (!tip) {
-      tip = document.createElement('div');
-      tip.id = 'mention-tip';
-      tip.className = 'mention-tip';
-      document.body.appendChild(tip);
-    }
-    tip.textContent = text;
-    const rect = promptEl.getBoundingClientRect();
-    tip.style.left = `${rect.left + 12}px`;
-    tip.style.top = `${rect.top - 32}px`;
-    tip.classList.add('show');
-    setTimeout(() => tip.classList.remove('show'), 2000);
   }
 
   function clearPlaceholder() {
@@ -347,16 +445,20 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsSummaryEl) settingsSummaryEl.value = '';
       if (settingsLabelEl) settingsLabelEl.value = '';
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = '20';
+      if (settingsMarkdownEl) settingsMarkdownEl.checked = true;
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || '';
     } else {
       if (settingsCwdEl) settingsCwdEl.value = conversationSettings?.cwd || '';
       if (settingsApprovalEl) settingsApprovalEl.value = conversationSettings?.approvalPolicy || '';
       if (settingsSandboxEl) settingsSandboxEl.value = conversationSettings?.sandboxPolicy || '';
       if (settingsModelEl) settingsModelEl.value = conversationSettings?.model || '';
+      // Update effort options for the loaded model before setting effort value
+      updateEffortOptionsForModel(conversationSettings?.model);
       if (settingsEffortEl) settingsEffortEl.value = conversationSettings?.effort || '';
       if (settingsSummaryEl) settingsSummaryEl.value = conversationSettings?.summary || '';
       if (settingsLabelEl) settingsLabelEl.value = conversationSettings?.label || '';
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = conversationSettings?.commandOutputLines || '20';
+      if (settingsMarkdownEl) settingsMarkdownEl.checked = conversationSettings?.markdown !== false;
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || conversationSettings?.rolloutId || '';
     }
     if (settingsRolloutRowEl) {
@@ -500,7 +602,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function buildDropdown(listEl, options, inputEl) {
+  function buildDropdown(listEl, options, inputEl, onChange) {
     if (!listEl) return;
     listEl.innerHTML = '';
     options.forEach((opt) => {
@@ -510,17 +612,18 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.textContent = opt;
       btn.addEventListener('click', () => {
         if (inputEl) inputEl.value = opt;
-        closeDropdown(listEl);
+        closeDropdownMenu(listEl);
+        if (typeof onChange === 'function') onChange(opt);
       });
       listEl.appendChild(btn);
     });
   }
 
-  function updateDropdownOptions(listEl, options, inputEl) {
+  function updateDropdownOptions(listEl, options, inputEl, onChange) {
     if (!listEl) return;
     listEl.innerHTML = '';
     const values = Array.from(new Set(options.filter(Boolean)));
-    buildDropdown(listEl, values, inputEl);
+    buildDropdown(listEl, values, inputEl, onChange);
   }
 
   async function loadModelOptions() {
@@ -528,22 +631,39 @@ document.addEventListener('DOMContentLoaded', () => {
       const r = await fetch('/api/appserver/models', { cache: 'no-store' });
       if (!r.ok) return;
       const data = await r.json();
-      const items = data?.result?.data || data?.result?.models || data?.result || [];
-      const names = [];
+      const items = data?.result?.data || data?.result?.models || data?.data || data?.result || [];
       if (Array.isArray(items)) {
-        items.forEach((item) => {
-          if (typeof item === 'string') names.push(item);
-          else if (item && typeof item === 'object') {
-            if (item.id) names.push(item.id);
-            else if (item.name) names.push(item.name);
-          }
-        });
-      }
-      if (names.length) {
-        updateDropdownOptions(settingsModelOptions, names, settingsModelEl);
+        modelList = items.filter(m => m && typeof m === 'object' && m.id);
+        const names = modelList.map(m => m.id);
+        if (names.length) {
+          updateDropdownOptions(settingsModelOptions, names, settingsModelEl, updateEffortOptionsForModel);
+        }
+        // Update effort options for currently selected model
+        updateEffortOptionsForModel(settingsModelEl?.value);
       }
     } catch {
       // ignore
+    }
+  }
+
+  function updateEffortOptionsForModel(modelId) {
+    if (!modelId || !modelList.length) return;
+    const model = modelList.find(m => m.id === modelId);
+    if (!model || !Array.isArray(model.supportedReasoningEfforts)) {
+      // Fallback to default options if model not found
+      updateDropdownOptions(settingsEffortOptions, ['low', 'medium', 'high'], settingsEffortEl);
+      return;
+    }
+    const efforts = model.supportedReasoningEfforts.map(e => e.reasoningEffort).filter(Boolean);
+    if (efforts.length) {
+      updateDropdownOptions(settingsEffortOptions, efforts, settingsEffortEl);
+      // If current effort is not supported, clear it or set to default
+      const currentEffort = settingsEffortEl?.value;
+      if (currentEffort && !efforts.includes(currentEffort)) {
+        if (settingsEffortEl) {
+          settingsEffortEl.value = model.defaultReasoningEffort || efforts[0] || '';
+        }
+      }
     }
   }
 
@@ -940,12 +1060,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateContextRemaining(total, windowSize) {
     if (!contextRemainingEl) return;
-    if (!Number.isFinite(total) || !Number.isFinite(windowSize)) {
+    if (!Number.isFinite(total) || !Number.isFinite(windowSize) || windowSize <= 0) {
       contextRemainingEl.textContent = '—';
       return;
     }
-    const remaining = Math.max(0, Number(windowSize) - Number(total));
-    contextRemainingEl.textContent = String(remaining);
+    const pct = Math.min(100, Math.round((Number(total) / Number(windowSize)) * 100));
+    contextRemainingEl.textContent = `${pct}%`;
+    // Color code based on usage
+    if (pct >= 90) {
+      contextRemainingEl.classList.add('critical');
+      contextRemainingEl.classList.remove('warn');
+    } else if (pct >= 70) {
+      contextRemainingEl.classList.add('warn');
+      contextRemainingEl.classList.remove('critical');
+    } else {
+      contextRemainingEl.classList.remove('warn', 'critical');
+    }
   }
 
   function resetTimeline() {
@@ -1155,6 +1285,19 @@ document.addEventListener('DOMContentLoaded', () => {
         fragment.appendChild(row);
         return;
       }
+      // Token usage entries - update context display on replay
+      if (entry.role === 'token_usage') {
+        if (Number.isFinite(entry.total)) {
+          tokenCount = Number(entry.total);
+          setCounter(counterTokensEl, tokenCount);
+        }
+        if (Number.isFinite(entry.context_window)) {
+          contextWindow = Number(entry.context_window);
+          updateContextRemaining(entry.total, entry.context_window);
+        }
+        // Don't render token_usage as a visible row
+        return;
+      }
       // Error entries
       if (entry.role === 'error') {
         const { row, body } = buildRow('error', 'error');
@@ -1167,9 +1310,25 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const label = entry.role === 'assistant' ? 'assistant' : entry.role;
       const { row, body } = buildRow('message', label);
-      const pre = document.createElement('pre');
-      pre.textContent = entry.text || '';
-      body.append(pre);
+      if (entry.role === 'assistant' && isMarkdownEnabled()) {
+        const container = document.createElement('div');
+        container.className = 'markdown-body';
+        const renderer = smd.default_renderer(container);
+        const parser = smd.parser(renderer);
+        smd.parser_write(parser, stripCitations(entry.text || ''));
+        smd.parser_end(parser);
+        // Highlight code blocks
+        container.querySelectorAll('pre code').forEach((block) => {
+          if (typeof hljs !== 'undefined') {
+            hljs.highlightElement(block);
+          }
+        });
+        body.append(container);
+      } else {
+        const pre = document.createElement('pre');
+        pre.textContent = entry.role === 'assistant' ? stripCitations(entry.text || '') : (entry.text || '');
+        body.append(pre);
+      }
       fragment.appendChild(row);
       incrementMessages();
     });
@@ -1189,10 +1348,20 @@ document.addEventListener('DOMContentLoaded', () => {
     let entry = assistantRows.get(key);
     if (!entry) {
       const { body } = createRow('message', 'assistant');
-      const pre = document.createElement('pre');
-      pre.textContent = '';
-      body.append(pre);
-      entry = { pre, counted: false };
+      const container = document.createElement('div');
+      container.className = 'markdown-body';
+      body.append(container);
+      if (isMarkdownEnabled()) {
+        // Create streaming markdown parser with default renderer
+        const renderer = smd.default_renderer(container);
+        const parser = smd.parser(renderer);
+        entry = { container, parser, useMarkdown: true, counted: false };
+      } else {
+        // Plain text mode - use pre element
+        const pre = document.createElement('pre');
+        container.append(pre);
+        entry = { container, pre, useMarkdown: false, counted: false };
+      }
       assistantRows.set(key, entry);
     }
     return entry;
@@ -1201,7 +1370,12 @@ document.addEventListener('DOMContentLoaded', () => {
   function appendAssistantDelta(id, delta) {
     if (!delta) return;
     const entry = getAssistantRow(id);
-    entry.pre.textContent += delta;
+    const cleanDelta = stripCitations(delta);
+    if (entry.useMarkdown && entry.parser) {
+      smd.parser_write(entry.parser, cleanDelta);
+    } else if (entry.pre) {
+      entry.pre.textContent += cleanDelta;
+    }
     maybeAutoScroll();
   }
 
@@ -1209,7 +1383,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const key = id || 'assistant';
     const entry = assistantRows.get(key);
     if (!entry) return;
-    if (text) entry.pre.textContent = text;
+    if (entry.useMarkdown && entry.parser) {
+      // End the streaming parser
+      smd.parser_end(entry.parser);
+      // Highlight code blocks after parsing is complete
+      entry.container.querySelectorAll('pre code').forEach((block) => {
+        if (typeof hljs !== 'undefined') {
+          hljs.highlightElement(block);
+        }
+      });
+    }
     if (!entry.counted) {
       incrementMessages();
       entry.counted = true;
@@ -1759,6 +1942,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || '20', 10);
+    const mdEnabled = settingsMarkdownEl?.checked !== false;
     const settings = {
       cwd,
       approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
@@ -1768,7 +1952,10 @@ document.addEventListener('DOMContentLoaded', () => {
       summary: settingsSummaryEl?.value?.trim() || null,
       label: settingsLabelEl?.value?.trim() || null,
       commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
+      markdown: mdEnabled,
     };
+    // Update local markdown state
+    setMarkdownEnabled(mdEnabled);
     const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
     if (isNewConversation) {
       const meta = await postJson('/api/appserver/conversations', {});
@@ -1877,6 +2064,8 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         currentThreadId = null;
       }
+      // Sync markdown toggle from settings
+      setMarkdownEnabled(conversationSettings?.markdown !== false);
     } catch {
       // Don't touch statusEl here - it's for server status only
     }
@@ -2241,6 +2430,16 @@ document.addEventListener('DOMContentLoaded', () => {
   ]);
   loadModelOptions();
 
+  // Update effort options when model input changes (typing or paste)
+  if (settingsModelEl) {
+    settingsModelEl.addEventListener('input', () => {
+      updateEffortOptionsForModel(settingsModelEl.value);
+    });
+    settingsModelEl.addEventListener('change', () => {
+      updateEffortOptionsForModel(settingsModelEl.value);
+    });
+  }
+
   window.CodexAgent = {
     helpers: {
       openSettingsModal,
@@ -2305,6 +2504,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   promptEl?.addEventListener('keydown', async (evt) => {
     if (evt.key === 'Enter' && !evt.shiftKey) {
+      if (isMobile) {
+        // On mobile, Enter inserts newline (let default happen)
+        return;
+      }
       evt.preventDefault();
       const text = getPromptText().trim();
       if (!text) return;
@@ -2318,25 +2521,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Input event - no longer need manual @ detection, Tribute handles it
   promptEl?.addEventListener('input', () => {
-    if (normalizeTimer) clearTimeout(normalizeTimer);
-    normalizeTimer = setTimeout(normalizeMentions, 200);
-    if (detectMentionTrigger()) {
-      const text = getPromptText().replace(/\s@$/, ' ');
-      renderPromptFromText(text);
-      moveCaretToEnd();
-      const startPath = conversationSettings?.cwd || settingsCwdEl?.value || '~';
-      mentionTriggered = true;
-      openPicker(startPath, 'mention');
-    }
+    // Tribute handles @ mentions automatically
   });
 
   promptEl?.addEventListener('click', (evt) => {
     const target = evt.target;
     if (!(target instanceof HTMLElement)) return;
     if (target.classList.contains('mention-token')) {
-      const path = target.dataset.path || target.textContent || '';
-      showTapTip(path);
+      // Show full path on click/tap
+      const path = target.dataset.path || target.title || target.textContent || '';
+      console.log('Mention path:', path);
     }
   });
 
@@ -2344,6 +2540,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const startPath = conversationSettings?.cwd || settingsCwdEl?.value || '~';
     openPicker(startPath, 'mention');
   });
+
+  // Initialize Tribute for @ mentions
+  initTribute();
 
   contextRemainingEl?.addEventListener('click', () => {
     if (window.CodexAgent?.helpers?.openWarningModal) {
@@ -2376,4 +2575,22 @@ document.addEventListener('DOMContentLoaded', () => {
     updateScrollButton();
     if (autoScroll) maybeAutoScroll(true);
   });
+
+  // Markdown toggle in header - syncs with settings and saves to SSOT
+  markdownToggleEl?.addEventListener('change', async () => {
+    const enabled = markdownToggleEl.checked;
+    setMarkdownEnabled(enabled);
+    // Save to SSOT if we have an active conversation
+    if (conversationMeta?.conversation_id) {
+      await postJson('/api/appserver/conversation', { 
+        settings: { ...conversationSettings, markdown: enabled } 
+      });
+    }
+  });
+
+  // Sync markdown toggle when conversation loads
+  function syncMarkdownFromSettings() {
+    const enabled = conversationSettings?.markdown !== false;
+    setMarkdownEnabled(enabled);
+  }
 });

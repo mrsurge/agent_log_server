@@ -653,9 +653,55 @@ The `fingerprint` is derived from the repository/working directory path, ensurin
 
 **Solution:**
 - Backend intercepts `thread/resume`, `thread/start`, and `turn/start` RPC methods
-- Injects settings (`model`, `cwd`, `approvalPolicy`, `effort`, etc.) from the conversation's SSOT meta before forwarding to codex-app-server
+- Injects settings from the conversation's SSOT meta before forwarding to codex-app-server
 - Frontend no longer responsible for sending settings - only validates conversation ID matches (guards against stale tabs/multi-device conflicts)
 - Clean separation: backend owns SSOT and enforces settings, frontend only guards against conflicts
+
+**Per-Method Parameter Support:**
+
+Different RPC methods accept different parameters (per codex-app-server schema):
+
+| Setting | `thread/resume` | `thread/start` | `turn/start` |
+|---------|-----------------|----------------|--------------|
+| `model` | ✓ | ✓ | ✓ |
+| `cwd` | ✓ | ✓ | ✓ |
+| `approvalPolicy` | ✓ | ✓ | ✓ |
+| `sandbox`/`sandboxPolicy` | ✓ | ✓ | ✓ |
+| `reasoningEffort`/`effort` | ✗ | ✓ (as `reasoningEffort`) | ✓ (as `effort`) |
+| `summary` | ✗ | ✗ | ✓ |
+
+**Key Behavior:**
+- Changing `model` mid-conversation: Takes effect on next `thread/resume` or `turn/start`
+- Changing `effort` (reasoning level) mid-conversation: Takes effect on next `turn/start` only (not on resume)
+- Settings are read fresh from SSOT on each RPC, enabling mid-conversation changes
+- Multi-device/tab support: Backend always uses current SSOT, frontend validates conversation ID before sending
+
+### Dynamic Model/Effort Dropdowns (Implemented)
+
+**Problem:** Different models support different reasoning effort levels (e.g., `gpt-5.1-codex-mini` supports `low/medium/high` but not `xhigh`). Users could select invalid combinations.
+
+**Solution:**
+- Backend fetches model list from codex-app-server via `model/list` RPC, caches for 5 minutes
+- Each model includes `supportedReasoningEfforts` array with valid options
+- Frontend stores full model list with metadata
+- When user selects a model, effort dropdown is dynamically updated to only show supported options
+- If current effort is not supported by new model, it's automatically reset to the model's default
+
+**Model List Response Structure:**
+```typescript
+{
+  data: [{
+    id: "gpt-5.1-codex-mini",
+    displayName: "gpt-5.1-codex-mini",
+    supportedReasoningEfforts: [
+      {reasoningEffort: "medium", description: "..."},
+      {reasoningEffort: "high", description: "..."}
+    ],
+    defaultReasoningEffort: "medium",
+    isDefault: false
+  }, ...]
+}
+```
 
 ## Future Considerations
 
