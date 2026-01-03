@@ -6,6 +6,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const timelineEl = document.getElementById('agent-timeline');
   const timelineWrapEl = timelineEl?.closest('.timeline-wrap');
   const scrollContainer = timelineWrapEl || timelineEl;
+  const statusRibbonEl = document.getElementById('status-ribbon');
+  const statusLabelEl = document.getElementById('status-label');
+  const statusDotEl = document.getElementById('status-dot');
   const startBtn = document.getElementById('agent-start');
   const stopBtn = document.getElementById('agent-stop');
   const promptEl = document.getElementById('agent-prompt');
@@ -109,9 +112,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const reasoningRows = new Map();
   const diffRows = new Map();
   const toolRows = new Map();
-  let activityRow = null;
-  let activityTextEl = null;
-  let activityLineEl = null;
   let topSpacerEl = null;
   let bottomSpacerEl = null;
   let placeholderCleared = false;
@@ -359,7 +359,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!text || !text.trim()) { cb([]); return; }
         try {
           const cwd = conversationSettings?.cwd || '~';
-          const res = await fetch(`/api/fs/search?query=${encodeURIComponent(text)}&root=${encodeURIComponent(cwd)}&limit=20`);
+          const res = await fetch(`/api/fs/search?query=${encodeURIComponent(text)}&root=${encodeURIComponent(cwd)}&limit=30`);
           if (!res.ok) { cb([]); return; }
           const data = await res.json();
           // Items already sorted: directories first, then files
@@ -900,30 +900,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function ensureActivityRow() {
-    if (activityRow) return;
-    clearPlaceholder();
-    const row = document.createElement('div');
-    row.className = 'timeline-row activity';
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = 'activity';
-    const body = document.createElement('div');
-    body.className = 'body';
-    const line = document.createElement('div');
-    line.className = 'activity-line';
-    const spinner = document.createElement('span');
-    spinner.className = 'spinner';
-    const text = document.createElement('span');
-    text.className = 'activity-text';
-    text.textContent = 'idle';
-    line.append(spinner, text);
-    body.append(line);
-    row.append(meta, body);
-    timelineEl.append(row);
-    activityRow = row;
-    activityTextEl = text;
-    activityLineEl = line;
-    maybeAutoScroll(true);
+    // No longer needed - status ribbon is always present in HTML
+    // Kept as no-op for compatibility
   }
 
   function insertRow(row, beforeEl) {
@@ -932,8 +910,6 @@ document.addEventListener('DOMContentLoaded', () => {
       timelineEl.insertBefore(row, beforeEl);
     } else if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
       timelineEl.insertBefore(row, bottomSpacerEl);
-    } else if (activityRow && activityRow.parentElement === timelineEl) {
-      timelineEl.insertBefore(row, activityRow);
     } else {
       timelineEl.appendChild(row);
     }
@@ -959,10 +935,16 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function setActivity(label, active) {
-    ensureActivityRow();
-    if (activityTextEl) activityTextEl.textContent = label || 'idle';
-    if (activityLineEl) activityLineEl.classList.toggle('active', Boolean(active));
-    maybeAutoScroll();
+    // Update status ribbon instead of activity row
+    if (statusLabelEl) statusLabelEl.textContent = label || 'idle';
+    if (statusRibbonEl) statusRibbonEl.classList.toggle('active', Boolean(active));
+  }
+
+  function setStatusDot(status) {
+    // status: 'success', 'error', 'warning', or null/'' for neutral
+    if (!statusDotEl) return;
+    statusDotEl.classList.remove('success', 'error', 'warning');
+    if (status) statusDotEl.classList.add(status);
   }
 
   // Plan overlay (todo list) functions
@@ -1111,9 +1093,6 @@ document.addEventListener('DOMContentLoaded', () => {
     reasoningRows.clear();
     diffRows.clear();
     toolRows.clear();
-    activityRow = null;
-    activityTextEl = null;
-    activityLineEl = null;
     planOverlayEl = null;
     planListEl = null;
     planItems.clear();
@@ -1131,6 +1110,9 @@ document.addEventListener('DOMContentLoaded', () => {
     setCounter(counterMessagesEl, messageCount);
     setCounter(counterTokensEl, tokenCount);
     if (contextRemainingEl) contextRemainingEl.textContent = '—';
+    // Reset status ribbon
+    setActivity('idle', false);
+    setStatusDot(null);
     timelineEl.appendChild(topSpacerEl);
     const placeholder = document.createElement('div');
     placeholder.id = 'timeline-placeholder';
@@ -1322,6 +1304,54 @@ document.addEventListener('DOMContentLoaded', () => {
           updateContextRemaining(entry.total, entry.context_window);
         }
         // Don't render token_usage as a visible row
+        return;
+      }
+      // Status entries - update ribbon dot on replay
+      if (entry.role === 'status') {
+        if (entry.status) {
+          setStatusDot(entry.status);
+        }
+        // Don't render status as a visible row
+        return;
+      }
+      // Shell command entries
+      if (entry.role === 'shell') {
+        // Render command - use 'message' class like live stream does
+        const { row: cmdRow, body: cmdBody } = buildRow('message', 'shell');
+        const cmdText = document.createElement('pre');
+        cmdText.textContent = `$ ${entry.command || ''}`;
+        cmdBody.appendChild(cmdText);
+        fragment.appendChild(cmdRow);
+        
+        // Render output - reuse command-result styling
+        const exitCode = entry.exit_code || 0;
+        const { row: outRow, body: outBody } = buildRow('command-result', exitCode === 0 ? 'shell ✓' : 'shell ✗');
+        if (exitCode !== 0) outRow.classList.add('error');
+        
+        const output = document.createElement('pre');
+        output.className = 'command-output';
+        
+        if (entry.stdout) {
+          const stdoutEl = document.createElement('span');
+          stdoutEl.className = 'shell-stdout';
+          stdoutEl.textContent = entry.stdout;
+          output.appendChild(stdoutEl);
+        }
+        if (entry.stderr) {
+          const stderrEl = document.createElement('span');
+          stderrEl.className = 'shell-stderr';
+          stderrEl.textContent = entry.stderr;
+          output.appendChild(stderrEl);
+        }
+        if (!entry.stdout && !entry.stderr) {
+          output.textContent = '(no output)';
+        }
+        
+        outBody.appendChild(output);
+        fragment.appendChild(outRow);
+        
+        // Update status dot
+        setStatusDot(exitCode === 0 ? 'success' : 'error');
         return;
       }
       // Error entries
@@ -1526,6 +1556,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (duration !== undefined && duration !== null) parts.push(`duration=${duration}ms`);
     entry.pre.textContent += `[end] ${parts.join(' ')}\n`;
     lastEventType = 'tool';
+    // Update status dot based on exit code
+    if (exitCode === 0 || exitCode === undefined || exitCode === null) {
+      setStatusDot('success');
+    } else {
+      setStatusDot('error');
+    }
   }
 
   function renderToolInteraction(evt) {
@@ -1717,7 +1753,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     row.appendChild(body);
     
-    // Insert before activity row
+    // Insert before bottom spacer
     if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
       timelineEl.insertBefore(row, bottomSpacerEl);
     } else {
@@ -1726,6 +1762,13 @@ document.addEventListener('DOMContentLoaded', () => {
     
     lastEventType = 'command';
     maybeAutoScroll();
+    
+    // Update status dot based on exit code
+    if (exitCode === 0 || exitCode === undefined || exitCode === null) {
+      setStatusDot('success');
+    } else {
+      setStatusDot('error');
+    }
   }
 
   function addDiff(id, text, path) {
@@ -2199,6 +2242,63 @@ document.addEventListener('DOMContentLoaded', () => {
     await sendRpc('turn/start', params);
   }
 
+  // Direct shell command execution via !command
+  async function sendShellCommand(command) {
+    if (!command) return;
+    if (!conversationMeta?.conversation_id) {
+      setActivity('save settings first', true);
+      return;
+    }
+    setActivity('executing', true);
+
+    // Add user command to transcript display
+    addMessage('shell', `$ ${command}`);
+
+    try {
+      const resp = await postJson('/api/appserver/shell/exec', { command });
+      if (resp.error) {
+        renderShellOutput(command, '', resp.error, 1);
+        setStatusDot('error');
+      } else {
+        renderShellOutput(command, resp.stdout || '', resp.stderr || '', resp.exitCode || 0);
+        setStatusDot(resp.exitCode === 0 ? 'success' : 'error');
+      }
+    } catch (err) {
+      renderShellOutput(command, '', String(err), 1);
+      setStatusDot('error');
+    }
+    setActivity('idle', false);
+  }
+
+  // Render shell output card - reuse command-result styling
+  function renderShellOutput(command, stdout, stderr, exitCode) {
+    const { row, body } = buildRow('command-result', exitCode === 0 ? 'shell ✓' : 'shell ✗');
+    if (exitCode !== 0) row.classList.add('error');
+    
+    const output = document.createElement('pre');
+    output.className = 'command-output';
+    
+    if (stdout) {
+      const stdoutEl = document.createElement('span');
+      stdoutEl.className = 'shell-stdout';
+      stdoutEl.textContent = stdout;
+      output.appendChild(stdoutEl);
+    }
+    if (stderr) {
+      const stderrEl = document.createElement('span');
+      stderrEl.className = 'shell-stderr';
+      stderrEl.textContent = stderr;
+      output.appendChild(stderrEl);
+    }
+    if (!stdout && !stderr) {
+      output.textContent = '(no output)';
+    }
+    
+    body.appendChild(output);
+    scrollContainer.appendChild(row);
+    row.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }
+
   async function interruptTurn() {
     try {
       setActivity('interrupt', true);
@@ -2265,18 +2365,27 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'activity':
         lastEventType = 'activity';
         setActivity(evt.label || 'idle', Boolean(evt.active));
-        // Clear plan overlay when turn ends (idle state)
+        // Update status dot based on activity
         if (!evt.active && evt.label === 'idle') {
           finalizePlanToTranscript();
+          // Keep last status dot state (don't reset on idle)
         }
         return;
       case 'error':
         lastEventType = 'error';
         renderErrorCard(evt.message || 'Unknown error');
+        setStatusDot('error');
         return;
       case 'warning':
         lastEventType = 'warning';
         renderWarningCard(evt.message || '');
+        setStatusDot('warning');
+        return;
+      case 'status':
+        // Status event from turn/completed - update ribbon dot
+        if (evt.status) {
+          setStatusDot(evt.status);
+        }
         return;
       case 'message':
         lastEventType = 'message';
@@ -2289,6 +2398,7 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'assistant_finalize':
         lastEventType = 'assistant';
         finalizeAssistant(evt.id, evt.text || '');
+        setStatusDot('success');
         return;
       case 'reasoning_delta':
         lastEventType = 'reasoning';
@@ -2521,11 +2631,20 @@ document.addEventListener('DOMContentLoaded', () => {
     closeDropdownMenu(openDropdownEl);
   });
 
+  // Helper to dispatch message or shell command based on ! prefix
+  async function dispatchInput(text) {
+    if (text.startsWith('!')) {
+      await sendShellCommand(text.slice(1).trim());
+    } else {
+      await sendUserMessage(text);
+    }
+  }
+
   sendBtn?.addEventListener('click', async () => {
     const text = getPromptText().trim();
     if (!text) return;
     clearPrompt();
-    await sendUserMessage(text);
+    await dispatchInput(text);
   });
 
   promptEl?.addEventListener('keydown', async (evt) => {
@@ -2538,7 +2657,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const text = getPromptText().trim();
       if (!text) return;
       clearPrompt();
-      await sendUserMessage(text);
+      await dispatchInput(text);
       return;
     }
     if (evt.key === 'Enter' && evt.shiftKey) {

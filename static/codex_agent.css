@@ -613,6 +613,8 @@ textarea {
   border-bottom: 1px solid #12151d;
   padding: 10px 12px;
   background: #12151d;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
 }
 
 .timeline-row:nth-child(even) {
@@ -700,6 +702,8 @@ textarea {
   border: 1px solid #1f2533;
   padding: 8px;
   border-radius: 8px;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
 }
 
 .timeline-row.diff pre {
@@ -1223,6 +1227,10 @@ textarea {
   border-radius: 0;
   border: none;
 }
+/* Shell output stderr styling */
+.timeline-row.command-result pre.command-output .shell-stderr {
+  color: #f87171;
+}
 
 .command-footer {
   color: var(--muted);
@@ -1394,4 +1402,59 @@ textarea {
 }
 .tribute-file {
   color: var(--text);
+}
+
+/* Status Ribbon - thin bar above composer */
+.status-ribbon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 25px;
+  padding: 0 10px;
+  background: var(--darker);
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.status-ribbon .status-spinner {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--accent);
+  opacity: 0;
+  flex-shrink: 0;
+}
+.status-ribbon.active .status-spinner {
+  opacity: 1;
+  animation: spin 0.8s linear infinite;
+}
+.status-ribbon .status-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.status-ribbon.active .status-text {
+  opacity: 1;
+}
+.status-ribbon .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+.status-ribbon .status-dot.success {
+  background: #4ade80;
+}
+.status-ribbon .status-dot.error {
+  background: #f87171;
+}
+.status-ribbon .status-dot.warning {
+  background: #fbbf24;
 }

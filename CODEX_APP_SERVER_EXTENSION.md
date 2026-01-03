@@ -296,23 +296,29 @@ Main JavaScript file handling all frontend logic:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ Header: Model selector, Settings button                         │
+│ Header: Model selector, Context %, Markdown toggle, Settings    │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  Transcript Area (scrollable)                                   │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │ [User Message Card]                                       │  │
 │  │ [Reasoning Card] - collapsible                            │  │
-│  │ [Agent Message Card]                                      │  │
+│  │ [Agent Message Card] - markdown rendered                  │  │
+│  │ [Plan Card] - with step checkboxes                        │  │
 │  │ [Command Card] - with output, duration                    │  │
+│  │ [Shell Card] - user !command output                       │  │
 │  │ [Diff Card] - syntax highlighted                          │  │
 │  │ [Approval Card] - Accept/Decline buttons                  │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │
-│  [Activity Ribbon] - current streaming content                  │
-│                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
-│ Input Area: Textarea + Send button                              │
+│ [Status Ribbon] spinner + activity text + status dot ●         │
+├─────────────────────────────────────────────────────────────────┤
+│ Input Area: contenteditable + @mention + Send/Interrupt         │
+│ - @ triggers Tribute.js file picker                             │
+│ - ! prefix sends direct shell command                           │
+│ - Mobile: Enter=newline, button=send                            │
+│ - Desktop: Enter=send, Shift+Enter=newline                      │
 └─────────────────────────────────────────────────────────────────┘
 
 [Drawer] - Slide-out panel showing full transcript
@@ -703,8 +709,169 @@ Different RPC methods accept different parameters (per codex-app-server schema):
 }
 ```
 
+### Streaming Markdown Rendering (Implemented)
+
+**Problem:** Agent responses with markdown (code blocks, bold, lists) weren't being rendered properly during streaming or in transcript replay.
+
+**Solution:**
+- Integrated `streaming-markdown` (smd) library for live markdown parsing during token deltas
+- Markdown parser is created per message and receives deltas incrementally via `smd.parser_write()`
+- On message complete, `smd.parser_end()` finalizes rendering
+- User toggle in conversation header and settings modal to enable/disable markdown
+- Setting persisted in conversation SSOT as `markdown: true|false`
+- Citations like `'citeturn1file0L11-L26'` are stripped from rendered output
+
+**Key Code:**
+```javascript
+const renderer = smd.default_renderer(container);
+const parser = smd.parser(renderer);
+// On each delta:
+smd.parser_write(parser, cleanDelta);
+// On complete:
+smd.parser_end(parser);
+```
+
+### File Mentions with Tribute.js (Implemented)
+
+**Problem:** The original `@` mention system was clunky - cursor jumped to end on insert, `@` at start of text didn't work, tokens were hard to edit/delete.
+
+**Solution:**
+- Replaced custom implementation with Tribute.js library for autocomplete
+- `@` trigger shows file picker dropdown with fuzzy search
+- Files and directories are fetched from backend via `/api/appserver/mention`
+- Uses `ripgrep --files` for fast file listing, respects `.gitignore`
+- Selected files inserted as non-editable tokens (spans with `contenteditable="false"`)
+- Directories and files separated in dropdown with visual separator
+- Files shown as 📄 icon, directories as 📁 icon
+- Paths are relative to conversation CWD
+
+**API Endpoint:**
+```
+POST /api/appserver/mention
+{
+  "query": "search term",
+  "limit": 30
+}
+
+Response:
+{
+  "files": [
+    {"path": "src/main.py", "type": "file"},
+    {"path": "src/utils/", "type": "directory"}
+  ]
+}
+```
+
+### Direct Shell Command Execution (Implemented)
+
+**Problem:** Users wanted to run shell commands directly without going through the agent.
+
+**Solution:**
+- `!` prefix in input triggers direct shell execution (e.g., `!ls -la`)
+- Commands sent to backend `/api/appserver/shell/exec` endpoint
+- Backend executes via codex-app-server's shell interface
+- Output rendered in same style as agent command cards
+- Results persisted to transcript with role `shell_input` and `shell_output`
+- Exit code determines success/error styling
+
+**Transcript Format:**
+```jsonl
+{"role": "shell_input", "command": "ls -la", "timestamp": "ISO"}
+{"role": "shell_output", "command": "ls -la", "stdout": "...", "stderr": "...", "exit_code": 0, "timestamp": "ISO"}
+```
+
+### Status Ribbon Refactor (Implemented)
+
+**Problem:** Activity ribbon took up too much space and didn't show command success/failure status.
+
+**Solution:**
+- Refactored ribbon to tile above user input area (6px height)
+- Added status dot indicator (right-justified):
+  - 🟢 Green: Last command/response succeeded
+  - 🔴 Red: Last command/response failed/errored
+  - 🟡 Yellow: Warning
+  - ⚪ Gray: Idle/neutral
+- Spinner scaled down to fit compact ribbon
+- Status persisted to transcript as `{"role": "status", "status": "success|error", ...}`
+- Replays restore status dot state from transcript
+
+### Mobile Keyboard Handling (Implemented)
+
+**Problem:** On mobile, pressing Enter key in the input would send the message, making it impossible to type multi-line messages.
+
+**Solution:**
+- User agent detection for mobile devices (Android, iOS, etc.)
+- On mobile: Enter key inserts newline, only Send button submits
+- On desktop: Enter sends, Shift+Enter inserts newline
+- Detection uses standard mobile UA patterns
+
+### Context Window Display (Fixed)
+
+**Problem:** Context window pill always showed 0%.
+
+**Solution:**
+- Parse `thread/tokenUsage/updated` events properly
+- Calculate percentage: `(inputTokens / modelContextWindow) * 100`
+- Display as percentage in UI
+- Store raw values in transcript for replay: `{"role": "token_usage", "input_tokens": N, "context_window": M, ...}`
+
+### Word Wrap Styling (Implemented)
+
+Added CSS for proper word wrapping in agent messages, user messages, and reasoning:
+```css
+.message-body {
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  word-break: break-word;
+}
+```
+
+## API Endpoints (Updated)
+
+### Shell Execution
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/appserver/shell/exec` | POST | Execute shell command directly |
+
+**Request:**
+```json
+{"command": "ls -la"}
+```
+
+**Response:**
+```json
+{"stdout": "...", "stderr": "", "exitCode": 0}
+```
+
+### File Mentions
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/appserver/mention` | POST | Get file/directory list for mention autocomplete |
+
+**Request:**
+```json
+{"query": "src", "limit": 30}
+```
+
+**Response:**
+```json
+{"files": [{"path": "src/main.py", "type": "file"}, ...]}
+```
+
+## Transcript Entry Types (Updated)
+
+```jsonl
+{"role": "shell_input", "command": "ls", "timestamp": "ISO"}
+{"role": "shell_output", "command": "ls", "stdout": "...", "stderr": "", "exit_code": 0, "timestamp": "ISO"}
+{"role": "status", "status": "success|error|warning", "timestamp": "ISO"}
+{"role": "token_usage", "input_tokens": 1234, "output_tokens": 567, "context_window": 128000, "timestamp": "ISO"}
+```
+
 ## Future Considerations
 
 1. **Session recovery** - Better handling of corrupted rollouts
 2. **Multi-agent** - Agent log server for inter-agent communication
 3. **Consecutive reasoning merge** - Merge multiple consecutive reasoning blocks into one display card
+4. **Warp-like shell interface** - Full shell mode with streaming output, using codex-app-server's PTY management

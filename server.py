@@ -1105,6 +1105,33 @@ async def _route_appserver_event(
             await _set_turn_id(turn_id)
         else:
             await _set_turn_id(None)
+            # Determine turn status from payload
+            turn_obj = payload.get("turn", {}) if isinstance(payload, dict) else {}
+            turn_status = turn_obj.get("status", "completed")  # completed, interrupted, failed, inProgress
+            turn_error = turn_obj.get("error")
+            # Map to ribbon status
+            if turn_status == "failed":
+                ribbon_status = "error"
+            elif turn_status == "interrupted":
+                ribbon_status = "warning"
+            else:
+                ribbon_status = "success"
+            # Write status to transcript and emit to frontend
+            if convo_id:
+                await _append_transcript_entry(convo_id, {
+                    "role": "status",
+                    "status": ribbon_status,
+                    "turn_status": turn_status,
+                    "turn_id": turn_id,
+                    "error": turn_error,
+                    "event": "turn/completed",
+                })
+            events.append({
+                "type": "status",
+                "status": ribbon_status,
+                "turn_status": turn_status,
+                "error": turn_error,
+            })
             # On turn completion, write accumulated plan to transcript if any steps exist
             plan_steps = state.get("plan_steps", [])
             if plan_steps and convo_id:
@@ -2149,6 +2176,13 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 cls="timeline-wrap"
                             ),
                             Div(
+                                Span(cls="status-spinner"),
+                                Span("idle", id="status-label", cls="status-text"),
+                                Span(cls="status-dot", id="status-dot"),
+                                cls="status-ribbon",
+                                id="status-ribbon"
+                            ),
+                            Div(
                                 Div(
                                     id="agent-prompt",
                                     contenteditable="true",
@@ -3022,6 +3056,64 @@ async def api_appserver_interrupt():
     return {"ok": True, "thread_id": thread_id, "turn_id": turn_id}
 
 
+@app.post("/api/appserver/shell/exec")
+async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
+    """Execute a shell command via codex-app-server's command/exec RPC."""
+    command = payload.get("command", "")
+    if not command:
+        raise HTTPException(status_code=400, detail="No command provided")
+    
+    info = await _get_or_start_appserver_shell()
+    await _ensure_appserver_reader(info["shell_id"])
+    await _ensure_appserver_initialized()
+    cfg = _load_appserver_config()
+    cwd = cfg.get("cwd")
+    convo_id = cfg.get("conversation_id")
+    
+    # Split command into array for shell execution
+    # Using shell=True style by wrapping in sh -c
+    cmd_array = ["sh", "-c", command]
+    
+    params = {
+        "command": cmd_array,
+        "timeoutMs": 30000,  # 30 second timeout
+        "cwd": cwd,
+        "sandboxPolicy": None,  # Use server default
+    }
+    
+    try:
+        result = await _rpc_request("command/exec", params=params)
+        exit_code = result.get("exitCode", 1)
+        stdout = result.get("stdout", "")
+        stderr = result.get("stderr", "")
+        
+        # Write to transcript
+        if convo_id:
+            await _append_transcript_entry(convo_id, {
+                "role": "shell",
+                "command": command,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code,
+                "event": "command/exec",
+            })
+        
+        return {"exitCode": exit_code, "stdout": stdout, "stderr": stderr}
+    except Exception as e:
+        error_msg = str(e)
+        if convo_id:
+            await _append_transcript_entry(convo_id, {
+                "role": "shell",
+                "command": command,
+                "stdout": "",
+                "stderr": error_msg,
+                "exit_code": 1,
+                "event": "command/exec",
+                "error": True,
+            })
+        return {"exitCode": 1, "stdout": "", "stderr": error_msg, "error": error_msg}
+
+
 @app.post("/api/appserver/compact")
 async def api_appserver_compact():
     info = await _get_or_start_appserver_shell()
@@ -3067,7 +3159,8 @@ async def _rpc_request(method: str, params: Optional[Dict[str, Any]] = None, tim
     if isinstance(result, dict):
         if result.get("error"):
             raise HTTPException(status_code=500, detail=result.get("error"))
-        return result
+        # RPC responses have the actual data nested in "result" key
+        return result.get("result", result)
     raise HTTPException(status_code=500, detail="Invalid RPC response")
 
 
