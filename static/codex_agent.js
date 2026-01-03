@@ -352,7 +352,8 @@ document.addEventListener('DOMContentLoaded', () => {
       },
       menuItemTemplate: function(item) {
         const icon = item.original.type === 'directory' ? '📁' : '📄';
-        return icon + ' ' + item.original.name;
+        const typeClass = item.original.type === 'directory' ? 'tribute-dir' : 'tribute-file';
+        return '<span class="' + typeClass + '">' + icon + ' ' + item.original.name + '</span>';
       },
       values: async function(text, cb) {
         if (!text || !text.trim()) { cb([]); return; }
@@ -361,6 +362,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const res = await fetch(`/api/fs/search?query=${encodeURIComponent(text)}&root=${encodeURIComponent(cwd)}&limit=20`);
           if (!res.ok) { cb([]); return; }
           const data = await res.json();
+          // Items already sorted: directories first, then files
           cb(data.items || []);
         } catch (e) {
           console.warn('Tribute fetch error:', e);
@@ -369,6 +371,30 @@ document.addEventListener('DOMContentLoaded', () => {
       },
       lookup: 'name',
       fillAttr: 'path',
+    });
+    
+    // Add separator between directories and files after menu renders
+    promptEl.addEventListener('tribute-active-true', () => {
+      setTimeout(() => {
+        const menu = document.querySelector('.tribute-container ul');
+        if (!menu) return;
+        const items = menu.querySelectorAll('li');
+        let lastWasDir = false;
+        let firstFile = null;
+        items.forEach(li => {
+          const isDir = li.querySelector('.tribute-dir');
+          if (lastWasDir && !isDir && !firstFile) {
+            firstFile = li;
+          }
+          lastWasDir = !!isDir;
+        });
+        if (firstFile && !firstFile.previousElementSibling?.classList.contains('tribute-separator')) {
+          const sep = document.createElement('li');
+          sep.className = 'tribute-separator';
+          sep.innerHTML = '<hr>';
+          firstFile.parentNode.insertBefore(sep, firstFile);
+        }
+      }, 10);
     });
     
     tributeInstance.attach(promptEl);

@@ -1379,3 +1379,19 @@ textarea {
   color: var(--muted);
   font-style: italic;
 }
+.tribute-container li.tribute-separator {
+  padding: 0;
+  margin: 4px 8px;
+  pointer-events: none;
+}
+.tribute-container li.tribute-separator hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0;
+}
+.tribute-dir {
+  color: var(--accent);
+}
+.tribute-file {
+  color: var(--text);
+}

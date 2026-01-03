@@ -2153,7 +2153,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     id="agent-prompt",
                                     contenteditable="true",
                                     cls="prompt-input",
-                                    **{"data-placeholder": "Message to Codex… (Shift+Enter for newline)"},
+                                    **{"data-placeholder": "Message to Codex… (@ to mention files, Shift+Enter for newline)"},
                                 ),
                                 Button("Send", id="agent-send", cls="btn primary"),
                                 cls="composer"
