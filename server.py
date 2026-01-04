@@ -83,8 +83,12 @@ _shell_call_ids: Dict[str, Dict[str, Any]] = {}  # Track active shell commands f
 _model_list_cache: Optional[List[Dict[str, Any]]] = None
 _model_list_cache_time: float = 0
 _agent_pty_event_tasks: Dict[str, asyncio.Task] = {}
-_agent_pty_event_offsets: Dict[str, int] = {}
+_agent_pty_ws_offsets: Dict[str, int] = {}
+_agent_pty_transcript_offsets: Dict[str, int] = {}
 _mcp_shell_id: Optional[str] = None
+_agent_pty_exec_seq: int = 0
+_pty_raw_subscribers: Dict[str, List[asyncio.Queue]] = {}  # conversation_id -> list of queues for raw PTY output
+_pty_command_running: Dict[str, bool] = {}  # conversation_id -> whether a command is currently running
 DEBUG_MODE = False
 DEBUG_RAW_LOG_PATH: Optional[Path] = None
 CODEX_AGENT_THEME_COLOR = "#0d0f13"
@@ -816,6 +820,89 @@ async def _append_transcript_entry(conversation_id: str, entry: Dict[str, Any]) 
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _agent_pty_transcript_offset_path(conversation_id: str) -> Path:
+    """Path to persisted transcript offset for agent PTY events."""
+    safe_id = _sanitize_conversation_id(conversation_id)
+    return _conversation_dir(safe_id) / "agent_pty" / ".transcript_offset"
+
+
+def _load_agent_pty_transcript_offset(conversation_id: str) -> int:
+    """Load persisted transcript offset, or 0 if not found."""
+    path = _agent_pty_transcript_offset_path(conversation_id)
+    try:
+        if path.exists():
+            return int(path.read_text().strip())
+    except Exception:
+        pass
+    return 0
+
+
+def _save_agent_pty_transcript_offset(conversation_id: str, offset: int) -> None:
+    """Persist transcript offset to disk."""
+    path = _agent_pty_transcript_offset_path(conversation_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(offset))
+    except Exception:
+        pass
+
+
+async def _tail_agent_pty_events_to_transcript(conversation_id: str, *, max_lines_per_tick: int = 50) -> None:
+    """Best-effort: mirror agent PTY block events into transcript SSOT for replay.
+
+    Reads from conversations/<id>/agent_pty/events.jsonl and writes a compact entry to transcript.jsonl.
+    Offset is persisted to disk to survive server restarts.
+    """
+    if not conversation_id:
+        return
+    path = _agent_pty_events_path(conversation_id)
+    if not path.exists():
+        return
+    try:
+        data = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="replace")
+    except Exception:
+        return
+    raw = data.encode("utf-8", errors="replace")
+    # Load offset from memory cache or disk
+    offset = _agent_pty_transcript_offsets.get(conversation_id)
+    if offset is None:
+        offset = _load_agent_pty_transcript_offset(conversation_id)
+        _agent_pty_transcript_offsets[conversation_id] = offset
+    if offset > len(raw):
+        offset = 0
+    tail = raw[offset:]
+    if not tail:
+        return
+    lines = tail.splitlines()[:max_lines_per_tick]
+    for line in lines:
+        try:
+            evt = json.loads(line.decode("utf-8", errors="replace"))
+        except Exception:
+            continue
+        if not isinstance(evt, dict):
+            continue
+        etype = evt.get("type")
+        if etype not in {"agent_block_begin", "agent_block_delta", "agent_block_end"}:
+            continue
+        block_id = evt.get("block_id") or (evt.get("block") or {}).get("block_id")
+        payload = {
+            "role": "agent_pty",
+            "event": etype,
+            "block_id": block_id,
+            "block": evt.get("block"),
+        }
+        if etype == "agent_block_delta":
+            payload["delta"] = evt.get("delta")
+        await _append_transcript_entry(conversation_id, payload)
+        # Note: do not synthesize additional shell_* transcript rows from agent PTY blocks.
+        # It duplicates output and makes compound commands appear as multiple commands.
+    consumed = b"\n".join(lines)
+    new_offset = offset + len(consumed) + (1 if lines else 0)
+    _agent_pty_transcript_offsets[conversation_id] = new_offset
+    # Persist to disk
+    _save_agent_pty_transcript_offset(conversation_id, new_offset)
+
+
 async def _maybe_capture_transcript(
     label: Optional[str],
     payload: Any,
@@ -1087,7 +1174,7 @@ async def _ensure_agent_pty_event_tailer(conversation_id: str) -> None:
                 data = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="replace")
                 # Track byte offsets (best-effort) to avoid rebroadcast loops.
                 raw_bytes = data.encode("utf-8", errors="replace")
-                offset = _agent_pty_event_offsets.get(conversation_id, 0)
+                offset = _agent_pty_ws_offsets.get(conversation_id, 0)
                 if offset > len(raw_bytes):
                     offset = 0
                 tail = raw_bytes[offset:]
@@ -1099,10 +1186,12 @@ async def _ensure_agent_pty_event_tailer(conversation_id: str) -> None:
                         event = json.loads(line.decode("utf-8", errors="replace"))
                     except Exception:
                         continue
-                    # Forward as-is to the UI websocket stream.
+                    # Forward as-is to the UI websocket stream ONLY.
+                    # Transcript writing is handled separately by _tail_agent_pty_events_to_transcript
+                    # which uses its own offset tracking to avoid duplicates.
                     if isinstance(event, dict):
                         await _broadcast_appserver_ui(event)
-                _agent_pty_event_offsets[conversation_id] = len(raw_bytes)
+                _agent_pty_ws_offsets[conversation_id] = len(raw_bytes)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1119,6 +1208,7 @@ async def _agent_pty_monitor_loop() -> None:
             convo_id = cfg.get("conversation_id")
             if isinstance(convo_id, str) and convo_id:
                 await _ensure_agent_pty_event_tailer(convo_id)
+                await _tail_agent_pty_events_to_transcript(convo_id)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1340,22 +1430,28 @@ async def _route_appserver_event(
     
     if label_lower in {"codex/event/token_count", "thread/tokenusage/updated"} and isinstance(payload, dict):
         total = None
+        input_tokens = None
+        cached_input_tokens = None
         context_window = None
         
-        # Handle codex/event/token_count format: { info: { total_token_usage: {..., total_tokens}, model_context_window } }
+        # Handle codex/event/token_count format: { info: { total_token_usage: {...}, model_context_window } }
         if isinstance(payload.get("info"), dict):
             info = payload["info"]
             usage = info.get("total_token_usage") or {}
             if isinstance(usage, dict):
                 total = usage.get("total_tokens")
+                input_tokens = usage.get("input_tokens")
+                cached_input_tokens = usage.get("cached_input_tokens")
             context_window = info.get("model_context_window")
         
-        # Handle thread/tokenUsage/updated format: { tokenUsage: { total: {totalTokens}, modelContextWindow } }
+        # Handle thread/tokenUsage/updated format: { tokenUsage: { total: {totalTokens, inputTokens, cachedInputTokens}, modelContextWindow } }
         if total is None and isinstance(payload.get("tokenUsage"), dict):
             token_usage = payload["tokenUsage"]
             total_breakdown = token_usage.get("total") or {}
             if isinstance(total_breakdown, dict):
                 total = total_breakdown.get("totalTokens") or total_breakdown.get("total_tokens")
+                input_tokens = total_breakdown.get("inputTokens") or total_breakdown.get("input_tokens")
+                cached_input_tokens = total_breakdown.get("cachedInputTokens") or total_breakdown.get("cached_input_tokens")
             context_window = token_usage.get("modelContextWindow") or token_usage.get("model_context_window")
         
         # Fallback to direct fields
@@ -1367,6 +1463,15 @@ async def _route_appserver_event(
         if isinstance(total, (int, float)):
             total_int = int(total)
             event = {"type": "token_count", "total": total_int}
+            
+            # Calculate active context: input_tokens - cached_input_tokens
+            # This is what actually counts against the context window
+            if isinstance(input_tokens, (int, float)) and isinstance(cached_input_tokens, (int, float)):
+                active_context = int(input_tokens) - int(cached_input_tokens)
+                event["active_context"] = max(0, active_context)
+                event["input_tokens"] = int(input_tokens)
+                event["cached_input_tokens"] = int(cached_input_tokens)
+            
             if isinstance(context_window, (int, float)):
                 context_window_int = int(context_window)
                 event["context_window"] = context_window_int
@@ -1375,10 +1480,34 @@ async def _route_appserver_event(
                     await _append_transcript_entry(convo_id, {
                         "role": "token_usage",
                         "total": total_int,
+                        "active_context": event.get("active_context"),
+                        "input_tokens": event.get("input_tokens"),
+                        "cached_input_tokens": event.get("cached_input_tokens"),
                         "context_window": context_window_int,
                         "event": label_lower,
                     })
             events.append(event)
+        return events
+
+    # Context compacted event - agent dropped some history to fit context window
+    if label_lower in {"thread/compacted", "context_compacted", "codex/event/context_compacted"} and isinstance(payload, dict):
+        thread_id_compact = payload.get("threadId") or payload.get("thread_id") or thread_id
+        turn_id_compact = payload.get("turnId") or payload.get("turn_id") or turn_id
+        # [Transcript] Record compaction event
+        if convo_id:
+            await _append_transcript_entry(convo_id, {
+                "role": "context_compacted",
+                "thread_id": thread_id_compact,
+                "turn_id": turn_id_compact,
+                "event": label_lower,
+            })
+        # [Frontend] Notify user that context was compacted
+        events.append({
+            "type": "context_compacted",
+            "thread_id": thread_id_compact,
+            "turn_id": turn_id_compact,
+        })
+        events.append({"type": "activity", "label": "context compacted", "active": True})
         return events
 
     # -------------------------------------------------------------------------
@@ -2316,11 +2445,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                 Link(rel="icon", type="image/svg+xml", href=_asset(CODEX_AGENT_ICON_PATH)),
                 Link(rel="stylesheet", href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap"),
                 Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"),
-                Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.min.css"),
+                Link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"),
                 Link(rel="stylesheet", href=_asset("/static/vendor/tribute.css")),
                 Link(rel="stylesheet", href=_asset("/static/codex_agent.css")),
                 Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.min.js", defer=True),
+                Script(src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"),
                 Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
                 Script(src=_asset("/static/vendor/socket.io/socket.io.min.js")),
                 Script(src=_asset("/static/vendor/tribute.min.js")),
@@ -2542,6 +2671,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 Label(
                                     Span("Render Markdown"),
                                     Input(type="checkbox", id="settings-markdown", checked=True),
+                                    cls="settings-checkbox-row"
+                                ),
+                                Label(
+                                    Span("Use xterm.js (terminal)"),
+                                    Input(type="checkbox", id="settings-xterm", checked=True),
                                     cls="settings-checkbox-row"
                                 ),
                                 cls="settings-body"
@@ -3208,6 +3342,42 @@ async def api_mcp_agent_pty_status():
     return {"running": False, "shell_id": shell_id}
 
 
+@app.post("/api/mcp/agent-pty/exec")
+async def api_mcp_agent_pty_exec(payload: Dict[str, Any] = Body(...)):
+    """Execute a command in the agent-owned per-conversation PTY via MCP subprocess (stdio)."""
+    command = payload.get("command", "")
+    if not isinstance(command, str) or not command.strip():
+        raise HTTPException(status_code=400, detail="No command provided")
+    async with _config_lock:
+        cfg = _load_appserver_config()
+    convo_id = cfg.get("conversation_id")
+    if not isinstance(convo_id, str) or not convo_id:
+        raise HTTPException(status_code=409, detail="No active conversation")
+    # Ensure MCP service is running.
+    await _get_or_start_mcp_shell()
+    # For now, we call the MCP server by importing and using its FastMCP tool impl in-process.
+    # This keeps wiring simple; we can later route through stdio transport for strict process boundaries.
+    try:
+        import mcp_agent_pty_server as mcp_srv  # type: ignore
+        result = await mcp_srv.pty_exec(conversation_id=convo_id, cmd=command)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"mcp exec failed: {exc}")
+    return {"ok": True, **(result if isinstance(result, dict) else {"result": result})}
+
+
+async def _emit_shell_events_from_agent_block(conversation_id: str, block: Dict[str, Any]) -> None:
+    """Bridge agent PTY blocks into the existing shell_* frontend event stream."""
+    global _agent_pty_exec_seq
+    _agent_pty_exec_seq += 1
+    call_id = f"agentpty_{_agent_pty_exec_seq}"
+    cmd = block.get("cmd") or ""
+    cwd = block.get("cwd")
+    await _broadcast_appserver_ui({"type": "shell_begin", "id": call_id, "command": cmd, "cwd": cwd, "stream": "stdout"})
+    # No deltas here; those are streamed via agent_block_delta. shell_end still helps unify UI handling.
+    exit_code = block.get("exit_code") if isinstance(block.get("exit_code"), int) else 0
+    await _broadcast_appserver_ui({"type": "shell_end", "id": call_id, "exitCode": exit_code, "stdout": "", "stderr": ""})
+
+
 @app.post("/api/appserver/rpc")
 async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
     print(f"[DEBUG] /api/appserver/rpc received: {payload}")
@@ -3563,6 +3733,139 @@ async def appserver_ws(websocket: WebSocket):
                 _appserver_ws_clients_ui.remove(websocket)
             if websocket in _appserver_ws_clients_raw:
                 _appserver_ws_clients_raw.remove(websocket)
+
+
+@app.websocket("/ws/pty/{conversation_id}")
+async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
+    """Raw bidirectional PTY WebSocket - streams PTY output and accepts stdin input."""
+    await websocket.accept()
+    
+    # Import MCP server module for PTY access
+    try:
+        import mcp_agent_pty_server as mcp_srv
+    except ImportError:
+        await websocket.close(code=1011, reason="MCP server not available")
+        return
+    
+    # Get or create conversation state and ensure shell is running
+    state = mcp_srv._state(conversation_id)
+    try:
+        await state.ensure_shell()
+    except Exception as e:
+        await websocket.close(code=1011, reason=f"Failed to start PTY: {e}")
+        return
+    
+    # Create a queue for this connection
+    output_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    ws_closed = False
+    
+    async def chunk_callback(chunk: str) -> None:
+        """Callback to receive raw PTY chunks."""
+        if not ws_closed:
+            try:
+                output_queue.put_nowait(chunk)
+            except asyncio.QueueFull:
+                pass
+    
+    # Register callback for raw chunks
+    state.add_raw_chunk_callback(chunk_callback)
+    
+    async def send_output():
+        """Send PTY output to WebSocket."""
+        nonlocal ws_closed
+        try:
+            while not ws_closed:
+                chunk = await output_queue.get()
+                try:
+                    await websocket.send_text(chunk)
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+    
+    async def receive_input():
+        """Receive stdin from WebSocket and write to PTY."""
+        nonlocal ws_closed
+        try:
+            mgr = await get_framework_shell_manager()
+            while True:
+                try:
+                    data = await websocket.receive_text()
+                    if state.shell_id:
+                        await mgr.write_to_pty(state.shell_id, data)
+                except WebSocketDisconnect:
+                    break
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            ws_closed = True
+    
+    send_task = asyncio.create_task(send_output())
+    recv_task = asyncio.create_task(receive_input())
+    
+    try:
+        await asyncio.gather(send_task, recv_task, return_exceptions=True)
+    finally:
+        ws_closed = True
+        send_task.cancel()
+        recv_task.cancel()
+        state.remove_raw_chunk_callback(chunk_callback)
+
+
+@app.post("/api/pty/stdin")
+async def api_pty_stdin(payload: Dict[str, Any] = Body(...)):
+    """Send stdin to the PTY (for non-WebSocket clients)."""
+    data = payload.get("data", "")
+    if not isinstance(data, str):
+        raise HTTPException(status_code=400, detail="data must be a string")
+    
+    async with _config_lock:
+        cfg = _load_appserver_config()
+    convo_id = cfg.get("conversation_id")
+    if not convo_id:
+        raise HTTPException(status_code=409, detail="No active conversation")
+    
+    try:
+        import mcp_agent_pty_server as mcp_srv
+        state = mcp_srv._state(convo_id)
+        if not state.shell_id:
+            raise HTTPException(status_code=409, detail="No PTY running")
+        mgr = await get_framework_shell_manager()
+        await mgr.write_to_pty(state.shell_id, data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write stdin: {e}")
+    
+    return {"ok": True}
+
+
+@app.get("/api/pty/status")
+async def api_pty_status():
+    """Get PTY status including whether a command is running."""
+    async with _config_lock:
+        cfg = _load_appserver_config()
+    convo_id = cfg.get("conversation_id")
+    if not convo_id:
+        return {"running": False, "command_active": False}
+    
+    command_active = _pty_command_running.get(convo_id, False)
+    
+    try:
+        import mcp_agent_pty_server as mcp_srv
+        state = mcp_srv._state(convo_id)
+        has_shell = state.shell_id is not None
+        has_active_block = state._active is not None
+    except Exception:
+        has_shell = False
+        has_active_block = False
+    
+    return {
+        "running": has_shell,
+        "command_active": has_active_block or command_active,
+        "conversation_id": convo_id,
+    }
+
 
 # --- Startup ---
 def parse_args() -> argparse.Namespace:

@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const startBtn = document.getElementById('agent-start');
   const stopBtn = document.getElementById('agent-stop');
   const promptEl = document.getElementById('agent-prompt');
+  const footerEl = document.querySelector('.composer');
   const footerTerminalToggleEl = document.getElementById('footer-terminal-toggle');
   const sendBtn = document.getElementById('agent-send');
   const interruptBtn = document.getElementById('turn-interrupt');
@@ -39,6 +40,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsLabelEl = document.getElementById('settings-label');
   const settingsCommandLinesEl = document.getElementById('settings-command-lines');
   const settingsMarkdownEl = document.getElementById('settings-markdown');
+  const settingsXtermEl = document.getElementById('settings-xterm');
   const markdownToggleEl = document.getElementById('markdown-toggle');
   const footerApprovalValue = document.getElementById('footer-approval-value');
   const footerApprovalToggle = document.getElementById('footer-approval-toggle');
@@ -103,6 +105,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let rpcId = 1;
   let modelList = []; // Cached model list with supportedReasoningEfforts
   let markdownEnabled = true; // Toggle for markdown rendering
+  let useXterm = true; // Toggle for xterm.js vs text box rendering
+  let commandRunning = false; // Whether a PTY command is currently running
+  let ptyWebSocket = null; // Raw PTY WebSocket connection
   const pending = new Map();
 
   // Detect mobile for input behavior
@@ -143,7 +148,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (promptEl) {
       promptEl.setAttribute(
         'data-placeholder',
-        terminalMode ? 'Command… (Enter to run)' : 'Message to Codex… (@ to mention files, Shift+Enter for newline)'
+        terminalMode ? 'Command… (Enter to run)' : '@ to mention files'
       );
     }
     if (footerTerminalToggleEl) {
@@ -160,6 +165,26 @@ document.addEventListener('DOMContentLoaded', () => {
     markdownEnabled = enabled;
     if (markdownToggleEl) markdownToggleEl.checked = enabled;
     if (settingsMarkdownEl) settingsMarkdownEl.checked = enabled;
+  }
+
+  function isXtermEnabled() {
+    return useXterm;
+  }
+
+  function setXtermEnabled(enabled) {
+    useXterm = enabled;
+    if (settingsXtermEl) settingsXtermEl.checked = enabled;
+  }
+
+  function setCommandRunning(running) {
+    commandRunning = running;
+    // Visual indicator: composer background goes black when stdin is active
+    if (promptEl) {
+      promptEl.classList.toggle('stdin-mode', running && terminalMode);
+    }
+    if (footerEl) {
+      footerEl.classList.toggle('stdin-mode', running && terminalMode);
+    }
   }
 
   // Strip OpenAI citation markers like 'citeturn1file0L11-L26'
@@ -504,6 +529,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsLabelEl) settingsLabelEl.value = conversationSettings?.label || '';
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = conversationSettings?.commandOutputLines || '20';
       if (settingsMarkdownEl) settingsMarkdownEl.checked = conversationSettings?.markdown !== false;
+      if (settingsXtermEl) settingsXtermEl.checked = conversationSettings?.useXterm !== false;
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || conversationSettings?.rolloutId || '';
     }
     if (settingsRolloutRowEl) {
@@ -1187,6 +1213,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!items || !items.length || !timelineEl) return;
     const fragment = document.createDocumentFragment();
     const truncateLines = conversationSettings?.commandOutputLines || 20;
+    const pendingAgentPtyTerms = [];
+    const agentPtyByBlock = new Map(); // blockId -> { row, termEl, cmd, buf }
     items.forEach((entry) => {
       if (!entry || !entry.role) return;
       if (entry.role === 'reasoning') {
@@ -1321,7 +1349,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (Number.isFinite(entry.context_window)) {
           contextWindow = Number(entry.context_window);
-          updateContextRemaining(entry.total, entry.context_window);
+          // Use active_context for percentage if available
+          const contextUsed = Number.isFinite(entry.active_context) ? entry.active_context : entry.total;
+          updateContextRemaining(contextUsed, entry.context_window);
         }
         // Don't render token_usage as a visible row
         return;
@@ -1332,6 +1362,23 @@ document.addEventListener('DOMContentLoaded', () => {
           setStatusDot(entry.status);
         }
         // Don't render status as a visible row
+        return;
+      }
+      // Context compacted entries
+      if (entry.role === 'context_compacted') {
+        const row = document.createElement('div');
+        row.className = 'timeline-row system';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = 'context compacted';
+        const body = document.createElement('div');
+        body.className = 'body';
+        const msg = document.createElement('div');
+        msg.className = 'system-message';
+        msg.textContent = 'Context was compacted to fit within the model\'s context window.';
+        body.appendChild(msg);
+        row.append(meta, body);
+        fragment.appendChild(row);
         return;
       }
       // Shell command entries
@@ -1382,6 +1429,95 @@ document.addEventListener('DOMContentLoaded', () => {
         setStatusDot(exitCode === 0 ? 'success' : 'error');
         return;
       }
+      // Agent PTY block entries (replay)
+      if (entry.role === 'agent_pty') {
+        const eventType = entry.event || entry.type;
+        const block = entry.block || {};
+        const blockId = entry.block_id || block.block_id || entry.blockId || 'agent';
+        if (eventType === 'agent_block_begin') {
+          const cmd = block.cmd || '';
+          const row = document.createElement('div');
+          row.className = 'timeline-row command-result terminal-card';
+          row.dataset.agentBlockId = blockId;
+
+          const body = document.createElement('div');
+          body.className = 'body';
+
+          const cmdRibbon = document.createElement('div');
+          cmdRibbon.className = 'command-ribbon';
+          cmdRibbon.textContent = cmd ? `$ ${cmd}` : '';
+          body.appendChild(cmdRibbon);
+
+          const termEl = document.createElement('div');
+          termEl.className = 'command-output';
+          body.appendChild(termEl);
+
+          row.appendChild(body);
+          fragment.appendChild(row);
+          // Don't create xterm yet - element not in DOM. Will be created in RAF callback.
+          const rec = { row, termEl, cmdRibbon, term: null, cmd, buf: '', text: '' };
+          agentPtyByBlock.set(blockId, rec);
+          // Also register in global map so live handlers don't duplicate
+          agentBlockRows.set(blockId, rec);
+          pendingAgentPtyTerms.push(rec);
+          return;
+        }
+        if (eventType === 'agent_block_delta') {
+          const delta = entry.delta || '';
+          if (!delta) return;
+          // Check global map first (from previous replay or live)
+          let rec = agentPtyByBlock.get(blockId) || agentBlockRows.get(blockId);
+          if (!rec) {
+            // If we got deltas without a begin (paging/replay edge), create a minimal row.
+            const row = document.createElement('div');
+            row.className = 'timeline-row command-result terminal-card';
+            row.dataset.agentBlockId = blockId;
+
+            const body = document.createElement('div');
+            body.className = 'body';
+
+            const cmdRibbon = document.createElement('div');
+            cmdRibbon.className = 'command-ribbon';
+            cmdRibbon.textContent = '';
+            body.appendChild(cmdRibbon);
+
+            const termEl = document.createElement('div');
+            termEl.className = 'command-output';
+            body.appendChild(termEl);
+
+            row.appendChild(body);
+            fragment.appendChild(row);
+            // Don't create xterm yet - element not in DOM
+            rec = { row, termEl, cmdRibbon, term: null, cmd: '', buf: '', text: '' };
+            agentPtyByBlock.set(blockId, rec);
+            agentBlockRows.set(blockId, rec);
+            pendingAgentPtyTerms.push(rec);
+          }
+          rec.buf += delta;
+          return;
+        }
+        if (eventType === 'agent_block_end') {
+          // Footer + exit code (optional)
+          const rec = agentPtyByBlock.get(blockId) || agentBlockRows.get(blockId);
+          if (rec && !rec.cmd && (block.cmd || '')) {
+            rec.cmd = block.cmd || '';
+            // Update ribbon if cmd was set from end event
+            if (rec.cmdRibbon) {
+              rec.cmdRibbon.textContent = `$ ${rec.cmd}`;
+            }
+          }
+          const exitCode = block.exit_code ?? block.exitCode;
+          if (rec && exitCode !== undefined && exitCode !== null && exitCode !== 0) {
+            const footer = document.createElement('div');
+            footer.className = 'command-footer';
+            footer.textContent = `exit ${exitCode}`;
+            rec.row.querySelector('.body')?.appendChild(footer);
+          }
+          return;
+        }
+        // Unknown agent_pty event: skip rendering rather than showing noisy role labels.
+        return;
+      }
       // Error entries
       if (entry.role === 'error') {
         const { row, body } = buildRow('error', 'error');
@@ -1422,6 +1558,34 @@ document.addEventListener('DOMContentLoaded', () => {
       timelineEl.insertBefore(fragment, insertBefore);
     } else {
       timelineEl.appendChild(fragment);
+    }
+
+    // Initialize content after rows are in DOM (xterm needs DOM presence)
+    if (pendingAgentPtyTerms.length) {
+      requestAnimationFrame(() => {
+        pendingAgentPtyTerms.forEach((rec) => {
+          if (useXterm) {
+            try {
+              // Create xterm now that element is in DOM
+              if (!rec.term) {
+                const lineCount = (rec.buf || '').split('\n').length;
+                const rows = Math.min(Math.max(lineCount, 3), 30);
+                rec.term = createXterm(rec.termEl, rows);
+              }
+              if (rec.buf && rec.term) {
+                const normalized = rec.buf.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
+                rec.term.write(normalized);
+              }
+            } catch (e) {
+              // Fallback to text
+              rec.termEl.textContent = rec.buf || '';
+            }
+          } else {
+            // Text box fallback
+            rec.termEl.textContent = rec.buf || '';
+          }
+        });
+      });
     }
     measureRowHeight();
     updateSpacerHeights();
@@ -1605,16 +1769,17 @@ document.addEventListener('DOMContentLoaded', () => {
     lastEventType = 'tool';
   }
 
-  function createXterm(container) {
+  function createXterm(container, rows) {
     if (typeof Terminal === 'undefined') return null;
     const term = new Terminal({
-      convertEol: true,
+      convertEol: false,
       cursorBlink: false,
       disableStdin: true,
       fontFamily: 'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
       fontSize: 12,
-      scrollback: 3000,
-      theme: { background: '#0c0f15', foreground: '#b8c7d9' },
+      rows: rows || 10,
+      scrollback: 5000,
+      theme: { background: '#000000', foreground: '#c9d1d9' },
     });
     term.open(container);
     return term;
@@ -1646,7 +1811,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
       row.appendChild(body);
       insertRow(row);
-      const term = createXterm(termEl);
+      // Only create xterm if setting enabled
+      const term = useXterm ? createXterm(termEl) : null;
       entry = { row, cmdRibbon, term, termEl, text: '' };
       agentBlockRows.set(key, entry);
     }
@@ -1657,19 +1823,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const block = evt.block || {};
     const blockId = evt.block_id || block.block_id || evt.blockId || 'agent';
     const cmd = block.cmd || '';
-    const cwd = block.cwd || '';
     const label = cmd ? `$ ${cmd}` : 'agent pty';
     const entry = getAgentBlockRow(blockId, label);
-    let ribbon = `[agent] ${cmd ? `$ ${cmd}` : 'pty'}`;
-    if (cwd) ribbon += `\ncwd: ${cwd}`;
-    entry.cmdRibbon.textContent = ribbon;
+    // Show command in styled ribbon (white on gray), not inside xterm
+    entry.cmdRibbon.textContent = cmd ? `$ ${cmd}` : '';
     entry.text = '';
     if (entry.term) {
       entry.term.reset();
-      if (cmd) entry.term.writeln(`$ ${cmd}`);
     }
     lastEventType = 'shell';
     setActivity('agent pty', true);
+    setCommandRunning(true);
     maybeAutoScroll();
   }
 
@@ -1679,10 +1843,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const delta = evt.delta || '';
     if (!delta) return;
     entry.text += delta;
-    if (entry.term) {
-      entry.term.write(delta.replace(/\n/g, '\r\n'));
+    if (useXterm && entry.term) {
+      const normalized = delta.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
+      entry.term.write(normalized);
     } else {
-      // Fallback: append text if xterm isn't available
+      // Fallback: append text if xterm isn't available or disabled
       entry.termEl.textContent = entry.text;
     }
     lastEventType = 'shell';
@@ -1705,6 +1870,7 @@ document.addEventListener('DOMContentLoaded', () => {
       setStatusDot('success');
     }
     setActivity('idle', false);
+    setCommandRunning(false);
     lastEventType = 'shell';
     maybeAutoScroll();
     // keep row in map for later deltas (should not happen) but don't delete yet
@@ -1969,6 +2135,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     lastEventType = 'warning';
+    maybeAutoScroll();
+  }
+
+  function renderContextCompactedCard() {
+    clearPlaceholder();
+    const { row, body } = createRow('system', 'context compacted');
+    const msg = document.createElement('div');
+    msg.className = 'system-message';
+    msg.textContent = 'Context was compacted to fit within the model\'s context window. Some earlier conversation history may have been summarized or dropped.';
+    body.appendChild(msg);
+    lastEventType = 'system';
     maybeAutoScroll();
   }
 
@@ -2298,6 +2475,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || '20', 10);
     const mdEnabled = settingsMarkdownEl?.checked !== false;
+    const xtermEnabled = settingsXtermEl?.checked !== false;
     const settings = {
       cwd,
       approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
@@ -2308,9 +2486,12 @@ document.addEventListener('DOMContentLoaded', () => {
       label: settingsLabelEl?.value?.trim() || null,
       commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
       markdown: mdEnabled,
+      useXterm: xtermEnabled,
     };
     // Update local markdown state
     setMarkdownEnabled(mdEnabled);
+    // Update xterm mode
+    setXtermEnabled(xtermEnabled);
     const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
     if (isNewConversation) {
       const meta = await postJson('/api/appserver/conversations', {});
@@ -2421,6 +2602,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       // Sync markdown toggle from settings
       setMarkdownEnabled(conversationSettings?.markdown !== false);
+      // Sync xterm toggle from settings
+      setXtermEnabled(conversationSettings?.useXterm !== false);
     } catch {
       // Don't touch statusEl here - it's for server status only
     }
@@ -2532,6 +2715,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Now uses streaming - shell_begin/delta/end events handle rendering
   async function sendShellCommand(command) {
     if (!command) return;
+    // Normalize contenteditable/mobile whitespace (NBSP etc) to avoid "command not found" surprises.
+    command = String(command)
+      .replace(/\u00A0/g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+    if (!command) return;
     if (!conversationMeta?.conversation_id) {
       setActivity('save settings first', true);
       return;
@@ -2539,7 +2728,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Activity and row creation handled by shell_begin event from backend
     // Just send the request and let events flow
     try {
-      const resp = await postJson('/api/appserver/shell/exec', { command });
+      const endpoint = terminalMode ? '/api/mcp/agent-pty/exec' : '/api/appserver/shell/exec';
+      const resp = await postJson(endpoint, { command });
       // Response includes callId - shell_end event will finalize the row
       // If error and no shell_end was received, show error
       if (resp.error && !shellRows.has(resp.callId)) {
@@ -2731,8 +2921,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         updateTokens(evt.total);
         if (Number.isFinite(evt.context_window)) {
-          updateContextRemaining(evt.total, evt.context_window);
+          // Use active_context (input - cached) for percentage if available
+          const contextUsed = Number.isFinite(evt.active_context) ? evt.active_context : evt.total;
+          updateContextRemaining(contextUsed, evt.context_window);
         }
+        return;
+      case 'context_compacted':
+        lastEventType = 'system';
+        renderContextCompactedCard();
         return;
       case 'mention_insert':
         insertMention(evt.path || '');
@@ -2935,6 +3131,41 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   promptEl?.addEventListener('keydown', async (evt) => {
+    // When command is running in terminal mode, stream keystrokes directly to PTY
+    if (commandRunning && terminalMode) {
+      evt.preventDefault();
+      let data = '';
+      if (evt.key === 'Enter') {
+        data = '\n';
+      } else if (evt.key === 'Backspace') {
+        data = '\x7f'; // DEL character
+      } else if (evt.key === 'Tab') {
+        data = '\t';
+      } else if (evt.key === 'Escape') {
+        data = '\x1b';
+      } else if (evt.key === 'ArrowUp') {
+        data = '\x1b[A';
+      } else if (evt.key === 'ArrowDown') {
+        data = '\x1b[B';
+      } else if (evt.key === 'ArrowRight') {
+        data = '\x1b[C';
+      } else if (evt.key === 'ArrowLeft') {
+        data = '\x1b[D';
+      } else if (evt.ctrlKey && evt.key.length === 1) {
+        // Ctrl+C, Ctrl+D, etc.
+        const code = evt.key.toUpperCase().charCodeAt(0) - 64;
+        if (code > 0 && code < 32) {
+          data = String.fromCharCode(code);
+        }
+      } else if (evt.key.length === 1) {
+        data = evt.key;
+      }
+      if (data) {
+        await sendPtyStdin(data);
+      }
+      return;
+    }
+    
     if (evt.key === 'Enter' && !evt.shiftKey) {
       if (isMobile && !terminalMode) {
         // On mobile, Enter inserts newline (let default happen)
@@ -2953,8 +3184,29 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Input event - no longer need manual @ detection, Tribute handles it
+  // Send stdin to PTY
+  async function sendPtyStdin(data) {
+    if (ptyWebSocket && ptyWebSocket.readyState === WebSocket.OPEN) {
+      ptyWebSocket.send(data);
+    } else {
+      // Fallback to HTTP POST
+      try {
+        await postJson('/api/pty/stdin', { data });
+      } catch (e) {
+        console.error('Failed to send PTY stdin:', e);
+      }
+    }
+  }
+
   promptEl?.addEventListener('input', () => {
+    // When in stdin mode, send each character as it's typed
+    if (commandRunning && terminalMode) {
+      const text = getPromptText();
+      if (text) {
+        clearPrompt();
+        sendPtyStdin(text);
+      }
+    }
     // Tribute handles @ mentions automatically
   });
 

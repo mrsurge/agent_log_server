@@ -1,0 +1,11 @@
+version: "1"
+shells:
+  mcp_agent_pty:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["mcp", "agent-pty"]
+    command:
+      - python
+      - mcp_agent_pty_server.py
+    labels:
+      app: "mcp-agent-pty"

@@ -1058,6 +1058,18 @@ textarea {
   border-top: 1px solid #202634;
   background: #0f121a;
   padding: 12px;
+  transition: background-color 0.2s ease;
+}
+
+/* Stdin mode - composer becomes black when streaming input to PTY */
+.composer.stdin-mode,
+.footer.stdin-mode .composer {
+  background: #000;
+}
+.composer.stdin-mode .prompt-input,
+.footer.stdin-mode .composer .prompt-input {
+  background: #000;
+  color: #69eea3;
 }
 
 body.terminal-mode #footer-terminal-toggle.pill {
@@ -1240,6 +1252,9 @@ body.terminal-mode #footer-terminal-toggle.pill {
   margin: 0;
   border-radius: 0;
 }
+.command-ribbon:empty {
+  display: none;
+}
 
 .timeline-row.command-result pre.command-output {
   background: #000;
@@ -1258,6 +1273,27 @@ body.terminal-mode #footer-terminal-toggle.pill {
 /* Shell output stderr styling */
 .timeline-row.command-result pre.command-output .shell-stderr {
   color: #f87171;
+}
+
+/* xterm output blocks (agent PTY + future user PTY) */
+.timeline-row.command-result .command-output {
+  background: #000;
+  color: #c9d1d9;
+  padding: 10px 14px;
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: monospace;
+  font-size: 0.85em;
+  min-height: 1.5em;
+}
+/* xterm styling - let it handle its own layout */
+.timeline-row.command-result .command-output .xterm {
+  padding: 4px 8px;
+}
+.timeline-row.command-result .command-output .xterm,
+.timeline-row.command-result .command-output .xterm-viewport,
+.timeline-row.command-result .command-output .xterm-screen {
+  background-color: #000 !important;
 }
 
 .command-footer {
