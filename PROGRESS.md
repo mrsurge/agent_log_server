@@ -9,8 +9,10 @@
 
 ### In Progress
 - Long-running user PTY (dtach-backed) + block capture + wiring terminal-mode input to it (replacing one-off shell exec in terminal mode).
+- Manage MCP agent-pty server as a framework-shells service.
 
 ### Next
+- Ensure MCP agent-pty shell is started automatically and has UI controls/status.
 - Add per-conversation user PTY spawn/attach lifecycle in `server.py`.
 - Implement user block markers + block spool store (same schema as agent blocks).
 - Render user blocks/cards and allow agent to read user blocks (read-only at first).

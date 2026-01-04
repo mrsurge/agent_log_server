@@ -12,7 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const startBtn = document.getElementById('agent-start');
   const stopBtn = document.getElementById('agent-stop');
   const promptEl = document.getElementById('agent-prompt');
-  const terminalToggleBtn = document.getElementById('terminal-toggle');
+  const footerTerminalToggleEl = document.getElementById('footer-terminal-toggle');
   const sendBtn = document.getElementById('agent-send');
   const interruptBtn = document.getElementById('turn-interrupt');
   const counterMessagesEl = document.getElementById('counter-messages');
@@ -69,7 +69,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const rolloutCloseBtn = document.getElementById('rollout-close');
   const rolloutListEl = document.getElementById('rollout-list');
   const mentionPillEl = document.getElementById('mention-pill');
-  const userTerminalEl = document.getElementById('user-terminal');
 
   localStorage.setItem('last_tab', 'codex-agent');
   const mobileParam = new URLSearchParams(window.location.search).get('mobile');
@@ -136,43 +135,20 @@ document.addEventListener('DOMContentLoaded', () => {
   let transcriptLoading = false;
   let estimatedRowHeight = 28;
   let terminalMode = false;
-  let userTerm = null;
-  let userTermActiveShellId = null;
-
-  function ensureUserTerminal() {
-    if (userTerm || !userTerminalEl) return userTerm;
-    if (typeof Terminal === 'undefined') return null;
-    userTerm = new Terminal({
-      convertEol: true,
-      fontFamily: 'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      fontSize: 12,
-      cursorBlink: true,
-      scrollback: 2000,
-      theme: {
-        background: '#0b0e12',
-        foreground: '#d6dde6',
-        cursor: '#d6dde6',
-      },
-    });
-    userTerm.open(userTerminalEl);
-    userTerm.writeln('terminal mode: running one-off commands (scaffolding)');
-    return userTerm;
-  }
 
   function setTerminalMode(enabled) {
     terminalMode = Boolean(enabled);
     document.body.classList.toggle('terminal-mode', terminalMode);
     if (sendBtn) sendBtn.style.display = terminalMode ? 'none' : '';
-    if (terminalMode) ensureUserTerminal();
     if (promptEl) {
       promptEl.setAttribute(
         'data-placeholder',
         terminalMode ? 'Command… (Enter to run)' : 'Message to Codex… (@ to mention files, Shift+Enter for newline)'
       );
     }
-    if (terminalToggleBtn) {
-      terminalToggleBtn.classList.toggle('active', terminalMode);
-      terminalToggleBtn.textContent = terminalMode ? 'Chat' : 'Terminal';
+    if (footerTerminalToggleEl) {
+      footerTerminalToggleEl.classList.toggle('active', terminalMode);
+      footerTerminalToggleEl.textContent = terminalMode ? 'chat' : '>_';
     }
   }
 
@@ -1629,6 +1605,21 @@ document.addEventListener('DOMContentLoaded', () => {
     lastEventType = 'tool';
   }
 
+  function createXterm(container) {
+    if (typeof Terminal === 'undefined') return null;
+    const term = new Terminal({
+      convertEol: true,
+      cursorBlink: false,
+      disableStdin: true,
+      fontFamily: 'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+      fontSize: 12,
+      scrollback: 3000,
+      theme: { background: '#0c0f15', foreground: '#b8c7d9' },
+    });
+    term.open(container);
+    return term;
+  }
+
   // --- Agent PTY block streaming (from MCP sidecar) ---
   const agentBlockRows = new Map();
 
@@ -1638,7 +1629,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!entry) {
       clearPlaceholder();
       const row = document.createElement('div');
-      row.className = 'timeline-row command-result';
+      row.className = 'timeline-row command-result terminal-card';
       row.dataset.agentBlockId = key;
 
       const body = document.createElement('div');
@@ -1649,13 +1640,14 @@ document.addEventListener('DOMContentLoaded', () => {
       cmdRibbon.textContent = label ? `[agent] ${label}` : '[agent]';
       body.appendChild(cmdRibbon);
 
-      const pre = document.createElement('pre');
-      pre.className = 'command-output';
-      body.appendChild(pre);
+      const termEl = document.createElement('div');
+      termEl.className = 'command-output';
+      body.appendChild(termEl);
 
       row.appendChild(body);
       insertRow(row);
-      entry = { row, cmdRibbon, pre };
+      const term = createXterm(termEl);
+      entry = { row, cmdRibbon, term, termEl, text: '' };
       agentBlockRows.set(key, entry);
     }
     return entry;
@@ -1671,7 +1663,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let ribbon = `[agent] ${cmd ? `$ ${cmd}` : 'pty'}`;
     if (cwd) ribbon += `\ncwd: ${cwd}`;
     entry.cmdRibbon.textContent = ribbon;
-    entry.pre.textContent = '';
+    entry.text = '';
+    if (entry.term) {
+      entry.term.reset();
+      if (cmd) entry.term.writeln(`$ ${cmd}`);
+    }
     lastEventType = 'shell';
     setActivity('agent pty', true);
     maybeAutoScroll();
@@ -1681,7 +1677,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const blockId = evt.block_id || evt.blockId || 'agent';
     const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
     const delta = evt.delta || '';
-    if (delta) entry.pre.appendChild(document.createTextNode(delta));
+    if (!delta) return;
+    entry.text += delta;
+    if (entry.term) {
+      entry.term.write(delta.replace(/\n/g, '\r\n'));
+    } else {
+      // Fallback: append text if xterm isn't available
+      entry.termEl.textContent = entry.text;
+    }
     lastEventType = 'shell';
     maybeAutoScroll();
   }
@@ -1714,7 +1717,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!entry) {
       clearPlaceholder();
       const row = document.createElement('div');
-      row.className = 'timeline-row command-result';
+      row.className = 'timeline-row command-result terminal-card';
       row.dataset.shellId = id;
       
       const body = document.createElement('div');
@@ -1726,15 +1729,16 @@ document.addEventListener('DOMContentLoaded', () => {
       cmdRibbon.textContent = '$ ...';
       body.appendChild(cmdRibbon);
       
-      // Output area (pre for streaming)
-      const pre = document.createElement('pre');
-      pre.className = 'command-output';
-      body.appendChild(pre);
+      // Output area (xterm container for streaming)
+      const termEl = document.createElement('div');
+      termEl.className = 'command-output';
+      body.appendChild(termEl);
       
       row.appendChild(body);
       insertRow(row);
       
-      entry = { row, cmdRibbon, pre, stdout: '', stderr: '' };
+      const term = createXterm(termEl);
+      entry = { row, cmdRibbon, term, termEl, text: '' };
       shellRows.set(id, entry);
     }
     return entry;
@@ -1745,18 +1749,13 @@ document.addEventListener('DOMContentLoaded', () => {
     let cmdText = `$ ${evt.command || ''}`;
     if (evt.cwd) cmdText += `\ncwd: ${evt.cwd}`;
     entry.cmdRibbon.textContent = cmdText;
-    entry.pre.textContent = '';
-    entry.stdout = '';
-    entry.stderr = '';
+    entry.text = '';
+    if (entry.term) {
+      entry.term.reset();
+      entry.term.writeln(`$ ${evt.command || ''}`);
+    }
     lastEventType = 'shell';
     setActivity('executing', true);
-    if (terminalMode) {
-      const t = ensureUserTerminal();
-      if (t) {
-        userTermActiveShellId = evt.id;
-        t.writeln(`$ ${evt.command || ''}`);
-      }
-    }
     maybeAutoScroll();
   }
 
@@ -1764,24 +1763,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const entry = shellRows.get(evt.id);
     if (!entry) return;
     const delta = evt.delta || '';
-    const stream = evt.stream || 'stdout';
     if (delta) {
-      if (stream === 'stderr') {
-        entry.stderr += delta;
-        const span = document.createElement('span');
-        span.className = 'shell-stderr';
-        span.textContent = delta;
-        entry.pre.appendChild(span);
+      entry.text += delta;
+      if (entry.term) {
+        entry.term.write(delta.replace(/\n/g, '\r\n'));
       } else {
-        entry.stdout += delta;
-        entry.pre.appendChild(document.createTextNode(delta));
+        entry.termEl.textContent = entry.text;
       }
     }
     lastEventType = 'shell';
-    if (terminalMode && userTermActiveShellId === evt.id) {
-      const t = ensureUserTerminal();
-      if (t && delta) t.write(delta.replace(/\n/g, '\r\n'));
-    }
     maybeAutoScroll();
   }
 
@@ -1796,16 +1786,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const exitCode = evt.exitCode ?? 0;
     
     // If no streaming output was received, show batch result
-    if (!entry.stdout && !entry.stderr && (evt.stdout || evt.stderr)) {
-      entry.pre.textContent = '';
-      if (evt.stdout) {
-        entry.pre.appendChild(document.createTextNode(evt.stdout));
-      }
-      if (evt.stderr) {
-        const span = document.createElement('span');
-        span.className = 'shell-stderr';
-        span.textContent = evt.stderr;
-        entry.pre.appendChild(span);
+    if (!entry.text && (evt.stdout || evt.stderr)) {
+      entry.text = String(evt.stdout || '') + String(evt.stderr || '');
+      if (entry.term) {
+        entry.term.reset();
+        if (evt.command) entry.term.writeln(`$ ${evt.command}`);
+        entry.term.write(entry.text.replace(/\n/g, '\r\n'));
+      } else {
+        entry.termEl.textContent = entry.text;
       }
     }
     
@@ -1822,11 +1810,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setActivity('idle', false);
     lastEventType = 'shell';
     maybeAutoScroll();
-    if (terminalMode && userTermActiveShellId === evt.id) {
-      const t = ensureUserTerminal();
-      if (t) t.writeln(exitCode === 0 ? '\r\n[ok]' : `\r\n[exit ${exitCode}]`);
-      userTermActiveShellId = null;
-    }
     
     // Clean up tracking
     shellRows.delete(evt.id);
@@ -2946,7 +2929,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await dispatchInput(text);
   });
 
-  terminalToggleBtn?.addEventListener('click', () => {
+  footerTerminalToggleEl?.addEventListener('click', () => {
     setTerminalMode(!terminalMode);
     promptEl?.focus();
   });

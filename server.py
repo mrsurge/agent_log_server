@@ -39,6 +39,7 @@ async def _lifespan(app: FastAPI):
         info = await _get_or_start_appserver_shell()
         await _ensure_appserver_reader(info["shell_id"])
         await _ensure_appserver_initialized()
+        await _get_or_start_mcp_shell()
         agent_pty_monitor_task = asyncio.create_task(_agent_pty_monitor_loop(), name="agent-pty-monitor")
     except Exception:
         pass
@@ -83,6 +84,7 @@ _model_list_cache: Optional[List[Dict[str, Any]]] = None
 _model_list_cache_time: float = 0
 _agent_pty_event_tasks: Dict[str, asyncio.Task] = {}
 _agent_pty_event_offsets: Dict[str, int] = {}
+_mcp_shell_id: Optional[str] = None
 DEBUG_MODE = False
 DEBUG_RAW_LOG_PATH: Optional[Path] = None
 CODEX_AGENT_THEME_COLOR = "#0d0f13"
@@ -120,6 +122,7 @@ def _default_appserver_config() -> Dict[str, Any]:
         "active_view": "splash",
         "app_server_command": None,
         "shell_id": None,
+        "mcp_shell_id": None,
     }
 
 
@@ -960,6 +963,59 @@ async def _stop_appserver_shell() -> None:
     _appserver_shell_id = None
     _appserver_initialized = False
 
+
+async def _get_or_start_mcp_shell() -> Dict[str, Any]:
+    global _mcp_shell_id
+    _ensure_framework_shells_secret()
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        if cfg.get("mcp_shell_id"):
+            _mcp_shell_id = cfg["mcp_shell_id"]
+
+    if _mcp_shell_id:
+        mgr = await get_framework_shell_manager()
+        shell = await mgr.get_shell(_mcp_shell_id)
+        if shell and shell.status == "running":
+            return {"shell_id": _mcp_shell_id, "status": "running", "pid": shell.pid}
+
+    mgr = await get_framework_shell_manager()
+    orch = Orchestrator(mgr)
+    cfg = _load_appserver_config()
+    cwd = cfg.get("cwd") or "."
+    spec_path = Path(__file__).resolve().parent / "shellspec" / "mcp_agent_pty.yaml"
+    shell = await orch.start_from_ref(
+        f"{spec_path}#mcp_agent_pty",
+        base_dir=spec_path.parent,
+        ctx={"CWD": cwd},
+        label="mcp:agent-pty",
+        wait_ready=False,
+    )
+    _mcp_shell_id = shell.id
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        cfg["mcp_shell_id"] = shell.id
+        _save_appserver_config(cfg)
+    return {"shell_id": shell.id, "status": "running", "pid": shell.pid}
+
+
+async def _stop_mcp_shell() -> None:
+    global _mcp_shell_id
+    _ensure_framework_shells_secret()
+    if not _mcp_shell_id:
+        cfg = _load_appserver_config()
+        _mcp_shell_id = cfg.get("mcp_shell_id")
+    if not _mcp_shell_id:
+        return
+    mgr = await get_framework_shell_manager()
+    try:
+        await mgr.terminate_shell(_mcp_shell_id, force=True)
+    except Exception:
+        pass
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        cfg["mcp_shell_id"] = None
+        _save_appserver_config(cfg)
+    _mcp_shell_id = None
 
 async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
     if not _appserver_ws_clients_ui:
@@ -2343,7 +2399,6 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 ),
                                 cls="timeline-wrap"
                             ),
-                            Div(id="user-terminal", cls="user-terminal", **{"data-hidden": "true"}),
                             Div(
                                 Span(cls="status-spinner"),
                                 Span("idle", id="status-label", cls="status-text"),
@@ -2356,9 +2411,8 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     id="agent-prompt",
                                     contenteditable="true",
                                     cls="prompt-input",
-                                    **{"data-placeholder": "Message to Codex… (@ to mention files, Shift+Enter for newline)"},
+                                    **{"data-placeholder": "@ to mention files"},
                                 ),
-                                Button("Terminal", id="terminal-toggle", cls="btn"),
                                 Button("Send", id="agent-send", cls="btn primary"),
                                 cls="composer"
                             ),
@@ -2378,8 +2432,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     cls="status-pill footer-cell"
                                 ),
                                 Div(
-                                    Span("Msgs"),
-                                    Span("0", id="counter-messages", cls="pill"),
+                                    Span(">_", id="footer-terminal-toggle", cls="pill"),
                                     cls="status-pill footer-cell"
                                 ),
                                 Div(cls="footer-cell footer-empty"),
@@ -3129,6 +3182,32 @@ async def api_appserver_status():
     return {"running": False, "shell_id": shell_id}
 
 
+@app.post("/api/mcp/agent-pty/start")
+async def api_mcp_agent_pty_start():
+    info = await _get_or_start_mcp_shell()
+    return {"ok": True, **info}
+
+
+@app.post("/api/mcp/agent-pty/stop")
+async def api_mcp_agent_pty_stop():
+    await _stop_mcp_shell()
+    return {"ok": True}
+
+
+@app.get("/api/mcp/agent-pty/status")
+async def api_mcp_agent_pty_status():
+    _ensure_framework_shells_secret()
+    cfg = _load_appserver_config()
+    shell_id = cfg.get("mcp_shell_id")
+    if not shell_id:
+        return {"running": False}
+    mgr = await get_framework_shell_manager()
+    shell = await mgr.get_shell(shell_id)
+    if shell and shell.status == "running":
+        return {"running": True, "shell_id": shell_id, "pid": shell.pid}
+    return {"running": False, "shell_id": shell_id}
+
+
 @app.post("/api/appserver/rpc")
 async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
     print(f"[DEBUG] /api/appserver/rpc received: {payload}")
@@ -3380,9 +3459,8 @@ async def api_appserver_models():
     await _ensure_appserver_initialized()
     response = await _rpc_request("model/list", params={})
     
-    # Extract model list from response
-    result = response.get("result", {})
-    models = result.get("data", [])
+    # _rpc_request already extracts the "result" key, so response is the result directly
+    models = response.get("data", []) if isinstance(response, dict) else []
     if isinstance(models, list):
         _model_list_cache = models
         _model_list_cache_time = time.time()

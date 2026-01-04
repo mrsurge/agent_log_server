@@ -599,7 +599,7 @@ textarea {
 .timeline {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 0;
   font-size: 14px;
 }
 
@@ -615,6 +615,7 @@ textarea {
   background: #12151d;
   overflow-wrap: break-word;
   word-wrap: break-word;
+  border-radius: 0;
 }
 
 .timeline-row:nth-child(even) {
@@ -701,9 +702,22 @@ textarea {
   background: #0c0f15;
   border: 1px solid #1f2533;
   padding: 8px;
-  border-radius: 8px;
+  border-radius: 0;
   overflow-wrap: break-word;
   word-wrap: break-word;
+}
+
+/* Terminal illusion: nothing rounded inside transcript rows */
+.timeline-row * {
+  border-radius: 0 !important;
+}
+
+.terminal-card {
+  background: transparent;
+}
+
+.terminal-card .xterm {
+  padding: 0;
 }
 
 .timeline-row.diff pre {
@@ -1046,23 +1060,9 @@ textarea {
   padding: 12px;
 }
 
-body.terminal-mode #terminal-toggle.btn {
-  border-color: rgba(105, 238, 163, 0.6);
+body.terminal-mode #footer-terminal-toggle.pill {
+  border-color: rgba(105, 238, 163, 0.65);
   box-shadow: 0 0 0 1px rgba(105, 238, 163, 0.15) inset;
-}
-
-.user-terminal {
-  display: none;
-  height: 260px;
-  margin: 12px 0 10px 0;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  overflow: hidden;
-  background: rgba(10, 12, 16, 0.75);
-}
-
-body.terminal-mode .user-terminal {
-  display: block;
 }
 
 .composer textarea,
@@ -1071,6 +1071,15 @@ body.terminal-mode .user-terminal {
 .composer .prompt-input {
   border: none;
   background: transparent;
+}
+
+/* Start compact (1 line) but expand as you type */
+.composer .prompt-input {
+  min-height: 28px;
+  padding: 6px 10px;
+  line-height: 1.3;
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 .mention-token {
