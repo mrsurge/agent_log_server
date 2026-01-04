@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const startBtn = document.getElementById('agent-start');
   const stopBtn = document.getElementById('agent-stop');
   const promptEl = document.getElementById('agent-prompt');
+  const terminalToggleBtn = document.getElementById('terminal-toggle');
   const sendBtn = document.getElementById('agent-send');
   const interruptBtn = document.getElementById('turn-interrupt');
   const counterMessagesEl = document.getElementById('counter-messages');
@@ -68,6 +69,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const rolloutCloseBtn = document.getElementById('rollout-close');
   const rolloutListEl = document.getElementById('rollout-list');
   const mentionPillEl = document.getElementById('mention-pill');
+  const userTerminalEl = document.getElementById('user-terminal');
 
   localStorage.setItem('last_tab', 'codex-agent');
   const mobileParam = new URLSearchParams(window.location.search).get('mobile');
@@ -112,6 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const reasoningRows = new Map();
   const diffRows = new Map();
   const toolRows = new Map();
+  const shellRows = new Map();  // Track streaming shell output rows
   let topSpacerEl = null;
   let bottomSpacerEl = null;
   let placeholderCleared = false;
@@ -132,6 +135,46 @@ document.addEventListener('DOMContentLoaded', () => {
   let transcriptLimit = 120;
   let transcriptLoading = false;
   let estimatedRowHeight = 28;
+  let terminalMode = false;
+  let userTerm = null;
+  let userTermActiveShellId = null;
+
+  function ensureUserTerminal() {
+    if (userTerm || !userTerminalEl) return userTerm;
+    if (typeof Terminal === 'undefined') return null;
+    userTerm = new Terminal({
+      convertEol: true,
+      fontFamily: 'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+      fontSize: 12,
+      cursorBlink: true,
+      scrollback: 2000,
+      theme: {
+        background: '#0b0e12',
+        foreground: '#d6dde6',
+        cursor: '#d6dde6',
+      },
+    });
+    userTerm.open(userTerminalEl);
+    userTerm.writeln('terminal mode: running one-off commands (scaffolding)');
+    return userTerm;
+  }
+
+  function setTerminalMode(enabled) {
+    terminalMode = Boolean(enabled);
+    document.body.classList.toggle('terminal-mode', terminalMode);
+    if (sendBtn) sendBtn.style.display = terminalMode ? 'none' : '';
+    if (terminalMode) ensureUserTerminal();
+    if (promptEl) {
+      promptEl.setAttribute(
+        'data-placeholder',
+        terminalMode ? 'Command… (Enter to run)' : 'Message to Codex… (@ to mention files, Shift+Enter for newline)'
+      );
+    }
+    if (terminalToggleBtn) {
+      terminalToggleBtn.classList.toggle('active', terminalMode);
+      terminalToggleBtn.textContent = terminalMode ? 'Chat' : 'Terminal';
+    }
+  }
 
   function isMarkdownEnabled() {
     return markdownEnabled;
@@ -1093,6 +1136,7 @@ document.addEventListener('DOMContentLoaded', () => {
     reasoningRows.clear();
     diffRows.clear();
     toolRows.clear();
+    shellRows.clear();
     planOverlayEl = null;
     planListEl = null;
     planItems.clear();
@@ -1316,41 +1360,49 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       // Shell command entries
       if (entry.role === 'shell') {
-        // Render command - use 'message' class like live stream does
-        const { row: cmdRow, body: cmdBody } = buildRow('message', 'shell');
-        const cmdText = document.createElement('pre');
-        cmdText.textContent = `$ ${entry.command || ''}`;
-        cmdBody.appendChild(cmdText);
-        fragment.appendChild(cmdRow);
-        
-        // Render output - reuse command-result styling
+        // Match live render: single command-result row with ribbon + output
         const exitCode = entry.exit_code || 0;
-        const { row: outRow, body: outBody } = buildRow('command-result', exitCode === 0 ? 'shell ✓' : 'shell ✗');
-        if (exitCode !== 0) outRow.classList.add('error');
         
-        const output = document.createElement('pre');
-        output.className = 'command-output';
+        const row = document.createElement('div');
+        row.className = 'timeline-row command-result';
         
+        const body = document.createElement('div');
+        body.className = 'body';
+        
+        // Command ribbon
+        const cmdRibbon = document.createElement('div');
+        cmdRibbon.className = 'command-ribbon';
+        cmdRibbon.textContent = `$ ${entry.command || ''}`;
+        body.appendChild(cmdRibbon);
+        
+        // Output
+        const pre = document.createElement('pre');
+        pre.className = 'command-output';
         if (entry.stdout) {
-          const stdoutEl = document.createElement('span');
-          stdoutEl.className = 'shell-stdout';
-          stdoutEl.textContent = entry.stdout;
-          output.appendChild(stdoutEl);
+          pre.appendChild(document.createTextNode(entry.stdout));
         }
         if (entry.stderr) {
           const stderrEl = document.createElement('span');
           stderrEl.className = 'shell-stderr';
           stderrEl.textContent = entry.stderr;
-          output.appendChild(stderrEl);
+          pre.appendChild(stderrEl);
         }
         if (!entry.stdout && !entry.stderr) {
-          output.textContent = '(no output)';
+          pre.textContent = '(no output)';
+        }
+        body.appendChild(pre);
+        
+        // Footer with exit code if non-zero
+        if (exitCode !== 0) {
+          const footer = document.createElement('div');
+          footer.className = 'command-footer';
+          footer.textContent = `exit ${exitCode}`;
+          body.appendChild(footer);
         }
         
-        outBody.appendChild(output);
-        fragment.appendChild(outRow);
+        row.appendChild(body);
+        fragment.appendChild(row);
         
-        // Update status dot
         setStatusDot(exitCode === 0 ? 'success' : 'error');
         return;
       }
@@ -1575,6 +1627,257 @@ document.addEventListener('DOMContentLoaded', () => {
       entry.pre.textContent += `[io] ${parts.join(' ')}\n`;
     }
     lastEventType = 'tool';
+  }
+
+  // --- Agent PTY block streaming (from MCP sidecar) ---
+  const agentBlockRows = new Map();
+
+  function getAgentBlockRow(blockId, label) {
+    const key = blockId || `agent-block:${label || 'agent'}`;
+    let entry = agentBlockRows.get(key);
+    if (!entry) {
+      clearPlaceholder();
+      const row = document.createElement('div');
+      row.className = 'timeline-row command-result';
+      row.dataset.agentBlockId = key;
+
+      const body = document.createElement('div');
+      body.className = 'body';
+
+      const cmdRibbon = document.createElement('div');
+      cmdRibbon.className = 'command-ribbon';
+      cmdRibbon.textContent = label ? `[agent] ${label}` : '[agent]';
+      body.appendChild(cmdRibbon);
+
+      const pre = document.createElement('pre');
+      pre.className = 'command-output';
+      body.appendChild(pre);
+
+      row.appendChild(body);
+      insertRow(row);
+      entry = { row, cmdRibbon, pre };
+      agentBlockRows.set(key, entry);
+    }
+    return entry;
+  }
+
+  function renderAgentBlockBegin(evt) {
+    const block = evt.block || {};
+    const blockId = evt.block_id || block.block_id || evt.blockId || 'agent';
+    const cmd = block.cmd || '';
+    const cwd = block.cwd || '';
+    const label = cmd ? `$ ${cmd}` : 'agent pty';
+    const entry = getAgentBlockRow(blockId, label);
+    let ribbon = `[agent] ${cmd ? `$ ${cmd}` : 'pty'}`;
+    if (cwd) ribbon += `\ncwd: ${cwd}`;
+    entry.cmdRibbon.textContent = ribbon;
+    entry.pre.textContent = '';
+    lastEventType = 'shell';
+    setActivity('agent pty', true);
+    maybeAutoScroll();
+  }
+
+  function renderAgentBlockDelta(evt) {
+    const blockId = evt.block_id || evt.blockId || 'agent';
+    const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
+    const delta = evt.delta || '';
+    if (delta) entry.pre.appendChild(document.createTextNode(delta));
+    lastEventType = 'shell';
+    maybeAutoScroll();
+  }
+
+  function renderAgentBlockEnd(evt) {
+    const block = evt.block || {};
+    const blockId = evt.block_id || block.block_id || evt.blockId || 'agent';
+    const entry = agentBlockRows.get(blockId);
+    if (!entry) return;
+    const exitCode = block.exit_code ?? block.exitCode;
+    if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
+      const footer = document.createElement('div');
+      footer.className = 'command-footer';
+      footer.textContent = `exit ${exitCode}`;
+      entry.row.querySelector('.body').appendChild(footer);
+      setStatusDot('error');
+    } else {
+      setStatusDot('success');
+    }
+    setActivity('idle', false);
+    lastEventType = 'shell';
+    maybeAutoScroll();
+    // keep row in map for later deltas (should not happen) but don't delete yet
+  }
+
+  // --- Shell streaming functions ---
+  // Uses same styling as command-result (renderCommandResult)
+  function getShellRow(id) {
+    let entry = shellRows.get(id);
+    if (!entry) {
+      clearPlaceholder();
+      const row = document.createElement('div');
+      row.className = 'timeline-row command-result';
+      row.dataset.shellId = id;
+      
+      const body = document.createElement('div');
+      body.className = 'body';
+      
+      // Command ribbon (same as renderCommandResult)
+      const cmdRibbon = document.createElement('div');
+      cmdRibbon.className = 'command-ribbon';
+      cmdRibbon.textContent = '$ ...';
+      body.appendChild(cmdRibbon);
+      
+      // Output area (pre for streaming)
+      const pre = document.createElement('pre');
+      pre.className = 'command-output';
+      body.appendChild(pre);
+      
+      row.appendChild(body);
+      insertRow(row);
+      
+      entry = { row, cmdRibbon, pre, stdout: '', stderr: '' };
+      shellRows.set(id, entry);
+    }
+    return entry;
+  }
+
+  function renderShellBegin(evt) {
+    const entry = getShellRow(evt.id);
+    let cmdText = `$ ${evt.command || ''}`;
+    if (evt.cwd) cmdText += `\ncwd: ${evt.cwd}`;
+    entry.cmdRibbon.textContent = cmdText;
+    entry.pre.textContent = '';
+    entry.stdout = '';
+    entry.stderr = '';
+    lastEventType = 'shell';
+    setActivity('executing', true);
+    if (terminalMode) {
+      const t = ensureUserTerminal();
+      if (t) {
+        userTermActiveShellId = evt.id;
+        t.writeln(`$ ${evt.command || ''}`);
+      }
+    }
+    maybeAutoScroll();
+  }
+
+  function renderShellDelta(evt) {
+    const entry = shellRows.get(evt.id);
+    if (!entry) return;
+    const delta = evt.delta || '';
+    const stream = evt.stream || 'stdout';
+    if (delta) {
+      if (stream === 'stderr') {
+        entry.stderr += delta;
+        const span = document.createElement('span');
+        span.className = 'shell-stderr';
+        span.textContent = delta;
+        entry.pre.appendChild(span);
+      } else {
+        entry.stdout += delta;
+        entry.pre.appendChild(document.createTextNode(delta));
+      }
+    }
+    lastEventType = 'shell';
+    if (terminalMode && userTermActiveShellId === evt.id) {
+      const t = ensureUserTerminal();
+      if (t && delta) t.write(delta.replace(/\n/g, '\r\n'));
+    }
+    maybeAutoScroll();
+  }
+
+  function renderShellEnd(evt) {
+    const entry = shellRows.get(evt.id);
+    if (!entry) {
+      // No streaming happened, render batch result
+      renderShellBatchResult(evt);
+      return;
+    }
+    
+    const exitCode = evt.exitCode ?? 0;
+    
+    // If no streaming output was received, show batch result
+    if (!entry.stdout && !entry.stderr && (evt.stdout || evt.stderr)) {
+      entry.pre.textContent = '';
+      if (evt.stdout) {
+        entry.pre.appendChild(document.createTextNode(evt.stdout));
+      }
+      if (evt.stderr) {
+        const span = document.createElement('span');
+        span.className = 'shell-stderr';
+        span.textContent = evt.stderr;
+        entry.pre.appendChild(span);
+      }
+    }
+    
+    // Add footer with exit code (same as renderCommandResult)
+    if (exitCode !== 0) {
+      const footer = document.createElement('div');
+      footer.className = 'command-footer';
+      footer.textContent = `exit ${exitCode}`;
+      entry.row.querySelector('.body').appendChild(footer);
+    }
+    
+    // Update status
+    setStatusDot(exitCode === 0 ? 'success' : 'error');
+    setActivity('idle', false);
+    lastEventType = 'shell';
+    maybeAutoScroll();
+    if (terminalMode && userTermActiveShellId === evt.id) {
+      const t = ensureUserTerminal();
+      if (t) t.writeln(exitCode === 0 ? '\r\n[ok]' : `\r\n[exit ${exitCode}]`);
+      userTermActiveShellId = null;
+    }
+    
+    // Clean up tracking
+    shellRows.delete(evt.id);
+  }
+
+  function renderShellBatchResult(evt) {
+    // Fallback - use same structure as renderCommandResult
+    clearPlaceholder();
+    const row = document.createElement('div');
+    row.className = 'timeline-row command-result';
+    
+    const body = document.createElement('div');
+    body.className = 'body';
+    
+    // Command ribbon
+    const cmdRibbon = document.createElement('div');
+    cmdRibbon.className = 'command-ribbon';
+    cmdRibbon.textContent = `$ ${evt.command || '(shell)'}`;
+    body.appendChild(cmdRibbon);
+    
+    // Output
+    const pre = document.createElement('pre');
+    pre.className = 'command-output';
+    if (evt.stdout) {
+      pre.appendChild(document.createTextNode(evt.stdout));
+    }
+    if (evt.stderr) {
+      const span = document.createElement('span');
+      span.className = 'shell-stderr';
+      span.textContent = evt.stderr;
+      pre.appendChild(span);
+    }
+    if (!evt.stdout && !evt.stderr) {
+      pre.textContent = '(no output)';
+    }
+    body.appendChild(pre);
+    
+    // Footer with exit code
+    const exitCode = evt.exitCode ?? 0;
+    if (exitCode !== 0) {
+      const footer = document.createElement('div');
+      footer.className = 'command-footer';
+      footer.textContent = `exit ${exitCode}`;
+      body.appendChild(footer);
+    }
+    
+    row.appendChild(body);
+    insertRow(row);
+    
+    setStatusDot(exitCode === 0 ? 'success' : 'error');
+    setActivity('idle', false);
   }
 
   // Render a plan card (completed plan from turn) - collapsible
@@ -2243,60 +2546,36 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Direct shell command execution via !command
+  // Now uses streaming - shell_begin/delta/end events handle rendering
   async function sendShellCommand(command) {
     if (!command) return;
     if (!conversationMeta?.conversation_id) {
       setActivity('save settings first', true);
       return;
     }
-    setActivity('executing', true);
-
-    // Add user command to transcript display
-    addMessage('shell', `$ ${command}`);
-
+    // Activity and row creation handled by shell_begin event from backend
+    // Just send the request and let events flow
     try {
       const resp = await postJson('/api/appserver/shell/exec', { command });
-      if (resp.error) {
-        renderShellOutput(command, '', resp.error, 1);
-        setStatusDot('error');
-      } else {
-        renderShellOutput(command, resp.stdout || '', resp.stderr || '', resp.exitCode || 0);
-        setStatusDot(resp.exitCode === 0 ? 'success' : 'error');
+      // Response includes callId - shell_end event will finalize the row
+      // If error and no shell_end was received, show error
+      if (resp.error && !shellRows.has(resp.callId)) {
+        renderShellBatchResult({
+          exitCode: resp.exitCode || 1,
+          stdout: resp.stdout || '',
+          stderr: resp.stderr || resp.error,
+        });
       }
     } catch (err) {
-      renderShellOutput(command, '', String(err), 1);
+      // Network error - show batch result
+      renderShellBatchResult({
+        exitCode: 1,
+        stdout: '',
+        stderr: String(err),
+      });
       setStatusDot('error');
+      setActivity('idle', false);
     }
-    setActivity('idle', false);
-  }
-
-  // Render shell output card - reuse command-result styling
-  function renderShellOutput(command, stdout, stderr, exitCode) {
-    const { row, body } = buildRow('command-result', exitCode === 0 ? 'shell ✓' : 'shell ✗');
-    if (exitCode !== 0) row.classList.add('error');
-    
-    const output = document.createElement('pre');
-    output.className = 'command-output';
-    
-    if (stdout) {
-      const stdoutEl = document.createElement('span');
-      stdoutEl.className = 'shell-stdout';
-      stdoutEl.textContent = stdout;
-      output.appendChild(stdoutEl);
-    }
-    if (stderr) {
-      const stderrEl = document.createElement('span');
-      stderrEl.className = 'shell-stderr';
-      stderrEl.textContent = stderr;
-      output.appendChild(stderrEl);
-    }
-    if (!stdout && !stderr) {
-      output.textContent = '(no output)';
-    }
-    
-    body.appendChild(output);
-    scrollContainer.appendChild(row);
-    row.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }
 
   async function interruptTurn() {
@@ -2434,6 +2713,24 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       case 'tool_interaction':
         renderToolInteraction(evt);
+        return;
+      case 'agent_block_begin':
+        renderAgentBlockBegin(evt);
+        return;
+      case 'agent_block_delta':
+        renderAgentBlockDelta(evt);
+        return;
+      case 'agent_block_end':
+        renderAgentBlockEnd(evt);
+        return;
+      case 'shell_begin':
+        renderShellBegin(evt);
+        return;
+      case 'shell_delta':
+        renderShellDelta(evt);
+        return;
+      case 'shell_end':
+        renderShellEnd(evt);
         return;
       case 'plan_update':
         lastEventType = 'plan';
@@ -2633,7 +2930,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Helper to dispatch message or shell command based on ! prefix
   async function dispatchInput(text) {
-    if (text.startsWith('!')) {
+    if (terminalMode && !text.startsWith('!')) {
+      await sendShellCommand(text.trim());
+    } else if (text.startsWith('!')) {
       await sendShellCommand(text.slice(1).trim());
     } else {
       await sendUserMessage(text);
@@ -2647,9 +2946,14 @@ document.addEventListener('DOMContentLoaded', () => {
     await dispatchInput(text);
   });
 
+  terminalToggleBtn?.addEventListener('click', () => {
+    setTerminalMode(!terminalMode);
+    promptEl?.focus();
+  });
+
   promptEl?.addEventListener('keydown', async (evt) => {
     if (evt.key === 'Enter' && !evt.shiftKey) {
-      if (isMobile) {
+      if (isMobile && !terminalMode) {
         // On mobile, Enter inserts newline (let default happen)
         return;
       }

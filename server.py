@@ -34,13 +34,19 @@ from fasthtml.common import (
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    agent_pty_monitor_task: Optional[asyncio.Task] = None
     try:
         info = await _get_or_start_appserver_shell()
         await _ensure_appserver_reader(info["shell_id"])
         await _ensure_appserver_initialized()
+        agent_pty_monitor_task = asyncio.create_task(_agent_pty_monitor_loop(), name="agent-pty-monitor")
     except Exception:
         pass
     yield
+    if agent_pty_monitor_task:
+        agent_pty_monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await agent_pty_monitor_task
 
 app = FastAPI(lifespan=_lifespan)
 socketio_server = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
@@ -72,8 +78,11 @@ _approval_item_cache: Dict[str, Dict[str, Any]] = {}
 _approval_request_map: Dict[str, str] = {}
 _appserver_rpc_waiters: Dict[str, asyncio.Future] = {}
 _appserver_initialized = False
+_shell_call_ids: Dict[str, Dict[str, Any]] = {}  # Track active shell commands for streaming
 _model_list_cache: Optional[List[Dict[str, Any]]] = None
 _model_list_cache_time: float = 0
+_agent_pty_event_tasks: Dict[str, asyncio.Task] = {}
+_agent_pty_event_offsets: Dict[str, int] = {}
 DEBUG_MODE = False
 DEBUG_RAW_LOG_PATH: Optional[Path] = None
 CODEX_AGENT_THEME_COLOR = "#0d0f13"
@@ -1000,12 +1009,98 @@ async def _broadcast_appserver_raw(message: str) -> None:
             _appserver_ws_clients_raw.remove(ws)
 
 
+def _agent_pty_events_path(conversation_id: str) -> Path:
+    safe_id = _sanitize_conversation_id(conversation_id)
+    return _conversation_dir(safe_id) / "agent_pty" / "events.jsonl"
+
+
+async def _ensure_agent_pty_event_tailer(conversation_id: str) -> None:
+    if not conversation_id:
+        return
+    existing = _agent_pty_event_tasks.get(conversation_id)
+    if existing and not existing.done():
+        return
+
+    async def _tail() -> None:
+        path = _agent_pty_events_path(conversation_id)
+        while True:
+            try:
+                if not path.exists():
+                    await asyncio.sleep(0.5)
+                    continue
+                data = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="replace")
+                # Track byte offsets (best-effort) to avoid rebroadcast loops.
+                raw_bytes = data.encode("utf-8", errors="replace")
+                offset = _agent_pty_event_offsets.get(conversation_id, 0)
+                if offset > len(raw_bytes):
+                    offset = 0
+                tail = raw_bytes[offset:]
+                if not tail:
+                    await asyncio.sleep(0.2)
+                    continue
+                for line in tail.splitlines():
+                    try:
+                        event = json.loads(line.decode("utf-8", errors="replace"))
+                    except Exception:
+                        continue
+                    # Forward as-is to the UI websocket stream.
+                    if isinstance(event, dict):
+                        await _broadcast_appserver_ui(event)
+                _agent_pty_event_offsets[conversation_id] = len(raw_bytes)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(0.5)
+
+    _agent_pty_event_tasks[conversation_id] = asyncio.create_task(_tail(), name=f"agent-pty-events:{conversation_id}")
+
+
+async def _agent_pty_monitor_loop() -> None:
+    while True:
+        try:
+            async with _config_lock:
+                cfg = _load_appserver_config()
+            convo_id = cfg.get("conversation_id")
+            if isinstance(convo_id, str) and convo_id:
+                await _ensure_agent_pty_event_tailer(convo_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+
+# =============================================================================
+# EVENT ROUTER
+# =============================================================================
+# This router processes events from codex-app-server and:
+#   1. Emits frontend events via WebSocket for live UI updates (streaming deltas)
+#   2. Writes to transcript SSOT for replay/persistence
+#
+# Event flow:
+#   codex-app-server stdout -> _appserver_reader -> _route_appserver_event
+#                                                         |
+#                                     +-------------------+-------------------+
+#                                     |                                       |
+#                            [Frontend Events]                      [Transcript SSOT]
+#                            via _broadcast_appserver_ui()          via _append_transcript_entry()
+#                            - Streaming deltas                     - Complete items for replay
+#                            - Activity indicators                  - User messages, assistant msgs
+#                            - Approvals                            - Commands, diffs, plans
+# =============================================================================
+
 async def _route_appserver_event(
     label: Optional[str],
     payload: Any,
     conversation_id: Optional[str],
     request_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
+    """
+    Route codex-app-server events to frontend (streaming) and transcript (replay).
+    
+    Returns a list of events to broadcast to the frontend via WebSocket.
+    Also writes completed items to the transcript SSOT for replay.
+    """
     events: List[Dict[str, Any]] = []
     if not label:
         return events
@@ -1032,7 +1127,12 @@ async def _route_appserver_event(
 
     label_lower = label.lower()
 
-    # Approvals
+    # -------------------------------------------------------------------------
+    # SECTION: Approval Events (Frontend only - user interaction required)
+    # -------------------------------------------------------------------------
+    # These events require user interaction and are only sent to frontend.
+    # Approval decisions are recorded to transcript separately via /approval_record.
+    
     if "commandexecution/requestapproval" in label_lower:
         if isinstance(payload, dict):
             item_id = payload.get("itemId") or payload.get("item_id") or payload.get("id")
@@ -1095,8 +1195,14 @@ async def _route_appserver_event(
             events.append({"type": "activity", "label": "approval", "active": True})
         return events
 
-    # Thread/turn activity
+    # -------------------------------------------------------------------------
+    # SECTION: Turn Lifecycle Events (Frontend + Transcript)
+    # -------------------------------------------------------------------------
+    # Turn start/complete events update UI activity state and write status to
+    # transcript for replay. Plans are accumulated during turn and written on complete.
+    
     if label_lower == "thread/started":
+        # [Frontend] Activity indicator only
         events.append({"type": "activity", "label": "thread started", "active": True})
         return events
 
@@ -1151,20 +1257,31 @@ async def _route_appserver_event(
         events.append({"type": "activity", "label": "turn started" if label_lower == "turn/started" else "idle", "active": label_lower == "turn/started"})
         return events
 
-    # Unified diff
+    # -------------------------------------------------------------------------
+    # SECTION: Diff Events (Frontend + Transcript for Replay)
+    # -------------------------------------------------------------------------
+    # Unified diffs are emitted to frontend for display and written to transcript
+    # for replay. We dedupe diffs to avoid showing the same change multiple times.
+    
     if label_lower == "turn/diff/updated" and isinstance(payload, dict):
         diff, path = _extract_diff_with_path(payload)
         if diff:
+            # [Frontend] diff event + [Transcript] for replay
             await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item_id, events, path=path)
         return events
 
     if label_lower == "codex/event/turn_diff" and isinstance(payload, dict):
         diff, path = _extract_diff_with_path(payload)
         if diff:
+            # [Frontend] diff event + [Transcript] for replay
             await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item_id, events, path=path)
         return events
 
-    # Token counts
+    # -------------------------------------------------------------------------
+    # SECTION: Token Usage (Frontend + Transcript for Replay)
+    # -------------------------------------------------------------------------
+    # Token counts update the context window display and are saved for replay.
+    
     if label_lower in {"codex/event/token_count", "thread/tokenusage/updated"} and isinstance(payload, dict):
         total = None
         context_window = None
@@ -1208,18 +1325,21 @@ async def _route_appserver_event(
             events.append(event)
         return events
 
-    # Error events - capture and display
+    # -------------------------------------------------------------------------
+    # SECTION: Error/Warning Events (Frontend + Transcript for Replay)
+    # -------------------------------------------------------------------------
+    
     if label_lower in {"codex/event/error", "error"} and isinstance(payload, dict):
         error_obj = payload.get("error") or payload
         message = error_obj.get("message") or str(error_obj)
-        # Store to transcript
+        # [Transcript] Store for replay
         if convo_id:
             await _append_transcript_entry(convo_id, {
                 "role": "error",
                 "text": message,
                 "event": label_lower,
             })
-        # Emit to frontend
+        # [Frontend] Error display
         events.append({
             "type": "error",
             "message": message,
@@ -1227,8 +1347,8 @@ async def _route_appserver_event(
         events.append({"type": "activity", "label": "error", "active": False})
         return events
 
-    # Warning events
     if label_lower == "codex/event/warning" and isinstance(payload, dict):
+        # [Frontend only] Warnings not persisted to transcript
         message = payload.get("message") or payload.get("msg", {}).get("message") or ""
         if message:
             events.append({
@@ -1237,7 +1357,11 @@ async def _route_appserver_event(
             })
         return events
 
-    # Suppress noisy events
+    # -------------------------------------------------------------------------
+    # SECTION: Suppressed Events (No action)
+    # -------------------------------------------------------------------------
+    # These events are noisy or redundant - we handle their data elsewhere.
+    
     if label_lower in {
         "codex/event/item_started",
         "codex/event/item_completed",
@@ -1249,22 +1373,26 @@ async def _route_appserver_event(
     }:
         return events
 
-    # Plan update events (codex/event/plan_update - array of steps)
+    # -------------------------------------------------------------------------
+    # SECTION: Plan Events (Frontend streaming + Transcript on turn complete)
+    # -------------------------------------------------------------------------
+    # Plan updates stream to frontend for live overlay. Full plan is written to
+    # transcript on turn/completed for replay.
+    
     if label_lower == "codex/event/plan_update" and isinstance(payload, dict):
         plan_steps = payload.get("plan")
         if isinstance(plan_steps, list):
-            # Replace entire plan state with latest update
             normalized_steps = []
             for step_obj in plan_steps:
                 if isinstance(step_obj, dict):
                     step = step_obj.get("step")
-                    status = step_obj.get("status")  # pending, in_progress, completed
+                    status = step_obj.get("status")
                     if step:
                         normalized_steps.append({
                             "step": step,
                             "status": status or "pending",
                         })
-                        # Emit for live overlay
+                        # [Frontend] Live overlay update
                         events.append({
                             "type": "plan_update",
                             "step": step,
@@ -1273,12 +1401,10 @@ async def _route_appserver_event(
             state["plan_steps"] = normalized_steps
         return events
 
-    # turn/plan/updated - array of plan steps from v2 protocol
-    # Emit plan_update events for live overlay AND accumulate for transcript on turn/completed
     if label_lower == "turn/plan/updated" and isinstance(payload, dict):
+        # [Frontend] Live overlay + accumulate for [Transcript] on turn/completed
         plan_steps = payload.get("plan")
         if isinstance(plan_steps, list):
-            # Replace entire plan state with latest update
             normalized_steps = []
             for step_obj in plan_steps:
                 if isinstance(step_obj, dict):
@@ -1302,11 +1428,19 @@ async def _route_appserver_event(
             state["plan_steps"] = normalized_steps
         return events
 
-    # Item events
+    # -------------------------------------------------------------------------
+    # SECTION: Item Events (Frontend streaming deltas + Transcript on complete)
+    # -------------------------------------------------------------------------
+    # Item lifecycle: item/started -> deltas -> item/completed
+    # - Deltas stream to frontend for live display
+    # - Complete items written to transcript for replay
+    
     if label_lower == "item/started" and isinstance(payload, dict):
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
         item_type = str(item.get("type") or "").lower() if isinstance(item, dict) else ""
+        
         if item_type == "usermessage":
+            # [Transcript] User messages saved immediately
             entry = _extract_item_text(item)
             if entry and convo_id:
                 await _append_transcript_entry(convo_id, {
@@ -1315,16 +1449,21 @@ async def _route_appserver_event(
                     "item_id": item.get("id"),
                     "event": "item/started",
                 })
+            # [Frontend] Display user message
             if entry:
                 events.append({"type": "message", "role": "user", "id": item.get("id"), "text": entry["text"]})
             return events
+            
         if item_type == "reasoning":
+            # Track state for delta accumulation
             state["reason_source"] = state["reason_source"] or "item"
             if item.get("id"):
                 state["reasoning_id"] = item.get("id")
                 _register_item_state(item.get("id"), state)
             return events
+            
         if item_type == "filechange":
+            # Cache diff info for approval - actual diff emitted via turn_diff
             diff, path = _extract_diff_with_path(item)
             if item.get("id"):
                 _approval_item_cache[str(item.get("id"))] = {
@@ -1332,18 +1471,21 @@ async def _route_appserver_event(
                     "changes": item.get("changes"),
                     "path": path,
                 }
-            # Don't emit diff here - wait for turn_diff which has full context
             return events
+            
         if item_type == "commandexecution":
-            # Just cache the command info for later, emit activity
+            # Cache command info, show activity
             if item.get("id"):
                 _approval_item_cache[str(item.get("id"))] = {
                     "command": item.get("command") or item.get("cmd") or item.get("argv"),
                     "cwd": item.get("cwd"),
                 }
+            # [Frontend] Activity indicator
             events.append({"type": "activity", "label": "running command", "active": True})
             return events
+            
         if item_type in {"agentmessage", "assistantmessage", "assistant"}:
+            # Track state for delta accumulation
             state["msg_source"] = state["msg_source"] or "item"
             if item.get("id"):
                 state["assistant_id"] = item.get("id")
@@ -1354,8 +1496,10 @@ async def _route_appserver_event(
     if label_lower == "item/completed" and isinstance(payload, dict):
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
         item_type = str(item.get("type") or "").lower() if isinstance(item, dict) else ""
+        
         if item_type in {"agentmessage", "assistantmessage", "assistant"}:
             entry = _extract_item_text(item)
+            # [Transcript] Save complete assistant message for replay
             if entry and convo_id:
                 await _append_transcript_entry(convo_id, {
                     "role": entry["role"],
@@ -1363,18 +1507,19 @@ async def _route_appserver_event(
                     "item_id": item.get("id"),
                     "event": "item/completed",
                 })
+            # [Frontend] Finalize streaming message
             if state.get("msg_source") in {None, "item"} and state.get("assistant_started"):
                 events.append({"type": "assistant_finalize", "id": item.get("id") or state.get("assistant_id") or "assistant", "text": entry["text"] if entry else item.get("text")})
             events.append({"type": "activity", "label": "idle", "active": False})
             return events
+            
         if item_type == "reasoning":
-            # Extract reasoning text from summary array
             summary = item.get("summary") or item.get("summary_text") or []
             if isinstance(summary, list) and summary:
                 text = " ".join(str(s) for s in summary if s).strip()
             else:
                 text = str(summary).strip() if summary else ""
-            # Store to transcript
+            # [Transcript] Save complete reasoning for replay
             if text and convo_id:
                 await _append_transcript_entry(convo_id, {
                     "role": "reasoning",
@@ -1382,17 +1527,16 @@ async def _route_appserver_event(
                     "item_id": item.get("id"),
                     "event": "item/completed",
                 })
-            # Send finalize event to frontend
+            # [Frontend] Finalize streaming reasoning
             if state.get("reason_source") in {None, "item"} and state.get("reasoning_started"):
                 events.append({"type": "reasoning_finalize", "id": item.get("id") or state.get("reasoning_id") or "reasoning", "text": text})
                 state["reasoning_started"] = False
                 state["reasoning_buffer"] = ""
                 state["reasoning_id"] = None
-            # Don't set idle here - keep spinner going until turn/completed
             return events
+            
         if item_type == "filechange":
-            # Don't emit diff here - wait for turn_diff which has full context
-            # Just cache the data for approval tracking
+            # Cache for approval tracking - diff emitted via turn_diff
             diff, path = _extract_diff_with_path(item)
             if item.get("id") and diff:
                 _approval_item_cache[str(item.get("id"))] = {
@@ -1401,16 +1545,16 @@ async def _route_appserver_event(
                     "path": path,
                 }
             return events
+            
         if item_type == "commandexecution":
             command = item.get("command") or item.get("cmd") or item.get("argv") or ""
             cwd = item.get("cwd") or ""
             output = item.get("aggregatedOutput") or item.get("output") or item.get("stdout") or ""
             exit_code = item.get("exitCode") if item.get("exitCode") is not None else item.get("exit_code")
             duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
-            # Clean up output (remove \r\n -> \n)
             if isinstance(output, str):
                 output = output.replace("\r\n", "\n").replace("\r", "\n")
-            # Record to transcript
+            # [Transcript] Save command result for replay
             if convo_id:
                 await _append_transcript_entry(convo_id, {
                     "role": "command",
@@ -1422,6 +1566,7 @@ async def _route_appserver_event(
                     "item_id": item.get("id"),
                     "event": "item/completed",
                 })
+            # [Frontend] Display command result
             events.append({
                 "type": "command_result",
                 "id": item.get("id"),
@@ -1431,13 +1576,20 @@ async def _route_appserver_event(
                 "exit_code": exit_code,
                 "duration_ms": duration_ms,
             })
-            # Don't set idle here - keep spinner going until turn/completed
             events.append({"type": "activity", "label": "processing", "active": True})
             return events
+            
         return events
 
-    # Agent message deltas (JSON-RPC)
+    # -------------------------------------------------------------------------
+    # SECTION: Streaming Delta Events (Frontend only - not persisted)
+    # -------------------------------------------------------------------------
+    # Delta events stream token-by-token to frontend for live display.
+    # Complete content is persisted on item/completed, not during streaming.
+    
+    # --- Assistant Message Deltas ---
     if label_lower == "item/agentmessage/delta" and isinstance(payload, dict):
+        # [Frontend] Stream text delta
         if state["msg_source"] in {None, "item"}:
             state["msg_source"] = "item"
             item_id = payload.get("itemId") or payload.get("id") or state.get("assistant_id") or "assistant"
@@ -1451,8 +1603,9 @@ async def _route_appserver_event(
                 events.append({"type": "activity", "label": "responding", "active": True})
         return events
 
-    # Reasoning deltas (JSON-RPC)
+    # --- Reasoning Deltas ---
     if label_lower in {"item/reasoning/summarytextdelta", "item/reasoning/textdelta"} and isinstance(payload, dict):
+        # [Frontend] Stream reasoning delta
         if state["reason_source"] in {None, "item"}:
             state["reason_source"] = "item"
             item_id = payload.get("itemId") or payload.get("id") or state.get("reasoning_id") or "reasoning"
@@ -1468,6 +1621,7 @@ async def _route_appserver_event(
         return events
 
     if label_lower == "item/reasoning/summarypartadded" and isinstance(payload, dict):
+        # [Frontend] Reasoning section break
         if state["reason_source"] in {None, "item"}:
             state["reason_source"] = "item"
             item_id = payload.get("itemId") or payload.get("id") or state.get("reasoning_id") or "reasoning"
@@ -1479,8 +1633,9 @@ async def _route_appserver_event(
             events.append({"type": "reasoning_delta", "id": item_id, "delta": "\n"})
         return events
 
-    # Codex event deltas
+    # --- Legacy Codex Event Deltas (alternate protocol) ---
     if label_lower in {"codex/event/agent_message_content_delta", "codex/event/agent_message_delta"} and isinstance(payload, dict):
+        # [Frontend] Stream text delta (legacy format)
         if state["msg_source"] in {None, "codex"}:
             state["msg_source"] = "codex"
             item_id = payload.get("item_id") or payload.get("itemId") or state.get("assistant_id") or "assistant"
@@ -1495,6 +1650,7 @@ async def _route_appserver_event(
         return events
 
     if label_lower == "codex/event/agent_message" and isinstance(payload, dict):
+        # [Transcript] + [Frontend] Complete message (legacy format)
         text = payload.get("message") or payload.get("text")
         if isinstance(text, str) and convo_id:
             await _append_transcript_entry(convo_id, {
@@ -1505,10 +1661,10 @@ async def _route_appserver_event(
             })
         if state.get("msg_source") in {None, "codex"} and state.get("assistant_started"):
             events.append({"type": "assistant_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("assistant_id") or "assistant", "text": text})
-        # Don't set idle here - wait for turn/completed to stop spinner
         return events
 
     if label_lower in {"codex/event/agent_reasoning_delta", "codex/event/reasoning_content_delta", "codex/event/reasoning_summary_delta"} and isinstance(payload, dict):
+        # [Frontend] Stream reasoning delta (legacy format)
         if state["reason_source"] in {None, "codex"}:
             state["reason_source"] = "codex"
             item_id = payload.get("item_id") or payload.get("itemId") or state.get("reasoning_id") or "reasoning"
@@ -1524,6 +1680,7 @@ async def _route_appserver_event(
         return events
 
     if label_lower == "codex/event/agent_reasoning_section_break" and isinstance(payload, dict):
+        # [Frontend] Reasoning section break (legacy format)
         if state["reason_source"] in {None, "codex"}:
             state["reason_source"] = "codex"
             item_id = payload.get("item_id") or payload.get("itemId") or state.get("reasoning_id") or "reasoning"
@@ -1536,28 +1693,31 @@ async def _route_appserver_event(
         return events
 
     if label_lower == "codex/event/agent_reasoning" and isinstance(payload, dict):
+        # [Frontend] Finalize reasoning (legacy format)
         text = payload.get("text") or payload.get("message")
-        # Don't store to transcript here - item/completed handles storage
-        # Just send finalize event to frontend if needed
         if state.get("reason_source") in {None, "codex"} and state.get("reasoning_started"):
             events.append({"type": "reasoning_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("reasoning_id") or "reasoning", "text": text})
-            # Reset reasoning state for next reasoning block
             state["reasoning_started"] = False
             state["reasoning_buffer"] = ""
             state["reasoning_id"] = None
-        # Don't set idle here - wait for turn/completed to stop spinner
         return events
 
-    # Tooling / command execution events (legacy protocol - just show activity)
+    # -------------------------------------------------------------------------
+    # SECTION: Tool/Command Execution Events (Frontend streaming)
+    # -------------------------------------------------------------------------
+    # Command output deltas stream to frontend. Complete output is captured
+    # on item/completed for transcript.
+    
     if label_lower in {"exec_command_begin", "exec_command_output_delta", "exec_command_end"} and isinstance(payload, dict):
+        # Legacy protocol - activity indicators only
         if label_lower == "exec_command_begin":
             events.append({"type": "activity", "label": "running command", "active": True})
         elif label_lower == "exec_command_end":
             events.append({"type": "activity", "label": "processing", "active": True})
-        # exec_command_output_delta is ignored - output comes with item/completed
         return events
 
     if label_lower in {"item/commandexecution/outputdelta", "item/commandexecution/terminalinteraction"} and isinstance(payload, dict):
+        # [Frontend] Stream command output deltas
         tool_id = _tool_event_id(label_lower, payload, thread_id, turn_id)
         if label_lower.endswith("outputdelta"):
             delta = payload.get("delta") or payload.get("output") or payload.get("stdout") or ""
@@ -1582,6 +1742,7 @@ async def _route_appserver_event(
         return events
 
     if label_lower in {"mcp_tool_call_begin", "mcp_tool_call_end"} and isinstance(payload, dict):
+        # [Frontend] MCP tool call begin/end
         tool_id = _tool_event_id(label_lower, payload, thread_id, turn_id)
         if label_lower.endswith("begin"):
             events.append({
@@ -1599,7 +1760,12 @@ async def _route_appserver_event(
             })
         return events
 
+    # No handler matched - return empty events list
     return events
+
+# =============================================================================
+# END EVENT ROUTER
+# =============================================================================
 
 
 async def _ensure_appserver_reader(shell_id: str) -> None:
@@ -2094,9 +2260,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                 Link(rel="icon", type="image/svg+xml", href=_asset(CODEX_AGENT_ICON_PATH)),
                 Link(rel="stylesheet", href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap"),
                 Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"),
+                Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.min.css"),
                 Link(rel="stylesheet", href=_asset("/static/vendor/tribute.css")),
                 Link(rel="stylesheet", href=_asset("/static/codex_agent.css")),
                 Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.min.js", defer=True),
                 Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
                 Script(src=_asset("/static/vendor/socket.io/socket.io.min.js")),
                 Script(src=_asset("/static/vendor/tribute.min.js")),
@@ -2175,6 +2343,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 ),
                                 cls="timeline-wrap"
                             ),
+                            Div(id="user-terminal", cls="user-terminal", **{"data-hidden": "true"}),
                             Div(
                                 Span(cls="status-spinner"),
                                 Span("idle", id="status-label", cls="status-text"),
@@ -2189,6 +2358,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     cls="prompt-input",
                                     **{"data-placeholder": "Message to Codex… (@ to mention files, Shift+Enter for newline)"},
                                 ),
+                                Button("Terminal", id="terminal-toggle", cls="btn"),
                                 Button("Send", id="agent-send", cls="btn primary"),
                                 cls="composer"
                             ),
@@ -2846,10 +3016,10 @@ async def api_appserver_rollouts():
         response = await _rpc_request("thread/list", params={"limit": 200}, timeout=15.0)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="thread/list timed out")
-    data = response.get("result") if isinstance(response, dict) else None
+    # _rpc_request already extracts the "result" key, so response is the result directly
     items_raw = []
-    if isinstance(data, dict):
-        items_raw = data.get("data") or []
+    if isinstance(response, dict):
+        items_raw = response.get("data") or []
     items: List[Dict[str, Any]] = []
     for item in items_raw:
         if not isinstance(item, dict):
@@ -3058,7 +3228,7 @@ async def api_appserver_interrupt():
 
 @app.post("/api/appserver/shell/exec")
 async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
-    """Execute a shell command via codex-app-server's command/exec RPC."""
+    """Execute a shell command via codex-app-server's command/exec RPC with streaming."""
     command = payload.get("command", "")
     if not command:
         raise HTTPException(status_code=400, detail="No command provided")
@@ -3069,6 +3239,17 @@ async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
     cfg = _load_appserver_config()
     cwd = cfg.get("cwd")
     convo_id = cfg.get("conversation_id")
+    
+    # Generate tracking ID for streaming
+    call_id = f"shell_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    
+    # Emit shell_begin immediately so frontend can create streaming row
+    await _broadcast_appserver_ui({
+        "type": "shell_begin",
+        "id": call_id,
+        "command": command,
+        "cwd": cwd,
+    })
     
     # Split command into array for shell execution
     # Using shell=True style by wrapping in sh -c
@@ -3081,11 +3262,23 @@ async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
         "sandboxPolicy": None,  # Use server default
     }
     
+    # Track this call_id for routing deltas
+    _shell_call_ids[call_id] = {"command": command, "cwd": cwd, "convo_id": convo_id}
+    
     try:
-        result = await _rpc_request("command/exec", params=params)
+        result = await _rpc_request("command/exec", params=params, timeout=35.0)
         exit_code = result.get("exitCode", 1)
         stdout = result.get("stdout", "")
         stderr = result.get("stderr", "")
+        
+        # Emit shell_end with full result
+        await _broadcast_appserver_ui({
+            "type": "shell_end",
+            "id": call_id,
+            "exitCode": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+        })
         
         # Write to transcript
         if convo_id:
@@ -3098,9 +3291,18 @@ async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
                 "event": "command/exec",
             })
         
-        return {"exitCode": exit_code, "stdout": stdout, "stderr": stderr}
+        return {"exitCode": exit_code, "stdout": stdout, "stderr": stderr, "callId": call_id}
     except Exception as e:
         error_msg = str(e)
+        # Emit shell_end with error
+        await _broadcast_appserver_ui({
+            "type": "shell_end",
+            "id": call_id,
+            "exitCode": 1,
+            "stdout": "",
+            "stderr": error_msg,
+            "error": True,
+        })
         if convo_id:
             await _append_transcript_entry(convo_id, {
                 "role": "shell",
@@ -3111,7 +3313,9 @@ async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
                 "event": "command/exec",
                 "error": True,
             })
-        return {"exitCode": 1, "stdout": "", "stderr": error_msg, "error": error_msg}
+        return {"exitCode": 1, "stdout": "", "stderr": error_msg, "error": error_msg, "callId": call_id}
+    finally:
+        _shell_call_ids.pop(call_id, None)
 
 
 @app.post("/api/appserver/compact")

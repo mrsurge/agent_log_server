@@ -1046,6 +1046,25 @@ textarea {
   padding: 12px;
 }
 
+body.terminal-mode #terminal-toggle.btn {
+  border-color: rgba(105, 238, 163, 0.6);
+  box-shadow: 0 0 0 1px rgba(105, 238, 163, 0.15) inset;
+}
+
+.user-terminal {
+  display: none;
+  height: 260px;
+  margin: 12px 0 10px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(10, 12, 16, 0.75);
+}
+
+body.terminal-mode .user-terminal {
+  display: block;
+}
+
 .composer textarea,
 .composer .prompt-input { flex: 1; }
 .composer textarea,
