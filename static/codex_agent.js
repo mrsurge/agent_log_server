@@ -41,6 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsCommandLinesEl = document.getElementById('settings-command-lines');
   const settingsMarkdownEl = document.getElementById('settings-markdown');
   const settingsXtermEl = document.getElementById('settings-xterm');
+  const settingsDiffSyntaxEl = document.getElementById('settings-diff-syntax');
   const markdownToggleEl = document.getElementById('markdown-toggle');
   const footerApprovalValue = document.getElementById('footer-approval-value');
   const footerApprovalToggle = document.getElementById('footer-approval-toggle');
@@ -106,6 +107,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let modelList = []; // Cached model list with supportedReasoningEfforts
   let markdownEnabled = true; // Toggle for markdown rendering
   let useXterm = true; // Toggle for xterm.js vs text box rendering
+  let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
   let commandRunning = false; // Whether a PTY command is currently running
   let ptyWebSocket = null; // Raw PTY WebSocket connection
   const pending = new Map();
@@ -174,6 +176,80 @@ document.addEventListener('DOMContentLoaded', () => {
   function setXtermEnabled(enabled) {
     useXterm = enabled;
     if (settingsXtermEl) settingsXtermEl.checked = enabled;
+  }
+
+  function isDiffSyntaxEnabled() {
+    return diffSyntaxHighlight;
+  }
+
+  function setDiffSyntaxEnabled(enabled) {
+    diffSyntaxHighlight = enabled;
+    const el = document.getElementById('settings-diff-syntax');
+    if (el) el.checked = enabled;
+  }
+
+  // Detect language from command for syntax highlighting
+  function detectLangFromCommand(command) {
+    if (!command) return null;
+    // Common patterns: cat/head/tail/less + file, or file extension in command
+    const catMatch = command.match(/\b(?:cat|head|tail|less|more|bat)\s+['"]*([^\s'"]+)/);
+    if (catMatch) {
+      const file = catMatch[1];
+      const ext = file.split('.').pop()?.toLowerCase();
+      const extMap = {
+        'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
+        'py': 'python', 'rb': 'ruby', 'rs': 'rust', 'go': 'go',
+        'java': 'java', 'kt': 'kotlin', 'scala': 'scala',
+        'c': 'c', 'h': 'c', 'cpp': 'cpp', 'cc': 'cpp', 'hpp': 'cpp',
+        'cs': 'csharp', 'fs': 'fsharp',
+        'php': 'php', 'swift': 'swift', 'r': 'r',
+        'json': 'json', 'yaml': 'yaml', 'yml': 'yaml', 'toml': 'toml',
+        'xml': 'xml', 'html': 'html', 'htm': 'html', 'css': 'css', 'scss': 'scss',
+        'md': 'markdown', 'markdown': 'markdown',
+        'sh': 'bash', 'bash': 'bash', 'zsh': 'bash', 'fish': 'bash',
+        'sql': 'sql', 'graphql': 'graphql', 'gql': 'graphql',
+        'dockerfile': 'dockerfile', 'makefile': 'makefile',
+        'tf': 'hcl', 'hcl': 'hcl',
+        'lua': 'lua', 'vim': 'vim', 'el': 'lisp', 'clj': 'clojure',
+        'ex': 'elixir', 'exs': 'elixir', 'erl': 'erlang',
+        'hs': 'haskell', 'ml': 'ocaml', 'nim': 'nim', 'zig': 'zig',
+      };
+      if (ext && extMap[ext]) return extMap[ext];
+      // Check for known filenames
+      const basename = file.split('/').pop()?.toLowerCase();
+      if (basename === 'dockerfile') return 'dockerfile';
+      if (basename === 'makefile' || basename === 'gnumakefile') return 'makefile';
+      if (basename?.endsWith('rc') || basename?.startsWith('.')) return 'bash';
+    }
+    // Check for inline code execution
+    if (command.includes('python') || command.includes('python3')) return 'python';
+    if (command.includes('node ') || command.includes('npx ')) return 'javascript';
+    if (command.includes('ruby ')) return 'ruby';
+    if (command.includes('go run')) return 'go';
+    if (command.includes('rustc') || command.includes('cargo')) return 'rust';
+    // Default for shell commands
+    if (command.match(/\b(ls|cd|pwd|echo|grep|find|awk|sed|curl|wget)\b/)) return 'bash';
+    return null;
+  }
+
+  // Apply syntax highlighting to text if enabled and hljs available
+  function highlightCode(text, lang) {
+    if (!isDiffSyntaxEnabled() || typeof hljs === 'undefined' || !text?.trim()) {
+      return escapeHtml(text || '');
+    }
+    try {
+      if (lang && hljs.getLanguage(lang)) {
+        return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+      }
+      // Try auto-detection
+      const result = hljs.highlightAuto(text);
+      if (result.relevance > 5) {
+        return result.value;
+      }
+    } catch (e) {
+      // Fall back to escaped text
+    }
+    return escapeHtml(text);
   }
 
   function setCommandRunning(running) {
@@ -530,6 +606,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = conversationSettings?.commandOutputLines || '20';
       if (settingsMarkdownEl) settingsMarkdownEl.checked = conversationSettings?.markdown !== false;
       if (settingsXtermEl) settingsXtermEl.checked = conversationSettings?.useXterm !== false;
+      if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = conversationSettings?.diffSyntax === true;
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || conversationSettings?.rolloutId || '';
     }
     if (settingsRolloutRowEl) {
@@ -1183,10 +1260,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function addMessage(role, text) {
     const label = role === 'assistant' ? 'assistant' : role;
-    const { body } = createRow('message', label);
-    const pre = document.createElement('pre');
-    pre.textContent = text || '';
-    body.append(pre);
+    const { row, body } = buildRow('message', label);
+    if (role === 'user') row.classList.add('user');
+    insertRow(row);
+    if ((role === 'assistant' || role === 'user') && isMarkdownEnabled()) {
+      const container = document.createElement('div');
+      container.className = 'markdown-body';
+      const renderer = smd.default_renderer(container);
+      const parser = smd.parser(renderer);
+      smd.parser_write(parser, role === 'assistant' ? stripCitations(text || '') : (text || ''));
+      smd.parser_end(parser);
+      container.querySelectorAll('pre code').forEach((block) => {
+        if (typeof hljs !== 'undefined') {
+          hljs.highlightElement(block);
+        }
+      });
+      body.append(container);
+    } else {
+      const pre = document.createElement('pre');
+      pre.textContent = text || '';
+      body.append(pre);
+    }
     incrementMessages();
     lastEventType = 'message';
   }
@@ -1236,7 +1330,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const pre = document.createElement('pre');
         pre.className = 'diff-block';
-        pre.innerHTML = formatDiff(entry.text || '');
+        pre.innerHTML = formatDiff(entry.text || '', entry.path);
         body.append(pre);
         fragment.appendChild(row);
         return;
@@ -1605,12 +1699,13 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const label = entry.role === 'assistant' ? 'assistant' : entry.role;
       const { row, body } = buildRow('message', label);
-      if (entry.role === 'assistant' && isMarkdownEnabled()) {
+      if (entry.role === 'user') row.classList.add('user');
+      if ((entry.role === 'assistant' || entry.role === 'user') && isMarkdownEnabled()) {
         const container = document.createElement('div');
         container.className = 'markdown-body';
         const renderer = smd.default_renderer(container);
         const parser = smd.parser(renderer);
-        smd.parser_write(parser, stripCitations(entry.text || ''));
+        smd.parser_write(parser, entry.role === 'assistant' ? stripCitations(entry.text || '') : (entry.text || ''));
         smd.parser_end(parser);
         // Highlight code blocks
         container.querySelectorAll('pre code').forEach((block) => {
@@ -2356,33 +2451,44 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
-  function formatDiff(text) {
+  function formatDiff(text, filePath) {
     if (!text) return '';
+    
+    // First pass: compute max line numbers for proper padding
     let oldLine = 0;
     let newLine = 0;
-    let maxOld = 0;
-    let maxNew = 0;
+    let maxOldLen = 1;
+    let maxNewLen = 1;
+    
     text.split('\n').forEach((line) => {
       if (line.startsWith('@@')) {
         const match = line.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
         if (match) {
-          const oldStart = parseInt(match[1], 10);
-          const newStart = parseInt(match[3], 10);
-          maxOld = Math.max(maxOld, String(oldStart).length);
-          maxNew = Math.max(maxNew, String(newStart).length);
+          oldLine = parseInt(match[1], 10);
+          const oldCount = parseInt(match[2] || '1', 10);
+          newLine = parseInt(match[3], 10);
+          const newCount = parseInt(match[4] || '1', 10);
+          // Max possible line numbers in this hunk
+          maxOldLen = Math.max(maxOldLen, String(oldLine + oldCount).length);
+          maxNewLen = Math.max(maxNewLen, String(newLine + newCount).length);
         }
       }
     });
+    
+    // Reset for second pass
+    oldLine = 0;
+    newLine = 0;
+    
+    // Second pass: render lines
     return text.split('\n').map((line) => {
       let cls = 'diff-context';
       let display = line;
-      let gutter = ' ';
+      let changeMarker = ' ';
       let oldNo = '';
       let newNo = '';
 
       if (line.startsWith('@@')) {
         cls = 'diff-hunk';
-        gutter = '@';
         const match = line.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)/);
         if (match) {
           const oldStart = parseInt(match[1], 10);
@@ -2393,39 +2499,64 @@ document.addEventListener('DOMContentLoaded', () => {
           const newEnd = Math.max(newStart, newStart + newCount - 1);
           const oldRange = oldCount === 1 ? `${oldStart}` : `${oldStart}-${oldEnd}`;
           const newRange = newCount === 1 ? `${newStart}` : `${newStart}-${newEnd}`;
-          const label = match[5] && match[5].trim() ? ` (${match[5].trim()})` : '';
+          const label = match[5] && match[5].trim() ? ` ${match[5].trim()}` : '';
           display = `Lines ${oldRange} → ${newRange}${label}`;
           oldLine = oldStart;
           newLine = newStart;
         }
+        // Hunk header gets special gutter
+        const hunkGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
+        return `<span class="diff-line ${cls}"><span class="diff-gutter">${escapeHtml(hunkGutter)}</span><span class="diff-text">${escapeHtml(display)}</span></span>`;
       } else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git')) {
         // Skip diff headers entirely - filename shown separately
         return '';
       } else if (line.startsWith('+') && !line.startsWith('+++')) {
         cls = 'diff-add';
-        gutter = '+';
+        changeMarker = '+';
         newNo = String(newLine);
         newLine += 1;
         display = line.slice(1);
       } else if (line.startsWith('-') && !line.startsWith('---')) {
         cls = 'diff-del';
-        gutter = '-';
+        changeMarker = '-';
         oldNo = String(oldLine);
         oldLine += 1;
         display = line.slice(1);
       } else if (line.startsWith(' ')) {
-        gutter = ' ';
+        changeMarker = ' ';
         oldNo = String(oldLine);
         newNo = String(newLine);
         oldLine += 1;
         newLine += 1;
         display = line.slice(1);
+      } else {
+        // Empty line or other content
+        display = line;
       }
-      const padOld = oldNo ? oldNo.padStart(maxOld, ' ') : ''.padStart(maxOld, ' ');
-      const padNew = newNo ? newNo.padStart(maxNew, ' ') : ''.padStart(maxNew, ' ');
-      const sep = oldNo || newNo ? '|' : ' ';
-      const gutterText = `${padOld}${sep}${padNew}${gutter}`;
-      return `<span class=\"diff-line ${cls}\"><span class=\"diff-gutter\">${escapeHtml(gutterText)}</span><span class=\"diff-text\">${escapeHtml(display)}</span></span>`;
+      
+      // Build gutter: "OLD│NEW± "
+      // Pad each number to max width, use spaces for missing numbers
+      const padOld = oldNo ? oldNo.padStart(maxOldLen, ' ') : ''.padStart(maxOldLen, ' ');
+      const padNew = newNo ? newNo.padStart(maxNewLen, ' ') : ''.padStart(maxNewLen, ' ');
+      const gutterText = `${padOld}│${padNew}${changeMarker} `;
+      
+      // Optionally syntax highlight the code
+      let codeHtml = escapeHtml(display);
+      if (isDiffSyntaxEnabled() && typeof hljs !== 'undefined' && display.trim()) {
+        try {
+          const ext = filePath ? filePath.split('.').pop() : '';
+          const lang = ext ? hljs.getLanguage(ext) : null;
+          if (lang) {
+            codeHtml = hljs.highlight(display, { language: ext, ignoreIllegals: true }).value;
+          } else {
+            codeHtml = hljs.highlightAuto(display).value;
+          }
+        } catch (e) {
+          // Fall back to escaped text
+        }
+      }
+      
+      return `<span class="diff-line ${cls}"><span class="diff-gutter">${escapeHtml(gutterText)}</span><span class="diff-text">${codeHtml}</span></span>`;
     }).filter(line => line !== '').join('');
   }
 
@@ -2444,14 +2575,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (payload.diff) {
       diffText = payload.diff;
-      lines.push(`<pre class="diff-block">${formatDiff(payload.diff)}</pre>`);
+      lines.push(`<pre class="diff-block">${formatDiff(payload.diff, payload.path)}</pre>`);
     }
     if (payload.changes && Array.isArray(payload.changes)) {
       payload.changes.forEach((change) => {
         if (change && change.diff) {
           diffText = diffText || change.diff;
           filePath = filePath || change.path;
-          lines.push(`<div><strong>${escapeHtml(toRelativePath(change.path) || 'file')}</strong></div><pre class="diff-block">${formatDiff(change.diff)}</pre>`);
+          lines.push(`<div><strong>${escapeHtml(toRelativePath(change.path) || 'file')}</strong></div><pre class="diff-block">${formatDiff(change.diff, change.path)}</pre>`);
         }
       });
     }
@@ -2574,6 +2705,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || '20', 10);
     const mdEnabled = settingsMarkdownEl?.checked !== false;
     const xtermEnabled = settingsXtermEl?.checked !== false;
+    const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
     const settings = {
       cwd,
       approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
@@ -2585,11 +2717,14 @@ document.addEventListener('DOMContentLoaded', () => {
       commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
       markdown: mdEnabled,
       useXterm: xtermEnabled,
+      diffSyntax: diffSyntaxEnabled,
     };
     // Update local markdown state
     setMarkdownEnabled(mdEnabled);
     // Update xterm mode
     setXtermEnabled(xtermEnabled);
+    // Update diff syntax highlight state
+    setDiffSyntaxEnabled(diffSyntaxEnabled);
     const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
     if (isNewConversation) {
       const meta = await postJson('/api/appserver/conversations', {});
