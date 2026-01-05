@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import pyte
+import pyte.modes
+
 
 def _ensure_framework_shells_secret() -> None:
     """Derive a stable secret from cwd/repo root if not already set."""
@@ -81,6 +84,15 @@ def _blocks_events_path(conversation_id: str) -> Path:
 
 def _rcfile_path(conversation_id: str) -> Path:
     return _agent_pty_root(conversation_id) / "bashrc_agent_pty.sh"
+
+
+# Sprint 2: Screen model paths
+def _screen_events_path(conversation_id: str) -> Path:
+    return _agent_pty_root(conversation_id) / "screen.jsonl"
+
+
+def _screen_snapshot_path(conversation_id: str) -> Path:
+    return _agent_pty_root(conversation_id) / "screen.snapshot.json"
 
 
 _MARKER_BEGIN = "__FWS_BLOCK_BEGIN__"
@@ -281,6 +293,29 @@ class ConversationState:
         self._spool_size: int = 0
         # Waiters for wait_for - list of (condition_fn, future, from_cursor)
         self._waiters: list = []
+        
+        # === Sprint 1: Screen model (pyte) ===
+        self._screen: Optional[pyte.Screen] = None
+        self._stream: Optional[pyte.ByteStream] = None
+        self._screen_cols: int = 120
+        self._screen_rows: int = 40
+        self._pending_dirty_rows: set = set()
+        
+        # Raw byte stream (truly lossless via subscribe_output_bytes)
+        self._raw_path: Optional[Path] = None
+        self._raw_size: int = 0
+        self._bytes_queue: Optional[asyncio.Queue] = None
+        self._bytes_reader_task: Optional[asyncio.Task] = None
+        
+        # Dedicated lock for screen operations (avoid blocking wait_for)
+        self._screen_lock = asyncio.Lock()
+        
+        # === Sprint 2: Screen delta rate limiting ===
+        self._last_screen_delta_ts: float = 0.0
+        self._screen_delta_min_interval: float = 0.1  # 100ms = max 10/sec
+        self._last_snapshot_ts: float = 0.0
+        self._snapshot_interval: float = 0.25  # 250ms
+        self._screen_delta_task: Optional[asyncio.Task] = None
 
     @property
     def mode(self) -> str:
@@ -381,6 +416,186 @@ class ConversationState:
         for i in reversed(resolved):
             self._waiters.pop(i)
 
+    # === Sprint 1: Screen model methods ===
+    
+    async def _init_raw(self) -> None:
+        """Initialize raw byte stream file."""
+        if self._raw_path is None:
+            self._raw_path = _agent_pty_root(self.conversation_id) / "output.raw"
+            self._raw_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._raw_path.exists():
+                self._raw_size = self._raw_path.stat().st_size
+            else:
+                self._raw_path.write_bytes(b"")
+                self._raw_size = 0
+
+    async def _append_raw(self, data: bytes) -> int:
+        """Append raw bytes (lossless), return new size."""
+        async with self._screen_lock:
+            await self._init_raw()
+            await asyncio.to_thread(self._append_bytes, self._raw_path, data)
+            self._raw_size += len(data)
+            return self._raw_size
+
+    def _init_screen(self) -> None:
+        """Initialize pyte screen model."""
+        if self._screen is None:
+            self._screen = pyte.Screen(self._screen_cols, self._screen_rows)
+            self._stream = pyte.ByteStream(self._screen)
+
+    def _feed_screen(self, data: bytes) -> set:
+        """Feed data to pyte, return set of dirty row indices."""
+        self._init_screen()
+        try:
+            self._stream.feed(data)
+        except Exception:
+            pass  # pyte may choke on malformed sequences
+        dirty = set(self._screen.dirty)
+        self._pending_dirty_rows.update(dirty)
+        return dirty
+
+    def _get_screen_row(self, row: int) -> str:
+        """Get text content of a screen row (0-indexed)."""
+        if self._screen is None:
+            return ""
+        # Use screen.display[row] for correct column-ordered string
+        return self._screen.display[row].rstrip()
+
+    def _is_alt_screen(self) -> bool:
+        """Check if terminal is in alternate screen mode."""
+        if self._screen is None:
+            return False
+        # pyte 0.8.x doesn't have ALTBUF mode or in_alternate_screen
+        # Return False for now; alt-screen detection can be added later
+        # by tracking DECSET 1049/1047 sequences manually if needed
+        return getattr(self._screen, 'in_alternate_screen', False)
+
+    def _get_screen_snapshot(self) -> dict:
+        """Get full screen state as dict."""
+        self._init_screen()
+        rows = []
+        for i in range(self._screen_rows):
+            rows.append(self._get_screen_row(i))
+        return {
+            "rows": rows,
+            "cursor": {"row": self._screen.cursor.y, "col": self._screen.cursor.x},
+            "title": getattr(self._screen, 'title', '') or "",
+            "alt_screen": self._is_alt_screen(),
+            "cols": self._screen_cols,
+            "rows_count": self._screen_rows,
+            "ts": _now_ms(),
+        }
+
+    # === Sprint 2: Screen delta events ===
+
+    async def _emit_screen_delta(self) -> None:
+        """Emit screen delta event (rate-limited). Flushes _pending_dirty_rows."""
+        now = time.time()
+        
+        # Rate limit (skip if too soon)
+        if now - self._last_screen_delta_ts < self._screen_delta_min_interval:
+            if self._pending_dirty_rows:
+                delay = self._screen_delta_min_interval - (now - self._last_screen_delta_ts)
+                if not self._screen_delta_task or self._screen_delta_task.done():
+                    async def _delayed_flush() -> None:
+                        await asyncio.sleep(max(0.0, delay))
+                        await self._emit_screen_delta()
+                    self._screen_delta_task = asyncio.create_task(_delayed_flush())
+            return
+        
+        if not self._pending_dirty_rows:
+            return
+        
+        async with self._screen_lock:
+            # Build delta event from buffered dirty rows
+            rows_data = []
+            for row_idx in sorted(self._pending_dirty_rows):
+                if 0 <= row_idx < self._screen_rows:
+                    rows_data.append({
+                        "row": row_idx,
+                        "text": self._get_screen_row(row_idx),
+                    })
+            
+            event = {
+                "type": "screen_delta",
+                "conversation_id": self.conversation_id,
+                "rows": rows_data,
+                "cursor": {"row": self._screen.cursor.y, "col": self._screen.cursor.x},
+                "title": getattr(self._screen, 'title', '') or "",
+                "alt_screen": self._is_alt_screen(),
+                "ts": _now_ms(),
+            }
+            
+            # Write to screen.jsonl
+            path = _screen_events_path(self.conversation_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(event, ensure_ascii=False)
+            await asyncio.to_thread(self._append_text_line, path, line + "\n")
+            
+            # Clear pending dirty rows and pyte's dirty set
+            self._pending_dirty_rows.clear()
+            if self._screen:
+                self._screen.dirty.clear()
+            self._last_screen_delta_ts = now
+        
+        # Maybe update snapshot
+        await self._maybe_update_snapshot()
+
+    async def _maybe_update_snapshot(self) -> None:
+        """Update snapshot file if enough time has passed."""
+        now = time.time()
+        if now - self._last_snapshot_ts < self._snapshot_interval:
+            return
+        
+        async with self._screen_lock:
+            snapshot = self._get_screen_snapshot()
+            path = _screen_snapshot_path(self.conversation_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                path.write_text, 
+                json.dumps(snapshot, ensure_ascii=False), 
+                encoding="utf-8"
+            )
+            self._last_snapshot_ts = now
+
+    async def _flush_screen_state(self) -> None:
+        """Force flush any pending screen state (call on session end)."""
+        # Force emit regardless of rate limit
+        self._last_screen_delta_ts = 0
+        await self._emit_screen_delta()
+        # Force snapshot update
+        self._last_snapshot_ts = 0
+        await self._maybe_update_snapshot()
+
+    async def _ensure_bytes_reader(self, mgr) -> None:
+        """Subscribe to raw bytes stream from PTY (truly lossless)."""
+        if self._bytes_reader_task and not self._bytes_reader_task.done():
+            return
+        
+        # Require subscribe_output_bytes (framework_shells >= 0.0.4)
+        if not hasattr(mgr, 'subscribe_output_bytes'):
+            raise RuntimeError("subscribe_output_bytes() is required for lossless raw bytes")
+        
+        self._bytes_queue = await mgr.subscribe_output_bytes(self.shell_id)
+        
+        async def _run_bytes() -> None:
+            while True:
+                chunk_bytes: bytes = await self._bytes_queue.get()
+                # Append raw bytes directly (truly lossless)
+                await self._append_raw(chunk_bytes)
+                # Feed raw bytes directly to pyte.ByteStream
+                try:
+                    self._feed_screen(chunk_bytes)
+                    # Sprint 2: Emit screen delta (rate-limited)
+                    await self._emit_screen_delta()
+                except Exception:
+                    pass  # pyte may choke; raw bytes already saved
+        
+        self._bytes_reader_task = asyncio.create_task(
+            _run_bytes(), 
+            name=f"agent-pty-bytes-reader:{self.conversation_id}"
+        )
+
     async def ensure_shell(self, *, cwd: Optional[str] = None) -> str:
         async with self.lock:
             if self.shell_id:
@@ -403,6 +618,9 @@ class ConversationState:
         if self._reader_task and not self._reader_task.done():
             return
         q = await mgr.subscribe_output(self.shell_id)
+        
+        # Sprint 1: Also start bytes reader for lossless raw stream + pyte
+        await self._ensure_bytes_reader(mgr)
 
         async def _run() -> None:
             while True:
@@ -503,6 +721,9 @@ class ConversationState:
         # Try graceful exit with Ctrl+C
         await self.send_stdin("\x03")
         
+        # Sprint 2: Flush screen state before ending
+        await self._flush_screen_state()
+        
         # Mark session as ended
         if self._active:
             self._active.status = "completed"
@@ -585,7 +806,7 @@ class ConversationState:
         if self._active:
             # Preserve exact newlines by writing the line as-is; file is jsonl-ish but used as raw text.
             out_path = Path(self._active.output_path)
-            await asyncio.to_thread(self._append_raw, out_path, line + "\n")
+            await asyncio.to_thread(self._append_text_line, out_path, line + "\n")
             await self._append_event(
                 {
                     "type": "agent_block_delta",
@@ -607,6 +828,8 @@ class ConversationState:
         
         # If we were in interactive mode, end the session
         if self._mode == "interactive" and self._active:
+            # Sprint 2: Flush screen state before ending
+            await self._flush_screen_state()
             self._active.status = "completed"
             self._active.ts_end = _now_ms()
             if exit_code is not None:
@@ -640,7 +863,7 @@ class ConversationState:
         self._mode = "idle"
 
     @staticmethod
-    def _append_raw(path: Path, data: str) -> None:
+    def _append_text_line(path: Path, data: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(data)

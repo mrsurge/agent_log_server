@@ -1294,7 +1294,7 @@ body.terminal-mode #footer-terminal-toggle.pill {
   color: #c9d1d9;
   padding: 10px 14px;
   margin: 0;
-  font-family: monospace;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.85em;
   white-space: pre-wrap;
   word-break: break-all;
@@ -1302,6 +1302,15 @@ body.terminal-mode #footer-terminal-toggle.pill {
   overflow-y: auto;
   border-radius: 0;
   border: none;
+}
+/* Syntax highlighted code in command output */
+.timeline-row.command-result pre.command-output code {
+  background: transparent;
+  padding: 0;
+}
+.truncation-note {
+  color: #8b949e;
+  font-style: italic;
 }
 /* Shell output stderr styling */
 .timeline-row.command-result pre.command-output .shell-stderr {

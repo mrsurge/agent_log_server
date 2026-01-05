@@ -191,44 +191,78 @@ document.addEventListener('DOMContentLoaded', () => {
   // Detect language from command for syntax highlighting
   function detectLangFromCommand(command) {
     if (!command) return null;
-    // Common patterns: cat/head/tail/less + file, or file extension in command
-    const catMatch = command.match(/\b(?:cat|head|tail|less|more|bat)\s+['"]*([^\s'"]+)/);
-    if (catMatch) {
-      const file = catMatch[1];
+    
+    // Handle sh -c 'command' wrapper - extract inner command
+    const shCMatch = command.match(/sh\s+-[lc]+\s+['"](.+)['"]\s*$/);
+    const innerCmd = shCMatch ? shCMatch[1] : command;
+    
+    const extMap = {
+      'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
+      'py': 'python', 'rb': 'ruby', 'rs': 'rust', 'go': 'go',
+      'java': 'java', 'kt': 'kotlin', 'scala': 'scala',
+      'c': 'c', 'h': 'c', 'cpp': 'cpp', 'cc': 'cpp', 'hpp': 'cpp',
+      'cs': 'csharp', 'fs': 'fsharp',
+      'php': 'php', 'swift': 'swift', 'r': 'r',
+      'json': 'json', 'yaml': 'yaml', 'yml': 'yaml', 'toml': 'toml',
+      'xml': 'xml', 'html': 'html', 'htm': 'html', 'css': 'css', 'scss': 'scss',
+      'md': 'markdown', 'markdown': 'markdown',
+      'sh': 'bash', 'bash': 'bash', 'zsh': 'bash', 'fish': 'bash',
+      'sql': 'sql', 'graphql': 'graphql', 'gql': 'graphql',
+      'dockerfile': 'dockerfile', 'makefile': 'makefile',
+      'tf': 'hcl', 'hcl': 'hcl',
+      'lua': 'lua', 'vim': 'vim', 'el': 'lisp', 'clj': 'clojure',
+      'ex': 'elixir', 'exs': 'elixir', 'erl': 'erlang',
+      'hs': 'haskell', 'ml': 'ocaml', 'nim': 'nim', 'zig': 'zig',
+    };
+    
+    // Helper to extract lang from file path
+    function langFromFile(file) {
+      if (!file) return null;
       const ext = file.split('.').pop()?.toLowerCase();
-      const extMap = {
-        'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
-        'py': 'python', 'rb': 'ruby', 'rs': 'rust', 'go': 'go',
-        'java': 'java', 'kt': 'kotlin', 'scala': 'scala',
-        'c': 'c', 'h': 'c', 'cpp': 'cpp', 'cc': 'cpp', 'hpp': 'cpp',
-        'cs': 'csharp', 'fs': 'fsharp',
-        'php': 'php', 'swift': 'swift', 'r': 'r',
-        'json': 'json', 'yaml': 'yaml', 'yml': 'yaml', 'toml': 'toml',
-        'xml': 'xml', 'html': 'html', 'htm': 'html', 'css': 'css', 'scss': 'scss',
-        'md': 'markdown', 'markdown': 'markdown',
-        'sh': 'bash', 'bash': 'bash', 'zsh': 'bash', 'fish': 'bash',
-        'sql': 'sql', 'graphql': 'graphql', 'gql': 'graphql',
-        'dockerfile': 'dockerfile', 'makefile': 'makefile',
-        'tf': 'hcl', 'hcl': 'hcl',
-        'lua': 'lua', 'vim': 'vim', 'el': 'lisp', 'clj': 'clojure',
-        'ex': 'elixir', 'exs': 'elixir', 'erl': 'erlang',
-        'hs': 'haskell', 'ml': 'ocaml', 'nim': 'nim', 'zig': 'zig',
-      };
       if (ext && extMap[ext]) return extMap[ext];
-      // Check for known filenames
       const basename = file.split('/').pop()?.toLowerCase();
       if (basename === 'dockerfile') return 'dockerfile';
       if (basename === 'makefile' || basename === 'gnumakefile') return 'makefile';
       if (basename?.endsWith('rc') || basename?.startsWith('.')) return 'bash';
+      return null;
     }
-    // Check for inline code execution
-    if (command.includes('python') || command.includes('python3')) return 'python';
-    if (command.includes('node ') || command.includes('npx ')) return 'javascript';
-    if (command.includes('ruby ')) return 'ruby';
-    if (command.includes('go run')) return 'go';
-    if (command.includes('rustc') || command.includes('cargo')) return 'rust';
-    // Default for shell commands
-    if (command.match(/\b(ls|cd|pwd|echo|grep|find|awk|sed|curl|wget)\b/)) return 'bash';
+    
+    // Pattern 1: cat/head/tail/less + file
+    const catMatch = innerCmd.match(/\b(?:cat|head|tail|less|more|bat)\s+['"]*([^\s'"]+)/);
+    if (catMatch) {
+      const lang = langFromFile(catMatch[1]);
+      if (lang) return lang;
+    }
+    
+    // Pattern 2: sed -n 'range' file (file is last argument)
+    const sedMatch = innerCmd.match(/\bsed\s+(?:-[^\s]+\s+)*'[^']+'\s+([^\s'"]+)\s*$/);
+    if (sedMatch) {
+      const lang = langFromFile(sedMatch[1]);
+      if (lang) return lang;
+    }
+    
+    // Pattern 3: awk/grep with file argument
+    const awkGrepMatch = innerCmd.match(/\b(?:awk|grep)\s+(?:-[^\s]+\s+)*(?:'[^']+'|"[^"]+")\s+([^\s'"]+)\s*$/);
+    if (awkGrepMatch) {
+      const lang = langFromFile(awkGrepMatch[1]);
+      if (lang) return lang;
+    }
+    
+    // Pattern 4: Any file path with known extension at end of command
+    const anyFileMatch = innerCmd.match(/([^\s'"]+\.\w+)\s*$/);
+    if (anyFileMatch) {
+      const lang = langFromFile(anyFileMatch[1]);
+      if (lang) return lang;
+    }
+    
+    // Check for inline code execution (use innerCmd)
+    if (innerCmd.includes('python') || innerCmd.includes('python3')) return 'python';
+    if (innerCmd.includes('node ') || innerCmd.includes('npx ')) return 'javascript';
+    if (innerCmd.includes('ruby ')) return 'ruby';
+    if (innerCmd.includes('go run')) return 'go';
+    if (innerCmd.includes('rustc') || innerCmd.includes('cargo')) return 'rust';
+    // Default for shell commands that don't output code
+    if (innerCmd.match(/\b(ls|cd|pwd|mkdir|rm|mv|cp|chmod|chown)\b/)) return 'bash';
     return null;
   }
 
@@ -1358,9 +1392,21 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           const outputPre = document.createElement('pre');
           outputPre.className = 'command-output';
-          outputPre.textContent = displayOutput;
-          if (truncated) {
-            outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
+          // Try syntax highlighting based on command
+          const lang = detectLangFromCommand(entry.command);
+          if (lang && isDiffSyntaxEnabled()) {
+            outputPre.innerHTML = highlightCode(displayOutput, lang);
+            if (truncated) {
+              const truncNote = document.createElement('span');
+              truncNote.className = 'truncation-note';
+              truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
+              outputPre.appendChild(truncNote);
+            }
+          } else {
+            outputPre.textContent = displayOutput;
+            if (truncated) {
+              outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
+            }
           }
           body.appendChild(outputPre);
         }
@@ -2385,9 +2431,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (displayOutput) {
       const outputPre = document.createElement('pre');
       outputPre.className = 'command-output';
-      outputPre.textContent = displayOutput;
-      if (truncated) {
-        outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
+      // Try syntax highlighting based on command
+      const lang = detectLangFromCommand(command);
+      if (lang && isDiffSyntaxEnabled()) {
+        outputPre.innerHTML = highlightCode(displayOutput, lang);
+        if (truncated) {
+          const truncNote = document.createElement('span');
+          truncNote.className = 'truncation-note';
+          truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
+          outputPre.appendChild(truncNote);
+        }
+      } else {
+        outputPre.textContent = displayOutput;
+        if (truncated) {
+          outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
+        }
       }
       body.appendChild(outputPre);
     }
@@ -2429,7 +2487,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function addDiff(id, text, path) {
     const entry = getDiffRow(id, path);
-    entry.pre.innerHTML = formatDiff(text || '');
+    entry.pre.innerHTML = formatDiff(text || '', path);
     lastEventType = 'diff';
     maybeAutoScroll();
   }
@@ -2445,7 +2503,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const pre = document.createElement('pre');
     pre.className = 'diff-block';
-    pre.innerHTML = formatDiff(text || '');
+    pre.innerHTML = formatDiff(text || '', path);
     body.appendChild(pre);
     lastEventType = 'diff';
     maybeAutoScroll();
@@ -2544,12 +2602,22 @@ document.addEventListener('DOMContentLoaded', () => {
       let codeHtml = escapeHtml(display);
       if (isDiffSyntaxEnabled() && typeof hljs !== 'undefined' && display.trim()) {
         try {
-          const ext = filePath ? filePath.split('.').pop() : '';
-          const lang = ext ? hljs.getLanguage(ext) : null;
-          if (lang) {
-            codeHtml = hljs.highlight(display, { language: ext, ignoreIllegals: true }).value;
-          } else {
-            codeHtml = hljs.highlightAuto(display).value;
+          const ext = filePath ? filePath.split('.').pop()?.toLowerCase() : '';
+          // Map common extensions to hljs language names
+          const extToLang = {
+            'py': 'python', 'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript',
+            'jsx': 'javascript', 'rb': 'ruby', 'rs': 'rust', 'go': 'go', 'sh': 'bash',
+            'yml': 'yaml', 'md': 'markdown', 'htm': 'html',
+          };
+          const lang = extToLang[ext] || ext;
+          if (lang && hljs.getLanguage(lang)) {
+            codeHtml = hljs.highlight(display, { language: lang, ignoreIllegals: true }).value;
+          } else if (display.length > 10) {
+            // Only auto-detect for non-trivial lines
+            const auto = hljs.highlightAuto(display);
+            if (auto.relevance > 3) {
+              codeHtml = auto.value;
+            }
           }
         } catch (e) {
           // Fall back to escaped text
@@ -2837,6 +2905,8 @@ document.addEventListener('DOMContentLoaded', () => {
       setMarkdownEnabled(conversationSettings?.markdown !== false);
       // Sync xterm toggle from settings
       setXtermEnabled(conversationSettings?.useXterm !== false);
+      // Sync diff syntax toggle from settings
+      setDiffSyntaxEnabled(conversationSettings?.diffSyntax === true);
     } catch {
       // Don't touch statusEl here - it's for server status only
     }

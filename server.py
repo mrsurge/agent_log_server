@@ -1660,12 +1660,22 @@ async def _route_appserver_event(
             
         if item_type == "commandexecution":
             # Cache command info, show activity
+            command = item.get("command") or item.get("cmd") or item.get("argv") or ""
+            cwd = item.get("cwd") or ""
+            tool_id = _tool_event_id(label_lower, item, thread_id, turn_id)
             if item.get("id"):
                 _approval_item_cache[str(item.get("id"))] = {
-                    "command": item.get("command") or item.get("cmd") or item.get("argv"),
-                    "cwd": item.get("cwd"),
+                    "command": command,
+                    "cwd": cwd,
+                    "tool_id": tool_id,
                 }
-            # [Frontend] Activity indicator
+            # [Frontend] Tool begin for command execution (creates tool:command row for streaming)
+            events.append({
+                "type": "tool_begin",
+                "id": tool_id,
+                "tool": "command",
+                "arguments": {"command": command, "cwd": cwd} if command else {},
+            })
             events.append({"type": "activity", "label": "running command", "active": True})
             return events
             
@@ -1739,6 +1749,22 @@ async def _route_appserver_event(
             duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
             if isinstance(output, str):
                 output = output.replace("\r\n", "\n").replace("\r", "\n")
+            
+            # Get tool_id from cache (set in item/started)
+            cached = _approval_item_cache.get(str(item.get("id"))) or {}
+            tool_id = cached.get("tool_id") or _tool_event_id(label_lower, item, thread_id, turn_id)
+            
+            # [Frontend] Tool end for command execution (closes tool:command row)
+            events.append({
+                "type": "tool_end",
+                "id": tool_id,
+                "tool": "command",
+                "arguments": {"command": command, "cwd": cwd},
+                "result": {"exit_code": exit_code, "output_lines": len(output.split('\n')) if output else 0},
+                "duration_ms": duration_ms,
+                "is_error": exit_code not in (None, 0),
+            })
+            
             # [Transcript] Save command result for replay
             if convo_id:
                 await _append_transcript_entry(convo_id, {
@@ -1751,7 +1777,7 @@ async def _route_appserver_event(
                     "item_id": item.get("id"),
                     "event": "item/completed",
                 })
-            # [Frontend] Display command result
+            # [Frontend] Display command result (full output)
             events.append({
                 "type": "command_result",
                 "id": item.get("id"),
@@ -2557,6 +2583,14 @@ async def codex_agent_ui() -> FastHTMLResponse:
                 Link(rel="stylesheet", href=_asset("/static/vendor/tribute.css")),
                 Link(rel="stylesheet", href=_asset("/static/codex_agent.css")),
                 Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/rust.min.js"),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"),
+                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/dockerfile.min.js"),
                 Script(src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"),
                 Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
                 Script(src=_asset("/static/vendor/socket.io/socket.io.min.js")),
@@ -2784,6 +2818,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 Label(
                                     Span("Use xterm.js (terminal)"),
                                     Input(type="checkbox", id="settings-xterm", checked=True),
+                                    cls="settings-checkbox-row"
+                                ),
+                                Label(
+                                    Span("Syntax highlighting (diffs & terminal)"),
+                                    Input(type="checkbox", id="settings-diff-syntax", checked=False),
                                     cls="settings-checkbox-row"
                                 ),
                                 cls="settings-body"
