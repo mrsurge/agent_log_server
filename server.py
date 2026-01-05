@@ -1926,23 +1926,131 @@ async def _route_appserver_event(
             })
         return events
 
-    if label_lower in {"mcp_tool_call_begin", "mcp_tool_call_end"} and isinstance(payload, dict):
-        # [Frontend] MCP tool call begin/end
-        tool_id = _tool_event_id(label_lower, payload, thread_id, turn_id)
-        if label_lower.endswith("begin"):
+    if ("mcp_tool_call_begin" in label_lower or "mcp_tool_call_end" in label_lower) and isinstance(payload, dict):
+        # [Frontend + Transcript] MCP tool call begin/end
+        # payload might be params wrapper with 'msg' inside, or the msg itself
+        msg = payload.get("msg") if isinstance(payload.get("msg"), dict) else payload
+        call_id = msg.get("call_id") or ""
+        invocation = msg.get("invocation") or {}
+        server_name = invocation.get("server") or "mcp"
+        tool_name = invocation.get("tool") or "unknown"
+        arguments = invocation.get("arguments") or {}
+        tool_id = f"mcp:{server_name}:{tool_name}:{call_id}"
+        
+        if "begin" in label_lower:
+            # [Frontend] Tool begin event
             events.append({
                 "type": "tool_begin",
                 "id": tool_id,
-                "tool": payload.get("tool") or "mcp",
-                "payload": payload.get("args") or payload.get("arguments") or payload,
+                "tool": tool_name,
+                "server": server_name,
+                "arguments": arguments,
             })
+            events.append({"type": "activity", "label": f"calling {tool_name}", "active": True})
         else:
+            # Parse result - can be {Ok: ...} or {Err: ...}
+            result_raw = msg.get("result") or {}
+            duration_raw = msg.get("duration") or {}
+            
+            # Duration is {secs, nanos} - convert to ms
+            if isinstance(duration_raw, dict):
+                secs = duration_raw.get("secs", 0)
+                nanos = duration_raw.get("nanos", 0)
+                duration_ms = secs * 1000 + nanos // 1_000_000
+            else:
+                duration_ms = 0
+            
+            # Extract the actual result data from Ok/Err wrapper
+            is_error = False
+            result_data = None
+            if isinstance(result_raw, dict):
+                if "Ok" in result_raw:
+                    ok_data = result_raw["Ok"]
+                    is_error = ok_data.get("isError", False) if isinstance(ok_data, dict) else False
+                    # Prefer structuredContent.result if available (actual JSON result)
+                    if isinstance(ok_data, dict) and isinstance(ok_data.get("structuredContent"), dict):
+                        result_data = ok_data["structuredContent"].get("result")
+                    # Fallback to content[0].text if no structured content
+                    if result_data is None and isinstance(ok_data, dict):
+                        content = ok_data.get("content", [])
+                        if content and isinstance(content[0], dict) and content[0].get("text"):
+                            # Try to parse the text as JSON
+                            try:
+                                result_data = json.loads(content[0]["text"])
+                            except (json.JSONDecodeError, TypeError):
+                                result_data = content[0]["text"]
+                    if result_data is None:
+                        result_data = ok_data
+                elif "Err" in result_raw:
+                    result_data = {"error": result_raw["Err"]}
+                    is_error = True
+                else:
+                    result_data = result_raw
+            else:
+                result_data = result_raw
+            
+            # [Frontend] Tool end event with full result
             events.append({
                 "type": "tool_end",
                 "id": tool_id,
-                "tool": payload.get("tool") or "mcp",
-                "payload": payload.get("result") or payload.get("output") or payload,
+                "tool": tool_name,
+                "server": server_name,
+                "arguments": arguments,
+                "result": result_data,
+                "duration_ms": duration_ms,
+                "is_error": is_error,
             })
+            events.append({"type": "activity", "label": "processing", "active": True})
+            
+            # [Transcript] Record completed MCP tool call for replay
+            if convo_id:
+                await _append_transcript_entry(convo_id, {
+                    "role": "mcp_tool",
+                    "server": server_name,
+                    "tool": tool_name,
+                    "call_id": call_id,
+                    "arguments": arguments,
+                    "result": result_data,
+                    "duration_ms": duration_ms,
+                    "is_error": is_error,
+                    "timestamp": utc_ts(),
+                })
+        return events
+
+    if ("web_search_begin" in label_lower or "web_search_end" in label_lower) and isinstance(payload, dict):
+        # [Frontend + Transcript] Web search begin/end
+        # payload might be params wrapper with 'msg' inside, or the msg itself
+        msg = payload.get("msg") if isinstance(payload.get("msg"), dict) else payload
+        call_id = msg.get("call_id") or ""
+        tool_id = f"web_search:{call_id}"
+        
+        if "begin" in label_lower:
+            # [Frontend] Search begin
+            events.append({
+                "type": "tool_begin",
+                "id": tool_id,
+                "tool": "web_search",
+            })
+            events.append({"type": "activity", "label": "searching web", "active": True})
+        else:
+            query = msg.get("query") or ""
+            # [Frontend] Search end
+            events.append({
+                "type": "tool_end",
+                "id": tool_id,
+                "tool": "web_search",
+                "query": query,
+            })
+            events.append({"type": "activity", "label": "processing", "active": True})
+            
+            # [Transcript] Record completed web search for replay
+            if convo_id:
+                await _append_transcript_entry(convo_id, {
+                    "role": "web_search",
+                    "query": query,
+                    "call_id": call_id,
+                    "timestamp": utc_ts(),
+                })
         return events
 
     # No handler matched - return empty events list

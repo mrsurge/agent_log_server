@@ -763,8 +763,8 @@ textarea {
   background: #000;
   padding: 0;
 }
-.diff-add { background: #0f3d1f; }
-.diff-del { background: #4a1515; }
+.diff-add { background: #0f2310; }
+.diff-del { background: #3e1515; }
 .diff-hunk { background: #1b1f2b; }
 .diff-file { background: #111; }
 .diff-meta { background: #0b0d12; }
@@ -805,7 +805,7 @@ textarea {
 .markdown-body h3 { font-size: 1.1em; }
 
 .markdown-body code {
-  background: #161b22;
+  background: #34353e;
   padding: 2px 6px;
   border-radius: 4px;
   font-family: 'JetBrains Mono', monospace;

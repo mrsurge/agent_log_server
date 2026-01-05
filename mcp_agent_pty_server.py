@@ -1,12 +1,41 @@
 #!/usr/bin/env python3
 import asyncio
 import base64
+import hashlib
 import json
 import os
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+
+def _ensure_framework_shells_secret() -> None:
+    """Derive a stable secret from cwd/repo root if not already set."""
+    if os.environ.get("FRAMEWORK_SHELLS_SECRET"):
+        return
+    repo_root = str(Path(__file__).resolve().parent)
+    fingerprint = hashlib.sha256(repo_root.encode("utf-8")).hexdigest()[:16]
+    base_dir = Path(os.path.expanduser("~/.cache/framework_shells"))
+    secret_dir = base_dir / "runtimes" / fingerprint
+    secret_file = secret_dir / "secret"
+    if secret_file.exists():
+        secret = secret_file.read_text(encoding="utf-8").strip()
+    else:
+        secret_dir.mkdir(parents=True, exist_ok=True)
+        secret = secrets.token_hex(32)
+        secret_file.write_text(secret, encoding="utf-8")
+        try:
+            os.chmod(secret_file, 0o600)
+        except Exception:
+            pass
+    os.environ["FRAMEWORK_SHELLS_SECRET"] = secret
+    os.environ["FRAMEWORK_SHELLS_REPO_FINGERPRINT"] = fingerprint
+    os.environ["FRAMEWORK_SHELLS_BASE_DIR"] = str(base_dir)
+
+# Auto-set secret before importing framework_shells
+_ensure_framework_shells_secret()
 
 from framework_shells import get_manager as get_framework_shell_manager
 from mcp.server.fastmcp import FastMCP
@@ -67,6 +96,25 @@ def _write_rcfile(path: Path) -> None:
     #
     # We rely on base64 + tr to avoid quoting issues.
     content = r"""
+# Termux guard: ensure env + shebang compatibility
+if [ -n "${PREFIX:-}" ] && [ -x "${PREFIX}/bin/env" ]; then
+  export PATH="${PREFIX}/bin:${PATH}"
+  if [ -z "${TERMUX_VERSION:-}" ]; then
+    export TERMUX_VERSION="1"
+  fi
+  if [ -f "${PREFIX}/lib/libtermux-exec.so" ]; then
+    export LD_PRELOAD="${PREFIX}/lib/libtermux-exec.so"
+  fi
+elif [ -d "/data/data/com.termux/files/usr" ]; then
+  export PATH="/data/data/com.termux/files/usr/bin:${PATH}"
+  if [ -z "${TERMUX_VERSION:-}" ]; then
+    export TERMUX_VERSION="1"
+  fi
+  if [ -f "/data/data/com.termux/files/usr/lib/libtermux-exec.so" ]; then
+    export LD_PRELOAD="/data/data/com.termux/files/usr/lib/libtermux-exec.so"
+  fi
+fi
+
 __FWS_SEQ=0
 __FWS_LAST_SEQ=""
 __FWS_IN_MARKER=0
@@ -100,10 +148,11 @@ __fws_emit_end() {
 }
 
 __fws_emit_prompt() {
+  local exit_code="${1:-$?}"
   local ts="$(__fws_now_ms)"
   local cwd="$(pwd -P 2>/dev/null || pwd)"
   local cwd_b64="$(__fws_b64 "$cwd")"
-  printf '\n__FWS_PROMPT__ ts=%s cwd_b64=%s\n' "$ts" "$cwd_b64"
+  printf '\n__FWS_PROMPT__ ts=%s cwd_b64=%s exit=%s\n' "$ts" "$cwd_b64" "$exit_code"
 }
 
 __fws_should_ignore_cmd() {
@@ -125,7 +174,8 @@ if [ "${__FWS_MANUAL}" = "1" ]; then
   
   # Emit prompt sentinel after each command (PROMPT_COMMAND runs before prompt display)
   __fws_manual_precmd() {
-    __fws_emit_prompt
+    local ec="$?"
+    __fws_emit_prompt "$ec"
   }
   PROMPT_COMMAND="__fws_manual_precmd"
 else
@@ -164,7 +214,7 @@ else
     __fws_emit_end "$exit_code" "$ts" "$__FWS_LAST_SEQ"
     __FWS_LAST_SEQ=""
     __FWS_IN_MARKER=0
-    __fws_emit_prompt
+    __fws_emit_prompt "$exit_code"
   }
 
   PROMPT_COMMAND="__fws_precmd"
@@ -173,6 +223,21 @@ fi
 PS1="agent-pty> "
 """
     path.write_text(content.lstrip(), encoding="utf-8")
+
+
+def _termux_env_overrides() -> Dict[str, str]:
+    prefix = os.environ.get("PREFIX")
+    if not prefix or not Path(prefix).exists():
+        prefix = "/data/data/com.termux/files/usr"
+    if not Path(prefix).exists():
+        return {}
+    env: Dict[str, str] = {}
+    env["PATH"] = f"{prefix}/bin:" + os.environ.get("PATH", "")
+    env["TERMUX_VERSION"] = os.environ.get("TERMUX_VERSION", "1")
+    ld_preload = f"{prefix}/lib/libtermux-exec.so"
+    if Path(ld_preload).exists():
+        env["LD_PRELOAD"] = ld_preload
+    return env
 
 
 @dataclass
@@ -288,7 +353,7 @@ class ConversationState:
             return
         # Read recent spool data for matching
         resolved = []
-        for i, (match_fn, future, from_cursor) in enumerate(self._waiters):
+        for i, (match_fn, future, from_cursor, match_type) in enumerate(self._waiters):
             if future.done():
                 resolved.append(i)
                 continue
@@ -303,7 +368,7 @@ class ConversationState:
                         "match_text": result["match_text"],
                         "match_cursor": match_cursor,
                         "match_span": {"start": match_cursor, "end": match_end_cursor},
-                        "next_cursor": data_end_cursor,
+                        "resume_cursor": match_end_cursor,
                     }
                     if result.get("extra"):
                         response["extra"] = result["extra"]
@@ -325,7 +390,10 @@ class ConversationState:
             root.mkdir(parents=True, exist_ok=True)
             rcfile = _rcfile_path(self.conversation_id)
             _write_rcfile(rcfile)
-            command = ["env", "__FWS_MANUAL=1", "bash", "--rcfile", str(rcfile), "-i"]
+            env_parts = ["env", "__FWS_MANUAL=1"]
+            for k, v in _termux_env_overrides().items():
+                env_parts.append(f"{k}={v}")
+            command = env_parts + ["bash", "--rcfile", str(rcfile), "-i"]
             rec = await mgr.spawn_shell_dtach(command, cwd=cwd or str(Path.cwd()), label=f"agent-pty:{self.conversation_id}")
             self.shell_id = rec.id
             await self._ensure_reader(mgr)
@@ -414,15 +482,15 @@ class ConversationState:
                 await mgr.write_to_pty(self.shell_id, f'cd "{cwd}" 2>/dev/null\n')
             await mgr.write_to_pty(self.shell_id, cmd + "\n")
         
-        # Get current spool cursor so agent can wait_for from here
-        _, cursor = await self.read_spool(0, 0)
+        # Get current spool size so agent can wait_for from here
+        await self._init_spool()
         
         return {
             "ok": True,
             "session_id": self._interactive_session_id,
             "block_id": block_id,
             "ts_begin": ts,
-            "cursor": cursor,
+            "resume_cursor": self._spool_size,
         }
 
     async def end_session(self, session_id: Optional[str] = None) -> Dict[str, Any]:
@@ -529,10 +597,20 @@ class ConversationState:
 
     async def _handle_prompt(self, line: str) -> None:
         """Handle prompt sentinel - transition from block_running/interactive to idle."""
+        # Parse exit code from prompt sentinel
+        kv = self._parse_kv(line)
+        exit_code = None
+        try:
+            exit_code = int(kv.get("exit", ""))
+        except (ValueError, TypeError):
+            pass
+        
         # If we were in interactive mode, end the session
         if self._mode == "interactive" and self._active:
             self._active.status = "completed"
             self._active.ts_end = _now_ms()
+            if exit_code is not None:
+                self._active.exit_code = exit_code
             await self._append_block_index(self._active)
             await self._append_event({
                 "type": "agent_block_end",
@@ -541,6 +619,24 @@ class ConversationState:
             })
             self._active = None
             self._interactive_session_id = None
+        self._mode = "idle"
+
+    async def _finalize_interactive_session(self, exit_code: Optional[int] = None) -> None:
+        """Finalize an interactive session (idempotent)."""
+        if self._mode != "interactive" or not self._active:
+            return
+        self._active.status = "completed"
+        self._active.ts_end = _now_ms()
+        if exit_code is not None:
+            self._active.exit_code = exit_code
+        await self._append_block_index(self._active)
+        await self._append_event({
+            "type": "agent_block_end",
+            "conversation_id": self.conversation_id,
+            "block": self._active.__dict__
+        })
+        self._active = None
+        self._interactive_session_id = None
         self._mode = "idle"
 
     @staticmethod
@@ -656,7 +752,7 @@ class ConversationState:
                             if line_end == -1:
                                 line_end = len(data)
                             line = data[idx:line_end]
-                            # Parse kv pairs like ts=123 cwd_b64=...
+                            # Parse kv pairs like ts=123 cwd_b64=... exit=0
                             for part in line.split()[1:]:
                                 if "=" in part:
                                     k, v = part.split("=", 1)
@@ -664,6 +760,8 @@ class ConversationState:
                                         extra["cwd"] = _b64decode(v)
                                     elif k == "ts":
                                         extra["ts"] = int(v)
+                                    elif k == "exit":
+                                        extra["exit_code"] = int(v)
                         except Exception:
                             pass
                         return {"matched": True, "match_text": _MARKER_PROMPT, "match_index": idx, "match_end": end_idx, "extra": extra}
@@ -693,13 +791,17 @@ class ConversationState:
         if result:
             match_cursor = from_cursor + result["match_index"]
             match_end_cursor = from_cursor + result["match_end"]
+            # If prompt match, trigger session finalization (idempotent)
+            if match_type == "prompt":
+                exit_code = result.get("extra", {}).get("exit_code")
+                await self._finalize_interactive_session(exit_code)
             response = {
                 "ok": True,
                 "matched": True,
                 "match_text": result["match_text"],
                 "match_cursor": match_cursor,
                 "match_span": {"start": match_cursor, "end": match_end_cursor},
-                "next_cursor": data_end_cursor,  # Resume from end of scanned data
+                "resume_cursor": match_end_cursor,
             }
             if result.get("extra"):
                 response["extra"] = result["extra"]
@@ -708,18 +810,21 @@ class ConversationState:
         # Not found - register waiter
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        self._waiters.append((match_fn, future, from_cursor))
+        self._waiters.append((match_fn, future, from_cursor, match_type))
         
         try:
             result = await asyncio.wait_for(future, timeout=timeout_ms / 1000.0)
+            # If prompt match, trigger session finalization (idempotent)
+            if match_type == "prompt":
+                exit_code = result.get("extra", {}).get("exit_code")
+                await self._finalize_interactive_session(exit_code)
             return {"ok": True, **result}
         except asyncio.TimeoutError:
-            # Return current cursor position even on timeout
-            _, next_cursor = await self.read_spool(0, 0)  # Get current spool size
-            return {"ok": False, "matched": False, "error": "timeout", "next_cursor": next_cursor}
+            # Return current spool size so agent can resume from here
+            return {"ok": False, "matched": False, "error": "timeout", "resume_cursor": self._spool_size}
         finally:
             # Clean up waiter if still present
-            self._waiters = [(m, f, c) for (m, f, c) in self._waiters if f is not future]
+            self._waiters = [(m, f, c, t) for (m, f, c, t) in self._waiters if f is not future]
 
     def get_status(self) -> Dict[str, Any]:
         """Get current PTY status."""
@@ -729,7 +834,7 @@ class ConversationState:
             "active_session_id": self._interactive_session_id,
             "active_block_id": self._active.block_id if self._active else None,
             "shell_id": self.shell_id,
-            "spool_cursor": self._spool_size,
+            "resume_cursor": self._spool_size,
         }
 
 
@@ -747,7 +852,7 @@ def _state(conversation_id: str) -> ConversationState:
 mcp = FastMCP(name="agent-pty-blocks", instructions="Agent PTY + block store tools (per-conversation).")
 
 
-@mcp.tool(name="pty.exec", description="Execute a command (block mode) - waits for completion with BEGIN/END markers.")
+@mcp.tool(name="pty_exec", description="Execute a command (block mode) - waits for completion with BEGIN/END markers.")
 async def pty_exec(conversation_id: str, cmd: str, cwd: Optional[str] = None) -> Dict[str, Any]:
     state = _state(conversation_id)
     if state.mode == "interactive":
@@ -758,7 +863,7 @@ async def pty_exec(conversation_id: str, cmd: str, cwd: Optional[str] = None) ->
 
 
 @mcp.tool(
-    name="pty.exec_interactive",
+    name="pty_exec_interactive",
     description="Start an interactive session - command runs without wrappers, use send+wait_for to interact."
 )
 async def pty_exec_interactive(conversation_id: str, cmd: str, cwd: Optional[str] = None) -> Dict[str, Any]:
@@ -776,13 +881,13 @@ async def pty_exec_interactive(conversation_id: str, cmd: str, cwd: Optional[str
     return await state.exec_interactive(cmd=cmd, cwd=cwd)
 
 
-@mcp.tool(name="pty.end_session", description="End an interactive session.")
+@mcp.tool(name="pty_end_session", description="End an interactive session.")
 async def pty_end_session(conversation_id: str, session_id: Optional[str] = None) -> Dict[str, Any]:
     state = _state(conversation_id)
     return await state.end_session(session_id)
 
 
-@mcp.tool(name="pty.send", description="Send raw bytes to PTY stdin (text, control chars, escape sequences).")
+@mcp.tool(name="pty_send", description="Send raw bytes to PTY stdin (text, control chars, escape sequences).")
 async def pty_send(conversation_id: str, data: str) -> Dict[str, Any]:
     """
     Send raw data to the PTY.
@@ -797,23 +902,23 @@ async def pty_send(conversation_id: str, data: str) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty.ctrl_c", description="Send Ctrl+C (SIGINT) to PTY.")
+@mcp.tool(name="pty_ctrl_c", description="Send Ctrl+C (SIGINT) to PTY.")
 async def pty_ctrl_c(conversation_id: str) -> Dict[str, Any]:
     return await pty_send(conversation_id, "\x03")
 
 
-@mcp.tool(name="pty.ctrl_d", description="Send Ctrl+D (EOF) to PTY.")
+@mcp.tool(name="pty_ctrl_d", description="Send Ctrl+D (EOF) to PTY.")
 async def pty_ctrl_d(conversation_id: str) -> Dict[str, Any]:
     return await pty_send(conversation_id, "\x04")
 
 
-@mcp.tool(name="pty.enter", description="Send Enter/newline to PTY.")
+@mcp.tool(name="pty_enter", description="Send Enter/newline to PTY.")
 async def pty_enter(conversation_id: str) -> Dict[str, Any]:
     return await pty_send(conversation_id, "\r")
 
 
 @mcp.tool(
-    name="pty.wait_for",
+    name="pty_wait_for",
     description="Wait for a condition in PTY output. Returns when match found or timeout."
 )
 async def pty_wait_for(
@@ -833,14 +938,14 @@ async def pty_wait_for(
         timeout_ms: Timeout in milliseconds (default 30s)
     
     Returns on match:
-        {ok: true, matched: true, match_text, match_cursor, match_span: {start, end}, next_cursor, extra?}
+        {ok: true, matched: true, match_text, match_cursor, match_span: {start, end}, resume_cursor, extra?}
         - match_cursor: byte offset where match starts (for bookmarking)
         - match_span: {start, end} byte offsets of the match
-        - next_cursor: byte offset to use for next wait_for (end of scanned data)
+        - resume_cursor: byte offset to use as from_cursor for next wait_for (= match_span.end)
         - extra: for prompt matches, includes parsed {cwd, ts}
     
     Returns on timeout:
-        {ok: false, matched: false, error: "timeout", next_cursor}
+        {ok: false, matched: false, error: "timeout", resume_cursor}
     """
     state = _state(conversation_id)
     try:
@@ -855,13 +960,92 @@ async def pty_wait_for(
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty.status", description="Get PTY status: mode, active block/session, cursor position.")
+@mcp.tool(name="pty_wait_prompt", description="Wait for shell prompt sentinel and finalize interactive session.")
+async def pty_wait_prompt(
+    conversation_id: str,
+    from_cursor: int = 0,
+    timeout_ms: int = 30000,
+) -> Dict[str, Any]:
+    """
+    Wait for the shell prompt sentinel (__FWS_PROMPT__).
+    
+    This is a convenience wrapper around wait_for(match_type="prompt") that also
+    ensures the interactive session is finalized and mode transitions to idle.
+    
+    Returns on match:
+        {ok: true, matched: true, match_text, match_cursor, match_span, resume_cursor, extra: {cwd, ts, exit_code}}
+    
+    Returns on timeout:
+        {ok: false, matched: false, error: "timeout", resume_cursor}
+    """
+    state = _state(conversation_id)
+    try:
+        await state.ensure_shell()
+        return await state.wait_for(
+            match="",
+            match_type="prompt",
+            from_cursor=from_cursor,
+            timeout_ms=timeout_ms,
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="pty_expect_send", description="Atomic wait-for-match then send input (under lock).")
+async def pty_expect_send(
+    conversation_id: str,
+    expect: str,
+    send: str,
+    expect_type: str = "substring",
+    from_cursor: int = 0,
+    timeout_ms: int = 30000,
+) -> Dict[str, Any]:
+    """
+    Atomically wait for a pattern, then send input.
+    
+    This prevents race conditions between detecting a prompt and sending input.
+    The wait and send happen under a per-PTY lock.
+    
+    Args:
+        expect: Pattern to wait for
+        send: Data to send after match (supports \\r for Enter, \\x03 for Ctrl+C, etc.)
+        expect_type: 'substring', 'regex', or 'prompt'
+        from_cursor: Byte offset to start searching from
+        timeout_ms: Timeout for the wait phase
+    
+    Returns on success:
+        {ok: true, matched: true, match_text, match_span, resume_cursor, sent: true}
+    
+    Returns on timeout:
+        {ok: false, matched: false, error: "timeout", resume_cursor, sent: false}
+    """
+    state = _state(conversation_id)
+    try:
+        await state.ensure_shell()
+        async with state.lock:
+            result = await state.wait_for(
+                match=expect,
+                match_type=expect_type,
+                from_cursor=from_cursor,
+                timeout_ms=timeout_ms,
+            )
+            if result.get("matched"):
+                await state.send_stdin(send)
+                result["sent"] = True
+            else:
+                result["sent"] = False
+            return result
+    except Exception as e:
+        return {"ok": False, "error": str(e), "sent": False}
+
+
+@mcp.tool(name="pty_status", description="Get PTY status: mode, active block/session, cursor position.")
 async def pty_status(conversation_id: str) -> Dict[str, Any]:
     state = _state(conversation_id)
     return state.get_status()
 
 
-@mcp.tool(name="pty.read_spool", description="Read raw output from the conversation spool at a cursor position.")
+@mcp.tool(name="pty_read_spool", description="Read raw output from the conversation spool at a cursor position.")
 async def pty_read_spool(
     conversation_id: str,
     from_cursor: int = 0,
@@ -871,13 +1055,13 @@ async def pty_read_spool(
     state = _state(conversation_id)
     try:
         await state._init_spool()
-        data, next_cursor = await state.read_spool(from_cursor, max_bytes)
-        return {"ok": True, "data": data, "cursor": from_cursor, "next_cursor": next_cursor}
+        data, data_end = await state.read_spool(from_cursor, max_bytes)
+        return {"ok": True, "data": data, "cursor": from_cursor, "resume_cursor": data_end}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="blocks.since", description="List blocks since a byte cursor in blocks.jsonl (per conversation).")
+@mcp.tool(name="blocks_since", description="List blocks since a byte cursor in blocks.jsonl (per conversation).")
 async def blocks_since(conversation_id: str, cursor: int = 0, limit: int = 50) -> Dict[str, Any]:
     path = _blocks_index_path(conversation_id)
     if not path.exists():
@@ -901,7 +1085,7 @@ async def blocks_since(conversation_id: str, cursor: int = 0, limit: int = 50) -
     return {"ok": True, "cursor": cursor, "next_cursor": next_cursor, "items": items}
 
 
-@mcp.tool(name="blocks.read", description="Read raw output bytes from a block output file.")
+@mcp.tool(name="blocks_read", description="Read raw output bytes from a block output file.")
 async def blocks_read(conversation_id: str, block_id: str, offset: int = 0, max_bytes: int = 65536) -> Dict[str, Any]:
     max_bytes = max(1, min(int(max_bytes), 512 * 1024))
     offset = max(0, int(offset))
@@ -922,7 +1106,7 @@ async def blocks_read(conversation_id: str, block_id: str, offset: int = 0, max_
     return {"ok": True, "offset": offset, "next_offset": offset + len(chunk), "data": chunk.decode("utf-8", errors="replace")}
 
 
-@mcp.tool(name="blocks.get", description="Get metadata for a block id (from blocks.jsonl).")
+@mcp.tool(name="blocks_get", description="Get metadata for a block id (from blocks.jsonl).")
 async def blocks_get(conversation_id: str, block_id: str) -> Dict[str, Any]:
     path = _blocks_index_path(conversation_id)
     if not path.exists():
@@ -942,7 +1126,7 @@ async def blocks_get(conversation_id: str, block_id: str) -> Dict[str, Any]:
     return {"ok": False, "error": "block not found"}
 
 
-@mcp.tool(name="blocks.search", description="Search within a block's output for a substring; returns matching line snippets.")
+@mcp.tool(name="blocks_search", description="Search within a block's output for a substring; returns matching line snippets.")
 async def blocks_search(conversation_id: str, block_id: str, query: str, limit: int = 50) -> Dict[str, Any]:
     meta = await blocks_get(conversation_id, block_id)
     if not meta.get("ok") or not meta.get("block"):

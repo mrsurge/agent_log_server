@@ -1528,6 +1528,81 @@ document.addEventListener('DOMContentLoaded', () => {
         fragment.appendChild(row);
         return;
       }
+      // MCP tool call entries
+      if (entry.role === 'mcp_tool') {
+        const row = document.createElement('div');
+        row.className = 'timeline-row command-result mcp-tool-card';
+        const body = document.createElement('div');
+        body.className = 'body';
+        // Tool header
+        const header = document.createElement('div');
+        header.className = 'command-ribbon';
+        const toolName = entry.tool || 'mcp_tool';
+        const serverName = entry.server || '';
+        header.textContent = serverName ? `${serverName}:${toolName}` : toolName;
+        body.appendChild(header);
+        // Content area
+        const content = document.createElement('pre');
+        content.className = 'mcp-tool-content';
+        const lines = [];
+        // Format arguments as key: value
+        if (entry.arguments && Object.keys(entry.arguments).length > 0) {
+          Object.entries(entry.arguments).forEach(([k, v]) => {
+            const val = typeof v === 'string' ? v : JSON.stringify(v);
+            lines.push(`  ${k}: ${val}`);
+          });
+        }
+        // Format result
+        if (entry.result !== undefined && entry.result !== null) {
+          lines.push('→');
+          if (typeof entry.result === 'object') {
+            Object.entries(entry.result).forEach(([k, v]) => {
+              if (typeof v === 'object' && v !== null) {
+                lines.push(`  ${k}:`);
+                Object.entries(v).forEach(([k2, v2]) => {
+                  lines.push(`    ${k2}: ${JSON.stringify(v2)}`);
+                });
+              } else {
+                lines.push(`  ${k}: ${JSON.stringify(v)}`);
+              }
+            });
+          } else {
+            lines.push(`  ${entry.result}`);
+          }
+        }
+        content.textContent = lines.join('\n');
+        if (entry.is_error) content.classList.add('error-text');
+        body.appendChild(content);
+        // Footer with duration
+        if (entry.duration_ms !== undefined && entry.duration_ms !== null) {
+          const footer = document.createElement('div');
+          footer.className = 'command-footer';
+          footer.textContent = `${entry.duration_ms}ms`;
+          body.appendChild(footer);
+        }
+        row.appendChild(body);
+        fragment.appendChild(row);
+        return;
+      }
+      // Web search entries
+      if (entry.role === 'web_search') {
+        const row = document.createElement('div');
+        row.className = 'timeline-row command-result web-search-card';
+        const body = document.createElement('div');
+        body.className = 'body';
+        const header = document.createElement('div');
+        header.className = 'command-ribbon';
+        header.textContent = `🔍 web_search`;
+        body.appendChild(header);
+        if (entry.query) {
+          const queryPre = document.createElement('pre');
+          queryPre.textContent = entry.query;
+          body.appendChild(queryPre);
+        }
+        row.appendChild(body);
+        fragment.appendChild(row);
+        return;
+      }
       const label = entry.role === 'assistant' ? 'assistant' : entry.role;
       const { row, body } = buildRow('message', label);
       if (entry.role === 'assistant' && isMarkdownEnabled()) {
@@ -1713,17 +1788,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderToolBegin(evt) {
     const toolName = evt.tool || 'tool';
-    const entry = getToolRow(evt.id, `tool:${toolName}`);
-    const payload = evt.payload || {};
-    const cmd = payload.command || payload.cmd || payload.args;
-    const cwd = payload.cwd;
-    const parts = [];
-    if (cmd) parts.push(String(cmd));
-    if (cwd) parts.push(`cwd=${cwd}`);
-    if (parts.length) {
-      entry.pre.textContent += `[begin] ${parts.join(' ')}\n`;
-    } else {
-      entry.pre.textContent += '[begin]\n';
+    const serverName = evt.server || '';
+    const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
+    const entry = getToolRow(evt.id, label);
+    // Format arguments as indented key: value
+    const args = evt.arguments || evt.payload || {};
+    const lines = [];
+    Object.entries(args).forEach(([k, v]) => {
+      const val = typeof v === 'string' ? v : JSON.stringify(v);
+      lines.push(`  ${k}: ${val}`);
+    });
+    if (lines.length) {
+      entry.pre.textContent += lines.join('\n') + '\n';
     }
     lastEventType = 'tool';
   }
@@ -1739,17 +1815,39 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderToolEnd(evt) {
-    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`);
-    const payload = evt.payload || {};
-    const exitCode = payload.exit_code ?? payload.exitCode;
-    const duration = payload.duration_ms ?? payload.durationMs;
-    const parts = [];
-    if (exitCode !== undefined && exitCode !== null) parts.push(`exit=${exitCode}`);
-    if (duration !== undefined && duration !== null) parts.push(`duration=${duration}ms`);
-    entry.pre.textContent += `[end] ${parts.join(' ')}\n`;
+    const toolName = evt.tool || 'tool';
+    const serverName = evt.server || '';
+    const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
+    const entry = getToolRow(evt.id, label);
+    // Handle both old payload format and new result format
+    const result = evt.result || evt.payload || {};
+    const durationMs = evt.duration_ms ?? result.duration_ms ?? result.durationMs;
+    const isError = evt.is_error || result.isError || false;
+    
+    // Format result as indented key: value
+    entry.pre.textContent += '→\n';
+    if (result && typeof result === 'object') {
+      Object.entries(result).forEach(([k, v]) => {
+        if (typeof v === 'object' && v !== null) {
+          entry.pre.textContent += `  ${k}:\n`;
+          Object.entries(v).forEach(([k2, v2]) => {
+            entry.pre.textContent += `    ${k2}: ${JSON.stringify(v2)}\n`;
+          });
+        } else {
+          entry.pre.textContent += `  ${k}: ${JSON.stringify(v)}\n`;
+        }
+      });
+    }
+    
+    // Duration footer
+    if (durationMs !== undefined && durationMs !== null) {
+      entry.pre.textContent += `${durationMs}ms\n`;
+    }
+    
     lastEventType = 'tool';
-    // Update status dot based on exit code
-    if (exitCode === 0 || exitCode === undefined || exitCode === null) {
+    // Update status dot based on error state
+    const exitCode = result.exit_code ?? result.exitCode;
+    if (!isError && (exitCode === 0 || exitCode === undefined || exitCode === null)) {
       setStatusDot('success');
     } else {
       setStatusDot('error');
