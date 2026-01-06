@@ -110,6 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
   let commandRunning = false; // Whether a PTY command is currently running
   let ptyWebSocket = null; // Raw PTY WebSocket connection
+  let activeAgentPtyBlockId = null;
   const pending = new Map();
 
   // Detect mobile for input behavior
@@ -1377,9 +1378,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Command ribbon
         const cmdRibbon = document.createElement('div');
         cmdRibbon.className = 'command-ribbon';
-        let cmdText = entry.command || '';
-        if (entry.cwd) cmdText += `\ncwd: ${entry.cwd}`;
-        cmdRibbon.textContent = cmdText;
+        // Just show the command, skip cwd line (redundant)
+        cmdRibbon.textContent = entry.command || '';
         body.appendChild(cmdRibbon);
         // Output
         if (entry.output) {
@@ -1595,7 +1595,7 @@ document.addEventListener('DOMContentLoaded', () => {
           row.appendChild(body);
           fragment.appendChild(row);
           // Don't create xterm yet - element not in DOM. Will be created in RAF callback.
-          const rec = { row, termEl, cmdRibbon, term: null, cmd, buf: '', text: '' };
+          const rec = { row, termEl, cmdRibbon, term: null, cmd, buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
           agentPtyByBlock.set(blockId, rec);
           // Also register in global map so live handlers don't duplicate
           agentBlockRows.set(blockId, rec);
@@ -1628,7 +1628,7 @@ document.addEventListener('DOMContentLoaded', () => {
             row.appendChild(body);
             fragment.appendChild(row);
             // Don't create xterm yet - element not in DOM
-            rec = { row, termEl, cmdRibbon, term: null, cmd: '', buf: '', text: '' };
+            rec = { row, termEl, cmdRibbon, term: null, cmd: '', buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
             agentPtyByBlock.set(blockId, rec);
             agentBlockRows.set(blockId, rec);
             pendingAgentPtyTerms.push(rec);
@@ -1788,7 +1788,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const rows = Math.min(Math.max(lineCount, 3), 30);
                 rec.term = createXterm(rec.termEl, rows);
               }
-              if (rec.buf && rec.term) {
+              if (rec.buf && rec.term && rec.renderMode !== 'screen') {
                 const normalized = rec.buf.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
                 rec.term.write(normalized);
               }
@@ -1929,6 +1929,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderToolBegin(evt) {
     const toolName = evt.tool || 'tool';
+    // Skip command tools - they're redundant with command cards
+    if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
     const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
     const entry = getToolRow(evt.id, label);
@@ -1946,6 +1948,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderToolDelta(evt) {
+    const toolName = evt.tool || 'tool';
+    // Skip command tools - they're redundant with command cards
+    if (toolName === 'command' || toolName === 'shell') return;
     const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`);
     const delta = evt.delta || '';
     if (delta) {
@@ -1957,6 +1962,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderToolEnd(evt) {
     const toolName = evt.tool || 'tool';
+    // Skip command tools - they're redundant with command cards
+    if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
     const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
     const entry = getToolRow(evt.id, label);
@@ -2052,7 +2059,7 @@ document.addEventListener('DOMContentLoaded', () => {
       insertRow(row);
       // Only create xterm if setting enabled
       const term = useXterm ? createXterm(termEl) : null;
-      entry = { row, cmdRibbon, term, termEl, text: '' };
+      entry = { row, cmdRibbon, term, termEl, text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
       agentBlockRows.set(key, entry);
     }
     return entry;
@@ -2067,6 +2074,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Show command in styled ribbon (white on gray), not inside xterm
     entry.cmdRibbon.textContent = cmd ? `$ ${cmd}` : '';
     entry.text = '';
+    entry.screenRows = null;
+    entry.renderMode = 'raw';
+    entry.hasRawStream = Boolean(ptyWebSocket && ptyWebSocket.readyState === WebSocket.OPEN);
+    activeAgentPtyBlockId = blockId;
     if (entry.term) {
       entry.term.reset();
     }
@@ -2079,6 +2090,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderAgentBlockDelta(evt) {
     const blockId = evt.block_id || evt.blockId || 'agent';
     const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
+    if (entry.renderMode === 'screen' || entry.hasRawStream) return;
     const delta = evt.delta || '';
     if (!delta) return;
     entry.text += delta;
@@ -2091,6 +2103,73 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     lastEventType = 'shell';
     maybeAutoScroll();
+  }
+
+  function renderScreenDelta(evt) {
+    const blockId = evt.block_id || evt.blockId;
+    if (!blockId) return;
+    const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
+    if (entry.renderMode !== 'screen') return;
+    if (entry.renderMode !== 'screen') {
+      entry.renderMode = 'screen';
+      entry.text = '';
+      entry.buf = '';
+      if (entry.term) {
+        entry.term.reset();
+      }
+    }
+    const rowCount = Number.isFinite(evt.rows_count) ? evt.rows_count : 40;
+    if (!entry.screenRows || entry.screenRows.length !== rowCount) {
+      entry.screenRows = new Array(rowCount).fill('');
+    }
+    const rows = Array.isArray(evt.rows) ? evt.rows : [];
+    rows.forEach((r) => {
+      if (!r || !Number.isFinite(r.row)) return;
+      const idx = r.row;
+      if (idx >= 0 && idx < entry.screenRows.length) {
+        entry.screenRows[idx] = r.text || '';
+      }
+    });
+    if (useXterm) {
+      if (!entry.term) {
+        entry.term = createXterm(entry.termEl, rowCount);
+      }
+      if (entry.term) {
+        const content = entry.screenRows.join('\r\n');
+        entry.term.write('\x1b[2J\x1b[H' + content);
+      }
+    } else {
+      entry.termEl.textContent = entry.screenRows.join('\n');
+    }
+    lastEventType = 'shell';
+    maybeAutoScroll();
+  }
+
+  function _decodeBase64ToUtf8(b64) {
+    try {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return new TextDecoder('utf-8').decode(bytes);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function renderAgentPtyRaw(evt) {
+    // Raw PTY events are now handled by PTY WebSocket for user terminal
+    // Agent transcript should use screen_delta events for clean rendering
+    // Skip processing here to avoid duplicate/noisy output
+    return;
+    
+    // Original code kept for reference:
+    // const blockId = evt.block_id || evt.blockId;
+    // if (!blockId) return;
+    // const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
+    // if (entry.renderMode === 'screen') return;
+    // ...
   }
 
   function renderAgentBlockEnd(evt) {
@@ -2112,6 +2191,9 @@ document.addEventListener('DOMContentLoaded', () => {
     setCommandRunning(false);
     lastEventType = 'shell';
     maybeAutoScroll();
+    if (activeAgentPtyBlockId === blockId) {
+      activeAgentPtyBlockId = null;
+    }
     // keep row in map for later deltas (should not happen) but don't delete yet
   }
 
@@ -2151,9 +2233,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderShellBegin(evt) {
     const entry = getShellRow(evt.id);
-    let cmdText = `$ ${evt.command || ''}`;
-    if (evt.cwd) cmdText += `\ncwd: ${evt.cwd}`;
-    entry.cmdRibbon.textContent = cmdText;
+    // Just show the command, skip cwd line (redundant)
+    entry.cmdRibbon.textContent = `$ ${evt.command || ''}`;
     entry.text = '';
     if (entry.term) {
       entry.term.reset();
@@ -2421,10 +2502,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Command ribbon (black background, white text)
     const cmdRibbon = document.createElement('div');
     cmdRibbon.className = 'command-ribbon';
-    // Just show the command, cwd on separate line if present
-    let cmdText = command;
-    if (cwd) cmdText += `\ncwd: ${cwd}`;
-    cmdRibbon.textContent = cmdText;
+    // Just show the command, skip cwd line (redundant)
+    cmdRibbon.textContent = command;
     body.appendChild(cmdRibbon);
     
     // Output block (if any)
@@ -2907,6 +2986,8 @@ document.addEventListener('DOMContentLoaded', () => {
       setXtermEnabled(conversationSettings?.useXterm !== false);
       // Sync diff syntax toggle from settings
       setDiffSyntaxEnabled(conversationSettings?.diffSyntax === true);
+      // Connect PTY WebSocket for user terminal
+      connectPtyWebSocket();
     } catch {
       // Don't touch statusEl here - it's for server status only
     }
@@ -3199,6 +3280,12 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'agent_block_end':
         renderAgentBlockEnd(evt);
         return;
+      case 'screen_delta':
+        renderScreenDelta(evt);
+        return;
+      case 'agent_pty_raw':
+        renderAgentPtyRaw(evt);
+        return;
       case 'shell_begin':
         renderShellBegin(evt);
         return;
@@ -3291,6 +3378,89 @@ document.addEventListener('DOMContentLoaded', () => {
     socket.on('appserver_event', (data) => {
       handleEvent(data);
     });
+  }
+
+  // Connect raw PTY WebSocket for user terminal (separate from agent transcript)
+  function connectPtyWebSocket() {
+    const convoId = conversationMeta?.conversation_id;
+    if (!convoId) return;
+    
+    // Close existing connection if any
+    if (ptyWebSocket) {
+      ptyWebSocket.close();
+      ptyWebSocket = null;
+    }
+    
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/pty/${encodeURIComponent(convoId)}`;
+    
+    try {
+      ptyWebSocket = new WebSocket(wsUrl);
+      
+      ptyWebSocket.onopen = () => {
+        console.log('PTY WebSocket connected');
+        if (activeAgentPtyBlockId) {
+          const entry = agentBlockRows.get(activeAgentPtyBlockId);
+          if (entry) entry.hasRawStream = true;
+        }
+      };
+      
+      ptyWebSocket.onmessage = (event) => {
+        // Raw PTY output - for user terminal xterm rendering
+        // This is separate from agent transcript which uses screen_delta events
+        const data = event.data;
+        if (typeof data === 'string' && data) {
+          // Find active user terminal entry and write to it
+          // For now, we can use a dedicated user terminal or the active agent block in raw mode
+          handleUserPtyOutput(data);
+        }
+      };
+      
+      ptyWebSocket.onerror = (err) => {
+        console.error('PTY WebSocket error:', err);
+      };
+      
+      ptyWebSocket.onclose = () => {
+        console.log('PTY WebSocket closed');
+        ptyWebSocket = null;
+      };
+    } catch (e) {
+      console.error('Failed to connect PTY WebSocket:', e);
+    }
+  }
+
+  // Handle raw PTY output for user terminal
+  function handleUserPtyOutput(chunk) {
+    // Route raw PTY output to the active agent block (raw mode)
+    if (activeAgentPtyBlockId) {
+      const entry = agentBlockRows.get(activeAgentPtyBlockId);
+      if (entry) {
+        entry.hasRawStream = true;
+        if (!entry.term && useXterm) {
+          entry.term = createXterm(entry.termEl, 12);
+        }
+        if (useXterm && entry.term) {
+          entry.term.write(chunk);
+        } else if (!useXterm && entry.termEl) {
+          entry.text += chunk;
+          entry.termEl.textContent = entry.text;
+        }
+        maybeAutoScroll();
+        return;
+      }
+    }
+    // Fallback: find any raw-mode block
+    for (const [blockId, entry] of agentBlockRows) {
+      if (entry.renderMode === 'raw' && entry.term && useXterm) {
+        entry.hasRawStream = true;
+        entry.term.write(chunk);
+        maybeAutoScroll();
+        return;
+      }
+    }
+    // Fallback: if no raw-mode block, could create a dedicated user terminal
+    // For now, just log
+    // console.log('PTY output (no target):', chunk.substring(0, 50));
   }
 
   setPill(statusEl, 'idle', 'warn');

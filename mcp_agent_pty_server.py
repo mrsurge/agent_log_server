@@ -41,6 +41,7 @@ def _ensure_framework_shells_secret() -> None:
 _ensure_framework_shells_secret()
 
 from framework_shells import get_manager as get_framework_shell_manager
+from framework_shells.orchestrator import Orchestrator
 from mcp.server.fastmcp import FastMCP
 
 
@@ -85,6 +86,9 @@ def _blocks_events_path(conversation_id: str) -> Path:
 def _rcfile_path(conversation_id: str) -> Path:
     return _agent_pty_root(conversation_id) / "bashrc_agent_pty.sh"
 
+def _marker_path(conversation_id: str) -> Path:
+    return _agent_pty_root(conversation_id) / "markers.log"
+
 
 # Sprint 2: Screen model paths
 def _screen_events_path(conversation_id: str) -> Path:
@@ -94,12 +98,15 @@ def _screen_events_path(conversation_id: str) -> Path:
 def _screen_snapshot_path(conversation_id: str) -> Path:
     return _agent_pty_root(conversation_id) / "screen.snapshot.json"
 
+def _shell_id_path(conversation_id: str) -> Path:
+    return _agent_pty_root(conversation_id) / "shell_id.txt"
+
 
 _MARKER_BEGIN = "__FWS_BLOCK_BEGIN__"
 _MARKER_END = "__FWS_BLOCK_END__"
 
 
-def _write_rcfile(path: Path) -> None:
+def _write_rcfile(path: Path, marker_path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Marker format:
     #   __FWS_BLOCK_BEGIN__ seq=<n> ts=<ms> cwd_b64=<...> cmd_b64=<...>
@@ -127,6 +134,10 @@ elif [ -d "/data/data/com.termux/files/usr" ]; then
   fi
 fi
 
+__FWS_MARKER_FILE="__FWS_MARKER_FILE_PATH__"
+: > "$__FWS_MARKER_FILE"
+exec 3>>"$__FWS_MARKER_FILE"
+
 __FWS_SEQ=0
 __FWS_LAST_SEQ=""
 __FWS_IN_MARKER=0
@@ -149,14 +160,14 @@ __fws_emit_begin() {
   local seq="$4"
   local cwd_b64="$(__fws_b64 "$cwd")"
   local cmd_b64="$(__fws_b64 "$cmd")"
-  printf '\n__FWS_BLOCK_BEGIN__ seq=%s ts=%s cwd_b64=%s cmd_b64=%s\n' "$seq" "$ts" "$cwd_b64" "$cmd_b64"
+  printf '\n__FWS_BLOCK_BEGIN__ seq=%s ts=%s cwd_b64=%s cmd_b64=%s\n' "$seq" "$ts" "$cwd_b64" "$cmd_b64" >&3
 }
 
 __fws_emit_end() {
   local exit_code="$1"
   local ts="$2"
   local seq="$3"
-  printf '\n__FWS_BLOCK_END__ seq=%s ts=%s exit=%s\n' "$seq" "$ts" "$exit_code"
+  printf '\n__FWS_BLOCK_END__ seq=%s ts=%s exit=%s\n' "$seq" "$ts" "$exit_code" >&3
 }
 
 __fws_emit_prompt() {
@@ -164,7 +175,7 @@ __fws_emit_prompt() {
   local ts="$(__fws_now_ms)"
   local cwd="$(pwd -P 2>/dev/null || pwd)"
   local cwd_b64="$(__fws_b64 "$cwd")"
-  printf '\n__FWS_PROMPT__ ts=%s cwd_b64=%s exit=%s\n' "$ts" "$cwd_b64" "$exit_code"
+  printf '\n__FWS_PROMPT__ ts=%s cwd_b64=%s exit=%s\n' "$ts" "$cwd_b64" "$exit_code" >&3
 }
 
 __fws_should_ignore_cmd() {
@@ -234,6 +245,7 @@ fi
 
 PS1="agent-pty> "
 """
+    content = content.replace("__FWS_MARKER_FILE_PATH__", str(marker_path))
     path.write_text(content.lstrip(), encoding="utf-8")
 
 
@@ -270,6 +282,10 @@ def _output_spool_path(conversation_id: str) -> Path:
     """Canonical output spool for wait_for cursor operations."""
     return _agent_pty_root(conversation_id) / "output.spool"
 
+def _raw_events_path(conversation_id: str) -> Path:
+    """Raw chunk event stream for UI playback (base64 bytes)."""
+    return _agent_pty_root(conversation_id) / "raw_events.jsonl"
+
 
 _MARKER_PROMPT = "__FWS_PROMPT__"
 
@@ -304,8 +320,14 @@ class ConversationState:
         # Raw byte stream (truly lossless via subscribe_output_bytes)
         self._raw_path: Optional[Path] = None
         self._raw_size: int = 0
+        # How many raw bytes have been fed into the screen model
+        self._screen_raw_size: int = 0
         self._bytes_queue: Optional[asyncio.Queue] = None
         self._bytes_reader_task: Optional[asyncio.Task] = None
+        # Marker sideband (stdout markers moved to fd3)
+        self._marker_path: Optional[Path] = None
+        self._marker_task: Optional[asyncio.Task] = None
+        self._marker_buffer: bytes = b""
         
         # Dedicated lock for screen operations (avoid blocking wait_for)
         self._screen_lock = asyncio.Lock()
@@ -429,6 +451,14 @@ class ConversationState:
                 self._raw_path.write_bytes(b"")
                 self._raw_size = 0
 
+    async def _refresh_raw_size(self) -> None:
+        """Refresh raw file size from disk."""
+        await self._init_raw()
+        try:
+            self._raw_size = self._raw_path.stat().st_size
+        except Exception:
+            pass
+
     async def _append_raw(self, data: bytes) -> int:
         """Append raw bytes (lossless), return new size."""
         async with self._screen_lock:
@@ -437,11 +467,24 @@ class ConversationState:
             self._raw_size += len(data)
             return self._raw_size
 
+    async def _append_raw_event(self, data: bytes) -> None:
+        """Append raw chunk event (base64) for UI playback."""
+        path = _raw_events_path(self.conversation_id)
+        payload = {
+            "type": "agent_pty_raw",
+            "conversation_id": self.conversation_id,
+            "block_id": self._active.block_id if self._active else None,
+            "data_b64": base64.b64encode(data).decode("ascii"),
+            "ts": _now_ms(),
+        }
+        await asyncio.to_thread(self._append_text_line, path, json.dumps(payload, ensure_ascii=False) + "\n")
+
     def _init_screen(self) -> None:
         """Initialize pyte screen model."""
         if self._screen is None:
             self._screen = pyte.Screen(self._screen_cols, self._screen_rows)
             self._stream = pyte.ByteStream(self._screen)
+            self._screen_raw_size = 0
 
     def _feed_screen(self, data: bytes) -> set:
         """Feed data to pyte, return set of dirty row indices."""
@@ -450,16 +493,21 @@ class ConversationState:
             self._stream.feed(data)
         except Exception:
             pass  # pyte may choke on malformed sequences
+        self._screen_raw_size += len(data)
         dirty = set(self._screen.dirty)
         self._pending_dirty_rows.update(dirty)
         return dirty
 
     def _get_screen_row(self, row: int) -> str:
-        """Get text content of a screen row (0-indexed)."""
+        """Get text content of a screen row (0-indexed), with markers filtered."""
         if self._screen is None:
             return ""
         # Use screen.display[row] for correct column-ordered string
-        return self._screen.display[row].rstrip()
+        text = self._screen.display[row].rstrip()
+        # Filter out shell markers that shouldn't appear in screen output
+        if "__FWS_BLOCK_BEGIN__" in text or "__FWS_BLOCK_END__" in text or "__FWS_PROMPT__" in text:
+            return ""
+        return text
 
     def _is_alt_screen(self) -> bool:
         """Check if terminal is in alternate screen mode."""
@@ -483,8 +531,77 @@ class ConversationState:
             "alt_screen": self._is_alt_screen(),
             "cols": self._screen_cols,
             "rows_count": self._screen_rows,
+            "raw_size": self._screen_raw_size,
             "ts": _now_ms(),
         }
+
+    async def _load_snapshot_file(self) -> Optional[dict]:
+        """Load snapshot from disk if it exists."""
+        path = _screen_snapshot_path(self.conversation_id)
+        if not path.exists():
+            return None
+        try:
+            data = await asyncio.to_thread(path.read_text, encoding="utf-8")
+            snapshot = json.loads(data)
+            if isinstance(snapshot, dict) and "rows" in snapshot:
+                return snapshot
+        except Exception:
+            return None
+        return None
+
+    async def _write_snapshot_file(self, snapshot: dict) -> None:
+        """Persist snapshot to disk."""
+        path = _screen_snapshot_path(self.conversation_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            path.write_text,
+            json.dumps(snapshot, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    async def _rehydrate_screen_from_raw(self, upto: Optional[int] = None) -> None:
+        """Rebuild screen model from raw bytes on disk."""
+        await self._refresh_raw_size()
+        raw_size = self._raw_size if upto is None else min(self._raw_size, int(upto))
+        # Fresh screen
+        self._screen = pyte.Screen(self._screen_cols, self._screen_rows)
+        self._stream = pyte.ByteStream(self._screen)
+        self._pending_dirty_rows.clear()
+        self._screen_raw_size = 0
+        if raw_size <= 0:
+            return
+        offset = 0
+        chunk_size = 1024 * 1024
+        while offset < raw_size:
+            to_read = min(chunk_size, raw_size - offset)
+            data = await asyncio.to_thread(self._read_bytes, self._raw_path, offset, to_read)
+            if not data:
+                break
+            self._feed_screen(data)
+            offset += len(data)
+        if self._screen:
+            self._screen.dirty.clear()
+
+    async def _load_shell_id(self) -> Optional[str]:
+        """Load cached shell id from disk."""
+        path = _shell_id_path(self.conversation_id)
+        if not path.exists():
+            return None
+        try:
+            data = await asyncio.to_thread(path.read_text, encoding="utf-8")
+            shell_id = data.strip()
+            return shell_id or None
+        except Exception:
+            return None
+
+    async def _save_shell_id(self, shell_id: str) -> None:
+        """Persist shell id to disk."""
+        path = _shell_id_path(self.conversation_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await asyncio.to_thread(path.write_text, shell_id, encoding="utf-8")
+        except Exception:
+            pass
 
     # === Sprint 2: Screen delta events ===
 
@@ -519,10 +636,13 @@ class ConversationState:
             event = {
                 "type": "screen_delta",
                 "conversation_id": self.conversation_id,
+                "block_id": self._active.block_id if self._active else None,
                 "rows": rows_data,
                 "cursor": {"row": self._screen.cursor.y, "col": self._screen.cursor.x},
                 "title": getattr(self._screen, 'title', '') or "",
                 "alt_screen": self._is_alt_screen(),
+                "cols": self._screen_cols,
+                "rows_count": self._screen_rows,
                 "ts": _now_ms(),
             }
             
@@ -583,9 +703,11 @@ class ConversationState:
                 chunk_bytes: bytes = await self._bytes_queue.get()
                 # Append raw bytes directly (truly lossless)
                 await self._append_raw(chunk_bytes)
+                await self._append_raw_event(chunk_bytes)
                 # Feed raw bytes directly to pyte.ByteStream
                 try:
-                    self._feed_screen(chunk_bytes)
+                    async with self._screen_lock:
+                        self._feed_screen(chunk_bytes)
                     # Sprint 2: Emit screen delta (rate-limited)
                     await self._emit_screen_delta()
                 except Exception:
@@ -596,22 +718,122 @@ class ConversationState:
             name=f"agent-pty-bytes-reader:{self.conversation_id}"
         )
 
+    async def _ensure_marker_reader(self) -> None:
+        """Read marker lines from sideband file (fd3) instead of stdout."""
+        if self._marker_task and not self._marker_task.done():
+            return
+        if self._marker_path is None:
+            self._marker_path = _marker_path(self.conversation_id)
+        path = self._marker_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(b"")
+
+        async def _run_markers() -> None:
+            offset = 0
+            buffer = b""
+            while True:
+                try:
+                    if not path.exists():
+                        await asyncio.sleep(0.5)
+                        continue
+                    raw = await asyncio.to_thread(path.read_bytes)
+                    if offset > len(raw):
+                        offset = 0
+                    tail = raw[offset:]
+                    if not tail:
+                        await asyncio.sleep(0.2)
+                        continue
+                    offset = len(raw)
+                    buffer += tail
+                    if b"\n" not in buffer:
+                        continue
+                    parts = buffer.split(b"\n")
+                    buffer = parts.pop()
+                    for part in parts:
+                        line = part.decode("utf-8", errors="replace").strip()
+                        if not line:
+                            continue
+                        await self._append_spool(line + "\n")
+                        await self._check_waiters(line)
+                        async with self.lock:
+                            if _MARKER_BEGIN in line:
+                                await self._handle_begin(line)
+                                continue
+                            if _MARKER_END in line:
+                                await self._handle_end(line)
+                                continue
+                            if _MARKER_PROMPT in line:
+                                await self._handle_prompt(line)
+                                continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await asyncio.sleep(0.5)
+
+        self._marker_task = asyncio.create_task(
+            _run_markers(),
+            name=f"agent-pty-markers:{self.conversation_id}"
+        )
+
     async def ensure_shell(self, *, cwd: Optional[str] = None) -> str:
         async with self.lock:
-            if self.shell_id:
-                return self.shell_id
             mgr = await get_framework_shell_manager()
+            self._marker_path = _marker_path(self.conversation_id)
+            if self.shell_id:
+                await self._ensure_reader(mgr)
+                await self._ensure_marker_reader()
+                return self.shell_id
+            # Try cached shell id (reattach)
+            cached_id = await self._load_shell_id()
+            if cached_id:
+                try:
+                    rec = await mgr.get_shell(cached_id)
+                    if rec and rec.status == "running":
+                        self.shell_id = rec.id
+                        await self._ensure_reader(mgr)
+                        await self._ensure_marker_reader()
+                        return self.shell_id
+                except Exception:
+                    pass
+            # Try find by label (reattach)
+            label = f"agent-pty:{self.conversation_id}"
+            try:
+                rec = await mgr.find_shell_by_label(label, status="running")
+            except Exception:
+                rec = None
+            if rec:
+                self.shell_id = rec.id
+                await self._save_shell_id(rec.id)
+                await self._ensure_reader(mgr)
+                await self._ensure_marker_reader()
+                return self.shell_id
             root = _agent_pty_root(self.conversation_id)
             root.mkdir(parents=True, exist_ok=True)
             rcfile = _rcfile_path(self.conversation_id)
-            _write_rcfile(rcfile)
-            env_parts = ["env", "__FWS_MANUAL=1"]
-            for k, v in _termux_env_overrides().items():
-                env_parts.append(f"{k}={v}")
-            command = env_parts + ["bash", "--rcfile", str(rcfile), "-i"]
-            rec = await mgr.spawn_shell_dtach(command, cwd=cwd or str(Path.cwd()), label=f"agent-pty:{self.conversation_id}")
+            marker_path = _marker_path(self.conversation_id)
+            _write_rcfile(rcfile, marker_path)
+            self._marker_path = marker_path
+            ctx = {
+                "PROJECT_ROOT": str(Path(__file__).resolve().parent),
+                "CONVERSATION_ID": self.conversation_id,
+                "RCFILE": str(rcfile),
+                "CWD": cwd or str(Path.cwd()),
+            }
+            env_overrides = {"__FWS_MANUAL": "1", **_termux_env_overrides()}
+            spec_ref = "shellspec/mcp_agent_pty.yaml#agent_pty_shell"
+            rec = await Orchestrator(mgr).start_from_ref(
+                spec_ref,
+                base_dir=Path(__file__).resolve().parent,
+                ctx=ctx,
+                label=label,
+                env_overrides=env_overrides,
+                wait_ready=True,
+            )
             self.shell_id = rec.id
+            await self._save_shell_id(rec.id)
             await self._ensure_reader(mgr)
+            await self._ensure_marker_reader()
             return self.shell_id
 
     async def _ensure_reader(self, mgr) -> None:
@@ -636,6 +858,8 @@ class ConversationState:
         async with self.lock:
             loop = asyncio.get_running_loop()
             self._begin_waiter = loop.create_future()
+            # Clear screen BEFORE running the command so the final screen reflects only this run.
+            await mgr.write_to_pty(self.shell_id, "\x1b[2J\x1b[H")
             # Wrap the entire submitted command line in a single BEGIN/END marker pair.
             # This keeps `echo hi && pwd` as one block.
             wrapped = (
@@ -698,6 +922,8 @@ class ConversationState:
             # Send command directly (no wrappers)
             if cwd:
                 await mgr.write_to_pty(self.shell_id, f'cd "{cwd}" 2>/dev/null\n')
+            # Clear screen BEFORE interactive command so the prompt snapshot is just this run.
+            await mgr.write_to_pty(self.shell_id, "\x1b[2J\x1b[H")
             await mgr.write_to_pty(self.shell_id, cmd + "\n")
         
         # Get current spool size so agent can wait_for from here
@@ -794,15 +1020,6 @@ class ConversationState:
         await asyncio.to_thread(self._append_line, path, text.rstrip("\n"))
 
     async def _on_line(self, line: str) -> None:
-        if _MARKER_BEGIN in line:
-            await self._handle_begin(line)
-            return
-        if _MARKER_END in line:
-            await self._handle_end(line)
-            return
-        if _MARKER_PROMPT in line:
-            await self._handle_prompt(line)
-            return
         if self._active:
             # Preserve exact newlines by writing the line as-is; file is jsonl-ish but used as raw text.
             out_path = Path(self._active.output_path)
@@ -1284,6 +1501,176 @@ async def pty_read_spool(
         return {"ok": False, "error": str(e)}
 
 
+# === Sprint 3: Screen model MCP tools ===
+
+@mcp.tool(name="pty_read_raw", description="Read lossless raw PTY output bytes at an offset (base64 encoded).")
+async def pty_read_raw(
+    conversation_id: str,
+    from_offset: int = 0,
+    max_bytes: int = 65536,
+) -> Dict[str, Any]:
+    """
+    Read raw PTY output (lossless bytes, includes all escape sequences).
+    
+    Returns base64-encoded data since raw bytes may contain invalid UTF-8.
+    Use this for debugging or replay. For TUI state, use pty_read_screen instead.
+    """
+    state = _state(conversation_id)
+    try:
+        await state._init_raw()
+        from_offset = max(0, int(from_offset))
+        max_bytes = max(1, min(int(max_bytes), 1024 * 1024))
+        
+        if from_offset >= state._raw_size:
+            return {"ok": True, "data_b64": "", "offset": from_offset, "resume_offset": state._raw_size, "raw_size": state._raw_size}
+        
+        data = await asyncio.to_thread(
+            ConversationState._read_bytes, state._raw_path, from_offset, max_bytes
+        )
+        # Return as base64 (primary) - safe for JSON transport
+        data_b64 = base64.b64encode(data).decode("ascii")
+        return {
+            "ok": True,
+            "data_b64": data_b64,
+            "data_utf8_lossy": data.decode("utf-8", errors="replace"),
+            "offset": from_offset,
+            "resume_offset": from_offset + len(data),
+            "raw_size": state._raw_size,
+            "bytes_returned": len(data),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="pty_read_screen", description="Get the current terminal screen state (what the user sees).")
+async def pty_read_screen(conversation_id: str) -> Dict[str, Any]:
+    """
+    Get the current rendered screen state.
+    
+    Returns the terminal screen as an array of row strings, plus cursor position,
+    title, and alt-screen state. This is what an agent should read for TUI control.
+    
+    Note: Screen dimensions are fixed at 120x40. Resize support planned for future.
+    """
+    state = _state(conversation_id)
+    try:
+        async with state._screen_lock:
+            await state._refresh_raw_size()
+            # If in-memory screen is current, return it.
+            if state._screen is not None and state._screen_raw_size == state._raw_size:
+                snapshot = state._get_screen_snapshot()
+                return {"ok": True, **snapshot}
+            # Try snapshot file if it matches raw size.
+            snapshot = await state._load_snapshot_file()
+            if snapshot and snapshot.get("raw_size") == state._raw_size:
+                return {"ok": True, **snapshot}
+            # Rehydrate from raw bytes, then persist snapshot.
+            await state._rehydrate_screen_from_raw(state._raw_size)
+            snapshot = state._get_screen_snapshot()
+            await state._write_snapshot_file(snapshot)
+            return {"ok": True, **snapshot}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="pty_read_screen_deltas", description="Read screen delta events from a byte cursor position.")
+async def pty_read_screen_deltas(
+    conversation_id: str,
+    cursor: int = 0,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """
+    Read screen delta events (incremental row changes) from screen.jsonl.
+    
+    Cursor is a byte offset into screen.jsonl (like blocks.since).
+    Use resume_cursor from response as cursor for next call.
+    
+    Each delta contains: rows (changed), cursor position, title, alt_screen, ts.
+    """
+    path = _screen_events_path(conversation_id)
+    if not path.exists():
+        return {"ok": True, "cursor": 0, "resume_cursor": 0, "deltas": [], "file_size": 0}
+    
+    cursor = max(0, int(cursor))
+    limit = max(1, min(int(limit), 200))
+    
+    try:
+        file_size = await asyncio.to_thread(path.stat)
+        file_size = file_size.st_size
+        if cursor > file_size:
+            cursor = file_size
+
+        def _read_lines_from(path: Path, start: int, max_lines: int, chunk_size: int = 65536) -> tuple[list[bytes], int]:
+            lines: list[bytes] = []
+            bytes_read_total = 0
+            buf = b""
+            with path.open("rb") as f:
+                f.seek(start)
+                while len(lines) < max_lines:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    bytes_read_total += len(chunk)
+                    buf += chunk
+                    while len(lines) < max_lines:
+                        idx = buf.find(b"\n")
+                        if idx == -1:
+                            break
+                        lines.append(buf[:idx])
+                        buf = buf[idx + 1 :]
+                if buf and len(lines) < max_lines:
+                    lines.append(buf)
+                    buf = b""
+            consumed = bytes_read_total - len(buf)
+            return lines, consumed
+
+        lines, consumed = await asyncio.to_thread(_read_lines_from, path, cursor, limit)
+
+        deltas = []
+        for raw in lines:
+            try:
+                deltas.append(json.loads(raw))
+            except Exception:
+                continue
+
+        resume_cursor = cursor + consumed
+        if resume_cursor > file_size:
+            resume_cursor = file_size
+
+        return {"ok": True, "cursor": cursor, "resume_cursor": resume_cursor, "deltas": deltas, "file_size": file_size}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="pty_screen_status", description="Get screen model status (dimensions, cursor, title, alt-screen).")
+async def pty_screen_status(conversation_id: str) -> Dict[str, Any]:
+    """
+    Get screen model metadata without full row content.
+    
+    Useful for checking dimensions, cursor position, title, and alt-screen state
+    without transferring all row data.
+    
+    Note: Screen dimensions are fixed at 120x40. Future: pty_resize tool.
+    """
+    state = _state(conversation_id)
+    try:
+        async with state._screen_lock:
+            state._init_screen()
+            return {
+                "ok": True,
+                "conversation_id": conversation_id,
+                "cursor": {"row": state._screen.cursor.y, "col": state._screen.cursor.x},
+                "title": getattr(state._screen, 'title', '') or "",
+                "alt_screen": state._is_alt_screen(),
+                "cols": state._screen_cols,
+                "rows": state._screen_rows,
+                "raw_size": state._raw_size,
+                "spool_size": state._spool_size,
+            }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @mcp.tool(name="blocks_since", description="List blocks since a byte cursor in blocks.jsonl (per conversation).")
 async def blocks_since(conversation_id: str, cursor: int = 0, limit: int = 50) -> Dict[str, Any]:
     path = _blocks_index_path(conversation_id)
@@ -1373,6 +1760,14 @@ async def blocks_search(conversation_id: str, block_id: str, query: str, limit: 
 
 
 async def _main() -> None:
+    transport = os.environ.get("MCP_TRANSPORT", "").strip().lower()
+    if transport in ("streamable-http", "streamable_http", "http"):
+        await mcp.run_streamable_http_async()
+        return
+    if transport == "sse":
+        mount_path = os.environ.get("MCP_MOUNT_PATH") or None
+        await mcp.run_sse_async(mount_path=mount_path)
+        return
     await mcp.run_stdio_async()
 
 

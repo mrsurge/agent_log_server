@@ -85,6 +85,10 @@ _model_list_cache_time: float = 0
 _agent_pty_event_tasks: Dict[str, asyncio.Task] = {}
 _agent_pty_ws_offsets: Dict[str, int] = {}
 _agent_pty_transcript_offsets: Dict[str, int] = {}
+_agent_pty_screen_event_tasks: Dict[str, asyncio.Task] = {}
+_agent_pty_screen_ws_offsets: Dict[str, int] = {}
+_agent_pty_raw_event_tasks: Dict[str, asyncio.Task] = {}
+_agent_pty_raw_ws_offsets: Dict[str, int] = {}
 _mcp_shell_id: Optional[str] = None
 _agent_pty_exec_seq: int = 0
 _pty_raw_subscribers: Dict[str, List[asyncio.Queue]] = {}  # conversation_id -> list of queues for raw PTY output
@@ -1157,6 +1161,15 @@ def _agent_pty_events_path(conversation_id: str) -> Path:
     return _conversation_dir(safe_id) / "agent_pty" / "events.jsonl"
 
 
+def _agent_pty_screen_events_path(conversation_id: str) -> Path:
+    safe_id = _sanitize_conversation_id(conversation_id)
+    return _conversation_dir(safe_id) / "agent_pty" / "screen.jsonl"
+
+def _agent_pty_raw_events_path(conversation_id: str) -> Path:
+    safe_id = _sanitize_conversation_id(conversation_id)
+    return _conversation_dir(safe_id) / "agent_pty" / "raw_events.jsonl"
+
+
 async def _ensure_agent_pty_event_tailer(conversation_id: str) -> None:
     if not conversation_id:
         return
@@ -1200,6 +1213,86 @@ async def _ensure_agent_pty_event_tailer(conversation_id: str) -> None:
     _agent_pty_event_tasks[conversation_id] = asyncio.create_task(_tail(), name=f"agent-pty-events:{conversation_id}")
 
 
+async def _ensure_agent_pty_screen_event_tailer(conversation_id: str) -> None:
+    if not conversation_id:
+        return
+    existing = _agent_pty_screen_event_tasks.get(conversation_id)
+    if existing and not existing.done():
+        return
+
+    async def _tail() -> None:
+        path = _agent_pty_screen_events_path(conversation_id)
+        while True:
+            try:
+                if not path.exists():
+                    await asyncio.sleep(0.5)
+                    continue
+                raw_bytes = await asyncio.to_thread(path.read_bytes)
+                offset = _agent_pty_screen_ws_offsets.get(conversation_id, 0)
+                if offset > len(raw_bytes):
+                    offset = 0
+                tail = raw_bytes[offset:]
+                if not tail:
+                    await asyncio.sleep(0.2)
+                    continue
+                for line in tail.splitlines():
+                    try:
+                        event = json.loads(line.decode("utf-8", errors="replace"))
+                    except Exception:
+                        continue
+                    if isinstance(event, dict):
+                        await _broadcast_appserver_ui(event)
+                _agent_pty_screen_ws_offsets[conversation_id] = len(raw_bytes)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(0.5)
+
+    _agent_pty_screen_event_tasks[conversation_id] = asyncio.create_task(
+        _tail(), name=f"agent-pty-screen:{conversation_id}"
+    )
+
+
+async def _ensure_agent_pty_raw_event_tailer(conversation_id: str) -> None:
+    if not conversation_id:
+        return
+    existing = _agent_pty_raw_event_tasks.get(conversation_id)
+    if existing and not existing.done():
+        return
+
+    async def _tail() -> None:
+        path = _agent_pty_raw_events_path(conversation_id)
+        while True:
+            try:
+                if not path.exists():
+                    await asyncio.sleep(0.5)
+                    continue
+                raw_bytes = await asyncio.to_thread(path.read_bytes)
+                offset = _agent_pty_raw_ws_offsets.get(conversation_id, 0)
+                if offset > len(raw_bytes):
+                    offset = 0
+                tail = raw_bytes[offset:]
+                if not tail:
+                    await asyncio.sleep(0.2)
+                    continue
+                for line in tail.splitlines():
+                    try:
+                        event = json.loads(line.decode("utf-8", errors="replace"))
+                    except Exception:
+                        continue
+                    if isinstance(event, dict):
+                        await _broadcast_appserver_ui(event)
+                _agent_pty_raw_ws_offsets[conversation_id] = len(raw_bytes)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(0.5)
+
+    _agent_pty_raw_event_tasks[conversation_id] = asyncio.create_task(
+        _tail(), name=f"agent-pty-raw:{conversation_id}"
+    )
+
+
 async def _agent_pty_monitor_loop() -> None:
     while True:
         try:
@@ -1208,6 +1301,8 @@ async def _agent_pty_monitor_loop() -> None:
             convo_id = cfg.get("conversation_id")
             if isinstance(convo_id, str) and convo_id:
                 await _ensure_agent_pty_event_tailer(convo_id)
+                await _ensure_agent_pty_screen_event_tailer(convo_id)
+                await _ensure_agent_pty_raw_event_tailer(convo_id)
                 await _tail_agent_pty_events_to_transcript(convo_id)
         except asyncio.CancelledError:
             raise

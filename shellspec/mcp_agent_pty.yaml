@@ -4,8 +4,24 @@ shells:
     backend: pipe
     cwd: ${CWD}
     subgroups: ["mcp", "agent-pty"]
+    env:
+      MCP_TRANSPORT: "streamable-http"
+      FASTMCP_HOST: "127.0.0.1"
+      FASTMCP_PORT: "12360"
+      FASTMCP_STREAMABLE_HTTP_PATH: "/mcp"
     command:
       - python
       - mcp_agent_pty_server.py
     labels:
       app: "mcp-agent-pty"
+  agent_pty_shell:
+    backend: dtach
+    cwd: ${ctx:CWD}
+    subgroups:
+      - agent-pty
+      - conversation:${ctx:CONVERSATION_ID}
+    command:
+      - bash
+      - --rcfile
+      - ${ctx:RCFILE}
+      - -i

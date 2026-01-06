@@ -5,6 +5,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
 NAME="agent-pty-blocks"
 SERVER_PATH="$REPO_ROOT/mcp_agent_pty_server.py"
+HOST="${MCP_HOST:-127.0.0.1}"
+PORT="${MCP_PORT:-12360}"
+PATH_SUFFIX="${MCP_PATH:-/mcp}"
 
 FWS_SECRET=""
 if command -v python >/dev/null 2>&1; then
@@ -24,7 +27,7 @@ if [ ! -f "$SERVER_PATH" ]; then
   exit 1
 fi
 
-NAME="$NAME" REPO_ROOT="$REPO_ROOT" SERVER_PATH="$SERVER_PATH" FWS_SECRET="$FWS_SECRET" python - <<'PY'
+NAME="$NAME" REPO_ROOT="$REPO_ROOT" SERVER_PATH="$SERVER_PATH" FWS_SECRET="$FWS_SECRET" HOST="$HOST" PORT="$PORT" PATH_SUFFIX="$PATH_SUFFIX" python - <<'PY'
 import os
 import re
 from pathlib import Path
@@ -71,11 +74,8 @@ def toml_str(val: str) -> str:
     return '"' + val.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 out.append(f"[{target}]")
-out.append(f"command = {toml_str('python')}")
-out.append(f"args = [{toml_str(server_path)}]")
-out.append(f"cwd = {toml_str(repo_root)}")
-if fws_secret:
-    out.append("env = { FRAMEWORK_SHELLS_SECRET = " + toml_str(fws_secret) + " }")
+url = f"http://{os.environ.get('HOST')}:{os.environ.get('PORT')}{os.environ.get('PATH_SUFFIX')}"
+out.append(f"url = {toml_str(url)}")
 out.append("")
 
 new_content = "\n".join(out)
