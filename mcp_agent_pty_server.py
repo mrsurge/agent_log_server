@@ -36,12 +36,12 @@ def _ensure_framework_shells_secret() -> None:
     os.environ["FRAMEWORK_SHELLS_SECRET"] = secret
     os.environ["FRAMEWORK_SHELLS_REPO_FINGERPRINT"] = fingerprint
     os.environ["FRAMEWORK_SHELLS_BASE_DIR"] = str(base_dir)
+    os.environ.setdefault("FRAMEWORK_SHELLS_RUN_ID", "app-server")
 
 # Auto-set secret before importing framework_shells
 _ensure_framework_shells_secret()
 
 from framework_shells import get_manager as get_framework_shell_manager
-from framework_shells.orchestrator import Orchestrator
 from mcp.server.fastmcp import FastMCP
 
 
@@ -95,11 +95,57 @@ def _screen_events_path(conversation_id: str) -> Path:
     return _agent_pty_root(conversation_id) / "screen.jsonl"
 
 
-def _screen_snapshot_path(conversation_id: str) -> Path:
-    return _agent_pty_root(conversation_id) / "screen.snapshot.json"
-
 def _shell_id_path(conversation_id: str) -> Path:
     return _agent_pty_root(conversation_id) / "shell_id.txt"
+
+def _shell_manager_registry_path() -> Path:
+    return Path(os.path.expanduser("~/.cache/app_server/shell_manager.json"))
+
+def _load_shell_manager_registry() -> Optional[Dict[str, Any]]:
+    path = _shell_manager_registry_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        return None
+    return None
+
+def _shell_manager_url() -> Optional[str]:
+    env_url = os.environ.get("SHELL_MANAGER_URL")
+    if env_url:
+        return env_url
+    registry = _load_shell_manager_registry()
+    if registry and registry.get("url"):
+        return str(registry["url"])
+    host = os.environ.get("SHELL_MANAGER_HOST")
+    port = os.environ.get("SHELL_MANAGER_PORT")
+    if host and port:
+        return f"http://{host}:{port}"
+    return None
+
+def _manager_run_id() -> str:
+    return os.environ.get("FRAMEWORK_SHELLS_RUN_ID") or "app-server"
+
+async def _get_fws_manager():
+    return await get_framework_shell_manager(run_id=_manager_run_id())
+
+async def _shell_manager_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    url_base = _shell_manager_url()
+    if not url_base:
+        raise RuntimeError("shell manager not discovered (no registry or env url)")
+    url = url_base.rstrip("/") + path
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    def _post() -> Dict[str, Any]:
+        import urllib.request
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            raw = resp.read()
+        return json.loads(raw.decode("utf-8"))
+    return await asyncio.to_thread(_post)
 
 
 _MARKER_BEGIN = "__FWS_BLOCK_BEGIN__"
@@ -335,8 +381,6 @@ class ConversationState:
         # === Sprint 2: Screen delta rate limiting ===
         self._last_screen_delta_ts: float = 0.0
         self._screen_delta_min_interval: float = 0.1  # 100ms = max 10/sec
-        self._last_snapshot_ts: float = 0.0
-        self._snapshot_interval: float = 0.25  # 250ms
         self._screen_delta_task: Optional[asyncio.Task] = None
 
     @property
@@ -507,6 +551,9 @@ class ConversationState:
         # Filter out shell markers that shouldn't appear in screen output
         if "__FWS_BLOCK_BEGIN__" in text or "__FWS_BLOCK_END__" in text or "__FWS_PROMPT__" in text:
             return ""
+        # Filter manual wrapper lines injected by the agent PTY
+        if "__fws_cmd=" in text or "__fws_emit_begin" in text or "__fws_emit_end" in text:
+            return ""
         return text
 
     def _is_alt_screen(self) -> bool:
@@ -534,30 +581,6 @@ class ConversationState:
             "raw_size": self._screen_raw_size,
             "ts": _now_ms(),
         }
-
-    async def _load_snapshot_file(self) -> Optional[dict]:
-        """Load snapshot from disk if it exists."""
-        path = _screen_snapshot_path(self.conversation_id)
-        if not path.exists():
-            return None
-        try:
-            data = await asyncio.to_thread(path.read_text, encoding="utf-8")
-            snapshot = json.loads(data)
-            if isinstance(snapshot, dict) and "rows" in snapshot:
-                return snapshot
-        except Exception:
-            return None
-        return None
-
-    async def _write_snapshot_file(self, snapshot: dict) -> None:
-        """Persist snapshot to disk."""
-        path = _screen_snapshot_path(self.conversation_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(
-            path.write_text,
-            json.dumps(snapshot, ensure_ascii=False),
-            encoding="utf-8",
-        )
 
     async def _rehydrate_screen_from_raw(self, upto: Optional[int] = None) -> None:
         """Rebuild screen model from raw bytes on disk."""
@@ -652,40 +675,17 @@ class ConversationState:
             line = json.dumps(event, ensure_ascii=False)
             await asyncio.to_thread(self._append_text_line, path, line + "\n")
             
-            # Clear pending dirty rows and pyte's dirty set
-            self._pending_dirty_rows.clear()
-            if self._screen:
-                self._screen.dirty.clear()
-            self._last_screen_delta_ts = now
-        
-        # Maybe update snapshot
-        await self._maybe_update_snapshot()
-
-    async def _maybe_update_snapshot(self) -> None:
-        """Update snapshot file if enough time has passed."""
-        now = time.time()
-        if now - self._last_snapshot_ts < self._snapshot_interval:
-            return
-        
-        async with self._screen_lock:
-            snapshot = self._get_screen_snapshot()
-            path = _screen_snapshot_path(self.conversation_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(
-                path.write_text, 
-                json.dumps(snapshot, ensure_ascii=False), 
-                encoding="utf-8"
-            )
-            self._last_snapshot_ts = now
+        # Clear pending dirty rows and pyte's dirty set
+        self._pending_dirty_rows.clear()
+        if self._screen:
+            self._screen.dirty.clear()
+        self._last_screen_delta_ts = now
 
     async def _flush_screen_state(self) -> None:
         """Force flush any pending screen state (call on session end)."""
         # Force emit regardless of rate limit
         self._last_screen_delta_ts = 0
         await self._emit_screen_delta()
-        # Force snapshot update
-        self._last_snapshot_ts = 0
-        await self._maybe_update_snapshot()
 
     async def _ensure_bytes_reader(self, mgr) -> None:
         """Subscribe to raw bytes stream from PTY (truly lossless)."""
@@ -778,7 +778,7 @@ class ConversationState:
 
     async def ensure_shell(self, *, cwd: Optional[str] = None) -> str:
         async with self.lock:
-            mgr = await get_framework_shell_manager()
+            mgr = await _get_fws_manager()
             self._marker_path = _marker_path(self.conversation_id)
             if self.shell_id:
                 await self._ensure_reader(mgr)
@@ -796,40 +796,20 @@ class ConversationState:
                         return self.shell_id
                 except Exception:
                     pass
-            # Try find by label (reattach)
-            label = f"agent-pty:{self.conversation_id}"
-            try:
-                rec = await mgr.find_shell_by_label(label, status="running")
-            except Exception:
-                rec = None
-            if rec:
-                self.shell_id = rec.id
-                await self._save_shell_id(rec.id)
-                await self._ensure_reader(mgr)
-                await self._ensure_marker_reader()
-                return self.shell_id
-            root = _agent_pty_root(self.conversation_id)
-            root.mkdir(parents=True, exist_ok=True)
-            rcfile = _rcfile_path(self.conversation_id)
-            marker_path = _marker_path(self.conversation_id)
-            _write_rcfile(rcfile, marker_path)
-            self._marker_path = marker_path
-            ctx = {
-                "PROJECT_ROOT": str(Path(__file__).resolve().parent),
-                "CONVERSATION_ID": self.conversation_id,
-                "RCFILE": str(rcfile),
-                "CWD": cwd or str(Path.cwd()),
-            }
-            env_overrides = {"__FWS_MANUAL": "1", **_termux_env_overrides()}
-            spec_ref = "shellspec/mcp_agent_pty.yaml#agent_pty_shell"
-            rec = await Orchestrator(mgr).start_from_ref(
-                spec_ref,
-                base_dir=Path(__file__).resolve().parent,
-                ctx=ctx,
-                label=label,
-                env_overrides=env_overrides,
-                wait_ready=True,
+            # Request shell from external shell manager (attach-only, no local spawn).
+            info = await _shell_manager_request(
+                "/shells/ensure",
+                {
+                    "conversation_id": self.conversation_id,
+                    "cwd": cwd or str(Path.cwd()),
+                },
             )
+            shell_id = info.get("shell_id")
+            if not shell_id:
+                raise RuntimeError("shell manager did not return shell_id")
+            rec = await mgr.get_shell(shell_id)
+            if not rec or rec.status != "running":
+                raise RuntimeError("shell manager returned non-running shell")
             self.shell_id = rec.id
             await self._save_shell_id(rec.id)
             await self._ensure_reader(mgr)
@@ -853,7 +833,7 @@ class ConversationState:
 
     async def exec(self, *, cmd: str, cwd: Optional[str] = None) -> Dict[str, Any]:
         await self.ensure_shell(cwd=cwd)
-        mgr = await get_framework_shell_manager()
+        mgr = await _get_fws_manager()
         cmd_b64 = base64.b64encode(cmd.encode("utf-8", errors="replace")).decode("ascii")
         async with self.lock:
             loop = asyncio.get_running_loop()
@@ -890,7 +870,7 @@ class ConversationState:
         the shell prompt sentinel is detected or the session is ended.
         """
         await self.ensure_shell(cwd=cwd)
-        mgr = await get_framework_shell_manager()
+        mgr = await _get_fws_manager()
         
         # Create a session block manually (no shell wrapper)
         async with self.lock:
@@ -1156,7 +1136,7 @@ class ConversationState:
         """Send raw bytes to PTY stdin."""
         if not self.shell_id:
             raise RuntimeError("No shell running")
-        mgr = await get_framework_shell_manager()
+        mgr = await _get_fws_manager()
         await mgr.write_to_pty(self.shell_id, data)
 
     async def wait_for(
@@ -1560,14 +1540,9 @@ async def pty_read_screen(conversation_id: str) -> Dict[str, Any]:
             if state._screen is not None and state._screen_raw_size == state._raw_size:
                 snapshot = state._get_screen_snapshot()
                 return {"ok": True, **snapshot}
-            # Try snapshot file if it matches raw size.
-            snapshot = await state._load_snapshot_file()
-            if snapshot and snapshot.get("raw_size") == state._raw_size:
-                return {"ok": True, **snapshot}
-            # Rehydrate from raw bytes, then persist snapshot.
+            # Rehydrate from raw bytes when in-memory state is stale.
             await state._rehydrate_screen_from_raw(state._raw_size)
             snapshot = state._get_screen_snapshot()
-            await state._write_snapshot_file(snapshot)
             return {"ok": True, **snapshot}
     except Exception as e:
         return {"ok": False, "error": str(e)}

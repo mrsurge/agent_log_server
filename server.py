@@ -39,6 +39,7 @@ async def _lifespan(app: FastAPI):
         info = await _get_or_start_appserver_shell()
         await _ensure_appserver_reader(info["shell_id"])
         await _ensure_appserver_initialized()
+        await _get_or_start_shell_manager()
         await _get_or_start_mcp_shell()
         agent_pty_monitor_task = asyncio.create_task(_agent_pty_monitor_loop(), name="agent-pty-monitor")
     except Exception:
@@ -90,6 +91,7 @@ _agent_pty_screen_ws_offsets: Dict[str, int] = {}
 _agent_pty_raw_event_tasks: Dict[str, asyncio.Task] = {}
 _agent_pty_raw_ws_offsets: Dict[str, int] = {}
 _mcp_shell_id: Optional[str] = None
+_shell_manager_shell_id: Optional[str] = None
 _agent_pty_exec_seq: int = 0
 _pty_raw_subscribers: Dict[str, List[asyncio.Queue]] = {}  # conversation_id -> list of queues for raw PTY output
 _pty_command_running: Dict[str, bool] = {}  # conversation_id -> whether a command is currently running
@@ -131,6 +133,7 @@ def _default_appserver_config() -> Dict[str, Any]:
         "app_server_command": None,
         "shell_id": None,
         "mcp_shell_id": None,
+        "shell_manager_shell_id": None,
     }
 
 
@@ -989,6 +992,12 @@ def _ensure_framework_shells_secret() -> None:
     os.environ["FRAMEWORK_SHELLS_SECRET"] = secret
     os.environ["FRAMEWORK_SHELLS_REPO_FINGERPRINT"] = fingerprint
     os.environ["FRAMEWORK_SHELLS_BASE_DIR"] = str(base_dir)
+    os.environ.setdefault("FRAMEWORK_SHELLS_RUN_ID", "app-server")
+
+
+async def _get_fws_manager():
+    _ensure_framework_shells_secret()
+    return await get_framework_shell_manager(run_id=os.environ.get("FRAMEWORK_SHELLS_RUN_ID", "app-server"))
 
 
 async def _get_or_start_appserver_shell() -> Dict[str, Any]:
@@ -1000,13 +1009,13 @@ async def _get_or_start_appserver_shell() -> Dict[str, Any]:
             _appserver_shell_id = cfg["shell_id"]
 
     if _appserver_shell_id:
-        mgr = await get_framework_shell_manager()
+        mgr = await _get_fws_manager()
         shell = await mgr.get_shell(_appserver_shell_id)
         if shell and shell.status == "running":
             return {"shell_id": _appserver_shell_id, "status": "running", "pid": shell.pid}
 
     # Start a new app-server shell via shellspec
-    mgr = await get_framework_shell_manager()
+    mgr = await _get_fws_manager()
     orch = Orchestrator(mgr)
     cfg = _load_appserver_config()
     cwd = cfg.get("cwd") or "."
@@ -1042,7 +1051,7 @@ async def _stop_appserver_shell() -> None:
         with suppress(asyncio.CancelledError):
             await _appserver_reader_task
         _appserver_reader_task = None
-    mgr = await get_framework_shell_manager()
+    mgr = await _get_fws_manager()
     try:
         await mgr.terminate_shell(_appserver_shell_id, force=True)
     except Exception:
@@ -1055,6 +1064,60 @@ async def _stop_appserver_shell() -> None:
     _appserver_initialized = False
 
 
+async def _get_or_start_shell_manager() -> Dict[str, Any]:
+    global _shell_manager_shell_id
+    _ensure_framework_shells_secret()
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        if cfg.get("shell_manager_shell_id"):
+            _shell_manager_shell_id = cfg["shell_manager_shell_id"]
+
+    if _shell_manager_shell_id:
+        mgr = await _get_fws_manager()
+        shell = await mgr.get_shell(_shell_manager_shell_id)
+        if shell and shell.status == "running":
+            return {"shell_id": _shell_manager_shell_id, "status": "running", "pid": shell.pid}
+
+    mgr = await _get_fws_manager()
+    orch = Orchestrator(mgr)
+    cfg = _load_appserver_config()
+    cwd = cfg.get("cwd") or "."
+    spec_path = Path(__file__).resolve().parent / "shellspec" / "mcp_agent_pty.yaml"
+    shell = await orch.start_from_ref(
+        f"{spec_path}#shell_manager",
+        base_dir=spec_path.parent,
+        ctx={"CWD": cwd},
+        label="shell-manager:agent-pty",
+        wait_ready=False,
+    )
+    _shell_manager_shell_id = shell.id
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        cfg["shell_manager_shell_id"] = shell.id
+        _save_appserver_config(cfg)
+    return {"shell_id": shell.id, "status": "running", "pid": shell.pid}
+
+
+async def _stop_shell_manager() -> None:
+    global _shell_manager_shell_id
+    _ensure_framework_shells_secret()
+    if not _shell_manager_shell_id:
+        cfg = _load_appserver_config()
+        _shell_manager_shell_id = cfg.get("shell_manager_shell_id")
+    if not _shell_manager_shell_id:
+        return
+    mgr = await _get_fws_manager()
+    try:
+        await mgr.terminate_shell(_shell_manager_shell_id, force=True)
+    except Exception:
+        pass
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        cfg["shell_manager_shell_id"] = None
+        _save_appserver_config(cfg)
+    _shell_manager_shell_id = None
+
+
 async def _get_or_start_mcp_shell() -> Dict[str, Any]:
     global _mcp_shell_id
     _ensure_framework_shells_secret()
@@ -1064,12 +1127,12 @@ async def _get_or_start_mcp_shell() -> Dict[str, Any]:
             _mcp_shell_id = cfg["mcp_shell_id"]
 
     if _mcp_shell_id:
-        mgr = await get_framework_shell_manager()
+        mgr = await _get_fws_manager()
         shell = await mgr.get_shell(_mcp_shell_id)
         if shell and shell.status == "running":
             return {"shell_id": _mcp_shell_id, "status": "running", "pid": shell.pid}
 
-    mgr = await get_framework_shell_manager()
+    mgr = await _get_fws_manager()
     orch = Orchestrator(mgr)
     cfg = _load_appserver_config()
     cwd = cfg.get("cwd") or "."
@@ -1097,7 +1160,7 @@ async def _stop_mcp_shell() -> None:
         _mcp_shell_id = cfg.get("mcp_shell_id")
     if not _mcp_shell_id:
         return
-    mgr = await get_framework_shell_manager()
+    mgr = await _get_fws_manager()
     try:
         await mgr.terminate_shell(_mcp_shell_id, force=True)
     except Exception:
@@ -2188,7 +2251,7 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
         return
 
     async def _reader():
-        mgr = await get_framework_shell_manager()
+        mgr = await _get_fws_manager()
         state = mgr.get_pipe_state(shell_id)
         if not state or not state.process.stdout:
             return
@@ -2317,7 +2380,7 @@ async def _write_appserver(payload: Dict[str, Any]) -> None:
         shell_id = cfg.get("shell_id")
     if not shell_id:
         raise HTTPException(status_code=409, detail="app-server not running")
-    mgr = await get_framework_shell_manager()
+    mgr = await _get_fws_manager()
     state = mgr.get_pipe_state(shell_id)
     if not state or not state.process.stdin:
         raise HTTPException(status_code=409, detail="app-server pipe not available")
@@ -3551,7 +3614,7 @@ async def api_appserver_status():
     shell_id = cfg.get("shell_id")
     if not shell_id:
         return {"running": False}
-    mgr = await get_framework_shell_manager()
+    mgr = await _get_fws_manager()
     shell = await mgr.get_shell(shell_id)
     if shell and shell.status == "running":
         return {"running": True, "shell_id": shell_id, "pid": shell.pid}
@@ -3577,7 +3640,7 @@ async def api_mcp_agent_pty_status():
     shell_id = cfg.get("mcp_shell_id")
     if not shell_id:
         return {"running": False}
-    mgr = await get_framework_shell_manager()
+    mgr = await _get_fws_manager()
     shell = await mgr.get_shell(shell_id)
     if shell and shell.status == "running":
         return {"running": True, "shell_id": shell_id, "pid": shell.pid}
@@ -4029,7 +4092,7 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
         """Receive stdin from WebSocket and write to PTY."""
         nonlocal ws_closed
         try:
-            mgr = await get_framework_shell_manager()
+            mgr = await _get_fws_manager()
             while True:
                 try:
                     data = await websocket.receive_text()
@@ -4074,7 +4137,7 @@ async def api_pty_stdin(payload: Dict[str, Any] = Body(...)):
         state = mcp_srv._state(convo_id)
         if not state.shell_id:
             raise HTTPException(status_code=409, detail="No PTY running")
-        mgr = await get_framework_shell_manager()
+        mgr = await _get_fws_manager()
         await mgr.write_to_pty(state.shell_id, data)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write stdin: {e}")

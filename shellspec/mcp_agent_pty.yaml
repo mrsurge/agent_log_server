@@ -5,6 +5,7 @@ shells:
     cwd: ${CWD}
     subgroups: ["mcp", "agent-pty"]
     env:
+      FRAMEWORK_SHELLS_RUN_ID: "app-server"
       MCP_TRANSPORT: "streamable-http"
       FASTMCP_HOST: "127.0.0.1"
       FASTMCP_PORT: "12360"
@@ -25,3 +26,14 @@ shells:
       - --rcfile
       - ${ctx:RCFILE}
       - -i
+  shell_manager:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["mcp", "shell-manager"]
+    env:
+      FRAMEWORK_SHELLS_RUN_ID: "app-server"
+      SHELL_MANAGER_HOST: "127.0.0.1"
+      SHELL_MANAGER_PORT: "12361"
+    command:
+      - python
+      - shell_manager.py

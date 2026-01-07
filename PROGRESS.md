@@ -2,6 +2,8 @@
 
 ### Done
 - Added MCP server `mcp_agent_pty_server.py` (stdio) with tools: `pty.exec`, `pty.exec_interactive`, `pty.send`, `pty.wait_for`, `pty.status`, `pty.read_spool`, `pty.end_session`, `pty.ctrl_c`, `pty.ctrl_d`, `pty.enter`, `blocks.since`, `blocks.get`, `blocks.read`, `blocks.search`.
+- Added pyte screen model with lossless raw byte capture, screen deltas/snapshots, and Sprint 3 MCP tools: `pty_read_raw`, `pty_read_screen`, `pty_read_screen_deltas`, `pty_screen_status`.
+- Added golden test doc for screen rendering: `SCREEN_MODEL_GOLDEN_TEST.md`.
 - Agent PTY is per conversation (dtach-backed) with deterministic block markers; writes `agent_pty/blocks.jsonl`, `agent_pty/blocks/*.out`, `agent_pty/events.jsonl`, `agent_pty/output.spool`.
 - Server tails `agent_pty/events.jsonl` and fans out `agent_block_*` events to the frontend via WebSocket.
 - Transcript replay: agent PTY blocks now render as xterm-backed transcript cards (prompt + output).
