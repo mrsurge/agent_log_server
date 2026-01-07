@@ -39,8 +39,8 @@ async def _lifespan(app: FastAPI):
         info = await _get_or_start_appserver_shell()
         await _ensure_appserver_reader(info["shell_id"])
         await _ensure_appserver_initialized()
-        await _get_or_start_shell_manager()
-        await _get_or_start_mcp_shell()
+        # Do not auto-start the MCP worker or shell manager on server startup.
+        # These should be launched explicitly (or owned by the MCP client in stdio mode).
         agent_pty_monitor_task = asyncio.create_task(_agent_pty_monitor_loop(), name="agent-pty-monitor")
     except Exception:
         pass
