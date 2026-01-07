@@ -111,6 +111,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let commandRunning = false; // Whether a PTY command is currently running
   let ptyWebSocket = null; // Raw PTY WebSocket connection
   let activeAgentPtyBlockId = null;
+  let currentAppServerShellId = null;
+  let lastSavedAppServerShellId = null;
   const pending = new Map();
 
   // Detect mobile for input behavior
@@ -1218,9 +1220,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!Number.isFinite(total)) return;
     tokenCount = Number(total);
     setCounter(counterTokensEl, tokenCount);
-    if (Number.isFinite(contextWindow)) {
-      updateContextRemaining(tokenCount, contextWindow);
-    }
+    // Don't update context percentage here - only update when we get both
+    // total and context_window from the same event to avoid stale data
   }
 
   function updateContextRemaining(total, windowSize) {
@@ -1229,6 +1230,8 @@ document.addEventListener('DOMContentLoaded', () => {
       contextRemainingEl.textContent = '—';
       return;
     }
+    // Debug: log values to console
+    console.log('updateContextRemaining:', { total, windowSize, pct: Math.round((total / windowSize) * 100) });
     const pct = Math.min(100, Math.round((Number(total) / Number(windowSize)) * 100));
     contextRemainingEl.textContent = `${pct}%`;
     // Color code based on usage
@@ -1489,9 +1492,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (Number.isFinite(entry.context_window)) {
           contextWindow = Number(entry.context_window);
-          // Use active_context for percentage if available
-          const contextUsed = Number.isFinite(entry.active_context) ? entry.active_context : entry.total;
-          updateContextRemaining(contextUsed, entry.context_window);
+          // Use total tokens for percentage (matches CLI behavior)
+          updateContextRemaining(entry.total, entry.context_window);
         }
         // Don't render token_usage as a visible row
         return;
@@ -2999,6 +3001,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const r = await fetch('/api/appserver/status', { cache: 'no-store' });
       if (!r.ok) return;
       const data = await r.json();
+      if (data && data.shell_id) {
+        currentAppServerShellId = data.shell_id;
+        if (currentAppServerShellId && currentAppServerShellId !== lastSavedAppServerShellId) {
+          await postJson('/api/appserver/conversation', {
+            settings: { appserver_shell_id: currentAppServerShellId },
+          });
+          lastSavedAppServerShellId = currentAppServerShellId;
+        }
+      }
       if (data.running) {
         setPill(statusEl, 'running', 'ok');
       } else {
@@ -3041,7 +3052,17 @@ document.addEventListener('DOMContentLoaded', () => {
     await fetchConversation();
     if (currentThreadId) {
       try {
+        const savedShellId = conversationSettings?.appserver_shell_id || null;
+        if (currentAppServerShellId && savedShellId === currentAppServerShellId) {
+          return currentThreadId;
+        }
         await sendRpc('thread/resume', { threadId: currentThreadId });
+        if (currentAppServerShellId) {
+          await postJson('/api/appserver/conversation', {
+            settings: { appserver_shell_id: currentAppServerShellId },
+          });
+          lastSavedAppServerShellId = currentAppServerShellId;
+        }
         return currentThreadId;
       } catch {
         currentThreadId = null;
@@ -3051,6 +3072,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const threadId = result?.thread?.id;
     if (threadId) {
       currentThreadId = threadId;
+      if (currentAppServerShellId) {
+        await postJson('/api/appserver/conversation', {
+          settings: { appserver_shell_id: currentAppServerShellId },
+        });
+        lastSavedAppServerShellId = currentAppServerShellId;
+      }
       return threadId;
     }
     throw new Error('thread/start failed');
@@ -3311,9 +3338,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         updateTokens(evt.total);
         if (Number.isFinite(evt.context_window)) {
-          // Use active_context (input - cached) for percentage if available
-          const contextUsed = Number.isFinite(evt.active_context) ? evt.active_context : evt.total;
-          updateContextRemaining(contextUsed, evt.context_window);
+          // Use total tokens for percentage (matches CLI behavior)
+          updateContextRemaining(evt.total, evt.context_window);
         }
         return;
       case 'context_compacted':

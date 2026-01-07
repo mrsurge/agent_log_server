@@ -4,8 +4,10 @@ import base64
 import hashlib
 import json
 import os
+import sys
 import secrets
 import time
+import atexit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -1270,6 +1272,15 @@ def _state(conversation_id: str) -> ConversationState:
 
 
 mcp = FastMCP(name="agent-pty-blocks", instructions="Agent PTY + block store tools (per-conversation).")
+
+# Diagnostic markers for stdio MCP process lifetime
+print(f"MCP SERVER STARTED pid={os.getpid()}", file=sys.stderr)
+atexit.register(lambda: print(f"MCP SERVER EXITING pid={os.getpid()}", file=sys.stderr))
+
+
+@mcp.tool(name="ping", description="Return MCP server pid (diagnostic).")
+async def ping() -> Dict[str, Any]:
+    return {"ok": True, "pid": os.getpid()}
 
 
 @mcp.tool(name="pty_exec", description="Execute a command (block mode) - waits for completion with BEGIN/END markers.")

@@ -682,6 +682,29 @@ Different RPC methods accept different parameters (per codex-app-server schema):
 - Settings are read fresh from SSOT on each RPC, enabling mid-conversation changes
 - Multi-device/tab support: Backend always uses current SSOT, frontend validates conversation ID before sending
 
+### Thread Resume Gating via App Server Shell ID (Implemented)
+
+**Problem:** The frontend was calling `thread/resume` on every message, which causes codex-app-server to spawn a new conversation each time (and repeatedly spawn MCP stdio servers). This was unnecessary once a thread was already active in the same app-server session.
+
+**Solution:**
+- The frontend tracks the current **app-server shell id** (from `/api/appserver/status`).
+- This shell id is persisted in the SSOT conversation settings as `appserver_shell_id`.
+- `thread/resume` is only called when the **current shell id differs** from the saved one (i.e., after a server restart or session reset).
+- If the shell id matches, the frontend skips `thread/resume` and goes straight to `turn/start`.
+
+**SSOT Setting:**
+```json
+{
+  "settings": {
+    "appserver_shell_id": "fs_<timestamp>_<rand>"
+  }
+}
+```
+
+**Behavior Summary:**
+- **Same shell id:** No resume, reuse existing thread.
+- **Shell id changed:** Resume once, then update SSOT.
+
 ### Dynamic Model/Effort Dropdowns (Implemented)
 
 **Problem:** Different models support different reasoning effort levels (e.g., `gpt-5.1-codex-mini` supports `low/medium/high` but not `xhigh`). Users could select invalid combinations.
@@ -807,13 +830,14 @@ Response:
 
 ### Context Window Display (Fixed)
 
-**Problem:** Context window pill always showed 0%.
+**Problem:** Context window pill showed wrong percentage (was using `active_context` which is tiny due to caching).
 
 **Solution:**
 - Parse `thread/tokenUsage/updated` events properly
-- Calculate percentage: `(inputTokens / modelContextWindow) * 100`
-- Display as percentage in UI
-- Store raw values in transcript for replay: `{"role": "token_usage", "input_tokens": N, "context_window": M, ...}`
+- Calculate percentage: `(totalTokens / modelContextWindow) * 100` - matches CLI behavior
+- Display as "used" percentage in UI (e.g., 56% means 56% of context window consumed)
+- Store raw values in transcript for replay: `{"role": "token_usage", "total": N, "input_tokens": N, "cached_input_tokens": N, "active_context": N, "context_window": M, ...}`
+- Note: `active_context = inputTokens - cachedInputTokens` is also recorded but not used for display percentage
 
 ### Word Wrap Styling (Implemented)
 
@@ -866,7 +890,7 @@ Added CSS for proper word wrapping in agent messages, user messages, and reasoni
 {"role": "shell_input", "command": "ls", "timestamp": "ISO"}
 {"role": "shell_output", "command": "ls", "stdout": "...", "stderr": "", "exit_code": 0, "timestamp": "ISO"}
 {"role": "status", "status": "success|error|warning", "timestamp": "ISO"}
-{"role": "token_usage", "input_tokens": 1234, "output_tokens": 567, "context_window": 128000, "timestamp": "ISO"}
+{"role": "token_usage", "total": 145243, "input_tokens": 145013, "cached_input_tokens": 144896, "active_context": 117, "context_window": 258400, "timestamp": "ISO"}
 ```
 
 ## Future Considerations
@@ -875,3 +899,42 @@ Added CSS for proper word wrapping in agent messages, user messages, and reasoni
 2. **Multi-agent** - Agent log server for inter-agent communication
 3. **Consecutive reasoning merge** - Merge multiple consecutive reasoning blocks into one display card
 4. **Warp-like shell interface** - Full shell mode with streaming output, using codex-app-server's PTY management
+5. **Screen model colors** - Current pyte screen model is text-only; adding ANSI color preservation requires new delta schema with cell attributes
+
+## MCP Agent PTY Integration
+
+The server includes an MCP (Model Context Protocol) server for PTY management, enabling agent-to-agent communication and TUI control.
+
+### Screen Model (pyte)
+
+A pyte-based terminal screen model provides clean rendered output for agents:
+
+- **Raw bytes** → `output.raw` (lossless, via `subscribe_output_bytes`)
+- **Screen deltas** → `screen.jsonl` (rate-limited, clean text rows)
+- **Snapshots** → `screen.snapshot.json` (full screen state)
+
+**MCP Tools:**
+| Tool | Description |
+|------|-------------|
+| `pty_read_raw` | Read lossless raw bytes (base64 encoded) |
+| `pty_read_screen` | Get current screen state (40 rows, cursor, title) |
+| `pty_read_screen_deltas` | Read incremental screen changes |
+| `pty_screen_status` | Get screen metadata without row content |
+
+### Data Flow
+
+```
+PTY (bash + rcfile)
+    │
+    ├─► subscribe_output() ──► text ──► _on_chunk ──► spool + block parsing
+    │                                                  (markers filtered here)
+    │
+    └─► subscribe_output_bytes() ──► bytes ──► _run_bytes
+                                                  │
+                                                  ├─► output.raw (lossless)
+                                                  ├─► raw_events.jsonl
+                                                  ├─► pyte screen model
+                                                  └─► screen.jsonl (deltas)
+```
+
+**Note:** Shell markers (`__FWS_BLOCK_BEGIN__`, etc.) are in raw output because they're printed by the rcfile. The `agent_block_delta` events are already filtered (clean). Screen model currently includes markers; filtering planned.
