@@ -312,7 +312,7 @@ Main JavaScript file handling all frontend logic:
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
-│ [Status Ribbon] spinner + activity text + status dot ●         │
+│ [Status Ribbon] spinner + activity text + status dot ●          │
 ├─────────────────────────────────────────────────────────────────┤
 │ Input Area: contenteditable + @mention + Send/Interrupt         │
 │ - @ triggers Tribute.js file picker                             │
@@ -682,28 +682,31 @@ Different RPC methods accept different parameters (per codex-app-server schema):
 - Settings are read fresh from SSOT on each RPC, enabling mid-conversation changes
 - Multi-device/tab support: Backend always uses current SSOT, frontend validates conversation ID before sending
 
-### Thread Resume Gating via App Server Shell ID (Implemented)
+### Thread Resume Gating via “Thread Session Marker” (Implemented)
 
-**Problem:** The frontend was calling `thread/resume` on every message, which causes codex-app-server to spawn a new conversation each time (and repeatedly spawn MCP stdio servers). This was unnecessary once a thread was already active in the same app-server session.
+**Problem:** `thread/resume` was being invoked more often than needed. In codex-app-server, `thread/resume` creates a new conversation session, which re-initializes MCP and can spawn additional stdio MCP server processes. Once a thread is already active for the current app-server run, re-resuming is redundant.
 
 **Solution:**
-- The frontend tracks the current **app-server shell id** (from `/api/appserver/status`).
-- This shell id is persisted in the SSOT conversation settings as `appserver_shell_id`.
-- `thread/resume` is only called when the **current shell id differs** from the saved one (i.e., after a server restart or session reset).
-- If the shell id matches, the frontend skips `thread/resume` and goes straight to `turn/start`.
+- The system writes a **thread session marker** into SSOT after a successful `thread/start` or `thread/resume`.
+- The marker is a pair: `{ thread_session_shell_id, thread_session_thread_id }`.
+- On first message after a restart/reconnect, the frontend compares:
+  - current app-server shell id (from `/api/appserver/status`) vs `thread_session_shell_id`
+  - current thread id vs `thread_session_thread_id`
+- Only when either differs does it call `thread/resume`. Otherwise it goes straight to `turn/start`.
 
 **SSOT Setting:**
 ```json
 {
   "settings": {
-    "appserver_shell_id": "fs_<timestamp>_<rand>"
+    "thread_session_shell_id": "fs_<timestamp>_<rand>",
+    "thread_session_thread_id": "<thread_id>"
   }
 }
 ```
 
 **Behavior Summary:**
-- **Same shell id:** No resume, reuse existing thread.
-- **Shell id changed:** Resume once, then update SSOT.
+- **Same marker:** No resume; reuse the existing thread session.
+- **Marker changed/missing:** Resume once, then update SSOT.
 
 ### Dynamic Model/Effort Dropdowns (Implemented)
 

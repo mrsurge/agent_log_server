@@ -330,6 +330,13 @@ async def _update_conversation_meta(patch: Dict[str, Any]) -> Dict[str, Any]:
 async def _set_thread_id(thread_id: str) -> None:
     if not thread_id:
         return
+    
+    # Check if this thread_id is already bound to another conversation
+    existing_convo = _find_conversation_by_thread_id(thread_id)
+    if existing_convo:
+        # Thread already bound - don't rebind to another conversation
+        return
+    
     convo_id = await _ensure_conversation()
     meta = _load_conversation_meta(convo_id)
     if not meta.get("thread_id"):
@@ -1398,23 +1405,34 @@ async def _route_appserver_event(
     payload: Any,
     conversation_id: Optional[str],
     request_id: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+) -> tuple[Optional[str], List[Dict[str, Any]]]:
     """
     Route codex-app-server events to frontend (streaming) and transcript (replay).
     
-    Returns a list of events to broadcast to the frontend via WebSocket.
+    Returns a tuple of (resolved_conversation_id, events_list).
+    The conversation_id is resolved from thread_id lookup first, then falls back to active.
+    Events should be broadcast with conversation_id so frontend can filter.
     Also writes completed items to the transcript SSOT for replay.
     """
     events: List[Dict[str, Any]] = []
     if not label:
-        return events
-    async with _config_lock:
-        cfg = _load_appserver_config()
-        convo_id = cfg.get("conversation_id")
+        return None, events
 
+    # Extract thread_id from payload FIRST - this is the authoritative source
     thread_id = _get_thread_id(conversation_id, payload)
-    if not convo_id and thread_id:
+    
+    # Resolve conversation_id: prioritize thread_id lookup over active conversation
+    # This ensures events route to the correct conversation even when viewing a different one
+    convo_id: Optional[str] = None
+    if thread_id:
         convo_id = _find_conversation_by_thread_id(thread_id)
+    
+    # Fallback to active conversation only if thread_id lookup fails
+    if not convo_id:
+        async with _config_lock:
+            cfg = _load_appserver_config()
+            convo_id = cfg.get("conversation_id")
+    
     if not convo_id:
         convo_id = await _ensure_conversation()
     turn_id = _get_turn_id(payload)
@@ -1458,7 +1476,7 @@ async def _route_appserver_event(
                 },
             })
             events.append({"type": "activity", "label": "approval", "active": True})
-        return events
+        return convo_id, events
 
     # Legacy apply_patch_approval_request - cache the diff by call_id for later approval
     if "apply_patch_approval_request" in label_lower:
@@ -1497,7 +1515,7 @@ async def _route_appserver_event(
                 },
             })
             events.append({"type": "activity", "label": "approval", "active": True})
-        return events
+        return convo_id, events
 
     # -------------------------------------------------------------------------
     # SECTION: Turn Lifecycle Events (Frontend + Transcript)
@@ -1508,7 +1526,41 @@ async def _route_appserver_event(
     if label_lower == "thread/started":
         # [Frontend] Activity indicator only
         events.append({"type": "activity", "label": "thread started", "active": True})
-        return events
+        # Best-effort: persist a "thread session marker" so a fresh frontend
+        # can decide whether it must `thread/resume` for this conversation.
+        try:
+            # Try to extract thread id from payload if present.
+            thread_obj = payload.get("thread", {}) if isinstance(payload, dict) else {}
+            thread_id_from_event = (
+                thread_obj.get("id")
+                or payload.get("threadId")
+                or payload.get("thread_id")
+                or payload.get("id")
+            )
+            if isinstance(thread_id_from_event, str) and thread_id_from_event:
+                await _set_thread_id(thread_id_from_event)
+            async with _config_lock:
+                cfg = _load_appserver_config()
+            shell_id = cfg.get("shell_id")
+            convo_id_local = cfg.get("conversation_id")
+            if (
+                isinstance(convo_id_local, str)
+                and convo_id_local
+                and isinstance(shell_id, str)
+                and shell_id
+                and _conversation_meta_path(convo_id_local).exists()
+            ):
+                meta = _load_conversation_meta(convo_id_local)
+                settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+                if shell_id:
+                    settings["thread_session_shell_id"] = shell_id
+                if isinstance(thread_id_from_event, str) and thread_id_from_event:
+                    settings["thread_session_thread_id"] = thread_id_from_event
+                meta["settings"] = settings
+                _save_conversation_meta(convo_id_local, meta)
+        except Exception:
+            pass
+        return convo_id, events
 
     if label_lower in {"turn/started", "turn/completed"}:
         if label_lower == "turn/started":
@@ -1559,7 +1611,7 @@ async def _route_appserver_event(
             # Clear plan state for next turn
             state["plan_steps"] = []
         events.append({"type": "activity", "label": "turn started" if label_lower == "turn/started" else "idle", "active": label_lower == "turn/started"})
-        return events
+        return convo_id, events
 
     # -------------------------------------------------------------------------
     # SECTION: Diff Events (Frontend + Transcript for Replay)
@@ -1572,14 +1624,14 @@ async def _route_appserver_event(
         if diff:
             # [Frontend] diff event + [Transcript] for replay
             await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item_id, events, path=path)
-        return events
+        return convo_id, events
 
     if label_lower == "codex/event/turn_diff" and isinstance(payload, dict):
         diff, path = _extract_diff_with_path(payload)
         if diff:
             # [Frontend] diff event + [Transcript] for replay
             await _emit_diff_event(state, diff, convo_id, thread_id, turn_id, item_id, events, path=path)
-        return events
+        return convo_id, events
 
     # -------------------------------------------------------------------------
     # SECTION: Token Usage (Frontend + Transcript for Replay)
@@ -1645,7 +1697,7 @@ async def _route_appserver_event(
                         "event": label_lower,
                     })
             events.append(event)
-        return events
+        return convo_id, events
 
     # Context compacted event - agent dropped some history to fit context window
     if label_lower in {"thread/compacted", "context_compacted", "codex/event/context_compacted"} and isinstance(payload, dict):
@@ -1666,7 +1718,7 @@ async def _route_appserver_event(
             "turn_id": turn_id_compact,
         })
         events.append({"type": "activity", "label": "context compacted", "active": True})
-        return events
+        return convo_id, events
 
     # -------------------------------------------------------------------------
     # SECTION: Error/Warning Events (Frontend + Transcript for Replay)
@@ -1688,7 +1740,7 @@ async def _route_appserver_event(
             "message": message,
         })
         events.append({"type": "activity", "label": "error", "active": False})
-        return events
+        return convo_id, events
 
     if label_lower == "codex/event/warning" and isinstance(payload, dict):
         # [Frontend only] Warnings not persisted to transcript
@@ -1698,7 +1750,7 @@ async def _route_appserver_event(
                 "type": "warning",
                 "message": message,
             })
-        return events
+        return convo_id, events
 
     # -------------------------------------------------------------------------
     # SECTION: Suppressed Events (No action)
@@ -1714,7 +1766,7 @@ async def _route_appserver_event(
         "codex/event/mcp_startup_complete",
         "account/ratelimits/updated",
     }:
-        return events
+        return convo_id, events
 
     # -------------------------------------------------------------------------
     # SECTION: Plan Events (Frontend streaming + Transcript on turn complete)
@@ -1742,7 +1794,7 @@ async def _route_appserver_event(
                             "status": status or "pending",
                         })
             state["plan_steps"] = normalized_steps
-        return events
+        return convo_id, events
 
     if label_lower == "turn/plan/updated" and isinstance(payload, dict):
         # [Frontend] Live overlay + accumulate for [Transcript] on turn/completed
@@ -1769,7 +1821,7 @@ async def _route_appserver_event(
                             "status": normalized_status or "pending",
                         })
             state["plan_steps"] = normalized_steps
-        return events
+        return convo_id, events
 
     # -------------------------------------------------------------------------
     # SECTION: Item Events (Frontend streaming deltas + Transcript on complete)
@@ -1795,7 +1847,7 @@ async def _route_appserver_event(
             # [Frontend] Display user message
             if entry:
                 events.append({"type": "message", "role": "user", "id": item.get("id"), "text": entry["text"]})
-            return events
+            return convo_id, events
             
         if item_type == "reasoning":
             # Track state for delta accumulation
@@ -1803,7 +1855,7 @@ async def _route_appserver_event(
             if item.get("id"):
                 state["reasoning_id"] = item.get("id")
                 _register_item_state(item.get("id"), state)
-            return events
+            return convo_id, events
             
         if item_type == "filechange":
             # Cache diff info for approval - actual diff emitted via turn_diff
@@ -1814,7 +1866,7 @@ async def _route_appserver_event(
                     "changes": item.get("changes"),
                     "path": path,
                 }
-            return events
+            return convo_id, events
             
         if item_type == "commandexecution":
             # Cache command info, show activity
@@ -1835,7 +1887,7 @@ async def _route_appserver_event(
                 "arguments": {"command": command, "cwd": cwd} if command else {},
             })
             events.append({"type": "activity", "label": "running command", "active": True})
-            return events
+            return convo_id, events
             
         if item_type in {"agentmessage", "assistantmessage", "assistant"}:
             # Track state for delta accumulation
@@ -1844,7 +1896,7 @@ async def _route_appserver_event(
                 state["assistant_id"] = item.get("id")
                 _register_item_state(item.get("id"), state)
             state["assistant_started"] = True
-            return events
+            return convo_id, events
 
     if label_lower == "item/completed" and isinstance(payload, dict):
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
@@ -1864,7 +1916,7 @@ async def _route_appserver_event(
             if state.get("msg_source") in {None, "item"} and state.get("assistant_started"):
                 events.append({"type": "assistant_finalize", "id": item.get("id") or state.get("assistant_id") or "assistant", "text": entry["text"] if entry else item.get("text")})
             events.append({"type": "activity", "label": "idle", "active": False})
-            return events
+            return convo_id, events
             
         if item_type == "reasoning":
             summary = item.get("summary") or item.get("summary_text") or []
@@ -1886,7 +1938,7 @@ async def _route_appserver_event(
                 state["reasoning_started"] = False
                 state["reasoning_buffer"] = ""
                 state["reasoning_id"] = None
-            return events
+            return convo_id, events
             
         if item_type == "filechange":
             # Cache for approval tracking - diff emitted via turn_diff
@@ -1897,7 +1949,7 @@ async def _route_appserver_event(
                     "changes": item.get("changes"),
                     "path": path,
                 }
-            return events
+            return convo_id, events
             
         if item_type == "commandexecution":
             command = item.get("command") or item.get("cmd") or item.get("argv") or ""
@@ -1946,9 +1998,9 @@ async def _route_appserver_event(
                 "duration_ms": duration_ms,
             })
             events.append({"type": "activity", "label": "processing", "active": True})
-            return events
+            return convo_id, events
             
-        return events
+        return convo_id, events
 
     # -------------------------------------------------------------------------
     # SECTION: Streaming Delta Events (Frontend only - not persisted)
@@ -1970,7 +2022,7 @@ async def _route_appserver_event(
             if isinstance(delta, str) and delta:
                 events.append({"type": "assistant_delta", "id": item_id, "delta": delta})
                 events.append({"type": "activity", "label": "responding", "active": True})
-        return events
+        return convo_id, events
 
     # --- Reasoning Deltas ---
     if label_lower in {"item/reasoning/summarytextdelta", "item/reasoning/textdelta"} and isinstance(payload, dict):
@@ -1987,7 +2039,7 @@ async def _route_appserver_event(
                 state["reasoning_buffer"] = state.get("reasoning_buffer", "") + delta
                 events.append({"type": "reasoning_delta", "id": item_id, "delta": delta})
                 events.append({"type": "activity", "label": "reasoning", "active": True})
-        return events
+        return convo_id, events
 
     if label_lower == "item/reasoning/summarypartadded" and isinstance(payload, dict):
         # [Frontend] Reasoning section break
@@ -2000,7 +2052,7 @@ async def _route_appserver_event(
             state["reasoning_started"] = True
             state["reasoning_buffer"] = state.get("reasoning_buffer", "") + "\n"
             events.append({"type": "reasoning_delta", "id": item_id, "delta": "\n"})
-        return events
+        return convo_id, events
 
     # --- Legacy Codex Event Deltas (alternate protocol) ---
     if label_lower in {"codex/event/agent_message_content_delta", "codex/event/agent_message_delta"} and isinstance(payload, dict):
@@ -2016,7 +2068,7 @@ async def _route_appserver_event(
             if isinstance(delta, str) and delta:
                 events.append({"type": "assistant_delta", "id": item_id, "delta": delta})
                 events.append({"type": "activity", "label": "responding", "active": True})
-        return events
+        return convo_id, events
 
     if label_lower == "codex/event/agent_message" and isinstance(payload, dict):
         # [Transcript] + [Frontend] Complete message (legacy format)
@@ -2030,7 +2082,7 @@ async def _route_appserver_event(
             })
         if state.get("msg_source") in {None, "codex"} and state.get("assistant_started"):
             events.append({"type": "assistant_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("assistant_id") or "assistant", "text": text})
-        return events
+        return convo_id, events
 
     if label_lower in {"codex/event/agent_reasoning_delta", "codex/event/reasoning_content_delta", "codex/event/reasoning_summary_delta"} and isinstance(payload, dict):
         # [Frontend] Stream reasoning delta (legacy format)
@@ -2046,7 +2098,7 @@ async def _route_appserver_event(
                 state["reasoning_buffer"] = state.get("reasoning_buffer", "") + delta
                 events.append({"type": "reasoning_delta", "id": item_id, "delta": delta})
                 events.append({"type": "activity", "label": "reasoning", "active": True})
-        return events
+        return convo_id, events
 
     if label_lower == "codex/event/agent_reasoning_section_break" and isinstance(payload, dict):
         # [Frontend] Reasoning section break (legacy format)
@@ -2059,7 +2111,7 @@ async def _route_appserver_event(
             state["reasoning_started"] = True
             state["reasoning_buffer"] = state.get("reasoning_buffer", "") + "\n\n"
             events.append({"type": "reasoning_delta", "id": item_id, "delta": "\n\n"})
-        return events
+        return convo_id, events
 
     if label_lower == "codex/event/agent_reasoning" and isinstance(payload, dict):
         # [Frontend] Finalize reasoning (legacy format)
@@ -2069,7 +2121,7 @@ async def _route_appserver_event(
             state["reasoning_started"] = False
             state["reasoning_buffer"] = ""
             state["reasoning_id"] = None
-        return events
+        return convo_id, events
 
     # -------------------------------------------------------------------------
     # SECTION: Tool/Command Execution Events (Frontend streaming)
@@ -2083,7 +2135,7 @@ async def _route_appserver_event(
             events.append({"type": "activity", "label": "running command", "active": True})
         elif label_lower == "exec_command_end":
             events.append({"type": "activity", "label": "processing", "active": True})
-        return events
+        return convo_id, events
 
     if label_lower in {"item/commandexecution/outputdelta", "item/commandexecution/terminalinteraction"} and isinstance(payload, dict):
         # [Frontend] Stream command output deltas
@@ -2108,7 +2160,7 @@ async def _route_appserver_event(
                     "pid": payload.get("pid"),
                 },
             })
-        return events
+        return convo_id, events
 
     if ("mcp_tool_call_begin" in label_lower or "mcp_tool_call_end" in label_lower) and isinstance(payload, dict):
         # [Frontend + Transcript] MCP tool call begin/end
@@ -2199,7 +2251,7 @@ async def _route_appserver_event(
                     "is_error": is_error,
                     "timestamp": utc_ts(),
                 })
-        return events
+        return convo_id, events
 
     if ("web_search_begin" in label_lower or "web_search_end" in label_lower) and isinstance(payload, dict):
         # [Frontend + Transcript] Web search begin/end
@@ -2235,10 +2287,10 @@ async def _route_appserver_event(
                     "call_id": call_id,
                     "timestamp": utc_ts(),
                 })
-        return events
+        return convo_id, events
 
     # No handler matched - return empty events list
-    return events
+    return convo_id, events
 
 # =============================================================================
 # END EVENT ROUTER
@@ -2342,8 +2394,11 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
                 if request_id is not None:
                     payload["_request_id"] = request_id
 
-            events = await _route_appserver_event(label, payload, conversation_id, request_id)
+            resolved_convo_id, events = await _route_appserver_event(label, payload, conversation_id, request_id)
             for event in events:
+                # Include conversation_id in every event so frontend can filter
+                if resolved_convo_id:
+                    event["conversation_id"] = resolved_convo_id
                 await _broadcast_appserver_ui(event)
 
         try:
@@ -3201,6 +3256,35 @@ async def api_appserver_conversation_select(payload: Dict[str, Any] = Body(...))
     convo_id = convo_id.strip()
     if not _conversation_meta_path(convo_id).exists():
         raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    # Cleanup: delete previous draft conversation if switching away from it
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        prev_convo_id = cfg.get("conversation_id")
+    if prev_convo_id and prev_convo_id != convo_id and _conversation_meta_path(prev_convo_id).exists():
+        prev_meta = _load_conversation_meta(prev_convo_id)
+        if prev_meta.get("status") == "draft" and not prev_meta.get("thread_id"):
+            # Previous conversation was a draft with no thread - delete it using same logic as DELETE endpoint
+            prev_path = _conversation_dir(prev_convo_id)
+            if prev_path.exists():
+                for child in prev_path.glob("**/*"):
+                    if child.is_file():
+                        try:
+                            child.unlink()
+                        except Exception:
+                            pass
+                try:
+                    for child in sorted(prev_path.glob("**/*"), reverse=True):
+                        if child.is_dir():
+                            child.rmdir()
+                    prev_path.rmdir()
+                except Exception:
+                    pass
+                async with _config_lock:
+                    cfg = _load_appserver_config()
+                    _remove_conversation_from_config(prev_convo_id, cfg)
+                    _save_appserver_config(cfg)
+    
     meta = _load_conversation_meta(convo_id)
     async with _config_lock:
         cfg = _load_appserver_config()
@@ -3253,22 +3337,22 @@ async def api_appserver_conversation_delete(conversation_id: str):
         raise HTTPException(status_code=400, detail="Missing conversation_id")
     convo_id = _sanitize_conversation_id(conversation_id)
     path = _conversation_dir(convo_id)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    # Remove sidecar directory
-    for child in path.glob("**/*"):
-        if child.is_file():
-            try:
-                child.unlink()
-            except Exception:
-                pass
-    try:
-        for child in sorted(path.glob("**/*"), reverse=True):
-            if child.is_dir():
-                child.rmdir()
-        path.rmdir()
-    except Exception:
-        pass
+    # Remove sidecar directory if it exists
+    if path.exists():
+        for child in path.glob("**/*"):
+            if child.is_file():
+                try:
+                    child.unlink()
+                except Exception:
+                    pass
+        try:
+            for child in sorted(path.glob("**/*"), reverse=True):
+                if child.is_dir():
+                    child.rmdir()
+            path.rmdir()
+        except Exception:
+            pass
+    # Always clean up config regardless of directory state
     async with _config_lock:
         cfg = _load_appserver_config()
         _remove_conversation_from_config(convo_id, cfg)
@@ -3604,6 +3688,21 @@ async def api_appserver_stop():
 async def api_appserver_start():
     info = await _get_or_start_appserver_shell()
     await _ensure_appserver_reader(info["shell_id"])
+    # Persist current app-server shell id into the SSOT conversation meta so
+    # a fresh frontend session can decide whether a `thread/resume` is needed.
+    try:
+        async with _config_lock:
+            cfg = _load_appserver_config()
+        convo_id = cfg.get("conversation_id")
+        if isinstance(convo_id, str) and convo_id and _conversation_meta_path(convo_id).exists():
+            meta = _load_conversation_meta(convo_id)
+            settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+            if settings.get("appserver_shell_id") != info["shell_id"]:
+                settings["appserver_shell_id"] = info["shell_id"]
+                meta["settings"] = settings
+                _save_conversation_meta(convo_id, meta)
+    except Exception:
+        pass
     return {"ok": True, **info}
 
 
@@ -3617,6 +3716,19 @@ async def api_appserver_status():
     mgr = await _get_fws_manager()
     shell = await mgr.get_shell(shell_id)
     if shell and shell.status == "running":
+        # Best-effort: keep SSOT in sync with the live app-server shell id so a
+        # brand new frontend session can decide whether it must `thread/resume`.
+        try:
+            convo_id = cfg.get("conversation_id")
+            if isinstance(convo_id, str) and convo_id and _conversation_meta_path(convo_id).exists():
+                meta = _load_conversation_meta(convo_id)
+                settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+                if settings.get("appserver_shell_id") != shell_id:
+                    settings["appserver_shell_id"] = shell_id
+                    meta["settings"] = settings
+                    _save_conversation_meta(convo_id, meta)
+        except Exception:
+            pass
         return {"running": True, "shell_id": shell_id, "pid": shell.pid}
     return {"running": False, "shell_id": shell_id}
 

@@ -112,7 +112,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let ptyWebSocket = null; // Raw PTY WebSocket connection
   let activeAgentPtyBlockId = null;
   let currentAppServerShellId = null;
-  let lastSavedAppServerShellId = null;
   const pending = new Map();
 
   // Detect mobile for input behavior
@@ -3003,12 +3002,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await r.json();
       if (data && data.shell_id) {
         currentAppServerShellId = data.shell_id;
-        if (currentAppServerShellId && currentAppServerShellId !== lastSavedAppServerShellId) {
-          await postJson('/api/appserver/conversation', {
-            settings: { appserver_shell_id: currentAppServerShellId },
-          });
-          lastSavedAppServerShellId = currentAppServerShellId;
-        }
       }
       if (data.running) {
         setPill(statusEl, 'running', 'ok');
@@ -3052,16 +3045,16 @@ document.addEventListener('DOMContentLoaded', () => {
     await fetchConversation();
     if (currentThreadId) {
       try {
-        const savedShellId = conversationSettings?.appserver_shell_id || null;
-        if (currentAppServerShellId && savedShellId === currentAppServerShellId) {
+        const savedShellId = conversationSettings?.thread_session_shell_id || null;
+        const savedThreadId = conversationSettings?.thread_session_thread_id || null;
+        if (currentAppServerShellId && savedShellId === currentAppServerShellId && savedThreadId === currentThreadId) {
           return currentThreadId;
         }
         await sendRpc('thread/resume', { threadId: currentThreadId });
         if (currentAppServerShellId) {
           await postJson('/api/appserver/conversation', {
-            settings: { appserver_shell_id: currentAppServerShellId },
+            settings: { thread_session_shell_id: currentAppServerShellId, thread_session_thread_id: currentThreadId },
           });
-          lastSavedAppServerShellId = currentAppServerShellId;
         }
         return currentThreadId;
       } catch {
@@ -3074,9 +3067,8 @@ document.addEventListener('DOMContentLoaded', () => {
       currentThreadId = threadId;
       if (currentAppServerShellId) {
         await postJson('/api/appserver/conversation', {
-          settings: { appserver_shell_id: currentAppServerShellId },
+          settings: { thread_session_shell_id: currentAppServerShellId, thread_session_thread_id: threadId },
         });
-        lastSavedAppServerShellId = currentAppServerShellId;
       }
       return threadId;
     }
@@ -3224,6 +3216,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function handleEvent(evt) {
     if (!evt || typeof evt !== 'object') return;
+    
+    // Filter events by conversation_id - only render events for active conversation
+    const activeConvoId = conversationMeta?.conversation_id;
+    if (evt.conversation_id && activeConvoId && evt.conversation_id !== activeConvoId) {
+      // Event belongs to a different conversation - ignore for rendering
+      return;
+    }
+    
     switch (evt.type) {
       case 'activity':
         lastEventType = 'activity';
