@@ -8,6 +8,8 @@ import sys
 import secrets
 import time
 import atexit
+import contextlib
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -18,6 +20,8 @@ import pyte.modes
 
 def _ensure_framework_shells_secret() -> None:
     """Derive a stable secret from cwd/repo root if not already set."""
+    # Prefer SIGWINCH delivery after resize_pty() for dtach-backed PTYs.
+    os.environ.setdefault("FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE", "1")
     if os.environ.get("FRAMEWORK_SHELLS_SECRET"):
         return
     repo_root = str(Path(__file__).resolve().parent)
@@ -97,6 +101,10 @@ def _screen_events_path(conversation_id: str) -> Path:
     return _agent_pty_root(conversation_id) / "screen.jsonl"
 
 
+def _screen_size_path(conversation_id: str) -> Path:
+    return _agent_pty_root(conversation_id) / "screen_size.json"
+
+
 def _shell_id_path(conversation_id: str) -> Path:
     return _agent_pty_root(conversation_id) / "shell_id.txt"
 
@@ -131,8 +139,28 @@ def _shell_manager_url() -> Optional[str]:
 def _manager_run_id() -> str:
     return os.environ.get("FRAMEWORK_SHELLS_RUN_ID") or "app-server"
 
+@contextlib.contextmanager
+def _redirect_stdout_to_stderr() -> Any:
+    """
+    Redirect stdout to stderr inside a narrow scope.
+
+    Why: framework_shells currently prints some lifecycle messages to stdout,
+    which is fatal for STDIO MCP (stdout must be JSON-RPC only).
+    """
+
+    class _StdoutToStderr(io.TextIOBase):
+        def write(self, s: str) -> int:
+            return sys.stderr.write(s)
+
+        def flush(self) -> None:
+            sys.stderr.flush()
+
+    with contextlib.redirect_stdout(_StdoutToStderr()):
+        yield
+
 async def _get_fws_manager():
-    return await get_framework_shell_manager(run_id=_manager_run_id())
+    with _redirect_stdout_to_stderr():
+        return await get_framework_shell_manager(run_id=_manager_run_id())
 
 async def _shell_manager_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     url_base = _shell_manager_url()
@@ -364,6 +392,9 @@ class ConversationState:
         self._screen_cols: int = 120
         self._screen_rows: int = 40
         self._pending_dirty_rows: set = set()
+        self._screen_size_loaded: bool = False
+        # Scrollback (HistoryScreen)
+        self._scrollback_limit: int = 2000
         
         # Raw byte stream (truly lossless via subscribe_output_bytes)
         self._raw_path: Optional[Path] = None
@@ -384,6 +415,35 @@ class ConversationState:
         self._last_screen_delta_ts: float = 0.0
         self._screen_delta_min_interval: float = 0.1  # 100ms = max 10/sec
         self._screen_delta_task: Optional[asyncio.Task] = None
+
+    async def _load_persisted_screen_size(self) -> None:
+        """Best-effort load of persisted screen size for this conversation."""
+        if self._screen_size_loaded:
+            return
+        self._screen_size_loaded = True
+        path = _screen_size_path(self.conversation_id)
+        if not path.exists():
+            return
+        try:
+            raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
+            data = json.loads(raw)
+            cols = int(data.get("cols") or 0)
+            rows = int(data.get("rows") or 0)
+            if cols > 0 and rows > 0:
+                self._screen_cols = cols
+                self._screen_rows = rows
+        except Exception:
+            return
+
+    async def _save_persisted_screen_size(self) -> None:
+        """Best-effort persist of current screen size for this conversation."""
+        path = _screen_size_path(self.conversation_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"cols": int(self._screen_cols), "rows": int(self._screen_rows), "ts": _now_ms()}
+        try:
+            await asyncio.to_thread(path.write_text, json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            return
 
     @property
     def mode(self) -> str:
@@ -528,7 +588,9 @@ class ConversationState:
     def _init_screen(self) -> None:
         """Initialize pyte screen model."""
         if self._screen is None:
-            self._screen = pyte.Screen(self._screen_cols, self._screen_rows)
+            # HistoryScreen preserves scrollback (lines that scroll off the top).
+            # This helps agents read prior output without parsing raw control bytes.
+            self._screen = pyte.HistoryScreen(self._screen_cols, self._screen_rows, history=self._scrollback_limit)
             self._stream = pyte.ByteStream(self._screen)
             self._screen_raw_size = 0
 
@@ -581,6 +643,51 @@ class ConversationState:
             "cols": self._screen_cols,
             "rows_count": self._screen_rows,
             "raw_size": self._screen_raw_size,
+            "ts": _now_ms(),
+        }
+
+    def _render_history_line(self, line: Any) -> str:
+        """
+        Best-effort render of a HistoryScreen line to plain text.
+
+        In pyte 0.8.x, history lines are Screen buffer line objects (dict-like,
+        mapping column -> Char). We render by sorting columns and concatenating
+        Char.data, then rstrip trailing whitespace.
+        """
+        try:
+            if hasattr(line, "items"):
+                parts = []
+                for _, ch in sorted(line.items()):  # type: ignore[arg-type]
+                    parts.append(getattr(ch, "data", str(ch)))
+                return "".join(parts).rstrip()
+        except Exception:
+            pass
+        try:
+            return str(line).rstrip()
+        except Exception:
+            return ""
+
+    def _get_scrollback_snapshot(self, limit: int = 200) -> Dict[str, Any]:
+        """Return a snapshot of scrollback (top history) plus metadata."""
+        self._init_screen()
+        limit = max(1, min(int(limit), 2000))
+        lines: list[str] = []
+        total = 0
+        try:
+            hist = getattr(self._screen, "history", None)
+            top = getattr(hist, "top", None)
+            if top is not None:
+                total = len(top)
+                for line in list(top)[-limit:]:
+                    lines.append(self._render_history_line(line))
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "lines": lines,
+            "scrollback_total": total,
+            "cols": self._screen_cols,
+            "rows_count": self._screen_rows,
             "ts": _now_ms(),
         }
 
@@ -782,7 +889,14 @@ class ConversationState:
         async with self.lock:
             mgr = await _get_fws_manager()
             self._marker_path = _marker_path(self.conversation_id)
+            # Load per-conversation preferred screen size (if any) before attach/resize.
+            await self._load_persisted_screen_size()
             if self.shell_id:
+                # Ensure dtach attach proxy has a sane winsize for pyte parity.
+                try:
+                    await mgr.resize_pty(self.shell_id, self._screen_cols, self._screen_rows)
+                except Exception:
+                    pass
                 await self._ensure_reader(mgr)
                 await self._ensure_marker_reader()
                 return self.shell_id
@@ -793,6 +907,11 @@ class ConversationState:
                     rec = await mgr.get_shell(cached_id)
                     if rec and rec.status == "running":
                         self.shell_id = rec.id
+                        # Ensure dtach attach proxy has a sane winsize for pyte parity.
+                        try:
+                            await mgr.resize_pty(self.shell_id, self._screen_cols, self._screen_rows)
+                        except Exception:
+                            pass
                         await self._ensure_reader(mgr)
                         await self._ensure_marker_reader()
                         return self.shell_id
@@ -814,6 +933,11 @@ class ConversationState:
                 raise RuntimeError("shell manager returned non-running shell")
             self.shell_id = rec.id
             await self._save_shell_id(rec.id)
+            # Ensure dtach attach proxy has a sane winsize for pyte parity.
+            try:
+                await mgr.resize_pty(self.shell_id, self._screen_cols, self._screen_rows)
+            except Exception:
+                pass
             await self._ensure_reader(mgr)
             await self._ensure_marker_reader()
             return self.shell_id
@@ -1016,32 +1140,15 @@ class ConversationState:
             )
 
     async def _handle_prompt(self, line: str) -> None:
-        """Handle prompt sentinel - transition from block_running/interactive to idle."""
-        # Parse exit code from prompt sentinel
-        kv = self._parse_kv(line)
-        exit_code = None
-        try:
-            exit_code = int(kv.get("exit", ""))
-        except (ValueError, TypeError):
-            pass
-        
-        # If we were in interactive mode, end the session
-        if self._mode == "interactive" and self._active:
-            # Sprint 2: Flush screen state before ending
-            await self._flush_screen_state()
-            self._active.status = "completed"
-            self._active.ts_end = _now_ms()
-            if exit_code is not None:
-                self._active.exit_code = exit_code
-            await self._append_block_index(self._active)
-            await self._append_event({
-                "type": "agent_block_end",
-                "conversation_id": self.conversation_id,
-                "block": self._active.__dict__
-            })
-            self._active = None
-            self._interactive_session_id = None
-        self._mode = "idle"
+        """
+        Handle prompt sentinel (__FWS_PROMPT__).
+
+        IMPORTANT: This must not implicitly finalize interactive sessions or
+        transition mode -> idle. Prompt markers are consumed explicitly via
+        pty_wait_prompt / wait_for(match_type="prompt"), which performs the
+        session finalization deterministically.
+        """
+        return
 
     async def _finalize_interactive_session(self, exit_code: Optional[int] = None) -> None:
         """Finalize an interactive session (idempotent)."""
@@ -1555,6 +1662,76 @@ async def pty_read_screen(conversation_id: str) -> Dict[str, Any]:
             await state._rehydrate_screen_from_raw(state._raw_size)
             snapshot = state._get_screen_snapshot()
             return {"ok": True, **snapshot}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="pty_read_scrollback", description="Read rendered scrollback lines from the terminal history buffer.")
+async def pty_read_scrollback(conversation_id: str, limit: int = 200) -> Dict[str, Any]:
+    """
+    Read scrollback (lines that have scrolled off the top of the screen).
+
+    This is derived from the pyte HistoryScreen model, which is fed from the
+    lossless `output.raw` stream. For TUIs, prefer `pty_read_screen` for the
+    current visible state.
+    """
+    state = _state(conversation_id)
+    try:
+        async with state._screen_lock:
+            await state._refresh_raw_size()
+            # Ensure the screen model is current before reading history.
+            if state._screen is None or state._screen_raw_size != state._raw_size:
+                await state._rehydrate_screen_from_raw(state._raw_size)
+            return state._get_scrollback_snapshot(limit=limit)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="pty_resize", description="Resize the PTY and screen model for this conversation.")
+async def pty_resize(conversation_id: str, cols: int, rows: int) -> Dict[str, Any]:
+    """
+    Resize the underlying PTY winsize and rebuild the pyte screen model.
+
+    Intended callers:
+    - UI surface: set to xterm.js-fit cols/rows (preferred)
+    - Agents: explicit resize when needed (headless / deterministic)
+
+    This persists the last chosen size under agent_pty/screen_size.json so
+    reattach/ensure_shell can restore it.
+    """
+    state = _state(conversation_id)
+    try:
+        cols_i = int(cols)
+        rows_i = int(rows)
+        cols_i = max(1, min(cols_i, 500))
+        rows_i = max(1, min(rows_i, 300))
+
+        await state.ensure_shell()
+        mgr = await _get_fws_manager()
+
+        async with state._screen_lock:
+            state._screen_cols = cols_i
+            state._screen_rows = rows_i
+            await state._save_persisted_screen_size()
+            try:
+                await mgr.resize_pty(state.shell_id, cols_i, rows_i)
+            except Exception:
+                pass
+            # Rebuild screen from the lossless byte stream at the new size.
+            await state._refresh_raw_size()
+            await state._rehydrate_screen_from_raw(state._raw_size)
+            snapshot = state._get_screen_snapshot()
+        return {"ok": True, **snapshot}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="pty_get_size", description="Get the current screen model size for this conversation.")
+async def pty_get_size(conversation_id: str) -> Dict[str, Any]:
+    state = _state(conversation_id)
+    try:
+        await state._load_persisted_screen_size()
+        return {"ok": True, "cols": int(state._screen_cols), "rows": int(state._screen_rows)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

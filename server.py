@@ -1644,24 +1644,29 @@ async def _route_appserver_event(
         cached_input_tokens = None
         context_window = None
         
-        # Handle codex/event/token_count format: { info: { total_token_usage: {...}, model_context_window } }
+        # Handle codex/event/token_count format: { info: { last_token_usage: {...}, model_context_window } }
+        # Use "last_token_usage" (current turn) not "total_token_usage" (cumulative)
         if isinstance(payload.get("info"), dict):
             info = payload["info"]
-            usage = info.get("total_token_usage") or {}
+            usage = info.get("last_token_usage") or {}
             if isinstance(usage, dict):
-                total = usage.get("total_tokens")
+                # For context %, use last turn's input_tokens
+                total = usage.get("input_tokens")
                 input_tokens = usage.get("input_tokens")
                 cached_input_tokens = usage.get("cached_input_tokens")
             context_window = info.get("model_context_window")
         
-        # Handle thread/tokenUsage/updated format: { tokenUsage: { total: {totalTokens, inputTokens, cachedInputTokens}, modelContextWindow } }
+        # Handle thread/tokenUsage/updated format: { tokenUsage: { last: {inputTokens, ...}, modelContextWindow } }
+        # Use "last" (current turn) for context percentage, not "total" (cumulative)
         if total is None and isinstance(payload.get("tokenUsage"), dict):
             token_usage = payload["tokenUsage"]
-            total_breakdown = token_usage.get("total") or {}
-            if isinstance(total_breakdown, dict):
-                total = total_breakdown.get("totalTokens") or total_breakdown.get("total_tokens")
-                input_tokens = total_breakdown.get("inputTokens") or total_breakdown.get("input_tokens")
-                cached_input_tokens = total_breakdown.get("cachedInputTokens") or total_breakdown.get("cached_input_tokens")
+            # Use "last" breakdown - this is the current turn's token usage
+            last_breakdown = token_usage.get("last") or {}
+            if isinstance(last_breakdown, dict):
+                # For context %, use last.inputTokens (what's in the context window now)
+                total = last_breakdown.get("inputTokens") or last_breakdown.get("input_tokens")
+                input_tokens = last_breakdown.get("inputTokens") or last_breakdown.get("input_tokens")
+                cached_input_tokens = last_breakdown.get("cachedInputTokens") or last_breakdown.get("cached_input_tokens")
             context_window = token_usage.get("modelContextWindow") or token_usage.get("model_context_window")
         
         # Fallback to direct fields
@@ -3757,6 +3762,49 @@ async def api_mcp_agent_pty_status():
     if shell and shell.status == "running":
         return {"running": True, "shell_id": shell_id, "pid": shell.pid}
     return {"running": False, "shell_id": shell_id}
+
+
+@app.get("/api/mcp/agent-pty/default-size")
+async def api_mcp_agent_pty_default_size() -> Dict[str, Any]:
+    # Keep in sync with mcp_agent_pty_server ConversationState defaults.
+    return {"ok": True, "cols": 120, "rows": 40}
+
+
+def _agent_pty_resize_api_enabled() -> bool:
+    # Opt-in only (wire this to UI later).
+    v = os.environ.get("AGENT_PTY_RESIZE_API", "").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+@app.get("/api/mcp/agent-pty/size")
+async def api_mcp_agent_pty_size(conversation_id: str = Query(...)) -> Dict[str, Any]:
+    if not _agent_pty_resize_api_enabled():
+        raise HTTPException(status_code=404, detail="Resize API disabled")
+    try:
+        import mcp_agent_pty_server as mcp_srv  # type: ignore
+        return await mcp_srv.pty_get_size(conversation_id=conversation_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"mcp size failed: {exc}")
+
+
+@app.post("/api/mcp/agent-pty/resize")
+async def api_mcp_agent_pty_resize(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    if not _agent_pty_resize_api_enabled():
+        raise HTTPException(status_code=404, detail="Resize API disabled")
+    convo_id = str(payload.get("conversation_id") or "").strip()
+    if not convo_id:
+        raise HTTPException(status_code=400, detail="conversation_id required")
+    try:
+        cols = int(payload.get("cols") or 0)
+        rows = int(payload.get("rows") or 0)
+    except Exception:
+        raise HTTPException(status_code=400, detail="cols/rows must be ints")
+
+    try:
+        import mcp_agent_pty_server as mcp_srv  # type: ignore
+        return await mcp_srv.pty_resize(conversation_id=convo_id, cols=cols, rows=rows)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"mcp resize failed: {exc}")
 
 
 @app.post("/api/mcp/agent-pty/exec")

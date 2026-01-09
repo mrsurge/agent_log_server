@@ -548,6 +548,33 @@ Standardize cursor semantics across spool and screen delta readers so agents can
 
 ---
 
+## Sprint 3.2: Resize Support (PTY + Screen Model)
+
+**Effort:** ~1-2 hours  
+**Depends on:** Sprint 3
+
+### Goal
+Allow both UI and agents to resize the underlying PTY *and* keep the pyte screen model aligned, so TUIs redraw correctly and `pty_read_screen` remains faithful.
+
+### Changes
+1. **New MCP tool:** `pty_resize(conversation_id, cols, rows)`
+   - Calls `mgr.resize_pty(shell_id, cols, rows)` (dtach proxy winsize).
+   - Rebuilds pyte screen model at the new dimensions.
+   - Rehydrates from `output.raw` (so the screen model remains consistent after resize).
+2. **Persist last size per conversation**
+   - Store `{cols, rows}` in SSOT conversation configuration (preferred) or in `agent_pty/size.json` as fallback.
+   - `ensure_shell()` applies last known size immediately after (re)attach.
+3. **Eventing**
+   - Emit a `screen_delta` immediately after resize that includes the new `cols/rows_count`.
+   - (Optional) Add a `screen_resize` event type for UIs that want an explicit resize signal.
+
+### Validation
+- Start `gemini --screen-reader`, call `pty_resize` (e.g., 120x40 -> 100x30), then `pty_read_screen` should not show duplicated header/prompt rows.
+- Confirm `pty_read_screen` reports the updated `cols/rows_count`.
+- Confirm `ensure_shell()` reapplies the persisted size after reload/reattach.
+
+---
+
 ## Sprint 4: Scrollback Buffer + Session Lifecycle
 
 **Effort:** ~2 hours  

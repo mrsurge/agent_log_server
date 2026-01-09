@@ -5,6 +5,9 @@ import os
 import secrets
 import time
 import hashlib
+import contextlib
+import io
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -17,6 +20,8 @@ from framework_shells.orchestrator import Orchestrator
 
 def _ensure_framework_shells_secret() -> None:
     """Derive a stable secret from cwd/repo root if not already set."""
+    # Prefer SIGWINCH delivery after resize_pty() for dtach-backed PTYs.
+    os.environ.setdefault("FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE", "1")
     if os.environ.get("FRAMEWORK_SHELLS_SECRET"):
         return
     repo_root = str(Path(__file__).resolve().parent)
@@ -45,7 +50,20 @@ def _manager_run_id() -> str:
 
 
 async def _get_fws_manager():
-    return await get_framework_shell_manager(run_id=_manager_run_id())
+    @contextlib.contextmanager
+    def _redirect_stdout_to_stderr() -> Any:
+        class _StdoutToStderr(io.TextIOBase):
+            def write(self, s: str) -> int:
+                return sys.stderr.write(s)
+
+            def flush(self) -> None:
+                sys.stderr.flush()
+
+        with contextlib.redirect_stdout(_StdoutToStderr()):
+            yield
+
+    with _redirect_stdout_to_stderr():
+        return await get_framework_shell_manager(run_id=_manager_run_id())
 
 
 def _agent_pty_root(conversation_id: str) -> Path:
@@ -258,6 +276,11 @@ async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             env_overrides=env_overrides,
             wait_ready=True,
         )
+    # Ensure dtach attach proxy has a sane winsize for pyte parity.
+    try:
+        await mgr.resize_pty(rec.id, 120, 40)
+    except Exception:
+        pass
     return {"ok": True, "shell_id": rec.id, "label": rec.label, "status": rec.status}
 
 
