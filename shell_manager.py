@@ -244,6 +244,10 @@ async def health() -> Dict[str, Any]:
     return {"ok": True, "pid": os.getpid()}
 
 
+def _agent_pty_label(conversation_id: str) -> str:
+    return f"agent-pty:{conversation_id}"
+
+
 @app.post("/shells/ensure")
 async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     conversation_id = str(payload.get("conversation_id") or "").strip()
@@ -252,7 +256,7 @@ async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     cwd = payload.get("cwd")
     _ensure_framework_shells_secret()
     mgr = await _get_fws_manager()
-    label = f"agent-pty:{conversation_id}"
+    label = _agent_pty_label(conversation_id)
     rec = await mgr.find_shell_by_label(label, status="running")
     if not rec:
         root = _agent_pty_root(conversation_id)
@@ -282,6 +286,54 @@ async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     except Exception:
         pass
     return {"ok": True, "shell_id": rec.id, "label": rec.label, "status": rec.status}
+
+
+@app.post("/shells/terminate")
+async def shells_terminate(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Terminate the dtach-backed agent PTY shell for a conversation (best-effort)."""
+    conversation_id = str(payload.get("conversation_id") or "").strip()
+    if not conversation_id:
+        raise HTTPException(status_code=400, detail="conversation_id required")
+    force = bool(payload.get("force", True))
+    _ensure_framework_shells_secret()
+    mgr = await _get_fws_manager()
+    label = _agent_pty_label(conversation_id)
+    rec = await mgr.find_shell_by_label(label, status="running")
+    if not rec:
+        return {"ok": True, "terminated": False, "reason": "not running"}
+    try:
+        await mgr.terminate_shell(rec.id, force=force)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"terminate failed: {exc}")
+    return {"ok": True, "terminated": True, "shell_id": rec.id}
+
+
+@app.post("/shells/terminate_all")
+async def shells_terminate_all(payload: Dict[str, Any] = Body({})) -> Dict[str, Any]:
+    """Terminate all running agent PTY shells (label prefix agent-pty:)."""
+    _ensure_framework_shells_secret()
+    mgr = await _get_fws_manager()
+    force = bool(payload.get("force", True))
+    prefix = str(payload.get("label_prefix") or "agent-pty:")
+    try:
+        records = await mgr.list_shells()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"list_shells failed: {exc}")
+
+    terminated: int = 0
+    for rec in records:
+        label = rec.label or ""
+        if rec.status != "running":
+            continue
+        if not label.startswith(prefix):
+            continue
+        try:
+            await mgr.terminate_shell(rec.id, force=force)
+            terminated += 1
+        except Exception:
+            # best-effort cleanup; keep going
+            pass
+    return {"ok": True, "terminated": terminated, "label_prefix": prefix}
 
 
 def _main() -> None:

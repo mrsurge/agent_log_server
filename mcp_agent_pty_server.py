@@ -10,6 +10,7 @@ import time
 import atexit
 import contextlib
 import io
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -176,6 +177,24 @@ async def _shell_manager_request(path: str, payload: Dict[str, Any]) -> Dict[str
             raw = resp.read()
         return json.loads(raw.decode("utf-8"))
     return await asyncio.to_thread(_post)
+
+
+def _shell_manager_request_sync(path: str, payload: Dict[str, Any], *, timeout_s: float = 0.5) -> Optional[Dict[str, Any]]:
+    """Best-effort synchronous request (used from atexit)."""
+    url_base = _shell_manager_url()
+    if not url_base:
+        return None
+    url = url_base.rstrip("/") + path
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
+            raw = resp.read()
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
 
 
 _MARKER_BEGIN = "__FWS_BLOCK_BEGIN__"
@@ -387,8 +406,14 @@ class ConversationState:
         self._waiters: list = []
         
         # === Sprint 1: Screen model (pyte) ===
-        self._screen: Optional[pyte.Screen] = None
-        self._stream: Optional[pyte.ByteStream] = None
+        # We keep two screen models to represent primary + alternate screen buffers.
+        # Alt-screen is common for TUIs and must not corrupt the primary scrollback.
+        self._screen_main: Optional[pyte.HistoryScreen] = None
+        self._stream_main: Optional[pyte.ByteStream] = None
+        self._screen_alt: Optional[pyte.HistoryScreen] = None
+        self._stream_alt: Optional[pyte.ByteStream] = None
+        self._in_alt_screen: bool = False
+        self._ansi_mode_buf: bytes = b""  # carryover for split CSI ? 1049 h/l sequences
         self._screen_cols: int = 120
         self._screen_rows: int = 40
         self._pending_dirty_rows: set = set()
@@ -472,11 +497,13 @@ class ConversationState:
         if self._spool_path is None:
             self._spool_path = _output_spool_path(self.conversation_id)
             self._spool_path.parent.mkdir(parents=True, exist_ok=True)
-            if self._spool_path.exists():
-                self._spool_size = self._spool_path.stat().st_size
-            else:
+            if not self._spool_path.exists():
                 self._spool_path.write_bytes(b"")
-                self._spool_size = 0
+        # Always refresh from disk: multiple processes can append to the same spool.
+        try:
+            self._spool_size = self._spool_path.stat().st_size
+        except Exception:
+            pass
 
     async def _append_spool(self, data: str) -> int:
         """Append to spool, return new size (cursor position)."""
@@ -499,6 +526,11 @@ class ConversationState:
         async with self._spool_lock:
             await self._init_spool()
             from_cursor = max(0, int(from_cursor))
+            # Refresh size under lock (external writers may have appended).
+            try:
+                self._spool_size = self._spool_path.stat().st_size
+            except Exception:
+                pass
             if from_cursor >= self._spool_size:
                 return ("", self._spool_size)
             data = await asyncio.to_thread(self._read_bytes, self._spool_path, from_cursor, max_bytes)
@@ -585,60 +617,137 @@ class ConversationState:
         }
         await asyncio.to_thread(self._append_text_line, path, json.dumps(payload, ensure_ascii=False) + "\n")
 
-    def _init_screen(self) -> None:
-        """Initialize pyte screen model."""
-        if self._screen is None:
-            # HistoryScreen preserves scrollback (lines that scroll off the top).
-            # This helps agents read prior output without parsing raw control bytes.
-            self._screen = pyte.HistoryScreen(self._screen_cols, self._screen_rows, history=self._scrollback_limit)
-            self._stream = pyte.ByteStream(self._screen)
-            self._screen_raw_size = 0
+    def _active_screen(self) -> tuple[pyte.HistoryScreen, pyte.ByteStream]:
+        """Return the active (main/alt) screen + stream, creating on demand."""
+        if self._in_alt_screen:
+            if self._screen_alt is None or self._stream_alt is None:
+                self._screen_alt = pyte.HistoryScreen(self._screen_cols, self._screen_rows, history=self._scrollback_limit)
+                self._stream_alt = pyte.ByteStream(self._screen_alt)
+            return (self._screen_alt, self._stream_alt)
+        if self._screen_main is None or self._stream_main is None:
+            self._screen_main = pyte.HistoryScreen(self._screen_cols, self._screen_rows, history=self._scrollback_limit)
+            self._stream_main = pyte.ByteStream(self._screen_main)
+        return (self._screen_main, self._stream_main)
+
+    def _mark_full_dirty(self) -> None:
+        self._pending_dirty_rows.update(range(self._screen_rows))
+
+    def _set_alt_screen(self, enabled: bool) -> None:
+        if bool(enabled) == self._in_alt_screen:
+            return
+        self._in_alt_screen = bool(enabled)
+        # Ensure target screen exists; when entering alt screen, reset it to match
+        # typical TUI behavior (alt buffer starts fresh).
+        screen, _ = self._active_screen()
+        if enabled:
+            try:
+                screen.reset()
+            except Exception:
+                pass
+        # Force a full repaint on mode switch.
+        self._mark_full_dirty()
+
+    _ALTBUF_RE = re.compile(rb"\x1b\[\?([0-9]{4})([hl])")
 
     def _feed_screen(self, data: bytes) -> set:
-        """Feed data to pyte, return set of dirty row indices."""
-        self._init_screen()
-        try:
-            self._stream.feed(data)
-        except Exception:
-            pass  # pyte may choke on malformed sequences
-        self._screen_raw_size += len(data)
-        dirty = set(self._screen.dirty)
-        self._pending_dirty_rows.update(dirty)
-        return dirty
+        """Feed bytes to the active pyte screen, tracking alt-screen transitions."""
+        # Stitch with any split CSI prefix from the previous chunk.
+        buf = self._ansi_mode_buf + (data or b"")
+        self._ansi_mode_buf = b""
+
+        dirty_total: set[int] = set()
+        pos = 0
+
+        for m in self._ALTBUF_RE.finditer(buf):
+            start, end = m.span()
+            segment = buf[pos:start]
+            if segment:
+                screen, stream = self._active_screen()
+                try:
+                    stream.feed(segment)
+                except Exception:
+                    pass
+                dirty_total.update(getattr(screen, "dirty", set()))
+            code = m.group(1)
+            action = m.group(2)
+            # Only treat 1049/1047 as alt-buffer toggles. 1048 is save/restore cursor.
+            if code in (b"1049", b"1047"):
+                self._set_alt_screen(action == b"h")
+            pos = end
+
+        tail = buf[pos:]
+        # Preserve potentially split ESC[?1049h sequence at end of chunk.
+        idx = tail.rfind(b"\x1b[?")
+        if idx != -1 and (len(tail) - idx) < 10:
+            feed_part = tail[:idx]
+            self._ansi_mode_buf = tail[idx:]
+        else:
+            feed_part = tail
+            self._ansi_mode_buf = b""
+        if len(self._ansi_mode_buf) > 64:
+            self._ansi_mode_buf = self._ansi_mode_buf[-64:]
+
+        if feed_part:
+            screen, stream = self._active_screen()
+            try:
+                stream.feed(feed_part)
+            except Exception:
+                pass
+            dirty_total.update(getattr(screen, "dirty", set()))
+
+        self._screen_raw_size += len(data or b"")
+        self._pending_dirty_rows.update(dirty_total)
+        return dirty_total
 
     def _get_screen_row(self, row: int) -> str:
         """Get text content of a screen row (0-indexed), with markers filtered."""
-        if self._screen is None:
+        screen, _ = self._active_screen()
+        if screen is None:
             return ""
         # Use screen.display[row] for correct column-ordered string
-        text = self._screen.display[row].rstrip()
+        text = screen.display[row].rstrip()
         # Filter out shell markers that shouldn't appear in screen output
         if "__FWS_BLOCK_BEGIN__" in text or "__FWS_BLOCK_END__" in text or "__FWS_PROMPT__" in text:
             return ""
-        # Filter manual wrapper lines injected by the agent PTY
-        if "__fws_cmd=" in text or "__fws_emit_begin" in text or "__fws_emit_end" in text:
+        # Filter manual wrapper fragments injected by pty_exec.
+        # These can wrap across multiple rows, so match on multiple stable substrings.
+        wrapper_markers = (
+            "__fws_cmd=",
+            "__fws_emit_begin",
+            "__fws_emit_end",
+            "__FWS_SEQ=",
+            "__FWS_LAST_SEQ",
+            "__FWS_IN_MARKER",
+            "__fws_seq=",
+            "$__fws_seq",
+            "__fws_ts=",
+            "$__fws_ts",
+            "__fws_ts2=",
+            "$__fws_ts2",
+            "__fws_cwd=",
+            "$__fws_cwd",
+            "eval \"$__fws_cmd\"",
+            "base64 -d",
+            "2>/dev/null",
+        )
+        if any(m in text for m in wrapper_markers):
             return ""
         return text
 
     def _is_alt_screen(self) -> bool:
         """Check if terminal is in alternate screen mode."""
-        if self._screen is None:
-            return False
-        # pyte 0.8.x doesn't have ALTBUF mode or in_alternate_screen
-        # Return False for now; alt-screen detection can be added later
-        # by tracking DECSET 1049/1047 sequences manually if needed
-        return getattr(self._screen, 'in_alternate_screen', False)
+        return bool(self._in_alt_screen)
 
     def _get_screen_snapshot(self) -> dict:
         """Get full screen state as dict."""
-        self._init_screen()
+        screen, _ = self._active_screen()
         rows = []
         for i in range(self._screen_rows):
             rows.append(self._get_screen_row(i))
         return {
             "rows": rows,
-            "cursor": {"row": self._screen.cursor.y, "col": self._screen.cursor.x},
-            "title": getattr(self._screen, 'title', '') or "",
+            "cursor": {"row": screen.cursor.y, "col": screen.cursor.x},
+            "title": getattr(screen, 'title', '') or "",
             "alt_screen": self._is_alt_screen(),
             "cols": self._screen_cols,
             "rows_count": self._screen_rows,
@@ -669,12 +778,12 @@ class ConversationState:
 
     def _get_scrollback_snapshot(self, limit: int = 200) -> Dict[str, Any]:
         """Return a snapshot of scrollback (top history) plus metadata."""
-        self._init_screen()
+        screen, _ = self._active_screen()
         limit = max(1, min(int(limit), 2000))
         lines: list[str] = []
         total = 0
         try:
-            hist = getattr(self._screen, "history", None)
+            hist = getattr(screen, "history", None)
             top = getattr(hist, "top", None)
             if top is not None:
                 total = len(top)
@@ -695,9 +804,13 @@ class ConversationState:
         """Rebuild screen model from raw bytes on disk."""
         await self._refresh_raw_size()
         raw_size = self._raw_size if upto is None else min(self._raw_size, int(upto))
-        # Fresh screen
-        self._screen = pyte.Screen(self._screen_cols, self._screen_rows)
-        self._stream = pyte.ByteStream(self._screen)
+        # Fresh screens
+        self._screen_main = pyte.HistoryScreen(self._screen_cols, self._screen_rows, history=self._scrollback_limit)
+        self._stream_main = pyte.ByteStream(self._screen_main)
+        self._screen_alt = None
+        self._stream_alt = None
+        self._in_alt_screen = False
+        self._ansi_mode_buf = b""
         self._pending_dirty_rows.clear()
         self._screen_raw_size = 0
         if raw_size <= 0:
@@ -711,8 +824,12 @@ class ConversationState:
                 break
             self._feed_screen(data)
             offset += len(data)
-        if self._screen:
-            self._screen.dirty.clear()
+        for s in (self._screen_main, self._screen_alt):
+            if s:
+                try:
+                    s.dirty.clear()
+                except Exception:
+                    pass
 
     async def _load_shell_id(self) -> Optional[str]:
         """Load cached shell id from disk."""
@@ -756,6 +873,7 @@ class ConversationState:
             return
         
         async with self._screen_lock:
+            screen, _ = self._active_screen()
             # Build delta event from buffered dirty rows
             rows_data = []
             for row_idx in sorted(self._pending_dirty_rows):
@@ -770,8 +888,8 @@ class ConversationState:
                 "conversation_id": self.conversation_id,
                 "block_id": self._active.block_id if self._active else None,
                 "rows": rows_data,
-                "cursor": {"row": self._screen.cursor.y, "col": self._screen.cursor.x},
-                "title": getattr(self._screen, 'title', '') or "",
+                "cursor": {"row": screen.cursor.y, "col": screen.cursor.x},
+                "title": getattr(screen, "title", "") or "",
                 "alt_screen": self._is_alt_screen(),
                 "cols": self._screen_cols,
                 "rows_count": self._screen_rows,
@@ -786,8 +904,12 @@ class ConversationState:
             
         # Clear pending dirty rows and pyte's dirty set
         self._pending_dirty_rows.clear()
-        if self._screen:
-            self._screen.dirty.clear()
+        for s in (self._screen_main, self._screen_alt):
+            if s:
+                try:
+                    s.dirty.clear()
+                except Exception:
+                    pass
         self._last_screen_delta_ts = now
 
     async def _flush_screen_state(self) -> None:
@@ -1264,6 +1386,12 @@ class ConversationState:
         import re
         
         await self._init_spool()
+        # Refresh spool size (external writers may have appended).
+        try:
+            if self._spool_path is not None:
+                self._spool_size = self._spool_path.stat().st_size
+        except Exception:
+            pass
         
         # Build match function based on type
         # Returns: {matched, match_text, match_index, match_end, extra?} or None
@@ -1350,6 +1478,11 @@ class ConversationState:
             return {"ok": True, **result}
         except asyncio.TimeoutError:
             # Return current spool size so agent can resume from here
+            try:
+                if self._spool_path is not None:
+                    self._spool_size = self._spool_path.stat().st_size
+            except Exception:
+                pass
             return {"ok": False, "matched": False, "error": "timeout", "resume_cursor": self._spool_size}
         finally:
             # Clean up waiter if still present
@@ -1365,6 +1498,39 @@ class ConversationState:
             "shell_id": self.shell_id,
             "resume_cursor": self._spool_size,
         }
+
+    async def close_shell(self, *, force: bool = True) -> Dict[str, Any]:
+        """
+        Terminate the conversation-owned agent PTY shell (best-effort).
+
+        This uses the external shell_manager for termination so that the dtach
+        session is cleaned up even if the MCP process is exiting.
+        """
+        shell_id = self.shell_id
+        # Cancel local readers (best-effort).
+        for task in (self._reader_task, self._bytes_reader_task, self._marker_task, self._screen_delta_task):
+            if task and not task.done():
+                task.cancel()
+        self._reader_task = None
+        self._bytes_reader_task = None
+        self._marker_task = None
+        self._screen_delta_task = None
+
+        # Reset local state (screen/raw remain on disk).
+        self._active = None
+        self._mode = "idle"
+        self._interactive_session_id = None
+        self.shell_id = None
+
+        try:
+            result = await _shell_manager_request(
+                "/shells/terminate",
+                {"conversation_id": self.conversation_id, "force": bool(force)},
+            )
+            return {"ok": True, "shell_id": shell_id, "result": result}
+        except Exception as e:
+            # Still consider local cleanup successful; termination may be handled elsewhere.
+            return {"ok": False, "shell_id": shell_id, "error": str(e)}
 
 
 _states: Dict[str, ConversationState] = {}
@@ -1382,7 +1548,19 @@ mcp = FastMCP(name="agent-pty-blocks", instructions="Agent PTY + block store too
 
 # Diagnostic markers for stdio MCP process lifetime
 print(f"MCP SERVER STARTED pid={os.getpid()}", file=sys.stderr)
-atexit.register(lambda: print(f"MCP SERVER EXITING pid={os.getpid()}", file=sys.stderr))
+
+def _atexit_cleanup() -> None:
+    # Best-effort: terminate any conversation shells this MCP process touched.
+    # The contract for this project is that stdio MCP process lifetime owns the
+    # PTY shells it uses. If the shell_manager isn't available, this is a no-op.
+    try:
+        for convo_id in list(_states.keys()):
+            _shell_manager_request_sync("/shells/terminate", {"conversation_id": convo_id, "force": True})
+    except Exception:
+        pass
+    print(f"MCP SERVER EXITING pid={os.getpid()}", file=sys.stderr)
+
+atexit.register(_atexit_cleanup)
 
 
 @mcp.tool(name="ping", description="Return MCP server pid (diagnostic).")
@@ -1648,14 +1826,14 @@ async def pty_read_screen(conversation_id: str) -> Dict[str, Any]:
     Returns the terminal screen as an array of row strings, plus cursor position,
     title, and alt-screen state. This is what an agent should read for TUI control.
     
-    Note: Screen dimensions are fixed at 120x40. Resize support planned for future.
+    Note: Screen dimensions default to 120x40; callers can change them via `pty_resize`.
     """
     state = _state(conversation_id)
     try:
         async with state._screen_lock:
             await state._refresh_raw_size()
             # If in-memory screen is current, return it.
-            if state._screen is not None and state._screen_raw_size == state._raw_size:
+            if (state._screen_main is not None or state._screen_alt is not None) and state._screen_raw_size == state._raw_size:
                 snapshot = state._get_screen_snapshot()
                 return {"ok": True, **snapshot}
             # Rehydrate from raw bytes when in-memory state is stale.
@@ -1680,7 +1858,7 @@ async def pty_read_scrollback(conversation_id: str, limit: int = 200) -> Dict[st
         async with state._screen_lock:
             await state._refresh_raw_size()
             # Ensure the screen model is current before reading history.
-            if state._screen is None or state._screen_raw_size != state._raw_size:
+            if (state._screen_main is None and state._screen_alt is None) or state._screen_raw_size != state._raw_size:
                 await state._rehydrate_screen_from_raw(state._raw_size)
             return state._get_scrollback_snapshot(limit=limit)
     except Exception as e:
@@ -1734,6 +1912,19 @@ async def pty_get_size(conversation_id: str) -> Dict[str, Any]:
         return {"ok": True, "cols": int(state._screen_cols), "rows": int(state._screen_rows)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="pty_close", description="Terminate the conversation-owned agent PTY shell (dtach).")
+async def pty_close(conversation_id: str, force: bool = True) -> Dict[str, Any]:
+    """
+    Terminate the conversation-owned agent PTY shell.
+
+    This is the explicit agent-side cleanup hook. It is the only supported way
+    for agents to kill the PTY; MCP process exit may also attempt best-effort
+    cleanup, but callers should not rely on it.
+    """
+    state = _state(conversation_id)
+    return await state.close_shell(force=force)
 
 
 @mcp.tool(name="pty_read_screen_deltas", description="Read screen delta events from a byte cursor position.")
@@ -1813,17 +2004,20 @@ async def pty_screen_status(conversation_id: str) -> Dict[str, Any]:
     Useful for checking dimensions, cursor position, title, and alt-screen state
     without transferring all row data.
     
-    Note: Screen dimensions are fixed at 120x40. Future: pty_resize tool.
+    Note: Screen dimensions default to 120x40; callers can change them via `pty_resize`.
     """
     state = _state(conversation_id)
     try:
         async with state._screen_lock:
-            state._init_screen()
+            await state._refresh_raw_size()
+            if (state._screen_main is None and state._screen_alt is None) or state._screen_raw_size != state._raw_size:
+                await state._rehydrate_screen_from_raw(state._raw_size)
+            screen, _ = state._active_screen()
             return {
                 "ok": True,
                 "conversation_id": conversation_id,
-                "cursor": {"row": state._screen.cursor.y, "col": state._screen.cursor.x},
-                "title": getattr(state._screen, 'title', '') or "",
+                "cursor": {"row": screen.cursor.y, "col": screen.cursor.x},
+                "title": getattr(screen, "title", "") or "",
                 "alt_screen": state._is_alt_screen(),
                 "cols": state._screen_cols,
                 "rows": state._screen_rows,

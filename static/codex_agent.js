@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const scrollContainer = timelineWrapEl || timelineEl;
   const statusRibbonEl = document.getElementById('status-ribbon');
   const statusLabelEl = document.getElementById('status-label');
+  const statusReasoningEl = document.getElementById('status-reasoning');
   const statusDotEl = document.getElementById('status-dot');
   const startBtn = document.getElementById('agent-start');
   const stopBtn = document.getElementById('agent-stop');
@@ -144,6 +145,58 @@ document.addEventListener('DOMContentLoaded', () => {
   let transcriptLoading = false;
   let estimatedRowHeight = 28;
   let terminalMode = false;
+  let draftSaveTimer = null;
+  let lastDraftHash = null;
+
+  // Debounced draft save to persist composer content
+  function saveDraftDebounced() {
+    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    // Capture conversation_id NOW to avoid race condition on conversation switch
+    const convoId = conversationMeta?.conversation_id;
+    if (!convoId) return;
+
+    draftSaveTimer = setTimeout(async () => {
+      const text = getPromptText();
+      // Simple hash to avoid sending unchanged drafts
+      const hash = text.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
+      if (hash === lastDraftHash) return;
+      lastDraftHash = hash;
+      try {
+        await postJson('/api/appserver/conversation/draft', {
+          conversation_id: convoId,
+          draft: text
+        });
+      } catch (e) {
+        console.warn('Draft save failed:', e);
+      }
+    }, 500);
+  }
+
+  function restoreDraft() {
+    if (!promptEl) return;
+    const draft = conversationMeta?.draft;
+    if (draft && typeof draft === 'string' && draft.trim()) {
+      renderPromptFromText(draft);
+      // Update hash to match restored draft
+      lastDraftHash = draft.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
+    } else {
+      // No draft - clear composer
+      clearPrompt();
+      lastDraftHash = null;
+    }
+  }
+
+  function clearDraft() {
+    lastDraftHash = null;
+    // Fire and forget - clear the draft from storage
+    const convoId = conversationMeta?.conversation_id;
+    if (convoId) {
+      postJson('/api/appserver/conversation/draft', {
+        conversation_id: convoId,
+        draft: ''
+      }).catch(() => {});
+    }
+  }
 
   function setTerminalMode(enabled) {
     terminalMode = Boolean(enabled);
@@ -502,9 +555,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!item) return '';
         const cwd = conversationSettings?.cwd || '';
         const relPath = getRelativePath(item.original.path, cwd);
-        return '<span class="mention-token" contenteditable="false" data-path="' + 
-               relPath + '" title="' + item.original.path + '">' + 
-               item.original.name + '</span> ';
+        return '<span class="mention-token" contenteditable="false" data-path="' +
+               relPath + '" title="' + item.original.path + '">' +
+               item.original.name + '</span>';
       },
       menuItemTemplate: function(item) {
         const icon = item.original.type === 'directory' ? '📁' : '📄';
@@ -1098,6 +1151,22 @@ document.addEventListener('DOMContentLoaded', () => {
     if (statusRibbonEl) statusRibbonEl.classList.toggle('active', Boolean(active));
   }
 
+  function setReasoningRibbon(text) {
+    if (!statusReasoningEl) return;
+    if (!text) {
+      clearReasoningRibbon();
+      return;
+    }
+    statusReasoningEl.textContent = text;
+    statusReasoningEl.classList.add('active');
+  }
+
+  function clearReasoningRibbon() {
+    if (!statusReasoningEl) return;
+    statusReasoningEl.textContent = '';
+    statusReasoningEl.classList.remove('active');
+  }
+
   function setStatusDot(status) {
     // status: 'success', 'error', 'warning', or null/'' for neutral
     if (!statusDotEl) return;
@@ -1273,6 +1342,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Reset status ribbon
     setActivity('idle', false);
     setStatusDot(null);
+    clearReasoningRibbon();
     timelineEl.appendChild(topSpacerEl);
     const placeholder = document.createElement('div');
     placeholder.id = 'timeline-placeholder';
@@ -2815,6 +2885,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function selectConversationWithView(conversationId, view) {
     if (!conversationId) return;
+    // Cancel any pending draft save to avoid race condition
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
+    lastDraftHash = null;
     resetTimeline();
     await postJson('/api/appserver/conversations/select', { conversation_id: conversationId, view });
     await fetchConversation();
@@ -2824,6 +2900,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function createConversation() {
+    // Cancel any pending draft save from previous conversation
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
+    lastDraftHash = null;
     await postJson('/api/appserver/conversations', {});
     await fetchConversation();
     await fetchConversations();
@@ -2989,6 +3071,8 @@ document.addEventListener('DOMContentLoaded', () => {
       setDiffSyntaxEnabled(conversationSettings?.diffSyntax === true);
       // Connect PTY WebSocket for user terminal
       connectPtyWebSocket();
+      // Restore draft from conversation meta
+      restoreDraft();
     } catch {
       // Don't touch statusEl here - it's for server status only
     }
@@ -3248,6 +3332,14 @@ document.addEventListener('DOMContentLoaded', () => {
         // Status event from turn/completed - update ribbon dot
         if (evt.status) {
           setStatusDot(evt.status);
+        }
+        clearReasoningRibbon();
+        return;
+      case 'thought':
+        // Thought event - show thought text in status ribbon
+        if (evt.text) {
+          setActivity(evt.text, true);
+          setReasoningRibbon(evt.text);
         }
         return;
       case 'message':
@@ -3621,6 +3713,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const text = getPromptText().trim();
     if (!text) return;
     clearPrompt();
+    clearDraft();
     await dispatchInput(text);
   });
 
@@ -3674,6 +3767,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const text = getPromptText().trim();
       if (!text) return;
       clearPrompt();
+      clearDraft();
       await dispatchInput(text);
       return;
     }
@@ -3705,6 +3799,10 @@ document.addEventListener('DOMContentLoaded', () => {
         clearPrompt();
         sendPtyStdin(text);
       }
+    }
+    // Save draft with debounce (not in terminal/stdin mode)
+    if (!commandRunning && !terminalMode) {
+      saveDraftDebounced();
     }
     // Tribute handles @ mentions automatically
   });

@@ -39,8 +39,9 @@ async def _lifespan(app: FastAPI):
         info = await _get_or_start_appserver_shell()
         await _ensure_appserver_reader(info["shell_id"])
         await _ensure_appserver_initialized()
-        # Do not auto-start the MCP worker or shell manager on server startup.
-        # These should be launched explicitly (or owned by the MCP client in stdio mode).
+        # Ensure the shell manager is available for agent PTY attach/terminate operations.
+        # This keeps the backend stable even when the MCP stdio worker is session-scoped.
+        await _get_or_start_shell_manager()
         agent_pty_monitor_task = asyncio.create_task(_agent_pty_monitor_loop(), name="agent-pty-monitor")
     except Exception:
         pass
@@ -49,6 +50,13 @@ async def _lifespan(app: FastAPI):
         agent_pty_monitor_task.cancel()
         with suppress(asyncio.CancelledError):
             await agent_pty_monitor_task
+    # Cleanup on server shutdown: kill extension-owned subprocess shells.
+    with suppress(Exception):
+        await _terminate_agent_pty_conversation_shells(force=True)
+    with suppress(Exception):
+        await _stop_mcp_shell()
+    with suppress(Exception):
+        await _stop_shell_manager()
 
 app = FastAPI(lifespan=_lifespan)
 socketio_server = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
@@ -79,6 +87,7 @@ _appserver_raw_buffer: List[str] = []
 _approval_item_cache: Dict[str, Dict[str, Any]] = {}
 _approval_request_map: Dict[str, str] = {}
 _appserver_rpc_waiters: Dict[str, asyncio.Future] = {}
+_pending_turn_starts: Dict[str, Dict[str, Any]] = {}  # request_id -> original payload for auto-resume
 _appserver_initialized = False
 _shell_call_ids: Dict[str, Dict[str, Any]] = {}  # Track active shell commands for streaming
 _model_list_cache: Optional[List[Dict[str, Any]]] = None
@@ -704,6 +713,58 @@ def _diff_signature(diff_text: str) -> str:
     return hashlib.sha1(signature.encode("utf-8")).hexdigest()
 
 
+# Thought block pattern: **<thought content>**
+_THOUGHT_PATTERN = re.compile(r'\*\*([^*]+)\*\*')
+
+
+def _extract_and_scrub_thoughts_stream(delta: str, state: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """
+    Streaming thought extractor that handles **title** patterns across delta chunks.
+    Returns (scrubbed_text, thoughts) and keeps any incomplete marker in state.
+    """
+    if not isinstance(delta, str) or not delta:
+        return delta, []
+    buffer = state.get("thought_buffer", "")
+    text = buffer + delta
+    thoughts: List[str] = []
+    scrubbed_parts: List[str] = []
+    idx = 0
+    state["thought_buffer"] = ""
+    while True:
+        start = text.find("**", idx)
+        if start == -1:
+            scrubbed_parts.append(text[idx:])
+            break
+        scrubbed_parts.append(text[idx:start])
+        end = text.find("**", start + 2)
+        if end == -1:
+            state["thought_buffer"] = text[start:]
+            break
+        content = text[start + 2:end]
+        if content:
+            thoughts.append(content)
+        idx = end + 2
+    scrubbed = "".join(scrubbed_parts)
+    # If we ended on a single trailing '*', keep it for the next delta.
+    if not state["thought_buffer"] and text.endswith("*") and not text.endswith("**"):
+        state["thought_buffer"] = "*"
+        if scrubbed.endswith("*"):
+            scrubbed = scrubbed[:-1]
+    return scrubbed, thoughts
+
+
+def _extract_and_scrub_thoughts(text: str) -> Tuple[str, List[str]]:
+    """
+    Extract thought blocks from text and return (scrubbed_text, list_of_thoughts).
+    Thought blocks are **<thought content>** patterns.
+    """
+    if not text:
+        return text, []
+    thoughts = _THOUGHT_PATTERN.findall(text)
+    scrubbed = _THOUGHT_PATTERN.sub('', text)
+    return scrubbed, thoughts
+
+
 def _get_thread_id(conversation_id: Optional[str], payload: Any) -> Optional[str]:
     if conversation_id:
         return str(conversation_id)
@@ -751,6 +812,7 @@ def _get_turn_state(thread_id: Optional[str], turn_id: Optional[str]) -> Dict[st
             "reasoning_started": False,
             "assistant_buffer": "",
             "reasoning_buffer": "",
+            "thought_buffer": "",
             "diff_hashes": set(),
             "diff_seen": False,
             "plan_steps": [],  # Accumulate plan steps during turn
@@ -1178,6 +1240,30 @@ async def _stop_mcp_shell() -> None:
         _save_appserver_config(cfg)
     _mcp_shell_id = None
 
+
+async def _terminate_agent_pty_conversation_shells(*, force: bool = True) -> Dict[str, Any]:
+    """Terminate all running conversation-owned agent PTY dtach shells (best-effort)."""
+    _ensure_framework_shells_secret()
+    mgr = await _get_fws_manager()
+    try:
+        records = await mgr.list_shells()
+    except Exception:
+        return {"ok": False, "terminated": 0}
+
+    terminated = 0
+    for rec in records:
+        label = rec.label or ""
+        if rec.status != "running":
+            continue
+        if not label.startswith("agent-pty:"):
+            continue
+        try:
+            await mgr.terminate_shell(rec.id, force=force)
+            terminated += 1
+        except Exception:
+            pass
+    return {"ok": True, "terminated": terminated}
+
 async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
     if not _appserver_ws_clients_ui:
         # still try socket.io
@@ -1567,6 +1653,7 @@ async def _route_appserver_event(
             await _set_turn_id(turn_id)
         else:
             await _set_turn_id(None)
+            state["thought_buffer"] = ""
             # Determine turn status from payload
             turn_obj = payload.get("turn", {}) if isinstance(payload, dict) else {}
             turn_status = turn_obj.get("status", "completed")  # completed, interrupted, failed, inProgress
@@ -1929,20 +2016,26 @@ async def _route_appserver_event(
                 text = " ".join(str(s) for s in summary if s).strip()
             else:
                 text = str(summary).strip() if summary else ""
-            # [Transcript] Save complete reasoning for replay
-            if text and convo_id:
+            # Scrub thought titles from complete reasoning text
+            scrubbed_text, thoughts = _extract_and_scrub_thoughts(text)
+            # Emit thought titles to ribbon (smooth transition for mid-stream conversation switch)
+            for thought in thoughts:
+                events.append({"type": "thought", "text": thought})
+            # [Transcript] Save complete reasoning for replay (scrubbed)
+            if scrubbed_text and convo_id:
                 await _append_transcript_entry(convo_id, {
                     "role": "reasoning",
-                    "text": text,
+                    "text": scrubbed_text,
                     "item_id": item.get("id"),
                     "event": "item/completed",
                 })
-            # [Frontend] Finalize streaming reasoning
+            # [Frontend] Finalize streaming reasoning (scrubbed)
             if state.get("reason_source") in {None, "item"} and state.get("reasoning_started"):
-                events.append({"type": "reasoning_finalize", "id": item.get("id") or state.get("reasoning_id") or "reasoning", "text": text})
+                events.append({"type": "reasoning_finalize", "id": item.get("id") or state.get("reasoning_id") or "reasoning", "text": scrubbed_text})
                 state["reasoning_started"] = False
                 state["reasoning_buffer"] = ""
                 state["reasoning_id"] = None
+            state["thought_buffer"] = ""
             return convo_id, events
             
         if item_type == "filechange":
@@ -2042,8 +2135,17 @@ async def _route_appserver_event(
             delta = payload.get("delta")
             if isinstance(delta, str):
                 state["reasoning_buffer"] = state.get("reasoning_buffer", "") + delta
-                events.append({"type": "reasoning_delta", "id": item_id, "delta": delta})
-                events.append({"type": "activity", "label": "reasoning", "active": True})
+                # Extract thought titles from reasoning and show in status ribbon
+                scrubbed_delta, thoughts = _extract_and_scrub_thoughts_stream(delta, state)
+                for thought in thoughts:
+                    events.append({"type": "thought", "text": thought})
+                if scrubbed_delta:
+                    events.append({"type": "reasoning_delta", "id": item_id, "delta": scrubbed_delta})
+                # Show thought in activity or default to reasoning
+                if thoughts:
+                    events.append({"type": "activity", "label": thoughts[-1], "active": True})
+                elif scrubbed_delta:
+                    events.append({"type": "activity", "label": "reasoning", "active": True})
         return convo_id, events
 
     if label_lower == "item/reasoning/summarypartadded" and isinstance(payload, dict):
@@ -2078,15 +2180,16 @@ async def _route_appserver_event(
     if label_lower == "codex/event/agent_message" and isinstance(payload, dict):
         # [Transcript] + [Frontend] Complete message (legacy format)
         text = payload.get("message") or payload.get("text")
-        if isinstance(text, str) and convo_id:
-            await _append_transcript_entry(convo_id, {
-                "role": "assistant",
-                "text": text.strip(),
-                "item_id": payload.get("item_id") or payload.get("itemId"),
-                "event": "agent_message",
-            })
-        if state.get("msg_source") in {None, "codex"} and state.get("assistant_started"):
-            events.append({"type": "assistant_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("assistant_id") or "assistant", "text": text})
+        if isinstance(text, str):
+            if convo_id:
+                await _append_transcript_entry(convo_id, {
+                    "role": "assistant",
+                    "text": text.strip(),
+                    "item_id": payload.get("item_id") or payload.get("itemId"),
+                    "event": "agent_message",
+                })
+            if state.get("msg_source") in {None, "codex"} and state.get("assistant_started"):
+                events.append({"type": "assistant_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("assistant_id") or "assistant", "text": text.strip()})
         return convo_id, events
 
     if label_lower in {"codex/event/agent_reasoning_delta", "codex/event/reasoning_content_delta", "codex/event/reasoning_summary_delta"} and isinstance(payload, dict):
@@ -2101,8 +2204,17 @@ async def _route_appserver_event(
             delta = payload.get("delta")
             if isinstance(delta, str):
                 state["reasoning_buffer"] = state.get("reasoning_buffer", "") + delta
-                events.append({"type": "reasoning_delta", "id": item_id, "delta": delta})
-                events.append({"type": "activity", "label": "reasoning", "active": True})
+                # Extract thought titles from reasoning and show in status ribbon
+                scrubbed_delta, thoughts = _extract_and_scrub_thoughts_stream(delta, state)
+                for thought in thoughts:
+                    events.append({"type": "thought", "text": thought})
+                if scrubbed_delta:
+                    events.append({"type": "reasoning_delta", "id": item_id, "delta": scrubbed_delta})
+                # Show thought in activity or default to reasoning
+                if thoughts:
+                    events.append({"type": "activity", "label": thoughts[-1], "active": True})
+                elif scrubbed_delta:
+                    events.append({"type": "activity", "label": "reasoning", "active": True})
         return convo_id, events
 
     if label_lower == "codex/event/agent_reasoning_section_break" and isinstance(payload, dict):
@@ -2121,11 +2233,17 @@ async def _route_appserver_event(
     if label_lower == "codex/event/agent_reasoning" and isinstance(payload, dict):
         # [Frontend] Finalize reasoning (legacy format)
         text = payload.get("text") or payload.get("message")
+        # Scrub thought titles from complete reasoning text
+        scrubbed_text, thoughts = _extract_and_scrub_thoughts(text) if text else ("", [])
+        # Emit thought titles to ribbon (smooth transition for mid-stream conversation switch)
+        for thought in thoughts:
+            events.append({"type": "thought", "text": thought})
         if state.get("reason_source") in {None, "codex"} and state.get("reasoning_started"):
-            events.append({"type": "reasoning_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("reasoning_id") or "reasoning", "text": text})
+            events.append({"type": "reasoning_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("reasoning_id") or "reasoning", "text": scrubbed_text})
             state["reasoning_started"] = False
             state["reasoning_buffer"] = ""
             state["reasoning_id"] = None
+        state["thought_buffer"] = ""
         return convo_id, events
 
     # -------------------------------------------------------------------------
@@ -2342,6 +2460,26 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
                 if pending_label:
                     pending_label = None
                 if parsed.get("error"):
+                    error_msg = parsed.get("error", {}).get("message", "")
+                    req_id = str(parsed.get("id"))
+                    
+                    # Ignore "Already initialized" - harmless
+                    if "Already initialized" in error_msg:
+                        _pending_turn_starts.pop(req_id, None)
+                        return
+                    
+                    # Auto-resume on "conversation not found" for pending turn/start
+                    if "conversation not found" in error_msg and req_id in _pending_turn_starts:
+                        original_payload = _pending_turn_starts.pop(req_id)
+                        thread_id = original_payload.get("params", {}).get("threadId")
+                        if thread_id:
+                            print(f"[DEBUG] Auto-resuming thread {thread_id} after 'conversation not found'")
+                            asyncio.create_task(_auto_resume_and_retry(thread_id, original_payload))
+                            return  # Don't broadcast error to frontend
+                    
+                    # Clean up tracking for other errors
+                    _pending_turn_starts.pop(req_id, None)
+                    
                     await _broadcast_appserver_ui({
                         "type": "rpc_error",
                         "id": parsed.get("id"),
@@ -2359,6 +2497,8 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
                         "id": parsed.get("id"),
                         "result": result,
                     })
+                # Clean up pending turn/start tracking on any response
+                _pending_turn_starts.pop(str(parsed.get("id")), None)
                 waiter = _appserver_rpc_waiters.pop(str(parsed.get("id")), None)
                 if waiter and not waiter.done():
                     waiter.set_result(parsed)
@@ -2449,6 +2589,51 @@ async def _write_appserver(payload: Dict[str, Any]) -> None:
     state.process.stdin.write((line + "\n").encode("utf-8"))
     await state.process.stdin.drain()
     print(f"[DEBUG] Write complete")
+
+
+async def _auto_resume_and_retry(thread_id: str, original_payload: Dict[str, Any]) -> None:
+    """Auto-resume a thread and retry the original turn/start request.
+    
+    Called when codex-app-server returns "conversation not found" for a turn/start.
+    Silently resumes the thread and re-sends the original request.
+    """
+    try:
+        # Build thread/resume request
+        resume_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+        resume_payload: Dict[str, Any] = {
+            "id": resume_id,
+            "method": "thread/resume",
+            "params": {"threadId": thread_id}
+        }
+        
+        # Inject settings from SSOT (same logic as in api_appserver_rpc)
+        async with _config_lock:
+            cfg = _load_appserver_config()
+        convo_id = cfg.get("conversation_id")
+        if convo_id:
+            meta = _load_conversation_meta(convo_id)
+            settings = meta.get("settings", {})
+            params = resume_payload["params"]
+            for key in ("model", "cwd", "approvalPolicy", "sandbox"):
+                if key in settings and settings[key] and key not in params:
+                    params[key] = settings[key]
+        
+        print(f"[DEBUG] Sending thread/resume for {thread_id}")
+        await _write_appserver(resume_payload)
+        
+        # Wait briefly for resume to complete before retrying
+        await asyncio.sleep(0.5)
+        
+        # Re-send original turn/start with a new request ID
+        retry_id = int(datetime.now(timezone.utc).timestamp() * 1000) + 1
+        retry_payload = original_payload.copy()
+        retry_payload["id"] = retry_id
+        
+        print(f"[DEBUG] Retrying turn/start after resume: {retry_payload}")
+        await _write_appserver(retry_payload)
+        
+    except Exception as e:
+        print(f"[ERROR] Auto-resume failed for thread {thread_id}: {e}")
 
 
 async def _ensure_appserver_initialized() -> None:
@@ -2891,6 +3076,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                             Div(
                                 Span(cls="status-spinner"),
                                 Span("idle", id="status-label", cls="status-text"),
+                                Span("", id="status-reasoning", cls="status-reasoning"),
                                 Span(cls="status-dot", id="status-dot"),
                                 cls="status-ribbon",
                                 id="status-ribbon"
@@ -3208,6 +3394,49 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
         cfg["active_view"] = cfg.get("active_view") or "conversation"
         _save_appserver_config(cfg)
     return meta
+
+
+# Cache for draft hash to avoid unnecessary writes
+_draft_hash_cache: Dict[str, str] = {}
+
+
+@app.post("/api/appserver/conversation/draft")
+async def api_appserver_conversation_draft(payload: Dict[str, Any] = Body(...)):
+    """
+    Save composer draft to conversation meta. Uses SHA-256 hash collision detection
+    to avoid unnecessary disk writes when the draft hasn't changed.
+
+    Accepts explicit conversation_id to avoid race conditions when switching conversations.
+    """
+    draft = payload.get("draft", "")
+    if not isinstance(draft, str):
+        draft = ""
+
+    # Use explicit conversation_id if provided, otherwise fall back to active
+    convo_id = payload.get("conversation_id")
+    if not convo_id or not isinstance(convo_id, str):
+        convo_id = await _ensure_conversation()
+
+    # Validate the conversation exists
+    if not _conversation_meta_path(convo_id).exists():
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # Hash the draft content to detect changes
+    draft_hash = hashlib.sha256(draft.encode("utf-8")).hexdigest()
+
+    # Check if the draft has changed since last save
+    cached_hash = _draft_hash_cache.get(convo_id)
+    if cached_hash == draft_hash:
+        # No change, skip write
+        return {"status": "unchanged", "conversation_id": convo_id}
+
+    # Update cache and save to meta
+    _draft_hash_cache[convo_id] = draft_hash
+    meta = _load_conversation_meta(convo_id)
+    meta["draft"] = draft
+    _save_conversation_meta(convo_id, meta)
+
+    return {"status": "saved", "conversation_id": convo_id}
 
 
 @app.get("/api/appserver/conversations")
@@ -3888,6 +4117,10 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
             
             payload["params"] = params
             print(f"[DEBUG] SSOT injection for {method}: {params}")
+    
+    # Track turn/start requests for auto-resume on "conversation not found" error
+    if method == "turn/start" and payload.get("id") is not None:
+        _pending_turn_starts[str(payload["id"])] = payload.copy()
     
     await _write_appserver(payload)
     return {"ok": True}
