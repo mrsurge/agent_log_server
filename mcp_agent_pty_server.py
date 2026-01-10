@@ -389,6 +389,7 @@ class ConversationState:
     def __init__(self, conversation_id: str) -> None:
         self.conversation_id = conversation_id
         self.lock = asyncio.Lock()
+        self._raw_lock = asyncio.Lock()
         self.shell_id: Optional[str] = None
         self._reader_task: Optional[asyncio.Task] = None
         self._buffer = ""
@@ -599,7 +600,7 @@ class ConversationState:
 
     async def _append_raw(self, data: bytes) -> int:
         """Append raw bytes (lossless), return new size."""
-        async with self._screen_lock:
+        async with self._raw_lock:
             await self._init_raw()
             await asyncio.to_thread(self._append_bytes, self._raw_path, data)
             self._raw_size += len(data)
@@ -712,23 +713,38 @@ class ConversationState:
         # Filter manual wrapper fragments injected by pty_exec.
         # These can wrap across multiple rows, so match on multiple stable substrings.
         wrapper_markers = (
+            # Variable assignments
             "__fws_cmd=",
-            "__fws_emit_begin",
-            "__fws_emit_end",
+            "__fws_seq=",
+            "__fws_ts=",
+            "__fws_ts2=",
+            "__fws_cwd=",
+            "__fws_ec=",
             "__FWS_SEQ=",
             "__FWS_LAST_SEQ",
             "__FWS_IN_MARKER",
-            "__fws_seq=",
+            # Variable references
+            "$__fws_cmd",
             "$__fws_seq",
-            "__fws_ts=",
             "$__fws_ts",
-            "__fws_ts2=",
             "$__fws_ts2",
-            "__fws_cwd=",
             "$__fws_cwd",
+            "$__fws_ec",
+            "$__FWS_SEQ",
+            # Function calls
+            "__fws_emit_begin",
+            "__fws_emit_end",
+            "__fws_now_ms",
+            # Wrapper structure fragments
             "eval \"$__fws_cmd\"",
             "base64 -d",
             "2>/dev/null",
+            "printf %s",
+            "if [ -n",
+            "; then",
+            "; fi",
+            "\"; fi",
+            "pwd -P",
         )
         if any(m in text for m in wrapper_markers):
             return ""
@@ -932,17 +948,23 @@ class ConversationState:
         async def _run_bytes() -> None:
             while True:
                 chunk_bytes: bytes = await self._bytes_queue.get()
-                # Append raw bytes directly (truly lossless)
-                await self._append_raw(chunk_bytes)
-                await self._append_raw_event(chunk_bytes)
-                # Feed raw bytes directly to pyte.ByteStream
-                try:
-                    async with self._screen_lock:
+                # ATOMIC: append raw AND feed screen under the same screen lock.
+                # This prevents rehydration from seeing _raw_size > _screen_raw_size
+                # and re-feeding already-queued bytes (duplicate output bug).
+                async with self._screen_lock:
+                    await self._append_raw(chunk_bytes)
+                    try:
                         self._feed_screen(chunk_bytes)
-                    # Sprint 2: Emit screen delta (rate-limited)
+                    except Exception:
+                        pass  # pyte may choke; raw bytes already saved
+
+                # UI playback event stream (doesn't participate in screen correctness).
+                await self._append_raw_event(chunk_bytes)
+                # Sprint 2: Emit screen delta (rate-limited)
+                try:
                     await self._emit_screen_delta()
                 except Exception:
-                    pass  # pyte may choke; raw bytes already saved
+                    pass
         
         self._bytes_reader_task = asyncio.create_task(
             _run_bytes(), 
