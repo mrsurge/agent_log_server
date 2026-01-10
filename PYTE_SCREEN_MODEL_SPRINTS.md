@@ -913,6 +913,7 @@ Each command produces a block with:
 - Agent reads block data, not UI streams.
 - `pty_read_screen` returns the last known rendered screen even if in-memory state is gone.
 - Raw bytes are preserved losslessly and can rehydrate the screen.
+- Cursor usage rule: `pty_wait_prompt` / `pty_wait_for(match_type="prompt")` must be chained using the returned `resume_cursor` (or a known “since last block” cursor). Calling `pty_wait_prompt(from_cursor=0)` can match an old `__FWS_PROMPT__` already present in `output.spool` and create false positives.
 
 ---
 
