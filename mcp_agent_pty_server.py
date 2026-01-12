@@ -437,6 +437,15 @@ class ConversationState:
         # Dedicated lock for screen operations (avoid blocking wait_for)
         self._screen_lock = asyncio.Lock()
         
+        # Dedicated lock for raw file operations (avoid deadlock with _screen_lock)
+        self._raw_lock = asyncio.Lock()
+        
+        # Scrollback file (cursor-addressable, filtered lines)
+        self._scrollback_path: Optional[Path] = None
+        self._scrollback_size: int = 0
+        self._scrollback_line_count: int = 0
+        self._last_scrollback_sync: int = 0  # Last raw_size when scrollback was synced
+        
         # === Sprint 2: Screen delta rate limiting ===
         self._last_screen_delta_ts: float = 0.0
         self._screen_delta_min_interval: float = 0.1  # 100ms = max 10/sec
@@ -618,6 +627,112 @@ class ConversationState:
         }
         await asyncio.to_thread(self._append_text_line, path, json.dumps(payload, ensure_ascii=False) + "\n")
 
+    async def _init_scrollback(self) -> None:
+        """Initialize scrollback file for cursor-based access."""
+        if self._scrollback_path is None:
+            self._scrollback_path = _agent_pty_root(self.conversation_id) / "scrollback.jsonl"
+            self._scrollback_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._scrollback_path.exists():
+                self._scrollback_size = self._scrollback_path.stat().st_size
+                # Count lines for line_count tracking
+                try:
+                    content = self._scrollback_path.read_text(encoding="utf-8")
+                    self._scrollback_line_count = content.count("\n")
+                except Exception:
+                    self._scrollback_line_count = 0
+            else:
+                self._scrollback_path.write_bytes(b"")
+                self._scrollback_size = 0
+                self._scrollback_line_count = 0
+
+    async def _sync_scrollback(self) -> None:
+        """Sync current pyte scrollback history to scrollback.jsonl (filtered)."""
+        await self._init_scrollback()
+        screen, _ = self._active_screen()
+        hist = getattr(screen, "history", None)
+        top = getattr(hist, "top", None) if hist else None
+        if top is None:
+            return
+        # Get all lines from history, filter, and write new ones
+        new_lines: list[str] = []
+        for line in list(top):
+            rendered = self._render_history_line(line)
+            if rendered is not None and rendered.strip():
+                new_lines.append(rendered)
+        # Write all lines (overwrite for now; could optimize to append-only later)
+        payload_lines = []
+        for line in new_lines:
+            entry = {"text": line, "ts": _now_ms()}
+            payload_lines.append(json.dumps(entry, ensure_ascii=False))
+        content = "\n".join(payload_lines) + ("\n" if payload_lines else "")
+        await asyncio.to_thread(self._scrollback_path.write_text, content, encoding="utf-8")
+        self._scrollback_size = len(content.encode("utf-8"))
+        self._scrollback_line_count = len(new_lines)
+        self._last_scrollback_sync = self._screen_raw_size
+
+    async def _read_scrollback_cursor(self, cursor: int = 0, limit: int = 200) -> Dict[str, Any]:
+        """Read scrollback lines from cursor position (byte offset in scrollback.jsonl)."""
+        await self._init_scrollback()
+        limit = max(1, min(int(limit), 2000))
+        cursor = max(0, int(cursor))
+        
+        if not self._scrollback_path.exists():
+            return {
+                "ok": True,
+                "cursor": cursor,
+                "resume_cursor": 0,
+                "lines": [],
+                "total": 0,
+                "ts": _now_ms(),
+            }
+        
+        try:
+            content = await asyncio.to_thread(self._scrollback_path.read_bytes)
+        except Exception:
+            return {"ok": False, "error": "Failed to read scrollback file"}
+        
+        total_size = len(content)
+        if cursor >= total_size:
+            return {
+                "ok": True,
+                "cursor": cursor,
+                "resume_cursor": total_size,
+                "lines": [],
+                "total": self._scrollback_line_count,
+                "ts": _now_ms(),
+            }
+        
+        # Read from cursor position
+        tail = content[cursor:]
+        lines: list[str] = []
+        bytes_read = 0
+        
+        for raw_line in tail.split(b"\n"):
+            if not raw_line:
+                bytes_read += 1  # newline
+                continue
+            bytes_read += len(raw_line) + 1  # line + newline
+            if len(lines) >= limit:
+                break
+            try:
+                entry = json.loads(raw_line.decode("utf-8"))
+                lines.append(entry.get("text", ""))
+            except Exception:
+                continue
+        
+        resume_cursor = cursor + bytes_read
+        if resume_cursor > total_size:
+            resume_cursor = total_size
+        
+        return {
+            "ok": True,
+            "cursor": cursor,
+            "resume_cursor": resume_cursor,
+            "lines": lines,
+            "total": self._scrollback_line_count,
+            "ts": _now_ms(),
+        }
+
     def _active_screen(self) -> tuple[pyte.HistoryScreen, pyte.ByteStream]:
         """Return the active (main/alt) screen + stream, creating on demand."""
         if self._in_alt_screen:
@@ -700,6 +815,51 @@ class ConversationState:
         self._pending_dirty_rows.update(dirty_total)
         return dirty_total
 
+    # Wrapper/marker fragments that should be filtered from agent-visible output.
+    # Used by both _get_screen_row() and _filter_scrollback_line().
+    _NOISE_MARKERS = (
+        # FWS block markers
+        "__FWS_BLOCK_BEGIN__",
+        "__FWS_BLOCK_END__",
+        "__FWS_PROMPT__",
+        # Variable assignments
+        "__fws_cmd=",
+        "__fws_seq=",
+        "__fws_ts=",
+        "__fws_ts2=",
+        "__fws_cwd=",
+        "__fws_ec=",
+        "__FWS_SEQ=",
+        "__FWS_LAST_SEQ",
+        "__FWS_IN_MARKER",
+        # Variable references
+        "$__fws_cmd",
+        "$__fws_seq",
+        "$__fws_ts",
+        "$__fws_ts2",
+        "$__fws_cwd",
+        "$__fws_ec",
+        "$__FWS_SEQ",
+        # Function calls
+        "__fws_emit_begin",
+        "__fws_emit_end",
+        "__fws_now_ms",
+        # Wrapper structure fragments
+        "eval \"$__fws_cmd\"",
+        "base64 -d",
+        "2>/dev/null",
+        "printf %s",
+        "if [ -n",
+        "; then",
+        "; fi",
+        "\"; fi",
+        "pwd -P",
+    )
+
+    def _is_noise_line(self, text: str) -> bool:
+        """Check if a line contains wrapper/marker noise that should be filtered."""
+        return any(m in text for m in self._NOISE_MARKERS)
+
     def _get_screen_row(self, row: int) -> str:
         """Get text content of a screen row (0-indexed), with markers filtered."""
         screen, _ = self._active_screen()
@@ -707,46 +867,7 @@ class ConversationState:
             return ""
         # Use screen.display[row] for correct column-ordered string
         text = screen.display[row].rstrip()
-        # Filter out shell markers that shouldn't appear in screen output
-        if "__FWS_BLOCK_BEGIN__" in text or "__FWS_BLOCK_END__" in text or "__FWS_PROMPT__" in text:
-            return ""
-        # Filter manual wrapper fragments injected by pty_exec.
-        # These can wrap across multiple rows, so match on multiple stable substrings.
-        wrapper_markers = (
-            # Variable assignments
-            "__fws_cmd=",
-            "__fws_seq=",
-            "__fws_ts=",
-            "__fws_ts2=",
-            "__fws_cwd=",
-            "__fws_ec=",
-            "__FWS_SEQ=",
-            "__FWS_LAST_SEQ",
-            "__FWS_IN_MARKER",
-            # Variable references
-            "$__fws_cmd",
-            "$__fws_seq",
-            "$__fws_ts",
-            "$__fws_ts2",
-            "$__fws_cwd",
-            "$__fws_ec",
-            "$__FWS_SEQ",
-            # Function calls
-            "__fws_emit_begin",
-            "__fws_emit_end",
-            "__fws_now_ms",
-            # Wrapper structure fragments
-            "eval \"$__fws_cmd\"",
-            "base64 -d",
-            "2>/dev/null",
-            "printf %s",
-            "if [ -n",
-            "; then",
-            "; fi",
-            "\"; fi",
-            "pwd -P",
-        )
-        if any(m in text for m in wrapper_markers):
+        if self._is_noise_line(text):
             return ""
         return text
 
@@ -771,26 +892,31 @@ class ConversationState:
             "ts": _now_ms(),
         }
 
-    def _render_history_line(self, line: Any) -> str:
+    def _render_history_line(self, line: Any) -> Optional[str]:
         """
         Best-effort render of a HistoryScreen line to plain text.
 
         In pyte 0.8.x, history lines are Screen buffer line objects (dict-like,
         mapping column -> Char). We render by sorting columns and concatenating
         Char.data, then rstrip trailing whitespace.
+        
+        Returns None if the line is noise (wrapper/marker fragment).
         """
+        text = ""
         try:
             if hasattr(line, "items"):
                 parts = []
                 for _, ch in sorted(line.items()):  # type: ignore[arg-type]
                     parts.append(getattr(ch, "data", str(ch)))
-                return "".join(parts).rstrip()
+                text = "".join(parts).rstrip()
+            else:
+                text = str(line).rstrip()
         except Exception:
-            pass
-        try:
-            return str(line).rstrip()
-        except Exception:
-            return ""
+            return None
+        # Filter noise lines (same as visible screen rows)
+        if self._is_noise_line(text):
+            return None
+        return text
 
     def _get_scrollback_snapshot(self, limit: int = 200) -> Dict[str, Any]:
         """Return a snapshot of scrollback (top history) plus metadata."""
@@ -798,19 +924,25 @@ class ConversationState:
         limit = max(1, min(int(limit), 2000))
         lines: list[str] = []
         total = 0
+        filtered_count = 0
         try:
             hist = getattr(screen, "history", None)
             top = getattr(hist, "top", None)
             if top is not None:
                 total = len(top)
                 for line in list(top)[-limit:]:
-                    lines.append(self._render_history_line(line))
+                    rendered = self._render_history_line(line)
+                    if rendered is not None:
+                        lines.append(rendered)
+                    else:
+                        filtered_count += 1
         except Exception:
             pass
         return {
             "ok": True,
             "lines": lines,
             "scrollback_total": total,
+            "filtered_count": filtered_count,
             "cols": self._screen_cols,
             "rows_count": self._screen_rows,
             "ts": _now_ms(),
@@ -1291,8 +1423,66 @@ class ConversationState:
         transition mode -> idle. Prompt markers are consumed explicitly via
         pty_wait_prompt / wait_for(match_type="prompt"), which performs the
         session finalization deterministically.
+        
+        However, we DO persist per-block screen/scrollback snapshots here for
+        agent context retrieval without replaying the entire conversation.
         """
-        return
+        # Persist screen snapshot for this block
+        await self._persist_block_snapshot()
+
+    async def _persist_block_snapshot(self) -> None:
+        """Persist screen and scrollback snapshots for the current block.
+        
+        Waits briefly for bytes-reader to catch up before capturing snapshot,
+        since marker file (fd3) can arrive before all PTY bytes are processed.
+        """
+        try:
+            block_id = self._active.block_id if self._active else None
+            ts = _now_ms()
+            
+            # Wait for bytes-reader to catch up (max 500ms in 50ms increments)
+            for _ in range(10):
+                async with self._screen_lock:
+                    await self._refresh_raw_size()
+                    if self._screen_raw_size >= self._raw_size:
+                        break
+                await asyncio.sleep(0.05)
+            
+            async with self._screen_lock:
+                await self._refresh_raw_size()
+                # Ensure screen model is current
+                if (self._screen_main is None and self._screen_alt is None) or self._screen_raw_size != self._raw_size:
+                    await self._rehydrate_screen_from_raw(self._raw_size)
+                
+                # Get screen snapshot
+                screen_snapshot = self._get_screen_snapshot()
+                screen_snapshot["block_id"] = block_id
+                screen_snapshot["ts"] = ts
+                
+                # Sync and get scrollback
+                if self._last_scrollback_sync < self._screen_raw_size:
+                    await self._sync_scrollback()
+                scrollback_snapshot = self._get_scrollback_snapshot(limit=500)
+                scrollback_snapshot["block_id"] = block_id
+                scrollback_snapshot["ts"] = ts
+            
+            # Write screen snapshot
+            screen_path = _agent_pty_root(self.conversation_id) / "screen.snapshot.json"
+            await asyncio.to_thread(
+                screen_path.write_text,
+                json.dumps(screen_snapshot, ensure_ascii=False),
+                encoding="utf-8"
+            )
+            
+            # Write scrollback snapshot
+            scrollback_path = _agent_pty_root(self.conversation_id) / "scrollback.snapshot.json"
+            await asyncio.to_thread(
+                scrollback_path.write_text,
+                json.dumps(scrollback_snapshot, ensure_ascii=False),
+                encoding="utf-8"
+            )
+        except Exception:
+            pass  # Best-effort persistence
 
     async def _finalize_interactive_session(self, exit_code: Optional[int] = None) -> None:
         """Finalize an interactive session (idempotent)."""
@@ -1867,13 +2057,20 @@ async def pty_read_screen(conversation_id: str) -> Dict[str, Any]:
 
 
 @mcp.tool(name="pty_read_scrollback", description="Read rendered scrollback lines from the terminal history buffer.")
-async def pty_read_scrollback(conversation_id: str, limit: int = 200) -> Dict[str, Any]:
+async def pty_read_scrollback(conversation_id: str, cursor: int = 0, limit: int = 200) -> Dict[str, Any]:
     """
     Read scrollback (lines that have scrolled off the top of the screen).
 
     This is derived from the pyte HistoryScreen model, which is fed from the
     lossless `output.raw` stream. For TUIs, prefer `pty_read_screen` for the
     current visible state.
+    
+    Supports cursor-based pagination:
+    - cursor: byte offset in scrollback.jsonl (0 = start)
+    - limit: max lines to return
+    - Returns resume_cursor for next call
+    
+    Wrapper/marker noise is filtered out automatically.
     """
     state = _state(conversation_id)
     try:
@@ -1882,7 +2079,11 @@ async def pty_read_scrollback(conversation_id: str, limit: int = 200) -> Dict[st
             # Ensure the screen model is current before reading history.
             if (state._screen_main is None and state._screen_alt is None) or state._screen_raw_size != state._raw_size:
                 await state._rehydrate_screen_from_raw(state._raw_size)
-            return state._get_scrollback_snapshot(limit=limit)
+            # Sync scrollback to file if needed
+            if state._last_scrollback_sync < state._screen_raw_size:
+                await state._sync_scrollback()
+            # Read from cursor position
+            return await state._read_scrollback_cursor(cursor=cursor, limit=limit)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -2136,6 +2337,188 @@ async def blocks_search(conversation_id: str, block_id: str, query: str, limit: 
             if len(hits) >= limit:
                 break
     return {"ok": True, "hits": hits}
+
+
+# =============================================================================
+# Agent Log MCP Tools
+# =============================================================================
+# These tools provide a plain-text interface to the agent log server,
+# abstracting away JSON escaping and HTTP details.
+
+_AGENT_LOG_URL = "http://127.0.0.1:12359/api/messages"
+
+
+async def _agent_log_fetch(limit: int = 10) -> list:
+    """Fetch messages from agent log server."""
+    import urllib.request
+    url = f"{_AGENT_LOG_URL}?limit={limit}"
+    try:
+        def _get():
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        messages = await asyncio.to_thread(_get)
+        return messages
+    except Exception:
+        return []
+
+
+async def _agent_log_post_internal(who: str, message: str) -> dict:
+    """Post a message to agent log server."""
+    import urllib.request
+    payload = json.dumps({"who": who, "message": message}, ensure_ascii=False).encode("utf-8")
+    try:
+        def _post():
+            req = urllib.request.Request(
+                _AGENT_LOG_URL,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        return await asyncio.to_thread(_post)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="agent_log_post", description="Post a message to the agent log. Plain text, no escaping needed.")
+async def agent_log_post(who: str, message: str) -> Dict[str, Any]:
+    """
+    Post a message to the shared agent log.
+    
+    Args:
+        who: Your identifier/pseudonym (e.g., "Dex", "vectorArc")
+        message: Plain text message. Newlines are preserved as-is.
+    
+    Returns:
+        {ok: true} on success, or {ok: false, error: "..."} on failure.
+    """
+    if not who or not message:
+        return {"ok": False, "error": "who and message are required"}
+    result = await _agent_log_post_internal(who, message)
+    if "ts" in result:
+        return {"ok": True, "ts": result.get("ts")}
+    return result
+
+
+@mcp.tool(name="agent_log_inbox", description="Get a preview inbox of recent agent log messages.")
+async def agent_log_inbox(limit: int = 10, preview_chars: int = 60) -> Dict[str, Any]:
+    """
+    Fetch a preview inbox of recent messages.
+    
+    Returns truncated previews so you can quickly scan without reading full messages.
+    Use agent_log_get(idx) to read a specific message in full.
+    
+    Args:
+        limit: Number of messages to fetch (default 10, max 50)
+        preview_chars: Max characters for preview (default 60)
+    
+    Returns:
+        {ok: true, items: [{idx, ts, who, preview}, ...]}
+        Items are ordered most-recent-first (idx=0 is newest).
+    """
+    limit = max(1, min(int(limit), 50))
+    preview_chars = max(10, min(int(preview_chars), 200))
+    
+    messages = await _agent_log_fetch(limit)
+    items = []
+    for idx, msg in enumerate(messages):
+        ts = msg.get("ts", "")
+        who = msg.get("who", "")
+        full_message = msg.get("message", "")
+        # Preview: first line, truncated
+        first_line = full_message.split("\n")[0] if full_message else ""
+        if len(first_line) > preview_chars:
+            preview = first_line[:preview_chars - 3] + "..."
+        else:
+            preview = first_line
+        items.append({"idx": idx, "ts": ts, "who": who, "preview": preview})
+    
+    return {"ok": True, "items": items}
+
+
+@mcp.tool(name="agent_log_get", description="Get the full text of a message by inbox index.")
+async def agent_log_get(idx: int = 0, limit: int = 10) -> str:
+    """
+    Get the full text of a specific message from the inbox.
+    
+    Args:
+        idx: Index from inbox (0 = most recent, 1 = second most recent, etc.)
+        limit: How many messages to fetch when building inbox (must be > idx)
+    
+    Returns:
+        Formatted plain text: "[timestamp] who:\nmessage"
+    """
+    idx = max(0, int(idx))
+    limit = max(idx + 1, min(int(limit), 50))
+    
+    messages = await _agent_log_fetch(limit)
+    if not messages:
+        return "(no messages in log)"
+    
+    if idx >= len(messages):
+        return f"(error: index {idx} out of range, only {len(messages)} messages)"
+    
+    msg = messages[idx]
+    ts = msg.get("ts", "")
+    who = msg.get("who", "")
+    message = msg.get("message", "")
+    return f"[{ts}] {who}:\n{message}"
+
+
+@mcp.tool(name="agent_log_last", description="Get the most recent message from the agent log.")
+async def agent_log_last() -> str:
+    """
+    Shortcut to get the most recent message.
+    
+    Returns:
+        Formatted plain text: "[timestamp] who:\nmessage"
+    """
+    messages = await _agent_log_fetch(1)
+    if not messages:
+        return "(no messages in log)"
+    
+    msg = messages[0]
+    ts = msg.get("ts", "")
+    who = msg.get("who", "")
+    message = msg.get("message", "")
+    return f"[{ts}] {who}:\n{message}"
+
+
+@mcp.tool(name="agent_log_read", description="Read recent messages as formatted plain text.")
+async def agent_log_read(limit: int = 10) -> str:
+    """
+    Read recent messages formatted as plain text.
+    
+    Returns all messages in a single text block, formatted as:
+    [timestamp] who:
+    message
+    
+    [timestamp] who:
+    message
+    ...
+    
+    Args:
+        limit: Number of messages to fetch (default 10, max 50)
+    
+    Returns:
+        Formatted plain text with all messages
+    """
+    limit = max(1, min(int(limit), 50))
+    
+    messages = await _agent_log_fetch(limit)
+    if not messages:
+        return "(no messages)"
+    
+    formatted = []
+    for msg in messages:
+        ts = msg.get("ts", "")
+        who = msg.get("who", "")
+        message = msg.get("message", "")
+        formatted.append(f"[{ts}] {who}:\n{message}")
+    
+    return "\n\n".join(formatted)
 
 
 async def _main() -> None:

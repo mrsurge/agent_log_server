@@ -1578,3 +1578,64 @@ body.terminal-mode #footer-terminal-toggle.pill {
 .status-ribbon .status-dot.warning {
   background: #fbbf24;
 }
+
+/* MCP Tool Cards */
+.mcp-tool-card .body {
+  background: var(--bg);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mcp-tool-args {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0;
+  background: transparent;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.mcp-tool-args:empty {
+  display: none;
+}
+.mcp-tool-result-header {
+  padding: 0.25rem 0.75rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+.mcp-tool-content {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0;
+  background: transparent;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.mcp-tool-result {
+  padding: 0.5rem 0.75rem;
+}
+.mcp-tool-result.markdown-body {
+  font-size: 0.9rem;
+}
+.mcp-tool-arg-label {
+  padding: 0.25rem 0.75rem 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+.mcp-tool-arg-value {
+  padding: 0.5rem 0.75rem;
+}
+.mcp-tool-arg-value.markdown-body {
+  font-size: 0.9rem;
+}
+.mcp-tool-arg-value-plain {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.25rem 0.75rem;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

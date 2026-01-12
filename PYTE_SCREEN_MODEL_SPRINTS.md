@@ -709,6 +709,59 @@ Allow both UI and agents to resize the underlying PTY *and* keep the pyte screen
 1. Tail `screen.jsonl` in `server.py` (like `events.jsonl`)
 2. Broadcast `screen_delta` events to WebSocket
 3. Add screen display option in frontend (optional)
+4. Remove per-card xterm.js dependency by using canonical snapshots
+
+### UI Direction (Warp-like without per-card terminals)
+
+Now that Sprint 4 produces canonical artifacts per block:
+- `agent_pty/screen.snapshot.json` (final rendered rows at prompt)
+- `agent_pty/scrollback.snapshot.json` (filtered scrollback summary)
+- `agent_pty/output.raw` (lossless bytes, for replay/debug only)
+
+…the transcript cards no longer need to be live xterm.js instances.
+
+**Recommended split**
+- **User “composer / prompt”**: make this a dedicated xterm.js instance backed by a *user-owned* PTY.
+  - This gives true prompt-line behavior (cursor movement, editing, bracketed paste, completions) and a clean TUI handoff.
+- **Transcript cards (history)**: render from snapshots (DOM text), not from xterm.js.
+  - When a block ends, freeze the card using `screen.snapshot.json` (and optionally a “more” expander from `scrollback.snapshot.json`).
+  - Provide an optional “replay raw” action that renders `output.raw` for debugging, without making it the default view.
+
+**Why this helps**
+- Avoids xterm lifecycle per card and eliminates stream-routing bugs (“which xterm gets bytes?”).
+- Makes cards deterministic and cheap to render.
+- Aligns user and agent context: the same snapshot artifacts are what agents read and what users see.
+
+### Transcript “Meta Envelope” (User-command context for agents)
+
+**Problem:** When a user runs a command from `/codex-agent`, we want that action to become *first-class agent context* in the transcript, without requiring special tools/instructions.
+
+**Solution:** The app auto-prepends an unambiguous metadata “envelope” to the transcript message. The frontend can strip/hide it while still using it for wiring; agents can parse it and immediately know which shell was used and how to fetch full context via MCP.
+
+**Sentinels (v1):**
+- Start: ASCII Record Separator + prefix: `\\u001eCODEX_META ` (must appear at the start of the message)
+- End: ASCII Unit Separator: `\\u001f`
+
+**Payload (one-line JSON):**
+- Must be single-line JSON between start and end sentinels (no newlines).
+- Minimal fields:
+  - `v`: `1`
+  - `type`: `"user_cmd"` | `"user_kill"`
+  - `conversation_id`
+  - `shell_id`
+  - `ts` (ms)
+  - `cmd` (for `"user_cmd"`)
+  - `preview` (optional): `{ lines: string[], truncated: boolean }` (tail preview, bounded)
+  - `mcp` (optional): suggested calls (e.g. `pty_read_screen`, `pty_read_scrollback`, `pty_read_raw`)
+
+**Preview policy:**
+- Include only the last N lines (e.g. 10–30) as a “business end” preview.
+- Hard cap total preview size (e.g. 2–4 KB); set `preview.truncated=true` if capped.
+- Full output remains accessible via MCP using the embedded `conversation_id`/`shell_id`.
+
+**Frontend handling:**
+- Detect the envelope at the start of message, parse JSON until `\\u001f`.
+- Use metadata internally; omit/hide the envelope in UI rendering by default (optionally show a small “details” disclosure).
 
 ### Patch Proposal (server.py sketch)
 

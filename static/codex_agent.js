@@ -1752,21 +1752,63 @@ document.addEventListener('DOMContentLoaded', () => {
         const serverName = entry.server || '';
         header.textContent = serverName ? `${serverName}:${toolName}` : toolName;
         body.appendChild(header);
-        // Content area
-        const content = document.createElement('pre');
-        content.className = 'mcp-tool-content';
-        const lines = [];
-        // Format arguments as key: value
+        // Arguments section
         if (entry.arguments && Object.keys(entry.arguments).length > 0) {
-          Object.entries(entry.arguments).forEach(([k, v]) => {
-            const val = typeof v === 'string' ? v : JSON.stringify(v);
-            lines.push(`  ${k}: ${val}`);
-          });
+          const argEntries = Object.entries(entry.arguments);
+          // Check if any argument looks like markdown
+          const hasMarkdownArg = argEntries.some(([k, v]) => 
+            typeof v === 'string' && (v.includes('\n') || v.startsWith('#') || v.includes('**') || v.includes('`'))
+          );
+          
+          if (hasMarkdownArg) {
+            argEntries.forEach(([k, v]) => {
+              const argLabel = document.createElement('div');
+              argLabel.className = 'mcp-tool-arg-label';
+              argLabel.textContent = `${k}:`;
+              body.appendChild(argLabel);
+              
+              if (typeof v === 'string' && (v.includes('\n') || v.startsWith('#') || v.includes('**') || v.includes('`'))) {
+                const argContainer = document.createElement('div');
+                argContainer.className = 'markdown-body mcp-tool-arg-value';
+                const renderer = smd.default_renderer(argContainer);
+                const parser = smd.parser(renderer);
+                smd.parser_write(parser, v);
+                smd.parser_end(parser);
+                argContainer.querySelectorAll('pre code').forEach(block => {
+                  if (typeof hljs !== 'undefined') hljs.highlightElement(block);
+                });
+                body.appendChild(argContainer);
+              } else {
+                const argValue = document.createElement('pre');
+                argValue.className = 'mcp-tool-arg-value-plain';
+                argValue.textContent = typeof v === 'string' ? v : JSON.stringify(v);
+                body.appendChild(argValue);
+              }
+            });
+          } else {
+            const argsPre = document.createElement('pre');
+            argsPre.className = 'mcp-tool-args';
+            const argLines = [];
+            argEntries.forEach(([k, v]) => {
+              const val = typeof v === 'string' ? v : JSON.stringify(v);
+              argLines.push(`  ${k}: ${val}`);
+            });
+            argsPre.textContent = argLines.join('\n');
+            body.appendChild(argsPre);
+          }
         }
-        // Format result
+        // Result section
         if (entry.result !== undefined && entry.result !== null) {
-          lines.push('→');
+          const resultHeader = document.createElement('div');
+          resultHeader.className = 'mcp-tool-result-header';
+          resultHeader.textContent = '→';
+          body.appendChild(resultHeader);
+          
           if (typeof entry.result === 'object') {
+            // Object result: use pre-formatted display
+            const resultPre = document.createElement('pre');
+            resultPre.className = 'mcp-tool-content';
+            const lines = [];
             Object.entries(entry.result).forEach(([k, v]) => {
               if (typeof v === 'object' && v !== null) {
                 lines.push(`  ${k}:`);
@@ -1777,13 +1819,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 lines.push(`  ${k}: ${JSON.stringify(v)}`);
               }
             });
+            resultPre.textContent = lines.join('\n');
+            if (entry.is_error) resultPre.classList.add('error-text');
+            body.appendChild(resultPre);
           } else {
-            lines.push(`  ${entry.result}`);
+            // String result: render as markdown
+            const resultContainer = document.createElement('div');
+            resultContainer.className = 'markdown-body mcp-tool-result';
+            const renderer = smd.default_renderer(resultContainer);
+            const parser = smd.parser(renderer);
+            smd.parser_write(parser, String(entry.result));
+            smd.parser_end(parser);
+            // Highlight code blocks
+            resultContainer.querySelectorAll('pre code').forEach(block => {
+              if (typeof hljs !== 'undefined') {
+                hljs.highlightElement(block);
+              }
+            });
+            if (entry.is_error) resultContainer.classList.add('error-text');
+            body.appendChild(resultContainer);
           }
         }
-        content.textContent = lines.join('\n');
-        if (entry.is_error) content.classList.add('error-text');
-        body.appendChild(content);
         // Footer with duration
         if (entry.duration_ms !== undefined && entry.duration_ms !== null) {
           const footer = document.createElement('div');
@@ -1987,12 +2043,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const key = id || `tool:${label || 'tool'}`;
     let entry = toolRows.get(key);
     if (!entry) {
-      const { body } = createRow('tool', label || 'tool');
-      const pre = document.createElement('pre');
-      pre.className = 'tool-block';
-      pre.textContent = '';
-      body.append(pre);
-      entry = { pre };
+      // Match playback structure: mcp-tool-card with command-ribbon header
+      const row = document.createElement('div');
+      row.className = 'timeline-row command-result mcp-tool-card';
+      const body = document.createElement('div');
+      body.className = 'body';
+      const header = document.createElement('div');
+      header.className = 'command-ribbon';
+      header.textContent = label || 'tool';
+      body.appendChild(header);
+      // Args pre (for arguments)
+      const argsPre = document.createElement('pre');
+      argsPre.className = 'mcp-tool-args';
+      argsPre.textContent = '';
+      body.appendChild(argsPre);
+      row.appendChild(body);
+      insertRow(row);
+      entry = { row, body, argsPre, header, resultEl: null };
       toolRows.set(key, entry);
     }
     return entry;
@@ -2005,15 +2072,54 @@ document.addEventListener('DOMContentLoaded', () => {
     const serverName = evt.server || '';
     const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
     const entry = getToolRow(evt.id, label);
-    // Format arguments as indented key: value
+    // Format arguments
     const args = evt.arguments || evt.payload || {};
-    const lines = [];
-    Object.entries(args).forEach(([k, v]) => {
-      const val = typeof v === 'string' ? v : JSON.stringify(v);
-      lines.push(`  ${k}: ${val}`);
-    });
-    if (lines.length) {
-      entry.pre.textContent += lines.join('\n') + '\n';
+    const argEntries = Object.entries(args);
+    
+    // Check if any argument looks like it should be markdown (multiline string)
+    const hasMarkdownArg = argEntries.some(([k, v]) => 
+      typeof v === 'string' && (v.includes('\n') || v.startsWith('#') || v.includes('**') || v.includes('`'))
+    );
+    
+    if (hasMarkdownArg) {
+      // Render with markdown for multiline/formatted content
+      entry.argsPre.style.display = 'none'; // Hide the pre element
+      argEntries.forEach(([k, v]) => {
+        const argLabel = document.createElement('div');
+        argLabel.className = 'mcp-tool-arg-label';
+        argLabel.textContent = `${k}:`;
+        entry.body.insertBefore(argLabel, entry.argsPre);
+        
+        if (typeof v === 'string' && (v.includes('\n') || v.startsWith('#') || v.includes('**') || v.includes('`'))) {
+          // Render as markdown
+          const argContainer = document.createElement('div');
+          argContainer.className = 'markdown-body mcp-tool-arg-value';
+          const renderer = smd.default_renderer(argContainer);
+          const parser = smd.parser(renderer);
+          smd.parser_write(parser, v);
+          smd.parser_end(parser);
+          argContainer.querySelectorAll('pre code').forEach(block => {
+            if (typeof hljs !== 'undefined') hljs.highlightElement(block);
+          });
+          entry.body.insertBefore(argContainer, entry.argsPre);
+        } else {
+          // Render as plain value
+          const argValue = document.createElement('pre');
+          argValue.className = 'mcp-tool-arg-value-plain';
+          argValue.textContent = typeof v === 'string' ? v : JSON.stringify(v);
+          entry.body.insertBefore(argValue, entry.argsPre);
+        }
+      });
+    } else {
+      // Simple key: value format for basic args
+      const lines = [];
+      argEntries.forEach(([k, v]) => {
+        const val = typeof v === 'string' ? v : JSON.stringify(v);
+        lines.push(`  ${k}: ${val}`);
+      });
+      if (lines.length) {
+        entry.argsPre.textContent = lines.join('\n');
+      }
     }
     lastEventType = 'tool';
   }
@@ -2024,8 +2130,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (toolName === 'command' || toolName === 'shell') return;
     const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`);
     const delta = evt.delta || '';
-    if (delta) {
-      entry.pre.textContent += delta;
+    if (delta && entry.resultEl) {
+      // Append to result element if it exists
+      if (entry.resultEl.tagName === 'PRE') {
+        entry.resultEl.textContent += delta;
+      }
     }
     lastEventType = 'tool';
     maybeAutoScroll();
@@ -2039,28 +2148,62 @@ document.addEventListener('DOMContentLoaded', () => {
     const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
     const entry = getToolRow(evt.id, label);
     // Handle both old payload format and new result format
-    const result = evt.result || evt.payload || {};
-    const durationMs = evt.duration_ms ?? result.duration_ms ?? result.durationMs;
-    const isError = evt.is_error || result.isError || false;
+    const result = evt.result ?? evt.payload ?? null;
+    console.log('[renderToolEnd]', toolName, 'result type:', typeof result, 'isObject:', result && typeof result === 'object', 'result:', result);
+    const durationMs = evt.duration_ms ?? (result && result.duration_ms) ?? (result && result.durationMs);
+    const isError = evt.is_error || (result && result.isError) || false;
     
-    // Format result as indented key: value
-    entry.pre.textContent += '→\n';
+    // Result header
+    const resultHeader = document.createElement('div');
+    resultHeader.className = 'mcp-tool-result-header';
+    resultHeader.textContent = '→';
+    entry.body.appendChild(resultHeader);
+    
+    // Format result
     if (result && typeof result === 'object') {
+      // Object result: use pre-formatted display
+      const resultPre = document.createElement('pre');
+      resultPre.className = 'mcp-tool-content';
+      const lines = [];
       Object.entries(result).forEach(([k, v]) => {
         if (typeof v === 'object' && v !== null) {
-          entry.pre.textContent += `  ${k}:\n`;
+          lines.push(`  ${k}:`);
           Object.entries(v).forEach(([k2, v2]) => {
-            entry.pre.textContent += `    ${k2}: ${JSON.stringify(v2)}\n`;
+            lines.push(`    ${k2}: ${JSON.stringify(v2)}`);
           });
         } else {
-          entry.pre.textContent += `  ${k}: ${JSON.stringify(v)}\n`;
+          lines.push(`  ${k}: ${JSON.stringify(v)}`);
         }
       });
+      resultPre.textContent = lines.join('\n');
+      if (isError) resultPre.classList.add('error-text');
+      entry.body.appendChild(resultPre);
+      entry.resultEl = resultPre;
+    } else if (result) {
+      // String result: render as markdown
+      const resultContainer = document.createElement('div');
+      resultContainer.className = 'markdown-body mcp-tool-result';
+      const renderer = smd.default_renderer(resultContainer);
+      const parser = smd.parser(renderer);
+      smd.parser_write(parser, String(result));
+      smd.parser_end(parser);
+      // Highlight code blocks
+      resultContainer.querySelectorAll('pre code').forEach(block => {
+        if (typeof hljs !== 'undefined') {
+          hljs.highlightElement(block);
+        }
+      });
+      if (isError) resultContainer.classList.add('error-text');
+      entry.body.appendChild(resultContainer);
+      entry.resultEl = resultContainer;
     }
     
     // Duration footer
     if (durationMs !== undefined && durationMs !== null) {
-      entry.pre.textContent += `${durationMs}ms\n`;
+      const footer = document.createElement('div');
+      footer.className = 'command-footer';
+      footer.textContent = `${durationMs}ms`;
+      entry.body.appendChild(footer);
     }
     
     lastEventType = 'tool';
