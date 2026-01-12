@@ -1639,3 +1639,34 @@ body.terminal-mode #footer-terminal-toggle.pill {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Composer xterm terminal mode */
+.composer.terminal-active {
+  height: 33vh;
+  min-height: 200px;
+  max-height: 50vh;
+  padding: 0;
+  flex-direction: column;
+  border-top: none;
+}
+.composer.terminal-active .prompt-input,
+.composer.terminal-active #agent-send {
+  display: none;
+}
+.composer-terminal {
+  display: none;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+}
+.composer.terminal-active .composer-terminal {
+  display: block;
+}
+/* Ensure xterm fills container */
+.composer-terminal .xterm {
+  height: 100%;
+}
+.composer-terminal .xterm-viewport {
+  overflow-y: auto !important;
+}

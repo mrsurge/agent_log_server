@@ -278,6 +278,215 @@ def _save_conversation_meta(conversation_id: str, meta: Dict[str, Any]) -> None:
     path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+# =============================================================================
+# META ENVELOPE: User command context injection
+# =============================================================================
+# When user runs terminal commands, we buffer context and prepend it to the
+# next chat message as a sentinel-wrapped envelope. Agents see the full context;
+# transcript/frontend see clean messages (envelope stripped).
+
+_META_ENVELOPE_START = "\x1eCODEX_META "  # RS + prefix for false-positive guard
+_META_ENVELOPE_END = "\x1f"               # US
+_CMD_BUFFER_MAX_ENTRIES = 10
+_CMD_PREVIEW_MAX_LINES = 20
+_CMD_PREVIEW_MAX_BYTES = 3000
+
+
+def _get_shell_id_for_envelope(conversation_id: str) -> Optional[str]:
+    """Read shell_id from persisted file for meta envelope."""
+    path = _conversation_dir(conversation_id) / "agent_pty" / "shell_id.txt"
+    if path.exists():
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    return None
+
+
+def _record_last_injected_meta_envelope(conversation_id: str, envelope_json: str, *, command_count: int) -> None:
+    """Persist last injected meta envelope for debugging/visibility.
+
+    This does NOT affect what is sent to the model; it only stores a copy in SSOT.
+    """
+    try:
+        meta = _load_conversation_meta(conversation_id)
+        debug = meta.get("debug") if isinstance(meta.get("debug"), dict) else {}
+        debug["last_meta_envelope"] = {
+            "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "command_count": int(command_count),
+            "envelope_json": envelope_json,
+        }
+        meta["debug"] = debug
+        _save_conversation_meta(conversation_id, meta)
+    except Exception:
+        # Debug-only; do not fail the request.
+        pass
+
+
+async def _build_cmd_preview(conversation_id: str, block: Optional[dict] = None) -> dict:
+    """Build bounded tail preview from per-block output file.
+    
+    Uses the block's output_path for command-scoped output.
+    Falls back to inline stdout or conversation-wide snapshot if output_path unavailable.
+    """
+    def _read_block_output() -> List[str]:
+        """Sync helper to read block output file."""
+        result: List[str] = []
+        
+        # Try per-block output_path first (command-scoped)
+        if block:
+            output_path = block.get("output_path")
+            if output_path:
+                try:
+                    text = Path(output_path).read_text(encoding="utf-8")
+                    lines = text.splitlines()[-_CMD_PREVIEW_MAX_LINES:]
+                    if lines:
+                        return lines
+                except Exception:
+                    pass
+            
+            # Fallback to inline stdout
+            stdout = block.get("stdout", "")
+            if stdout:
+                lines = stdout.splitlines()[-_CMD_PREVIEW_MAX_LINES:]
+                if lines:
+                    return lines
+        
+        # Last resort: conversation-wide scrollback (legacy/fallback)
+        scrollback_path = _conversation_dir(conversation_id) / "agent_pty" / "scrollback.snapshot.json"
+        if scrollback_path.exists():
+            try:
+                data = json.loads(scrollback_path.read_text(encoding="utf-8"))
+                result = data.get("lines", [])[-_CMD_PREVIEW_MAX_LINES:]
+                if result:
+                    return result
+            except Exception:
+                pass
+        
+        return result
+    
+    lines = await asyncio.to_thread(_read_block_output)
+    truncated = False
+    
+    # Apply byte cap
+    total_bytes = 0
+    capped_lines: List[str] = []
+    for line in reversed(lines):
+        line_bytes = len(line.encode("utf-8"))
+        if total_bytes + line_bytes > _CMD_PREVIEW_MAX_BYTES:
+            truncated = True
+            break
+        capped_lines.insert(0, line)
+        total_bytes += line_bytes
+    
+    if len(capped_lines) < len(lines):
+        truncated = True
+    
+    return {"lines": capped_lines, "truncated": truncated}
+
+
+async def _buffer_cmd_context(conversation_id: str, block: dict) -> None:
+    """Append command context to buffer for next user message.
+    
+    Called on agent_block_end events. Accumulates up to N commands.
+    """
+    cmd = block.get("cmd", "")
+    exit_code = block.get("exit_code")
+    cwd = block.get("cwd", "")
+    block_id = block.get("block_id", "")
+    ts = block.get("ts_end") or block.get("ts_begin") or int(datetime.now(timezone.utc).timestamp() * 1000)
+    
+    shell_id = _get_shell_id_for_envelope(conversation_id)
+    preview = await _build_cmd_preview(conversation_id, block)
+    
+    entry = {
+        "cmd": cmd,
+        "exit_code": exit_code,
+        "cwd": cwd,
+        "block_id": block_id,
+        "ts": ts,
+        "preview": preview,
+    }
+    
+    meta = _load_conversation_meta(conversation_id)
+    buffer = meta.get("pending_cmd_buffer", {})
+    
+    # Initialize or update buffer
+    if "commands" not in buffer:
+        buffer = {
+            "v": 1,
+            "shell_id": shell_id,
+            "conversation_id": conversation_id,
+            "commands": [],
+            "total_commands_run": 0,
+        }
+    
+    buffer["total_commands_run"] = buffer.get("total_commands_run", 0) + 1
+    buffer["commands"].append(entry)
+    
+    # Cap at max entries (drop oldest)
+    if len(buffer["commands"]) > _CMD_BUFFER_MAX_ENTRIES:
+        buffer["commands"] = buffer["commands"][-_CMD_BUFFER_MAX_ENTRIES:]
+    
+    # Update shell_id if changed
+    if shell_id:
+        buffer["shell_id"] = shell_id
+    
+    meta["pending_cmd_buffer"] = buffer
+    _save_conversation_meta(conversation_id, meta)
+
+
+def _build_envelope_from_buffer(buffer: dict) -> str:
+    """Build envelope JSON from command buffer."""
+    total = buffer.get("total_commands_run", len(buffer.get("commands", [])))
+    kept = len(buffer.get("commands", []))
+    dropped = total - kept
+    
+    envelope = {
+        "v": 1,
+        "type": "user_cmd_context",
+        "conversation_id": buffer.get("conversation_id"),
+        "shell_id": buffer.get("shell_id"),
+        "total_commands_run": total,
+        "kept": kept,
+        "dropped": dropped,
+        "commands": buffer.get("commands", []),
+        "mcp": ["pty_read_screen", "pty_read_scrollback"],
+    }
+    return json.dumps(envelope, ensure_ascii=False)
+
+
+def _strip_meta_envelope(text: str) -> str:
+    """Strip leading meta envelope from text if present.
+    
+    The envelope is prepended to user messages to provide command context
+    to agents. It must be stripped before writing to transcript or
+    displaying in frontend.
+    """
+    if text.startswith(_META_ENVELOPE_START):
+        end_idx = text.find(_META_ENVELOPE_END)
+        if end_idx != -1:
+            return text[end_idx + 1:]
+    return text
+
+
+def _sanitize_transcript_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip meta envelope from transcript items for display.
+    
+    Applies to user messages that may have envelope in 'text' field.
+    Returns a copy with envelope stripped.
+    """
+    if not isinstance(item, dict):
+        return item
+    role = item.get("role", "")
+    if role == "user" and isinstance(item.get("text"), str):
+        text = _strip_meta_envelope(item["text"])
+        if text != item["text"]:
+            item = dict(item)  # Shallow copy
+            item["text"] = text
+    return item
+
+
 def _latest_legacy_transcript() -> Optional[Path]:
     if not LEGACY_TRANSCRIPT_DIR.exists():
         return None
@@ -505,11 +714,14 @@ def _rollout_preview_entries(path: Path, limit: int = 400) -> Dict[str, Any]:
                     ptype = payload.get("type")
                     if ptype == "user_message":
                         text = payload.get("message")
-                        if isinstance(text, str) and text.strip():
-                            key = ("user", text, ts_bucket)
-                            if key not in seen:
-                                seen.add(key)
-                                items.append({"role": "user", "text": text.strip(), "ts": rec.get("timestamp")})
+                        if isinstance(text, str):
+                            text = _strip_meta_envelope(text)  # Strip BEFORE .strip()
+                            text = text.strip()
+                            if text:
+                                key = ("user", text, ts_bucket)
+                                if key not in seen:
+                                    seen.add(key)
+                                    items.append({"role": "user", "text": text, "ts": rec.get("timestamp")})
                     elif ptype == "agent_message":
                         text = payload.get("message")
                         if isinstance(text, str) and text.strip():
@@ -541,8 +753,45 @@ def _rollout_preview_entries(path: Path, limit: int = 400) -> Dict[str, Any]:
     return {"items": items, "token_total": token_total}
 
 def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Extract text from user/assistant message items.
+    
+    This is the SINGLE choke point for sanitizing user messages before
+    they reach transcript or frontend. All envelope stripping happens here.
+    
+    Handles multiple schema variants:
+    - Legacy: item.type == "usermessage" / "user_message" / "agentmessage"
+    - ResponseItem: item.type == "message" with role == "user" / "assistant"
+    """
     raw_type = str(item.get("type") or "")
     item_type = raw_type.lower()
+    
+    # Handle ResponseItem schema: type == "message" with role field
+    if item_type == "message":
+        role = str(item.get("role") or "").lower()
+        text_parts: List[str] = []
+        content = item.get("content") or []
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        text_parts.append(text)
+        if not text_parts and isinstance(item.get("text"), str):
+            text_parts.append(item["text"])
+        text = "\n".join(text_parts)
+        
+        if role == "user":
+            text = _strip_meta_envelope(text)  # Strip BEFORE .strip() (control chars)
+            text = text.strip()
+            if text:
+                return {"role": "user", "text": text}
+        elif role in {"assistant", "agent"}:
+            text = text.strip()
+            if text:
+                return {"role": "assistant", "text": text}
+        return None
+    
+    # Handle legacy usermessage schema
     if item_type in {"usermessage", "user_message"}:
         text_parts: List[str] = []
         content = item.get("content") or []
@@ -556,15 +805,20 @@ def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
             text_parts.append(item["text"])
         if not text_parts and isinstance(item.get("message"), str):
             text_parts.append(item["message"])
-        text = "\n".join(text_parts).strip()
+        text = "\n".join(text_parts)
+        text = _strip_meta_envelope(text)  # Strip BEFORE .strip() (control chars)
+        text = text.strip()
         if text:
             return {"role": "user", "text": text}
+    
+    # Handle legacy assistant message schema
     if item_type in {"agentmessage", "assistantmessage", "assistant"}:
         text = item.get("text")
         if not isinstance(text, str):
             text = item.get("message") if isinstance(item.get("message"), str) else None
         if isinstance(text, str) and text.strip():
             return {"role": "assistant", "text": text.strip()}
+    
     return None
 
 
@@ -928,6 +1182,7 @@ async def _tail_agent_pty_events_to_transcript(conversation_id: str, *, max_line
 
     Reads from conversations/<id>/agent_pty/events.jsonl and writes a compact entry to transcript.jsonl.
     Offset is persisted to disk to survive server restarts.
+    Also buffers command context for meta envelope injection on next user message.
     """
     if not conversation_id:
         return
@@ -960,6 +1215,17 @@ async def _tail_agent_pty_events_to_transcript(conversation_id: str, *, max_line
         etype = evt.get("type")
         if etype not in {"agent_block_begin", "agent_block_delta", "agent_block_end"}:
             continue
+        
+        # Buffer command context on block end for meta envelope
+        if etype == "agent_block_end":
+            block = evt.get("block")
+            if isinstance(block, dict):
+                await _buffer_cmd_context(conversation_id, block)
+                # For raw mode blocks (user terminal via WebSocket), emit shell_* events
+                # so frontend creates transcript cards
+                if evt.get("raw_mode"):
+                    await _emit_shell_events_from_agent_block(conversation_id, block)
+        
         block_id = evt.get("block_id") or (evt.get("block") or {}).get("block_id")
         payload = {
             "role": "agent_pty",
@@ -1926,7 +2192,12 @@ async def _route_appserver_event(
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
         item_type = str(item.get("type") or "").lower() if isinstance(item, dict) else ""
         
-        if item_type == "usermessage":
+        # Handle user messages (both legacy "usermessage" and ResponseItem "message" with role="user")
+        is_user_message = (
+            item_type == "usermessage" or
+            (item_type == "message" and str(item.get("role") or "").lower() == "user")
+        )
+        if is_user_message:
             # [Transcript] User messages saved immediately
             entry = _extract_item_text(item)
             if entry and convo_id:
@@ -2995,6 +3266,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                 Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"),
                 Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/dockerfile.min.js"),
                 Script(src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"),
+                Script(src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"),
                 Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
                 Script(src=_asset("/static/vendor/socket.io/socket.io.min.js")),
                 Script(src=_asset("/static/vendor/tribute.min.js")),
@@ -3088,6 +3360,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     cls="prompt-input",
                                     **{"data-placeholder": "@ to mention files"},
                                 ),
+                                Div(id="composer-terminal", cls="composer-terminal"),
                                 Button("Send", id="agent-send", cls="btn primary"),
                                 cls="composer"
                             ),
@@ -3757,7 +4030,7 @@ async def api_appserver_transcript(conversation_id: Optional[str] = Query(None))
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                items.append(record)
+                items.append(_sanitize_transcript_item(record))
     except Exception:
         return {"conversation_id": str(convo_id), "items": []}
     return {"conversation_id": str(convo_id), "items": items}
@@ -3792,7 +4065,7 @@ async def api_appserver_transcript_range(
                 except json.JSONDecodeError:
                     continue
                 total += 1
-                buf.append(record)
+                buf.append(_sanitize_transcript_item(record))
         items = list(buf)
         offset = max(0, total - len(items))
     else:
@@ -3808,7 +4081,7 @@ async def api_appserver_transcript_range(
                 except json.JSONDecodeError:
                     continue
                 if total >= start and total < end:
-                    items.append(record)
+                    items.append(_sanitize_transcript_item(record))
                 total += 1
                 if total >= end and total >= start and len(items) >= limit:
                     # still count total by continuing
@@ -4000,9 +4273,9 @@ async def api_mcp_agent_pty_default_size() -> Dict[str, Any]:
 
 
 def _agent_pty_resize_api_enabled() -> bool:
-    # Opt-in only (wire this to UI later).
-    v = os.environ.get("AGENT_PTY_RESIZE_API", "").strip().lower()
-    return v in {"1", "true", "yes", "on"}
+    # Enabled by default for xterm composer; set AGENT_PTY_RESIZE_API=0 to disable.
+    v = os.environ.get("AGENT_PTY_RESIZE_API", "1").strip().lower()
+    return v not in {"0", "false", "no", "off"}
 
 
 @app.get("/api/mcp/agent-pty/size")
@@ -4066,10 +4339,21 @@ async def _emit_shell_events_from_agent_block(conversation_id: str, block: Dict[
     call_id = f"agentpty_{_agent_pty_exec_seq}"
     cmd = block.get("cmd") or ""
     cwd = block.get("cwd")
+    
+    # Read stdout from output_path if available, otherwise use inline stdout
+    stdout = ""
+    output_path = block.get("output_path")
+    if output_path:
+        try:
+            stdout = await asyncio.to_thread(Path(output_path).read_text, encoding="utf-8")
+        except Exception:
+            stdout = block.get("stdout") or ""
+    else:
+        stdout = block.get("stdout") or ""
+    
     await _broadcast_appserver_ui({"type": "shell_begin", "id": call_id, "command": cmd, "cwd": cwd, "stream": "stdout"})
-    # No deltas here; those are streamed via agent_block_delta. shell_end still helps unify UI handling.
     exit_code = block.get("exit_code") if isinstance(block.get("exit_code"), int) else 0
-    await _broadcast_appserver_ui({"type": "shell_end", "id": call_id, "exitCode": exit_code, "stdout": "", "stderr": ""})
+    await _broadcast_appserver_ui({"type": "shell_end", "id": call_id, "exitCode": exit_code, "stdout": stdout, "stderr": ""})
 
 
 @app.post("/api/appserver/rpc")
@@ -4080,6 +4364,7 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
     
     # Intercept thread/resume, thread/start, turn/start to inject settings from SSOT
     method = payload.get("method", "")
+    convo_id: Optional[str] = None
     if method in ("thread/resume", "thread/start", "turn/start"):
         async with _config_lock:
             cfg = _load_appserver_config()
@@ -4117,6 +4402,41 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
             
             payload["params"] = params
             print(f"[DEBUG] SSOT injection for {method}: {params}")
+    
+    # Inject pending command context envelope on turn/start
+    if method == "turn/start" and convo_id:
+        meta = _load_conversation_meta(convo_id)
+        buffer = meta.pop("pending_cmd_buffer", None)
+        if buffer and buffer.get("commands"):
+            _save_conversation_meta(convo_id, meta)  # Clear buffer
+            
+            # Build envelope
+            envelope_json = _build_envelope_from_buffer(buffer)
+            envelope = _META_ENVELOPE_START + envelope_json + _META_ENVELOPE_END
+            command_count = len(buffer.get("commands", []))
+            _record_last_injected_meta_envelope(convo_id, envelope_json, command_count=command_count)
+            # Best-effort: also surface to UI so you can see what the model saw.
+            try:
+                await _broadcast_appserver_ui({
+                    "type": "meta_envelope_injected",
+                    "conversation_id": convo_id,
+                    "command_count": command_count,
+                    "envelope_json": envelope_json,
+                })
+            except Exception:
+                pass
+            
+            # Prepend envelope to first text input item
+            # Frontend sends: params.input = [{ type: 'text', text: '...' }]
+            params = payload.get("params", {})
+            input_items = params.get("input", [])
+            if input_items and isinstance(input_items[0], dict):
+                if input_items[0].get("type") == "text":
+                    original_text = input_items[0].get("text", "")
+                    input_items[0]["text"] = envelope + original_text
+                    print(f"[DEBUG] Meta envelope injected: {command_count} commands")
+            
+            payload["params"] = params
     
     # Track turn/start requests for auto-resume on "conversation not found" error
     if method == "turn/start" and payload.get("id") is not None:
@@ -4452,6 +4772,9 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
     except Exception as e:
         await websocket.close(code=1011, reason=f"Failed to start PTY: {e}")
         return
+
+    # Clear any stale callbacks before adding new one (prevents duplicates from reconnects)
+    state.clear_raw_chunk_callbacks()
     
     # Create a queue for this connection
     output_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -4491,6 +4814,8 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                     data = await websocket.receive_text()
                     if state.shell_id:
                         await mgr.write_to_pty(state.shell_id, data)
+                        # Mark that input was received (for raw mode block events)
+                        state._has_input_since_prompt = True
                 except WebSocketDisconnect:
                     break
                 except Exception:

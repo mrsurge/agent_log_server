@@ -486,21 +486,76 @@ class ConversationState:
 
     def add_raw_chunk_callback(self, callback) -> None:
         """Add a callback to receive raw PTY chunks (for WebSocket streaming)."""
-        if callback not in self._raw_chunk_callbacks:
-            self._raw_chunk_callbacks.append(callback)
+        self._raw_chunk_callbacks.append(callback)
 
     def remove_raw_chunk_callback(self, callback) -> None:
         """Remove a raw chunk callback."""
         if callback in self._raw_chunk_callbacks:
             self._raw_chunk_callbacks.remove(callback)
 
+    def clear_raw_chunk_callbacks(self) -> None:
+        """Clear all raw chunk callbacks (used when new connection replaces old)."""
+        self._raw_chunk_callbacks.clear()
+
     async def _notify_raw_chunk(self, chunk: str) -> None:
-        """Notify all raw chunk callbacks."""
-        for cb in self._raw_chunk_callbacks:
+        """Notify all raw chunk callbacks.
+
+        NOTE: This stream is intended for user-facing terminal rendering (xterm.js).
+        We sanitize only framework-shell wrapper noise (BEGIN/END/PROMPT markers and
+        the long `__fws_cmd=...` wrapper line) while keeping ANSI colors intact.
+        """
+        original_chunk = chunk
+        chunk = self._sanitize_user_terminal_stream(chunk)
+        # Never black-hole output: if our sanitizer removed everything but the original
+        # contained non-whitespace, fall back to the original chunk.
+        if (not chunk) and original_chunk and original_chunk.strip():
+            chunk = original_chunk
+        if not chunk:
+            return
+        for cb in list(self._raw_chunk_callbacks):  # Copy list to avoid mutation during iteration
             try:
                 await cb(chunk)
             except Exception:
                 pass
+
+    @staticmethod
+    def _sanitize_user_terminal_stream(chunk: str) -> str:
+        """Remove framework-shell wrapper artifacts from the raw UI stream.
+
+        - Keep ANSI sequences + real program output.
+        - Drop internal wrapper input echo (the long `__fws_cmd="$(printf %s ...` line).
+        - Drop any sideband marker lines if they ever appear (defensive).
+        """
+        if not chunk:
+            return ""
+        # Fast path: if nothing relevant is present, return as-is.
+        if (
+            "__fws_cmd" not in chunk
+            and _MARKER_BEGIN not in chunk
+            and _MARKER_END not in chunk
+            and _MARKER_PROMPT not in chunk
+        ):
+            return chunk
+        # Remove whole lines that contain wrapper/marker noise.
+        #
+        # IMPORTANT: be conservative. If we over-filter, the user terminal goes blank.
+        out_parts: list[str] = []
+        for line in chunk.splitlines(keepends=True):
+            # Only drop the wrapper if it is clearly the echoed wrapper command line.
+            # This line typically starts with our PS1 and includes "__fws_cmd".
+            if "agent-pty>" in line and "__fws_cmd" in line:
+                continue
+            if (
+                "__fws_emit_begin" in line
+                or "__fws_emit_end" in line
+                or "__FWS_SEQ" in line
+                or _MARKER_BEGIN in line
+                or _MARKER_END in line
+                or _MARKER_PROMPT in line
+            ):
+                continue
+            out_parts.append(line)
+        return "".join(out_parts)
 
     async def _init_spool(self) -> None:
         """Initialize or open the output spool file."""
@@ -1426,6 +1481,7 @@ class ConversationState:
         
         However, we DO persist per-block screen/scrollback snapshots here for
         agent context retrieval without replaying the entire conversation.
+        
         """
         # Persist screen snapshot for this block
         await self._persist_block_snapshot()

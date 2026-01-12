@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const promptEl = document.getElementById('agent-prompt');
   const footerEl = document.querySelector('.composer');
   const footerTerminalToggleEl = document.getElementById('footer-terminal-toggle');
+  const composerTerminalEl = document.getElementById('composer-terminal');
   const sendBtn = document.getElementById('agent-send');
   const interruptBtn = document.getElementById('turn-interrupt');
   const counterMessagesEl = document.getElementById('counter-messages');
@@ -145,6 +146,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let transcriptLoading = false;
   let estimatedRowHeight = 28;
   let terminalMode = false;
+  let composerTerm = null;        // xterm instance for composer terminal
+  let composerFitAddon = null;    // FitAddon for auto-sizing
+  let composerResizeObserver = null;
   let draftSaveTimer = null;
   let lastDraftHash = null;
 
@@ -201,7 +205,18 @@ document.addEventListener('DOMContentLoaded', () => {
   function setTerminalMode(enabled) {
     terminalMode = Boolean(enabled);
     document.body.classList.toggle('terminal-mode', terminalMode);
-    if (sendBtn) sendBtn.style.display = terminalMode ? 'none' : '';
+    footerEl?.classList.toggle('terminal-active', terminalMode);
+    
+    if (terminalMode) {
+      // Hide send button, show terminal
+      if (sendBtn) sendBtn.style.display = 'none';
+      initComposerTerminal();
+    } else {
+      // Show send button, focus prompt
+      if (sendBtn) sendBtn.style.display = '';
+      promptEl?.focus();
+    }
+    
     if (promptEl) {
       promptEl.setAttribute(
         'data-placeholder',
@@ -212,6 +227,73 @@ document.addEventListener('DOMContentLoaded', () => {
       footerTerminalToggleEl.classList.toggle('active', terminalMode);
       footerTerminalToggleEl.textContent = terminalMode ? 'chat' : '>_';
     }
+  }
+
+  // Initialize composer terminal (xterm in footer)
+  function initComposerTerminal() {
+    if (!composerTerminalEl) return;
+    
+    // Create xterm if not exists
+    if (!composerTerm && typeof Terminal !== 'undefined') {
+      composerTerm = new Terminal({
+        convertEol: true,
+        cursorBlink: true,
+        scrollback: 5000,
+        fontFamily: 'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+        fontSize: 12,
+        theme: { background: '#000000', foreground: '#c9d1d9' },
+      });
+      composerTerm.open(composerTerminalEl);
+      
+      // Load FitAddon if available
+      if (typeof FitAddon !== 'undefined') {
+        composerFitAddon = new FitAddon.FitAddon();
+        composerTerm.loadAddon(composerFitAddon);
+      }
+      
+      // ResizeObserver for auto-fit
+      if (typeof ResizeObserver !== 'undefined') {
+        composerResizeObserver = new ResizeObserver(() => fitComposerTerminal());
+        composerResizeObserver.observe(composerTerminalEl);
+      }
+      
+      // Send input to PTY via WebSocket
+      composerTerm.onData((data) => {
+        if (ptyWebSocket && ptyWebSocket.readyState === WebSocket.OPEN) {
+          ptyWebSocket.send(data);
+        }
+      });
+      
+      // Sync resize to backend
+      composerTerm.onResize(({ cols, rows }) => {
+        syncComposerTerminalSize(cols, rows);
+      });
+    }
+    
+    // Connect PTY WebSocket if not connected
+    connectPtyWebSocket();
+    
+    // Fit and focus after DOM update
+    requestAnimationFrame(() => {
+      fitComposerTerminal();
+      composerTerm?.focus();
+    });
+  }
+
+  function fitComposerTerminal() {
+    if (composerFitAddon && composerTerm) {
+      try { composerFitAddon.fit(); } catch (_) {}
+    }
+  }
+
+  function syncComposerTerminalSize(cols, rows) {
+    const convoId = conversationMeta?.conversation_id;
+    if (!convoId || !cols || !rows) return;
+    fetch('/api/mcp/agent-pty/resize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: convoId, cols, rows }),
+    }).catch(() => {});
   }
 
   function isMarkdownEnabled() {
@@ -2430,7 +2512,7 @@ document.addEventListener('DOMContentLoaded', () => {
       cmdRibbon.textContent = '$ ...';
       body.appendChild(cmdRibbon);
       
-      // Output area (xterm container for streaming)
+      // Output area - PLAIN TEXT (no xterm in cards)
       const termEl = document.createElement('div');
       termEl.className = 'command-output';
       body.appendChild(termEl);
@@ -2438,8 +2520,8 @@ document.addEventListener('DOMContentLoaded', () => {
       row.appendChild(body);
       insertRow(row);
       
-      const term = createXterm(termEl);
-      entry = { row, cmdRibbon, term, termEl, text: '' };
+      // No xterm for shell cards - plain text only
+      entry = { row, cmdRibbon, term: null, termEl, text: '' };
       shellRows.set(id, entry);
     }
     return entry;
@@ -2450,10 +2532,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Just show the command, skip cwd line (redundant)
     entry.cmdRibbon.textContent = `$ ${evt.command || ''}`;
     entry.text = '';
-    if (entry.term) {
-      entry.term.reset();
-      entry.term.writeln(`$ ${evt.command || ''}`);
-    }
+    // Plain text mode - no xterm
+    entry.termEl.textContent = '';
     lastEventType = 'shell';
     setActivity('executing', true);
     maybeAutoScroll();
@@ -2465,11 +2545,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const delta = evt.delta || '';
     if (delta) {
       entry.text += delta;
-      if (entry.term) {
-        entry.term.write(delta.replace(/\n/g, '\r\n'));
-      } else {
-        entry.termEl.textContent = entry.text;
-      }
+      // Plain text mode
+      entry.termEl.textContent = entry.text;
     }
     lastEventType = 'shell';
     maybeAutoScroll();
@@ -2488,13 +2565,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // If no streaming output was received, show batch result
     if (!entry.text && (evt.stdout || evt.stderr)) {
       entry.text = String(evt.stdout || '') + String(evt.stderr || '');
-      if (entry.term) {
-        entry.term.reset();
-        if (evt.command) entry.term.writeln(`$ ${evt.command}`);
-        entry.term.write(entry.text.replace(/\n/g, '\r\n'));
-      } else {
-        entry.termEl.textContent = entry.text;
-      }
+      // Plain text mode
+      entry.termEl.textContent = entry.text;
     }
     
     // Add footer with exit code (same as renderCommandResult)
@@ -2681,6 +2753,26 @@ document.addEventListener('DOMContentLoaded', () => {
     body.appendChild(msg);
     lastEventType = 'system';
     maybeAutoScroll();
+  }
+
+  function renderMetaEnvelopeInjected(evt) {
+    const commandCount = evt.command_count ?? evt.commandCount ?? 0;
+    const envelopeJson = evt.envelope_json ?? evt.envelopeJson ?? '';
+    const pretty = (() => {
+      try {
+        return JSON.stringify(JSON.parse(envelopeJson), null, 2);
+      } catch {
+        return String(envelopeJson || '');
+      }
+    })();
+    // Show the exact prefix/suffix the model sees (as escaped literals so it is visible).
+    const text = [
+      'CODEX_META injected (debug):',
+      `commands: ${commandCount}`,
+      '',
+      '\\u001eCODEX_META ' + pretty + '\\u001f',
+    ].join('\n');
+    addMessage('meta', text);
   }
 
   function renderCommandResult(evt) {
@@ -3581,6 +3673,10 @@ document.addEventListener('DOMContentLoaded', () => {
         lastEventType = 'system';
         renderContextCompactedCard();
         return;
+      case 'meta_envelope_injected':
+        lastEventType = 'system';
+        renderMetaEnvelopeInjected(evt);
+        return;
       case 'mention_insert':
         insertMention(evt.path || '');
         return;
@@ -3692,7 +3788,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Handle raw PTY output for user terminal
   function handleUserPtyOutput(chunk) {
-    // Route raw PTY output to the active agent block (raw mode)
+    // Route to composer terminal when in terminal mode
+    // In xterm composer mode, the composer xterm is the ONLY live display surface
+    // Cards are created from shell_begin/shell_end events as plain text summaries
+    if (terminalMode && composerTerm) {
+      composerTerm.write(chunk);
+      return; // Composer xterm is exclusive display for live PTY in terminal mode
+    }
+    
+    // Route raw PTY output to the active agent block (raw mode) - for agent PTY, not user terminal
     if (activeAgentPtyBlockId) {
       const entry = agentBlockRows.get(activeAgentPtyBlockId);
       if (entry) {
@@ -3866,7 +3970,14 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   promptEl?.addEventListener('keydown', async (evt) => {
-    // When command is running in terminal mode, stream keystrokes directly to PTY
+    // When composer xterm is active, it handles all input - suppress promptEl
+    if (terminalMode && composerTerm) {
+      // xterm.onData() already sends keystrokes to PTY via WebSocket
+      // Don't let promptEl also handle Enter/keystrokes (prevents double input)
+      evt.preventDefault();
+      return;
+    }
+    // When command is running in terminal mode (but no composerTerm), stream keystrokes directly to PTY
     if (commandRunning && terminalMode) {
       evt.preventDefault();
       let data = '';
@@ -3935,6 +4046,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   promptEl?.addEventListener('input', () => {
+    // When composer xterm is active, it handles all input - skip promptEl
+    if (terminalMode && composerTerm) {
+      return;
+    }
     // When in stdin mode, send each character as it's typed
     if (commandRunning && terminalMode) {
       const text = getPromptText();
