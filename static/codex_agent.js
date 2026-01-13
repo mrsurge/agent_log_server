@@ -1710,16 +1710,32 @@ document.addEventListener('DOMContentLoaded', () => {
       if (entry.role === 'command') {
         const row = document.createElement('div');
         row.className = 'timeline-row command-result';
+        // If this command replaces a noisy agent PTY block card, remove it on replay.
+        if (entry.agent_block_id) {
+          try {
+            const dup = timelineEl?.querySelector(`.timeline-row.terminal-card[data-agent-block-id="${CSS.escape(entry.agent_block_id)}"]`);
+            if (dup && dup.parentElement) dup.parentElement.removeChild(dup);
+          } catch (_) {}
+        }
         const body = document.createElement('div');
         body.className = 'body';
         // Command ribbon
         const cmdRibbon = document.createElement('div');
         cmdRibbon.className = 'command-ribbon';
-        // Just show the command, skip cwd line (redundant)
-        cmdRibbon.textContent = entry.command || '';
+        // For user terminal commands, include the prompt in the ribbon.
+        const isUserTerminal = entry.source === 'user_terminal' || entry.source === 'user-terminal';
+        const prompt = entry.prompt || '';
+        const cmd = entry.command || '';
+        const ribbonText = (prompt ? `${prompt}${cmd}` : cmd);
+        if (isUserTerminal && typeof ribbonText === 'string' && ribbonText.includes('\x1b[')) {
+          cmdRibbon.innerHTML = ansiToHtml(ribbonText);
+        } else {
+          cmdRibbon.textContent = ribbonText;
+        }
         body.appendChild(cmdRibbon);
         // Output
         if (entry.output) {
+          const hasAnsi = typeof entry.output === 'string' && entry.output.includes('\x1b[');
           const lines = entry.output.split('\n');
           let displayOutput = entry.output;
           let truncated = false;
@@ -1729,10 +1745,8 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           const outputPre = document.createElement('pre');
           outputPre.className = 'command-output';
-          // Try syntax highlighting based on command
-          const lang = detectLangFromCommand(entry.command);
-          if (lang && isDiffSyntaxEnabled()) {
-            outputPre.innerHTML = highlightCode(displayOutput, lang);
+          if (isUserTerminal && hasAnsi) {
+            outputPre.innerHTML = ansiToHtml(displayOutput);
             if (truncated) {
               const truncNote = document.createElement('span');
               truncNote.className = 'truncation-note';
@@ -1740,9 +1754,21 @@ document.addEventListener('DOMContentLoaded', () => {
               outputPre.appendChild(truncNote);
             }
           } else {
-            outputPre.textContent = displayOutput;
-            if (truncated) {
-              outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
+            // Try syntax highlighting based on command
+            const lang = detectLangFromCommand(entry.command);
+            if (lang && isDiffSyntaxEnabled()) {
+              outputPre.innerHTML = highlightCode(displayOutput, lang);
+              if (truncated) {
+                const truncNote = document.createElement('span');
+                truncNote.className = 'truncation-note';
+                truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
+                outputPre.appendChild(truncNote);
+              }
+            } else {
+              outputPre.textContent = displayOutput;
+              if (truncated) {
+                outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
+              }
             }
           }
           body.appendChild(outputPre);
@@ -2958,9 +2984,92 @@ document.addEventListener('DOMContentLoaded', () => {
     addMessage('meta', text);
   }
 
+  function escapeHtml(s) {
+    return String(s || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function ansiToHtml(text) {
+    // Minimal ANSI SGR -> HTML span renderer (keeps output selectable inside <pre>).
+    const input = String(text || '');
+    const sgrRe = /\x1b\[([0-9;]*)m/g;
+    let lastIndex = 0;
+    let html = '';
+    let state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
+
+    function cssFor(st) {
+      const styles = [];
+      if (st.bold) styles.push('font-weight:600');
+      if (st.dim) styles.push('opacity:0.8');
+      if (st.italic) styles.push('font-style:italic');
+      if (st.underline) styles.push('text-decoration:underline');
+      const fgMap = {
+        30: '#000000', 31: '#e06c75', 32: '#98c379', 33: '#e5c07b', 34: '#61afef', 35: '#c678dd', 36: '#56b6c2', 37: '#abb2bf',
+        90: '#5c6370', 91: '#ff7a85', 92: '#b7f39b', 93: '#ffd68a', 94: '#7ab7ff', 95: '#e79aff', 96: '#7ae8f5', 97: '#ffffff',
+      };
+      const bgMap = {
+        40: '#000000', 41: '#e06c75', 42: '#98c379', 43: '#e5c07b', 44: '#61afef', 45: '#c678dd', 46: '#56b6c2', 47: '#abb2bf',
+        100: '#5c6370', 101: '#ff7a85', 102: '#b7f39b', 103: '#ffd68a', 104: '#7ab7ff', 105: '#e79aff', 106: '#7ae8f5', 107: '#ffffff',
+      };
+      let fg = st.fg;
+      let bg = st.bg;
+      if (st.inverse) {
+        const tmp = fg; fg = bg; bg = tmp;
+      }
+      if (fg != null && fgMap[fg]) styles.push(`color:${fgMap[fg]}`);
+      if (bg != null && bgMap[bg]) styles.push(`background-color:${bgMap[bg]}`);
+      return styles.join(';');
+    }
+
+    function applyCodes(codes) {
+      const parts = codes.length ? codes.split(';') : ['0'];
+      for (const p of parts) {
+        const n = Number(p || '0');
+        if (!Number.isFinite(n)) continue;
+        if (n === 0) state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
+        else if (n === 1) state.bold = true;
+        else if (n === 2) state.dim = true;
+        else if (n === 3) state.italic = true;
+        else if (n === 4) state.underline = true;
+        else if (n === 7) state.inverse = true;
+        else if (n === 22) { state.bold = false; state.dim = false; }
+        else if (n === 23) state.italic = false;
+        else if (n === 24) state.underline = false;
+        else if (n === 27) state.inverse = false;
+        else if (n === 39) state.fg = null;
+        else if (n === 49) state.bg = null;
+        else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) state.fg = n;
+        else if ((n >= 40 && n <= 47) || (n >= 100 && n <= 107)) state.bg = n;
+      }
+    }
+
+    function emitChunk(s) {
+      if (!s) return;
+      const css = cssFor(state);
+      const escaped = escapeHtml(s);
+      if (css) html += `<span style="${css}">${escaped}</span>`;
+      else html += escaped;
+    }
+
+    let m;
+    while ((m = sgrRe.exec(input)) !== null) {
+      emitChunk(input.slice(lastIndex, m.index));
+      applyCodes(m[1] || '');
+      lastIndex = sgrRe.lastIndex;
+    }
+    emitChunk(input.slice(lastIndex));
+    return html;
+  }
+
   function renderCommandResult(evt) {
     const command = evt.command || '';
     const cwd = evt.cwd || '';
+    const prompt = evt.prompt || '';
+    const agentBlockId = evt.agent_block_id || evt.agentBlockId || '';
     const output = evt.output || '';
     const exitCode = evt.exit_code;
     const durationMs = evt.duration_ms;
@@ -2981,6 +3090,13 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Build the row
     clearPlaceholder();
+    // If this command corresponds to an agent PTY block card (noise), remove it.
+    if (agentBlockId) {
+      try {
+        const dup = timelineEl?.querySelector(`.timeline-row.terminal-card[data-agent-block-id="${CSS.escape(agentBlockId)}"]`);
+        if (dup && dup.parentElement) dup.parentElement.removeChild(dup);
+      } catch (_) {}
+    }
     const row = document.createElement('div');
     row.className = 'timeline-row command-result';
     
@@ -2991,18 +3107,23 @@ document.addEventListener('DOMContentLoaded', () => {
     // Command ribbon (black background, white text)
     const cmdRibbon = document.createElement('div');
     cmdRibbon.className = 'command-ribbon';
-    // Just show the command, skip cwd line (redundant)
-    cmdRibbon.textContent = command;
+    // For user terminal commands, include the prompt in the ribbon.
+    const isUserTerminal = evt.source === 'user_terminal' || evt.source === 'user-terminal';
+    const ribbonText = (prompt ? `${prompt}${command}` : command);
+    if (isUserTerminal && typeof ribbonText === 'string' && ribbonText.includes('\x1b[')) {
+      cmdRibbon.innerHTML = ansiToHtml(ribbonText);
+    } else {
+      cmdRibbon.textContent = ribbonText;
+    }
     body.appendChild(cmdRibbon);
     
     // Output block (if any)
     if (displayOutput) {
       const outputPre = document.createElement('pre');
       outputPre.className = 'command-output';
-      // Try syntax highlighting based on command
-      const lang = detectLangFromCommand(command);
-      if (lang && isDiffSyntaxEnabled()) {
-        outputPre.innerHTML = highlightCode(displayOutput, lang);
+      const hasAnsi = typeof displayOutput === 'string' && displayOutput.includes('\x1b[');
+      if (isUserTerminal && hasAnsi) {
+        outputPre.innerHTML = ansiToHtml(displayOutput);
         if (truncated) {
           const truncNote = document.createElement('span');
           truncNote.className = 'truncation-note';
@@ -3010,9 +3131,21 @@ document.addEventListener('DOMContentLoaded', () => {
           outputPre.appendChild(truncNote);
         }
       } else {
-        outputPre.textContent = displayOutput;
-        if (truncated) {
-          outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
+        // Try syntax highlighting based on command
+        const lang = detectLangFromCommand(command);
+        if (lang && isDiffSyntaxEnabled()) {
+          outputPre.innerHTML = highlightCode(displayOutput, lang);
+          if (truncated) {
+            const truncNote = document.createElement('span');
+            truncNote.className = 'truncation-note';
+            truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
+            outputPre.appendChild(truncNote);
+          }
+        } else {
+          outputPre.textContent = displayOutput;
+          if (truncated) {
+            outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
+          }
         }
       }
       body.appendChild(outputPre);
@@ -4173,9 +4306,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Helper to dispatch message or shell command based on ! prefix
   async function dispatchInput(text) {
-    if (terminalMode && !text.startsWith('!')) {
-      await sendShellCommand(text.trim());
-    } else if (text.startsWith('!')) {
+    // Shell commands are explicit via ! prefix only.
+    // In terminalMode the composer xterm drives the PTY directly; we should not
+    // also route plain input through /api/appserver/shell/exec or it will create
+    // a duplicate `$ cmd` transcript row.
+    if (text.startsWith('!')) {
       await sendShellCommand(text.slice(1).trim());
     } else {
       await sendUserMessage(text);

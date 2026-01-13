@@ -374,6 +374,48 @@ def _strip_trailing_prompt_lines(text: str) -> str:
     return "\n".join(lines)
 
 
+def _strip_leading_echoed_command(text: str, prompt: str, cmd: str) -> str:
+    """Drop a leading echoed `<prompt><cmd>` line from a captured output slice.
+
+    Some interactive shells echo the typed command line into the PTY stream; for
+    command cards we already render `prompt+cmd` in the ribbon, so this would be
+    a duplicate line in the output body.
+    """
+    if not text or not cmd:
+        return text or ""
+    try:
+        lines = text.splitlines()
+        i = 0
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        if i >= len(lines):
+            return ""
+        first = lines[i]
+
+        def _strip_sgr(s: str) -> str:
+            # Remove only CSI SGR sequences (keeps semantics for comparison).
+            return re.sub(r"\x1b\[[0-9;]*m", "", s or "")
+
+        expected = _strip_sgr(f"{prompt}{cmd}").strip()
+        first_norm = _strip_sgr(first).strip()
+
+        # Exact match against rendered prompt+cmd (with or without SGR).
+        if expected and first_norm == expected:
+            lines.pop(i)
+        else:
+            # Fallback: many shells echo as `$ cmd` without cwd.
+            if re.match(rf"^\$\s*{re.escape(cmd)}\s*$", first_norm):
+                lines.pop(i)
+            else:
+                # Or as `<anything> $ cmd` (path stripped/simplified).
+                if re.match(rf"^.*\$\s*{re.escape(cmd)}\s*$", first_norm):
+                    lines.pop(i)
+
+        return "\n".join(lines)
+    except Exception:
+        return text
+
+
 def _safe_b64decode(s: str) -> str:
     if not s:
         return ""
@@ -402,6 +444,18 @@ async def _append_pending_cmd_buffer(conversation_id: str, entry: Dict[str, Any]
             "commands": [],
             "total_commands_run": 0,
         }
+
+    # Drop stale/legacy entries that used older block_id formats. The envelope is
+    # for *user terminal* commands and we standardize those as `user:<convo>:...`.
+    try:
+        cmds = buffer.get("commands", [])
+        if isinstance(cmds, list) and cmds:
+            buffer["commands"] = [
+                c for c in cmds
+                if isinstance(c, dict) and str(c.get("block_id") or "").startswith("user:")
+            ]
+    except Exception:
+        pass
 
     buffer["total_commands_run"] = buffer.get("total_commands_run", 0) + 1
     buffer["commands"].append(entry)
@@ -555,6 +609,11 @@ async def _buffer_cmd_context(conversation_id: str, block: dict) -> None:
     shell_id = _get_shell_id_for_envelope(conversation_id)
     preview = await _build_cmd_preview(conversation_id, block)
     
+    # The CODEX_META envelope is reserved for *user terminal* command context.
+    # Skip buffering legacy agent blocks here (they can be read from transcript/blocks).
+    if not str(block_id or "").startswith("user:"):
+        return
+
     entry = {
         "cmd": cmd,
         "exit_code": exit_code,
@@ -576,6 +635,17 @@ async def _buffer_cmd_context(conversation_id: str, block: dict) -> None:
             "commands": [],
             "total_commands_run": 0,
         }
+
+    # Ensure we don't carry legacy entries across versions.
+    try:
+        cmds = buffer.get("commands", [])
+        if isinstance(cmds, list) and cmds:
+            buffer["commands"] = [
+                c for c in cmds
+                if isinstance(c, dict) and str(c.get("block_id") or "").startswith("user:")
+            ]
+    except Exception:
+        pass
     
     buffer["total_commands_run"] = buffer.get("total_commands_run", 0) + 1
     buffer["commands"].append(entry)
@@ -5254,9 +5324,8 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                         text = raw_out.decode("utf-8", errors="replace")
                         scrubbed = _scrub_user_cmd_output_keep_sgr(text).strip("\n")
 
-                        # Build bounded preview for transcript/UI.
-                        preview_lines_raw = scrubbed.splitlines()[-_CMD_PREVIEW_MAX_LINES:]
-                        preview_text = "\n".join(preview_lines_raw).strip()
+                        # Full command output (scrubbed of cursor movement etc, but keeps SGR).
+                        full_text = scrubbed
                         duration_ms = None
                         try:
                             if block.get("ts_begin") and ts_end:
@@ -5267,11 +5336,34 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                         cmd = str(block.get("cmd") or "")
                         cwd = str(block.get("cwd") or "")
                         prompt = _termux_user_prompt_from_cwd(cwd)
+                        agent_block_id = None
+                        try:
+                            ts_begin = int(block.get("ts_begin") or 0)
+                            if ts_begin:
+                                agent_block_id = f"{convo_id}:{seq}:{ts_begin}"
+                        except Exception:
+                            agent_block_id = None
 
                         # Remove any trailing prompt redraws from the output slice; we render
                         # prompt+command in the ribbon instead.
-                        preview_text = _strip_trailing_prompt_lines(preview_text)
-                        preview_lines = preview_text.splitlines()[-_CMD_PREVIEW_MAX_LINES:]
+                        full_text = _strip_trailing_prompt_lines(full_text)
+                        full_text = _strip_leading_echoed_command(full_text, prompt=prompt, cmd=cmd)
+
+                        # User-facing transcript cards are bounded by the existing conversation setting
+                        # (SSOT): settings.commandOutputLines. Use a HEAD slice so output isn't "random tail".
+                        user_limit = 20
+                        try:
+                            meta = _load_conversation_meta(convo_id)
+                            settings = meta.get("settings", {}) if isinstance(meta, dict) else {}
+                            user_limit = int(settings.get("commandOutputLines") or 20)
+                        except Exception:
+                            user_limit = 20
+                        user_limit = max(1, min(user_limit, 2000))
+                        full_lines = full_text.splitlines()
+                        user_text = "\n".join(full_lines[:user_limit]).strip()
+
+                        # Agent envelope preview stays small/noisy-resistant: use a TAIL slice.
+                        envelope_lines = full_lines[-_CMD_PREVIEW_MAX_LINES:]
 
                         # Persist for replay.
                         await _append_transcript_entry(convo_id, {
@@ -5279,7 +5371,8 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                             "command": cmd,
                             "cwd": cwd,
                             "prompt": prompt,
-                            "output": preview_text,
+                            "agent_block_id": agent_block_id,
+                            "output": user_text,
                             "exit_code": exit_code,
                             "duration_ms": duration_ms,
                             "source": "user_terminal",
@@ -5293,7 +5386,8 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                             "command": cmd,
                             "cwd": cwd,
                             "prompt": prompt,
-                            "output": preview_text,
+                            "agent_block_id": agent_block_id,
+                            "output": user_text,
                             "exit_code": exit_code,
                             "duration_ms": duration_ms,
                             "source": "user_terminal",
@@ -5306,7 +5400,7 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                             "cwd": cwd,
                             "block_id": f"user:{convo_id}:{seq}:{ts_end or int(time.time() * 1000)}",
                             "ts": ts_end or int(time.time() * 1000),
-                            "preview": {"lines": preview_lines[-_CMD_PREVIEW_MAX_LINES:], "truncated": False},
+                            "preview": {"lines": envelope_lines[-_CMD_PREVIEW_MAX_LINES:], "truncated": False},
                         })
                         continue
 
