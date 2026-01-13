@@ -1948,10 +1948,19 @@ async def _agent_pty_monitor_loop() -> None:
                 cfg = _load_appserver_config()
             convo_id = cfg.get("conversation_id")
             if isinstance(convo_id, str) and convo_id:
-                await _ensure_agent_pty_event_tailer(convo_id)
-                await _ensure_agent_pty_screen_event_tailer(convo_id)
-                await _ensure_agent_pty_raw_event_tailer(convo_id)
-                await _tail_agent_pty_events_to_transcript(convo_id)
+                # Agent PTY event tailers are debug tooling; they are noisy and can produce
+                # duplicate user-facing cards. Keep them behind DEBUG_MODE.
+                if DEBUG_MODE:
+                    await _ensure_agent_pty_event_tailer(convo_id)
+                    await _ensure_agent_pty_screen_event_tailer(convo_id)
+                    await _ensure_agent_pty_raw_event_tailer(convo_id)
+                # Do not mirror agent PTY block events into the transcript by default.
+                # The user-facing terminal "command cards" are derived from deterministic
+                # user-terminal markers + bytes slicing, and agent PTY begin/end events
+                # are noisy/duplicative in the SSOT transcript.
+                #
+                # If you ever need these for debugging or replay of MCP tool calls, we
+                # can re-enable behind an explicit setting flag.
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -5311,6 +5320,9 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                         # Safety cap: don't slice unbounded output.
                         if (end_cursor - begin_cursor) > _USER_PTY_RAW_MAX_BYTES_PER_CMD:
                             begin_cursor = max(0, end_cursor - _USER_PTY_RAW_MAX_BYTES_PER_CMD)
+                            output_truncated_by_bytes = True
+                        else:
+                            output_truncated_by_bytes = False
 
                         def _read_slice() -> bytes:
                             try:
@@ -5349,18 +5361,10 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                         full_text = _strip_trailing_prompt_lines(full_text)
                         full_text = _strip_leading_echoed_command(full_text, prompt=prompt, cmd=cmd)
 
-                        # User-facing transcript cards are bounded by the existing conversation setting
-                        # (SSOT): settings.commandOutputLines. Use a HEAD slice so output isn't "random tail".
-                        user_limit = 20
-                        try:
-                            meta = _load_conversation_meta(convo_id)
-                            settings = meta.get("settings", {}) if isinstance(meta, dict) else {}
-                            user_limit = int(settings.get("commandOutputLines") or 20)
-                        except Exception:
-                            user_limit = 20
-                        user_limit = max(1, min(user_limit, 2000))
                         full_lines = full_text.splitlines()
-                        user_text = "\n".join(full_lines[:user_limit]).strip()
+                        # User-facing transcript + live cards should not apply an additional arbitrary
+                        # line cap. The UI already uses the SSOT setting (commandOutputLines).
+                        user_text = full_text.strip()
 
                         # Agent envelope preview stays small/noisy-resistant: use a TAIL slice.
                         envelope_lines = full_lines[-_CMD_PREVIEW_MAX_LINES:]
@@ -5377,6 +5381,7 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                             "duration_ms": duration_ms,
                             "source": "user_terminal",
                             "seq": seq,
+                            "output_truncated_by_bytes": bool(output_truncated_by_bytes),
                         })
 
                         # Live render.
@@ -5391,6 +5396,7 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                             "exit_code": exit_code,
                             "duration_ms": duration_ms,
                             "source": "user_terminal",
+                            "output_truncated_by_bytes": bool(output_truncated_by_bytes),
                         })
 
                         # Buffer for CODEX_META on next turn/start.
@@ -5400,7 +5406,10 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
                             "cwd": cwd,
                             "block_id": f"user:{convo_id}:{seq}:{ts_end or int(time.time() * 1000)}",
                             "ts": ts_end or int(time.time() * 1000),
-                            "preview": {"lines": envelope_lines[-_CMD_PREVIEW_MAX_LINES:], "truncated": False},
+                            "preview": {
+                                "lines": envelope_lines[-_CMD_PREVIEW_MAX_LINES:],
+                                "truncated": bool(output_truncated_by_bytes or (len(full_lines) > _CMD_PREVIEW_MAX_LINES)),
+                            },
                         })
                         continue
 
