@@ -4423,16 +4423,17 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
             envelope = _META_ENVELOPE_START + envelope_json + _META_ENVELOPE_END
             command_count = len(buffer.get("commands", []))
             _record_last_injected_meta_envelope(convo_id, envelope_json, command_count=command_count)
-            # Best-effort: also surface to UI so you can see what the model saw.
-            try:
-                await _broadcast_appserver_ui({
-                    "type": "meta_envelope_injected",
-                    "conversation_id": convo_id,
-                    "command_count": command_count,
-                    "envelope_json": envelope_json,
-                })
-            except Exception:
-                pass
+            # Debug-only: optionally surface to UI so you can see what the model saw.
+            if DEBUG_MODE:
+                try:
+                    await _broadcast_appserver_ui({
+                        "type": "meta_envelope_injected",
+                        "conversation_id": convo_id,
+                        "command_count": command_count,
+                        "envelope_json": envelope_json,
+                    })
+                except Exception:
+                    pass
             
             # Prepend envelope to first text input item
             # Frontend sends: params.input = [{ type: 'text', text: '...' }]
