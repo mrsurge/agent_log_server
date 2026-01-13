@@ -581,8 +581,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (innerCmd.includes('ruby ')) return 'ruby';
     if (innerCmd.includes('go run')) return 'go';
     if (innerCmd.includes('rustc') || innerCmd.includes('cargo')) return 'rust';
-    // Default for shell commands that don't output code
-    if (innerCmd.match(/\b(ls|cd|pwd|mkdir|rm|mv|cp|chmod|chown)\b/)) return 'bash';
     return null;
   }
 
@@ -604,6 +602,26 @@ document.addEventListener('DOMContentLoaded', () => {
       // Fall back to escaped text
     }
     return escapeHtml(text);
+  }
+
+  // Syntax highlight for command outputs (independent of diffSyntaxHighlight toggle).
+  // This is used for shell command ribbons/outputs, not for diff rendering.
+  function highlightCodeAlways(text, lang) {
+    if (typeof hljs === 'undefined' || !text?.trim()) {
+      return escapeHtml(text || '');
+    }
+    try {
+      if (lang && hljs.getLanguage(lang)) {
+        return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+      }
+      const result = hljs.highlightAuto(text);
+      if (result.relevance > 5) {
+        return result.value;
+      }
+    } catch (_) {
+      // fall through
+    }
+    return escapeHtml(text || '');
   }
 
   function setCommandRunning(running) {
@@ -827,7 +845,14 @@ document.addEventListener('DOMContentLoaded', () => {
       menuItemTemplate: function(item) {
         const icon = item.original.type === 'directory' ? '📁' : '📄';
         const typeClass = item.original.type === 'directory' ? 'tribute-dir' : 'tribute-file';
-        return '<span class="' + typeClass + '">' + icon + ' ' + item.original.name + '</span>';
+        const cwd = conversationSettings?.cwd || '';
+        const relPath = getRelativePath(item.original.path, cwd) || item.original.path || '';
+        const safeName = escapeHtml(item.original.name || '');
+        const safePath = escapeHtml(relPath);
+        return '<div class="' + typeClass + '">' +
+                 '<div class="tribute-item-name">' + icon + ' ' + safeName + '</div>' +
+                 '<div class="tribute-item-path">' + safePath + '</div>' +
+               '</div>';
       },
       values: async function(text, cb) {
         if (!text || !text.trim()) { cb([]); return; }
@@ -1258,31 +1283,44 @@ document.addEventListener('DOMContentLoaded', () => {
     renderPickerList(items);
   }
 
-  function renderPickerList(items) {
-    if (!pickerListEl) return;
-    pickerListEl.innerHTML = '';
-    items.forEach((item) => {
-      if (!item) return;
-      const row = document.createElement('div');
-      row.className = 'picker-item';
-      const icon = document.createElement('span');
-      icon.textContent = item.type === 'directory' ? '📁' : '📄';
-      const name = document.createElement('span');
-      name.textContent = item.name || item.path;
-      row.append(icon, name);
-      row.addEventListener('click', () => {
-        if (item.type === 'directory') {
-          fetchPicker(item.path);
-          return;
-        }
-        if (pickerMode === 'mention') {
-          insertMention(item.path || item.name || '');
-          closePicker();
-        }
-      });
-      pickerListEl.appendChild(row);
-    });
-  }
+	  function renderPickerList(items) {
+	    if (!pickerListEl) return;
+	    pickerListEl.innerHTML = '';
+	    items.forEach((item) => {
+	      if (!item) return;
+	      const row = document.createElement('div');
+	      row.className = 'picker-item';
+	      const icon = document.createElement('span');
+	      icon.textContent = item.type === 'directory' ? '📁' : '📄';
+	      const name = document.createElement('span');
+	      name.textContent = item.name || item.path;
+	      if (pickerMode === 'mention') {
+	        const textWrap = document.createElement('span');
+	        textWrap.className = 'picker-item-text';
+	        name.className = 'picker-item-name';
+	        const path = document.createElement('span');
+	        path.className = 'picker-item-path';
+	        const cwd = conversationSettings?.cwd || '';
+	        const relPath = getRelativePath(item.path || item.name || '', cwd) || (item.path || item.name || '');
+	        path.textContent = relPath;
+	        textWrap.append(name, path);
+	        row.append(icon, textWrap);
+	      } else {
+	        row.append(icon, name);
+	      }
+	      row.addEventListener('click', () => {
+	        if (item.type === 'directory') {
+	          fetchPicker(item.path);
+	          return;
+	        }
+	        if (pickerMode === 'mention') {
+	          insertMention(item.path || item.name || '');
+	          closePicker();
+	        }
+	      });
+	      pickerListEl.appendChild(row);
+	    });
+	  }
 
   function renderConversationList(items, activeId) {
     if (!conversationListEl) return;
@@ -1729,6 +1767,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const ribbonText = (prompt ? `${prompt}${cmd}` : cmd);
         if (isUserTerminal && typeof ribbonText === 'string' && ribbonText.includes('\x1b[')) {
           cmdRibbon.innerHTML = ansiToHtml(ribbonText);
+        } else if (!isUserTerminal && typeof hljs !== 'undefined' && String(cmd || '').trim() && hljs.getLanguage('bash')) {
+          // Playback: highlight the command itself as bash (shell) for codex exec outputs.
+          try {
+            const html = hljs.highlight(String(cmd || ''), { language: 'bash', ignoreIllegals: true }).value;
+            cmdRibbon.innerHTML = `<span class="shell-prompt">$ </span><span class="hljs">${html}</span>`;
+          } catch (_) {
+            cmdRibbon.textContent = ribbonText;
+          }
         } else {
           cmdRibbon.textContent = ribbonText;
         }
@@ -1755,9 +1801,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
           } else {
             // Try syntax highlighting based on command
-            const lang = detectLangFromCommand(entry.command);
-            if (lang && isDiffSyntaxEnabled()) {
-              outputPre.innerHTML = highlightCode(displayOutput, lang);
+            const lang = detectLangFromCommand(cmd);
+            if (lang && typeof hljs !== 'undefined') {
+              outputPre.innerHTML = highlightCodeAlways(displayOutput, lang);
               if (truncated) {
                 const truncNote = document.createElement('span');
                 truncNote.className = 'truncation-note';
@@ -1897,22 +1943,39 @@ document.addEventListener('DOMContentLoaded', () => {
         // Command ribbon
         const cmdRibbon = document.createElement('div');
         cmdRibbon.className = 'command-ribbon';
-        cmdRibbon.textContent = `$ ${entry.command || ''}`;
+        const shellCmd = String(entry.command || '');
+        if (typeof hljs !== 'undefined' && shellCmd.trim() && hljs.getLanguage('bash')) {
+          try {
+            const html = hljs.highlight(shellCmd, { language: 'bash', ignoreIllegals: true }).value;
+            cmdRibbon.innerHTML = `<span class="shell-prompt">$ </span><span class="hljs">${html}</span>`;
+          } catch (_) {
+            cmdRibbon.textContent = `$ ${shellCmd}`;
+          }
+        } else {
+          cmdRibbon.textContent = `$ ${shellCmd}`;
+        }
         body.appendChild(cmdRibbon);
         
         // Output
         const pre = document.createElement('pre');
         pre.className = 'command-output';
-        if (entry.stdout) {
-          pre.appendChild(document.createTextNode(entry.stdout));
+        const stdout = String(entry.stdout || '');
+        const stderr = String(entry.stderr || '');
+        const outLang = detectLangFromCommand(shellCmd);
+        if (stdout) {
+          if (outLang && typeof hljs !== 'undefined') {
+            pre.innerHTML = highlightCodeAlways(stdout, outLang);
+          } else {
+            pre.appendChild(document.createTextNode(stdout));
+          }
         }
         if (entry.stderr) {
           const stderrEl = document.createElement('span');
           stderrEl.className = 'shell-stderr';
-          stderrEl.textContent = entry.stderr;
+          stderrEl.textContent = stderr;
           pre.appendChild(stderrEl);
         }
-        if (!entry.stdout && !entry.stderr) {
+        if (!stdout && !stderr) {
           pre.textContent = '(no output)';
         }
         body.appendChild(pre);
@@ -2722,7 +2785,7 @@ document.addEventListener('DOMContentLoaded', () => {
       body.appendChild(cmdRibbon);
       
       // Output area - PLAIN TEXT (no xterm in cards)
-      const termEl = document.createElement('div');
+      const termEl = document.createElement('pre');
       termEl.className = 'command-output';
       body.appendChild(termEl);
       
@@ -2739,7 +2802,18 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderShellBegin(evt) {
     const entry = getShellRow(evt.id);
     // Just show the command, skip cwd line (redundant)
-    entry.cmdRibbon.textContent = `$ ${evt.command || ''}`;
+    const cmd = String(evt.command || '');
+    // Commands are always shell-highlighted (bash) for readability.
+    if (typeof hljs !== 'undefined' && cmd.trim() && hljs.getLanguage('bash')) {
+      try {
+        const html = hljs.highlight(cmd, { language: 'bash', ignoreIllegals: true }).value;
+        entry.cmdRibbon.innerHTML = `<span class="shell-prompt">$ </span><span class="hljs">${html}</span>`;
+      } catch {
+        entry.cmdRibbon.textContent = `$ ${cmd}`;
+      }
+    } else {
+      entry.cmdRibbon.textContent = `$ ${cmd}`;
+    }
     entry.text = '';
     // Plain text mode - no xterm
     entry.termEl.textContent = '';
@@ -2770,12 +2844,33 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     const exitCode = evt.exitCode ?? 0;
-    
-    // If no streaming output was received, show batch result
-    if (!entry.text && (evt.stdout || evt.stderr)) {
-      entry.text = String(evt.stdout || '') + String(evt.stderr || '');
-      // Plain text mode
+
+    // Prefer final stdout/stderr from the event so we can do syntax highlighting.
+    const stdout = String(evt.stdout || '');
+    const stderr = String(evt.stderr || '');
+    const cmd = String(evt.command || '');
+    const lang = detectLangFromCommand(cmd);
+    if (stdout || stderr) {
+      if (lang && typeof hljs !== 'undefined') {
+        try {
+          entry.termEl.innerHTML = highlightCodeAlways(stdout, lang);
+        } catch {
+          entry.termEl.textContent = stdout;
+        }
+      } else {
+        entry.termEl.textContent = stdout;
+      }
+      if (stderr) {
+        const stderrEl = document.createElement('span');
+        stderrEl.className = 'shell-stderr';
+        stderrEl.textContent = stderr;
+        entry.termEl.appendChild(stderrEl);
+      }
+    } else if (entry.text) {
+      // Streaming-only path (no stdout/stderr attached): keep plain text.
       entry.termEl.textContent = entry.text;
+    } else {
+      entry.termEl.textContent = '(no output)';
     }
     
     // Add footer with exit code (same as renderCommandResult)
@@ -2814,16 +2909,27 @@ document.addEventListener('DOMContentLoaded', () => {
     // Output
     const pre = document.createElement('pre');
     pre.className = 'command-output';
-    if (evt.stdout) {
-      pre.appendChild(document.createTextNode(evt.stdout));
-    }
-    if (evt.stderr) {
-      const span = document.createElement('span');
-      span.className = 'shell-stderr';
-      span.textContent = evt.stderr;
-      pre.appendChild(span);
-    }
-    if (!evt.stdout && !evt.stderr) {
+    const stdout = String(evt.stdout || '');
+    const stderr = String(evt.stderr || '');
+    const cmd = String(evt.command || '');
+    const lang = detectLangFromCommand(cmd);
+    if (stdout || stderr) {
+      if (lang && typeof hljs !== 'undefined') {
+        try {
+          pre.innerHTML = highlightCodeAlways(stdout, lang);
+        } catch {
+          pre.textContent = stdout;
+        }
+      } else {
+        pre.textContent = stdout;
+      }
+      if (stderr) {
+        const span = document.createElement('span');
+        span.className = 'shell-stderr';
+        span.textContent = stderr;
+        pre.appendChild(span);
+      }
+    } else {
       pre.textContent = '(no output)';
     }
     body.appendChild(pre);
@@ -3112,6 +3218,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const ribbonText = (prompt ? `${prompt}${command}` : command);
     if (isUserTerminal && typeof ribbonText === 'string' && ribbonText.includes('\x1b[')) {
       cmdRibbon.innerHTML = ansiToHtml(ribbonText);
+    } else if (!isUserTerminal && typeof hljs !== 'undefined' && String(command || '').trim() && hljs.getLanguage('bash')) {
+      // For codex command/exec responses, highlight the command itself as shell (bash).
+      try {
+        const html = hljs.highlight(String(command || ''), { language: 'bash', ignoreIllegals: true }).value;
+        cmdRibbon.innerHTML = `<span class="shell-prompt">$ </span><span class="hljs">${html}</span>`;
+      } catch (_) {
+        cmdRibbon.textContent = ribbonText;
+      }
     } else {
       cmdRibbon.textContent = ribbonText;
     }
@@ -3133,8 +3247,8 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         // Try syntax highlighting based on command
         const lang = detectLangFromCommand(command);
-        if (lang && isDiffSyntaxEnabled()) {
-          outputPre.innerHTML = highlightCode(displayOutput, lang);
+        if (lang && typeof hljs !== 'undefined') {
+          outputPre.innerHTML = highlightCodeAlways(displayOutput, lang);
           if (truncated) {
             const truncNote = document.createElement('span');
             truncNote.className = 'truncation-note';

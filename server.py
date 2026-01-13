@@ -5004,7 +5004,16 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
     # Get or create conversation state and ensure shell is running
     state = mcp_srv._state(conversation_id)
     try:
-        await state.ensure_shell()
+        # Prefer the SSOT CWD for this conversation so the user terminal always
+        # opens in the expected directory (matches meta.json settings).
+        desired_cwd = None
+        try:
+            meta = _load_conversation_meta(conversation_id)
+            settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+            desired_cwd = settings.get("cwd") if isinstance(settings, dict) else None
+        except Exception:
+            desired_cwd = None
+        await state.ensure_shell(cwd=desired_cwd)
     except Exception as e:
         await websocket.close(code=1011, reason=f"Failed to start PTY: {e}")
         return

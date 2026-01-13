@@ -1289,6 +1289,32 @@ body.terminal-mode #footer-terminal-toggle.pill {
   display: none;
 }
 
+/* Picker overlay (CWD + mentions): show basename + path for disambiguation */
+.picker-item-text {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.picker-item-name {
+  font-weight: 600;
+}
+.picker-item-path {
+  font-size: 0.85em;
+  opacity: 0.75;
+  word-break: break-all;
+}
+
+/* Tribute (@ mention) dropdown: basename + path */
+.tribute-container .tribute-item-name {
+  font-weight: 600;
+}
+.tribute-container .tribute-item-path {
+  font-size: 0.85em;
+  opacity: 0.75;
+  word-break: break-all;
+}
+
 .timeline-row.command-result pre.command-output {
   background: #000;
   color: #c9d1d9;
