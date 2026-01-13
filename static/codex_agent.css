@@ -1289,6 +1289,24 @@ body.terminal-mode #footer-terminal-toggle.pill {
   display: none;
 }
 
+/* Semantic shell ribbons (Tree-sitter): token classes in command ribbons only */
+.command-ribbon code.tsribbon {
+  font-family: inherit;
+  font-size: inherit;
+  white-space: inherit;
+}
+.command-ribbon .ts-function { color: #7ab7ff; }
+.command-ribbon .ts-keyword { color: #e5c07b; font-weight: 600; }
+.command-ribbon .ts-operator { color: #56b6c2; }
+.command-ribbon .ts-string { color: inherit; opacity: 0.92; }
+.command-ribbon .ts-property { color: #c678dd; }
+.command-ribbon .ts-number { color: #d19a66; }
+.command-ribbon .ts-constant { color: #e5c07b; }
+.command-ribbon .ts-comment { color: #5c6370; font-style: italic; }
+.command-ribbon .ts-embedded { color: #56b6c2; }
+.command-ribbon .ts-quote { opacity: 0.85; }
+.command-ribbon .ts-quoted-inner { color: inherit; }
+
 /* Picker overlay (CWD + mentions): show basename + path for disambiguation */
 .picker-item-text {
   display: inline-flex;

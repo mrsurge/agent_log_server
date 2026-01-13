@@ -44,6 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsMarkdownEl = document.getElementById('settings-markdown');
   const settingsXtermEl = document.getElementById('settings-xterm');
   const settingsDiffSyntaxEl = document.getElementById('settings-diff-syntax');
+  const settingsSemanticShellRibbonEl = document.getElementById('settings-semantic-shell-ribbon');
   const markdownToggleEl = document.getElementById('markdown-toggle');
   const footerApprovalValue = document.getElementById('footer-approval-value');
   const footerApprovalToggle = document.getElementById('footer-approval-toggle');
@@ -110,6 +111,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let markdownEnabled = true; // Toggle for markdown rendering
   let useXterm = true; // Toggle for xterm.js vs text box rendering
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
+  let semanticShellRibbonEnabled = false; // Tree-sitter semantic highlighting for shell command ribbons
   let commandRunning = false; // Whether a PTY command is currently running
   let ptyWebSocket = null; // Raw PTY WebSocket connection
   let ptyWebSocketConvoId = null; // conversation_id currently bound to ptyWebSocket
@@ -624,6 +626,326 @@ document.addEventListener('DOMContentLoaded', () => {
     return escapeHtml(text || '');
   }
 
+  // --- Tree-sitter semantic shell ribbon (optional) ---
+  let tsRibbonReady = false;
+  let tsRibbonInitPromise = null;
+  let tsRibbonParser = null;
+  let tsRibbonLang = null;
+  let tsRibbonQuery = null;
+  const tsRibbonCache = new Map(); // cmd -> html (simple LRU)
+  const TS_RIBBON_CACHE_MAX = 500;
+
+  function isSemanticShellRibbonEnabled() {
+    return semanticShellRibbonEnabled === true;
+  }
+
+  function setSemanticShellRibbonEnabled(enabled) {
+    semanticShellRibbonEnabled = enabled === true;
+    const el = document.getElementById('settings-semantic-shell-ribbon');
+    if (el) el.checked = semanticShellRibbonEnabled;
+  }
+
+  function _tsNormalizeCaptureName(name) {
+    const raw = String(name || '').replace(/^@/, '');
+    return raw.replace(/[^\w.-]+/g, '-').replace(/\./g, '-');
+  }
+
+  function _tsMaybeCachePut(key, value) {
+    if (!key) return;
+    if (tsRibbonCache.has(key)) tsRibbonCache.delete(key);
+    tsRibbonCache.set(key, value);
+    while (tsRibbonCache.size > TS_RIBBON_CACHE_MAX) {
+      const first = tsRibbonCache.keys().next().value;
+      tsRibbonCache.delete(first);
+    }
+  }
+
+  function _utf8Len(cp) {
+    if (cp <= 0x7F) return 1;
+    if (cp <= 0x7FF) return 2;
+    if (cp <= 0xFFFF) return 3;
+    return 4;
+  }
+
+  function _buildJsIndexToUtf8ByteOffsets(text) {
+    const s = String(text || '');
+    const offsets = new Array(s.length + 1);
+    let byte = 0;
+    for (let i = 0; i < s.length; ) {
+      offsets[i] = byte;
+      const cp = s.codePointAt(i);
+      byte += _utf8Len(cp);
+      i += cp > 0xFFFF ? 2 : 1;
+    }
+    offsets[s.length] = byte;
+    for (let i = 1; i < offsets.length; i++) {
+      if (offsets[i] == null) offsets[i] = offsets[i - 1];
+    }
+    return offsets;
+  }
+
+  function _utf8ByteToJsIndex(offsets, byteIndex) {
+    const arr = offsets;
+    let lo = 0;
+    let hi = arr.length - 1;
+    const target = Math.max(0, Math.min(Number(byteIndex) || 0, arr[hi] || 0));
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi + 1) / 2);
+      if (arr[mid] <= target) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  async function ensureTreeSitterRibbonReady() {
+    if (!isSemanticShellRibbonEnabled()) return false;
+    if (tsRibbonReady) return true;
+    if (tsRibbonInitPromise) return tsRibbonInitPromise;
+    tsRibbonInitPromise = (async () => {
+      // Load web-tree-sitter as an ES module (avoids global/version drift).
+      const mod = await import('/static/vendor/web-tree-sitter/web-tree-sitter.js');
+      const Parser = mod?.Parser;
+      const Language = mod?.Language;
+      const Query = mod?.Query;
+      if (!Parser || !Language || !Query) {
+        throw new Error('web-tree-sitter module did not export Parser/Language/Query');
+      }
+      await Parser.init({
+        locateFile: (file) => `/static/vendor/web-tree-sitter/${file}`,
+      });
+      tsRibbonLang = await Language.load('/static/vendor/tree-sitter-bash/tree-sitter-bash.wasm');
+      tsRibbonParser = new Parser();
+      tsRibbonParser.setLanguage(tsRibbonLang);
+      const r = await fetch('/static/vendor/tree-sitter-bash/highlights.scm', { cache: 'no-store' });
+      if (!r.ok) throw new Error('failed to load highlights.scm');
+      const scm = await r.text();
+      tsRibbonQuery = new Query(tsRibbonLang, scm);
+      tsRibbonReady = true;
+      return true;
+    })().catch((err) => {
+      console.warn('Tree-sitter ribbon init failed:', err);
+      tsRibbonReady = false;
+      tsRibbonInitPromise = null;
+      return false;
+    });
+    return tsRibbonInitPromise;
+  }
+
+  function _splitShellCString(cmd) {
+    // Heuristic: if command looks like `sh|bash|zsh -c|-lc "SCRIPT"` return script region.
+    const s = String(cmd || '');
+    const m = s.match(/\b(?:sh|bash|zsh|dash|ksh)\b/);
+    if (!m) return null;
+    const optIdx = s.search(/\s-[^\s]*c\b/); // -c, -lc, -xec, etc.
+    if (optIdx < 0) return null;
+    // Find first quote after the -c-ish option.
+    let i = optIdx;
+    while (i < s.length && s[i] !== '"' && s[i] !== "'") i++;
+    if (i >= s.length) return null;
+    const quote = s[i];
+    const startQuote = i;
+    i += 1;
+    let script = '';
+    for (; i < s.length; i++) {
+      const ch = s[i];
+      if (quote === '"' && ch === '\\' && i + 1 < s.length) {
+        script += ch + s[i + 1];
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        const endQuote = i;
+        return {
+          prefix: s.slice(0, startQuote),
+          quote,
+          script,
+          suffix: s.slice(endQuote + 1),
+        };
+      }
+      script += ch;
+    }
+    return null;
+  }
+
+  function splitQuotedSegments(text) {
+    const s = String(text || '');
+    const segs = [];
+    let buf = '';
+    let i = 0;
+
+    function pushText() {
+      if (buf) {
+        segs.push({ type: 'text', text: buf });
+        buf = '';
+      }
+    }
+
+    while (i < s.length) {
+      const ch = s[i];
+      if (ch !== '\'' && ch !== '"' && ch !== '`') {
+        buf += ch;
+        i += 1;
+        continue;
+      }
+
+      // Start of quoted region
+      const quote = ch;
+      pushText();
+      i += 1; // consume opening quote
+      let inner = '';
+
+      while (i < s.length) {
+        const c = s[i];
+        if (quote === '\'' ) {
+          // Single quotes: no escaping
+          if (c === '\'') break;
+          inner += c;
+          i += 1;
+          continue;
+        }
+        // Double/backtick: allow escapes
+        if (c === '\\' && i + 1 < s.length) {
+          inner += c + s[i + 1];
+          i += 2;
+          continue;
+        }
+        if (c === quote) break;
+        inner += c;
+        i += 1;
+      }
+
+      // If we never found the closing quote, treat the whole thing as plain text.
+      if (i >= s.length || s[i] !== quote) {
+        buf += quote + inner;
+        break;
+      }
+
+      // Consume closing quote
+      i += 1;
+      segs.push({ type: 'quote', quote, text: inner });
+    }
+
+    pushText();
+    return segs;
+  }
+
+  function treeSitterHighlightHtml(text) {
+    if (!tsRibbonReady || !tsRibbonParser || !tsRibbonQuery) {
+      return escapeHtml(text || '');
+    }
+    const input = String(text || '');
+    if (!input.trim()) return escapeHtml(input);
+    const cached = tsRibbonCache.get(input);
+    if (cached) return cached;
+
+    let tree;
+    try {
+      tree = tsRibbonParser.parse(input);
+    } catch (_) {
+      const escaped = escapeHtml(input);
+      _tsMaybeCachePut(input, escaped);
+      return escaped;
+    }
+
+    let captures = [];
+    try {
+      captures = tsRibbonQuery.captures(tree.rootNode) || [];
+    } catch (_) {
+      captures = [];
+    }
+
+    const offsets = _buildJsIndexToUtf8ByteOffsets(input);
+    const spans = [];
+    for (const cap of captures) {
+      const name = cap && (cap.name || cap.capture || cap[0]);
+      const node = cap && (cap.node || cap[1]);
+      const startB = node?.startIndex;
+      const endB = node?.endIndex;
+      if (startB == null || endB == null) continue;
+      const start = _utf8ByteToJsIndex(offsets, startB);
+      const end = _utf8ByteToJsIndex(offsets, endB);
+      if (end <= start) continue;
+      spans.push({
+        start,
+        end,
+        cls: `ts-${_tsNormalizeCaptureName(name)}`,
+        len: end - start,
+      });
+    }
+    // Sort by start, then prefer longer spans to reduce overlap junk.
+    spans.sort((a, b) => (a.start - b.start) || (b.len - a.len));
+    const picked = [];
+    let lastEnd = 0;
+    for (const sp of spans) {
+      if (sp.start < lastEnd) continue;
+      picked.push(sp);
+      lastEnd = sp.end;
+    }
+
+    let out = '';
+    let idx = 0;
+    for (const sp of picked) {
+      if (sp.start > idx) out += escapeHtml(input.slice(idx, sp.start));
+      out += `<span class="${sp.cls}">${escapeHtml(input.slice(sp.start, sp.end))}</span>`;
+      idx = sp.end;
+    }
+    if (idx < input.length) out += escapeHtml(input.slice(idx));
+    _tsMaybeCachePut(input, out);
+    return out;
+  }
+
+  function renderShellCmdRibbon(el, cmd) {
+    if (!el) return;
+    const command = String(cmd || '');
+
+    // Prefer semantic highlighting when enabled and ready (Tree-sitter).
+    if (isSemanticShellRibbonEnabled()) {
+      if (!tsRibbonReady && !tsRibbonInitPromise) {
+        // Fire-and-forget; replayTranscript awaits init explicitly.
+        ensureTreeSitterRibbonReady();
+      }
+      if (tsRibbonReady) {
+        try {
+          const segs = splitQuotedSegments(command);
+          let html = '';
+          for (const seg of segs) {
+            if (seg.type === 'text') {
+              html += treeSitterHighlightHtml(seg.text);
+            } else if (seg.type === 'quote') {
+              const q = escapeHtml(seg.quote);
+              html += `<span class="ts-quote">${q}</span>`;
+              html += `<span class="ts-quoted-inner">${treeSitterHighlightHtml(seg.text)}</span>`;
+              html += `<span class="ts-quote">${q}</span>`;
+            }
+          }
+          el.innerHTML = `<span class="shell-prompt">$ </span><code class="tsribbon">${html}</code>`;
+          return;
+        } catch (_) {
+          // Fall through to hljs rendering.
+        }
+      }
+    }
+
+    // Fallback: markdown-style highlight.js rendering (DOM code element + highlightElement).
+    if (typeof hljs === 'undefined' || !command.trim()) {
+      el.textContent = `$ ${command}`;
+      return;
+    }
+    try {
+      el.innerHTML = '';
+      const prefix = document.createElement('span');
+      prefix.className = 'shell-prompt';
+      prefix.textContent = '$ ';
+      const codeEl = document.createElement('code');
+      codeEl.className = 'language-bash';
+      codeEl.textContent = command;
+      el.append(prefix, codeEl);
+      hljs.highlightElement(codeEl);
+    } catch (_) {
+      el.textContent = `$ ${command}`;
+    }
+  }
+
   function setCommandRunning(running) {
     commandRunning = running;
     // Visual indicator: composer background goes black when stdin is active
@@ -972,6 +1294,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = '20';
       if (settingsMarkdownEl) settingsMarkdownEl.checked = true;
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || '';
+      if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = false;
     } else {
       if (settingsCwdEl) settingsCwdEl.value = conversationSettings?.cwd || '';
       if (settingsApprovalEl) settingsApprovalEl.value = conversationSettings?.approvalPolicy || '';
@@ -986,6 +1309,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsMarkdownEl) settingsMarkdownEl.checked = conversationSettings?.markdown !== false;
       if (settingsXtermEl) settingsXtermEl.checked = conversationSettings?.useXterm !== false;
       if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = conversationSettings?.diffSyntax === true;
+      if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = conversationSettings?.semanticShellRibbon === true;
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || conversationSettings?.rolloutId || '';
     }
     if (settingsRolloutRowEl) {
@@ -1767,14 +2091,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const ribbonText = (prompt ? `${prompt}${cmd}` : cmd);
         if (isUserTerminal && typeof ribbonText === 'string' && ribbonText.includes('\x1b[')) {
           cmdRibbon.innerHTML = ansiToHtml(ribbonText);
-        } else if (!isUserTerminal && typeof hljs !== 'undefined' && String(cmd || '').trim() && hljs.getLanguage('bash')) {
-          // Playback: highlight the command itself as bash (shell) for codex exec outputs.
-          try {
-            const html = hljs.highlight(String(cmd || ''), { language: 'bash', ignoreIllegals: true }).value;
-            cmdRibbon.innerHTML = `<span class="shell-prompt">$ </span><span class="hljs">${html}</span>`;
-          } catch (_) {
-            cmdRibbon.textContent = ribbonText;
-          }
+        } else if (!isUserTerminal) {
+          renderShellCmdRibbon(cmdRibbon, cmd);
         } else {
           cmdRibbon.textContent = ribbonText;
         }
@@ -1944,16 +2262,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const cmdRibbon = document.createElement('div');
         cmdRibbon.className = 'command-ribbon';
         const shellCmd = String(entry.command || '');
-        if (typeof hljs !== 'undefined' && shellCmd.trim() && hljs.getLanguage('bash')) {
-          try {
-            const html = hljs.highlight(shellCmd, { language: 'bash', ignoreIllegals: true }).value;
-            cmdRibbon.innerHTML = `<span class="shell-prompt">$ </span><span class="hljs">${html}</span>`;
-          } catch (_) {
-            cmdRibbon.textContent = `$ ${shellCmd}`;
-          }
-        } else {
-          cmdRibbon.textContent = `$ ${shellCmd}`;
-        }
+        renderShellCmdRibbon(cmdRibbon, shellCmd);
         body.appendChild(cmdRibbon);
         
         // Output
@@ -2802,18 +3111,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderShellBegin(evt) {
     const entry = getShellRow(evt.id);
     // Just show the command, skip cwd line (redundant)
-    const cmd = String(evt.command || '');
-    // Commands are always shell-highlighted (bash) for readability.
-    if (typeof hljs !== 'undefined' && cmd.trim() && hljs.getLanguage('bash')) {
-      try {
-        const html = hljs.highlight(cmd, { language: 'bash', ignoreIllegals: true }).value;
-        entry.cmdRibbon.innerHTML = `<span class="shell-prompt">$ </span><span class="hljs">${html}</span>`;
-      } catch {
-        entry.cmdRibbon.textContent = `$ ${cmd}`;
-      }
-    } else {
-      entry.cmdRibbon.textContent = `$ ${cmd}`;
-    }
+    renderShellCmdRibbon(entry.cmdRibbon, evt.command || '');
     entry.text = '';
     // Plain text mode - no xterm
     entry.termEl.textContent = '';
@@ -3218,14 +3516,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const ribbonText = (prompt ? `${prompt}${command}` : command);
     if (isUserTerminal && typeof ribbonText === 'string' && ribbonText.includes('\x1b[')) {
       cmdRibbon.innerHTML = ansiToHtml(ribbonText);
-    } else if (!isUserTerminal && typeof hljs !== 'undefined' && String(command || '').trim() && hljs.getLanguage('bash')) {
-      // For codex command/exec responses, highlight the command itself as shell (bash).
-      try {
-        const html = hljs.highlight(String(command || ''), { language: 'bash', ignoreIllegals: true }).value;
-        cmdRibbon.innerHTML = `<span class="shell-prompt">$ </span><span class="hljs">${html}</span>`;
-      } catch (_) {
-        cmdRibbon.textContent = ribbonText;
-      }
+    } else if (!isUserTerminal) {
+      renderShellCmdRibbon(cmdRibbon, command);
     } else {
       cmdRibbon.textContent = ribbonText;
     }
@@ -3601,6 +3893,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const mdEnabled = settingsMarkdownEl?.checked !== false;
     const xtermEnabled = settingsXtermEl?.checked !== false;
     const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
+    const semanticRibbonEnabled = settingsSemanticShellRibbonEl?.checked === true;
     const settings = {
       cwd,
       approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
@@ -3613,6 +3906,7 @@ document.addEventListener('DOMContentLoaded', () => {
       markdown: mdEnabled,
       useXterm: xtermEnabled,
       diffSyntax: diffSyntaxEnabled,
+      semanticShellRibbon: semanticRibbonEnabled,
     };
     // Update local markdown state
     setMarkdownEnabled(mdEnabled);
@@ -3620,6 +3914,11 @@ document.addEventListener('DOMContentLoaded', () => {
     setXtermEnabled(xtermEnabled);
     // Update diff syntax highlight state
     setDiffSyntaxEnabled(diffSyntaxEnabled);
+    // Update semantic shell ribbon state (Tree-sitter)
+    setSemanticShellRibbonEnabled(semanticRibbonEnabled);
+    if (semanticRibbonEnabled) {
+      await ensureTreeSitterRibbonReady();
+    }
     const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
     if (isNewConversation) {
       const meta = await postJson('/api/appserver/conversations', {});
@@ -3734,6 +4033,11 @@ document.addEventListener('DOMContentLoaded', () => {
       setXtermEnabled(conversationSettings?.useXterm !== false);
       // Sync diff syntax toggle from settings
       setDiffSyntaxEnabled(conversationSettings?.diffSyntax === true);
+      // Sync semantic shell ribbon toggle from settings (Tree-sitter)
+      setSemanticShellRibbonEnabled(conversationSettings?.semanticShellRibbon === true);
+      if (conversationSettings?.semanticShellRibbon === true) {
+        ensureTreeSitterRibbonReady();
+      }
       // If conversation switched, reset composer terminal state so we don't mix streams.
       const convoId = conversationMeta?.conversation_id;
       if (convoId && ptyWebSocketConvoId && ptyWebSocketConvoId !== convoId) {
@@ -3954,6 +4258,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function replayTranscript() {
     try {
+      if (isSemanticShellRibbonEnabled()) {
+        await ensureTreeSitterRibbonReady();
+      }
       const data = await fetchTranscriptRange(-1, transcriptLimit);
       if (!data || !Array.isArray(data.items)) return;
       transcriptTotal = data.total || 0;

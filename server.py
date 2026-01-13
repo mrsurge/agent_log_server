@@ -3737,6 +3737,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     Input(type="checkbox", id="settings-diff-syntax", checked=False),
                                     cls="settings-checkbox-row"
                                 ),
+                                Label(
+                                    Span("Semantic shell ribbon (Tree-sitter)"),
+                                    Input(type="checkbox", id="settings-semantic-shell-ribbon", checked=False),
+                                    cls="settings-checkbox-row"
+                                ),
                                 cls="settings-body"
                             ),
                             Div(

@@ -1301,13 +1301,6 @@ class ConversationState:
             # Load per-conversation preferred screen size (if any) before attach/resize.
             await self._load_persisted_screen_size()
             if self.shell_id:
-                # Align to desired cwd when idle (safe for the user-facing PTY open path).
-                # Avoid doing this while an interactive session is active.
-                if cwd and self._mode == "idle":
-                    try:
-                        await mgr.write_to_pty(self.shell_id, f'cd "{cwd}" 2>/dev/null || cd "{cwd}"\n')
-                    except Exception:
-                        pass
                 # Shell already known - only resize if size actually changed.
                 await self._maybe_resize_pty(mgr, self.shell_id, self._screen_cols, self._screen_rows)
                 await self._ensure_reader(mgr)
@@ -1320,11 +1313,6 @@ class ConversationState:
                     rec = await mgr.get_shell(cached_id)
                     if rec and rec.status == "running":
                         self.shell_id = rec.id
-                        if cwd and self._mode == "idle":
-                            try:
-                                await mgr.write_to_pty(self.shell_id, f'cd "{cwd}" 2>/dev/null || cd "{cwd}"\n')
-                            except Exception:
-                                pass
                         # Reattach - only resize if size actually changed.
                         await self._maybe_resize_pty(mgr, self.shell_id, self._screen_cols, self._screen_rows)
                         await self._ensure_reader(mgr)
