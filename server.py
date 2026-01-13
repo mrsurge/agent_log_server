@@ -15,6 +15,7 @@ import secrets
 import uuid
 import subprocess
 import socketio
+import binascii
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException, Depends
@@ -118,6 +119,12 @@ CODEX_AGENT_SCOPE = "/codex-agent/"
 _pty_hub_lock = asyncio.Lock()
 _pty_hubs: Dict[str, Dict[str, Any]] = {}  # conversation_id -> hub state
 _PTY_HUB_IDLE_SECS = float(os.environ.get("APP_SERVER_PTY_HUB_IDLE_SECS", "60"))
+
+# User terminal command capture (markers + raw bytes slicing)
+_USER_PTY_RAW_MAX_BYTES_PER_CMD = 512 * 1024  # cap per command slice (safety)
+_USER_PTY_RAW_DIRNAME = "user_pty"
+_user_pty_capture_lock = asyncio.Lock()
+_user_pty_capture: Dict[str, Dict[str, Any]] = {}  # conversation_id -> {raw_path, raw_cursor, open_blocks, marker_offset}
 
 
 def _asset(url: str) -> str:
@@ -264,6 +271,147 @@ def _default_conversation_meta(conversation_id: str) -> Dict[str, Any]:
         "status": "draft",
     }
 
+
+def _user_pty_root(conversation_id: str) -> Path:
+    return _conversation_dir(conversation_id) / _USER_PTY_RAW_DIRNAME
+
+
+def _user_pty_raw_path(conversation_id: str) -> Path:
+    return _user_pty_root(conversation_id) / "output.raw"
+
+
+def _user_pty_marker_path(conversation_id: str) -> Path:
+    # Markers are emitted by the agent_pty rcfile to fd3 and written under agent_pty.
+    return _conversation_dir(conversation_id) / "agent_pty" / "markers.log"
+
+
+def _user_pty_marker_offset_path(conversation_id: str) -> Path:
+    return _user_pty_root(conversation_id) / ".markers_offset"
+
+
+def _ansi_strip(text: str) -> str:
+    # Strip CSI + OSC sequences; keep printable output for transcript cards.
+    if not text:
+        return ""
+    try:
+        # OSC: ESC ] ... BEL or ST
+        text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+        # CSI: ESC [ ... letter
+        text = re.sub(r"\x1b\[[0-9;:?]*[ -/]*[@-~]", "", text)
+    except Exception:
+        return text
+    return text
+
+
+def _scrub_user_cmd_output_keep_sgr(text: str) -> str:
+    """Scrub terminal control noise but keep SGR color (CSI ... m) for UI rendering.
+
+    This is used for *user terminal* command output cards. We want colored output,
+    but we do not want cursor movement / clear-screen / save-restore cursor, etc.
+    """
+    if not text:
+        return ""
+    try:
+        # Normalize line endings early
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Drop OSC sequences (titles, etc.)
+        text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+
+        # Drop save/restore cursor (ESC 7 / ESC 8)
+        text = text.replace("\x1b7", "").replace("\x1b8", "")
+
+        # Keep only CSI SGR (ending with 'm'); drop all other CSI sequences.
+        def _keep_sgr(m: re.Match) -> str:
+            seq = m.group(0)
+            return seq if seq.endswith("m") else ""
+
+        text = re.sub(r"\x1b\[[0-9;:?]*[ -/]*[@-~]", _keep_sgr, text)
+
+        # Apply backspaces naively (common from readline/progress redraws).
+        out_chars: list[str] = []
+        for ch in text:
+            if ch == "\b":
+                if out_chars:
+                    out_chars.pop()
+                continue
+            out_chars.append(ch)
+        return "".join(out_chars)
+    except Exception:
+        return text
+
+
+def _termux_user_prompt_from_cwd(cwd: str) -> str:
+    """Render a prompt consistent with the agent_pty rcfile PS1 (SGR colors kept)."""
+    if not isinstance(cwd, str):
+        cwd = ""
+    # Common Termux path: /data/data/com.termux/files/home -> ~
+    home = os.path.expanduser("~")
+    if cwd and home and cwd.startswith(home):
+        cwd_disp = "~" + cwd[len(home):]
+        if cwd_disp == "":
+            cwd_disp = "~"
+    else:
+        cwd_disp = cwd or "~"
+    return f"\x1b[0;32m{cwd_disp}\x1b[0m \x1b[0;97m$\x1b[0m "
+
+
+def _strip_trailing_prompt_lines(text: str) -> str:
+    """Drop trailing PS1 lines from a captured output slice (keep real output)."""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    # Remove empty trailing lines first.
+    while lines and not lines[-1].strip():
+        lines.pop()
+    # Strip one or more trailing prompt-looking lines.
+    # We match the exact PS1 format set in shell_manager.py rcfile.
+    prompt_re = re.compile(r"^\x1b\[0;32m.*?\x1b\[0m \x1b\[0;97m\$\x1b\[0m\s*$")
+    while lines and prompt_re.match(lines[-1]):
+        lines.pop()
+        while lines and not lines[-1].strip():
+            lines.pop()
+    return "\n".join(lines)
+
+
+def _safe_b64decode(s: str) -> str:
+    if not s:
+        return ""
+    try:
+        raw = base64.b64decode(s.encode("ascii"), validate=False)
+        return raw.decode("utf-8", errors="replace")
+    except (binascii.Error, UnicodeError):
+        try:
+            raw = base64.b64decode(s.encode("ascii"), validate=False)
+            return raw.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+
+async def _append_pending_cmd_buffer(conversation_id: str, entry: Dict[str, Any]) -> None:
+    """Append a pre-built command entry to pending_cmd_buffer (for CODEX_META injection)."""
+    meta = _load_conversation_meta(conversation_id)
+    buffer = meta.get("pending_cmd_buffer", {})
+    shell_id = _get_shell_id_for_envelope(conversation_id)
+
+    if "commands" not in buffer:
+        buffer = {
+            "v": 1,
+            "shell_id": shell_id,
+            "conversation_id": conversation_id,
+            "commands": [],
+            "total_commands_run": 0,
+        }
+
+    buffer["total_commands_run"] = buffer.get("total_commands_run", 0) + 1
+    buffer["commands"].append(entry)
+    if len(buffer["commands"]) > _CMD_BUFFER_MAX_ENTRIES:
+        buffer["commands"] = buffer["commands"][-_CMD_BUFFER_MAX_ENTRIES:]
+    if shell_id:
+        buffer["shell_id"] = shell_id
+
+    meta["pending_cmd_buffer"] = buffer
+    _save_conversation_meta(conversation_id, meta)
 
 def _load_conversation_meta(conversation_id: str) -> Dict[str, Any]:
     path = _conversation_meta_path(conversation_id)
@@ -4880,6 +5028,296 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
     except Exception as e:
         await websocket.close(code=1011, reason=f"Failed to start PTY hub: {e}")
         return
+
+    async def _ensure_user_capture(convo_id: str, shell_id: str, mgr) -> None:
+        """Ensure background capture of raw bytes + marker slicing for user terminal commands."""
+        async with _user_pty_capture_lock:
+            cap = _user_pty_capture.get(convo_id)
+            if not cap:
+                raw_path = _user_pty_raw_path(convo_id)
+                raw_path.parent.mkdir(parents=True, exist_ok=True)
+                if not raw_path.exists():
+                    raw_path.write_bytes(b"")
+                try:
+                    raw_cursor = int(raw_path.stat().st_size)
+                except Exception:
+                    raw_cursor = 0
+
+                marker_offset = 0
+                off_path = _user_pty_marker_offset_path(convo_id)
+                if off_path.exists():
+                    try:
+                        marker_offset = int(off_path.read_text(encoding="utf-8").strip() or "0")
+                    except Exception:
+                        marker_offset = 0
+
+                cap = {
+                    "raw_path": raw_path,
+                    "raw_cursor": raw_cursor,
+                    "shell_id": shell_id,
+                    "open_blocks": {},  # seq -> {begin_cursor, ts_begin, cmd, cwd}
+                    "marker_offset": marker_offset,
+                    "emitted_block_ends": set(),  # (seq, ts_end) to avoid duplicates
+                    "bytes_task": None,
+                    "marker_task": None,
+                    "bytes_queue": None,
+                }
+                _user_pty_capture[convo_id] = cap
+            else:
+                cap["shell_id"] = shell_id
+
+        # Start bytes capture task once.
+        if not cap.get("bytes_task") or cap["bytes_task"].done():
+            if not hasattr(mgr, "subscribe_output_bytes"):
+                # No lossless bytes stream available; can't do deterministic slicing.
+                return
+            try:
+                bytes_q = await mgr.subscribe_output_bytes(shell_id)
+            except Exception:
+                return
+            cap["bytes_queue"] = bytes_q
+
+            def _append_bytes(path: Path, data: bytes) -> None:
+                with path.open("ab") as f:
+                    f.write(data)
+
+            async def _bytes_loop():
+                while True:
+                    chunk_b = await bytes_q.get()
+                    if not chunk_b:
+                        continue
+                    if isinstance(chunk_b, str):
+                        chunk = chunk_b.encode("utf-8", errors="replace")
+                    else:
+                        chunk = bytes(chunk_b)
+                    try:
+                        await asyncio.to_thread(_append_bytes, cap["raw_path"], chunk)  # type: ignore[arg-type]
+                    except Exception:
+                        # If we can't write, still advance cursor best-effort
+                        pass
+                    cap["raw_cursor"] = int(cap.get("raw_cursor") or 0) + len(chunk)
+
+            cap["bytes_task"] = asyncio.create_task(_bytes_loop(), name=f"user-pty-bytes:{convo_id}")
+
+        # Start marker tailer task once.
+        if cap.get("marker_task") and not cap["marker_task"].done():
+            return
+
+        marker_path = _user_pty_marker_path(convo_id)
+
+        async def _read_marker_tail(path: Path, offset: int) -> tuple[bytes, int, bool]:
+            if not path.exists():
+                return (b"", offset, False)
+            try:
+                data = await asyncio.to_thread(path.read_bytes)
+            except Exception:
+                return (b"", offset, False)
+            rewound = False
+            if offset > len(data):
+                offset = 0
+                rewound = True
+            return (data[offset:], offset, rewound)
+
+        async def _marker_loop():
+            buf = b""
+            while True:
+                tail, base_off, rewound = await _read_marker_tail(marker_path, int(cap.get("marker_offset") or 0))
+                if not tail:
+                    await asyncio.sleep(0.15)
+                    continue
+                # IMPORTANT: if the file was truncated and we rewound to 0, we must
+                # not keep adding to the previous (now invalid) offset, otherwise we'll
+                # re-read the same markers forever and spam duplicate command_result events.
+                if rewound:
+                    cap["marker_offset"] = base_off + len(tail)
+                else:
+                    cap["marker_offset"] = int(cap.get("marker_offset") or 0) + len(tail)
+                try:
+                    off_path = _user_pty_marker_offset_path(convo_id)
+                    off_path.parent.mkdir(parents=True, exist_ok=True)
+                    await asyncio.to_thread(off_path.write_text, str(cap["marker_offset"]), encoding="utf-8")
+                except Exception:
+                    pass
+
+                buf += tail
+                lines = buf.splitlines(keepends=False)
+                # Keep trailing partial line in buffer.
+                if buf and not (buf.endswith(b"\n") or buf.endswith(b"\r")):
+                    buf = lines[-1] if lines else buf
+                    lines = lines[:-1] if len(lines) > 1 else []
+                else:
+                    buf = b""
+
+                for raw_line in lines:
+                    try:
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                    except Exception:
+                        continue
+                    if not line:
+                        continue
+
+                    if line.startswith("__FWS_BLOCK_BEGIN__"):
+                        # __FWS_BLOCK_BEGIN__ seq=<n> ts=<ms> cwd_b64=<...> cmd_b64=<...>
+                        m = re.search(r"seq=([0-9]+)", line)
+                        if not m:
+                            continue
+                        seq = int(m.group(1))
+                        ts_m = re.search(r"ts=([0-9]+)", line)
+                        ts_begin = int(ts_m.group(1)) if ts_m else None
+                        cwd_b64 = ""
+                        cmd_b64 = ""
+                        mcwd = re.search(r"cwd_b64=([^\\s]+)", line)
+                        mcmd = re.search(r"cmd_b64=([^\\s]+)", line)
+                        if mcwd:
+                            cwd_b64 = mcwd.group(1)
+                        if mcmd:
+                            cmd_b64 = mcmd.group(1)
+                        cmd = _safe_b64decode(cmd_b64)
+                        cwd = _safe_b64decode(cwd_b64)
+                        cap["open_blocks"][seq] = {
+                            "seq": seq,
+                            "ts_begin": ts_begin,
+                            "cmd": cmd,
+                            "cwd": cwd,
+                            "begin_cursor": int(cap.get("raw_cursor") or 0),
+                        }
+                        continue
+
+                    if line.startswith("__FWS_BLOCK_END__"):
+                        m = re.search(r"seq=([0-9]+)", line)
+                        if not m:
+                            continue
+                        seq = int(m.group(1))
+                        exit_m = re.search(r"exit=([-0-9]+)", line)
+                        exit_code = int(exit_m.group(1)) if exit_m else 0
+                        ts_m = re.search(r"ts=([0-9]+)", line)
+                        ts_end = int(ts_m.group(1)) if ts_m else None
+
+                        # Dedupe: if we have already emitted this block end, skip it.
+                        # (This protects against marker offset bugs and noisy reconnects.)
+                        try:
+                            end_key = (seq, ts_end)
+                            if end_key in cap.get("emitted_block_ends", set()):
+                                continue
+                            cap.setdefault("emitted_block_ends", set()).add(end_key)
+                            # Bound memory.
+                            if len(cap["emitted_block_ends"]) > 5000:
+                                cap["emitted_block_ends"].clear()
+                        except Exception:
+                            pass
+
+                        block = cap["open_blocks"].pop(seq, None)
+                        if not isinstance(block, dict):
+                            continue
+                        begin_cursor = int(block.get("begin_cursor") or 0)
+                        end_cursor = int(cap.get("raw_cursor") or 0)
+
+                        # Marker events can arrive slightly ahead of the raw-bytes capture loop
+                        # (separate streams). If we slice too early, we may capture only a prompt
+                        # redraw and miss the actual command output.
+                        try:
+                            raw_path = cap.get("raw_path")
+                            if isinstance(raw_path, Path):
+                                last_size = None
+                                for _ in range(6):  # ~300ms max (6 * 50ms)
+                                    try:
+                                        size_now = int(raw_path.stat().st_size)
+                                    except Exception:
+                                        size_now = None
+                                    if size_now is None:
+                                        break
+                                    end_cursor = max(end_cursor, size_now)
+                                    if last_size is not None and size_now == last_size:
+                                        break
+                                    last_size = size_now
+                                    await asyncio.sleep(0.05)
+                                # Keep cursor in sync with file length if it advanced.
+                                if last_size is not None:
+                                    cap["raw_cursor"] = max(int(cap.get("raw_cursor") or 0), int(last_size))
+                        except Exception:
+                            pass
+                        if end_cursor < begin_cursor:
+                            continue
+                        # Safety cap: don't slice unbounded output.
+                        if (end_cursor - begin_cursor) > _USER_PTY_RAW_MAX_BYTES_PER_CMD:
+                            begin_cursor = max(0, end_cursor - _USER_PTY_RAW_MAX_BYTES_PER_CMD)
+
+                        def _read_slice() -> bytes:
+                            try:
+                                with cap["raw_path"].open("rb") as f:  # type: ignore
+                                    f.seek(begin_cursor)
+                                    return f.read(max(0, end_cursor - begin_cursor))
+                            except Exception:
+                                return b""
+
+                        raw_out = await asyncio.to_thread(_read_slice)
+                        text = raw_out.decode("utf-8", errors="replace")
+                        scrubbed = _scrub_user_cmd_output_keep_sgr(text).strip("\n")
+
+                        # Build bounded preview for transcript/UI.
+                        preview_lines_raw = scrubbed.splitlines()[-_CMD_PREVIEW_MAX_LINES:]
+                        preview_text = "\n".join(preview_lines_raw).strip()
+                        duration_ms = None
+                        try:
+                            if block.get("ts_begin") and ts_end:
+                                duration_ms = max(0, int(ts_end) - int(block["ts_begin"]))
+                        except Exception:
+                            duration_ms = None
+
+                        cmd = str(block.get("cmd") or "")
+                        cwd = str(block.get("cwd") or "")
+                        prompt = _termux_user_prompt_from_cwd(cwd)
+
+                        # Remove any trailing prompt redraws from the output slice; we render
+                        # prompt+command in the ribbon instead.
+                        preview_text = _strip_trailing_prompt_lines(preview_text)
+                        preview_lines = preview_text.splitlines()[-_CMD_PREVIEW_MAX_LINES:]
+
+                        # Persist for replay.
+                        await _append_transcript_entry(convo_id, {
+                            "role": "command",
+                            "command": cmd,
+                            "cwd": cwd,
+                            "prompt": prompt,
+                            "output": preview_text,
+                            "exit_code": exit_code,
+                            "duration_ms": duration_ms,
+                            "source": "user_terminal",
+                            "seq": seq,
+                        })
+
+                        # Live render.
+                        await _broadcast_appserver_ui({
+                            "type": "command_result",
+                            "conversation_id": convo_id,
+                            "command": cmd,
+                            "cwd": cwd,
+                            "prompt": prompt,
+                            "output": preview_text,
+                            "exit_code": exit_code,
+                            "duration_ms": duration_ms,
+                            "source": "user_terminal",
+                        })
+
+                        # Buffer for CODEX_META on next turn/start.
+                        await _append_pending_cmd_buffer(convo_id, {
+                            "cmd": cmd,
+                            "exit_code": exit_code,
+                            "cwd": cwd,
+                            "block_id": f"user:{convo_id}:{seq}:{ts_end or int(time.time() * 1000)}",
+                            "ts": ts_end or int(time.time() * 1000),
+                            "preview": {"lines": preview_lines[-_CMD_PREVIEW_MAX_LINES:], "truncated": False},
+                        })
+                        continue
+
+        cap["marker_task"] = asyncio.create_task(_marker_loop(), name=f"user-pty-markers:{convo_id}")
+
+    # Start/ensure background capture for this conversation (best-effort).
+    try:
+        mgr_for_capture = hub.get("mgr") or await _get_fws_manager()
+        await _ensure_user_capture(conversation_id, shell_id, mgr_for_capture)
+    except Exception:
+        pass
 
     # Register this websocket with the hub.
     client_q: asyncio.Queue = asyncio.Queue(maxsize=1000)
