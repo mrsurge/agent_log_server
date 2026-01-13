@@ -210,6 +210,12 @@ else
   }
   PROMPT_COMMAND="__fws_precmd"
 fi
+
+# Use a readline-safe prompt. Any non-printing characters (ANSI escapes) MUST be
+# wrapped in \[ \] so bash/readline can compute cursor position + wrapping
+# correctly. This prevents the "cursor lands in the middle of the prompt" /
+# wrap-overwrite glitches when the prompt is long.
+PS1='\[\e[0;32m\]\w\[\e[0m\] \[\e[0;97m\]\$\[\e[0m\] '
 """
     content = content.replace("__FWS_MARKER_FILE_PATH__", str(marker_path))
     path.write_text(content, encoding="utf-8")
@@ -270,7 +276,8 @@ async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             "RCFILE": str(rcfile),
             "CWD": cwd or str(Path.cwd()),
         }
-        env_overrides = {"__FWS_MANUAL": "1", **_termux_env_overrides()}
+        # Re-enable DEBUG trap based block begin/end markers (default behavior).
+        env_overrides = {"__FWS_MANUAL": "0", **_termux_env_overrides()}
         spec_ref = "shellspec/mcp_agent_pty.yaml#agent_pty_shell"
         rec = await Orchestrator(mgr).start_from_ref(
             spec_ref,

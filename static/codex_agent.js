@@ -112,6 +112,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
   let commandRunning = false; // Whether a PTY command is currently running
   let ptyWebSocket = null; // Raw PTY WebSocket connection
+  let ptyWebSocketConvoId = null; // conversation_id currently bound to ptyWebSocket
   let activeAgentPtyBlockId = null;
   let currentAppServerShellId = null;
   const pending = new Map();
@@ -149,6 +150,15 @@ document.addEventListener('DOMContentLoaded', () => {
   let composerTerm = null;        // xterm instance for composer terminal
   let composerFitAddon = null;    // FitAddon for auto-sizing
   let composerResizeObserver = null;
+  let composerPrimedConvoId = null;
+  let composerPriming = false;
+  let composerPendingChunks = [];
+  let composerPendingBytes = 0;
+  let composerPrimedWithTail = false;
+  let composerResizeSyncTimer = null;
+  let composerFitRaf = null;
+  let composerFitFramesRemaining = 0;
+  let composerLastResizeKey = null;
   let draftSaveTimer = null;
   let lastDraftHash = null;
 
@@ -232,9 +242,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initialize composer terminal (xterm in footer)
   function initComposerTerminal() {
     if (!composerTerminalEl) return;
+    const convoId = conversationMeta?.conversation_id;
     
     // Create xterm if not exists
-    if (!composerTerm && typeof Terminal !== 'undefined') {
+    const createdNow = !composerTerm;
+    if (createdNow && typeof Terminal !== 'undefined') {
       composerTerm = new Terminal({
         convertEol: true,
         cursorBlink: true,
@@ -266,16 +278,63 @@ document.addEventListener('DOMContentLoaded', () => {
       
       // Sync resize to backend
       composerTerm.onResize(({ cols, rows }) => {
-        syncComposerTerminalSize(cols, rows);
+        scheduleComposerTerminalResizeSync(cols, rows);
       });
     }
     
-    // Connect PTY WebSocket if not connected
-    connectPtyWebSocket();
+    // Keep the composer terminal continuously in sync with the live PTY stream.
+    // This avoids needing to rehydrate on every open/close (which is inherently
+    // lossy without full screen state) and prevents cursor/prompt drift.
+    const needsPrime = Boolean(createdNow) || (convoId && composerPrimedConvoId !== convoId);
+    if (needsPrime) {
+      composerPriming = true;
+      composerPendingChunks = [];
+      composerPendingBytes = 0;
+      composerPrimedWithTail = false;
+    }
     
     // Fit and focus after DOM update
-    requestAnimationFrame(() => {
-      fitComposerTerminal();
+    requestAnimationFrame(async () => {
+      // Ensure font is loaded before fit so cols/rows are stable.
+      await ensureFontLoaded('JetBrains Mono', 900);
+      
+      // Fit synchronously first to get accurate cols/rows (like file_editor_cm6)
+      if (composerFitAddon && composerTerm) {
+        try { composerFitAddon.fit(); } catch (_) {}
+      }
+
+      if (needsPrime) {
+        // Start from a blank viewport, then hydrate once, then stream live forever.
+        try { composerTerm?.reset(); } catch (_) {}
+        const didPrime = await primeComposerTerminalFromRawTail();
+        composerPrimedWithTail = Boolean(didPrime);
+        composerPriming = false;
+        // If we primed from tail, buffered chunks likely overlap; drop them.
+        if (!composerPrimedWithTail && composerPendingChunks.length && composerTerm) {
+          for (const chunk of composerPendingChunks) {
+            try { composerTerm.write(chunk); } catch (_) {}
+          }
+        }
+        composerPendingChunks = [];
+        composerPendingBytes = 0;
+      }
+
+      // Connect PTY WebSocket
+      connectPtyWebSocket();
+      
+      // After connection, fit again and send resize (like file_editor_cm6 does on shell ID receive)
+      setTimeout(() => {
+        if (composerFitAddon && composerTerm) {
+          try { composerFitAddon.fit(); } catch (_) {}
+        }
+        const cols = composerTerm?.cols;
+        const rows = composerTerm?.rows;
+        if (cols && rows) {
+          console.log('Sending initial resize:', cols, 'x', rows);
+          scheduleComposerTerminalResizeSync(cols, rows, { force: true });
+        }
+      }, 150);
+      
       composerTerm?.focus();
     });
   }
@@ -286,6 +345,34 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function requestComposerFit(frames = 8) {
+    if (!composerTerm || !composerFitAddon) return;
+    composerFitFramesRemaining = Math.max(composerFitFramesRemaining, Math.max(1, Number(frames) || 0));
+    if (composerFitRaf) return;
+    const step = () => {
+      composerFitRaf = null;
+      if (!composerTerm || !composerFitAddon) return;
+      try { composerFitAddon.fit(); } catch (_) {}
+      composerFitFramesRemaining = Math.max(0, composerFitFramesRemaining - 1);
+      if (composerFitFramesRemaining > 0) {
+        composerFitRaf = requestAnimationFrame(step);
+      }
+    };
+    composerFitRaf = requestAnimationFrame(step);
+  }
+
+  async function ensureFontLoaded(fontFamily, timeoutMs = 900) {
+    const fam = String(fontFamily || '').trim();
+    if (!fam) return;
+    if (!document.fonts || typeof document.fonts.load !== 'function') return;
+    try {
+      await Promise.race([
+        document.fonts.load(`12px "${fam}"`),
+        new Promise(resolve => setTimeout(resolve, Math.max(0, Number(timeoutMs) || 0))),
+      ]);
+    } catch (_) {}
+  }
+
   function syncComposerTerminalSize(cols, rows) {
     const convoId = conversationMeta?.conversation_id;
     if (!convoId || !cols || !rows) return;
@@ -294,6 +381,87 @@ document.addEventListener('DOMContentLoaded', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ conversation_id: convoId, cols, rows }),
     }).catch(() => {});
+  }
+
+  function scheduleComposerTerminalResizeSync(cols, rows, opts = {}) {
+    const convoId = conversationMeta?.conversation_id;
+    if (!convoId) return;
+    const c = Math.max(1, Number(cols) || 0);
+    const r = Math.max(1, Number(rows) || 0);
+    if (!c || !r) return;
+
+    const key = `${convoId}:${c}x${r}`;
+    if (!opts.force && composerLastResizeKey === key) return;
+    composerLastResizeKey = key;
+
+    if (composerResizeSyncTimer) {
+      try { clearTimeout(composerResizeSyncTimer); } catch (_) {}
+      composerResizeSyncTimer = null;
+    }
+
+    let attempts = 0;
+    const tryOnce = async () => {
+      attempts += 1;
+      // Conversation may have switched mid-retry; stop.
+      if (conversationMeta?.conversation_id !== convoId) return;
+      try {
+        const resp = await fetch('/api/mcp/agent-pty/resize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversation_id: convoId, cols: c, rows: r }),
+        });
+        if (resp && resp.ok) return;
+      } catch (_) {}
+      if (attempts >= 12) return;
+      const delay = Math.min(1500, 80 * attempts);
+      composerResizeSyncTimer = setTimeout(tryOnce, delay);
+    };
+
+    // If not forced and we already have a websocket + a stable terminal, one attempt is enough.
+    void tryOnce();
+  }
+
+  async function primeComposerTerminalFromRawTail() {
+    const convoId = conversationMeta?.conversation_id;
+    if (!convoId) return;
+    if (!terminalMode || !composerTerm) return;
+    if (composerPrimedConvoId === convoId) return;
+
+    try {
+      // Prefer framework_shells log tail for UI rehydration (matches what the user sees).
+      const r1 = await fetch(`/api/pty/fws_tail?conversation_id=${encodeURIComponent(convoId)}&tail_lines=200`, { cache: 'no-store' });
+      if (r1.ok) {
+        const data1 = await r1.json();
+        if (data1 && data1.ok && Array.isArray(data1.stdout_tail)) {
+          const text1 = data1.stdout_tail.join('');
+          if (text1) {
+            composerTerm.write(text1);
+            composerPrimedConvoId = convoId;
+            return true;
+          }
+        }
+      }
+
+      // Fallback to conversation-local raw tail (lossless byte log).
+      const r2 = await fetch(`/api/pty/raw_tail?conversation_id=${encodeURIComponent(convoId)}&max_bytes=65536`, { cache: 'no-store' });
+      if (!r2.ok) return;
+      const data2 = await r2.json();
+      if (!data2 || !data2.ok) return;
+      const b64 = data2.data_b64 || '';
+      if (!b64) {
+        composerPrimedConvoId = convoId;
+        return false;
+      }
+      const text2 = _decodeBase64ToUtf8(b64);
+      if (text2) {
+        composerTerm.write(text2);
+      }
+      composerPrimedConvoId = convoId;
+      return Boolean(text2);
+    } catch (_) {
+      // Best-effort; live WS will still work.
+    }
+    return false;
   }
 
   function isMarkdownEnabled() {
@@ -3304,6 +3472,14 @@ document.addEventListener('DOMContentLoaded', () => {
       setXtermEnabled(conversationSettings?.useXterm !== false);
       // Sync diff syntax toggle from settings
       setDiffSyntaxEnabled(conversationSettings?.diffSyntax === true);
+      // If conversation switched, reset composer terminal state so we don't mix streams.
+      const convoId = conversationMeta?.conversation_id;
+      if (convoId && ptyWebSocketConvoId && ptyWebSocketConvoId !== convoId) {
+        composerPrimedConvoId = null;
+        if (composerTerm && terminalMode) {
+          try { composerTerm.reset(); } catch (_) {}
+        }
+      }
       // Connect PTY WebSocket for user terminal
       connectPtyWebSocket();
       // Restore draft from conversation meta
@@ -3741,20 +3917,43 @@ document.addEventListener('DOMContentLoaded', () => {
   function connectPtyWebSocket() {
     const convoId = conversationMeta?.conversation_id;
     if (!convoId) return;
-    
-    // Close existing connection if any
+
+    // If we're already connected/connecting for this conversation, don't reconnect.
+    // Reconnecting aggressively can create race conditions where an old socket's
+    // onclose fires after a new one is created, nulling out the new connection
+    // and/or duplicating streams.
+    if (
+      ptyWebSocket &&
+      ptyWebSocketConvoId === convoId &&
+      (ptyWebSocket.readyState === WebSocket.OPEN || ptyWebSocket.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+
+    // Close existing connection if any (conversation changed or prior socket dead)
     if (ptyWebSocket) {
-      ptyWebSocket.close();
+      try {
+        // Detach handlers to avoid late events mutating global state
+        ptyWebSocket.onopen = null;
+        ptyWebSocket.onmessage = null;
+        ptyWebSocket.onerror = null;
+        ptyWebSocket.onclose = null;
+      } catch (_) {}
+      try { ptyWebSocket.close(); } catch (_) {}
       ptyWebSocket = null;
+      ptyWebSocketConvoId = null;
     }
     
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/pty/${encodeURIComponent(convoId)}`;
     
     try {
-      ptyWebSocket = new WebSocket(wsUrl);
+      const ws = new WebSocket(wsUrl);
+      ptyWebSocket = ws;
+      ptyWebSocketConvoId = convoId;
       
-      ptyWebSocket.onopen = () => {
+      ws.onopen = () => {
+        if (ptyWebSocket !== ws) return;
         console.log('PTY WebSocket connected');
         if (activeAgentPtyBlockId) {
           const entry = agentBlockRows.get(activeAgentPtyBlockId);
@@ -3762,7 +3961,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       };
       
-      ptyWebSocket.onmessage = (event) => {
+      ws.onmessage = (event) => {
+        if (ptyWebSocket !== ws) return;
         // Raw PTY output - for user terminal xterm rendering
         // This is separate from agent transcript which uses screen_delta events
         const data = event.data;
@@ -3773,13 +3973,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       };
       
-      ptyWebSocket.onerror = (err) => {
+      ws.onerror = (err) => {
+        if (ptyWebSocket !== ws) return;
         console.error('PTY WebSocket error:', err);
       };
       
-      ptyWebSocket.onclose = () => {
+      ws.onclose = () => {
+        if (ptyWebSocket !== ws) return;
         console.log('PTY WebSocket closed');
         ptyWebSocket = null;
+        ptyWebSocketConvoId = null;
       };
     } catch (e) {
       console.error('Failed to connect PTY WebSocket:', e);
@@ -3788,10 +3991,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Handle raw PTY output for user terminal
   function handleUserPtyOutput(chunk) {
-    // Route to composer terminal when in terminal mode
-    // In xterm composer mode, the composer xterm is the ONLY live display surface
-    // Cards are created from shell_begin/shell_end events as plain text summaries
-    if (terminalMode && composerTerm) {
+    // Always keep the composer terminal in sync once created.
+    // When not in terminal mode it's hidden, but continuing to stream output
+    // avoids drift and removes the need for lossy rehydration on reopen.
+    if (composerTerm) {
+      if (composerPriming) {
+        // Buffer live output until priming completes to avoid race with reset/rehydrate.
+        if (composerPendingBytes < 256 * 1024) {
+          composerPendingChunks.push(chunk);
+          composerPendingBytes += chunk.length || 0;
+        }
+        return;
+      }
       composerTerm.write(chunk);
       return; // Composer xterm is exclusive display for live PTY in terminal mode
     }

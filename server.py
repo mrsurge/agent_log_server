@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import base64
 import json
 import os
 import argparse
@@ -110,6 +111,13 @@ CODEX_AGENT_THEME_COLOR = "#0d0f13"
 CODEX_AGENT_ICON_PATH = "/static/codexas-icon.svg"
 CODEX_AGENT_START_URL = "/codex-agent/"
 CODEX_AGENT_SCOPE = "/codex-agent/"
+
+# Raw PTY websocket fanout: keep a single framework_shells subscription per conversation
+# to avoid triggering a new dtach attach/proxy (and readline prompt redisplay) on every
+# websocket open.
+_pty_hub_lock = asyncio.Lock()
+_pty_hubs: Dict[str, Dict[str, Any]] = {}  # conversation_id -> hub state
+_PTY_HUB_IDLE_SECS = float(os.environ.get("APP_SERVER_PTY_HUB_IDLE_SECS", "60"))
 
 
 def _asset(url: str) -> str:
@@ -4758,7 +4766,7 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
     """Raw bidirectional PTY WebSocket - streams PTY output and accepts stdin input."""
     await websocket.accept()
     
-    # Import MCP server module for PTY access
+    # Import MCP server module for PTY access (shell lookup/ensure only).
     try:
         import mcp_agent_pty_server as mcp_srv
     except ImportError:
@@ -4773,68 +4781,194 @@ async def pty_raw_ws(websocket: WebSocket, conversation_id: str):
         await websocket.close(code=1011, reason=f"Failed to start PTY: {e}")
         return
 
-    # Clear any stale callbacks before adding new one (prevents duplicates from reconnects)
-    state.clear_raw_chunk_callbacks()
-    
-    # Create a queue for this connection
-    output_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
-    ws_closed = False
-    
-    async def chunk_callback(chunk: str) -> None:
-        """Callback to receive raw PTY chunks."""
-        if not ws_closed:
-            try:
-                output_queue.put_nowait(chunk)
-            except asyncio.QueueFull:
-                pass
-    
-    # Register callback for raw chunks
-    state.add_raw_chunk_callback(chunk_callback)
-    
-    async def send_output():
-        """Send PTY output to WebSocket."""
-        nonlocal ws_closed
-        try:
-            while not ws_closed:
-                chunk = await output_queue.get()
+    shell_id = state.shell_id
+    if not shell_id:
+        await websocket.close(code=1011, reason="No PTY shell_id")
+        return
+
+    sanitize = False
+    try:
+        raw = websocket.query_params.get("sanitize")
+        sanitize = str(raw).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        sanitize = False
+
+    async def _ensure_hub(convo_id: str, shell_id: str) -> Dict[str, Any]:
+        """Ensure a single, long-lived framework_shells subscription for convo_id."""
+        async with _pty_hub_lock:
+            hub = _pty_hubs.get(convo_id)
+            if hub:
+                # If the shell id changed (shell restarted), rotate the hub.
+                if hub.get("shell_id") == shell_id and hub.get("task") and not hub["task"].done():
+                    return hub
+                # Stop old hub (best-effort) before replacing.
                 try:
-                    await websocket.send_text(chunk)
+                    hub.get("stop").set()
                 except Exception:
-                    break
+                    pass
+                try:
+                    t = hub.get("task")
+                    if t:
+                        t.cancel()
+                except Exception:
+                    pass
+                try:
+                    mgr0 = hub.get("mgr")
+                    q0 = hub.get("out_q")
+                    if mgr0 and q0:
+                        await mgr0.unsubscribe_output(hub.get("shell_id"), q0)
+                except Exception:
+                    pass
+                _pty_hubs.pop(convo_id, None)
+
+            mgr = await _get_fws_manager()
+            out_q = await mgr.subscribe_output(shell_id)
+            stop = asyncio.Event()
+
+            hub = {
+                "conversation_id": convo_id,
+                "shell_id": shell_id,
+                "mgr": mgr,
+                "out_q": out_q,
+                "stop": stop,
+                "clients": set(),  # websockets
+                "client_queues": {},  # ws -> asyncio.Queue[str]
+                "client_sender_tasks": {},  # ws -> task
+                "client_sanitize": {},  # ws -> bool
+                "last_empty_ts": None,
+                "idle_task": None,
+            }
+
+            async def _hub_loop() -> None:
+                while not stop.is_set():
+                    chunk = await out_q.get()
+                    if not isinstance(chunk, str):
+                        try:
+                            chunk = str(chunk)
+                        except Exception:
+                            continue
+                    if not chunk:
+                        continue
+
+                    # Fan out to all clients via their per-ws queues (avoid blocking here).
+                    for ws in list(hub["clients"]):
+                        q = hub["client_queues"].get(ws)
+                        if not q:
+                            continue
+                        out = chunk
+                        if hub["client_sanitize"].get(ws):
+                            try:
+                                out = mcp_srv.ConversationState._sanitize_user_terminal_stream(out)
+                            except Exception:
+                                out = chunk
+                        if not out:
+                            continue
+                        try:
+                            q.put_nowait(out)
+                        except asyncio.QueueFull:
+                            # Drop bursts rather than blocking (mobile reconnects etc.)
+                            pass
+
+            hub["task"] = asyncio.create_task(_hub_loop(), name=f"pty-hub:{convo_id}")
+            _pty_hubs[convo_id] = hub
+            return hub
+
+    hub = None
+    try:
+        hub = await _ensure_hub(conversation_id, shell_id)
+    except Exception as e:
+        await websocket.close(code=1011, reason=f"Failed to start PTY hub: {e}")
+        return
+
+    # Register this websocket with the hub.
+    client_q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    hub["clients"].add(websocket)
+    hub["client_queues"][websocket] = client_q
+    hub["client_sanitize"][websocket] = bool(sanitize)
+
+    async def send_output():
+        try:
+            while True:
+                chunk = await client_q.get()
+                await websocket.send_text(chunk)
         except asyncio.CancelledError:
             pass
-    
+        except Exception:
+            pass
+
+    send_task = asyncio.create_task(send_output(), name=f"pty-ws-sender:{conversation_id}")
+    hub["client_sender_tasks"][websocket] = send_task
+
+    async def _schedule_hub_idle_shutdown(hub: Dict[str, Any]) -> None:
+        # Wait a bit; if still no clients, tear down subscription.
+        await asyncio.sleep(max(0.0, _PTY_HUB_IDLE_SECS))
+        async with _pty_hub_lock:
+            if hub.get("clients"):
+                return
+            # Still empty; stop + unsubscribe.
+            try:
+                hub.get("stop").set()
+            except Exception:
+                pass
+            try:
+                t = hub.get("task")
+                if t:
+                    t.cancel()
+            except Exception:
+                pass
+            try:
+                mgr0 = hub.get("mgr")
+                q0 = hub.get("out_q")
+                sid0 = hub.get("shell_id")
+                if mgr0 and q0 and sid0:
+                    await mgr0.unsubscribe_output(sid0, q0)
+            except Exception:
+                pass
+            _pty_hubs.pop(hub.get("conversation_id"), None)
+
     async def receive_input():
-        """Receive stdin from WebSocket and write to PTY."""
-        nonlocal ws_closed
         try:
-            mgr = await _get_fws_manager()
+            mgr = hub.get("mgr") or await _get_fws_manager()
             while True:
                 try:
                     data = await websocket.receive_text()
-                    if state.shell_id:
-                        await mgr.write_to_pty(state.shell_id, data)
-                        # Mark that input was received (for raw mode block events)
-                        state._has_input_since_prompt = True
                 except WebSocketDisconnect:
                     break
                 except Exception:
                     break
+                if not data:
+                    continue
+                try:
+                    await mgr.write_to_pty(shell_id, data)
+                except Exception:
+                    break
         except asyncio.CancelledError:
             pass
-        finally:
-            ws_closed = True
-    
-    send_task = asyncio.create_task(send_output())
-    recv_task = asyncio.create_task(receive_input())
-    
+
+    recv_task = asyncio.create_task(receive_input(), name=f"pty-ws-recv:{conversation_id}")
+
     try:
         await asyncio.gather(send_task, recv_task, return_exceptions=True)
     finally:
-        ws_closed = True
-        send_task.cancel()
-        recv_task.cancel()
-        state.remove_raw_chunk_callback(chunk_callback)
+        with suppress(Exception):
+            recv_task.cancel()
+        with suppress(Exception):
+            send_task.cancel()
+        # Remove from hub, and schedule idle shutdown if empty.
+        try:
+            hub["clients"].discard(websocket)
+            hub["client_queues"].pop(websocket, None)
+            hub["client_sanitize"].pop(websocket, None)
+            hub["client_sender_tasks"].pop(websocket, None)
+        except Exception:
+            pass
+        if hub and not hub.get("clients"):
+            # Only one idle task per hub.
+            try:
+                if not hub.get("idle_task") or hub["idle_task"].done():
+                    hub["idle_task"] = asyncio.create_task(_schedule_hub_idle_shutdown(hub), name=f"pty-hub-idle:{conversation_id}")
+            except Exception:
+                pass
 
 
 @app.post("/api/pty/stdin")
@@ -4887,6 +5021,138 @@ async def api_pty_status():
         "running": has_shell,
         "command_active": has_active_block or command_active,
         "conversation_id": convo_id,
+    }
+
+@app.get("/api/pty/raw_tail")
+async def api_pty_raw_tail(
+    conversation_id: Optional[str] = Query(None),
+    max_bytes: int = Query(65536),
+) -> Dict[str, Any]:
+    """Return a tail of the lossless raw PTY byte stream (for xterm.js priming).
+
+    This is used to "rehydrate" the composer terminal on first open so the user
+    sees an initial prompt/history immediately, similar to the standalone
+    terminal app. Returned as base64 so we can preserve control bytes safely.
+    """
+    max_bytes = int(max_bytes or 0)
+    if max_bytes <= 0:
+        max_bytes = 65536
+    # Keep bounded: this endpoint is for UI priming, not full replay.
+    max_bytes = min(max_bytes, 256 * 1024)
+
+    convo_id = (conversation_id or "").strip()
+    if not convo_id:
+        async with _config_lock:
+            cfg = _load_appserver_config()
+        convo_id = str(cfg.get("conversation_id") or "").strip()
+    if not convo_id:
+        raise HTTPException(status_code=409, detail="No conversation_id")
+
+    safe_id = _sanitize_conversation_id(convo_id)
+    raw_path = _conversation_dir(safe_id) / "agent_pty" / "output.raw"
+
+    def _read_tail() -> tuple[bytes, int, int]:
+        if not raw_path.exists():
+            return (b"", 0, 0)
+        try:
+            st = raw_path.stat()
+            size = int(st.st_size)
+            start = max(0, size - max_bytes)
+            with raw_path.open("rb") as f:
+                f.seek(start)
+                data = f.read(max_bytes)
+            return (data, start, size)
+        except Exception:
+            return (b"", 0, 0)
+
+    data, start, total = await asyncio.to_thread(_read_tail)
+
+    # Avoid starting in the middle of a line/control sequence when possible:
+    # drop a leading partial line fragment if the tail begins mid-line.
+    try:
+        cut = None
+        for i, b in enumerate(data[:4096]):
+            if b in (10, 13):  # \n or \r
+                cut = i + 1
+                break
+        if cut is not None and cut > 0 and cut < len(data):
+            data = data[cut:]
+            start = min(total, start + cut)
+    except Exception:
+        pass
+
+    # Best-effort sanitize wrapper noise to match the live /ws/pty stream behavior.
+    # Keep ANSI; drop only obvious wrapper/marker lines.
+    try:
+        import mcp_agent_pty_server as mcp_srv
+        text = data.decode("utf-8", errors="replace")
+        sanitized = mcp_srv.ConversationState._sanitize_user_terminal_stream(text)
+        data = sanitized.encode("utf-8", errors="replace")
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "conversation_id": convo_id,
+        "path": str(raw_path),
+        "max_bytes": max_bytes,
+        "raw_size": total,
+        "offset": start,
+        "data_b64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+@app.get("/api/pty/fws_tail")
+async def api_pty_fws_tail(
+    conversation_id: Optional[str] = Query(None),
+    tail_lines: int = Query(200),
+) -> Dict[str, Any]:
+    """Return a tail of the framework_shells stdout log for the conversation's PTY.
+
+    This is the preferred UI rehydration source because it matches what the user
+    terminal sees (including ANSI) without depending on conversation-local
+    artifacts like agent_pty/output.raw.
+    """
+    tail_lines = max(0, min(int(tail_lines or 0), 5000))
+
+    convo_id = (conversation_id or "").strip()
+    if not convo_id:
+        async with _config_lock:
+            cfg = _load_appserver_config()
+        convo_id = str(cfg.get("conversation_id") or "").strip()
+    if not convo_id:
+        raise HTTPException(status_code=409, detail="No conversation_id")
+
+    try:
+        import mcp_agent_pty_server as mcp_srv  # type: ignore
+        state = mcp_srv._state(convo_id)
+        await state.ensure_shell()
+        shell_id = state.shell_id
+        if not shell_id:
+            raise RuntimeError("No PTY shell_id")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to resolve PTY shell: {exc}")
+
+    mgr = await _get_fws_manager()
+    rec = await mgr.get_shell(shell_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Shell not found")
+    try:
+        detail = await mgr.describe(rec, include_logs=True, tail_lines=tail_lines)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"describe failed: {exc}")
+
+    logs = (detail or {}).get("logs") if isinstance(detail, dict) else None
+    stdout_tail = (logs or {}).get("stdout_tail") if isinstance(logs, dict) else None
+    if not isinstance(stdout_tail, list):
+        stdout_tail = []
+
+    return {
+        "ok": True,
+        "conversation_id": convo_id,
+        "shell_id": shell_id,
+        "tail_lines": tail_lines,
+        "stdout_tail": stdout_tail,
     }
 
 

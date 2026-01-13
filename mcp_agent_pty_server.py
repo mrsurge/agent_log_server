@@ -11,6 +11,7 @@ import atexit
 import contextlib
 import io
 import re
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -162,6 +163,35 @@ def _redirect_stdout_to_stderr() -> Any:
 async def _get_fws_manager():
     with _redirect_stdout_to_stderr():
         return await get_framework_shell_manager(run_id=_manager_run_id())
+
+
+async def _signal_winch(mgr, shell_id: str) -> None:
+    """Best-effort SIGWINCH to dtach proxy + shell pid (stabilizes readline wrapping)."""
+    try:
+        pty_state = getattr(mgr, "_pty", {}).get(shell_id) if hasattr(mgr, "_pty") else None
+        proxy_pid = getattr(pty_state, "proxy_pid", None) if pty_state is not None else None
+        if proxy_pid:
+            try:
+                os.killpg(os.getpgid(proxy_pid), signal.SIGWINCH)
+            except Exception:
+                try:
+                    os.kill(proxy_pid, signal.SIGWINCH)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        rec = await mgr.get_shell(shell_id)
+    except Exception:
+        rec = None
+    if rec and getattr(rec, "pid", None):
+        try:
+            os.killpg(os.getpgid(rec.pid), signal.SIGWINCH)
+        except Exception:
+            try:
+                os.kill(rec.pid, signal.SIGWINCH)
+            except Exception:
+                pass
 
 async def _shell_manager_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     url_base = _shell_manager_url()
@@ -450,6 +480,9 @@ class ConversationState:
         self._last_screen_delta_ts: float = 0.0
         self._screen_delta_min_interval: float = 0.1  # 100ms = max 10/sec
         self._screen_delta_task: Optional[asyncio.Task] = None
+        
+        # Track last PTY resize to avoid redundant SIGWINCH cascades on reconnect
+        self._last_pty_resize_size: Optional[tuple] = None  # (cols, rows)
 
     async def _load_persisted_screen_size(self) -> None:
         """Best-effort load of persisted screen size for this conversation."""
@@ -541,9 +574,9 @@ class ConversationState:
         # IMPORTANT: be conservative. If we over-filter, the user terminal goes blank.
         out_parts: list[str] = []
         for line in chunk.splitlines(keepends=True):
-            # Only drop the wrapper if it is clearly the echoed wrapper command line.
-            # This line typically starts with our PS1 and includes "__fws_cmd".
-            if "agent-pty>" in line and "__fws_cmd" in line:
+            # Drop the echoed wrapper command line used by pty_exec.
+            # Don't rely on a specific PS1: the prompt may be customized.
+            if "__fws_cmd=" in line:
                 continue
             if (
                 "__fws_emit_begin" in line
@@ -1216,6 +1249,51 @@ class ConversationState:
             name=f"agent-pty-markers:{self.conversation_id}"
         )
 
+    async def _maybe_resize_pty(self, mgr, shell_id: str, cols: int, rows: int) -> bool:
+        """Resize PTY only if size changed. Returns True if resize was performed.
+        
+        Matches file_editor_cm6 behavior: resize_pty + explicit SIGWINCH.
+        """
+        new_size = (cols, rows)
+        if self._last_pty_resize_size == new_size:
+            return False
+        try:
+            await mgr.resize_pty(shell_id, cols, rows)
+            self._last_pty_resize_size = new_size
+            
+            # Explicitly send SIGWINCH to both proxy and shell (matches file_editor_cm6)
+            try:
+                proxy_pid = None
+                pty_state = getattr(mgr, "_pty", {}).get(shell_id) if hasattr(mgr, "_pty") else None
+                if pty_state is not None:
+                    proxy_pid = getattr(pty_state, "proxy_pid", None)
+                if proxy_pid:
+                    try:
+                        os.killpg(os.getpgid(proxy_pid), signal.SIGWINCH)
+                    except Exception:
+                        try:
+                            os.kill(proxy_pid, signal.SIGWINCH)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            try:
+                rec = await mgr.get_shell(shell_id)
+            except Exception:
+                rec = None
+            if rec and getattr(rec, "pid", None):
+                try:
+                    os.killpg(os.getpgid(rec.pid), signal.SIGWINCH)
+                except Exception:
+                    try:
+                        os.kill(rec.pid, signal.SIGWINCH)
+                    except Exception:
+                        pass
+            return True
+        except Exception:
+            return False
+
     async def ensure_shell(self, *, cwd: Optional[str] = None) -> str:
         async with self.lock:
             mgr = await _get_fws_manager()
@@ -1223,11 +1301,8 @@ class ConversationState:
             # Load per-conversation preferred screen size (if any) before attach/resize.
             await self._load_persisted_screen_size()
             if self.shell_id:
-                # Ensure dtach attach proxy has a sane winsize for pyte parity.
-                try:
-                    await mgr.resize_pty(self.shell_id, self._screen_cols, self._screen_rows)
-                except Exception:
-                    pass
+                # Shell already known - only resize if size actually changed.
+                await self._maybe_resize_pty(mgr, self.shell_id, self._screen_cols, self._screen_rows)
                 await self._ensure_reader(mgr)
                 await self._ensure_marker_reader()
                 return self.shell_id
@@ -1238,11 +1313,8 @@ class ConversationState:
                     rec = await mgr.get_shell(cached_id)
                     if rec and rec.status == "running":
                         self.shell_id = rec.id
-                        # Ensure dtach attach proxy has a sane winsize for pyte parity.
-                        try:
-                            await mgr.resize_pty(self.shell_id, self._screen_cols, self._screen_rows)
-                        except Exception:
-                            pass
+                        # Reattach - only resize if size actually changed.
+                        await self._maybe_resize_pty(mgr, self.shell_id, self._screen_cols, self._screen_rows)
                         await self._ensure_reader(mgr)
                         await self._ensure_marker_reader()
                         return self.shell_id
@@ -1264,11 +1336,9 @@ class ConversationState:
                 raise RuntimeError("shell manager returned non-running shell")
             self.shell_id = rec.id
             await self._save_shell_id(rec.id)
-            # Ensure dtach attach proxy has a sane winsize for pyte parity.
-            try:
-                await mgr.resize_pty(self.shell_id, self._screen_cols, self._screen_rows)
-            except Exception:
-                pass
+            # New shell - resize to our preferred size.
+            # For new shells, always resize since shell_manager defaults to 120x40.
+            await self._maybe_resize_pty(mgr, self.shell_id, self._screen_cols, self._screen_rows)
             await self._ensure_reader(mgr)
             await self._ensure_marker_reader()
             return self.shell_id
@@ -2170,10 +2240,9 @@ async def pty_resize(conversation_id: str, cols: int, rows: int) -> Dict[str, An
             state._screen_cols = cols_i
             state._screen_rows = rows_i
             await state._save_persisted_screen_size()
-            try:
-                await mgr.resize_pty(state.shell_id, cols_i, rows_i)
-            except Exception:
-                pass
+            # Use _maybe_resize_pty to avoid redundant SIGWINCH if size unchanged.
+            # This also updates _last_pty_resize_size for future ensure_shell() calls.
+            await state._maybe_resize_pty(mgr, state.shell_id, cols_i, rows_i)
             # Rebuild screen from the lossless byte stream at the new size.
             await state._refresh_raw_size()
             await state._rehydrate_screen_from_raw(state._raw_size)
