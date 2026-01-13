@@ -158,6 +158,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let composerResizeSyncTimer = null;
   let composerFitRaf = null;
   let composerFitFramesRemaining = 0;
+  let composerResizeSuppressed = false; // Suppress resize sync during initial open
   let composerLastResizeKey = null;
   let draftSaveTimer = null;
   let lastDraftHash = null;
@@ -225,6 +226,19 @@ document.addEventListener('DOMContentLoaded', () => {
       // Show send button, focus prompt
       if (sendBtn) sendBtn.style.display = '';
       promptEl?.focus();
+      
+      // Close WebSocket so next open gets a fresh connection with proper resize
+      if (ptyWebSocket) {
+        try {
+          ptyWebSocket.onopen = null;
+          ptyWebSocket.onmessage = null;
+          ptyWebSocket.onerror = null;
+          ptyWebSocket.onclose = null;
+        } catch (_) {}
+        try { ptyWebSocket.close(); } catch (_) {}
+        ptyWebSocket = null;
+        ptyWebSocketConvoId = null;
+      }
     }
     
     if (promptEl) {
@@ -257,17 +271,17 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       composerTerm.open(composerTerminalEl);
       
-      // Load FitAddon if available
-      if (typeof FitAddon !== 'undefined') {
-        composerFitAddon = new FitAddon.FitAddon();
-        composerTerm.loadAddon(composerFitAddon);
-      }
+      // FitAddon DISABLED - it causes readline redraw cascades
+      // if (typeof FitAddon !== 'undefined') {
+      //   composerFitAddon = new FitAddon.FitAddon();
+      //   composerTerm.loadAddon(composerFitAddon);
+      // }
       
-      // ResizeObserver for auto-fit
-      if (typeof ResizeObserver !== 'undefined') {
-        composerResizeObserver = new ResizeObserver(() => fitComposerTerminal());
-        composerResizeObserver.observe(composerTerminalEl);
-      }
+      // ResizeObserver DISABLED - it triggers fit which causes issues
+      // if (typeof ResizeObserver !== 'undefined') {
+      //   composerResizeObserver = new ResizeObserver(() => fitComposerTerminal());
+      //   composerResizeObserver.observe(composerTerminalEl);
+      // }
       
       // Send input to PTY via WebSocket
       composerTerm.onData((data) => {
@@ -276,8 +290,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       });
       
-      // Sync resize to backend
+      // Sync resize to backend (but respect suppression flag during open)
       composerTerm.onResize(({ cols, rows }) => {
+        if (composerResizeSuppressed) {
+          console.log('onResize suppressed during open:', cols, 'x', rows);
+          return;
+        }
         scheduleComposerTerminalResizeSync(cols, rows);
       });
     }
@@ -293,15 +311,14 @@ document.addEventListener('DOMContentLoaded', () => {
       composerPrimedWithTail = false;
     }
     
+    // Suppress auto-resize during open sequence to prevent FitAddon/ResizeObserver interference
+    composerResizeSuppressed = true;
+    composerLastResizeKey = null; // Reset so we always send resize on open
+    
     // Fit and focus after DOM update
     requestAnimationFrame(async () => {
       // Ensure font is loaded before fit so cols/rows are stable.
       await ensureFontLoaded('JetBrains Mono', 900);
-      
-      // Fit synchronously first to get accurate cols/rows (like file_editor_cm6)
-      if (composerFitAddon && composerTerm) {
-        try { composerFitAddon.fit(); } catch (_) {}
-      }
 
       if (needsPrime) {
         // Start from a blank viewport, then hydrate once, then stream live forever.
@@ -322,18 +339,16 @@ document.addEventListener('DOMContentLoaded', () => {
       // Connect PTY WebSocket
       connectPtyWebSocket();
       
-      // After connection, fit again and send resize (like file_editor_cm6 does on shell ID receive)
+      // Send resize with SIGWINCH after short delay to let layout settle
       setTimeout(() => {
-        if (composerFitAddon && composerTerm) {
-          try { composerFitAddon.fit(); } catch (_) {}
-        }
-        const cols = composerTerm?.cols;
-        const rows = composerTerm?.rows;
-        if (cols && rows) {
-          console.log('Sending initial resize:', cols, 'x', rows);
-          scheduleComposerTerminalResizeSync(cols, rows, { force: true });
-        }
+        const cols = composerTerm?.cols || 80;
+        const rows = composerTerm?.rows || 24;
+        console.log('Sending resize on open:', cols, 'x', rows);
+        syncComposerTerminalSize(cols, rows);
       }, 150);
+      
+      // Re-enable auto-resize (FitAddon is disabled anyway)
+      composerResizeSuppressed = false;
       
       composerTerm?.focus();
     });

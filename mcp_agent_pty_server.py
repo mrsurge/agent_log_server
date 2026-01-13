@@ -2240,9 +2240,45 @@ async def pty_resize(conversation_id: str, cols: int, rows: int) -> Dict[str, An
             state._screen_cols = cols_i
             state._screen_rows = rows_i
             await state._save_persisted_screen_size()
-            # Use _maybe_resize_pty to avoid redundant SIGWINCH if size unchanged.
-            # This also updates _last_pty_resize_size for future ensure_shell() calls.
-            await state._maybe_resize_pty(mgr, state.shell_id, cols_i, rows_i)
+            
+            # Always resize and send SIGWINCH - frontend calls this on every terminal open,
+            # and readline needs the signal to redraw properly even if size unchanged.
+            try:
+                await mgr.resize_pty(state.shell_id, cols_i, rows_i)
+            except Exception:
+                pass
+            state._last_pty_resize_size = (cols_i, rows_i)
+            
+            # Explicitly send SIGWINCH to both proxy and shell (matches file_editor_cm6)
+            try:
+                proxy_pid = None
+                pty_state = getattr(mgr, "_pty", {}).get(state.shell_id) if hasattr(mgr, "_pty") else None
+                if pty_state is not None:
+                    proxy_pid = getattr(pty_state, "proxy_pid", None)
+                if proxy_pid:
+                    try:
+                        os.killpg(os.getpgid(proxy_pid), signal.SIGWINCH)
+                    except Exception:
+                        try:
+                            os.kill(proxy_pid, signal.SIGWINCH)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            try:
+                rec = await mgr.get_shell(state.shell_id)
+            except Exception:
+                rec = None
+            if rec and getattr(rec, "pid", None):
+                try:
+                    os.killpg(os.getpgid(rec.pid), signal.SIGWINCH)
+                except Exception:
+                    try:
+                        os.kill(rec.pid, signal.SIGWINCH)
+                    except Exception:
+                        pass
+
             # Rebuild screen from the lossless byte stream at the new size.
             await state._refresh_raw_size()
             await state._rehydrate_screen_from_raw(state._raw_size)
