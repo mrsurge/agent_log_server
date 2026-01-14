@@ -3200,10 +3200,89 @@ def ensure_log_file(path: Path) -> None:
     if not path.exists():
         path.write_text("", encoding="utf-8")
 
-async def append_record(record: Dict[str, Any]) -> None:
+_next_msg_num: int = 1  # Auto-increment message number
+
+def _init_msg_num() -> None:
+    """Scan existing log, assign msg_num to any records missing it, set _next_msg_num."""
+    global _next_msg_num
+    if LOG_PATH is None or not LOG_PATH.exists():
+        _next_msg_num = 1
+        return
+    
+    # Read all records
+    records = []
+    with LOG_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    
+    if not records:
+        _next_msg_num = 1
+        return
+    
+    # Check if any records need numbering
+    needs_rewrite = any("msg_num" not in rec for rec in records)
+    
+    if needs_rewrite:
+        # Assign sequential msg_num to all records
+        for i, rec in enumerate(records, start=1):
+            rec["msg_num"] = i
+        # Rewrite the log file
+        with LOG_PATH.open("w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        _next_msg_num = len(records) + 1
+    else:
+        # Find max existing msg_num
+        max_num = max(rec.get("msg_num", 0) for rec in records)
+        _next_msg_num = max_num + 1
+
+def _delete_record_by_msg_num(msg_num: int) -> bool:
+    """Delete a record by msg_num. Returns True if deleted, False if not found."""
     assert LOG_PATH is not None
-    line = json.dumps(record, ensure_ascii=False)
+    if not LOG_PATH.exists():
+        return False
+    
+    records = []
+    found = False
+    with LOG_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                if rec.get("msg_num") == msg_num:
+                    found = True
+                    continue  # Skip this record (delete it)
+                records.append(rec)
+            except json.JSONDecodeError:
+                continue
+    
+    if found:
+        with LOG_PATH.open("w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return found
+
+async def append_record(record: Dict[str, Any]) -> None:
+    global _next_msg_num
+    assert LOG_PATH is not None
     async with _lock:
+        # Auto-assign msg_num if not present
+        if "msg_num" not in record:
+            record["msg_num"] = _next_msg_num
+            _next_msg_num += 1
+        else:
+            # Update _next_msg_num if record has higher number
+            if isinstance(record["msg_num"], int) and record["msg_num"] >= _next_msg_num:
+                _next_msg_num = record["msg_num"] + 1
+        line = json.dumps(record, ensure_ascii=False)
         with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
             f.flush()
@@ -3228,6 +3307,24 @@ def read_records(limit: Optional[int] = None) -> List[Dict[str, Any]]:
     if limit is not None and limit > 0:
         return records[-limit:]
     return records
+
+def get_record_by_msg_num(msg_num: int) -> Optional[Dict[str, Any]]:
+    """Get a specific record by its msg_num."""
+    assert LOG_PATH is not None
+    if not LOG_PATH.exists():
+        return None
+    with LOG_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                if rec.get("msg_num") == msg_num:
+                    return rec
+            except json.JSONDecodeError:
+                continue
+    return None
 
 # --- Models ---
 class MessageIn(BaseModel):
@@ -4938,6 +5035,23 @@ async def api_appserver_debug_toggle(enabled: bool = Body(..., embed=True)):
 async def get_messages(limit: int = Query(None, gt=0)):
     return read_records(limit=limit)
 
+@app.get("/api/messages/{msg_num}")
+async def get_message_by_num(msg_num: int):
+    """Get a specific message by its msg_num."""
+    record = get_record_by_msg_num(msg_num)
+    if record is None:
+        return JSONResponse({"error": f"Message {msg_num} not found"}, status_code=404)
+    return record
+
+@app.delete("/api/messages/{msg_num}")
+async def delete_message_by_num(msg_num: int):
+    """Delete a specific message by its msg_num."""
+    async with _lock:
+        deleted = _delete_record_by_msg_num(msg_num)
+    if not deleted:
+        return JSONResponse({"error": f"Message {msg_num} not found"}, status_code=404)
+    return {"ok": True, "deleted": msg_num}
+
 @app.post("/api/messages", status_code=201)
 async def post_message(msg: MessageIn):
     who = msg.who.strip()
@@ -4947,6 +5061,7 @@ async def post_message(msg: MessageIn):
 
     record = {"ts": utc_ts(), "who": who, "message": text}
     await append_record(record)
+    # record now has msg_num assigned by append_record
     return record
 
 @app.post("/api/shutdown")
@@ -5736,6 +5851,9 @@ def main():
         log_p = Path.cwd() / log_p
     ensure_log_file(log_p)
     LOG_PATH = log_p
+    
+    # Initialize message number counter from existing log
+    _init_msg_num()
 
     # Set up debug raw log in .cache directory
     if DEBUG_MODE:

@@ -2524,6 +2524,20 @@ async def _agent_log_fetch(limit: int = 10) -> list:
         return []
 
 
+async def _agent_log_fetch_by_num(msg_num: int) -> Optional[dict]:
+    """Fetch a specific message by msg_num from agent log server."""
+    import urllib.request
+    url = f"{_AGENT_LOG_URL}/{msg_num}"
+    try:
+        def _get():
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        return await asyncio.to_thread(_get)
+    except Exception:
+        return None
+
+
 async def _agent_log_post_internal(who: str, message: str) -> dict:
     """Post a message to agent log server."""
     import urllib.request
@@ -2543,6 +2557,20 @@ async def _agent_log_post_internal(who: str, message: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+async def _agent_log_delete_by_num(msg_num: int) -> dict:
+    """Delete a message by msg_num from agent log server."""
+    import urllib.request
+    url = f"{_AGENT_LOG_URL}/{msg_num}"
+    try:
+        def _delete():
+            req = urllib.request.Request(url, method="DELETE")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        return await asyncio.to_thread(_delete)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @mcp.tool(name="agent_log_post", description="Post a message to the agent log. Plain text, no escaping needed.")
 async def agent_log_post(who: str, message: str) -> Dict[str, Any]:
     """
@@ -2553,13 +2581,13 @@ async def agent_log_post(who: str, message: str) -> Dict[str, Any]:
         message: Plain text message. Newlines are preserved as-is.
     
     Returns:
-        {ok: true} on success, or {ok: false, error: "..."} on failure.
+        {ok: true, msg_num: <number>} on success, or {ok: false, error: "..."} on failure.
     """
     if not who or not message:
         return {"ok": False, "error": "who and message are required"}
     result = await _agent_log_post_internal(who, message)
     if "ts" in result:
-        return {"ok": True, "ts": result.get("ts")}
+        return {"ok": True, "msg_num": result.get("msg_num"), "ts": result.get("ts")}
     return result
 
 
@@ -2569,22 +2597,23 @@ async def agent_log_inbox(limit: int = 10, preview_chars: int = 60) -> Dict[str,
     Fetch a preview inbox of recent messages.
     
     Returns truncated previews so you can quickly scan without reading full messages.
-    Use agent_log_get(idx) to read a specific message in full.
+    Use agent_log_get_by_num(msg_num) to read a specific message in full.
     
     Args:
         limit: Number of messages to fetch (default 10, max 50)
         preview_chars: Max characters for preview (default 60)
     
     Returns:
-        {ok: true, items: [{idx, ts, who, preview}, ...]}
-        Items are ordered most-recent-first (idx=0 is newest).
+        {ok: true, items: [{msg_num, ts, who, preview}, ...]}
+        Items are ordered oldest-first as stored in log.
     """
     limit = max(1, min(int(limit), 50))
     preview_chars = max(10, min(int(preview_chars), 200))
     
     messages = await _agent_log_fetch(limit)
     items = []
-    for idx, msg in enumerate(messages):
+    for msg in messages:
+        msg_num = msg.get("msg_num")
         ts = msg.get("ts", "")
         who = msg.get("who", "")
         full_message = msg.get("message", "")
@@ -2594,7 +2623,7 @@ async def agent_log_inbox(limit: int = 10, preview_chars: int = 60) -> Dict[str,
             preview = first_line[:preview_chars - 3] + "..."
         else:
             preview = first_line
-        items.append({"idx": idx, "ts": ts, "who": who, "preview": preview})
+        items.append({"msg_num": msg_num, "ts": ts, "who": who, "preview": preview})
     
     return {"ok": True, "items": items}
 
@@ -2609,7 +2638,7 @@ async def agent_log_get(idx: int = 0, limit: int = 10) -> str:
         limit: How many messages to fetch when building inbox (must be > idx)
     
     Returns:
-        Formatted plain text: "[timestamp] who:\nmessage"
+        Formatted plain text: "#msg_num [timestamp] who:\nmessage"
     """
     idx = max(0, int(idx))
     limit = max(idx + 1, min(int(limit), 50))
@@ -2622,10 +2651,32 @@ async def agent_log_get(idx: int = 0, limit: int = 10) -> str:
         return f"(error: index {idx} out of range, only {len(messages)} messages)"
     
     msg = messages[idx]
+    msg_num = msg.get("msg_num", "?")
     ts = msg.get("ts", "")
     who = msg.get("who", "")
     message = msg.get("message", "")
-    return f"[{ts}] {who}:\n{message}"
+    return f"#{msg_num} [{ts}] {who}:\n{message}"
+
+
+@mcp.tool(name="agent_log_get_by_num", description="Get a specific message by its permanent message number.")
+async def agent_log_get_by_num(msg_num: int) -> str:
+    """
+    Get the full text of a specific message by its msg_num.
+    
+    Args:
+        msg_num: The permanent message number (shown in inbox as msg_num)
+    
+    Returns:
+        Formatted plain text: "#msg_num [timestamp] who:\nmessage"
+    """
+    msg = await _agent_log_fetch_by_num(msg_num)
+    if not msg:
+        return f"(error: message #{msg_num} not found)"
+    
+    ts = msg.get("ts", "")
+    who = msg.get("who", "")
+    message = msg.get("message", "")
+    return f"#{msg_num} [{ts}] {who}:\n{message}"
 
 
 @mcp.tool(name="agent_log_last", description="Get the most recent message from the agent log.")
@@ -2634,17 +2685,18 @@ async def agent_log_last() -> str:
     Shortcut to get the most recent message.
     
     Returns:
-        Formatted plain text: "[timestamp] who:\nmessage"
+        Formatted plain text: "#msg_num [timestamp] who:\nmessage"
     """
     messages = await _agent_log_fetch(1)
     if not messages:
         return "(no messages in log)"
     
     msg = messages[0]
+    msg_num = msg.get("msg_num", "?")
     ts = msg.get("ts", "")
     who = msg.get("who", "")
     message = msg.get("message", "")
-    return f"[{ts}] {who}:\n{message}"
+    return f"#{msg_num} [{ts}] {who}:\n{message}"
 
 
 @mcp.tool(name="agent_log_read", description="Read recent messages as formatted plain text.")
@@ -2653,10 +2705,10 @@ async def agent_log_read(limit: int = 10) -> str:
     Read recent messages formatted as plain text.
     
     Returns all messages in a single text block, formatted as:
-    [timestamp] who:
+    #msg_num [timestamp] who:
     message
     
-    [timestamp] who:
+    #msg_num [timestamp] who:
     message
     ...
     
@@ -2674,12 +2726,28 @@ async def agent_log_read(limit: int = 10) -> str:
     
     formatted = []
     for msg in messages:
+        msg_num = msg.get("msg_num", "?")
         ts = msg.get("ts", "")
         who = msg.get("who", "")
         message = msg.get("message", "")
-        formatted.append(f"[{ts}] {who}:\n{message}")
+        formatted.append(f"#{msg_num} [{ts}] {who}:\n{message}")
     
     return "\n\n".join(formatted)
+
+
+@mcp.tool(name="agent_log_delete", description="Delete a message from the agent log by its message number.")
+async def agent_log_delete(msg_num: int) -> Dict[str, Any]:
+    """
+    Delete a specific message from the agent log.
+    
+    Args:
+        msg_num: The permanent message number to delete
+    
+    Returns:
+        {ok: true, deleted: <msg_num>} on success, or {ok: false, error: "..."} on failure.
+    """
+    result = await _agent_log_delete_by_num(msg_num)
+    return result
 
 
 async def _main() -> None:

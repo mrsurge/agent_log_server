@@ -71,3 +71,5 @@ It is always a good idea for me to at least check the last few messages before b
 # **There is no "we can't do this unless we do that, so we're not doing it". there is only, "we can't do this unless we do that... so we're going to do that".**
 -
 **FOR TE2 AGENTS (THIS PROBABLY MEANS YOU) IN 'CODE CM6'... DO NOT USE *CHEAP* NATIVE BROWSER DROP-DOWNS. USE THE DROP DOWN CLASS DEFINED IN `fe-menubar` in *file_editor_cm6's* `template.html`**
+# Agent Log MCP Tool Exception
+Requests from the user to interact with the agent log (posting messages, reading messages, deleting messages, etc.) do not require the confirmation-of-understanding workflow. I have permission to execute agent log MCP tool calls immediately to the best of my understanding without seeking prior approval.
