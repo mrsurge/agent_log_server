@@ -13,6 +13,7 @@ import io
 import re
 import signal
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -2571,6 +2572,41 @@ async def _agent_log_delete_by_num(msg_num: int) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+async def _agent_log_await(after_msg_num: int, from_who: Optional[str] = None, timeout_ms: int = 180000) -> dict:
+    """Wait for the next message after a given msg_num."""
+    import urllib.request
+    url = f"{_AGENT_LOG_URL}/await"
+    payload = json.dumps({
+        "after_msg_num": after_msg_num,
+        "from_who": from_who,
+        "timeout_ms": timeout_ms
+    }, ensure_ascii=False).encode("utf-8")
+    
+    # Use a longer socket timeout than the await timeout
+    socket_timeout = (timeout_ms / 1000.0) + 10
+    
+    try:
+        def _post():
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=socket_timeout) as resp:
+                status = resp.status
+                body = json.loads(resp.read().decode("utf-8"))
+                if status == 408:
+                    return {"ok": False, "error": "timeout"}
+                return body
+        return await asyncio.to_thread(_post)
+    except Exception as e:
+        err_str = str(e)
+        if "408" in err_str or "timeout" in err_str.lower():
+            return {"ok": False, "error": "timeout"}
+        return {"ok": False, "error": err_str}
+
+
 @mcp.tool(name="agent_log_post", description="Post a message to the agent log. Plain text, no escaping needed.")
 async def agent_log_post(who: str, message: str) -> Dict[str, Any]:
     """
@@ -2748,6 +2784,285 @@ async def agent_log_delete(msg_num: int) -> Dict[str, Any]:
     """
     result = await _agent_log_delete_by_num(msg_num)
     return result
+
+
+@mcp.tool(name="agent_log_await", description="Wait for the next message in the agent log after a given msg_num.")
+async def agent_log_await(after_msg_num: int, from_who: Optional[str] = None, timeout_ms: int = 180000) -> str:
+    """
+    Block and wait for the next message posted to the agent log.
+    
+    Args:
+        after_msg_num: Wait for messages with msg_num greater than this
+        from_who: Optional filter - only return messages from this author
+        timeout_ms: How long to wait (default 3 minutes, max 10 minutes)
+    
+    Returns:
+        Formatted plain text: "#msg_num [timestamp] who:\nmessage"
+        Or "(timeout)" if no message arrives in time.
+    """
+    result = await _agent_log_await(after_msg_num, from_who, timeout_ms)
+    
+    if result.get("error") == "timeout":
+        return "(timeout)"
+    
+    if "msg_num" in result:
+        msg_num = result.get("msg_num", "?")
+        ts = result.get("ts", "")
+        who = result.get("who", "")
+        message = result.get("message", "")
+        return f"#{msg_num} [{ts}] {who}:\n{message}"
+    
+    return f"(error: {result.get('error', 'unknown')})"
+
+
+@mcp.tool(name="agent_log_post_await", description="Post a message and wait for the next reply in a single call.")
+async def agent_log_post_await(
+    who: str, 
+    message: str, 
+    await_from: Optional[str] = None, 
+    timeout_ms: int = 180000
+) -> Dict[str, Any]:
+    """
+    Post a message to the agent log, then block waiting for a reply.
+    
+    This enables back-and-forth conversation within a single tool call.
+    
+    Args:
+        who: Your identifier/pseudonym
+        message: The message to post
+        await_from: Optional - only accept replies from this author
+        timeout_ms: How long to wait for reply (default 3 minutes)
+    
+    Returns:
+        {
+            ok: true,
+            posted_msg_num: <your message's number>,
+            reply: "#msg_num [timestamp] who:\nmessage"
+        }
+        Or {ok: false, error: "..."} on failure.
+    """
+    if not who or not message:
+        return {"ok": False, "error": "who and message are required"}
+    
+    # Post the message
+    post_result = await _agent_log_post_internal(who, message)
+    if "msg_num" not in post_result:
+        return {"ok": False, "error": post_result.get("error", "failed to post")}
+    
+    posted_num = post_result["msg_num"]
+    
+    # Wait for reply
+    await_result = await _agent_log_await(posted_num, await_from, timeout_ms)
+    
+    if await_result.get("error") == "timeout":
+        return {
+            "ok": False, 
+            "error": "timeout waiting for reply",
+            "posted_msg_num": posted_num
+        }
+    
+    if "msg_num" in await_result:
+        msg_num = await_result.get("msg_num", "?")
+        ts = await_result.get("ts", "")
+        reply_who = await_result.get("who", "")
+        reply_msg = await_result.get("message", "")
+        return {
+            "ok": True,
+            "posted_msg_num": posted_num,
+            "reply_msg_num": msg_num,
+            "reply": f"#{msg_num} [{ts}] {reply_who}:\n{reply_msg}"
+        }
+    
+    return {"ok": False, "error": await_result.get("error", "unknown")}
+
+
+# =============================================================================
+# Agent-to-Agent User Message Tools
+# =============================================================================
+# These tools allow an agent to send a user message to codex-app-server,
+# appearing as an agent-initiated prompt with metadata.
+
+_APPSERVER_RPC_URL = "http://127.0.0.1:12359/api/appserver/rpc"
+
+
+def _build_agent_message_header(
+    pseudonym: str,
+    model: str,
+    repo: str,
+    subject: str,
+    reply_to: Optional[str] = None,
+) -> str:
+    """Build the agent message header block."""
+    header = f"""[AGENT MESSAGE]
+from: {pseudonym}
+model: {model}
+repo: {repo}
+subject: {subject}"""
+    if reply_to:
+        header += f"\nreply_to: {reply_to}"
+    header += "\n---\n"
+    return header
+
+
+async def _send_agent_user_message(
+    conversation_id: str,
+    pseudonym: str,
+    model: str,
+    repo: str,
+    subject: str,
+    message: str,
+    reply_to: Optional[str] = None,
+) -> dict:
+    """Send a user message to codex-app-server as an agent."""
+    import urllib.request
+    
+    header = _build_agent_message_header(pseudonym, model, repo, subject, reply_to)
+    full_message = header + message
+    
+    # Build turn/start RPC payload
+    rpc_payload = {
+        "method": "turn/start",
+        "id": int(datetime.now().timestamp() * 1000),
+        "params": {
+            "conversationId": conversation_id,
+            "input": [{"type": "text", "text": full_message}],
+        }
+    }
+    
+    payload_bytes = json.dumps(rpc_payload, ensure_ascii=False).encode("utf-8")
+    
+    try:
+        def _post():
+            req = urllib.request.Request(
+                _APPSERVER_RPC_URL,
+                data=payload_bytes,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        result = await asyncio.to_thread(_post)
+        return {"ok": True, "rpc_id": rpc_payload["id"], **result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="agent_send_message", description="Send a user message to codex-app-server as an agent (fire-and-forget).")
+async def agent_send_message(
+    conversation_id: str,
+    pseudonym: str,
+    model: str,
+    repo: str,
+    subject: str,
+    message: str,
+    reply_to: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Send a user message to another codex agent via codex-app-server.
+    
+    This is fire-and-forget - it sends the message and returns immediately.
+    The receiving agent sees it as a user message with agent metadata.
+    
+    Args:
+        conversation_id: Target conversation ID in codex-app-server
+        pseudonym: Your identifier (e.g., "Copilot", "Codex-Main")
+        model: Your model name (e.g., "gpt-5.2", "claude-sonnet-4")
+        repo: Your working repository path
+        subject: Brief subject/topic of the message
+        message: The actual message content
+        reply_to: Your conversation ID (so recipient knows where to reply)
+    
+    Returns:
+        {ok: true, rpc_id: <id>} on success
+    """
+    if not conversation_id or not message:
+        return {"ok": False, "error": "conversation_id and message are required"}
+    
+    return await _send_agent_user_message(
+        conversation_id=conversation_id,
+        pseudonym=pseudonym or "Agent",
+        model=model or "unknown",
+        repo=repo or "unknown",
+        subject=subject or "Agent Message",
+        message=message,
+        reply_to=reply_to,
+    )
+
+
+@mcp.tool(name="agent_send_message_await", description="Send a user message to codex-app-server and wait for response on agent log.")
+async def agent_send_message_await(
+    conversation_id: str,
+    pseudonym: str,
+    model: str,
+    repo: str,
+    subject: str,
+    message: str,
+    reply_to: Optional[str] = None,
+    await_from: Optional[str] = None,
+    timeout_ms: int = 300000,
+) -> Dict[str, Any]:
+    """
+    Send a user message to another codex agent and wait for their response on the agent log.
+    
+    The receiving agent should post their response to the agent log.
+    This tool waits for that response.
+    
+    Args:
+        conversation_id: Target conversation ID in codex-app-server
+        pseudonym: Your identifier
+        model: Your model name
+        repo: Your working repository path
+        subject: Brief subject/topic
+        message: The message content (should instruct recipient to respond via agent log)
+        reply_to: Your conversation ID (so recipient knows where to reply)
+        await_from: Optional - only accept log responses from this author
+        timeout_ms: How long to wait for response (default 5 minutes)
+    
+    Returns:
+        {ok: true, rpc_id: <id>, reply_msg_num: <num>, reply: "..."} on success
+    """
+    if not conversation_id or not message:
+        return {"ok": False, "error": "conversation_id and message are required"}
+    
+    # Get current highest msg_num before sending
+    messages = await _agent_log_fetch(1)
+    after_msg_num = 0
+    if messages and messages[0].get("msg_num"):
+        after_msg_num = messages[0]["msg_num"]
+    
+    # Send the message
+    send_result = await _send_agent_user_message(
+        conversation_id=conversation_id,
+        pseudonym=pseudonym or "Agent",
+        model=model or "unknown",
+        repo=repo or "unknown",
+        subject=subject or "Agent Message",
+        message=message,
+        reply_to=reply_to,
+    )
+    
+    if not send_result.get("ok"):
+        return send_result
+    
+    # Wait for response on agent log
+    await_result = await _agent_log_await(after_msg_num, await_from, timeout_ms)
+    
+    if await_result.get("error") == "timeout":
+        return {
+            "ok": False,
+            "error": "timeout waiting for reply on agent log",
+            "rpc_id": send_result.get("rpc_id"),
+        }
+    
+    if "msg_num" in await_result:
+        return {
+            "ok": True,
+            "rpc_id": send_result.get("rpc_id"),
+            "reply_msg_num": await_result["msg_num"],
+            "reply": f"#{await_result['msg_num']} [{await_result.get('ts', '')}] {await_result.get('who', '')}:\n{await_result.get('message', '')}",
+        }
+    
+    return {"ok": False, "error": await_result.get("error", "unknown")}
 
 
 async def _main() -> None:

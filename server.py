@@ -64,6 +64,14 @@ app = FastAPI(lifespan=_lifespan)
 socketio_server = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 socketio_app = socketio.ASGIApp(socketio_server, other_asgi_app=app)
 
+# Host-provided UI hints are runtime-only (not persisted). These are meant for iframe/drawer integration.
+_HOST_UI_STATE: Dict[str, Any] = {
+    "show_close": False,
+    "parent_origin": None,
+    "ide_mode": False,
+    "project_root": None,
+}
+
 
 @socketio_server.on("connect", namespace="/appserver")
 async def _appserver_connect(sid, environ):
@@ -3613,35 +3621,42 @@ async def codex_agent_ui() -> FastHTMLResponse:
             ),
             Body(
                 Div(
-                    Header(
-                        Div(
-                            H1("CodexAS-Extension"),
-                            Small("App-Server JSON-RPC • Unified Timeline"),
-                            cls="brand"
-                        ),
-                        Div(
-                            Div(
-                                Span("Status"),
-                                Span("idle", id="agent-status", cls="pill warn"),
-                                cls="status-pill"
-                            ),
-                            Button("Start", id="agent-start", cls="btn"),
-                            Button("Stop", id="agent-stop", cls="btn ghost"),
-                            cls="toolbar"
-                        ),
-                        cls="topbar"
-                    ),
-                    Main(
-                        # Threads panel intentionally removed for now.
-                        # NOTE: No native browser modals/dialogs/dropdowns allowed.
-                        # All future controls must be DOM-rendered.
-                        Section(
-                            H2("Conversations"),
-                            Div(
-                                P("Pick or create a conversation", cls="muted"),
-                                Div(id="conversation-list", cls="conversation-list"),
-                                cls="splash-body"
-                            ),
+	                    Header(
+	                        Div(
+	                            H1("CodexAS-Extension"),
+	                            Small("App-Server JSON-RPC • Unified Timeline"),
+	                            cls="brand"
+	                        ),
+	                        Div(
+	                            Div(
+	                                Span("Status"),
+	                                Span("idle", id="agent-status", cls="pill warn"),
+	                                cls="status-pill"
+	                            ),
+	                            Button("Start", id="agent-start", cls="btn"),
+	                            Button("Stop", id="agent-stop", cls="btn ghost"),
+	                            Button("×", id="host-close-top", cls="btn ghost host-close-btn"),
+	                            cls="toolbar"
+	                        ),
+	                        cls="topbar"
+	                    ),
+	                    Main(
+	                        # Threads panel intentionally removed for now.
+	                        # NOTE: No native browser modals/dialogs/dropdowns allowed.
+	                        # All future controls must be DOM-rendered.
+	                        Section(
+	                            H2("Conversations"),
+	                            Div(
+	                                Button("Project", id="splash-tab-project", cls="btn tiny toggle"),
+	                                Button("All", id="splash-tab-all", cls="btn tiny toggle active"),
+	                                cls="splash-tabs",
+	                                id="splash-tabs",
+	                            ),
+	                            Div(
+	                                P("Pick or create a conversation", cls="muted"),
+	                                Div(id="conversation-list", cls="conversation-list"),
+	                                cls="splash-body"
+	                            ),
                             Footer(
                                 Button("New Conversation", id="conversation-create", cls="btn primary"),
                                 cls="splash-footer"
@@ -3656,19 +3671,20 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     Div("—", id="conversation-label", cls="conversation-label"),
                                     cls="brand"
                                 ),
-                                Div(
-                                    Label(
-                                        Input(type="checkbox", id="markdown-toggle", checked=True),
-                                        Span("MD"),
-                                        cls="toggle-label"
-                                    ),
-                                    Span("disconnected", id="agent-ws", cls="pill warn"),
-                                    Button("Settings", id="conversation-settings", cls="btn"),
-                                    Button("Back", id="conversation-back", cls="btn ghost"),
-                                    cls="drawer-actions"
-                                ),
-                                cls="drawer-header"
-                            ),
+	                                Div(
+	                                    Label(
+	                                        Input(type="checkbox", id="markdown-toggle", checked=True),
+	                                        Span("MD"),
+	                                        cls="toggle-label"
+	                                    ),
+	                                    Span("disconnected", id="agent-ws", cls="pill warn"),
+	                                    Button("Settings", id="conversation-settings", cls="btn"),
+	                                    Button("Back", id="conversation-back", cls="btn ghost"),
+	                                    Button("×", id="host-close-drawer", cls="btn ghost host-close-btn"),
+	                                    cls="drawer-actions"
+	                                ),
+	                                cls="drawer-header"
+	                            ),
                             Div(
                                 Div(
                                     Div("Waiting for events...", id="timeline-placeholder", cls="timeline-row muted"),
@@ -4937,14 +4953,313 @@ async def api_appserver_compact():
 
 
 @app.post("/api/appserver/mention")
+@app.put("/api/appserver/mention")
 async def api_appserver_mention(payload: Dict[str, Any] = Body(...)):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
     path = payload.get("path")
     if not isinstance(path, str) or not path.strip():
         raise HTTPException(status_code=400, detail="Missing or invalid 'path'")
-    await _broadcast_appserver_ui({"type": "mention_insert", "path": path})
-    return {"ok": True}
+    if "`" in path:
+        raise HTTPException(status_code=400, detail="Invalid 'path' (backticks not supported)")
+    conversation_id = payload.get("conversation_id")
+    if conversation_id is not None and not isinstance(conversation_id, str):
+        raise HTTPException(status_code=400, detail="Invalid 'conversation_id'")
+
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        active_conversation_id = cfg.get("conversation_id")
+        active_view = cfg.get("active_view", "splash")
+
+    if not conversation_id:
+        conversation_id = active_conversation_id
+
+    if not conversation_id:
+        raise HTTPException(status_code=409, detail="No active conversation selected")
+
+    # Validate the conversation exists.
+    if not _conversation_meta_path(conversation_id).exists():
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    queued = True
+    if active_view == "conversation" and active_conversation_id == conversation_id:
+        await _broadcast_appserver_ui({"type": "mention_insert", "path": path, "conversation_id": conversation_id})
+        queued = False
+    else:
+        # Drawer closed (or different conversation active): append into the draft buffer
+        # so it appears in the composer when the conversation is opened.
+        meta = _load_conversation_meta(conversation_id)
+        draft = meta.get("draft")
+        if not isinstance(draft, str):
+            draft = ""
+        token = f"`{path}`"
+        if draft and not draft.endswith((" ", "\n", "\t")):
+            draft = draft + " " + token
+        else:
+            draft = draft + token
+        meta["draft"] = draft
+        _save_conversation_meta(conversation_id, meta)
+        _draft_hash_cache[conversation_id] = hashlib.sha256(draft.encode("utf-8")).hexdigest()
+
+    # CORS-friendly response for editor/iframe host apps.
+    return JSONResponse(
+        {"ok": True, "queued": queued, "conversation_id": conversation_id, "path": path},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.options("/api/appserver/mention")
+async def api_appserver_mention_options():
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, PUT, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
+
+
+@app.get("/api/host/ui")
+async def api_host_ui_get():
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        return {
+            "ok": True,
+            "host_ui": {
+                "show_close": bool(_HOST_UI_STATE.get("show_close")),
+                "parent_origin": _HOST_UI_STATE.get("parent_origin") if isinstance(_HOST_UI_STATE.get("parent_origin"), str) else None,
+                "ide_mode": bool(_HOST_UI_STATE.get("ide_mode")),
+                "project_root": _HOST_UI_STATE.get("project_root") if isinstance(_HOST_UI_STATE.get("project_root"), str) else None,
+            },
+            "active_view": cfg.get("active_view", "splash"),
+            "conversation_id": cfg.get("conversation_id"),
+        }
+
+
+async def _set_host_ui_state(
+    *,
+    show_close: Optional[bool] = None,
+    parent_origin: Optional[Optional[str]] = None,
+    ide_mode: Optional[bool] = None,
+    project_root: Optional[Optional[str]] = None,
+) -> Dict[str, Any]:
+    if show_close is not None:
+        _HOST_UI_STATE["show_close"] = bool(show_close)
+    if parent_origin is not None:
+        _HOST_UI_STATE["parent_origin"] = parent_origin or None
+    if ide_mode is not None:
+        _HOST_UI_STATE["ide_mode"] = bool(ide_mode)
+    if project_root is not None:
+        _HOST_UI_STATE["project_root"] = project_root or None
+
+    event = {
+        "type": "host_ui",
+        "show_close": bool(_HOST_UI_STATE.get("show_close")),
+        "parent_origin": _HOST_UI_STATE.get("parent_origin") if isinstance(_HOST_UI_STATE.get("parent_origin"), str) else None,
+        "ide_mode": bool(_HOST_UI_STATE.get("ide_mode")),
+        "project_root": _HOST_UI_STATE.get("project_root") if isinstance(_HOST_UI_STATE.get("project_root"), str) else None,
+    }
+    await _broadcast_appserver_ui(event)
+    return event
+
+
+@app.post("/api/host/ui")
+@app.put("/api/host/ui")
+async def api_host_ui_set(payload: Dict[str, Any] = Body(...)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    show_close = payload.get("show_close")
+    parent_origin = payload.get("parent_origin")
+    ide_mode = payload.get("ide_mode")
+    project_root = payload.get("project_root")
+    if show_close is not None and not isinstance(show_close, bool):
+        raise HTTPException(status_code=400, detail="Invalid 'show_close'")
+    if parent_origin is not None and parent_origin != "" and not isinstance(parent_origin, str):
+        raise HTTPException(status_code=400, detail="Invalid 'parent_origin'")
+    if ide_mode is not None and not isinstance(ide_mode, bool):
+        raise HTTPException(status_code=400, detail="Invalid 'ide_mode'")
+    if project_root is not None and project_root != "" and not isinstance(project_root, str):
+        raise HTTPException(status_code=400, detail="Invalid 'project_root'")
+
+    event = await _set_host_ui_state(
+        show_close=bool(show_close) if show_close is not None else None,
+        parent_origin=(parent_origin or None) if parent_origin is not None else None,
+        ide_mode=bool(ide_mode) if ide_mode is not None else None,
+        project_root=(project_root or None) if project_root is not None else None,
+    )
+
+    return JSONResponse(
+        {"ok": True, **event},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.post("/api/host/drawer/open")
+@app.put("/api/host/drawer/open")
+async def api_host_drawer_open(payload: Dict[str, Any] = Body(default_factory=dict)):
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    parent_origin = payload.get("parent_origin")
+    if parent_origin is not None and parent_origin != "" and not isinstance(parent_origin, str):
+        raise HTTPException(status_code=400, detail="Invalid 'parent_origin'")
+    project_root = payload.get("project_root")
+    if project_root is not None and project_root != "" and not isinstance(project_root, str):
+        raise HTTPException(status_code=400, detail="Invalid 'project_root'")
+    event = await _set_host_ui_state(
+        show_close=True,
+        ide_mode=True,
+        parent_origin=(parent_origin or None) if parent_origin is not None else None,
+        project_root=(project_root or None) if project_root is not None else None,
+    )
+    return JSONResponse(
+        {"ok": True, **event},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.options("/api/host/drawer/open")
+async def api_host_drawer_open_options():
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, PUT, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
+
+
+@app.post("/api/host/drawer/close")
+@app.put("/api/host/drawer/close")
+async def api_host_drawer_close(payload: Dict[str, Any] = Body(default_factory=dict)):
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    parent_origin = payload.get("parent_origin")
+    if parent_origin is not None and parent_origin != "" and not isinstance(parent_origin, str):
+        raise HTTPException(status_code=400, detail="Invalid 'parent_origin'")
+    event = await _set_host_ui_state(
+        show_close=False,
+        ide_mode=False,
+        parent_origin=(parent_origin or None) if parent_origin is not None else None,
+    )
+    return JSONResponse(
+        {"ok": True, **event},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.options("/api/host/drawer/close")
+async def api_host_drawer_close_options():
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, PUT, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
+
+
+@app.post("/api/host/project/cwd")
+@app.put("/api/host/project/cwd")
+async def api_host_project_cwd(payload: Dict[str, Any] = Body(...)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    cwd = payload.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        # Also accept the same shape as the host fetch response:
+        # { ok: true, data: { cwd: "<abs>" } } (or { data: { cwd: "<abs>" } })
+        data = payload.get("data")
+        if isinstance(data, dict):
+            cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        raise HTTPException(status_code=400, detail="Missing or invalid 'cwd'")
+    event = await _set_host_ui_state(project_root=cwd)
+    return JSONResponse(
+        {"ok": True, **event},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.options("/api/host/project/cwd")
+async def api_host_project_cwd_options():
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, PUT, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
+
+
+def _cors_headers_for_origin(origin: Optional[str]) -> Dict[str, str]:
+    if not origin:
+        return {"Access-Control-Allow-Origin": "*"}
+    # Best-effort allowlist: TE2 host UI typically runs on :8089 and calls into this server on :12359.
+    # If an Origin is provided, reflect it (browser will enforce it), and vary on Origin for caches.
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Vary": "Origin",
+    }
+
+
+@app.get("/api/host/resolve_iframe")
+async def api_host_resolve_iframe(request: Request):
+    # Resolve the correct iframe URL for the caller (host app), based on request host/scheme.
+    # This is intentionally simple: the iframe is always served from this server's /codex-agent.
+    scheme = request.url.scheme or "http"
+    host = request.headers.get("host") or request.url.netloc
+    url = f"{scheme}://{host}/codex-agent"
+    origin = request.headers.get("origin")
+    return JSONResponse(
+        {"ok": True, "url": url, "data": {"url": url}},
+        headers=_cors_headers_for_origin(origin),
+    )
+
+
+@app.options("/api/host/resolve_iframe")
+async def api_host_resolve_iframe_options(request: Request):
+    origin = request.headers.get("origin")
+    headers = {
+        **_cors_headers_for_origin(origin),
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400",
+    }
+    return Response(status_code=204, headers=headers)
+
+
+@app.options("/api/host/ui")
+async def api_host_ui_options():
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
 
 
 @app.post("/api/appserver/initialize")
@@ -5063,6 +5378,42 @@ async def post_message(msg: MessageIn):
     await append_record(record)
     # record now has msg_num assigned by append_record
     return record
+
+
+class AwaitIn(BaseModel):
+    after_msg_num: int
+    from_who: Optional[str] = None
+    timeout_ms: int = 180000  # default 3 minutes
+
+
+@app.post("/api/messages/await")
+async def await_message(req: AwaitIn):
+    """Long-poll for the next message after a given msg_num, optionally filtered by author."""
+    after_num = req.after_msg_num
+    from_who = req.from_who.strip() if req.from_who else None
+    timeout_s = max(1, min(req.timeout_ms, 600000)) / 1000.0  # cap at 10 minutes
+    
+    poll_interval = 0.5  # seconds
+    elapsed = 0.0
+    
+    while elapsed < timeout_s:
+        # Read all records and find first one after after_num matching criteria
+        records = read_records()
+        for rec in records:
+            rec_num = rec.get("msg_num")
+            if rec_num is None or rec_num <= after_num:
+                continue
+            if from_who and rec.get("who") != from_who:
+                continue
+            # Found a matching message
+            return rec
+        
+        # No match yet, wait and poll again
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+    
+    return JSONResponse({"error": "timeout", "after_msg_num": after_num}, status_code=408)
+
 
 @app.post("/api/shutdown")
 async def api_shutdown():

@@ -72,9 +72,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const pickerTitleEl = document.getElementById('picker-title');
   const pickerFilterEl = document.getElementById('picker-filter');
   const rolloutOverlayEl = document.getElementById('rollout-picker');
-  const rolloutCloseBtn = document.getElementById('rollout-close');
-  const rolloutListEl = document.getElementById('rollout-list');
-  const mentionPillEl = document.getElementById('mention-pill');
+	  const rolloutCloseBtn = document.getElementById('rollout-close');
+	  const rolloutListEl = document.getElementById('rollout-list');
+	  const mentionPillEl = document.getElementById('mention-pill');
+	  const hostCloseTopEl = document.getElementById('host-close-top');
+	  const hostCloseDrawerEl = document.getElementById('host-close-drawer');
 
   localStorage.setItem('last_tab', 'codex-agent');
   const mobileParam = new URLSearchParams(window.location.search).get('mobile');
@@ -88,10 +90,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.body.classList.toggle('mobile-scale', enableMobileScale);
 
   let conversationMeta = {};
-  let conversationSettings = {};
-  let conversationList = [];
-  let activeView = 'splash';
-  let currentThreadId = null;
+	  let conversationSettings = {};
+	  let conversationList = [];
+	  let activeView = 'splash';
+	  let hostUi = { showClose: false, parentOrigin: null };
+	  let splashTab = 'all'; // 'all' | 'project'
+	  let currentThreadId = null;
   let pendingNewConversation = false;
   let pendingRollout = null;
   let lastEventType = null;
@@ -569,6 +573,32 @@ document.addEventListener('DOMContentLoaded', () => {
       const lang = langFromFile(awkGrepMatch[1]);
       if (lang) return lang;
     }
+
+    // Pattern 3.5: "best effort" file token anywhere in command (helps with pipes/&& chains)
+    // Example: `... mcp_agent_pty_server.py | sed -n ...` or `... web-tree-sitter.js | head -n 40`
+    // Strategy: split by pipes/&&/||/; and prefer the last file-like token in the first segment(s).
+    const segments = innerCmd.split(/\s*(?:\|\||&&|\||;)\s*/g);
+    let best = null;
+    for (const seg of segments) {
+      const toks = seg.match(/(?:'[^']*'|"[^"]*"|`[^`]*`|[^\s]+)/g) || [];
+      for (const t of toks) {
+        const raw = String(t || '').trim();
+        if (!raw) continue;
+        // Strip wrapping quotes for file detection only.
+        const unq = (raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('`') && raw.endsWith('`'))
+          ? raw.slice(1, -1)
+          : raw;
+        // Ignore obvious flags/ops
+        if (unq.startsWith('-')) continue;
+        const m = unq.match(/([^\s'"]+\.\w+)$/);
+        if (m) {
+          const lang = langFromFile(m[1]);
+          if (lang) best = lang;
+        }
+      }
+      // We prefer the first segment that yields a result (usually contains the file), but allow update if later segments also yield.
+    }
+    if (best) return best;
     
     // Pattern 4: Any file path with known extension at end of command
     const anyFileMatch = innerCmd.match(/([^\s'"]+\.\w+)\s*$/);
@@ -1269,6 +1299,71 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.classList.toggle('drawer-open', Boolean(open));
   }
 
+	  function applyHostUi() {
+	    const show = Boolean(hostUi?.showClose);
+	    if (hostCloseTopEl) {
+	      hostCloseTopEl.style.display = (show && activeView !== 'conversation') ? 'inline-flex' : 'none';
+	    }
+	    if (hostCloseDrawerEl) {
+	      hostCloseDrawerEl.style.display = (show && activeView === 'conversation') ? 'inline-flex' : 'none';
+	    }
+	    const tabsEl = document.getElementById('splash-tabs');
+	    if (tabsEl) {
+	      const ideMode = Boolean(hostUi?.ideMode);
+	      tabsEl.style.display = ideMode ? 'flex' : 'none';
+	    }
+	  }
+
+  function sendHostCloseMessage() {
+    if (!window.parent || window.parent === window) return;
+    const payload = {
+      type: 'codex_agent_close',
+      conversation_id: conversationMeta?.conversation_id || null,
+      active_view: activeView || null,
+    };
+    const origin = hostUi?.parentOrigin || '*';
+    try {
+      window.parent.postMessage(payload, origin);
+    } catch {
+      // ignore
+    }
+  }
+
+	  async function fetchHostUi() {
+	    try {
+	      const r = await fetch('/api/host/ui', { cache: 'no-store' });
+	      if (!r.ok) return;
+	      const data = await r.json();
+	      const ui = data?.host_ui || {};
+	      hostUi = {
+	        showClose: Boolean(ui.show_close),
+	        parentOrigin: (typeof ui.parent_origin === 'string' && ui.parent_origin) ? ui.parent_origin : null,
+	        ideMode: Boolean(ui.ide_mode),
+	        projectRoot: (typeof ui.project_root === 'string' && ui.project_root) ? ui.project_root : null,
+	      };
+	      applyHostUi();
+	    } catch {
+	      // ignore
+	    }
+	  }
+
+	  function isConversationInProject(meta) {
+	    const root = hostUi?.projectRoot;
+	    if (!root || typeof root !== 'string') return false;
+	    const cwd = meta?.settings?.cwd;
+	    if (!cwd || typeof cwd !== 'string') return false;
+	    if (cwd === root) return true;
+	    const rootNorm = root.endsWith('/') ? root : `${root}/`;
+	    return cwd.startsWith(rootNorm);
+	  }
+
+	  function renderSplashTabs() {
+	    const allBtn = document.getElementById('splash-tab-all');
+	    const projectBtn = document.getElementById('splash-tab-project');
+	    if (allBtn) allBtn.classList.toggle('active', splashTab === 'all');
+	    if (projectBtn) projectBtn.classList.toggle('active', splashTab === 'project');
+	  }
+
   function updateActiveConversationLabel() {
     if (!activeConversationEl) return;
     activeConversationEl.textContent = '';
@@ -1284,7 +1379,12 @@ document.addEventListener('DOMContentLoaded', () => {
   function openSettingsModal() {
     if (!settingsModalEl) return;
     if (pendingNewConversation) {
-      if (settingsCwdEl) settingsCwdEl.value = '';
+      if (settingsCwdEl) {
+        const projectPrefill = (hostUi?.ideMode && splashTab === 'project' && typeof hostUi?.projectRoot === 'string' && hostUi.projectRoot)
+          ? hostUi.projectRoot
+          : '';
+        settingsCwdEl.value = projectPrefill;
+      }
       if (settingsApprovalEl) settingsApprovalEl.value = '';
       if (settingsSandboxEl) settingsSandboxEl.value = '';
       if (settingsModelEl) settingsModelEl.value = '';
@@ -1646,18 +1746,22 @@ document.addEventListener('DOMContentLoaded', () => {
 	    });
 	  }
 
-  function renderConversationList(items, activeId) {
-    if (!conversationListEl) return;
-    conversationListEl.innerHTML = '';
-    if (!items || !items.length) {
-      const empty = document.createElement('div');
-      empty.className = 'muted';
-      empty.textContent = 'No conversations yet.';
-      conversationListEl.appendChild(empty);
-      return;
-    }
-    items.forEach((meta) => {
-      if (!meta) return;
+	  function renderConversationList(items, activeId) {
+	    if (!conversationListEl) return;
+	    conversationListEl.innerHTML = '';
+	    let list = items || [];
+	    if (hostUi?.ideMode && splashTab === 'project') {
+	      list = list.filter(isConversationInProject);
+	    }
+	    if (!list || !list.length) {
+	      const empty = document.createElement('div');
+	      empty.className = 'muted';
+	      empty.textContent = splashTab === 'project' ? 'No project conversations yet.' : 'No conversations yet.';
+	      conversationListEl.appendChild(empty);
+	      return;
+	    }
+	    list.forEach((meta) => {
+	      if (!meta) return;
       const row = document.createElement('div');
       row.className = 'conversation-row';
       if (meta.conversation_id && meta.conversation_id === activeId) {
@@ -3811,26 +3915,28 @@ document.addEventListener('DOMContentLoaded', () => {
     try { return JSON.parse(text); } catch { return text; }
   }
 
-  async function fetchConversations() {
-    try {
-      const r = await fetch('/api/appserver/conversations', { cache: 'no-store' });
-      if (!r.ok) return;
-      const data = await r.json();
-      conversationList = data?.items || [];
-      const activeId = data?.active_conversation_id || null;
-      if (data?.active_view) activeView = data.active_view;
-      renderConversationList(conversationList, activeId);
-      updateActiveConversationLabel();
-    } catch {
-      // ignore
-    }
-  }
+	  async function fetchConversations() {
+	    try {
+	      const r = await fetch('/api/appserver/conversations', { cache: 'no-store' });
+	      if (!r.ok) return;
+	      const data = await r.json();
+	      conversationList = data?.items || [];
+	      const activeId = data?.active_conversation_id || null;
+	      if (data?.active_view) activeView = data.active_view;
+	      renderConversationList(conversationList, activeId);
+	      renderSplashTabs();
+	      updateActiveConversationLabel();
+	    } catch {
+	      // ignore
+	    }
+	  }
 
   async function setActiveView(view) {
     try {
       await postJson('/api/appserver/view', { view });
       activeView = view;
       setDrawerOpen(view === 'conversation');
+      applyHostUi();
     } catch {
       // ignore
     }
@@ -3854,6 +3960,8 @@ document.addEventListener('DOMContentLoaded', () => {
     await fetchConversations();
     await replayTranscript();
     setDrawerOpen(view === 'conversation');
+    activeView = view;
+    applyHostUi();
   }
 
   async function createConversation() {
@@ -3869,6 +3977,8 @@ document.addEventListener('DOMContentLoaded', () => {
     resetTimeline();
     await replayTranscript();
     setDrawerOpen(true);
+    activeView = 'conversation';
+    applyHostUi();
     openSettingsModal();
   }
 
@@ -4020,6 +4130,7 @@ document.addEventListener('DOMContentLoaded', () => {
       conversationSettings = conversationMeta?.settings || {};
       activeView = conversationMeta?.active_view || 'splash';
       setDrawerOpen(activeView === 'conversation');
+      applyHostUi();
       updateActiveConversationLabel();
       if (footerApprovalValue) footerApprovalValue.textContent = conversationSettings?.approvalPolicy || 'default';
       if (conversationMeta && conversationMeta.thread_id) {
@@ -4422,7 +4533,25 @@ document.addEventListener('DOMContentLoaded', () => {
         lastEventType = 'system';
         renderMetaEnvelopeInjected(evt);
         return;
+      case 'host_ui': {
+        hostUi = {
+          showClose: Boolean(evt.show_close),
+          parentOrigin: (typeof evt.parent_origin === 'string' && evt.parent_origin) ? evt.parent_origin : null,
+          ideMode: Boolean(evt.ide_mode),
+          projectRoot: (typeof evt.project_root === 'string' && evt.project_root) ? evt.project_root : null,
+        };
+        applyHostUi();
+        if (activeView === 'splash' && hostUi?.ideMode && splashTab === 'project') {
+          renderSplashTabs();
+          renderConversationList(conversationList, conversationMeta?.conversation_id || null);
+        }
+        return;
+      }
       case 'mention_insert':
+        // Only insert into the active conversation's composer.
+        // (Server should include conversation_id, but guard anyway.)
+        if (!conversationMeta?.conversation_id) return;
+        if (evt.conversation_id && evt.conversation_id !== conversationMeta.conversation_id) return;
         insertMention(evt.path || '');
         return;
       case 'rpc_response': {
@@ -4614,6 +4743,7 @@ document.addEventListener('DOMContentLoaded', () => {
   updateScrollButton();
   resetWsReady();
   connectWS();
+  fetchHostUi();
   bindPickerFilter();
   setDrawerOpen(false); // Start closed to avoid race conditions
   fetchConversation().then(async () => {
@@ -4861,6 +4991,41 @@ document.addEventListener('DOMContentLoaded', () => {
     const startPath = conversationSettings?.cwd || settingsCwdEl?.value || '~';
     openPicker(startPath, 'mention');
   });
+
+  hostCloseTopEl?.addEventListener('click', () => {
+    sendHostCloseMessage();
+  });
+
+	  hostCloseDrawerEl?.addEventListener('click', () => {
+	    sendHostCloseMessage();
+	  });
+
+	  const splashTabAllBtn = document.getElementById('splash-tab-all');
+	  const splashTabProjectBtn = document.getElementById('splash-tab-project');
+	  splashTabAllBtn?.addEventListener('click', () => {
+	    splashTab = 'all';
+	    renderSplashTabs();
+	    renderConversationList(conversationList, conversationMeta?.conversation_id || null);
+	  });
+	  splashTabProjectBtn?.addEventListener('click', async () => {
+	    splashTab = 'project';
+	    if (hostUi?.ideMode && hostUi?.parentOrigin) {
+	      try {
+	        const r = await fetch(`${hostUi.parentOrigin}/api/app/file_editor_cm6/agent/cwd`, { cache: 'no-store' });
+	        if (r.ok) {
+	          const data = await r.json();
+	          const cwd = data?.data?.cwd || data?.data?.path || null;
+	          if (typeof cwd === 'string' && cwd) {
+	            hostUi.projectRoot = cwd;
+	          }
+	        }
+	      } catch {
+	        // ignore - if CORS/host unavailable we simply show empty project list
+	      }
+	    }
+	    renderSplashTabs();
+	    renderConversationList(conversationList, conversationMeta?.conversation_id || null);
+	  });
 
   // Initialize Tribute for @ mentions
   initTribute();

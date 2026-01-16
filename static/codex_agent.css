@@ -116,6 +116,19 @@ body.drawer-open {
   min-height: 0;
 }
 
+.splash-tabs {
+  display: none;
+  gap: 8px;
+  align-items: center;
+  padding: 0 2px;
+}
+
+.splash-tabs .btn.toggle.active {
+  border-color: var(--accent);
+  color: #fff;
+  background: rgba(124, 92, 255, 0.22);
+}
+
 .splash-body {
   display: flex;
   flex-direction: column;
@@ -167,7 +180,7 @@ body.drawer-open {
 }
 
 .conversation-label-line {
-  color: var(--muted);
+  color: #b7ffcd;
   font-size: 11px;
   letter-spacing: 0.3px;
 }
@@ -247,6 +260,21 @@ body.drawer-open {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.host-close-btn {
+  display: none;
+  min-width: 36px;
+  padding: 6px 10px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+#host-close-top.host-close-btn {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  z-index: 6;
 }
 
 /* Markdown toggle in header */
