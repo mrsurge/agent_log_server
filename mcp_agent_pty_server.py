@@ -2882,7 +2882,7 @@ async def agent_log_post_await(
 # These tools allow an agent to send a user message to codex-app-server,
 # appearing as an agent-initiated prompt with metadata.
 
-_APPSERVER_RPC_URL = "http://127.0.0.1:12359/api/appserver/rpc"
+_APPSERVER_MESSAGE_URL = "http://127.0.0.1:12359/api/appserver/message"
 
 
 def _build_agent_message_header(
@@ -2913,41 +2913,44 @@ async def _send_agent_user_message(
     message: str,
     reply_to: Optional[str] = None,
 ) -> dict:
-    """Send a user message to codex-app-server as an agent."""
+    """Send a user message to codex-app-server via unified message endpoint.
+    
+    Uses /api/appserver/message which handles all thread resolution:
+    - Looks up thread_id from conversation meta
+    - Resumes thread if needed
+    - Starts new thread if none exists
+    - Sends turn/start with the message
+    """
     import urllib.request
     
     header = _build_agent_message_header(pseudonym, model, repo, subject, reply_to)
     full_message = header + message
     
-    # Build turn/start RPC payload
-    rpc_payload = {
-        "method": "turn/start",
-        "id": int(datetime.now().timestamp() * 1000),
-        "params": {
-            "conversationId": conversation_id,
-            "input": [{"type": "text", "text": full_message}],
-        }
+    # Use unified message endpoint - it handles all thread resolution
+    payload = {
+        "conversation_id": conversation_id,
+        "text": full_message
     }
     
-    payload_bytes = json.dumps(rpc_payload, ensure_ascii=False).encode("utf-8")
+    payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     
     try:
         def _post():
             req = urllib.request.Request(
-                _APPSERVER_RPC_URL,
+                _APPSERVER_MESSAGE_URL,
                 data=payload_bytes,
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         result = await asyncio.to_thread(_post)
-        return {"ok": True, "rpc_id": rpc_payload["id"], **result}
+        return result
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="agent_send_message", description="Send a user message to codex-app-server as an agent (fire-and-forget).")
+@mcp.tool(name="agent_send_message", description="Send message to another agent. ASK THE USER for your conversation_id to use as reply_to.")
 async def agent_send_message(
     conversation_id: str,
     pseudonym: str,
@@ -2955,28 +2958,25 @@ async def agent_send_message(
     repo: str,
     subject: str,
     message: str,
-    reply_to: Optional[str] = None,
+    reply_to: str,
 ) -> Dict[str, Any]:
     """
     Send a user message to another codex agent via codex-app-server.
     
-    This is fire-and-forget - it sends the message and returns immediately.
-    The receiving agent sees it as a user message with agent metadata.
-    
     Args:
-        conversation_id: Target conversation ID in codex-app-server
+        conversation_id: Target agent's conversation ID (where to send)
         pseudonym: Your identifier (e.g., "Copilot", "Codex-Main")
         model: Your model name (e.g., "gpt-5.2", "claude-sonnet-4")
         repo: Your working repository path
         subject: Brief subject/topic of the message
         message: The actual message content
-        reply_to: Your conversation ID (so recipient knows where to reply)
+        reply_to: YOUR conversation ID (so recipient can reply back to you)
     
     Returns:
-        {ok: true, rpc_id: <id>} on success
+        {ok: true, thread_id, conversation_id} on success
     """
-    if not conversation_id or not message:
-        return {"ok": False, "error": "conversation_id and message are required"}
+    if not conversation_id or not message or not reply_to:
+        return {"ok": False, "error": "conversation_id, message, and reply_to are required"}
     
     return await _send_agent_user_message(
         conversation_id=conversation_id,
@@ -2989,7 +2989,7 @@ async def agent_send_message(
     )
 
 
-@mcp.tool(name="agent_send_message_await", description="Send a user message to codex-app-server and wait for response on agent log.")
+@mcp.tool(name="agent_send_message_await", description="Send message to another agent and wait for reply. ASK THE USER for your conversation_id to use as reply_to.")
 async def agent_send_message_await(
     conversation_id: str,
     pseudonym: str,
@@ -2997,32 +2997,29 @@ async def agent_send_message_await(
     repo: str,
     subject: str,
     message: str,
-    reply_to: Optional[str] = None,
+    reply_to: str,
     await_from: Optional[str] = None,
     timeout_ms: int = 300000,
 ) -> Dict[str, Any]:
     """
     Send a user message to another codex agent and wait for their response on the agent log.
     
-    The receiving agent should post their response to the agent log.
-    This tool waits for that response.
-    
     Args:
-        conversation_id: Target conversation ID in codex-app-server
+        conversation_id: Target agent's conversation ID (where to send)
         pseudonym: Your identifier
         model: Your model name
         repo: Your working repository path
         subject: Brief subject/topic
         message: The message content (should instruct recipient to respond via agent log)
-        reply_to: Your conversation ID (so recipient knows where to reply)
+        reply_to: YOUR conversation ID (so recipient can reply back to you)
         await_from: Optional - only accept log responses from this author
         timeout_ms: How long to wait for response (default 5 minutes)
     
     Returns:
-        {ok: true, rpc_id: <id>, reply_msg_num: <num>, reply: "..."} on success
+        {ok: true, thread_id, reply_msg_num, reply: "..."} on success
     """
-    if not conversation_id or not message:
-        return {"ok": False, "error": "conversation_id and message are required"}
+    if not conversation_id or not message or not reply_to:
+        return {"ok": False, "error": "conversation_id, message, and reply_to are required"}
     
     # Get current highest msg_num before sending
     messages = await _agent_log_fetch(1)

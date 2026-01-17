@@ -1,0 +1,12 @@
+version: "1"
+shells:
+  gemini_acp:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["acp", "gemini"]
+    command:
+      - gemini
+      - --experimental-acp
+    labels:
+      app: "gemini-acp"
+      conversation_id: ${CONVERSATION_ID}

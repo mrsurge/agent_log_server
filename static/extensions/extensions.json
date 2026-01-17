@@ -1,0 +1,12 @@
+{
+  "version": "1.0",
+  "extensions": [
+    {
+      "id": "gemini-acp",
+      "name": "Gemini CLI (ACP)",
+      "type": "acp",
+      "path": "acp/gemini",
+      "enabled": true
+    }
+  ]
+}

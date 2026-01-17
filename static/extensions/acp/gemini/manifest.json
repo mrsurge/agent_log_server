@@ -1,0 +1,33 @@
+{
+  "id": "gemini-acp",
+  "name": "Gemini CLI",
+  "version": "1.0.0",
+  "type": "acp",
+  "description": "Google Gemini CLI agent via Agent Client Protocol",
+  
+  "agent": {
+    "command": "gemini",
+    "args": ["--experimental-acp"],
+    "env": {}
+  },
+  
+  "capabilities": {
+    "client": {
+      "fs": {
+        "readTextFile": true,
+        "writeTextFile": true
+      },
+      "terminal": true
+    }
+  },
+  
+  "model": {
+    "name": "gemini-2.5-pro",
+    "provider": "google"
+  },
+  
+  "ui": {
+    "icon": "gemini.svg",
+    "color": "#4285F4"
+  }
+}

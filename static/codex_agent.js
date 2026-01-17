@@ -49,6 +49,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const footerApprovalValue = document.getElementById('footer-approval-value');
   const footerApprovalToggle = document.getElementById('footer-approval-toggle');
   const footerApprovalOptions = document.getElementById('footer-approval-options');
+  const settingsAgentEl = document.getElementById('settings-agent');
+  const settingsAgentToggle = document.getElementById('settings-agent-toggle');
+  const settingsAgentOptions = document.getElementById('settings-agent-options');
+  const settingsAgentRowEl = document.getElementById('settings-agent-row');
   const settingsRolloutEl = document.getElementById('settings-rollout');
   const settingsRolloutRowEl = document.getElementById('settings-rollout-row');
   const settingsApprovalToggle = document.getElementById('settings-approval-toggle');
@@ -1364,6 +1368,59 @@ document.addEventListener('DOMContentLoaded', () => {
 	    if (projectBtn) projectBtn.classList.toggle('active', splashTab === 'project');
 	  }
 
+	  function toProjectRelativePath(path) {
+	    if (!path || typeof path !== 'string') return null;
+	    if (!path.startsWith('/')) return path;
+	    const root = hostUi?.projectRoot;
+	    if (!root || typeof root !== 'string') return null;
+	    const rootNorm = root.endsWith('/') ? root : `${root}/`;
+	    if (path === root) return '.';
+	    if (!path.startsWith(rootNorm)) return null;
+	    return path.slice(rootNorm.length);
+	  }
+
+	  async function ensureProjectRootLoaded() {
+	    if (hostUi?.projectRoot) return hostUi.projectRoot;
+	    if (!hostUi?.ideMode) return null;
+	    if (!hostUi?.parentOrigin) return null;
+	    try {
+	      const r = await fetch(`${hostUi.parentOrigin}/api/app/file_editor_cm6/agent/cwd`, { cache: 'no-store' });
+	      if (!r.ok) return null;
+	      const data = await r.json();
+	      const cwd = data?.data?.cwd || data?.data?.path || null;
+	      if (typeof cwd === 'string' && cwd) {
+	        hostUi.projectRoot = cwd;
+	        return cwd;
+	      }
+	    } catch {
+	      // ignore
+	    }
+	    return null;
+	  }
+
+	  async function postTe2OpenRequest({ path, line, column }) {
+	    const url = 'http://localhost:8089/api/app/file_editor_cm6/agent/open';
+	    await ensureProjectRootLoaded();
+	    const payload = {
+	      source: 'codex-agent',
+	      conversation_id: conversationMeta?.conversation_id || null,
+	    };
+	    const rel = toProjectRelativePath(path);
+	    if (rel) payload.rel = rel;
+	    else if (path) payload.path = path;
+	    if (Number.isFinite(line)) payload.line = Number(line);
+	    if (Number.isFinite(column)) payload.column = Number(column);
+	    try {
+	      await fetch(url, {
+	        method: 'POST',
+	        headers: { 'Content-Type': 'application/json' },
+	        body: JSON.stringify(payload),
+	      });
+	    } catch (e) {
+	      console.warn('Failed to post TE2 open_request:', e);
+	    }
+	  }
+
   function updateActiveConversationLabel() {
     if (!activeConversationEl) return;
     activeConversationEl.textContent = '';
@@ -1411,6 +1468,13 @@ document.addEventListener('DOMContentLoaded', () => {
       if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = conversationSettings?.diffSyntax === true;
       if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = conversationSettings?.semanticShellRibbon === true;
       if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || conversationSettings?.rolloutId || '';
+      if (settingsAgentEl) settingsAgentEl.value = conversationSettings?.agent || 'codex';
+    }
+    // Agent row: only show on new conversations (like rollout)
+    if (settingsAgentRowEl) {
+      const hasSavedSettings = !pendingNewConversation && conversationMeta?.settings && Object.values(conversationMeta.settings).some((v) => v);
+      const allowAgentSelect = !hasSavedSettings;
+      settingsAgentRowEl.style.display = allowAgentSelect ? 'block' : 'none';
     }
     if (settingsRolloutRowEl) {
       const hasSavedSettings = !pendingNewConversation && conversationMeta?.settings && Object.values(conversationMeta.settings).some((v) => v);
@@ -1594,6 +1658,28 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } catch {
       // ignore
+    }
+  }
+
+  // Load agent options from extensions API
+  async function loadAgentOptions() {
+    try {
+      const r = await fetch('/api/extensions', { cache: 'no-store' });
+      if (!r.ok) return;
+      const data = await r.json();
+      const extensions = data?.extensions || [];
+      // Build agent list: codex (default) + any loaded extensions
+      const agents = ['codex'];
+      extensions.forEach(ext => {
+        if (ext?.id && ext?.name) {
+          agents.push(ext.id);
+        }
+      });
+      if (agents.length > 1) {
+        updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl);
+      }
+    } catch {
+      // ignore - just use default 'codex'
     }
   }
 
@@ -3748,6 +3834,8 @@ document.addEventListener('DOMContentLoaded', () => {
     oldLine = 0;
     newLine = 0;
     
+    const safePath = filePath ? escapeHtml(String(filePath)) : '';
+
     // Second pass: render lines
     return text.split('\n').map((line) => {
       let cls = 'diff-context';
@@ -3775,7 +3863,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         // Hunk header gets special gutter
         const hunkGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
-        return `<span class="diff-line ${cls}"><span class="diff-gutter">${escapeHtml(hunkGutter)}</span><span class="diff-text">${escapeHtml(display)}</span></span>`;
+        return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${escapeHtml(String(oldLine || ''))}" data-new-line="${escapeHtml(String(newLine || ''))}"><span class="diff-gutter">${escapeHtml(hunkGutter)}</span><span class="diff-text">${escapeHtml(display)}</span></span>`;
       } else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git')) {
         // Skip diff headers entirely - filename shown separately
         return '';
@@ -3835,7 +3923,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
       
-      return `<span class="diff-line ${cls}"><span class="diff-gutter">${escapeHtml(gutterText)}</span><span class="diff-text">${codeHtml}</span></span>`;
+      const dataOld = escapeHtml(String(oldNo || ''));
+      const dataNew = escapeHtml(String(newNo || ''));
+      return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${dataOld}" data-new-line="${dataNew}"><span class="diff-gutter">${escapeHtml(gutterText)}</span><span class="diff-text">${codeHtml}</span></span>`;
     }).filter(line => line !== '').join('');
   }
 
@@ -4004,6 +4094,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const xtermEnabled = settingsXtermEl?.checked !== false;
     const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
     const semanticRibbonEnabled = settingsSemanticShellRibbonEl?.checked === true;
+    const agentType = settingsAgentEl?.value?.trim() || 'codex';
     const settings = {
       cwd,
       approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
@@ -4017,6 +4108,7 @@ document.addEventListener('DOMContentLoaded', () => {
       useXterm: xtermEnabled,
       diffSyntax: diffSyntaxEnabled,
       semanticShellRibbon: semanticRibbonEnabled,
+      agent: agentType,
     };
     // Update local markdown state
     setMarkdownEnabled(mdEnabled);
@@ -4278,12 +4370,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     setActivity('sending', true);
     await ensureInitialized();
-    const threadId = await ensureThread();
-    const params = {
-      threadId,
-      input: [{ type: 'text', text }],
-    };
-    await sendRpc('turn/start', params);
+    // Use unified message endpoint - backend handles all thread resolution
+    const result = await postJson('/api/appserver/message', {
+      conversation_id: conversationMeta.conversation_id,
+      text,
+    });
+    if (!result?.ok) {
+      console.error('sendUserMessage failed:', result?.error);
+      setActivity(result?.error || 'send failed', true);
+    }
   }
 
   // Direct shell command execution via !command
@@ -4788,6 +4883,11 @@ document.addEventListener('DOMContentLoaded', () => {
     'detailed',
     'auto',
   ]);
+  
+  // Agent dropdown - starts with codex, loads extensions dynamically
+  setupDropdown(settingsAgentEl, settingsAgentToggle, settingsAgentOptions, ['codex']);
+  loadAgentOptions();
+  
   loadModelOptions();
 
   // Update effort options when model input changes (typing or paste)
@@ -5060,6 +5160,26 @@ document.addEventListener('DOMContentLoaded', () => {
     autoScroll = !autoScroll;
     updateScrollButton();
     if (autoScroll) maybeAutoScroll(true);
+  });
+
+  timelineEl?.addEventListener('click', (evt) => {
+    const target = evt.target;
+    if (!(target instanceof HTMLElement)) return;
+    const lineEl = target.closest('.diff-line');
+    if (!(lineEl instanceof HTMLElement)) return;
+    const path = lineEl.getAttribute('data-path') || '';
+    const newLine = lineEl.getAttribute('data-new-line') || '';
+    const oldLine = lineEl.getAttribute('data-old-line') || '';
+    const line = parseInt(newLine || oldLine, 10);
+    if (!path || !Number.isFinite(line)) return;
+    // Avoid triggering on hunk headers (line numbers may be missing/0).
+    if (line <= 0) return;
+    // Tap highlight for touch-only WebViews (e.g. Gecko wrappers) where :hover may not show.
+    try {
+      lineEl.classList.add('tap-flash');
+      setTimeout(() => lineEl.classList.remove('tap-flash'), 180);
+    } catch {}
+    postTe2OpenRequest({ path, line, column: 1 });
   });
 
   // Markdown toggle in header - syncs with settings and saves to SSOT

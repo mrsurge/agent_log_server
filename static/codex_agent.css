@@ -779,9 +779,26 @@ textarea {
   color: #c9d1d9;
   background: #0d1117;
   border-bottom: 1px solid #21262d;
+  cursor: pointer;
 }
 .diff-line:last-child {
   border-bottom: none;
+}
+
+.diff-line:hover {
+  background: rgba(124, 92, 255, 0.12);
+}
+
+.diff-line.diff-hunk {
+  cursor: default;
+}
+
+.diff-line.diff-hunk:hover {
+  background: #0d1117;
+}
+
+.diff-line.tap-flash {
+  background: rgba(124, 92, 255, 0.22) !important;
 }
 .diff-gutter {
   white-space: pre;

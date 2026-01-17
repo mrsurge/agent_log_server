@@ -3766,6 +3766,16 @@ async def codex_agent_ui() -> FastHTMLResponse:
                             ),
                             Div(
                                 Label(
+                                    Span("Agent"),
+                                    Div(
+                                        Input(type="text", id="settings-agent", placeholder="codex", readonly=True, value="codex"),
+                                        Button("▾", id="settings-agent-toggle", cls="btn ghost dropdown-toggle"),
+                                        Div(id="settings-agent-options", cls="dropdown-list"),
+                                        cls="dropdown-field"
+                                    ),
+                                    id="settings-agent-row",
+                                ),
+                                Label(
                                     Span("CWD"),
                                     Div(
                                         Input(type="text", id="settings-cwd", placeholder="~/project"),
@@ -4709,6 +4719,138 @@ async def _emit_shell_events_from_agent_block(conversation_id: str, block: Dict[
     await _broadcast_appserver_ui({"type": "shell_end", "id": call_id, "exitCode": exit_code, "stdout": stdout, "stderr": ""})
 
 
+# =============================================================================
+# UNIFIED MESSAGE ENDPOINT
+# =============================================================================
+# Single endpoint for sending messages to any conversation.
+# Handles all thread resolution: lookup thread_id, resume if needed, start if new.
+# Both frontend and MCP tools use this - keeps them equally "dumb".
+
+class AppserverMessageIn(BaseModel):
+    conversation_id: str
+    text: str
+
+@app.post("/api/appserver/message")
+async def api_appserver_message(payload: AppserverMessageIn):
+    """
+    Unified message endpoint - send a message to any conversation.
+    
+    Handles all thread logic internally:
+    1. Lookup thread_id from conversation meta
+    2. Resume thread if it exists but not in memory
+    3. Start new thread if none exists
+    4. Send turn/start with the message
+    
+    Returns: { ok: bool, thread_id: str, error?: str }
+    """
+    convo_id = payload.conversation_id
+    text = payload.text
+    
+    if not convo_id or not text:
+        raise HTTPException(status_code=400, detail="conversation_id and text required")
+    
+    # Load conversation meta
+    meta = _load_conversation_meta(convo_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Conversation not found: {convo_id}")
+    
+    settings = meta.get("settings", {})
+    agent_type = settings.get("agent", "codex")
+    
+    # Route to ACP if non-codex agent
+    if agent_type != "codex" and _acp_manager:
+        return await _handle_acp_message(convo_id, text, agent_type, settings)
+    
+    # Default: route to codex-app-server
+    thread_id = meta.get("thread_id")
+    
+    # Generate request IDs
+    base_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+    
+    # Helper to inject settings into params
+    def inject_settings(params: Dict[str, Any], method: str) -> Dict[str, Any]:
+        if method == "turn/start":
+            for key in ("model", "cwd", "approvalPolicy", "sandboxPolicy", "summary"):
+                if key in settings and settings[key] and key not in params:
+                    params[key] = settings[key]
+            if "effort" in settings and settings["effort"] and "effort" not in params:
+                params["effort"] = settings["effort"]
+        elif method == "thread/start":
+            for key in ("model", "cwd", "approvalPolicy", "sandbox"):
+                if key in settings and settings[key] and key not in params:
+                    params[key] = settings[key]
+            if "effort" in settings and settings["effort"] and "reasoningEffort" not in params:
+                params["reasoningEffort"] = settings["effort"]
+        elif method == "thread/resume":
+            for key in ("model", "cwd", "approvalPolicy", "sandbox"):
+                if key in settings and settings[key] and key not in params:
+                    params[key] = settings[key]
+        return params
+    
+    try:
+        if thread_id:
+            # Thread exists - resume it first, then send turn/start
+            resume_params = inject_settings({"threadId": thread_id}, "thread/resume")
+            await _write_appserver({
+                "id": base_id,
+                "method": "thread/resume",
+                "params": resume_params
+            })
+            # Brief wait for resume to register
+            await asyncio.sleep(0.3)
+            
+            # Now send turn/start
+            turn_params = inject_settings({
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": text}]
+            }, "turn/start")
+            await _write_appserver({
+                "id": base_id + 1,
+                "method": "turn/start",
+                "params": turn_params
+            })
+        else:
+            # No thread yet - start a new one
+            start_params = inject_settings({}, "thread/start")
+            await _write_appserver({
+                "id": base_id,
+                "method": "thread/start",
+                "params": start_params
+            })
+            # Wait for thread/started response to get thread_id
+            # The thread_id will be captured by _set_thread_id from the response
+            await asyncio.sleep(0.5)
+            
+            # Re-load meta to get the new thread_id
+            meta = _load_conversation_meta(convo_id)
+            thread_id = meta.get("thread_id")
+            
+            if not thread_id:
+                # Fallback: check config
+                async with _config_lock:
+                    cfg = _load_appserver_config()
+                thread_id = cfg.get("thread_id")
+            
+            if not thread_id:
+                return {"ok": False, "error": "Failed to start thread - no thread_id received"}
+            
+            # Send turn/start with new thread
+            turn_params = inject_settings({
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": text}]
+            }, "turn/start")
+            await _write_appserver({
+                "id": base_id + 1,
+                "method": "turn/start",
+                "params": turn_params
+            })
+        
+        return {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
+    
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/appserver/rpc")
 async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
     print(f"[DEBUG] /api/appserver/rpc received: {payload}")
@@ -5413,6 +5555,139 @@ async def await_message(req: AwaitIn):
         elapsed += poll_interval
     
     return JSONResponse({"error": "timeout", "after_msg_num": after_num}, status_code=408)
+
+
+# =============================================================================
+# EXTENSION SYSTEM (ACP)
+# =============================================================================
+# Dynamic extension loading for ACP-based agents (e.g., Gemini CLI)
+# Extensions are loaded from static/extensions/ and communicate via ACP protocol
+
+from extensions.acp_client import init_acp_manager, get_acp_manager, ACPManager
+
+# Initialize ACP manager on startup
+_acp_manager: Optional[ACPManager] = None
+
+def _init_extensions():
+    global _acp_manager
+    server_root = Path(__file__).parent
+    extensions_dir = server_root / "static" / "extensions"
+    if extensions_dir.exists():
+        _acp_manager = init_acp_manager(extensions_dir, server_root)
+        print(f"[Extensions] Loaded {len(_acp_manager.extensions)} extensions")
+
+# Call on module load
+_init_extensions()
+
+
+@app.get("/api/extensions")
+async def api_extensions_list():
+    """List all available extensions."""
+    if not _acp_manager:
+        return {"extensions": []}
+    return {"extensions": _acp_manager.list_extensions()}
+
+
+@app.get("/api/extensions/{extension_id}")
+async def api_extension_get(extension_id: str):
+    """Get extension details."""
+    if not _acp_manager:
+        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
+    ext = _acp_manager.get_extension(extension_id)
+    if not ext:
+        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
+    return {
+        "id": ext.id,
+        "name": ext.name,
+        "command": ext.command,
+        "args": ext.args,
+        "capabilities": ext.capabilities,
+    }
+
+
+class ExtensionSessionIn(BaseModel):
+    conversation_id: str
+    extension_id: str
+    cwd: Optional[str] = None
+
+
+@app.post("/api/extensions/session")
+async def api_extension_session_create(payload: ExtensionSessionIn):
+    """Create a new ACP session for a conversation."""
+    if not _acp_manager:
+        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
+    
+    # Update callback to broadcast to our websocket
+    async def on_update(convo_id: str, update: Dict[str, Any]):
+        # Route ACP updates through our existing event system
+        await _broadcast_appserver_ui({
+            "type": "acp_update",
+            "conversation_id": convo_id,
+            "update": update,
+        })
+    
+    session = await _acp_manager.create_session(
+        conversation_id=payload.conversation_id,
+        extension_id=payload.extension_id,
+        on_update=on_update,
+        cwd=payload.cwd,
+    )
+    
+    if not session:
+        return JSONResponse({"error": "Failed to create session"}, status_code=500)
+    
+    return {
+        "ok": True,
+        "conversation_id": session.conversation_id,
+        "session_id": session.session_id,
+        "extension_id": session.extension_id,
+    }
+
+
+class ExtensionPromptIn(BaseModel):
+    conversation_id: str
+    text: str
+
+
+@app.post("/api/extensions/prompt")
+async def api_extension_prompt(payload: ExtensionPromptIn):
+    """Send a prompt to an ACP session."""
+    if not _acp_manager:
+        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
+    
+    result = await _acp_manager.send_prompt(
+        conversation_id=payload.conversation_id,
+        text=payload.text,
+    )
+    
+    if result and result.get("error"):
+        return JSONResponse({"error": result["error"]}, status_code=400)
+    
+    return result
+
+
+@app.post("/api/extensions/cancel")
+async def api_extension_cancel(payload: Dict[str, Any] = Body(...)):
+    """Cancel an ongoing prompt."""
+    if not _acp_manager:
+        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
+    
+    conversation_id = payload.get("conversation_id")
+    if not conversation_id:
+        return JSONResponse({"error": "conversation_id required"}, status_code=400)
+    
+    success = await _acp_manager.cancel_prompt(conversation_id)
+    return {"ok": success}
+
+
+@app.delete("/api/extensions/session/{conversation_id}")
+async def api_extension_session_close(conversation_id: str):
+    """Close an ACP session."""
+    if not _acp_manager:
+        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
+    
+    success = await _acp_manager.close_session(conversation_id)
+    return {"ok": success}
 
 
 @app.post("/api/shutdown")
