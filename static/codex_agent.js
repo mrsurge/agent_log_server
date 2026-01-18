@@ -1099,13 +1099,33 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  function createMentionToken(path) {
+  function isAbsPath(p) {
+    return typeof p === 'string' && p.startsWith('/');
+  }
+
+  function joinPath(a, b) {
+    if (!a) return b || '';
+    if (!b) return a || '';
+    if (a.endsWith('/')) return a + b;
+    return `${a}/${b}`;
+  }
+
+  function toMentionAbsAndBestPath(rawPath) {
+    const cwd = conversationSettings?.cwd || conversationMeta?.cwd || '';
+    const absPath = isAbsPath(rawPath) ? rawPath : (cwd ? joinPath(cwd, rawPath) : String(rawPath || ''));
+    const bestPath = (cwd && isAbsPath(absPath)) ? getRelativePath(absPath, cwd) : absPath;
+    return { absPath, bestPath, cwd };
+  }
+
+  function createMentionToken(rawPath) {
+    const { absPath, bestPath } = toMentionAbsAndBestPath(String(rawPath || ''));
     const span = document.createElement('span');
     span.className = 'mention-token';
-    span.dataset.path = path;
-    const display = String(path || '').split('/').filter(Boolean).pop() || path;
+    span.dataset.abs = absPath || '';
+    span.dataset.path = bestPath || '';
+    const display = String(bestPath || '').split('/').filter(Boolean).pop() || bestPath || absPath;
     span.textContent = display;
-    span.title = path;
+    span.title = absPath || bestPath || '';
     span.setAttribute('contenteditable', 'false');
     return span;
   }
@@ -1131,8 +1151,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (node.nodeType !== Node.ELEMENT_NODE) return '';
     const el = node;
     if (el.classList.contains('mention-token')) {
-      const path = el.dataset.path || el.textContent || '';
-      return path ? `\`${path}\`` : '';
+      const absPath = el.dataset.abs || '';
+      const fallback = el.dataset.path || el.textContent || '';
+      const cwd = conversationSettings?.cwd || conversationMeta?.cwd || '';
+      if (absPath && cwd) {
+        const best = getRelativePath(absPath, cwd);
+        // Serialize as relative iff abs is within conversation CWD; otherwise serialize as abs.
+        const out = (best !== absPath) ? best : absPath;
+        return out ? `\`${out}\`` : '';
+      }
+      return fallback ? `\`${fallback}\`` : '';
     }
     if (el.tagName === 'BR') return '\n';
     let out = '';
@@ -1193,9 +1221,11 @@ document.addEventListener('DOMContentLoaded', () => {
       selectTemplate: function(item) {
         if (!item) return '';
         const cwd = conversationSettings?.cwd || '';
-        const relPath = getRelativePath(item.original.path, cwd);
-        return '<span class="mention-token" contenteditable="false" data-path="' +
-               relPath + '" title="' + item.original.path + '">' +
+        const absPath = item.original.path || '';
+        const relPath = getRelativePath(absPath, cwd);
+        const bestPath = relPath || absPath;
+        return '<span class="mention-token" contenteditable="false" data-abs="' +
+               absPath + '" data-path="' + bestPath + '" title="' + absPath + '">' +
                item.original.name + '</span>';
       },
       menuItemTemplate: function(item) {
@@ -1258,15 +1288,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // Insert mention via button (manual insertion)
   function insertMention(path) {
     if (!promptEl || !path) return;
-    const cwd = conversationSettings?.cwd || '';
-    const relPath = getRelativePath(path, cwd);
-    const display = String(relPath || '').split('/').filter(Boolean).pop() || relPath;
+    const { absPath, bestPath, cwd } = toMentionAbsAndBestPath(String(path || ''));
+    const relPath = getRelativePath(absPath, cwd);
+    const displayPath = relPath || bestPath || absPath;
+    const display = String(displayPath || '').split('/').filter(Boolean).pop() || displayPath;
     
     const token = document.createElement('span');
     token.className = 'mention-token';
     token.contentEditable = 'false';
-    token.dataset.path = relPath;
-    token.title = path;
+    token.dataset.abs = absPath || '';
+    token.dataset.path = displayPath || '';
+    token.title = absPath || '';
     token.textContent = display;
     
     const selection = window.getSelection();
