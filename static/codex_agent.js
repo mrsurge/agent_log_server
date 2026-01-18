@@ -1433,7 +1433,7 @@ document.addEventListener('DOMContentLoaded', () => {
     el.textContent = label;
   }
 
-  function openSettingsModal() {
+  async function openSettingsModal() {
     if (!settingsModalEl) return;
     if (pendingNewConversation) {
       if (settingsCwdEl) {
@@ -1482,11 +1482,22 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsRolloutRowEl.style.display = allowRollout ? 'block' : 'none';
     }
     settingsModalEl.classList.remove('hidden');
+    // Update schema-based fields for current agent
+    const currentAgent = settingsAgentEl?.value || 'codex';
+    await onAgentSelectionChange(currentAgent);
   }
 
   function closeSettingsModal() {
     if (!settingsModalEl) return;
-    const cwdOk = Boolean(settingsCwdEl?.value?.trim());
+    const agentType = settingsAgentEl?.value?.trim() || 'codex';
+    let cwdOk;
+    if (agentType === 'codex') {
+      cwdOk = Boolean(settingsCwdEl?.value?.trim());
+    } else {
+      // Check schema field for CWD
+      const schemaVals = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
+      cwdOk = Boolean(schemaVals.cwd?.trim());
+    }
     if (!cwdOk) {
       setActivity('CWD required', true);
       return;
@@ -1676,10 +1687,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       });
       if (agents.length > 1) {
-        updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl);
+        updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl, onAgentSelectionChange);
       }
     } catch {
       // ignore - just use default 'codex'
+    }
+  }
+
+  // Called when agent selection changes in the dropdown
+  async function onAgentSelectionChange(agentId) {
+    // Delegate to schema module if available
+    if (window.CodexAgent?.helpers?.onAgentChange) {
+      await window.CodexAgent.helpers.onAgentChange(agentId);
     }
   }
 
@@ -4084,7 +4103,15 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function saveSettings() {
-    const cwd = settingsCwdEl?.value?.trim();
+    const agentType = settingsAgentEl?.value?.trim() || 'codex';
+    let cwd;
+    if (agentType === 'codex') {
+      cwd = settingsCwdEl?.value?.trim();
+    } else {
+      // Get CWD from schema fields
+      const schemaVals = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
+      cwd = schemaVals.cwd?.trim();
+    }
     if (!cwd) {
       setActivity('CWD required', true);
       return;
@@ -4094,22 +4121,39 @@ document.addEventListener('DOMContentLoaded', () => {
     const xtermEnabled = settingsXtermEl?.checked !== false;
     const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
     const semanticRibbonEnabled = settingsSemanticShellRibbonEl?.checked === true;
-    const agentType = settingsAgentEl?.value?.trim() || 'codex';
-    const settings = {
-      cwd,
-      approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
-      sandboxPolicy: settingsSandboxEl?.value?.trim() || null,
-      model: settingsModelEl?.value?.trim() || null,
-      effort: settingsEffortEl?.value?.trim() || null,
-      summary: settingsSummaryEl?.value?.trim() || null,
-      label: settingsLabelEl?.value?.trim() || null,
-      commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
-      markdown: mdEnabled,
-      useXterm: xtermEnabled,
-      diffSyntax: diffSyntaxEnabled,
-      semanticShellRibbon: semanticRibbonEnabled,
-      agent: agentType,
-    };
+    
+    // Build settings object based on agent type
+    let settings;
+    if (agentType === 'codex') {
+      settings = {
+        cwd,
+        approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
+        sandboxPolicy: settingsSandboxEl?.value?.trim() || null,
+        model: settingsModelEl?.value?.trim() || null,
+        effort: settingsEffortEl?.value?.trim() || null,
+        summary: settingsSummaryEl?.value?.trim() || null,
+        label: settingsLabelEl?.value?.trim() || null,
+        commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
+        markdown: mdEnabled,
+        useXterm: xtermEnabled,
+        diffSyntax: diffSyntaxEnabled,
+        semanticShellRibbon: semanticRibbonEnabled,
+        agent: agentType,
+      };
+    } else {
+      // Non-codex: use schema values + common UI settings
+      const schemaVals = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
+      settings = {
+        ...schemaVals,
+        label: settingsLabelEl?.value?.trim() || null,
+        commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
+        markdown: mdEnabled,
+        useXterm: xtermEnabled,
+        diffSyntax: diffSyntaxEnabled,
+        semanticShellRibbon: semanticRibbonEnabled,
+        agent: agentType,
+      };
+    }
     // Update local markdown state
     setMarkdownEnabled(mdEnabled);
     // Update xterm mode

@@ -8,7 +8,8 @@
   "agent": {
     "command": "gemini",
     "args": ["--experimental-acp"],
-    "env": {}
+    "env": {},
+    "eagerSessionInit": true
   },
   
   "capabilities": {

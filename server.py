@@ -28,6 +28,8 @@ from framework_shells import get_manager as get_framework_shell_manager
 from framework_shells.api import fws_ui
 from framework_shells.orchestrator import Orchestrator
 
+import extensions as ext_loader
+
 from fasthtml.common import (
     HTMLResponse as FastHTMLResponse,
     Html, Head, Body, Div, Section, Header, Footer, Main, H1, H2, H3, P, Button,
@@ -37,6 +39,7 @@ from fasthtml.common import (
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     agent_pty_monitor_task: Optional[asyncio.Task] = None
+    warmup_task: Optional[asyncio.Task] = None
     try:
         info = await _get_or_start_appserver_shell()
         await _ensure_appserver_reader(info["shell_id"])
@@ -45,9 +48,23 @@ async def _lifespan(app: FastAPI):
         # This keeps the backend stable even when the MCP stdio worker is session-scoped.
         await _get_or_start_shell_manager()
         agent_pty_monitor_task = asyncio.create_task(_agent_pty_monitor_loop(), name="agent-pty-monitor")
+        # Warm up ACP extensions in background (Gemini takes up to 60s to load)
+        # Don't block server startup - first message will wait if needed
+        async def _warmup_background():
+            try:
+                results = await ext_loader.warm_up_extensions(timeout=60.0)
+                for ext_id, ready in results.items():
+                    print(f"[Startup] Extension {ext_id}: {'ready' if ready else 'FAILED'}")
+            except Exception as e:
+                print(f"[Startup] Extension warm-up error: {e}")
+        warmup_task = asyncio.create_task(_warmup_background(), name="extension-warmup")
     except Exception:
         pass
     yield
+    if warmup_task:
+        warmup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await warmup_task
     if agent_pty_monitor_task:
         agent_pty_monitor_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -3613,6 +3630,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
                 Script(src="https://cdn.jsdelivr.net/npm/streaming-markdown/smd.min.js", type="module"),
                 Script("window.addEventListener('load', () => console.log('socket.io', typeof io));", defer=True),
                 Script(src=_asset("/static/modals/settings_modal.js"), defer=True),
+                Script(src=_asset("/static/modals/settings_schema.js"), defer=True),
                 Script(src=_asset("/static/modals/cwd_picker.js"), defer=True),
                 Script(src=_asset("/static/modals/rollout_picker.js"), defer=True),
                 Script(src=_asset("/static/modals/warning_modal.js"), defer=True),
@@ -3775,59 +3793,72 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     ),
                                     id="settings-agent-row",
                                 ),
-                                Label(
-                                    Span("CWD"),
-                                    Div(
-                                        Input(type="text", id="settings-cwd", placeholder="~/project"),
-                                        Button("Browse", id="settings-cwd-browse", cls="btn ghost"),
-                                        cls="settings-row"
+                                Div(
+                                    Label(
+                                        Span("CWD"),
+                                        Div(
+                                            Input(type="text", id="settings-cwd", placeholder="~/project"),
+                                            Button("Browse", id="settings-cwd-browse", cls="btn ghost"),
+                                            cls="settings-row"
+                                        ),
                                     ),
-                                ),
-                                Label(
-                                    Span("Approval Policy"),
-                                    Div(
-                                        Input(type="text", id="settings-approval", placeholder="on-failure"),
-                                        Button("▾", id="settings-approval-toggle", cls="btn ghost dropdown-toggle"),
-                                        Div(id="settings-approval-options", cls="dropdown-list"),
-                                        cls="dropdown-field"
+                                    Label(
+                                        Span("Approval Policy"),
+                                        Div(
+                                            Input(type="text", id="settings-approval", placeholder="on-failure"),
+                                            Button("▾", id="settings-approval-toggle", cls="btn ghost dropdown-toggle"),
+                                            Div(id="settings-approval-options", cls="dropdown-list"),
+                                            cls="dropdown-field"
+                                        ),
                                     ),
-                                ),
-                                Label(
-                                    Span("Sandbox Policy"),
-                                    Div(
-                                        Input(type="text", id="settings-sandbox", placeholder="workspaceWrite"),
-                                        Button("▾", id="settings-sandbox-toggle", cls="btn ghost dropdown-toggle"),
-                                        Div(id="settings-sandbox-options", cls="dropdown-list"),
-                                        cls="dropdown-field"
+                                    Label(
+                                        Span("Sandbox Policy"),
+                                        Div(
+                                            Input(type="text", id="settings-sandbox", placeholder="workspaceWrite"),
+                                            Button("▾", id="settings-sandbox-toggle", cls="btn ghost dropdown-toggle"),
+                                            Div(id="settings-sandbox-options", cls="dropdown-list"),
+                                            cls="dropdown-field"
+                                        ),
                                     ),
-                                ),
-                                Label(
-                                    Span("Model"),
-                                    Div(
-                                        Input(type="text", id="settings-model", placeholder="gpt-5.1-codex"),
-                                        Button("▾", id="settings-model-toggle", cls="btn ghost dropdown-toggle"),
-                                        Div(id="settings-model-options", cls="dropdown-list"),
-                                        cls="dropdown-field"
+                                    Label(
+                                        Span("Model"),
+                                        Div(
+                                            Input(type="text", id="settings-model", placeholder="gpt-5.1-codex"),
+                                            Button("▾", id="settings-model-toggle", cls="btn ghost dropdown-toggle"),
+                                            Div(id="settings-model-options", cls="dropdown-list"),
+                                            cls="dropdown-field"
+                                        ),
                                     ),
-                                ),
-                                Label(
-                                    Span("Effort"),
-                                    Div(
-                                        Input(type="text", id="settings-effort", placeholder="medium"),
-                                        Button("▾", id="settings-effort-toggle", cls="btn ghost dropdown-toggle"),
-                                        Div(id="settings-effort-options", cls="dropdown-list"),
-                                        cls="dropdown-field"
+                                    Label(
+                                        Span("Effort"),
+                                        Div(
+                                            Input(type="text", id="settings-effort", placeholder="medium"),
+                                            Button("▾", id="settings-effort-toggle", cls="btn ghost dropdown-toggle"),
+                                            Div(id="settings-effort-options", cls="dropdown-list"),
+                                            cls="dropdown-field"
+                                        ),
                                     ),
-                                ),
-                                Label(
-                                    Span("Summary"),
-                                    Div(
-                                        Input(type="text", id="settings-summary", placeholder="concise"),
-                                        Button("▾", id="settings-summary-toggle", cls="btn ghost dropdown-toggle"),
-                                        Div(id="settings-summary-options", cls="dropdown-list"),
-                                        cls="dropdown-field"
+                                    Label(
+                                        Span("Summary"),
+                                        Div(
+                                            Input(type="text", id="settings-summary", placeholder="concise"),
+                                            Button("▾", id="settings-summary-toggle", cls="btn ghost dropdown-toggle"),
+                                            Div(id="settings-summary-options", cls="dropdown-list"),
+                                            cls="dropdown-field"
+                                        ),
                                     ),
+                                    Label(
+                                        Span("Rollout"),
+                                        Div(
+                                            Input(type="text", id="settings-rollout", placeholder="(unselected)", readonly=True),
+                                            Button("Pick", id="settings-rollout-browse", cls="btn ghost"),
+                                            cls="settings-row"
+                                        ),
+                                        id="settings-rollout-row",
+                                    ),
+                                    id="settings-codex-fields",
                                 ),
+                                Div(id="settings-extension-fields"),
                                 Label(
                                     Span("Conversation Label"),
                                     Input(type="text", id="settings-label", placeholder="label"),
@@ -3835,15 +3866,6 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 Label(
                                     Span("Command Output Lines"),
                                     Input(type="number", id="settings-command-lines", placeholder="20", value="20", min="1", max="500"),
-                                ),
-                                Label(
-                                    Span("Rollout"),
-                                    Div(
-                                        Input(type="text", id="settings-rollout", placeholder="(unselected)", readonly=True),
-                                        Button("Pick", id="settings-rollout-browse", cls="btn ghost"),
-                                        cls="settings-row"
-                                    ),
-                                    id="settings-rollout-row",
                                 ),
                                 Label(
                                     Span("Render Markdown"),
@@ -4029,6 +4051,19 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
         cfg["conversation_id"] = convo_id
         cfg["active_view"] = cfg.get("active_view") or "conversation"
         _save_appserver_config(cfg)
+    
+    # Check if agent requires eager session initialization
+    final_settings = meta.get("settings", {})
+    agent_type = final_settings.get("agent", "")
+    if agent_type and ext_loader.has_extension(agent_type):
+        if ext_loader.requires_eager_session_init(agent_type):
+            cwd = final_settings.get("cwd", "~")
+            # Fire and forget - don't block the response
+            asyncio.create_task(
+                ext_loader.init_session(convo_id, agent_type, cwd),
+                name=f"eager-init:{convo_id}"
+            )
+    
     return meta
 
 
@@ -4757,9 +4792,11 @@ async def api_appserver_message(payload: AppserverMessageIn):
     settings = meta.get("settings", {})
     agent_type = settings.get("agent", "codex")
     
-    # Route to ACP if non-codex agent
-    if agent_type != "codex" and _acp_manager:
-        return await _handle_acp_message(convo_id, text, agent_type, settings)
+    # Route to extension if non-codex agent and handler exists
+    if agent_type != "codex":
+        handler = ext_loader.get_handler(agent_type)
+        if handler and hasattr(handler, "handle_message"):
+            return await handler.handle_message(convo_id, text, agent_type, settings)
     
     # Default: route to codex-app-server
     thread_id = meta.get("thread_id")
@@ -5561,20 +5598,24 @@ async def await_message(req: AwaitIn):
 # EXTENSION SYSTEM (ACP)
 # =============================================================================
 # Dynamic extension loading for ACP-based agents (e.g., Gemini CLI)
-# Extensions are loaded from static/extensions/ and communicate via ACP protocol
+# Extensions are loaded from extensions/ and communicate via ACP protocol
 
-from extensions.acp_client import init_acp_manager, get_acp_manager, ACPManager
-
-# Initialize ACP manager on startup
-_acp_manager: Optional[ACPManager] = None
-
+# Initialize extensions on startup
 def _init_extensions():
-    global _acp_manager
     server_root = Path(__file__).parent
-    extensions_dir = server_root / "static" / "extensions"
+    extensions_dir = server_root / "extensions"
     if extensions_dir.exists():
-        _acp_manager = init_acp_manager(extensions_dir, server_root)
-        print(f"[Extensions] Loaded {len(_acp_manager.extensions)} extensions")
+        ext_loader.load_extensions(
+            extensions_dir=extensions_dir,
+            server_root=server_root,
+            fws_getter=_get_fws_manager,
+            broadcast_fn=_broadcast_appserver_ui,
+            transcript_fn=_append_transcript_entry,
+            meta_fns={
+                "load": _load_conversation_meta,
+                "save": _save_conversation_meta,
+            },
+        )
 
 # Call on module load
 _init_extensions()
@@ -5583,111 +5624,55 @@ _init_extensions()
 @app.get("/api/extensions")
 async def api_extensions_list():
     """List all available extensions."""
-    if not _acp_manager:
-        return {"extensions": []}
-    return {"extensions": _acp_manager.list_extensions()}
+    return {"extensions": ext_loader.list_extensions()}
 
 
 @app.get("/api/extensions/{extension_id}")
 async def api_extension_get(extension_id: str):
     """Get extension details."""
-    if not _acp_manager:
-        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
-    ext = _acp_manager.get_extension(extension_id)
-    if not ext:
+    if not ext_loader.has_extension(extension_id):
         return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    return {
-        "id": ext.id,
-        "name": ext.name,
-        "command": ext.command,
-        "args": ext.args,
-        "capabilities": ext.capabilities,
-    }
+    # Return basic info from registry
+    exts = ext_loader.list_extensions()
+    for ext in exts:
+        if ext["id"] == extension_id:
+            return ext
+    return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
 
 
-class ExtensionSessionIn(BaseModel):
-    conversation_id: str
-    extension_id: str
-    cwd: Optional[str] = None
-
-
-@app.post("/api/extensions/session")
-async def api_extension_session_create(payload: ExtensionSessionIn):
-    """Create a new ACP session for a conversation."""
-    if not _acp_manager:
-        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
+@app.get("/api/extensions/{extension_id}/settings_schema")
+async def api_extension_settings_schema(extension_id: str):
+    """Get settings schema for an extension."""
+    # Special case: codex has no schema (hardcoded in frontend)
+    if extension_id == "codex":
+        return {"version": "1", "fields": [], "useBuiltin": True}
     
-    # Update callback to broadcast to our websocket
-    async def on_update(convo_id: str, update: Dict[str, Any]):
-        # Route ACP updates through our existing event system
-        await _broadcast_appserver_ui({
-            "type": "acp_update",
-            "conversation_id": convo_id,
-            "update": update,
-        })
+    if not ext_loader.has_extension(extension_id):
+        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
     
-    session = await _acp_manager.create_session(
-        conversation_id=payload.conversation_id,
-        extension_id=payload.extension_id,
-        on_update=on_update,
-        cwd=payload.cwd,
-    )
+    # Find extension path and load settings_schema.json
+    exts = ext_loader.list_extensions()
+    for ext in exts:
+        if ext["id"] == extension_id:
+            ext_path = ext.get("path", "")
+            if ext_path:
+                schema_file = Path(__file__).parent / "extensions" / ext_path / "settings_schema.json"
+                if schema_file.exists():
+                    try:
+                        return json.loads(schema_file.read_text())
+                    except Exception as e:
+                        return JSONResponse({"error": f"Failed to load schema: {e}"}, status_code=500)
+            break
     
-    if not session:
-        return JSONResponse({"error": "Failed to create session"}, status_code=500)
-    
-    return {
-        "ok": True,
-        "conversation_id": session.conversation_id,
-        "session_id": session.session_id,
-        "extension_id": session.extension_id,
-    }
+    # No schema found - return empty (extension has no custom settings)
+    return {"version": "1", "fields": []}
 
 
-class ExtensionPromptIn(BaseModel):
-    conversation_id: str
-    text: str
-
-
-@app.post("/api/extensions/prompt")
-async def api_extension_prompt(payload: ExtensionPromptIn):
-    """Send a prompt to an ACP session."""
-    if not _acp_manager:
-        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
-    
-    result = await _acp_manager.send_prompt(
-        conversation_id=payload.conversation_id,
-        text=payload.text,
-    )
-    
-    if result and result.get("error"):
-        return JSONResponse({"error": result["error"]}, status_code=400)
-    
-    return result
-
-
-@app.post("/api/extensions/cancel")
-async def api_extension_cancel(payload: Dict[str, Any] = Body(...)):
-    """Cancel an ongoing prompt."""
-    if not _acp_manager:
-        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
-    
-    conversation_id = payload.get("conversation_id")
-    if not conversation_id:
-        return JSONResponse({"error": "conversation_id required"}, status_code=400)
-    
-    success = await _acp_manager.cancel_prompt(conversation_id)
-    return {"ok": success}
-
-
-@app.delete("/api/extensions/session/{conversation_id}")
-async def api_extension_session_close(conversation_id: str):
-    """Close an ACP session."""
-    if not _acp_manager:
-        return JSONResponse({"error": "Extensions not initialized"}, status_code=500)
-    
-    success = await _acp_manager.close_session(conversation_id)
-    return {"ok": success}
+@app.get("/api/extensions/debug/raw")
+async def api_extensions_debug_raw(limit: int = Query(50, gt=0, le=200)):
+    """Get raw ACP message buffer for debugging."""
+    from extensions.acp_client import get_acp_raw_buffer
+    return {"items": get_acp_raw_buffer(limit)}
 
 
 @app.post("/api/shutdown")

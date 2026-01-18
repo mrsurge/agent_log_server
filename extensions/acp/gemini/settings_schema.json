@@ -1,0 +1,15 @@
+{
+  "version": "1",
+  "description": "Settings schema for Gemini CLI extension",
+  "fields": [
+    {
+      "id": "cwd",
+      "type": "path",
+      "label": "Working Directory",
+      "placeholder": "~/project",
+      "default": "~",
+      "required": true,
+      "browse": true
+    }
+  ]
+}

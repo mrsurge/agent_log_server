@@ -4,6 +4,7 @@ window.CodexAgentModules.push((ctx) => {
   const pickerUpBtn = document.getElementById('picker-up');
   const pickerSelectBtn = document.getElementById('picker-select');
   const settingsCwdEl = document.getElementById('settings-cwd');
+  const settingsAgentEl = document.getElementById('settings-agent');
 
   pickerCloseBtn?.addEventListener('click', () => ctx.helpers.closePicker());
   pickerUpBtn?.addEventListener('click', () => {
@@ -20,7 +21,15 @@ window.CodexAgentModules.push((ctx) => {
       ctx.helpers.closePicker();
       return;
     }
-    if (settingsCwdEl && pickerPath) settingsCwdEl.value = pickerPath;
+    // Update CWD field based on agent type
+    const agentType = settingsAgentEl?.value?.trim() || 'codex';
+    if (agentType === 'codex') {
+      if (settingsCwdEl && pickerPath) settingsCwdEl.value = pickerPath;
+    } else {
+      // Update schema field for non-codex agents
+      const schemaField = document.getElementById('settings-ext-cwd');
+      if (schemaField && pickerPath) schemaField.value = pickerPath;
+    }
     ctx.helpers.closePicker();
   });
 });
