@@ -444,6 +444,14 @@ _ready_events: Dict[str, asyncio.Event] = {}
 _warmup_shells: Dict[str, str] = {}
 # Shared shells: extension_id -> shell_id (permanent shell for multiplexing sessions)
 _shared_shells: Dict[str, str] = {}
+# Shared readers: extension_id -> asyncio.Task (ONE reader per shared shell)
+_shared_readers: Dict[str, asyncio.Task] = {}
+# Session registry: sessionId (ACP) -> conversation_id (ours) for demuxing
+_session_registry: Dict[str, str] = {}
+# Pending session/new requests: json-rpc id -> conversation_id (for capturing sessionId)
+_pending_session_new: Dict[int, str] = {}
+# Pending prompt requests: json-rpc id -> conversation_id (for routing prompt responses)
+_pending_prompts: Dict[int, str] = {}
 
 # Debug buffer for raw ACP messages (circular buffer)
 _acp_raw_buffer: List[Dict[str, Any]] = []
@@ -552,12 +560,18 @@ async def _start_new_session(
     cwd: str,
     fws_mgr: Any,
 ) -> Dict[str, Any]:
-    """Start a new ACP session from scratch (fallback when no warmed-up session available)."""
+    """Start a new ACP session from scratch (fallback when no warmed-up session available).
+    
+    NOTE: This is a legacy fallback. The preferred path is warm_up_extension + init_session.
+    """
     from extensions.acp_router import ACPEventRouter
     
     shell_id = await _manager.start_shell(conversation_id, agent_type, cwd, fws_mgr)
     if not shell_id:
         return {"ok": False, "error": f"Failed to start {agent_type} agent"}
+    
+    # Register this as the shared shell for the extension
+    _shared_shells[agent_type] = shell_id
     
     router = ACPEventRouter(
         conversation_id=conversation_id,
@@ -570,10 +584,14 @@ async def _start_new_session(
     if session:
         session.router = router
     
-    asyncio.create_task(
-        _acp_reader_loop(conversation_id, shell_id, router, fws_mgr),
-        name=f"acp-reader:{conversation_id}"
-    )
+    # Ensure shared reader is running for this extension
+    if agent_type not in _shared_readers or _shared_readers[agent_type].done():
+        print(f"[ACP] _start_new_session: starting shared reader for {agent_type}")
+        reader_task = asyncio.create_task(
+            _shared_acp_reader_loop(agent_type, shell_id, fws_mgr),
+            name=f"acp-shared-reader:{agent_type}"
+        )
+        _shared_readers[agent_type] = reader_task
     
     if not await _initialize_session(conversation_id, fws_mgr):
         return {"ok": False, "error": "Failed to initialize ACP connection"}
@@ -581,77 +599,154 @@ async def _start_new_session(
     return {"ok": True, "session_id": session.session_id if session else None}
 
 
-async def _acp_reader_loop(
-    conversation_id: str,
+async def _shared_acp_reader_loop(
+    extension_id: str,
     shell_id: str,
-    router: "ACPEventRouter",
     fws_mgr: Any,
 ) -> None:
-    """Read ACP agent stdout and route events."""
+    """
+    Shared reader for an ACP extension shell.
+    
+    ONE reader per shared shell - demuxes incoming messages by sessionId
+    and routes to the correct conversation's router.
+    """
     from extensions.acp_router import parse_acp_line
     
     state = fws_mgr.get_pipe_state(shell_id)
     if not state or not state.process.stdout:
-        print(f"[ACP] No stdout for shell {shell_id}")
+        print(f"[ACP] Shared reader: no stdout for shell {shell_id}")
         return
     
-    print(f"[ACP] Reader started for {conversation_id}")
-    session = _manager.get_session(conversation_id) if _manager else None
+    print(f"[ACP] Shared reader started for extension {extension_id}, shell {shell_id}")
     
     try:
         while True:
             line = await state.process.stdout.readline()
             if not line:
-                print(f"[ACP] EOF for {conversation_id}")
-                _add_to_raw_buffer("in", conversation_id, "[EOF]")
+                print(f"[ACP] Shared reader: EOF for {extension_id}")
+                _add_to_raw_buffer("in", f"__{extension_id}", "[EOF]")
                 break
             
             line_str = line.decode("utf-8", errors="replace").strip()
             if not line_str:
                 continue
             
-            # Log to debug buffer
-            _add_to_raw_buffer("in", conversation_id, line_str)
-            print(f"[ACP] RAW: {line_str[:200]}")
-            
+            # Parse the message first to extract routing info
             message = parse_acp_line(line_str)
+            if not message:
+                print(f"[ACP] Shared reader: could not parse line: {line_str[:100]}")
+                _add_to_raw_buffer("in", f"__{extension_id}", line_str)
+                continue
             
-            if message:
-                print(f"[ACP] PARSED: method={message.get('method')} id={message.get('id')}")
-                await router.route_event(message)
+            # Determine which conversation this message belongs to
+            conversation_id = _route_message_to_conversation(message)
+            
+            # Log to debug buffer with resolved conversation
+            _add_to_raw_buffer("in", conversation_id or f"__{extension_id}", line_str)
+            print(f"[ACP] SHARED RAW [{conversation_id or '?'}]: {line_str[:200]}")
+            print(f"[ACP] PARSED: method={message.get('method')} id={message.get('id')}")
+            
+            # Handle session/new response - register sessionId -> conversation mapping
+            msg_id = message.get("id")
+            if msg_id is not None and msg_id in _pending_session_new:
+                result = message.get("result", {})
+                session_id = result.get("sessionId")
+                pending_convo_id = _pending_session_new.pop(msg_id)
                 
-                # Capture session_id from session/new response (id=2)
-                if message.get("id") == 2 and message.get("result"):
-                    result = message["result"]
-                    if "sessionId" in result:
-                        session_id = result["sessionId"]
+                if session_id:
+                    # Register the mapping
+                    _session_registry[session_id] = pending_convo_id
+                    print(f"[ACP] Registered sessionId {session_id} -> {pending_convo_id}")
+                    
+                    # Update the session object
+                    if _manager:
+                        session = _manager.get_session(pending_convo_id)
                         if session:
                             session.session_id = session_id
-                            # Store as thread_id in meta if we have the functions
+                            session.ready = True
+                            # Store as thread_id in meta
                             if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
-                                meta = _meta_fns["load"](conversation_id)
+                                meta = _meta_fns["load"](pending_convo_id)
                                 if meta:
                                     meta["thread_id"] = session_id
-                                    meta["status"] = "active"  # No longer a draft
-                                    _meta_fns["save"](conversation_id, meta)
-                            print(f"[ACP] Session ID captured: {session_id}")
+                                    meta["status"] = "active"
+                                    _meta_fns["save"](pending_convo_id, meta)
+                    
+                    # Route to the conversation's router
+                    conversation_id = pending_convo_id
+            
+            # Handle prompt response - clean up pending prompt tracking
+            if msg_id is not None and msg_id in _pending_prompts:
+                # Pop from pending but keep conversation_id for routing
+                _pending_prompts.pop(msg_id)
+                print(f"[ACP] Prompt response received for request_id={msg_id}")
+            
+            # Route to the correct conversation's router
+            if conversation_id and _manager:
+                session = _manager.get_session(conversation_id)
+                if session and session.router:
+                    await session.router.route_event(message)
+                else:
+                    print(f"[ACP] Shared reader: no router for {conversation_id}")
+            elif message.get("id") == 1:
+                # Initialize response - this is for the warmup, no routing needed
+                print(f"[ACP] Shared reader: initialize response (warmup)")
             else:
-                print(f"[ACP] Could not parse line")
+                print(f"[ACP] Shared reader: no conversation for message")
     
     except asyncio.CancelledError:
-        print(f"[ACP] Reader cancelled for {conversation_id}")
+        print(f"[ACP] Shared reader cancelled for {extension_id}")
     except Exception as e:
-        print(f"[ACP] Reader error for {conversation_id}: {e}")
+        print(f"[ACP] Shared reader error for {extension_id}: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        print(f"[ACP] Reader ended for {conversation_id}")
+        print(f"[ACP] Shared reader ended for {extension_id}")
+        # Clean up
+        if extension_id in _shared_readers:
+            del _shared_readers[extension_id]
+
+
+def _route_message_to_conversation(message: Dict[str, Any]) -> Optional[str]:
+    """
+    Determine which conversation a message belongs to.
+    
+    Uses sessionId from the message params to look up in _session_registry.
+    Also checks pending request mappings for responses.
+    """
+    # Check for sessionId in params (session/update notifications)
+    params = message.get("params", {})
+    session_id = params.get("sessionId")
+    
+    if session_id and session_id in _session_registry:
+        return _session_registry[session_id]
+    
+    # Check for sessionId in nested update params
+    update = params.get("update", {})
+    if isinstance(update, dict):
+        # Some events might have sessionId at different levels
+        pass
+    
+    # For responses, check if we have a pending request mapping
+    msg_id = message.get("id")
+    if msg_id is not None:
+        # Check session/new pending requests
+        if msg_id in _pending_session_new:
+            return _pending_session_new[msg_id]
+        # Check prompt pending requests
+        if msg_id in _pending_prompts:
+            return _pending_prompts[msg_id]
+    
+    return None
 
 
 async def _send_session_new(conversation_id: str, cwd: str, fws_mgr: Any) -> bool:
     """
     Send session/new to create an ACP session with the correct CWD.
     Called after adopting a warmed-up process that has already been initialized.
+    
+    Uses a unique request ID and registers it in _pending_session_new so the
+    shared reader can route the response back to this conversation.
     """
     if not _manager:
         return False
@@ -664,10 +759,16 @@ async def _send_session_new(conversation_id: str, cwd: str, fws_mgr: Any) -> boo
     if not state or not state.process.stdin:
         return False
     
+    # Use a unique request ID based on timestamp + hash of conversation_id
+    request_id = int(datetime.now(timezone.utc).timestamp() * 1000) + hash(conversation_id) % 10000
+    
+    # Register this pending request so shared reader can route the response
+    _pending_session_new[request_id] = conversation_id
+    
     # Send session/new request with correct cwd
     session_request = {
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": request_id,
         "method": "session/new",
         "params": {
             "cwd": cwd,
@@ -679,13 +780,18 @@ async def _send_session_new(conversation_id: str, cwd: str, fws_mgr: Any) -> boo
     _add_to_raw_buffer("out", conversation_id, line.strip())
     state.process.stdin.write(line.encode("utf-8"))
     await state.process.stdin.drain()
-    print(f"[ACP] Sent session/new for {conversation_id} with cwd={cwd}")
+    print(f"[ACP] Sent session/new for {conversation_id} with cwd={cwd}, request_id={request_id}")
     
     return True
 
 
 async def _initialize_session(conversation_id: str, fws_mgr: Any) -> bool:
-    """Initialize ACP connection (send initialize + session/new)."""
+    """Initialize ACP connection (send initialize + session/new).
+    
+    NOTE: This is used for the legacy _start_new_session path where
+    a fresh shell is created. For shared shell architecture, warm_up_extension
+    handles initialize and init_session handles session/new.
+    """
     if not _manager:
         return False
     
@@ -723,10 +829,14 @@ async def _initialize_session(conversation_id: str, fws_mgr: Any) -> bool:
     
     await asyncio.sleep(0.5)
     
+    # Use unique request ID for session/new
+    request_id = int(datetime.now(timezone.utc).timestamp() * 1000) + hash(conversation_id) % 10000
+    _pending_session_new[request_id] = conversation_id
+    
     # Send session/new request with cwd
     session_request = {
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": request_id,
         "method": "session/new",
         "params": {
             "cwd": cwd,
@@ -738,7 +848,7 @@ async def _initialize_session(conversation_id: str, fws_mgr: Any) -> bool:
     _add_to_raw_buffer("out", conversation_id, line.strip())
     state.process.stdin.write(line.encode("utf-8"))
     await state.process.stdin.drain()
-    print(f"[ACP] Sent session/new for {conversation_id} with cwd={cwd}")
+    print(f"[ACP] Sent session/new for {conversation_id} with cwd={cwd}, request_id={request_id}")
     
     # Wait for session_id to be captured by reader (poll with timeout)
     for _ in range(20):  # 2 seconds max
@@ -772,10 +882,16 @@ async def _send_prompt(conversation_id: str, text: str, fws_mgr: Any) -> Dict[st
     if session.router:
         await session.router.on_turn_start(text)
     
+    # Generate unique request ID
+    request_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+    
+    # Register pending prompt for routing the response back
+    _pending_prompts[request_id] = conversation_id
+    
     # Send session/prompt request
     prompt_request = {
         "jsonrpc": "2.0",
-        "id": int(datetime.now(timezone.utc).timestamp() * 1000),
+        "id": request_id,
         "method": "session/prompt",
         "params": {
             "sessionId": session.session_id,
@@ -787,7 +903,7 @@ async def _send_prompt(conversation_id: str, text: str, fws_mgr: Any) -> Dict[st
     _add_to_raw_buffer("out", conversation_id, line.strip())
     state.process.stdin.write(line.encode("utf-8"))
     await state.process.stdin.drain()
-    print(f"[ACP] Sent prompt for {conversation_id}")
+    print(f"[ACP] Sent prompt for {conversation_id}, request_id={request_id}")
     
     return {"ok": True, "session_id": session.session_id}
 
@@ -911,11 +1027,14 @@ async def init_session(
     )
     session.router = router
     
-    # Start reader task for this conversation
-    asyncio.create_task(
-        _acp_reader_loop(conversation_id, shell_id, router, fws_mgr),
-        name=f"acp-reader:{conversation_id}"
-    )
+    # Ensure shared reader is running for this extension (NOT per-conversation)
+    if extension_id not in _shared_readers or _shared_readers[extension_id].done():
+        print(f"[ACP] init_session: starting shared reader for {extension_id}")
+        reader_task = asyncio.create_task(
+            _shared_acp_reader_loop(extension_id, shell_id, fws_mgr),
+            name=f"acp-shared-reader:{extension_id}"
+        )
+        _shared_readers[extension_id] = reader_task
     
     # Send session/new with correct CWD
     if not await _send_session_new(conversation_id, cwd, fws_mgr):
@@ -1054,6 +1173,19 @@ async def warm_up_extension(
     try:
         success = await asyncio.wait_for(_do_handshake(), timeout=timeout)
         if success:
+            # Start the shared reader for this extension
+            # This reader will handle ALL messages from this shell going forward
+            if extension_id not in _shared_readers or _shared_readers[extension_id].done():
+                print(f"[ACP] warm_up: starting shared reader for {extension_id}")
+                reader_task = asyncio.create_task(
+                    _shared_acp_reader_loop(extension_id, shell_id, fws_mgr),
+                    name=f"acp-shared-reader:{extension_id}"
+                )
+                _shared_readers[extension_id] = reader_task
+            
+            # Mark the shell as shared
+            _shared_shells[extension_id] = shell_id
+            
             ready_event.set()
         return success
     except asyncio.TimeoutError:

@@ -16,6 +16,8 @@ import uuid
 import subprocess
 import socketio
 import binascii
+import urllib.request
+import urllib.error
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException, Depends
@@ -5200,6 +5202,60 @@ async def api_appserver_mention_options():
             "Access-Control-Max-Age": "86400",
         },
     )
+
+
+def _te2_base_url() -> str:
+    # In the "single device app" model, TE2 runs locally (usually :8089).
+    # We still keep this override for cases where the host app tells us its origin explicitly.
+    origin = _HOST_UI_STATE.get("parent_origin")
+    if isinstance(origin, str) and origin.startswith(("http://", "https://")):
+        return origin.rstrip("/")
+    return "http://127.0.0.1:8089"
+
+
+async def _http_post_json(url: str, payload: Dict[str, Any], timeout_s: float = 6.0) -> Tuple[int, bytes, Dict[str, str]]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+
+    def _do() -> Tuple[int, bytes, Dict[str, str]]:
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                resp_body = resp.read() or b""
+                resp_headers = {k: v for k, v in resp.headers.items()}
+                return int(getattr(resp, "status", 200)), resp_body, resp_headers
+        except urllib.error.HTTPError as e:
+            err_body = e.read() or b""
+            resp_headers = {k: v for k, v in getattr(e, "headers", {}).items()}
+            return int(getattr(e, "code", 502)), err_body, resp_headers
+
+    return await asyncio.to_thread(_do)
+
+
+@app.post("/api/te2/agent/open")
+async def api_te2_agent_open(request: Request, payload: Dict[str, Any] = Body(...)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+
+    te2_url = f"{_te2_base_url()}/api/app/file_editor_cm6/agent/open"
+    status, body, _ = await _http_post_json(te2_url, payload, timeout_s=6.0)
+
+    origin = request.headers.get("origin")
+    headers = _cors_headers_for_origin(origin)
+    headers["Content-Type"] = "application/json"
+    return Response(content=body, status_code=status, headers=headers)
+
+
+@app.options("/api/te2/agent/open")
+async def api_te2_agent_open_options(request: Request):
+    origin = request.headers.get("origin")
+    headers = {
+        **_cors_headers_for_origin(origin),
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400",
+    }
+    return Response(status_code=204, headers=headers)
 
 
 @app.get("/api/host/ui")

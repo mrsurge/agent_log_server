@@ -160,19 +160,71 @@ while True:
 | `session/prompt` response | `assistant_finalize` + `turn_completed` | `finalizeAssistant()` |
 | (on prompt send) | `message` (role=user) + `turn_started` + `activity` | `addMessage()` |
 
-## Transcript Format
+## Event IDs and Ordering
 
-Same JSONL format as Codex - replay works unchanged:
+All events include fields for proper frontend rendering and ordering:
 
-```jsonl
-{"role": "user", "text": "Hello", "timestamp": "2026-01-17T05:00:00Z"}
-{"role": "reasoning", "text": "Thinking about...", "timestamp": "2026-01-17T05:00:01Z"}
-{"role": "assistant", "text": "Hi there!", "timestamp": "2026-01-17T05:00:02Z"}
-{"role": "command", "command": "ls -la", "output": "...", "status": "completed", "timestamp": "2026-01-17T05:00:03Z"}
-{"role": "status", "status": "success", "stop_reason": "end_turn", "timestamp": "2026-01-17T05:00:04Z"}
+### ID Fields
+
+Each event type has a unique `id` field for DOM element accumulation:
+
+| Event Type | ID Pattern | Purpose |
+|------------|------------|---------|
+| `message` (user) | `user_{turn}` | User message block |
+| `assistant_delta` | `msg_{turn}` | Assistant message accumulation |
+| `assistant_finalize` | `msg_{turn}` | Matches delta for finalization |
+| `reasoning_delta` | `reasoning_{turn}` | Reasoning block accumulation |
+| `shell_begin/delta/end` | `{tool_call_id}` | Tool call block (from ACP) |
+| `plan` | `plan_turn_{turn}` | Plan card |
+| `approval_request` | has `request_id` + `tool_call_id` | Approval UI |
+
+**Why distinct IDs matter:** The frontend uses `id` to find or create DOM elements. If `assistant_delta` and `reasoning_delta` shared the same ID, deltas would mix into the wrong element.
+
+### Ordering Fields
+
+Every event includes:
+
+| Field | Purpose |
+|-------|---------|
+| `seq` | Global sequence number (monotonically increasing) |
+| `turn_id` | Groups events within a turn (`turn_1`, `turn_2`, etc.) |
+
+```json
+{
+  "type": "assistant_delta",
+  "conversation_id": "abc123",
+  "id": "msg_1_2",
+  "delta": "Hello",
+  "turn_id": "turn_1",
+  "seq": 42
+}
 ```
 
-**Order:** reasoning before assistant (chronological order from ACP flow)
+### Block-Based IDs for Interleaved Events
+
+Gemini interleaves reasoning and message events within a turn. The frontend creates one DOM row per unique `id`. To preserve order, we use block-based IDs that increment each time the event type switches:
+
+| Event sequence | ID | Result |
+|----------------|-----|--------|
+| reasoning chunk | `reasoning_1_1` | New row |
+| reasoning chunk | `reasoning_1_1` | Appends to same row |
+| message chunk | `msg_1_2` | New row (below reasoning) |
+| reasoning chunk | `reasoning_1_3` | New row (below message) |
+| message chunk | `msg_1_4` | New row (below reasoning) |
+
+Format: `{type}_{turn}_{block}` where block increments on each type switch.
+
+### Transcript Entries
+
+Transcript entries mirror the ID structure for replay:
+
+```jsonl
+{"role": "user", "id": "user_1", "text": "Hello", "turn_id": "turn_1", "seq": 1, "timestamp": "..."}
+{"role": "reasoning", "id": "reasoning_1_1", "text": "Thinking...", "turn_id": "turn_1", "seq": 5, "timestamp": "..."}
+{"role": "assistant", "id": "msg_1_2", "text": "Hi!", "turn_id": "turn_1", "seq": 10, "timestamp": "..."}
+{"role": "command", "id": "tc_abc123", "command": "ls", "output": "...", "turn_id": "turn_1", "seq": 15, "timestamp": "..."}
+{"role": "status", "status": "success", "turn_id": "turn_1", "seq": 20, "timestamp": "..."}
+```
 
 ## ACP Protocol Details
 
@@ -332,12 +384,70 @@ Gemini sends `agent_message_chunk` in large blocks, not token-by-token. Streamin
 1. ~~**Session startup on conversation switch** - Buggy, needs investigation~~ **FIXED** - Eager warm-up + shared shell
 2. ~~**Multiple shells spawning** - Each conversation was starting a new Gemini process~~ **FIXED** - Shared shell architecture
 3. **Conversation hydration** - When switching to existing Gemini conversation, need to handle session state
-4. ~~**Tool call approval flow** - Not yet implemented (auto-approves)~~ **IMPLEMENTED** - Auto-approves with response sent back
-5. **File operations** - `fs/read_text_file`, `fs/write_text_file` stubs exist but not wired
+4. ~~**Tool call approval flow** - Not yet implemented (auto-approves)~~ **FIXED** - Correct ACP response format: `{"result":{"outcome":{"outcome":"selected","optionId":"proceed_once"}}}`
+5. ~~**File operations** - `fs/read_text_file`, `fs/write_text_file` stubs exist but not wired~~ **FIXED** - Handlers in router with shell_begin/end events
 6. **Terminal operations** - `terminal/*` methods not implemented
 7. **Error handling** - Need better recovery on shell crash
 8. **Cleanup** - Shell cleanup on conversation delete
 9. ~~**CWD not passed correctly** - Session was created with wrong CWD~~ **FIXED** - Eager init on settings save
+10. **Interleaved event ordering** - Gemini interleaves reasoning/message/tool events within a turn. Current fix uses block-based IDs (`reasoning_1_1`, `msg_1_2`, `reasoning_1_3`) so each block gets its own row. Still seeing bunching issues - needs further investigation.
+
+## Client Method Handlers
+
+The ACP router handles incoming requests from the agent:
+
+### `fs/read_text_file`
+
+Agent requests file content:
+```json
+{"jsonrpc":"2.0","id":0,"method":"fs/read_text_file","params":{"path":"/path/to/file.cpp","sessionId":"..."}}
+```
+
+We respond with:
+```json
+{"jsonrpc":"2.0","id":0,"result":{"content":"file content here..."}}
+```
+
+### `fs/write_text_file`
+
+Agent requests to write file:
+```json
+{"jsonrpc":"2.0","id":1,"method":"fs/write_text_file","params":{"path":"/path/to/file.cpp","content":"new content","sessionId":"..."}}
+```
+
+We respond with:
+```json
+{"jsonrpc":"2.0","id":1,"result":{}}
+```
+
+### `session/request_permission`
+
+Agent requests permission for a tool call (e.g., file edit):
+```json
+{"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{
+  "sessionId":"...",
+  "options":[
+    {"optionId":"proceed_always","name":"Allow All Edits","kind":"allow_always"},
+    {"optionId":"proceed_once","name":"Allow","kind":"allow_once"},
+    {"optionId":"cancel","name":"Reject","kind":"reject_once"}
+  ],
+  "toolCall":{"toolCallId":"...","title":"main.cpp: ...","kind":"edit","content":[...]}
+}}
+```
+
+We respond with the user's decision per ACP spec (currently auto-approves):
+```json
+{"jsonrpc":"2.0","id":1,"result":{"outcome":{"outcome":"selected","optionId":"proceed_once"}}}
+```
+
+**Note:** The result must be `{"outcome": {"outcome": "selected", "optionId": "..."}}`. For cancellation, use `{"outcome": {"outcome": "cancelled"}}`.
+
+### Unknown Methods
+
+For unhandled methods, we return a JSON-RPC error:
+```json
+{"jsonrpc":"2.0","id":99,"error":{"code":-32601,"message":"Method not found: some/method"}}
+```
 
 ## Eager Warm-up & Shared Shell Architecture
 

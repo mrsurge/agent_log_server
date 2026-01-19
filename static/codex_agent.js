@@ -1430,28 +1430,36 @@ document.addEventListener('DOMContentLoaded', () => {
 	    return null;
 	  }
 
-	  async function postTe2OpenRequest({ path, line, column }) {
-	    const url = 'http://localhost:8089/api/app/file_editor_cm6/agent/open';
-	    await ensureProjectRootLoaded();
-	    const payload = {
-	      source: 'codex-agent',
-	      conversation_id: conversationMeta?.conversation_id || null,
-	    };
-	    const rel = toProjectRelativePath(path);
-	    if (rel) payload.rel = rel;
-	    else if (path) payload.path = path;
-	    if (Number.isFinite(line)) payload.line = Number(line);
-	    if (Number.isFinite(column)) payload.column = Number(column);
-	    try {
-	      await fetch(url, {
-	        method: 'POST',
-	        headers: { 'Content-Type': 'application/json' },
-	        body: JSON.stringify(payload),
-	      });
-	    } catch (e) {
-	      console.warn('Failed to post TE2 open_request:', e);
-	    }
-	  }
+		  async function postTe2OpenRequest({ path, line, column }) {
+		    const url = '/api/te2/agent/open';
+		    await ensureProjectRootLoaded();
+		    const payload = {
+		      source: 'codex-agent',
+		      conversation_id: conversationMeta?.conversation_id || null,
+		    };
+		    let rel = null;
+		    if (typeof path === 'string' && path) {
+		      if (path.startsWith('/')) rel = toProjectRelativePath(path);
+		      else rel = path;
+		    }
+		    if (rel) payload.rel = rel;
+		    else if (path) payload.path = path;
+		    if (Number.isFinite(line)) payload.line = Number(line);
+		    if (Number.isFinite(column)) payload.column = Number(column);
+		    try {
+		      const r = await fetch(url, {
+		        method: 'POST',
+		        headers: { 'Content-Type': 'application/json' },
+		        body: JSON.stringify(payload),
+		      });
+		      if (!r.ok) {
+		        const txt = await r.text().catch(() => '');
+		        console.warn('Failed to post TE2 open_request:', r.status, txt);
+		      }
+		    } catch (e) {
+		      console.warn('Failed to post TE2 open_request:', e);
+		    }
+		  }
 
   function updateActiveConversationLabel() {
     if (!activeConversationEl) return;
@@ -3857,13 +3865,19 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
-  function formatDiff(text, filePath) {
-    if (!text) return '';
-    
-    // First pass: compute max line numbers for proper padding
-    let oldLine = 0;
-    let newLine = 0;
-    let maxOldLen = 1;
+	  function formatDiff(text, filePath) {
+	    if (!text) return '';
+	    
+	    // Multi-file diffs can arrive as a single unified diff blob (multiple diff --git sections)
+	    // but with only one `path` field at the event level. Track per-file boundaries so hunks/lines
+	    // are labeled/clickable with the correct file.
+	    const diffGitCount = (text.match(/^diff --git /gm) || []).length;
+	    const showFileHeaders = diffGitCount > 1 || !filePath;
+
+	    // First pass: compute max line numbers for proper padding
+	    let oldLine = 0;
+	    let newLine = 0;
+	    let maxOldLen = 1;
     let maxNewLen = 1;
     
     text.split('\n').forEach((line) => {
@@ -3881,24 +3895,50 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
     
-    // Reset for second pass
-    oldLine = 0;
-    newLine = 0;
-    
-    const safePath = filePath ? escapeHtml(String(filePath)) : '';
+	    // Reset for second pass
+	    oldLine = 0;
+	    newLine = 0;
 
-    // Second pass: render lines
-    return text.split('\n').map((line) => {
-      let cls = 'diff-context';
+	    let currentFilePath = filePath || null;
+	    const fileGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
+
+	    // Second pass: render lines
+	    return text.split('\n').map((line) => {
+	      let cls = 'diff-context';
       let display = line;
       let changeMarker = ' ';
       let oldNo = '';
       let newNo = '';
 
-      if (line.startsWith('@@')) {
-        cls = 'diff-hunk';
-        const match = line.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)/);
-        if (match) {
+	      if (line.startsWith('diff --git ')) {
+	        // Format: diff --git a/path b/path
+	        const parts = line.split(/\s+/);
+	        if (parts.length >= 4) {
+	          let bpath = parts[3];
+	          if (bpath.startsWith('b/')) bpath = bpath.slice(2);
+	          currentFilePath = bpath || currentFilePath;
+	        }
+	        // Reset counters for the new file; next @@ sets correct line numbers.
+	        oldLine = 0;
+	        newLine = 0;
+	        if (!showFileHeaders) return '';
+	        const relLabel = currentFilePath ? (toRelativePath(currentFilePath) || currentFilePath) : 'file';
+	        const safePath = currentFilePath ? escapeHtml(String(currentFilePath)) : '';
+	        return `<span class="diff-line diff-file" data-path="${safePath}" data-old-line="" data-new-line=""><span class="diff-gutter">${escapeHtml(fileGutter)}</span><span class="diff-text"><strong>${escapeHtml(relLabel)}</strong></span></span>`;
+	      }
+
+	      // Skip low-signal diff metadata lines (we render a file header row instead, above).
+	      if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('index ') || line.startsWith('new file mode') || line.startsWith('deleted file mode') || line.startsWith('similarity index') || line.startsWith('rename from') || line.startsWith('rename to')) {
+	        return '';
+	      }
+
+	      const activePath = currentFilePath || filePath || '';
+	      const safePath = activePath ? escapeHtml(String(activePath)) : '';
+
+	      if (line.startsWith('@@')) {
+	        cls = 'diff-hunk';
+	        const match = line.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)/);
+	        if (match) {
           const oldStart = parseInt(match[1], 10);
           const oldCount = parseInt(match[2] || '1', 10);
           const newStart = parseInt(match[3], 10);
@@ -3911,16 +3951,13 @@ document.addEventListener('DOMContentLoaded', () => {
           display = `Lines ${oldRange} → ${newRange}${label}`;
           oldLine = oldStart;
           newLine = newStart;
-        }
-        // Hunk header gets special gutter
-        const hunkGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
-        return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${escapeHtml(String(oldLine || ''))}" data-new-line="${escapeHtml(String(newLine || ''))}"><span class="diff-gutter">${escapeHtml(hunkGutter)}</span><span class="diff-text">${escapeHtml(display)}</span></span>`;
-      } else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git')) {
-        // Skip diff headers entirely - filename shown separately
-        return '';
-      } else if (line.startsWith('+') && !line.startsWith('+++')) {
-        cls = 'diff-add';
-        changeMarker = '+';
+	        }
+	        // Hunk header gets special gutter
+	        const hunkGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
+	        return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${escapeHtml(String(oldLine || ''))}" data-new-line="${escapeHtml(String(newLine || ''))}"><span class="diff-gutter">${escapeHtml(hunkGutter)}</span><span class="diff-text">${escapeHtml(display)}</span></span>`;
+	      } else if (line.startsWith('+') && !line.startsWith('+++')) {
+	        cls = 'diff-add';
+	        changeMarker = '+';
         newNo = String(newLine);
         newLine += 1;
         display = line.slice(1);
@@ -3950,12 +3987,12 @@ document.addEventListener('DOMContentLoaded', () => {
       
       // Optionally syntax highlight the code
       let codeHtml = escapeHtml(display);
-      if (isDiffSyntaxEnabled() && typeof hljs !== 'undefined' && display.trim()) {
-        try {
-          const ext = filePath ? filePath.split('.').pop()?.toLowerCase() : '';
-          // Map common extensions to hljs language names
-          const extToLang = {
-            'py': 'python', 'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript',
+	      if (isDiffSyntaxEnabled() && typeof hljs !== 'undefined' && display.trim()) {
+	        try {
+	          const ext = activePath ? activePath.split('.').pop()?.toLowerCase() : '';
+	          // Map common extensions to hljs language names
+	          const extToLang = {
+	            'py': 'python', 'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript',
             'jsx': 'javascript', 'rb': 'ruby', 'rs': 'rust', 'go': 'go', 'sh': 'bash',
             'yml': 'yaml', 'md': 'markdown', 'htm': 'html',
           };

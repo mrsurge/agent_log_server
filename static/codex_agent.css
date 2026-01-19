@@ -797,6 +797,16 @@ textarea {
   background: #0d1117;
 }
 
+.diff-line.diff-file {
+  cursor: default;
+  background: #0b0d12;
+  color: #c9d1d9;
+}
+
+.diff-line.diff-file:hover {
+  background: #0b0d12;
+}
+
 .diff-line.tap-flash {
   background: rgba(124, 92, 255, 0.22) !important;
 }

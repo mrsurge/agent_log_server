@@ -504,6 +504,18 @@ Output is truncated to `command_output_lines` setting (default: 20 lines).
 - Extract filename from `--- a/filename` header or `path` field
 - Show relative paths, strip git prefixes
 
+**Multi-file diff blobs (Frontend fix):**
+- Some `turn_diff` payloads arrive as a *single unified diff text blob* that contains multiple `diff --git a/... b/...` sections, but only a single top-level `path` field.
+- The frontend now treats `diff --git ...` lines as file boundaries and renders a file header row for each file when multiple sections exist.
+- Clickable diff lines (`data-path`) and per-line syntax highlighting now track the active file as the diff renderer walks the unified diff text (so multi-file diffs deeplink correctly).
+
+**Future plan (B2: structural diff SSOT, without extra transcript noise):**
+- Keep the UX contract: **one canonical diff card per turn** (avoid reintroducing the short/long/approval diff spam).
+- Upgrade the transcript diff entry schema from “one big `text` + one `path`” to a structured form:
+  - `{"role":"diff","changes":[{"path":"…","diff":"…"}, ...], ...}`
+  - Optionally keep `text` for backwards compatibility, but prefer rendering from `changes` when present.
+- This preserves a single transcript diff event per turn while making per-file path attribution lossless and eliminating the need for the frontend to infer file boundaries from raw unified diff headers.
+
 ### Approval Flow (Implemented)
 
 **Problem:** Approval would hang after clicking Accept.
