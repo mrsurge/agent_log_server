@@ -3697,7 +3697,7 @@ async def codex_agent_ui() -> FastHTMLResponse:
 	                                        Span("MD"),
 	                                        cls="toggle-label"
 	                                    ),
-	                                    Span("disconnected", id="agent-ws", cls="pill warn"),
+	                                    Span("👎", id="agent-ws", cls="pill warn"),
 	                                    Button("Settings", id="conversation-settings", cls="btn"),
 	                                    Button("Back", id="conversation-back", cls="btn ghost"),
 	                                    Button("×", id="host-close-drawer", cls="btn ghost host-close-btn"),
@@ -3721,20 +3721,19 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                 cls="status-ribbon",
                                 id="status-ribbon"
                             ),
-                            Div(
-                                Div(
-                                    id="agent-prompt",
-                                    contenteditable="true",
-                                    cls="prompt-input",
-                                    **{"data-placeholder": "@ to mention files"},
-                                ),
-                                Div(id="composer-terminal", cls="composer-terminal"),
-                                Button("Send", id="agent-send", cls="btn primary"),
-                                cls="composer"
-                            ),
-                            Footer(
-                                Div(
-                                    Span("Approval"),
+	                            Div(
+	                                Div(
+	                                    id="agent-prompt",
+	                                    contenteditable="true",
+	                                    cls="prompt-input",
+	                                    **{"data-placeholder": "@ to mention files"},
+	                                ),
+	                                Div(id="composer-terminal", cls="composer-terminal"),
+	                                cls="composer"
+	                            ),
+	                            Footer(
+	                                Div(
+	                                    Span("Approval"),
                                     Div(
                                         Span("default", id="footer-approval-value", cls="pill"),
                                         Div(id="footer-approval-options", cls="dropdown-list"),
@@ -3747,31 +3746,34 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                     Span("—", id="context-remaining", cls="pill"),
                                     cls="status-pill footer-cell"
                                 ),
-                                Div(
-                                    Span(">_", id="footer-terminal-toggle", cls="pill"),
-                                    cls="status-pill footer-cell"
-                                ),
-                                Div(cls="footer-cell footer-empty"),
-                                Div(
-                                    Span("Scroll"),
-                                    Button("Pinned", id="scroll-pin", cls="btn tiny toggle active"),
-                                    cls="status-pill footer-cell"
+	                                Div(
+	                                    Span(">_", id="footer-terminal-toggle", cls="pill"),
+	                                    cls="status-pill footer-cell"
+	                                ),
+	                                Div(
+	                                    Button("Send", id="agent-send", cls="btn primary"),
+	                                    cls="status-pill footer-cell footer-send"
+	                                ),
+	                                Div(
+	                                    Span("Scroll"),
+	                                    Button("Pinned", id="scroll-pin", cls="btn tiny toggle active"),
+	                                    cls="status-pill footer-cell"
                                 ),
                                 Div(
                                     Span("mention", id="mention-pill", cls="pill"),
                                     cls="status-pill footer-cell"
                                 ),
-                                Div(
-                                    Span("Tokens"),
-                                    Span("0", id="counter-tokens", cls="pill"),
-                                    cls="status-pill footer-cell"
-                                ),
-                                Div(
-                                    Button("Interrupt", id="turn-interrupt", cls="btn danger"),
-                                    cls="status-pill footer-cell footer-end"
-                                ),
-                                cls="footer"
-                            ),
+	                                Div(
+	                                    Span("Tokens"),
+	                                    Span("0", id="counter-tokens", cls="pill"),
+	                                    cls="status-pill footer-cell"
+	                                ),
+	                                Div(
+	                                    Button("Interrupt", id="turn-interrupt", cls="btn danger"),
+	                                    cls="status-pill footer-cell footer-end"
+	                                ),
+	                                cls="footer"
+	                            ),
                             cls="conversation-drawer",
                             id="conversation-drawer"
                         ),
@@ -4109,7 +4111,15 @@ async def api_appserver_conversation_draft(payload: Dict[str, Any] = Body(...)):
     meta["draft"] = draft
     _save_conversation_meta(convo_id, meta)
 
-    return {"status": "saved", "conversation_id": convo_id}
+    # Broadcast to other connected clients so stale tabs can rehydrate without reload.
+    await _broadcast_appserver_ui({
+        "type": "draft_update",
+        "conversation_id": convo_id,
+        "draft": draft,
+        "draft_hash": draft_hash,
+    })
+
+    return {"status": "saved", "conversation_id": convo_id, "draft_hash": draft_hash}
 
 
 @app.get("/api/appserver/conversations")

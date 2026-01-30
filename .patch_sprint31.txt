@@ -1,0 +1,31 @@
+*** Begin Patch
+*** Update File: /data/data/com.termux/files/home/downloads/agent_log_server/PYTE_SCREEN_MODEL_SPRINTS.md
+@@
+ ## Sprint 3: New MCP Tools for Screen Access
+@@
+ ### Validation
+ - Call `pty_read_screen` during TUI - should show clean rows
+ - Call `pty_read_raw` - should have escape sequences
+ - Call `pty_read_screen_deltas` - should have incremental events
+ 
+ ---
++
++## Sprint 3.1: Cursor Semantics Alignment (Quick Win)
++
++**Effort:** ~0.5 hours  
++**Depends on:** Sprint 3
++
++### Goal
++Standardize cursor semantics across spool and screen delta readers so agents can chain reads safely without skipping matches.
++
++### Changes
++1. **Spool waiters:** return `resume_cursor = match_span.end` (not end-of-scan), and use that in docs/examples.
++2. **Screen deltas:** keep cursor as byte offset; always return `resume_cursor` based on bytes consumed (not a line count heuristic).
++3. **Docs:** replace any lingering references to `next_cursor` in examples with `resume_cursor`.
++
++### Validation
++- Confirm chained `wait_for` calls do not skip matches when using `resume_cursor`.
++- Confirm `pty_read_screen_deltas` resumes cleanly when following `resume_cursor`.
++
++---
+*** End Patch

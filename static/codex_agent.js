@@ -172,6 +172,11 @@ document.addEventListener('DOMContentLoaded', () => {
   let composerLastResizeKey = null;
   let draftSaveTimer = null;
   let lastDraftHash = null;
+  let draftDirty = false;
+  let applyingDraft = false;
+
+  // Note: underscore emphasis is handled by the markdown renderer; do not escape underscores
+  // in the raw text stream, otherwise users will see literal backslashes in output.
 
   // Debounced draft save to persist composer content
   function saveDraftDebounced() {
@@ -191,6 +196,10 @@ document.addEventListener('DOMContentLoaded', () => {
           conversation_id: convoId,
           draft: text
         });
+        if (conversationMeta && conversationMeta.conversation_id === convoId) {
+          conversationMeta.draft = text;
+        }
+        draftDirty = false;
       } catch (e) {
         console.warn('Draft save failed:', e);
       }
@@ -202,17 +211,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const draft = conversationMeta?.draft;
     if (draft && typeof draft === 'string' && draft.trim()) {
       renderPromptFromText(draft);
+      draftDirty = false;
       // Update hash to match restored draft
       lastDraftHash = draft.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
     } else {
       // No draft - clear composer
       clearPrompt();
+      draftDirty = false;
       lastDraftHash = null;
     }
   }
 
   function clearDraft() {
     lastDraftHash = null;
+    draftDirty = false;
     // Fire and forget - clear the draft from storage
     const convoId = conversationMeta?.conversation_id;
     if (convoId) {
@@ -220,6 +232,28 @@ document.addEventListener('DOMContentLoaded', () => {
         conversation_id: convoId,
         draft: ''
       }).catch(() => {});
+    }
+  }
+
+  async function syncDraftFromServer(convoId) {
+    if (!convoId) return;
+    if (!promptEl) return;
+    if (draftDirty) return;
+    try {
+      const r = await fetch('/api/appserver/conversation', { cache: 'no-store' });
+      if (!r.ok) return;
+      const meta = await r.json();
+      if (!meta || meta.conversation_id !== convoId) return;
+      const serverDraft = meta.draft;
+      if (typeof serverDraft !== 'string') return;
+      const localText = getPromptText();
+      if (serverDraft === localText) return;
+      renderPromptFromText(serverDraft);
+      if (conversationMeta) conversationMeta.draft = serverDraft;
+      draftDirty = false;
+      lastDraftHash = serverDraft.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
+    } catch {
+      // ignore
     }
   }
 
@@ -1132,6 +1166,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderPromptFromText(text) {
     if (!promptEl) return;
+    applyingDraft = true;
     promptEl.innerHTML = '';
     const parts = String(text || '').split(/(`[^`]+`)/g);
     parts.forEach((part) => {
@@ -1143,6 +1178,7 @@ document.addEventListener('DOMContentLoaded', () => {
         appendTextWithBreaks(promptEl, part);
       }
     });
+    applyingDraft = false;
   }
 
   function serializePromptNode(node) {
@@ -4762,6 +4798,26 @@ document.addEventListener('DOMContentLoaded', () => {
         if (evt.conversation_id && evt.conversation_id !== conversationMeta.conversation_id) return;
         insertMention(evt.path || '');
         return;
+      case 'draft_update': {
+        if (!promptEl) return;
+        if (!conversationMeta?.conversation_id) return;
+        if (evt.conversation_id && evt.conversation_id !== conversationMeta.conversation_id) return;
+        const draft = evt.draft;
+        if (typeof draft !== 'string') return;
+        // Skip if we already have this exact content (avoid cursor jump on self-echo)
+        const incomingHash = draft.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
+        if (incomingHash === lastDraftHash) return;
+        // Only auto-apply when user hasn't typed locally since last save/restore.
+        if (draftDirty) {
+          console.warn('Draft update ignored (local dirty)');
+          return;
+        }
+        renderPromptFromText(draft);
+        conversationMeta.draft = draft;
+        lastDraftHash = incomingHash;
+        draftDirty = false;
+        return;
+      }
       case 'rpc_response': {
         const entry = pending.get(evt.id);
         if (entry) {
@@ -4794,7 +4850,7 @@ document.addEventListener('DOMContentLoaded', () => {
       setPill(wsStatusEl, 'no-io', 'err');
       return;
     }
-    setPill(wsStatusEl, 'connecting', 'warn');
+    setPill(wsStatusEl, '…', 'warn');
     const socket = io('/appserver', {
       transports: ['websocket'],
       reconnection: true,
@@ -4804,15 +4860,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     socket.on('connect', () => {
       markWsOpen();
-      setPill(wsStatusEl, 'connected', 'ok');
+      setPill(wsStatusEl, '👍', 'ok');
+      // Best-effort: refresh draft from SSOT on reconnect so stale tabs rehydrate.
+      syncDraftFromServer(conversationMeta?.conversation_id);
     });
     socket.on('disconnect', () => {
       resetWsReady();
-      setPill(wsStatusEl, 'disconnected', 'err');
+      setPill(wsStatusEl, '👎', 'err');
     });
     socket.on('connect_error', () => {
       resetWsReady();
-      setPill(wsStatusEl, 'error', 'err');
+      setPill(wsStatusEl, '👎', 'err');
     });
     socket.on('appserver_event', (data) => {
       handleEvent(data);
@@ -5170,25 +5228,28 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  promptEl?.addEventListener('input', () => {
-    // When composer xterm is active, it handles all input - skip promptEl
-    if (terminalMode && composerTerm) {
-      return;
-    }
-    // When in stdin mode, send each character as it's typed
-    if (commandRunning && terminalMode) {
-      const text = getPromptText();
-      if (text) {
+	  promptEl?.addEventListener('input', () => {
+	    // When composer xterm is active, it handles all input - skip promptEl
+	    if (terminalMode && composerTerm) {
+	      return;
+	    }
+	    if (!applyingDraft) {
+	      draftDirty = true;
+	    }
+	    // When in stdin mode, send each character as it's typed
+	    if (commandRunning && terminalMode) {
+	      const text = getPromptText();
+	      if (text) {
         clearPrompt();
         sendPtyStdin(text);
       }
     }
-    // Save draft with debounce (not in terminal/stdin mode)
-    if (!commandRunning && !terminalMode) {
-      saveDraftDebounced();
-    }
-    // Tribute handles @ mentions automatically
-  });
+	    // Save draft with debounce (not in terminal/stdin mode)
+	    if (!commandRunning && !terminalMode) {
+	      saveDraftDebounced();
+	    }
+	    // Tribute handles @ mentions automatically
+	  });
 
   promptEl?.addEventListener('click', (evt) => {
     const target = evt.target;
@@ -5299,12 +5360,18 @@ document.addEventListener('DOMContentLoaded', () => {
   markdownToggleEl?.addEventListener('change', async () => {
     const enabled = markdownToggleEl.checked;
     setMarkdownEnabled(enabled);
+    if (conversationSettings && typeof conversationSettings === 'object') {
+      conversationSettings.markdown = enabled;
+    }
     // Save to SSOT if we have an active conversation
     if (conversationMeta?.conversation_id) {
       await postJson('/api/appserver/conversation', { 
         settings: { ...conversationSettings, markdown: enabled } 
       });
     }
+    // Re-render timeline immediately so the user sees the new markdown mode take effect.
+    resetTimeline();
+    await replayTranscript();
   });
 
   // Sync markdown toggle when conversation loads
