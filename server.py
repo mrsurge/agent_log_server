@@ -828,6 +828,24 @@ async def _set_turn_id(turn_id: Optional[str]) -> None:
         _save_appserver_config(cfg)
 
 
+def _set_conversation_turn_id(conversation_id: str, turn_id: Optional[str]) -> None:
+    """Persist the current active turn id to the conversation sidecar.
+
+    This allows conversation-scoped interrupt without the frontend knowing thread/turn ids.
+    """
+    if not conversation_id:
+        return
+    convo_id = _sanitize_conversation_id(conversation_id)
+    if not _conversation_meta_path(convo_id).exists():
+        return
+    meta = _load_conversation_meta(convo_id)
+    if turn_id:
+        meta["turn_id"] = turn_id
+    else:
+        meta.pop("turn_id", None)
+    _save_conversation_meta(convo_id, meta)
+
+
 def _sanitize_conversation_id(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
     return safe or "unknown"
@@ -2179,8 +2197,18 @@ async def _route_appserver_event(
     if label_lower in {"turn/started", "turn/completed"}:
         if label_lower == "turn/started":
             await _set_turn_id(turn_id)
+            if convo_id:
+                try:
+                    _set_conversation_turn_id(convo_id, turn_id)
+                except Exception:
+                    pass
         else:
             await _set_turn_id(None)
+            if convo_id:
+                try:
+                    _set_conversation_turn_id(convo_id, None)
+                except Exception:
+                    pass
             state["thought_buffer"] = ""
             # Determine turn status from payload
             turn_obj = payload.get("turn", {}) if isinstance(payload, dict) else {}
@@ -4028,11 +4056,28 @@ async def api_appserver_conversation():
     return meta
 
 
+@app.get("/api/appserver/conversations/{conversation_id}/meta")
+async def api_appserver_conversation_meta(conversation_id: str):
+    """Fetch conversation meta without changing SSOT active conversation."""
+    convo_id = _sanitize_conversation_id(conversation_id)
+    if not convo_id or not _conversation_meta_path(convo_id).exists():
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    meta = _load_conversation_meta(convo_id)
+    return meta
+
+
 @app.post("/api/appserver/conversation")
 async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...)):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
-    convo_id = await _ensure_conversation()
+    # If conversation_id is provided, update that conversation without forcing SSOT.
+    convo_id = payload.get("conversation_id")
+    if not isinstance(convo_id, str) or not convo_id.strip():
+        convo_id = await _ensure_conversation()
+    else:
+        convo_id = _sanitize_conversation_id(convo_id.strip())
+        if not _conversation_meta_path(convo_id).exists():
+            raise HTTPException(status_code=404, detail="Conversation not found")
     meta = _load_conversation_meta(convo_id)
     settings = payload.get("settings")
     if isinstance(settings, dict):
@@ -4052,8 +4097,10 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
     async with _config_lock:
         cfg = _load_appserver_config()
         _add_conversation_to_config(convo_id, cfg)
-        cfg["conversation_id"] = convo_id
-        cfg["active_view"] = cfg.get("active_view") or "conversation"
+        # Only update SSOT active conversation when client didn't specify an explicit conversation_id.
+        if not (isinstance(payload.get("conversation_id"), str) and payload.get("conversation_id").strip()):
+            cfg["conversation_id"] = convo_id
+            cfg["active_view"] = cfg.get("active_view") or "conversation"
         _save_appserver_config(cfg)
     
     # Check if agent requires eager session initialization
@@ -4812,12 +4859,15 @@ async def api_appserver_message(payload: AppserverMessageIn):
     
     # Default: route to codex-app-server
     thread_id = meta.get("thread_id")
-    
+
     # Generate request IDs
     base_id = int(datetime.now(timezone.utc).timestamp() * 1000)
-    
+
     # Helper to inject settings into params
     def inject_settings(params: Dict[str, Any], method: str) -> Dict[str, Any]:
+        # NOTE: Codex App Server uses different field names for different methods:
+        # - thread/resume: sandbox (SandboxMode)
+        # - turn/start: sandboxPolicy (SandboxPolicy)
         if method == "turn/start":
             for key in ("model", "cwd", "approvalPolicy", "sandboxPolicy", "summary"):
                 if key in settings and settings[key] and key not in params:
@@ -4825,28 +4875,70 @@ async def api_appserver_message(payload: AppserverMessageIn):
             if "effort" in settings and settings["effort"] and "effort" not in params:
                 params["effort"] = settings["effort"]
         elif method == "thread/start":
-            for key in ("model", "cwd", "approvalPolicy", "sandbox"):
+            # thread/start uses `sandbox` (SandboxMode)
+            for key in ("model", "cwd", "approvalPolicy"):
                 if key in settings and settings[key] and key not in params:
                     params[key] = settings[key]
+            # Best-effort: map sandboxPolicy -> sandbox for thread/start/resume if only sandboxPolicy is present.
+            if "sandbox" not in params:
+                sb = settings.get("sandbox") or settings.get("sandboxPolicy")
+                if sb:
+                    params["sandbox"] = sb
             if "effort" in settings and settings["effort"] and "reasoningEffort" not in params:
                 params["reasoningEffort"] = settings["effort"]
         elif method == "thread/resume":
-            for key in ("model", "cwd", "approvalPolicy", "sandbox"):
+            for key in ("model", "cwd", "approvalPolicy"):
                 if key in settings and settings[key] and key not in params:
                     params[key] = settings[key]
+            if "sandbox" not in params:
+                sb = settings.get("sandbox") or settings.get("sandboxPolicy")
+                if sb:
+                    params["sandbox"] = sb
         return params
     
     try:
+        # Ensure the codex-app-server framework shell is running and reader is attached.
+        info = await _get_or_start_appserver_shell()
+        await _ensure_appserver_reader(info["shell_id"])
+        await _ensure_appserver_initialized()
+
         if thread_id:
-            # Thread exists - resume it first, then send turn/start
-            resume_params = inject_settings({"threadId": thread_id}, "thread/resume")
-            await _write_appserver({
-                "id": base_id,
-                "method": "thread/resume",
-                "params": resume_params
-            })
-            # Brief wait for resume to register
-            await asyncio.sleep(0.3)
+            # Thread exists - only resume if this conversation is not already active in the
+            # current codex-app-server shell session.
+            current_shell_id = info.get("shell_id")
+            saved_shell_id = settings.get("thread_session_shell_id")
+            saved_thread_id = settings.get("thread_session_thread_id")
+            needs_resume = not (
+                isinstance(current_shell_id, str)
+                and current_shell_id
+                and isinstance(saved_shell_id, str)
+                and saved_shell_id
+                and current_shell_id == saved_shell_id
+                and isinstance(saved_thread_id, str)
+                and saved_thread_id
+                and saved_thread_id == thread_id
+            )
+
+            if needs_resume:
+                resume_params = inject_settings({"threadId": thread_id}, "thread/resume")
+                await _write_appserver({
+                    "id": base_id,
+                    "method": "thread/resume",
+                    "params": resume_params
+                })
+                # Brief wait for resume to register
+                await asyncio.sleep(0.3)
+                # Persist session marker so the *next* message can skip resume when appropriate.
+                try:
+                    meta_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+                    if isinstance(current_shell_id, str) and current_shell_id:
+                        meta_settings["thread_session_shell_id"] = current_shell_id
+                    if isinstance(thread_id, str) and thread_id:
+                        meta_settings["thread_session_thread_id"] = thread_id
+                    meta["settings"] = meta_settings
+                    _save_conversation_meta(convo_id, meta)
+                except Exception:
+                    pass
             
             # Now send turn/start
             turn_params = inject_settings({
@@ -4893,6 +4985,18 @@ async def api_appserver_message(payload: AppserverMessageIn):
                 "method": "turn/start",
                 "params": turn_params
             })
+            # Persist session marker for the new thread.
+            try:
+                current_shell_id = info.get("shell_id")
+                meta_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+                if isinstance(current_shell_id, str) and current_shell_id:
+                    meta_settings["thread_session_shell_id"] = current_shell_id
+                if isinstance(thread_id, str) and thread_id:
+                    meta_settings["thread_session_thread_id"] = thread_id
+                meta["settings"] = meta_settings
+                _save_conversation_meta(convo_id, meta)
+            except Exception:
+                pass
         
         return {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
     
@@ -5025,17 +5129,33 @@ async def api_appserver_approval_record(payload: Dict[str, Any] = Body(...)):
 
 
 @app.post("/api/appserver/interrupt")
-async def api_appserver_interrupt():
+async def api_appserver_interrupt(payload: Optional[Dict[str, Any]] = Body(None)):
     info = await _get_or_start_appserver_shell()
     await _ensure_appserver_reader(info["shell_id"])
     await _ensure_appserver_initialized()
-    cfg = _load_appserver_config()
-    thread_id = cfg.get("thread_id")
-    turn_id = cfg.get("turn_id")
+    thread_id: Optional[str] = None
+    turn_id: Optional[str] = None
+
+    # Preferred: conversation-scoped interrupt (frontend sends conversation_id only).
+    convo_id = None
+    if isinstance(payload, dict):
+        convo_id = payload.get("conversation_id")
+    if isinstance(convo_id, str) and convo_id:
+        convo_id = _sanitize_conversation_id(convo_id)
+        meta = _load_conversation_meta(convo_id)
+        thread_id = meta.get("thread_id")
+        turn_id = meta.get("turn_id")
+
+    # Back-compat: fall back to SSOT config for older clients.
+    if not thread_id or not turn_id:
+        cfg = _load_appserver_config()
+        thread_id = thread_id or cfg.get("thread_id")
+        turn_id = turn_id or cfg.get("turn_id")
+
     if not thread_id or not turn_id:
         raise HTTPException(status_code=409, detail="No active turn to interrupt")
     await _rpc_request("turn/interrupt", params={"threadId": thread_id, "turnId": turn_id})
-    return {"ok": True, "thread_id": thread_id, "turn_id": turn_id}
+    return {"ok": True, "thread_id": thread_id, "turn_id": turn_id, "conversation_id": convo_id}
 
 
 @app.post("/api/appserver/shell/exec")

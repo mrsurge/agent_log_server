@@ -1,6 +1,0 @@
-Collecting pyte
-  Downloading pyte-0.8.2-py3-none-any.whl.metadata (3.0 kB)
-Requirement already satisfied: wcwidth in /data/data/com.termux/files/usr/lib/python3.12/site-packages (from pyte) (0.2.14)
-Downloading pyte-0.8.2-py3-none-any.whl (31 kB)
-Installing collected packages: pyte
-Successfully installed pyte-0.8.2

@@ -93,13 +93,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const enableMobileScale = storedMobile === '1';
   document.body.classList.toggle('mobile-scale', enableMobileScale);
 
-  let conversationMeta = {};
-	  let conversationSettings = {};
-	  let conversationList = [];
-	  let activeView = 'splash';
-	  let hostUi = { showClose: false, parentOrigin: null };
-	  let splashTab = 'all'; // 'all' | 'project'
-	  let currentThreadId = null;
+	  let conversationMeta = {};
+		  let conversationSettings = {};
+		  let conversationList = [];
+		  let activeView = 'splash';
+		  // Client-local selection (do not treat SSOT active conversation as an authority after boot).
+		  let clientConversationId = null;
+		  let clientActiveView = null;
+		  let hostUi = { showClose: false, parentOrigin: null };
+		  let splashTab = 'all'; // 'all' | 'project'
+		  let currentThreadId = null;
   let pendingNewConversation = false;
   let pendingRollout = null;
   let lastEventType = null;
@@ -1591,7 +1594,10 @@ document.addEventListener('DOMContentLoaded', () => {
   async function saveApprovalQuick(value) {
     const approval = normalizeApprovalValue(value?.trim());
     if (!approval) return;
-    await postJson('/api/appserver/conversation', { settings: { approvalPolicy: approval } });
+    await postJson('/api/appserver/conversation', {
+      conversation_id: conversationMeta?.conversation_id,
+      settings: { approvalPolicy: approval },
+    });
     conversationSettings.approvalPolicy = approval;
     if (footerApprovalValue) footerApprovalValue.textContent = approval;
   }
@@ -2302,6 +2308,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     incrementMessages();
     lastEventType = 'message';
+    // Scroll after content is fully added
+    maybeAutoScroll();
   }
 
   function updateSpacerHeights() {
@@ -4130,82 +4138,113 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
 	  async function fetchConversations() {
-	    try {
-	      const r = await fetch('/api/appserver/conversations', { cache: 'no-store' });
-	      if (!r.ok) return;
-	      const data = await r.json();
-	      conversationList = data?.items || [];
-	      const activeId = data?.active_conversation_id || null;
-	      if (data?.active_view) activeView = data.active_view;
-	      renderConversationList(conversationList, activeId);
-	      renderSplashTabs();
-	      updateActiveConversationLabel();
-	    } catch {
-	      // ignore
-	    }
-	  }
+		    try {
+		      const r = await fetch('/api/appserver/conversations', { cache: 'no-store' });
+		      if (!r.ok) return;
+		      const data = await r.json();
+		      conversationList = data?.items || [];
+		      const ssotActiveId = data?.active_conversation_id || null;
+		      const highlightId = clientConversationId || conversationMeta?.conversation_id || ssotActiveId;
+		      // SSOT active_view is only a boot default; keep client-local view.
+		      if (!clientActiveView && data?.active_view) clientActiveView = data.active_view;
+		      renderConversationList(conversationList, highlightId);
+		      renderSplashTabs();
+		      updateActiveConversationLabel();
+		    } catch {
+		      // ignore
+		    }
+		  }
 
-  async function setActiveView(view) {
-    try {
-      await postJson('/api/appserver/view', { view });
-      activeView = view;
-      setDrawerOpen(view === 'conversation');
-      applyHostUi();
-    } catch {
-      // ignore
-    }
-  }
+	  async function setActiveView(view) {
+	    // Client-local view, but also update SSOT so new clients inherit "last action wins"
+	    // (drawer open/closed) as the default boot view.
+	    try {
+	      await postJson('/api/appserver/view', { view });
+	    } catch {
+	      // ignore - SSOT is best-effort for boot defaults
+	    }
+	    clientActiveView = view;
+	    activeView = view;
+	    setDrawerOpen(view === 'conversation');
+	    applyHostUi();
+	  }
 
   async function selectConversation(conversationId) {
     return selectConversationWithView(conversationId, 'conversation');
   }
 
-  async function selectConversationWithView(conversationId, view) {
-    if (!conversationId) return;
+	  async function selectConversationWithView(conversationId, view) {
+	    if (!conversationId) return;
     // Cancel any pending draft save to avoid race condition
     if (draftSaveTimer) {
       clearTimeout(draftSaveTimer);
       draftSaveTimer = null;
-    }
-    lastDraftHash = null;
-    resetTimeline();
-    await postJson('/api/appserver/conversations/select', { conversation_id: conversationId, view });
-    await fetchConversation();
-    await fetchConversations();
-    await replayTranscript();
-    setDrawerOpen(view === 'conversation');
-    activeView = view;
-    applyHostUi();
-  }
+	    }
+	    lastDraftHash = null;
+	    resetTimeline();
+	    clientConversationId = conversationId;
+	    clientActiveView = view;
+	    // Update SSOT "active conversation" so new clients boot into the last selected conversation.
+	    // This should not be used as a guardrail by the client for sending.
+	    try {
+	      await postJson('/api/appserver/conversations/select', { conversation_id: conversationId, view });
+	    } catch {
+	      // ignore - SSOT is best-effort for boot defaults
+	    }
+	    await fetchConversation(conversationId);
+	    await fetchConversations();
+	    await replayTranscript();
+	    setDrawerOpen(view === 'conversation');
+	    activeView = view;
+	    applyHostUi();
+	  }
 
-  async function createConversation() {
+	  async function createConversation() {
     // Cancel any pending draft save from previous conversation
     if (draftSaveTimer) {
       clearTimeout(draftSaveTimer);
       draftSaveTimer = null;
-    }
-    lastDraftHash = null;
-    await postJson('/api/appserver/conversations', {});
-    await fetchConversation();
-    await fetchConversations();
-    resetTimeline();
-    await replayTranscript();
-    setDrawerOpen(true);
-    activeView = 'conversation';
-    applyHostUi();
-    openSettingsModal();
-  }
+	    }
+	    lastDraftHash = null;
+	    const meta = await postJson('/api/appserver/conversations', {});
+	    if (meta?.conversation_id) {
+	      clientConversationId = meta.conversation_id;
+	      clientActiveView = 'conversation';
+	      conversationMeta = meta;
+	      conversationSettings = meta?.settings || {};
+	      // SSOT: new clients should boot into the latest created/selected conversation.
+	      try {
+	        await postJson('/api/appserver/conversations/select', { conversation_id: meta.conversation_id, view: 'conversation' });
+	      } catch {
+	        // ignore
+	      }
+	    }
+	    await fetchConversation(clientConversationId);
+	    await fetchConversations();
+	    resetTimeline();
+	    await replayTranscript();
+	    setDrawerOpen(true);
+	    activeView = 'conversation';
+	    applyHostUi();
+	    openSettingsModal();
+	  }
 
-  async function deleteConversation(conversationId) {
-    if (!conversationId) return;
-    await fetch(`/api/appserver/conversations/${conversationId}`, { method: 'DELETE' });
-    await fetchConversations();
-    await fetchConversation();
-    if (!conversationMeta?.conversation_id) {
-      setDrawerOpen(false);
-      await setActiveView('splash');
-    }
-  }
+	  async function deleteConversation(conversationId) {
+	    if (!conversationId) return;
+	    await fetch(`/api/appserver/conversations/${conversationId}`, { method: 'DELETE' });
+	    if (clientConversationId && clientConversationId === conversationId) {
+	      clientConversationId = null;
+	      clientActiveView = 'splash';
+	      activeView = 'splash';
+	      setDrawerOpen(false);
+	    }
+	    await fetchConversations();
+	    await fetchConversation();
+	    if (!conversationMeta?.conversation_id) {
+	      setDrawerOpen(false);
+	      await setActiveView('splash');
+	    }
+	  }
 
   async function saveSettings() {
     const agentType = settingsAgentEl?.value?.trim() || 'codex';
@@ -4270,15 +4309,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (semanticRibbonEnabled) {
       await ensureTreeSitterRibbonReady();
     }
-    const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
-    if (isNewConversation) {
-      const meta = await postJson('/api/appserver/conversations', {});
-      if (meta?.conversation_id) {
-        await postJson('/api/appserver/conversations/select', { conversation_id: meta.conversation_id, view: 'conversation' });
-      }
-      pendingNewConversation = false;
-    }
-    await postJson('/api/appserver/conversation', { settings });
+	    const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
+	    if (isNewConversation) {
+	      const meta = await postJson('/api/appserver/conversations', {});
+	      if (meta?.conversation_id) {
+	        clientConversationId = meta.conversation_id;
+	        clientActiveView = 'conversation';
+	        conversationMeta = meta;
+	        conversationSettings = meta?.settings || {};
+	      }
+	      pendingNewConversation = false;
+	    }
+	    await postJson('/api/appserver/conversation', { conversation_id: conversationMeta?.conversation_id, settings });
     if (pendingRollout?.id && Array.isArray(pendingRollout.items)) {
       setActivity('loading rollout', true);
       await postJson('/api/appserver/conversations/bind-rollout', {
@@ -4287,9 +4329,9 @@ document.addEventListener('DOMContentLoaded', () => {
       pendingRollout = null;
       setActivity('rollout loaded', false);
     }
-    closeSettingsModal();
-    await fetchConversation();
-    await fetchConversations();
+	    closeSettingsModal();
+	    await fetchConversation(conversationMeta?.conversation_id);
+	    await fetchConversations();
     if (isNewConversation) {
       resetTimeline(); // Clear old transcript when switching to new conversation
     }
@@ -4363,19 +4405,28 @@ document.addEventListener('DOMContentLoaded', () => {
     return Boolean(ok);
   }
 
-  async function fetchConversation() {
-    try {
-      const r = await fetch('/api/appserver/conversation', { cache: 'no-store' });
-      if (!r.ok) return;
-      conversationMeta = await r.json();
-      conversationSettings = conversationMeta?.settings || {};
-      activeView = conversationMeta?.active_view || 'splash';
-      setDrawerOpen(activeView === 'conversation');
-      applyHostUi();
-      updateActiveConversationLabel();
-      if (footerApprovalValue) footerApprovalValue.textContent = conversationSettings?.approvalPolicy || 'default';
-      if (conversationMeta && conversationMeta.thread_id) {
-        currentThreadId = conversationMeta.thread_id;
+	  async function fetchConversation(conversationId = null) {
+	    try {
+	      const cid = conversationId || clientConversationId;
+	      const r = cid
+	        ? await fetch(`/api/appserver/conversations/${encodeURIComponent(cid)}/meta`, { cache: 'no-store' })
+	        : await fetch('/api/appserver/conversation', { cache: 'no-store' });
+	      if (!r.ok) return;
+	      conversationMeta = await r.json();
+	      conversationSettings = conversationMeta?.settings || {};
+	      if (!clientConversationId && conversationMeta?.conversation_id) {
+	        clientConversationId = conversationMeta.conversation_id;
+	      }
+	      if (!clientActiveView && conversationMeta?.active_view) {
+	        clientActiveView = conversationMeta.active_view;
+	      }
+	      activeView = clientActiveView || conversationMeta?.active_view || 'splash';
+	      setDrawerOpen(activeView === 'conversation');
+	      applyHostUi();
+	      updateActiveConversationLabel();
+	      if (footerApprovalValue) footerApprovalValue.textContent = conversationSettings?.approvalPolicy || 'default';
+	      if (conversationMeta && conversationMeta.thread_id) {
+	        currentThreadId = conversationMeta.thread_id;
       } else {
         currentThreadId = null;
       }
@@ -4398,15 +4449,15 @@ document.addEventListener('DOMContentLoaded', () => {
           try { composerTerm.reset(); } catch (_) {}
         }
       }
-      // Connect PTY WebSocket for user terminal
-      connectPtyWebSocket();
-      // Restore draft from conversation meta
-      restoreDraft();
-    } catch {
-      // Don't touch statusEl here - it's for server status only
-    }
-    updateConversationHeaderLabel();
-  }
+	      // Connect PTY WebSocket for user terminal
+	      connectPtyWebSocket();
+	      // Restore draft from conversation meta
+	      restoreDraft();
+	    } catch {
+	      // Don't touch statusEl here - it's for server status only
+	    }
+	    updateConversationHeaderLabel();
+	  }
 
   async function fetchStatus() {
     try {
@@ -4466,6 +4517,7 @@ document.addEventListener('DOMContentLoaded', () => {
         await sendRpc('thread/resume', { threadId: currentThreadId });
         if (currentAppServerShellId) {
           await postJson('/api/appserver/conversation', {
+            conversation_id: conversationMeta?.conversation_id,
             settings: { thread_session_shell_id: currentAppServerShellId, thread_session_thread_id: currentThreadId },
           });
         }
@@ -4480,6 +4532,7 @@ document.addEventListener('DOMContentLoaded', () => {
       currentThreadId = threadId;
       if (currentAppServerShellId) {
         await postJson('/api/appserver/conversation', {
+          conversation_id: conversationMeta?.conversation_id,
           settings: { thread_session_shell_id: currentAppServerShellId, thread_session_thread_id: threadId },
         });
       }
@@ -4488,47 +4541,25 @@ document.addEventListener('DOMContentLoaded', () => {
     throw new Error('thread/start failed');
   }
 
-  // Validate conversation ID matches before sending RPC (guards against stale tabs/multi-device)
-  async function validateConversationId() {
-    try {
-      const r = await fetch('/api/appserver/conversation', { cache: 'no-store' });
-      if (!r.ok) return false;
-      const serverMeta = await r.json();
-      const serverConvoId = serverMeta?.conversation_id;
-      const localConvoId = conversationMeta?.conversation_id;
-      if (serverConvoId && localConvoId && serverConvoId !== localConvoId) {
-        console.warn('Conversation ID mismatch - server:', serverConvoId, 'local:', localConvoId);
-        setActivity('conversation changed - refresh', false);
-        return false;
-      }
-      return true;
-    } catch {
-      return true; // Allow on network error
-    }
-  }
-
-  async function sendUserMessage(text) {
-    if (!text) return;
-    if (!conversationMeta?.conversation_id) {
-      setActivity('save settings first', true);
-      return;
-    }
-    // Guard against stale tabs / multi-device conflicts
-    if (!await validateConversationId()) {
-      return;
-    }
-    setActivity('sending', true);
-    await ensureInitialized();
-    // Use unified message endpoint - backend handles all thread resolution
-    const result = await postJson('/api/appserver/message', {
-      conversation_id: conversationMeta.conversation_id,
-      text,
-    });
-    if (!result?.ok) {
-      console.error('sendUserMessage failed:', result?.error);
-      setActivity(result?.error || 'send failed', true);
-    }
-  }
+	  async function sendUserMessage(text) {
+	    if (!text) return;
+	    const convoId = conversationMeta?.conversation_id;
+	    if (!convoId) {
+	      setActivity('save settings first', true);
+	      return;
+	    }
+	    setActivity('sending', true);
+	    await ensureInitialized();
+	    // Use unified message endpoint - backend handles all thread resolution
+	    const result = await postJson('/api/appserver/message', {
+	      conversation_id: convoId,
+	      text,
+	    });
+	    if (!result?.ok) {
+	      console.error('sendUserMessage failed:', result?.error);
+	      setActivity(result?.error || 'send failed', true);
+	    }
+	  }
 
   // Direct shell command execution via !command
   // Now uses streaming - shell_begin/delta/end events handle rendering
@@ -4573,7 +4604,8 @@ document.addEventListener('DOMContentLoaded', () => {
   async function interruptTurn() {
     try {
       setActivity('interrupt', true);
-      await postJson('/api/appserver/interrupt', null);
+      const convoId = conversationMeta?.conversation_id || null;
+      await postJson('/api/appserver/interrupt', convoId ? { conversation_id: convoId } : null);
       setActivity('interrupt sent', true);
     } catch (err) {
       console.warn('interrupt failed', err);
@@ -4582,7 +4614,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function fetchTranscriptRange(offset, limit) {
-    const url = `/api/appserver/transcript/range?offset=${offset}&limit=${limit}`;
+    const convoId = conversationMeta?.conversation_id || null;
+    const cid = convoId ? `&conversation_id=${encodeURIComponent(convoId)}` : '';
+    const url = `/api/appserver/transcript/range?offset=${offset}&limit=${limit}${cid}`;
     const r = await fetch(url, { cache: 'no-store' });
     if (!r.ok) return null;
     return r.json();
@@ -5356,19 +5390,20 @@ document.addEventListener('DOMContentLoaded', () => {
     postTe2OpenRequest({ path, line, column: 1 });
   });
 
-  // Markdown toggle in header - syncs with settings and saves to SSOT
-  markdownToggleEl?.addEventListener('change', async () => {
-    const enabled = markdownToggleEl.checked;
-    setMarkdownEnabled(enabled);
-    if (conversationSettings && typeof conversationSettings === 'object') {
-      conversationSettings.markdown = enabled;
-    }
-    // Save to SSOT if we have an active conversation
-    if (conversationMeta?.conversation_id) {
-      await postJson('/api/appserver/conversation', { 
-        settings: { ...conversationSettings, markdown: enabled } 
-      });
-    }
+	  // Markdown toggle in header - syncs with settings and saves to SSOT
+	  markdownToggleEl?.addEventListener('change', async () => {
+	    const enabled = markdownToggleEl.checked;
+	    setMarkdownEnabled(enabled);
+	    if (conversationSettings && typeof conversationSettings === 'object') {
+	      conversationSettings.markdown = enabled;
+	    }
+	    // Save to SSOT if we have an active conversation (explicit conversation_id so we don't depend on SSOT selection)
+	    if (conversationMeta?.conversation_id) {
+	      await postJson('/api/appserver/conversation', { 
+	        conversation_id: conversationMeta.conversation_id,
+	        settings: { ...conversationSettings, markdown: enabled } 
+	      });
+	    }
     // Re-render timeline immediately so the user sees the new markdown mode take effect.
     resetTimeline();
     await replayTranscript();
