@@ -2753,7 +2753,7 @@ async def _route_appserver_event(
                 events.append({"type": "assistant_finalize", "id": payload.get("item_id") or payload.get("itemId") or state.get("assistant_id") or "assistant", "text": text.strip()})
         return convo_id, events
 
-    if label_lower in {"codex/event/agent_reasoning_delta", "codex/event/reasoning_content_delta", "codex/event/reasoning_summary_delta"} and isinstance(payload, dict):
+    if label_lower in {"codex/event/agent_reasoning_delta", "codex/event/reasoning_content_delta", "codex/event/reasoning_summary_delta", "codex/event/agent_reasoning_raw_content_delta", "codex/event/reasoning_raw_content_delta"} and isinstance(payload, dict):
         # [Frontend] Stream reasoning delta (legacy format)
         if state["reason_source"] in {None, "codex"}:
             state["reason_source"] = "codex"
@@ -2791,7 +2791,7 @@ async def _route_appserver_event(
             events.append({"type": "reasoning_delta", "id": item_id, "delta": "\n\n"})
         return convo_id, events
 
-    if label_lower == "codex/event/agent_reasoning" and isinstance(payload, dict):
+    if label_lower in {"codex/event/agent_reasoning", "codex/event/agent_reasoning_raw_content"} and isinstance(payload, dict):
         # [Frontend] Finalize reasoning (legacy format)
         text = payload.get("text") or payload.get("message")
         # Scrub thought titles from complete reasoning text
@@ -5133,24 +5133,13 @@ async def api_appserver_interrupt(payload: Optional[Dict[str, Any]] = Body(None)
     info = await _get_or_start_appserver_shell()
     await _ensure_appserver_reader(info["shell_id"])
     await _ensure_appserver_initialized()
-    thread_id: Optional[str] = None
-    turn_id: Optional[str] = None
-
-    # Preferred: conversation-scoped interrupt (frontend sends conversation_id only).
-    convo_id = None
-    if isinstance(payload, dict):
-        convo_id = payload.get("conversation_id")
-    if isinstance(convo_id, str) and convo_id:
-        convo_id = _sanitize_conversation_id(convo_id)
-        meta = _load_conversation_meta(convo_id)
-        thread_id = meta.get("thread_id")
-        turn_id = meta.get("turn_id")
-
-    # Back-compat: fall back to SSOT config for older clients.
-    if not thread_id or not turn_id:
-        cfg = _load_appserver_config()
-        thread_id = thread_id or cfg.get("thread_id")
-        turn_id = turn_id or cfg.get("turn_id")
+    convo_id = payload.get("conversation_id") if isinstance(payload, dict) else None
+    if not isinstance(convo_id, str) or not convo_id:
+        raise HTTPException(status_code=400, detail="Missing required field: conversation_id")
+    convo_id = _sanitize_conversation_id(convo_id)
+    meta = _load_conversation_meta(convo_id)
+    thread_id = meta.get("thread_id")
+    turn_id = meta.get("turn_id")
 
     if not thread_id or not turn_id:
         raise HTTPException(status_code=409, detail="No active turn to interrupt")
@@ -5251,16 +5240,20 @@ async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
 
 
 @app.post("/api/appserver/compact")
-async def api_appserver_compact():
+async def api_appserver_compact(payload: Optional[Dict[str, Any]] = Body(None)):
     info = await _get_or_start_appserver_shell()
     await _ensure_appserver_reader(info["shell_id"])
     await _ensure_appserver_initialized()
-    cfg = _load_appserver_config()
-    thread_id = cfg.get("thread_id")
+    convo_id = payload.get("conversation_id") if isinstance(payload, dict) else None
+    if not isinstance(convo_id, str) or not convo_id:
+        raise HTTPException(status_code=400, detail="Missing required field: conversation_id")
+    convo_id = _sanitize_conversation_id(convo_id)
+    meta = _load_conversation_meta(convo_id)
+    thread_id = meta.get("thread_id")
     if not thread_id:
         raise HTTPException(status_code=409, detail="No active thread to compact")
     await _rpc_request("thread/compact", params={"threadId": thread_id})
-    return {"ok": True, "thread_id": thread_id}
+    return {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
 
 
 @app.post("/api/appserver/mention")

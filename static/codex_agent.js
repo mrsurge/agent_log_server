@@ -2275,7 +2275,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function requestContextCompact() {
     try {
-      await postJson('/api/appserver/compact', null);
+      const convoId = conversationMeta?.conversation_id || null;
+      await postJson('/api/appserver/compact', convoId ? { conversation_id: convoId } : null);
       setActivity('compact requested', true);
     } catch (err) {
       console.warn('compact failed', err);

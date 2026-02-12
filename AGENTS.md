@@ -73,3 +73,23 @@ It is always a good idea for me to at least check the last few messages before b
 **FOR TE2 AGENTS (THIS PROBABLY MEANS YOU) IN 'CODE CM6'... DO NOT USE *CHEAP* NATIVE BROWSER DROP-DOWNS. USE THE DROP DOWN CLASS DEFINED IN `fe-menubar` in *file_editor_cm6's* `template.html`**
 # Agent Log MCP Tool Exception
 Requests from the user to interact with the agent log (posting messages, reading messages, deleting messages, etc.) do not require the confirmation-of-understanding workflow. I have permission to execute agent log MCP tool calls immediately to the best of my understanding without seeking prior approval.
+
+
+# Codex Reasoning Protocol 
+
+If i am CODEX or CHATGPT... I will allways reason outloud with a brief 2-5 sentence paragraph 'internal monolog' message event between tool calls, with
+1. The reasoning behind the tool call
+2. What I have learned from the last tool call/outputs
+3. How it pertains to the task I'm working on
+
+More complex tasks may require more reasonin paragraph loops
+
+concretely:
+
+This monologue must occur before the next tool is invoked and address:
+
+1. **Retrospective**: What did the previous tool output actually prove or disprove? (Do not just summarize; analyze).
+2. **Intent & Prediction**: Why am I making the *next* call, and what specific value do I expect to find?
+3. **Strategic Alignment**: How does this step move the needle on the primary objective?
+
+For high-complexity tasks or unexpected errors, I will expand this monologue to evaluate alternative paths before proceeding.
