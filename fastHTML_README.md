@@ -154,6 +154,8 @@ and learn from others:
 
 - [Discord](https://discord.gg/qcXvcxMhdP)
 
+
+> **Note:** As of 2026, FastHTML now supports server-sent events (SSE) natively, making real-time updates even simpler than polling with HTMX.
 ## Other languages and related projects
 
 If you’re not a Python user, or are keen to try out a new language,

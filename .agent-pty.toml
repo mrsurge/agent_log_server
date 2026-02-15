@@ -1,0 +1,5 @@
+# Agent PTY project configuration
+# Auto-managed by kb tools.
+
+[knowledge]
+files = ["AGENTS.md", "CODE_TE2.md", "fastHTML_README.md"]
