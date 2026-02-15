@@ -1238,6 +1238,36 @@ def _diff_signature(diff_text: str) -> str:
     return hashlib.sha1(signature.encode("utf-8")).hexdigest()
 
 
+def _split_unified_diff_by_file(diff_text: str) -> List[Tuple[Optional[str], str]]:
+    """Split a unified diff blob into per-file sections.
+
+    Many upstream producers emit cumulative diffs (all files changed so far) on each update.
+    Splitting by file allows us to dedupe per file-section and avoid reprinting the entire
+    cumulative blob on every event.
+
+    Returns list of (path, section_text) tuples. Path is best-effort from headers.
+    """
+    if not isinstance(diff_text, str) or not diff_text.strip():
+        return []
+    lines = diff_text.splitlines(keepends=True)
+    start_idxs: List[int] = []
+    for i, line in enumerate(lines):
+        if line.startswith("diff --git "):
+            start_idxs.append(i)
+    if not start_idxs:
+        return [(None, diff_text)]
+
+    sections: List[Tuple[Optional[str], str]] = []
+    for j, start in enumerate(start_idxs):
+        end = start_idxs[j + 1] if (j + 1) < len(start_idxs) else len(lines)
+        section = "".join(lines[start:end]).strip()
+        if not section:
+            continue
+        path = _extract_path_from_diff(section)
+        sections.append((path, section))
+    return sections
+
+
 # Thought block pattern: **<thought content>**
 _THOUGHT_PATTERN = re.compile(r'\*\*([^*]+)\*\*')
 
@@ -1377,30 +1407,43 @@ async def _emit_diff_event(
 ) -> None:
     if not diff:
         return
-    diff_text = diff.strip()
-    if not diff_text:
+    diff_text_raw = diff.strip()
+    if not diff_text_raw:
         return
+
+    # If upstream emits cumulative diffs (multiple diff --git blocks), treat the blob as a
+    # container and dedupe/emit per-file sections to avoid reprinting the full cumulative
+    # diff on every update.
+    sections = _split_unified_diff_by_file(diff_text_raw)
+    if not sections:
+        return
+
     diff_hashes = state.setdefault("diff_hashes", set())
-    diff_hash = _diff_signature(diff_text)
-    if diff_hash in diff_hashes:
-        return
-    diff_hashes.add(diff_hash)
-    state["diff_seen"] = True
-    if thread_id or turn_id:
-        diff_id = f"{thread_id or 'unknown'}:{turn_id or 'unknown'}:{diff_hash[:12]}"
-    elif item_id:
-        diff_id = f"item:{item_id}:{diff_hash[:12]}"
-    else:
-        diff_id = f"diff:{diff_hash[:12]}"
-    events.append({"type": "diff", "id": diff_id, "text": diff_text, "path": path})
-    if record_transcript and conversation_id:
-        await _append_transcript_entry(conversation_id, {
-            "role": "diff",
-            "text": diff_text,
-            "path": path,
-            "item_id": diff_id,
-            "event": "turn_diff",
-        })
+    for section_path, section_text in sections:
+        if not section_text:
+            continue
+        diff_hash = _diff_signature(section_text)
+        if diff_hash in diff_hashes:
+            continue
+        diff_hashes.add(diff_hash)
+        state["diff_seen"] = True
+        if thread_id or turn_id:
+            diff_id = f"{thread_id or 'unknown'}:{turn_id or 'unknown'}:{diff_hash[:12]}"
+        elif item_id:
+            diff_id = f"item:{item_id}:{diff_hash[:12]}"
+        else:
+            diff_id = f"diff:{diff_hash[:12]}"
+
+        effective_path = section_path or path
+        events.append({"type": "diff", "id": diff_id, "text": section_text, "path": effective_path})
+        if record_transcript and conversation_id:
+            await _append_transcript_entry(conversation_id, {
+                "role": "diff",
+                "text": section_text,
+                "path": effective_path,
+                "item_id": diff_id,
+                "event": "turn_diff",
+            })
 
 
 async def _append_transcript_entry(conversation_id: str, entry: Dict[str, Any]) -> None:
