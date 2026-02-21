@@ -3,7 +3,7 @@ shells:
   mcp_agent_pty:
     backend: pipe
     cwd: ${CWD}
-    subgroups: ["mcp", "agent-pty"]
+    subgroups: ["codex_agent", "mcp", "agent-pty"]
     env:
       FRAMEWORK_SHELLS_RUN_ID: "app-server"
       MCP_TRANSPORT: "streamable-http"
@@ -19,6 +19,7 @@ shells:
     backend: dtach
     cwd: ${ctx:CWD}
     subgroups:
+      - codex_agent
       - agent-pty
       - conversation:${ctx:CONVERSATION_ID}
     command:
@@ -29,7 +30,7 @@ shells:
   shell_manager:
     backend: pipe
     cwd: ${CWD}
-    subgroups: ["mcp", "shell-manager"]
+    subgroups: ["codex_agent", "mcp", "shell-manager"]
     env:
       FRAMEWORK_SHELLS_RUN_ID: "app-server"
       SHELL_MANAGER_HOST: "127.0.0.1"

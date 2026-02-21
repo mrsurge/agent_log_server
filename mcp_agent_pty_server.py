@@ -56,9 +56,26 @@ from framework_shells import get_manager as get_framework_shell_manager
 from mcp.server.fastmcp import FastMCP
 
 
-def _load_project_config() -> dict:
-    """Load .agent-pty.toml from CWD if it exists."""
-    config_path = Path.cwd() / ".agent-pty.toml"
+def _find_project_root() -> Path:
+    """Walk up from CWD to find the directory containing .agent-pty.toml (like git finds .git)."""
+    cur = Path.cwd().resolve()
+    while True:
+        if (cur / ".agent-pty.toml").exists():
+            return cur
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    return Path.cwd()
+
+
+_KB_ROOT: Path = _find_project_root()
+
+
+def _load_project_config(root: Optional[Path] = None) -> dict:
+    """Load .agent-pty.toml from a directory (defaults to _KB_ROOT)."""
+    base = root or _KB_ROOT
+    config_path = base / ".agent-pty.toml"
     if not config_path.exists():
         return {}
     try:
@@ -3069,6 +3086,22 @@ def _kb_error(error: str, detail: str, **extra: Any) -> Dict[str, Any]:
     return payload
 
 
+def _kb_error_text(error: str, detail: str, **extra: Any) -> str:
+    """Format a KB error as clean plain text."""
+    parts = [f"[ERROR: {error}] {detail}"]
+    for k, v in extra.items():
+        parts.append(f"  {k}: {v}")
+    return "\n".join(parts)
+
+
+def _kb_dict_to_error_text(d: Dict[str, Any]) -> str:
+    """Convert an error dict from _kb_error() to plain text."""
+    error = d.get("error", "Unknown")
+    detail = d.get("detail", "")
+    extra = {k: v for k, v in d.items() if k not in ("error", "detail")}
+    return _kb_error_text(error, detail, **extra)
+
+
 def _kb_resolve_file(file: Optional[str] = None) -> Path | Dict[str, Any]:
     """Resolve a knowledge file path. Returns absolute Path or error dict."""
     files = _kb_configured_files()
@@ -3094,7 +3127,7 @@ def _kb_resolve_file(file: Optional[str] = None) -> Path | Dict[str, Any]:
             f"File '{selected}' not in configured knowledge files",
             configured=files,
         )
-    return (Path.cwd() / selected).resolve()
+    return (_KB_ROOT / selected).resolve()
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -3153,11 +3186,17 @@ def _replace_line_range(lines: list[str], start: int, end: int, replacement: str
 
 
 def _resolve_section_or_error(nodes: list[SectionNode], section_id: str) -> SectionNode | Dict[str, Any]:
-    exact = [n for n in nodes if n.id == section_id]
+    normalized_id = _normalize_heading(section_id or "")
+    # Try exact match first, then normalized match
+    exact = [n for n in nodes if n.id == section_id or n.id == normalized_id]
     if len(exact) == 1:
         return exact[0]
     if len(exact) > 1:
-        disambiguated = [n for n in exact if n.id_disambiguated == section_id]
+        # Prefer exact raw match over normalized
+        raw_exact = [n for n in nodes if n.id == section_id]
+        if len(raw_exact) == 1:
+            return raw_exact[0]
+        disambiguated = [n for n in exact if n.id_disambiguated == section_id or n.id_disambiguated == normalized_id]
         if len(disambiguated) == 1:
             return disambiguated[0]
         candidates = [{"id_disambiguated": n.id_disambiguated, "line_start": n.line_start} for n in exact]
@@ -3166,7 +3205,7 @@ def _resolve_section_or_error(nodes: list[SectionNode], section_id: str) -> Sect
             f"Section id '{section_id}' is ambiguous",
             candidates=candidates,
         )
-    by_disambiguated = [n for n in nodes if n.id_disambiguated == section_id]
+    by_disambiguated = [n for n in nodes if n.id_disambiguated == section_id or n.id_disambiguated == normalized_id]
     if len(by_disambiguated) == 1:
         return by_disambiguated[0]
     if len(by_disambiguated) > 1:
@@ -3191,7 +3230,7 @@ def _toml_quote(s: str) -> str:
 
 def _save_kb_files_config(files: list[str]) -> None:
     """Write knowledge.files config to .agent-pty.toml (minimal managed format)."""
-    config_path = Path.cwd() / ".agent-pty.toml"
+    config_path = _KB_ROOT / ".agent-pty.toml"
     lines = [
         "# Agent PTY project configuration",
         "# Auto-managed by kb tools.",
@@ -3232,49 +3271,65 @@ def _snippet_with_offsets(line: str, match_start: int, match_end: int, context_c
 
 
 @mcp.tool(name="kb_list", description="List configured markdown knowledge files.")
-async def kb_list() -> Dict[str, Any]:
+async def kb_list() -> str:
     files = _kb_configured_files()
     if not files:
-        return _kb_error("NotConfigured", "No knowledge files in .agent-pty.toml")
-    return {"files": files}
+        return _kb_error_text("NotConfigured", "No knowledge files in .agent-pty.toml")
+    out = [f"[kb_list: {len(files)} files  root: {_KB_ROOT}]"]
+    for f in files:
+        out.append(f"  {f}")
+    return "\n".join(out)
 
 
-@mcp.tool(name="kb_reload_config", description="Reload .agent-pty.toml from CWD and return effective knowledge files.")
-async def kb_reload_config() -> Dict[str, Any]:
-    global _PROJECT_CONFIG
+@mcp.tool(name="kb_reload_config", description="Reload .agent-pty.toml config and return effective knowledge files. Optionally set project root via cwd.")
+async def kb_reload_config(cwd: Optional[str] = None) -> str:
+    global _PROJECT_CONFIG, _KB_ROOT
+    if cwd:
+        new_root = Path(cwd).expanduser().resolve()
+        if not new_root.is_dir():
+            return _kb_error_text("InvalidParameter", f"Not a directory: {cwd}")
+        # Walk up to find .agent-pty.toml from the given cwd
+        cur = new_root
+        while True:
+            if (cur / ".agent-pty.toml").exists():
+                new_root = cur
+                break
+            parent = cur.parent
+            if parent == cur:
+                break
+            cur = parent
+        _KB_ROOT = new_root
     _PROJECT_CONFIG = _load_project_config()
     files = _kb_configured_files()
-    return {
-        "ok": True,
-        "config": _PROJECT_CONFIG,
-        "files": files,
-    }
+    out = [f"[kb_reload_config: OK  root: {_KB_ROOT}]"]
+    out.append(f"  files: {', '.join(files) if files else '(none)'}")
+    return "\n".join(out)
 
 
 @mcp.tool(name="kb_add_file", description="Add a file (absolute path) to knowledge.files and hot-reload config.")
-async def kb_add_file(abs_path: str) -> Dict[str, Any]:
+async def kb_add_file(abs_path: str) -> str:
     if not isinstance(abs_path, str) or not abs_path.strip():
-        return _kb_error("InvalidParameter", "abs_path is required")
+        return _kb_error_text("InvalidParameter", "abs_path is required")
     p = Path(abs_path).expanduser()
     if not p.is_absolute():
-        return _kb_error("InvalidParameter", "abs_path must be an absolute path")
+        return _kb_error_text("InvalidParameter", "abs_path must be an absolute path")
     if not p.exists() or not p.is_file():
-        return _kb_error("FileNotAllowed", f"File not found: {p}")
+        return _kb_error_text("FileNotAllowed", f"File not found: {p}")
 
-    cwd = Path.cwd().resolve()
+    root = _KB_ROOT.resolve()
     try:
-        rel = p.resolve().relative_to(cwd)
+        rel = p.resolve().relative_to(root)
     except Exception:
-        return _kb_error(
+        return _kb_error_text(
             "FileNotAllowed",
             "File must be inside current project root",
-            project_root=str(cwd),
+            project_root=str(root),
             abs_path=str(p.resolve()),
         )
 
     rel_str = rel.as_posix()
     if ".." in rel.parts:
-        return _kb_error("FileNotAllowed", "Path traversal not allowed", path=rel_str)
+        return _kb_error_text("FileNotAllowed", "Path traversal not allowed", path=rel_str)
 
     cfg = _load_project_config()
     kb = cfg.get("knowledge", {})
@@ -3293,12 +3348,9 @@ async def kb_add_file(abs_path: str) -> Dict[str, Any]:
 
     global _PROJECT_CONFIG
     _PROJECT_CONFIG = _load_project_config()
-    return {
-        "ok": True,
-        "added": rel_str,
-        "files": _kb_configured_files(),
-        "config_path": str((Path.cwd() / ".agent-pty.toml").resolve()),
-    }
+    all_files = _kb_configured_files()
+    config_path = (_KB_ROOT / ".agent-pty.toml").resolve()
+    return f"[kb_add_file: OK  added: {rel_str}]\n  config: {config_path}\n  files: {', '.join(all_files)}"
 
 
 @mcp.tool(name="kb_schema", description="Show heading schema for a markdown knowledge file with optional drill-down.")
@@ -3307,42 +3359,43 @@ async def kb_schema(
     id: Optional[str] = None,
     max_depth: Optional[int] = 1,
     root_depth: Optional[int] = None,
-) -> Dict[str, Any]:
+) -> str:
     resolved = _kb_resolve_file(file)
     if isinstance(resolved, dict):
-        return resolved
+        return _kb_dict_to_error_text(resolved)
     path = resolved
     text = _read_text_or_error(path)
     if isinstance(text, dict):
-        return text
-    lines = text.splitlines()
+        return _kb_dict_to_error_text(text)
     nodes = parse_markdown(text)
     if not nodes:
-        return {"file": str(path), "nodes": []}
+        return f"[schema: {path}]\n(no sections found)"
 
-    # Root listing mode: return top-level headings only.
+    lines = text.splitlines()
+
+    def _fmt_node(node, indent: int = 0) -> str:
+        prefix = "  " * indent
+        dis = f"  (use: {node.id_disambiguated})" if node.id_disambiguated != node.id else ""
+        # Always show full id when it differs from the displayed title
+        if node.id != node.title:
+            return f"{prefix}L{node.line_start} {'#' * node.depth} {node.title}  id: {node.id}{dis}"
+        return f"{prefix}L{node.line_start} {'#' * node.depth} {node.title}{dis}"
+
+    # Root listing mode
     if not id:
         if root_depth is None:
             top_depth = min(node.depth for node in nodes)
         else:
             top_depth = int(root_depth)
         top_nodes = [node for node in nodes if node.depth == top_depth]
-        out_nodes: list[Dict[str, Any]] = []
+        out = [f"[schema: {path.name}  sections: {len(top_nodes)}]"]
         for node in top_nodes:
-            item: Dict[str, Any] = {
-                "id": node.id,
-                "depth": node.depth,
-                "title": node.title,
-                "line_start": node.line_start,
-            }
-            if node.id_disambiguated != node.id:
-                item["id_disambiguated"] = node.id_disambiguated
-            out_nodes.append(item)
-        return {"file": str(path), "nodes": out_nodes}
+            out.append(_fmt_node(node))
+        return "\n".join(out)
 
     target = _resolve_section_or_error(nodes, id)
     if isinstance(target, dict):
-        return target
+        return _kb_dict_to_error_text(target)
 
     rel_depth = 1 if max_depth is None else int(max_depth)
     if rel_depth < 0:
@@ -3350,54 +3403,41 @@ async def kb_schema(
 
     body_text = _extract_line_range(lines, target.body_start, target.body_end)
     upper_depth = target.depth + rel_depth
-    children: list[Dict[str, Any]] = []
+    children = []
     if rel_depth > 0:
         for node in nodes:
             if node.line_start <= target.line_start or node.line_start > target.subtree_end:
                 continue
             if node.depth <= target.depth or node.depth > upper_depth:
                 continue
-            child: Dict[str, Any] = {
-                "id": node.id,
-                "depth": node.depth,
-                "title": node.title,
-                "line_start": node.line_start,
-            }
-            if node.id_disambiguated != node.id:
-                child["id_disambiguated"] = node.id_disambiguated
-            children.append(child)
+            children.append(node)
 
-    return {
-        "file": str(path),
-        "body": body_text,
-        "body_hash": _content_hash(body_text),
-        "children": children,
-        "meta": {
-            "id": target.id,
-            "title": target.title,
-            "depth": target.depth,
-            "line_start": target.line_start,
-            "body_start": target.body_start,
-            "body_end": target.body_end,
-            "subtree_end": target.subtree_end,
-        },
-    }
+    h = _content_hash(body_text)
+    out = [f"[section: {target.id}  depth: {target.depth}  lines: {target.line_start}-{target.subtree_end}  hash: {h}]"]
+    if body_text.strip():
+        out.append(body_text.rstrip())
+    if children:
+        out.append(f"\nChild headings ({len(children)}):")
+        for child in children:
+            indent = child.depth - target.depth - 1
+            out.append(_fmt_node(child, indent))
+    return "\n".join(out)
 
 
 @mcp.tool(name="kb_read", description="Read a section body or subtree from a markdown knowledge file.")
-async def kb_read(file: Optional[str] = None, id: str = "", include_children: bool = False) -> Dict[str, Any]:
+async def kb_read(file: Optional[str] = None, id: str = "", include_children: bool = False) -> str:
     resolved = _kb_resolve_file(file)
     if isinstance(resolved, dict):
-        return resolved
+        return _kb_dict_to_error_text(resolved)
     path = resolved
     text = _read_text_or_error(path)
     if isinstance(text, dict):
-        return text
+        return _kb_dict_to_error_text(text)
     lines = text.splitlines()
     nodes = parse_markdown(text)
     target = _resolve_section_or_error(nodes, id)
     if isinstance(target, dict):
-        return target
+        return _kb_dict_to_error_text(target)
     if include_children:
         start = target.line_start
         end = target.subtree_end
@@ -3405,46 +3445,33 @@ async def kb_read(file: Optional[str] = None, id: str = "", include_children: bo
         start = target.body_start
         end = target.body_end
     section_text = _extract_line_range(lines, start, end)
-    return {
-        "text": section_text,
-        "hash": _content_hash(section_text),
-        "meta": {
-            "id": target.id,
-            "title": target.title,
-            "line_start": start,
-            "line_end": end,
-        },
-    }
+    h = _content_hash(section_text)
+    header = f"[section: {target.id}  lines: {start}-{end}  hash: {h}]\n"
+    return header + section_text
 
 
 @mcp.tool(name="kb_search_headers", description="Case-insensitive substring search across heading titles.")
-async def kb_search_headers(file: Optional[str] = None, query: str = "") -> Dict[str, Any]:
+async def kb_search_headers(file: Optional[str] = None, query: str = "") -> str:
     resolved = _kb_resolve_file(file)
     if isinstance(resolved, dict):
-        return resolved
+        return _kb_dict_to_error_text(resolved)
     path = resolved
     text = _read_text_or_error(path)
     if isinstance(text, dict):
-        return text
+        return _kb_dict_to_error_text(text)
     q = (query or "").strip()
     if not q:
-        return {"file": str(path), "query": query, "matches": []}
+        return f"[search_headers: {path.name}  query: (empty)]\nNo query provided."
     qf = q.casefold()
     nodes = parse_markdown(text)
-    matches: list[Dict[str, Any]] = []
-    for node in nodes:
-        if qf in node.title.casefold():
-            item: Dict[str, Any] = {
-                "file": str(path),
-                "id": node.id,
-                "depth": node.depth,
-                "title": node.title,
-                "line_start": node.line_start,
-            }
-            if node.id_disambiguated != node.id:
-                item["id_disambiguated"] = node.id_disambiguated
-            matches.append(item)
-    return {"file": str(path), "query": query, "matches": matches}
+    matches = [node for node in nodes if qf in node.title.casefold()]
+    out = [f"[search_headers: {path.name}  query: {q}  matches: {len(matches)}]"]
+    for node in matches:
+        dis = f"  (disambiguated: {node.id_disambiguated})" if node.id_disambiguated != node.id else ""
+        out.append(f"  L{node.line_start} {'#' * node.depth} {node.title}  id: {node.id}{dis}")
+    if not matches:
+        out.append("  (no matches)")
+    return "\n".join(out)
 
 
 @mcp.tool(name="kb_search_content", description="Case-insensitive substring search across section bodies.")
@@ -3453,17 +3480,17 @@ async def kb_search_content(
     query: str = "",
     max_results: int = 10,
     context_chars: int = 80,
-) -> Dict[str, Any]:
+) -> str:
     resolved = _kb_resolve_file(file)
     if isinstance(resolved, dict):
-        return resolved
+        return _kb_dict_to_error_text(resolved)
     path = resolved
     text = _read_text_or_error(path)
     if isinstance(text, dict):
-        return text
+        return _kb_dict_to_error_text(text)
     q = (query or "").strip()
     if not q:
-        return {"file": str(path), "query": query, "results": []}
+        return f"[search_content: {path.name}  query: (empty)]\nNo query provided."
 
     lines = text.splitlines()
     nodes = parse_markdown(text)
@@ -3471,8 +3498,7 @@ async def kb_search_content(
     cap = max(1, int(max_results))
     ctx = max(20, int(context_chars))
 
-    results: list[Dict[str, Any]] = []
-    # Deterministic ordering: section order, then line order, then match position.
+    results: list[str] = []
     for node in nodes:
         if len(results) >= cap:
             break
@@ -3490,23 +3516,18 @@ async def kb_search_content(
                     break
                 end = idx + len(q)
                 snippet, ms, me = _snippet_with_offsets(line_text, idx, end, ctx)
-                item: Dict[str, Any] = {
-                    "file": str(path),
-                    "id": node.id,
-                    "title": node.title,
-                    "line_start": node.line_start,
-                    "match_line": ln,
-                    "snippet": snippet,
-                    "match_start": ms,
-                    "match_end": me,
-                }
-                if node.id_disambiguated != node.id:
-                    item["id_disambiguated"] = node.id_disambiguated
-                results.append(item)
+                dis = f"  (id: {node.id_disambiguated})" if node.id_disambiguated != node.id else f"  (id: {node.id})"
+                results.append(f"  L{ln} [{node.title}]{dis}  ...{snippet}...")
                 start = idx + max(1, len(qf))
                 if start >= len(lf):
                     break
-    return {"file": str(path), "query": query, "results": results}
+
+    out = [f"[search_content: {path.name}  query: {q}  results: {len(results)}]"]
+    if results:
+        out.extend(results)
+    else:
+        out.append("  (no matches)")
+    return "\n".join(out)
 
 
 @mcp.tool(name="kb_write", description="Append content or create child heading under a markdown section.")
@@ -3519,25 +3540,25 @@ async def kb_write(
     heading_depth: Optional[int] = None,
     dry_run: bool = False,
     confirm_hash: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> str:
     resolved = _kb_resolve_file(file)
     if isinstance(resolved, dict):
-        return resolved
+        return _kb_dict_to_error_text(resolved)
     path = resolved
     old_text = _read_text_or_error(path)
     if isinstance(old_text, dict):
-        return old_text
+        return _kb_dict_to_error_text(old_text)
     had_trailing_newline = old_text.endswith("\n")
     lines = old_text.splitlines()
     nodes = parse_markdown(old_text)
     target = _resolve_section_or_error(nodes, id)
     if isinstance(target, dict):
-        return target
+        return _kb_dict_to_error_text(target)
 
     body_text = _extract_line_range(lines, target.body_start, target.body_end)
     current_hash = _content_hash(body_text)
     if confirm_hash is not None and confirm_hash != current_hash:
-        return _kb_error(
+        return _kb_error_text(
             "Conflict",
             "confirm_hash does not match current body hash",
             current_hash=current_hash,
@@ -3545,20 +3566,24 @@ async def kb_write(
         )
 
     insert_at = max(0, target.body_end)
+    if heading_title and mode == "append":
+        mode = "heading"
     if mode == "append":
         insert_lines = (content or "").splitlines()
     elif mode == "heading":
+        # Insert after the entire subtree, not just the body
+        insert_at = max(0, target.subtree_end)
         if not heading_title:
-            return _kb_error("SectionNotFound", "heading_title is required for mode='heading'", id=id)
+            return _kb_error_text("SectionNotFound", "heading_title is required for mode='heading'", id=id)
         depth = heading_depth if heading_depth is not None else (target.depth + 1)
         if not isinstance(depth, int) or depth < 1 or depth > 6:
-            return _kb_error("SectionNotFound", "heading_depth must be between 1 and 6", id=id)
+            return _kb_error_text("SectionNotFound", "heading_depth must be between 1 and 6", id=id)
         heading_line = f"{'#' * depth} {heading_title}"
         insert_lines = [heading_line]
         if content:
             insert_lines.extend(content.splitlines())
     else:
-        return _kb_error("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
+        return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
 
     new_lines = lines[:insert_at] + insert_lines + lines[insert_at:]
     new_text = "\n".join(new_lines)
@@ -3566,11 +3591,10 @@ async def kb_write(
         new_text += "\n"
 
     diff = _unified_diff(old_text, new_text, str(path))
-    if dry_run:
-        return {"ok": True, "new_hash": _content_hash(new_text), "diff": diff}
-
-    _atomic_write(path, new_text)
-    return {"ok": True, "new_hash": _content_hash(new_text), "diff": diff}
+    action = "DRY RUN" if dry_run else "WRITTEN"
+    if not dry_run:
+        _atomic_write(path, new_text)
+    return f"[kb_write: {action}  hash: {_content_hash(new_text)}]\n{diff}"
 
 
 @mcp.tool(name="kb_update", description="Update body or subtree of a markdown section.")
@@ -3581,32 +3605,32 @@ async def kb_update(
     mode: str = "body",
     dry_run: bool = False,
     confirm_hash: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> str:
     resolved = _kb_resolve_file(file)
     if isinstance(resolved, dict):
-        return resolved
+        return _kb_dict_to_error_text(resolved)
     path = resolved
     old_text = _read_text_or_error(path)
     if isinstance(old_text, dict):
-        return old_text
+        return _kb_dict_to_error_text(old_text)
     had_trailing_newline = old_text.endswith("\n")
     lines = old_text.splitlines()
     nodes = parse_markdown(old_text)
     target = _resolve_section_or_error(nodes, id)
     if isinstance(target, dict):
-        return target
+        return _kb_dict_to_error_text(target)
 
     if mode == "body":
         start, end = target.body_start, target.body_end
     elif mode == "subtree":
         start, end = target.line_start, target.subtree_end
     else:
-        return _kb_error("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
+        return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
 
     current_region = _extract_line_range(lines, start, end)
     current_hash = _content_hash(current_region)
     if confirm_hash is not None and confirm_hash != current_hash:
-        return _kb_error(
+        return _kb_error_text(
             "Conflict",
             "confirm_hash does not match current section hash",
             current_hash=current_hash,
@@ -3619,11 +3643,10 @@ async def kb_update(
         new_text += "\n"
     diff = _unified_diff(old_text, new_text, str(path))
 
-    if dry_run:
-        return {"ok": True, "new_hash": _content_hash(content), "diff": diff}
-
-    _atomic_write(path, new_text)
-    return {"ok": True, "new_hash": _content_hash(content), "diff": diff}
+    action = "DRY RUN" if dry_run else "WRITTEN"
+    if not dry_run:
+        _atomic_write(path, new_text)
+    return f"[kb_update: {action}  hash: {_content_hash(content)}]\n{diff}"
 
 
 @mcp.tool(name="kb_remove", description="Remove body or subtree of a markdown section.")
@@ -3633,32 +3656,32 @@ async def kb_remove(
     mode: str = "subtree",
     dry_run: bool = False,
     confirm_hash: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> str:
     resolved = _kb_resolve_file(file)
     if isinstance(resolved, dict):
-        return resolved
+        return _kb_dict_to_error_text(resolved)
     path = resolved
     old_text = _read_text_or_error(path)
     if isinstance(old_text, dict):
-        return old_text
+        return _kb_dict_to_error_text(old_text)
     had_trailing_newline = old_text.endswith("\n")
     lines = old_text.splitlines()
     nodes = parse_markdown(old_text)
     target = _resolve_section_or_error(nodes, id)
     if isinstance(target, dict):
-        return target
+        return _kb_dict_to_error_text(target)
 
     if mode == "subtree":
         start, end = target.line_start, target.subtree_end
     elif mode == "body":
         start, end = target.body_start, target.body_end
     else:
-        return _kb_error("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
+        return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
 
     current_region = _extract_line_range(lines, start, end)
     current_hash = _content_hash(current_region)
     if confirm_hash is not None and confirm_hash != current_hash:
-        return _kb_error(
+        return _kb_error_text(
             "Conflict",
             "confirm_hash does not match current section hash",
             current_hash=current_hash,
@@ -3671,11 +3694,10 @@ async def kb_remove(
         new_text += "\n"
     diff = _unified_diff(old_text, new_text, str(path))
 
-    if dry_run:
-        return {"ok": True, "diff": diff}
-
-    _atomic_write(path, new_text)
-    return {"ok": True, "diff": diff}
+    action = "DRY RUN" if dry_run else "REMOVED"
+    if not dry_run:
+        _atomic_write(path, new_text)
+    return f"[kb_remove: {action}]\n{diff}"
 
 
 # =============================================================================

@@ -3,7 +3,7 @@ shells:
   gemini_acp:
     backend: pipe
     cwd: ${CWD}
-    subgroups: ["acp", "gemini"]
+    subgroups: ["codex_agent", "acp", "gemini"]
     command:
       - gemini
       - --experimental-acp
