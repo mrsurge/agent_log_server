@@ -12,6 +12,14 @@
       "browse": true
     },
     {
+      "id": "session",
+      "type": "session_picker",
+      "label": "Session",
+      "placeholder": "(new session)",
+      "source": "/api/extensions/copilot-sdk/sessions",
+      "resume_endpoint": "/api/extensions/copilot-sdk/sessions/resume"
+    },
+    {
       "id": "model",
       "type": "select",
       "label": "Model",
@@ -29,6 +37,39 @@
         {"value": "high", "label": "High"}
       ],
       "default": "medium"
+    },
+    {
+      "id": "approval_policy",
+      "type": "select",
+      "label": "Approval Policy",
+      "options": [
+        {"value": "auto-approve", "label": "Auto-Approve"},
+        {"value": "suggest", "label": "Suggest (auto-approve on timeout)"},
+        {"value": "always-ask", "label": "Always Ask"}
+      ],
+      "default": "suggest"
+    },
+    {
+      "id": "sandbox_policy",
+      "type": "select",
+      "label": "Directory Trust",
+      "options": [
+        {"value": "cwd-only", "label": "CWD Only"},
+        {"value": "allow-all-paths", "label": "Allow All Paths"},
+        {"value": "ask", "label": "Ask"}
+      ],
+      "default": "cwd-only"
+    },
+    {
+      "id": "web_policy",
+      "type": "select",
+      "label": "Web Access",
+      "options": [
+        {"value": "deny", "label": "Deny"},
+        {"value": "allow", "label": "Allow"},
+        {"value": "ask", "label": "Ask"}
+      ],
+      "default": "deny"
     }
   ]
 }

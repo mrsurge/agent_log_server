@@ -74,10 +74,10 @@ async def _lifespan(app: FastAPI):
     # Cleanup on server shutdown: kill extension-owned subprocess shells.
     with suppress(Exception):
         await _terminate_agent_pty_conversation_shells(force=True)
-    # Cleanup Copilot SDK client
-    with suppress(Exception):
-        from extensions.copilot_sdk_client import shutdown_client
-        await shutdown_client()
+    # Cleanup extensions
+    for ext_id in ext_loader.list_extensions():
+        with suppress(Exception):
+            await ext_loader.shutdown_extension(ext_id.get("id", ""))
     with suppress(Exception):
         await _stop_mcp_shell()
     with suppress(Exception):
@@ -104,6 +104,394 @@ async def _appserver_connect(sid, environ):
 @socketio_server.on("disconnect", namespace="/appserver")
 async def _appserver_disconnect(sid):
     return None
+
+
+# ── Socket.IO inbound handlers (mirrors HTTP endpoints) ──────────────
+# Each handler returns a value which Socket.IO delivers as the ack callback
+# argument on the client.  Errors are returned as {"__error": "..."}.
+
+def _sio_error(msg: str) -> Dict[str, str]:
+    return {"__error": str(msg)}
+
+
+@socketio_server.on("send_message", namespace="/appserver")
+async def _sio_send_message(sid, data):
+    """Mirror of POST /api/appserver/message"""
+    try:
+        convo_id = data.get("conversation_id")
+        text = data.get("text")
+        if not convo_id or not text:
+            return _sio_error("conversation_id and text required")
+        meta = _load_conversation_meta(convo_id)
+        if not meta:
+            return _sio_error(f"Conversation not found: {convo_id}")
+        settings = meta.get("settings", {})
+        agent_type = settings.get("agent", "codex")
+        if agent_type != "codex":
+            handler = ext_loader.get_handler(agent_type)
+            if handler and hasattr(handler, "handle_message"):
+                return await handler.handle_message(convo_id, text, agent_type, settings)
+        # Delegate to the HTTP handler for codex (complex RPC logic)
+        return await api_appserver_message(AppserverMessageIn(conversation_id=convo_id, text=text))
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("shell_exec", namespace="/appserver")
+async def _sio_shell_exec(sid, data):
+    """Mirror of POST /api/appserver/shell/exec"""
+    try:
+        return await api_appserver_shell_exec(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("rpc", namespace="/appserver")
+async def _sio_rpc(sid, data):
+    """Mirror of POST /api/appserver/rpc"""
+    try:
+        return await api_appserver_rpc(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("interrupt", namespace="/appserver")
+async def _sio_interrupt(sid, data):
+    """Mirror of POST /api/appserver/interrupt"""
+    try:
+        return await api_appserver_interrupt(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("compact", namespace="/appserver")
+async def _sio_compact(sid, data):
+    """Mirror of POST /api/appserver/compact"""
+    try:
+        return await api_appserver_compact(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("conversation_get", namespace="/appserver")
+async def _sio_conversation_get(sid, data):
+    """Mirror of GET /api/appserver/conversation"""
+    try:
+        return await api_appserver_conversation()
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("conversation_meta", namespace="/appserver")
+async def _sio_conversation_meta(sid, data):
+    """Mirror of GET /api/appserver/conversations/{id}/meta"""
+    try:
+        cid = data.get("conversation_id", "")
+        return await api_appserver_conversation_meta(cid)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("conversation_update", namespace="/appserver")
+async def _sio_conversation_update(sid, data):
+    """Mirror of POST /api/appserver/conversation"""
+    try:
+        return await api_appserver_conversation_update(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("conversation_draft", namespace="/appserver")
+async def _sio_conversation_draft(sid, data):
+    """Mirror of POST /api/appserver/conversation/draft"""
+    try:
+        return await api_appserver_conversation_draft(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("conversations_list", namespace="/appserver")
+async def _sio_conversations_list(sid, data):
+    """Mirror of GET /api/appserver/conversations"""
+    try:
+        return await api_appserver_conversations()
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("conversation_create", namespace="/appserver")
+async def _sio_conversation_create(sid, data):
+    """Mirror of POST /api/appserver/conversations"""
+    try:
+        return await api_appserver_conversation_create(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("conversation_select", namespace="/appserver")
+async def _sio_conversation_select(sid, data):
+    """Mirror of POST /api/appserver/conversations/select"""
+    try:
+        return await api_appserver_conversation_select(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("conversation_delete", namespace="/appserver")
+async def _sio_conversation_delete(sid, data):
+    """Mirror of DELETE /api/appserver/conversations/{id}"""
+    try:
+        cid = data.get("conversation_id", "")
+        return await api_appserver_conversation_delete(cid)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("conversation_bind_rollout", namespace="/appserver")
+async def _sio_conversation_bind_rollout(sid, data):
+    """Mirror of POST /api/appserver/conversations/bind-rollout"""
+    try:
+        return await api_appserver_conversation_bind_rollout(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("set_view", namespace="/appserver")
+async def _sio_set_view(sid, data):
+    """Mirror of POST /api/appserver/view"""
+    try:
+        return await api_appserver_set_view(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_models", namespace="/appserver")
+async def _sio_get_models(sid, data):
+    """Mirror of GET /api/appserver/models"""
+    try:
+        return await api_appserver_models()
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_rollouts", namespace="/appserver")
+async def _sio_get_rollouts(sid, data):
+    """Mirror of GET /api/appserver/rollouts"""
+    try:
+        return await api_appserver_rollouts()
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_rollout_preview", namespace="/appserver")
+async def _sio_get_rollout_preview(sid, data):
+    """Mirror of GET /api/appserver/rollouts/{id}/preview"""
+    try:
+        rid = data.get("rollout_id", "")
+        return await api_appserver_rollout_preview(rid)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_extensions", namespace="/appserver")
+async def _sio_get_extensions(sid, data):
+    """Mirror of GET /api/extensions"""
+    try:
+        return await api_extensions_list()
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_extension_settings_schema", namespace="/appserver")
+async def _sio_get_extension_settings_schema(sid, data):
+    """Mirror of GET /api/extensions/{id}/settings_schema"""
+    try:
+        eid = data.get("extension_id", "")
+        result = await api_extension_settings_schema(eid)
+        if isinstance(result, JSONResponse):
+            return _sio_error("Extension not found")
+        return result
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_sessions", namespace="/appserver")
+async def _sio_get_sessions(sid, data):
+    """Generic: list sessions for any extension."""
+    try:
+        ext_id = data.get("extension_id", "")
+        if not ext_id or not ext_loader.has_extension(ext_id):
+            return _sio_error(f"Unknown extension: {ext_id}")
+        return await ext_loader.list_sessions(ext_id, cwd=data.get("cwd"))
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("session_resume", namespace="/appserver")
+async def _sio_session_resume(sid, data):
+    """Generic: resume session for any extension."""
+    try:
+        ext_id = data.get("extension_id", "")
+        if not ext_id or not ext_loader.has_extension(ext_id):
+            return _sio_error(f"Unknown extension: {ext_id}")
+        session_id = data.get("session_id")
+        if not session_id:
+            return _sio_error("Missing session_id")
+        conversation_id = data.get("conversation_id") or await _ensure_conversation()
+        # 1. Bind
+        result = await ext_loader.resume_session_with_history(
+            ext_id, session_id=session_id, conversation_id=conversation_id,
+            cwd=data.get("cwd"), model=data.get("model"),
+        )
+        if not result.get("ok"):
+            return result
+        # 2. Hydrate transcript (like bind-rollout)
+        items = await ext_loader.hydrate_transcript(
+            ext_id, session_id=session_id, conversation_id=conversation_id,
+            cwd=data.get("cwd"), model=data.get("model"),
+        )
+        if items:
+            await _write_transcript_entries(conversation_id, items)
+        result["history_count"] = len(items)
+        return result
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_status", namespace="/appserver")
+async def _sio_get_status(sid, data):
+    """Mirror of GET /api/appserver/status"""
+    try:
+        return await api_appserver_status()
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("app_start", namespace="/appserver")
+async def _sio_app_start(sid, data):
+    """Mirror of POST /api/appserver/start"""
+    try:
+        return await api_appserver_start()
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("app_stop", namespace="/appserver")
+async def _sio_app_stop(sid, data):
+    """Mirror of POST /api/appserver/stop"""
+    try:
+        return await api_appserver_stop()
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("approval_record", namespace="/appserver")
+async def _sio_approval_record(sid, data):
+    """Mirror of POST /api/appserver/approval_record"""
+    try:
+        return await api_appserver_approval_record(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("approval_response", namespace="/appserver")
+async def _sio_approval_response(sid, data):
+    """Generic: resolve approval for any extension agent."""
+    try:
+        request_id = data.get("request_id")
+        decision = data.get("decision", "decline")
+        if not request_id:
+            return _sio_error("Missing request_id")
+        # Determine agent type from active conversation
+        async with _config_lock:
+            cfg = _load_appserver_config()
+        cid = cfg.get("conversation_id")
+        if not cid:
+            return _sio_error("No active conversation")
+        meta = _load_conversation_meta(cid)
+        agent = (meta.get("settings") or {}).get("agent", "codex")
+        if not ext_loader.has_extension(agent):
+            return _sio_error(f"No extension for agent: {agent}")
+        ext_loader.resolve_approval(agent, request_id, decision)
+        return {"ok": True}
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_transcript", namespace="/appserver")
+async def _sio_get_transcript(sid, data):
+    """Mirror of GET /api/appserver/transcript"""
+    try:
+        cid = data.get("conversation_id")
+        return await api_appserver_transcript(conversation_id=cid)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_transcript_range", namespace="/appserver")
+async def _sio_get_transcript_range(sid, data):
+    """Mirror of GET /api/appserver/transcript/range"""
+    try:
+        cid = data.get("conversation_id")
+        offset = data.get("offset", 0)
+        limit = data.get("limit", 120)
+        return await api_appserver_transcript_range(
+            conversation_id=cid, offset=offset, limit=min(limit, 500)
+        )
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_extension_models", namespace="/appserver")
+async def _sio_get_extension_models(sid, data):
+    """Generic: list models for any extension."""
+    try:
+        ext_id = data.get("extension_id", "")
+        if not ext_id or not ext_loader.has_extension(ext_id):
+            return _sio_error(f"Unknown extension: {ext_id}")
+        return await ext_loader.list_models(ext_id)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+# ── End Socket.IO handlers ───────────────────────────────────────────
+
 app.include_router(fws_ui.router, dependencies=[Depends(lambda: _ensure_framework_shells_secret())])
 
 # --- Config & State ---
@@ -112,7 +500,6 @@ _lock = asyncio.Lock()
 _config_lock = asyncio.Lock()
 _appserver_shell_id: Optional[str] = None
 _appserver_reader_task: Optional[asyncio.Task] = None
-_appserver_ws_clients_ui: List[WebSocket] = []
 _appserver_ws_clients_raw: List[WebSocket] = []
 _appserver_turn_state: Dict[str, Dict[str, Any]] = {}
 _appserver_item_state: Dict[str, Dict[str, Any]] = {}
@@ -1849,23 +2236,7 @@ async def _terminate_agent_pty_conversation_shells(*, force: bool = True) -> Dic
     return {"ok": True, "terminated": terminated}
 
 async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
-    if not _appserver_ws_clients_ui:
-        # still try socket.io
-        try:
-            await socketio_server.emit("appserver_event", event, namespace="/appserver")
-        except Exception:
-            pass
-        return
-    data = json.dumps(event, ensure_ascii=False)
-    stale: List[WebSocket] = []
-    for ws in _appserver_ws_clients_ui:
-        try:
-            await ws.send_text(data)
-        except Exception:
-            stale.append(ws)
-    for ws in stale:
-        with suppress(Exception):
-            _appserver_ws_clients_ui.remove(ws)
+    """Broadcast an event to all connected frontends via Socket.IO."""
     try:
         await socketio_server.emit("appserver_event", event, namespace="/appserver")
     except Exception:
@@ -3935,16 +4306,6 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                         ),
                                         id="settings-rollout-row",
                                     ),
-                                    Label(
-                                        Span("Session"),
-                                        Div(
-                                            Input(type="text", id="settings-session", placeholder="(new session)", readonly=True),
-                                            Button("Resume", id="settings-session-browse", cls="btn ghost"),
-                                            cls="settings-row"
-                                        ),
-                                        id="settings-session-row",
-                                        style="display:none",
-                                    ),
                                     id="settings-codex-fields",
                                 ),
                                 Div(id="settings-extension-fields"),
@@ -4163,6 +4524,13 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
                 meta_settings[key] = value
         meta["settings"] = meta_settings
     thread_id = payload.get("thread_id")
+    # Also check if settings contained a session_picker value (generic: any extension)
+    picked_session = None
+    if not thread_id and isinstance(settings, dict):
+        picked_session = settings.get("session") or None
+        thread_id = picked_session
+        if thread_id:
+            meta.setdefault("settings", {}).pop("session", None)  # one-time binding, not persistent
     if thread_id and not meta.get("thread_id"):
         meta["thread_id"] = thread_id
         meta["status"] = "active"
@@ -4176,13 +4544,44 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
             cfg["active_view"] = cfg.get("active_view") or "conversation"
         _save_appserver_config(cfg)
     
-    # Check if agent requires eager session initialization
+    # If user picked an existing session to resume, bind + hydrate transcript
+    # SYNCHRONOUS — must complete before response so frontend's replayTranscript()
+    # finds the entries. Same pattern as bind-rollout (which is also sync).
     final_settings = meta.get("settings", {})
     agent_type = final_settings.get("agent", "")
-    if agent_type and ext_loader.has_extension(agent_type):
+    if picked_session and agent_type and ext_loader.has_extension(agent_type):
+        cwd = final_settings.get("cwd", "~")
+        model = final_settings.get("model")
+        try:
+            # 1. Bind: resume the extension session
+            bind_result = await ext_loader.resume_session_with_history(
+                agent_type,
+                session_id=picked_session,
+                conversation_id=convo_id,
+                cwd=cwd,
+                model=model,
+            )
+            if not bind_result.get("ok"):
+                print(f"[WARN] Session bind failed: {bind_result}")
+            else:
+                # 2. Hydrate: get flat transcript entries from extension
+                items = await ext_loader.hydrate_transcript(
+                    agent_type,
+                    session_id=picked_session,
+                    conversation_id=convo_id,
+                    cwd=cwd,
+                    model=model,
+                )
+                # 3. Write to transcript.jsonl (same as bind-rollout)
+                if items:
+                    await _write_transcript_entries(convo_id, items)
+                    print(f"[INFO] Hydrated {len(items)} transcript entries for {convo_id[:8]}")
+        except Exception as e:
+            print(f"[WARN] Session bind+hydrate failed: {e}")
+    elif agent_type and ext_loader.has_extension(agent_type):
+        # No session picked — check if agent requires eager init for new sessions
         if ext_loader.requires_eager_session_init(agent_type):
             cwd = final_settings.get("cwd", "~")
-            # Fire and forget - don't block the response
             asyncio.create_task(
                 ext_loader.init_session(convo_id, agent_type, cwd),
                 name=f"eager-init:{convo_id}"
@@ -4324,20 +4723,10 @@ async def api_appserver_conversation_select(payload: Dict[str, Any] = Body(...))
     
     meta = _load_conversation_meta(convo_id)
 
-    # Resume Copilot SDK session if this conversation uses it
-    agent_type = (meta.get("settings") or {}).get("agent", "")
-    if agent_type == "copilot-sdk" and meta.get("thread_id"):
-        try:
-            from extensions.copilot_sdk_client import resume_session, has_session
-            if not has_session(convo_id):
-                cwd = (meta.get("settings") or {}).get("cwd", "~")
-                model = (meta.get("settings") or {}).get("model")
-                asyncio.create_task(
-                    resume_session(convo_id, cwd=cwd, model=model),
-                    name=f"copilot-resume:{convo_id[:8]}"
-                )
-        except ImportError:
-            pass
+    # NOTE: Copilot SDK sessions are NOT eagerly resumed on conversation select.
+    # Like codex, resume happens lazily on first message (handle_message checks
+    # meta["thread_id"] and calls resume_session if needed). This gives us
+    # multiplexing for free — switching conversations doesn't touch the SDK.
 
     async with _config_lock:
         cfg = _load_appserver_config()
@@ -5099,8 +5488,27 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
     
-    # Intercept thread/resume, thread/start, turn/start to inject settings from SSOT
+    # Route approval responses for extension agents (non-codex).
+    # JSON-RPC responses have "result" but no "method".
     method = payload.get("method", "")
+    if not method and "result" in payload:
+        # This is a JSON-RPC response — likely an approval decision.
+        # Check if the active conversation uses an extension agent.
+        async with _config_lock:
+            cfg = _load_appserver_config()
+        cid = cfg.get("conversation_id")
+        if cid:
+            meta = _load_conversation_meta(cid)
+            agent = (meta.get("settings") or {}).get("agent", "codex")
+            if agent != "codex" and ext_loader.has_extension(agent):
+                request_id = str(payload.get("id", ""))
+                decision = (payload.get("result") or {}).get("decision", "decline")
+                try:
+                    ext_loader.resolve_approval(agent, request_id, decision)
+                    return {"ok": True}
+                except Exception as e:
+                    print(f"[WARN] Extension approval routing failed: {e}")
+                    # Fall through to codex path
     convo_id: Optional[str] = None
     if method in ("thread/resume", "thread/start", "turn/start"):
         async with _config_lock:
@@ -5936,64 +6344,69 @@ async def api_extension_settings_schema(extension_id: str):
     return {"version": "1", "fields": []}
 
 
-@app.get("/api/extensions/copilot-sdk/models")
-async def api_copilot_sdk_models():
-    """List available models from the Copilot SDK."""
+@app.get("/api/extensions/{extension_id}/models")
+async def api_extension_models(extension_id: str):
+    """List available models for any extension."""
+    if not ext_loader.has_extension(extension_id):
+        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
     try:
-        from extensions.copilot_sdk_client import list_models
-        models = await list_models()
-        return {"models": models}
-    except ImportError:
-        return JSONResponse({"error": "Copilot SDK extension not loaded"}, status_code=503)
+        result = await ext_loader.list_models(extension_id)
+        # Normalize: if handler returned a list, wrap it
+        if isinstance(result, list):
+            return {"models": result}
+        return result if isinstance(result, dict) else {"models": result}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.get("/api/extensions/copilot-sdk/sessions")
-async def api_copilot_sdk_sessions(cwd: Optional[str] = Query(None)):
-    """List Copilot SDK sessions, sorted by CWD relevance if provided."""
+@app.get("/api/extensions/{extension_id}/sessions")
+async def api_extension_sessions(extension_id: str, cwd: Optional[str] = Query(None)):
+    """List sessions for any extension, sorted by CWD relevance if provided."""
+    if not ext_loader.has_extension(extension_id):
+        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
     try:
-        from extensions.copilot_sdk_client import list_sessions
-        sessions = await list_sessions(cwd=cwd)
+        sessions = await ext_loader.list_sessions(extension_id, cwd=cwd)
         return {"sessions": sessions}
-    except ImportError:
-        return JSONResponse({"error": "Copilot SDK extension not loaded"}, status_code=503)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.post("/api/extensions/copilot-sdk/sessions/resume")
-async def api_copilot_sdk_session_resume(payload: Dict[str, Any] = Body(...)):
-    """Resume a Copilot SDK session into a conversation."""
+@app.post("/api/extensions/{extension_id}/sessions/resume")
+async def api_extension_session_resume(extension_id: str, payload: Dict[str, Any] = Body(...)):
+    """Resume an extension session into a conversation."""
+    if not ext_loader.has_extension(extension_id):
+        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
     session_id = payload.get("session_id")
     if not session_id:
         raise HTTPException(status_code=400, detail="Missing session_id")
     
-    # Use provided conversation_id or create/get current one
     conversation_id = payload.get("conversation_id")
     if not conversation_id:
         conversation_id = await _ensure_conversation()
     
-    cwd = payload.get("cwd")
-    model = payload.get("model")
-    
     try:
-        from extensions.copilot_sdk_client import resume_session_with_history
-        result = await resume_session_with_history(
+        # 1. Bind: resume the SDK session
+        result = await ext_loader.resume_session_with_history(
+            extension_id,
             session_id=session_id,
             conversation_id=conversation_id,
-            cwd=cwd,
-            model=model,
+            cwd=payload.get("cwd"),
+            model=payload.get("model"),
         )
         if not result.get("ok"):
             return JSONResponse({"error": result.get("error", "Resume failed")}, status_code=500)
         
-        # Write history items to transcript
-        items = result.pop("items", [])
+        # 2. Hydrate: get flat transcript entries + write to JSONL
+        items = await ext_loader.hydrate_transcript(
+            extension_id,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            cwd=payload.get("cwd"),
+            model=payload.get("model"),
+        )
         if items:
             await _write_transcript_entries(conversation_id, items)
-        
-        # Update config to point at this conversation
+
         async with _config_lock:
             cfg = _load_appserver_config()
             cfg["conversation_id"] = conversation_id
@@ -6005,28 +6418,24 @@ async def api_copilot_sdk_session_resume(payload: Dict[str, Any] = Body(...)):
             "ok": True,
             "conversation_id": conversation_id,
             "session_id": session_id,
-            "history_count": result.get("history_count", 0),
+            "history_count": len(items),
         }
-    except ImportError:
-        return JSONResponse({"error": "Copilot SDK extension not loaded"}, status_code=503)
     except Exception as e:
         import traceback
         traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.get("/api/extensions/debug/raw")
-async def api_extensions_debug_raw(limit: int = Query(50, gt=0, le=200)):
+@app.get("/api/extensions/{extension_id}/debug/raw")
+async def api_extension_debug_raw(extension_id: str, limit: int = Query(50, gt=0, le=200)):
     """Get raw extension message buffer for debugging."""
+    if not ext_loader.has_extension(extension_id):
+        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
     try:
-        from extensions.copilot_sdk_client import get_raw_buffer
-        return {"items": get_raw_buffer(limit)}
-    except ImportError:
-        try:
-            from extensions.acp_client import get_acp_raw_buffer
-            return {"items": get_acp_raw_buffer(limit)}
-        except ImportError:
-            return {"items": []}
+        items = ext_loader.get_raw_buffer(extension_id, limit)
+        return {"items": items}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/shutdown")
@@ -6057,19 +6466,17 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.websocket("/ws/appserver")
 async def appserver_ws(websocket: WebSocket):
+    """Raw appserver WebSocket — only used for raw debug stream (mode=raw)."""
     await websocket.accept()
     mode = websocket.query_params.get("mode", "ui")
     if mode == "raw":
         _appserver_ws_clients_raw.append(websocket)
-    else:
-        _appserver_ws_clients_ui.append(websocket)
+    # UI mode clients should use Socket.IO /appserver namespace instead
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         with suppress(Exception):
-            if websocket in _appserver_ws_clients_ui:
-                _appserver_ws_clients_ui.remove(websocket)
             if websocket in _appserver_ws_clients_raw:
                 _appserver_ws_clients_raw.remove(websocket)
 

@@ -21,6 +21,22 @@ def utc_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _looks_like_diff(text: str) -> bool:
+    """Check if text looks like a unified diff (not just any tool output)."""
+    for line in text.splitlines()[:5]:
+        stripped = line.lstrip()
+        if stripped.startswith("---") or stripped.startswith("+++") or stripped.startswith("@@"):
+            return True
+    return False
+
+
+# Tools that mutate files — only these get post-execution diff entries
+_FILE_CHANGE_TOOLS = {
+    "edit", "create", "write", "write_file", "apply_patch", "delete",
+    "move", "rename", "insert", "replace", "patch",
+}
+
+
 class CopilotEventRouter:
     """
     Translates Copilot SDK SessionEvent objects to our internal event format.
@@ -94,6 +110,8 @@ class CopilotEventRouter:
         elif etype == SessionEventType.TOOL_EXECUTION_COMPLETE:
             await self._handle_tool_complete(event)
         elif etype == SessionEventType.TOOL_EXECUTION_PROGRESS:
+            await self._handle_tool_progress(event)
+        elif etype == SessionEventType.TOOL_EXECUTION_PARTIAL_RESULT:
             await self._handle_tool_progress(event)
         elif etype == SessionEventType.ASSISTANT_INTENT:
             await self._handle_intent(data)
@@ -279,14 +297,27 @@ class CopilotEventRouter:
 
     async def _handle_tool_start(self, event: SessionEvent) -> None:
         data = event.data
-        tool_call_id = str(event.id)
-        # Try to extract a meaningful command label
-        content = getattr(data, "content", None) or ""
-        tool_name = getattr(data, "source", None) or "tool"
+        # SDK uses data.tool_call_id as the stable tool call identifier
+        tool_call_id = data.tool_call_id or str(event.id)
+        tool_name = data.tool_name or data.mcp_tool_name or "tool"
+        # Build a command label from tool name + arguments (no truncation)
+        args_str = ""
+        raw_args = data.arguments
+        if raw_args:
+            if isinstance(raw_args, dict):
+                parts = []
+                for k, v in raw_args.items():
+                    parts.append(f"{k}={v}")
+                args_str = " " + " ".join(parts)
+            elif isinstance(raw_args, str):
+                args_str = " " + raw_args
+        command_label = f"{tool_name}{args_str}"
 
         self.tool_calls[tool_call_id] = {
             "id": tool_call_id,
-            "title": content or tool_name,
+            "title": command_label,
+            "tool_name": tool_name,
+            "arguments": raw_args,
             "turn_id": self.current_turn_id,
             "output": "",
         }
@@ -299,15 +330,24 @@ class CopilotEventRouter:
             "conversation_id": self.conversation_id,
             "id": tool_call_id,
             "turn_id": self.current_turn_id,
-            "command": content or tool_name,
+            "command": command_label,
             "cwd": "",
         })
 
     async def _handle_tool_complete(self, event: SessionEvent) -> None:
         data = event.data
-        tool_call_id = str(event.parent_id or event.id)
-        content = getattr(data, "content", None) or ""
+        tool_call_id = data.tool_call_id or str(event.parent_id or event.id)
+        result_obj = data.result
+        content = ""
+        detailed = ""
+        if result_obj:
+            content = getattr(result_obj, "content", "") or ""
+            detailed = getattr(result_obj, "detailed_content", "") or ""
+        else:
+            content = data.content or data.output or ""
         tool_call = self.tool_calls.get(tool_call_id, {})
+        tool_name = (tool_call.get("tool_name") or "").lower()
+        file_path = data.path or ""
 
         await self._emit({
             "type": "shell_end",
@@ -330,10 +370,33 @@ class CopilotEventRouter:
             "timestamp": utc_ts(),
         })
 
+        # Emit diff for file-mutating tools only (not view/grep/read)
+        if detailed and tool_name in _FILE_CHANGE_TOOLS:
+            await self._emit({
+                "type": "diff",
+                "conversation_id": self.conversation_id,
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "path": file_path,
+                "text": detailed,
+            })
+            await self._record({
+                "role": "diff",
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "path": file_path,
+                "text": detailed,
+                "timestamp": utc_ts(),
+            })
+
     async def _handle_tool_progress(self, event: SessionEvent) -> None:
         data = event.data
-        tool_call_id = str(event.parent_id or event.id)
-        content = getattr(data, "content", None) or ""
+        tool_call_id = data.tool_call_id or str(event.parent_id or event.id)
+        # Progress can come via partial_output, progress_message, or content
+        content = data.partial_output or data.progress_message or data.content or ""
+        # For PARTIAL_RESULT events, check result object too
+        if not content and data.result:
+            content = getattr(data.result, "content", "") or ""
 
         if content:
             tool_call = self.tool_calls.get(tool_call_id)

@@ -162,27 +162,17 @@ def is_initialized() -> bool:
 
 async def warm_up_extensions(timeout: float = 60.0) -> Dict[str, bool]:
     """
-    Warm up all ACP extensions (start shells, wait for ready).
-    
-    Call this on server startup to eagerly start slow-loading agents like Gemini.
+    Warm up all extensions that support it.
     Returns dict of extension_id -> success.
     """
     results: Dict[str, bool] = {}
-    
-    # Warm up Copilot SDK extensions
-    if "copilot_sdk" in _extension_handlers:
-        handler = _extension_handlers["copilot_sdk"]
+    for handler_type, handler in _extension_handlers.items():
         if hasattr(handler, "warm_up_all_extensions"):
-            sdk_results = await handler.warm_up_all_extensions(timeout=timeout)
-            results.update(sdk_results)
-    
-    # Warm up ACP extensions (legacy)
-    if "acp" in _extension_handlers:
-        handler = _extension_handlers["acp"]
-        if hasattr(handler, "warm_up_all_extensions"):
-            acp_results = await handler.warm_up_all_extensions(timeout=timeout)
-            results.update(acp_results)
-    
+            try:
+                type_results = await handler.warm_up_all_extensions(timeout=timeout)
+                results.update(type_results)
+            except Exception as e:
+                print(f"[Extensions] Warm-up failed for {handler_type}: {e}")
     return results
 
 
@@ -244,3 +234,85 @@ async def init_session(
         return await handler.init_session(conversation_id, extension_id, cwd)
     
     return {"ok": True}  # No-op for extensions that don't need it
+
+
+async def list_models(extension_id: str) -> Any:
+    """List models for an extension. Handler must implement list_models()."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "list_models"):
+        return await handler.list_models()
+    return {"models": []}
+
+
+async def list_sessions(extension_id: str, cwd: Optional[str] = None) -> Any:
+    """List sessions for an extension. Handler must implement list_sessions()."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "list_sessions"):
+        return await handler.list_sessions(cwd=cwd)
+    return []
+
+
+async def resume_session_with_history(
+    extension_id: str,
+    session_id: str,
+    conversation_id: str,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resume a session and hydrate transcript. Handler must implement resume_session_with_history()."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "resume_session_with_history"):
+        return await handler.resume_session_with_history(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            cwd=cwd,
+            model=model,
+        )
+    return {"ok": False, "error": f"Extension {extension_id} does not support session resume"}
+
+
+async def hydrate_transcript(
+    extension_id: str,
+    session_id: str,
+    conversation_id: str,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Get flat transcript entries for an existing session (port-in).
+
+    Handler must implement hydrate_transcript(session_id, conversation_id, ...).
+    Returns a list of transcript entries in the standard format:
+      {role: "user"|"assistant"|"reasoning"|"command"|"diff", text: "...", ...}
+    Server.py writes these via _write_transcript_entries — same as bind-rollout.
+    """
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "hydrate_transcript"):
+        return await handler.hydrate_transcript(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            cwd=cwd,
+            model=model,
+        )
+    return []
+
+
+def resolve_approval(extension_id: str, request_id: str, decision: str) -> None:
+    """Resolve an approval request. Handler must implement resolve_approval()."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "resolve_approval"):
+        handler.resolve_approval(request_id, decision)
+
+
+async def shutdown_extension(extension_id: str) -> None:
+    """Shutdown an extension. Handler must implement shutdown_client()."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "shutdown_client"):
+        await handler.shutdown_client()
+
+
+def get_raw_buffer(extension_id: str, limit: int = 50) -> Any:
+    """Get raw debug buffer. Handler must implement get_raw_buffer()."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "get_raw_buffer"):
+        return handler.get_raw_buffer(limit)
+    return []

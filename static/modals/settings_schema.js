@@ -16,6 +16,88 @@ window.CodexAgentModules.push((ctx) => {
   // Current schema field values (for save)
   let currentSchemaValues = {};
   
+  // Session picker overlay elements (reuse HTML already in template)
+  const sessionPickerOverlay = document.getElementById('session-picker');
+  const sessionPickerCloseBtn = document.getElementById('session-picker-close');
+  const sessionPickerListEl = document.getElementById('session-picker-list');
+  
+  // Track which input field the session picker is serving
+  let _sessionPickerTarget = null;  // { input, field }
+  
+  function openSessionPicker(field, input) {
+    if (!sessionPickerOverlay) return;
+    _sessionPickerTarget = { input, field };
+    sessionPickerOverlay.classList.remove('hidden');
+    fetchAndRenderSessions(field.source || '');
+  }
+  
+  function closeSessionPicker() {
+    if (!sessionPickerOverlay) return;
+    sessionPickerOverlay.classList.add('hidden');
+    _sessionPickerTarget = null;
+  }
+  
+  async function fetchAndRenderSessions(sourceUrl) {
+    if (!sessionPickerListEl) return;
+    sessionPickerListEl.innerHTML = '<div class="picker-item">Loading…</div>';
+    try {
+      const r = await fetch(sourceUrl, { cache: 'no-store' });
+      if (!r.ok) throw new Error('failed');
+      const data = await r.json();
+      const items = Array.isArray(data?.sessions) ? data.sessions
+        : Array.isArray(data) ? data : [];
+      renderSessionList(items);
+    } catch (err) {
+      console.warn('session list failed', err);
+      renderSessionList([]);
+    }
+  }
+  
+  function renderSessionList(items) {
+    if (!sessionPickerListEl) return;
+    sessionPickerListEl.innerHTML = '';
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'picker-item';
+      empty.textContent = 'No sessions found';
+      sessionPickerListEl.appendChild(empty);
+      return;
+    }
+    items.forEach(item => {
+      const sid = item?.sessionId || item?.session_id || item?.id || '';
+      const summary = item?.summary || '';
+      const modified = item?.modifiedTime || item?.modified_time || '';
+      
+      const row = document.createElement('div');
+      row.className = 'picker-item rollout-item';
+      row.dataset.sessionId = sid;
+      row.style.cursor = 'pointer';
+      
+      const idSpan = document.createElement('span');
+      idSpan.className = 'rollout-id';
+      idSpan.textContent = sid;
+      
+      const previewSpan = document.createElement('span');
+      previewSpan.className = 'rollout-preview';
+      previewSpan.textContent = summary || (modified ? `Modified: ${modified}` : '');
+      
+      row.append(idSpan, previewSpan);
+      row.addEventListener('click', () => {
+        if (_sessionPickerTarget) {
+          _sessionPickerTarget.input.value = sid;
+          _sessionPickerTarget.input.dataset.sessionId = sid;
+        }
+        closeSessionPicker();
+      });
+      sessionPickerListEl.appendChild(row);
+    });
+  }
+  
+  // Wire close button
+  if (sessionPickerCloseBtn) {
+    sessionPickerCloseBtn.addEventListener('click', closeSessionPicker);
+  }
+  
   /**
    * Load settings schema for an extension
    */
@@ -25,9 +107,9 @@ window.CodexAgentModules.push((ctx) => {
     }
     
     try {
-      const r = await fetch(`/api/extensions/${extensionId}/settings_schema`, { cache: 'no-store' });
-      if (!r.ok) return null;
-      const schema = await r.json();
+      const schema = ctx.helpers.sioCall
+        ? await ctx.helpers.sioCall('get_extension_settings_schema', { extension_id: extensionId }, { fallbackUrl: `/api/extensions/${extensionId}/settings_schema`, fallbackMethod: 'GET' })
+        : await fetch(`/api/extensions/${extensionId}/settings_schema`, { cache: 'no-store' }).then(r => r.ok ? r.json() : null);
       schemaCache[extensionId] = schema;
       return schema;
     } catch {
@@ -83,6 +165,36 @@ window.CodexAgentModules.push((ctx) => {
           
           label.appendChild(pathDiv);
           break;
+
+        case 'session_picker':
+          // Session picker: only shown for NEW conversations (no thread_id yet).
+          // Once a conversation is bound to a session, this field disappears.
+          const hasThread = !window.CodexAgent?.state?.pendingNewConversation
+            && window.CodexAgent?.state?.conversationMeta?.thread_id;
+          if (hasThread) break; // Already bound — hide picker
+
+          const sessionDiv = document.createElement('div');
+          sessionDiv.className = 'settings-row';
+          
+          input = document.createElement('input');
+          input.type = 'text';
+          input.id = `settings-ext-${field.id}`;
+          input.placeholder = field.placeholder || '(new session)';
+          input.readOnly = true;
+          input.value = '';
+          sessionDiv.appendChild(input);
+          
+          const resumeBtn = document.createElement('button');
+          resumeBtn.type = 'button';
+          resumeBtn.className = 'btn ghost';
+          resumeBtn.textContent = 'Browse';
+          resumeBtn.addEventListener('click', () => {
+            openSessionPicker(field, input);
+          });
+          sessionDiv.appendChild(resumeBtn);
+          
+          label.appendChild(sessionDiv);
+          break;
           
         case 'select':
           // Dropdown field
@@ -107,18 +219,38 @@ window.CodexAgentModules.push((ctx) => {
           listDiv.className = 'dropdown-list';
           listDiv.id = `settings-ext-${field.id}-options`;
           
-          // Build options
-          (field.options || []).forEach(opt => {
-            const optBtn = document.createElement('button');
-            optBtn.type = 'button';
-            optBtn.className = 'dropdown-item';
-            optBtn.textContent = typeof opt === 'object' ? opt.label : opt;
-            optBtn.addEventListener('click', () => {
-              input.value = typeof opt === 'object' ? opt.value : opt;
-              listDiv.classList.remove('open');
+          // Build options (static or dynamic)
+          const buildOptions = (options) => {
+            listDiv.innerHTML = '';
+            (options || []).forEach(opt => {
+              const optBtn = document.createElement('button');
+              optBtn.type = 'button';
+              optBtn.className = 'dropdown-item';
+              optBtn.textContent = typeof opt === 'object' ? opt.label : opt;
+              optBtn.addEventListener('click', () => {
+                input.value = typeof opt === 'object' ? opt.value : opt;
+                listDiv.classList.remove('open');
+              });
+              listDiv.appendChild(optBtn);
             });
-            listDiv.appendChild(optBtn);
-          });
+          };
+          
+          buildOptions(field.options);
+          
+          // Fetch dynamic options if configured
+          if (field.dynamic_source) {
+            const loadOpts = (data) => {
+              if (!data) return;
+              const items = data.models || data.options || [];
+              const opts = items.map(m => typeof m === 'object'
+                ? { value: m.id || m.value, label: m.name || m.label || m.id || m.value }
+                : { value: m, label: m });
+              if (opts.length) buildOptions(opts);
+            };
+            fetch(field.dynamic_source, { cache: 'no-store' })
+              .then(r => r.ok ? r.json() : null)
+              .then(loadOpts).catch(() => {});
+          }
           
           toggleBtn.addEventListener('click', (e) => {
             e.preventDefault();
@@ -175,6 +307,9 @@ window.CodexAgentModules.push((ctx) => {
     Object.entries(currentSchemaValues).forEach(([id, { input, type }]) => {
       if (type === 'checkbox') {
         values[id] = input.checked;
+      } else if (type === 'session_picker') {
+        // Return full session ID from dataset, not truncated display value
+        values[id] = input.dataset.sessionId || '';
       } else {
         values[id] = input.value;
       }

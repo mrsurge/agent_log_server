@@ -33,6 +33,49 @@ I will follow a structured, multi-step, approval-based workflow for every new ta
   4. **Subsequent Interactions**
   4(a) (sometimes inquiries)
 
+# INVARIANT: Platform-Agnostic Core Files — ZERO Extension-Specific Code
+
+**This is the single most important architectural rule in this repo. Violating it WILL break things and WILL get your work reverted.**
+
+The following files are **platform-agnostic**. They must contain **ZERO** direct imports of, or hardcoded references to, any specific extension handler module (e.g. `copilot_sdk_client`, `acp_client`, or any future `*_client`):
+
+- **`server.py`** — The backend. All extension interaction MUST go through `extensions/__init__.py` (imported as `ext_loader`). Pattern: `ext_loader.method_name(extension_id, ...)`. **NEVER** `from extensions.some_client import something`.
+- **`static/codex_agent.js`** — The frontend agent harness. No SDK-specific logic, event names, or branching. The existing Codex logic is the **working reference** — it does NOT get changed. New extensions plug in alongside it via the schema system.
+- **`static/modals/settings_schema.js`** — Schema-driven settings UI. Renders fields from `settings_schema.json`. No hardcoded extension IDs or SDK-specific event names.
+
+### Where extension-specific code DOES go:
+- `extensions/<ext_name>_client.py` — All SDK-specific logic (session management, message handling, approvals, etc.)
+- `extensions/<ext_name>_router.py` — Event translation from SDK format to internal format.
+- `extensions/<ext_name>/` — Manifests, settings schemas, static assets.
+- `extensions/__init__.py` (`ext_loader`) — Generic pass-through routing. Every method follows: `get_handler(ext_id) → hasattr(handler, "method") → handler.method(...)`.
+
+### The pattern — ALWAYS:
+```python
+# In server.py — CORRECT:
+import extensions as ext_loader
+result = await ext_loader.list_models(extension_id)
+
+# In server.py — WRONG (will be reverted on sight):
+from extensions.copilot_sdk_client import list_models
+result = await list_models()
+```
+
+### HTTP routes are generic:
+- `GET /api/extensions/{extension_id}/models`
+- `GET /api/extensions/{extension_id}/sessions`
+- `POST /api/extensions/{extension_id}/sessions/resume`
+- `GET /api/extensions/{extension_id}/debug/raw`
+
+### SIO handlers are generic:
+- `get_sessions` — takes `extension_id` in data payload
+- `session_resume` — takes `extension_id` in data payload
+- `approval_response` — reads agent type from conversation meta, routes via ext_loader
+- `get_extension_models` — takes `extension_id` in data payload
+
+**If you are adding a new extension, you add handler files in `extensions/` and a manifest in `extensions/extensions.json`. You do NOT touch `server.py`, `codex_agent.js`, or `settings_schema.js` with extension-specific code.**
+
+---
+
 **3. Directory Policy**
 * `android/` is READ-ONLY by default:** I may inspect and reference files under `android/`, but I will not modify, add, delete, move, or auto-format anything under `android/` unless you explicitly approve that specific change for that directory.
 

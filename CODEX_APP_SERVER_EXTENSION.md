@@ -916,6 +916,81 @@ Added CSS for proper word wrapping in agent messages, user messages, and reasoni
 4. **Warp-like shell interface** - Full shell mode with streaming output, using codex-app-server's PTY management
 5. **Screen model colors** - Current pyte screen model is text-only; adding ANSI color preservation requires new delta schema with cell attributes
 
+## Pluggable Extension System
+
+The server supports pluggable agent extensions alongside the built-in Codex flow. Extensions plug in via `extensions/__init__.py` (the "ext_loader") without modifying `server.py` or `codex_agent.js`.
+
+### INVARIANT: Platform-Agnostic Core Files
+
+**`server.py`, `codex_agent.js`, and `settings_schema.js` must contain ZERO extension-specific code.** See `AGENTS.md` for the full invariant. All extension interaction in server.py goes through `ext_loader`:
+
+```python
+import extensions as ext_loader
+result = await ext_loader.list_models(extension_id)  # CORRECT
+# from extensions.copilot_sdk_client import list_models  # WRONG — will be reverted
+```
+
+### Generic Extension API Routes
+
+All extension HTTP endpoints use `{extension_id}` path parameters:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `GET /api/extensions/{id}/models` | GET | List available models |
+| `GET /api/extensions/{id}/sessions` | GET | List sessions (with `?cwd=` sorting) |
+| `POST /api/extensions/{id}/sessions/resume` | POST | Resume+hydrate a session into a conversation |
+| `GET /api/extensions/{id}/debug/raw` | GET | Debug event buffer |
+| `GET /api/extensions/{id}/settings_schema` | GET | Get settings UI schema |
+
+### Generic Extension SIO Handlers
+
+| Event | Data | Purpose |
+|-------|------|---------|
+| `get_sessions` | `{extension_id, cwd}` | List sessions |
+| `session_resume` | `{extension_id, session_id, conversation_id}` | Resume + hydrate |
+| `approval_response` | `{request_id, decision}` | Resolve approval (reads agent from meta) |
+| `get_extension_models` | `{extension_id}` | List models |
+
+### Session Hydration: bind-rollout Pattern
+
+When a user picks an existing session to bind to a new conversation, the server follows the **same pattern** as Codex rollout binding:
+
+```
+Codex bind-rollout:
+  1. _rollout_preview_entries(path)   → List[{role, text, ts}]   (reads JSONL file)
+  2. _write_transcript_entries(items) → writes transcript.jsonl
+
+Extension hydrate_transcript:
+  1. ext_loader.hydrate_transcript(ext_id, session_id, ...) → List[{role, text, ts}]  (calls SDK)
+  2. _write_transcript_entries(items)  → writes transcript.jsonl  (SAME function!)
+```
+
+**Critical:** Hydration MUST complete before the HTTP response returns. The frontend transitions to conversation view and calls `replayTranscript()` immediately — if transcript isn't written yet, the view is empty. (This was a race condition when hydration was `asyncio.create_task()` fire-and-forget.)
+
+### ext_loader Pass-Through Methods
+
+`extensions/__init__.py` exposes generic methods that route to the active handler:
+
+| Method | Signature | Purpose |
+|--------|-----------|---------|
+| `list_models(ext_id)` | `async → List` | Get available models |
+| `list_sessions(ext_id, cwd)` | `async → List` | Get resumable sessions |
+| `resume_session_with_history(ext_id, session_id, convo_id, ...)` | `async → Dict` | Bind session to conversation |
+| `hydrate_transcript(ext_id, session_id, convo_id, ...)` | `async → List[Dict]` | Build flat transcript entries |
+| `resolve_approval(ext_id, request_id, decision)` | `sync → None` | Resolve pending approval |
+| `shutdown_extension(ext_id)` | `async → None` | Graceful shutdown |
+| `get_raw_buffer(ext_id, limit)` | `sync → List` | Debug buffer |
+
+All follow the same pattern: `get_handler(ext_id) → hasattr(handler, method) → handler.method(...)`.
+
+### Adding a New Extension
+
+1. Create `extensions/<name>_client.py` with `handle_message()`, `hydrate_transcript()`, etc.
+2. Create `extensions/<name>/manifest.json` and `settings_schema.json`
+3. Add entry to `extensions/extensions.json`
+4. Add handler type to `_load_handler_for_type()` in `extensions/__init__.py`
+5. **Do NOT touch** `server.py`, `codex_agent.js`, or `settings_schema.js`
+
 ## MCP Agent PTY Integration
 
 The server includes an MCP (Model Context Protocol) server for PTY management, enabling agent-to-agent communication and TUI control.
