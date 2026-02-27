@@ -75,7 +75,7 @@ window.CodexAgentModules.push((ctx) => {
       
       const idSpan = document.createElement('span');
       idSpan.className = 'rollout-id';
-      idSpan.textContent = sid;
+      idSpan.textContent = sid.length > 12 ? sid.slice(0, 8) + '…' : sid;
       
       const previewSpan = document.createElement('span');
       previewSpan.className = 'rollout-preview';
