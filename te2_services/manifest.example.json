@@ -1,0 +1,20 @@
+{
+  "name": "Codex Agent",
+  "id": "codex_agent",
+  "icon_src": "icon.svg",
+  "version": "0.2.0",
+  "description": "Hosts the Codex Agent UI with SIO transport relay.",
+  "shellspec": {
+    "app_worker": "shellspec/app_worker.yaml#app-worker"
+  },
+  "entrypoints": {
+    "backend_blueprint": "main.py",
+    "frontend_template": "template.html",
+    "frontend_script": "main.js"
+  },
+  "services": {
+    "path": "services",
+    "modules": ["appserver_transport"]
+  },
+  "fullscreen": true
+}

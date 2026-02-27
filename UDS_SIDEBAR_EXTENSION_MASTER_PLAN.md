@@ -1,5 +1,7 @@
 # UDS Sidebar Extension Master Plan
 
+> Last reviewed: 2026-02-27T15:10:59Z
+
 ## Objective
 Replace legacy browser cross-origin sidebar/control paths with backend-to-backend JSON-RPC 2.0 over Unix domain socket (UDS), while preserving existing TE2 UI behavior.
 
@@ -193,3 +195,5 @@ Goal: provide an alternate source of truth for last-edit location when complex d
 ### Phase 9: edit tracker integration hook
 - Implement `edit_tracker.last_change.publish`.
 - Wire tracker prioritization rules for conflicting signals (agent-provided vs diff-derived).
+
+> Bonus timestamp: 2026-02-27T15:10:59Z — 🐹 guinea pig was here

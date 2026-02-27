@@ -500,7 +500,6 @@ _lock = asyncio.Lock()
 _config_lock = asyncio.Lock()
 _appserver_shell_id: Optional[str] = None
 _appserver_reader_task: Optional[asyncio.Task] = None
-_appserver_ws_clients_raw: List[WebSocket] = []
 _appserver_turn_state: Dict[str, Dict[str, Any]] = {}
 _appserver_item_state: Dict[str, Dict[str, Any]] = {}
 _appserver_raw_buffer: List[str] = []
@@ -2254,17 +2253,6 @@ async def _broadcast_appserver_raw(message: str) -> None:
                 f.write(message + "\n")
         except Exception:
             pass
-    if not _appserver_ws_clients_raw:
-        return
-    stale: List[WebSocket] = []
-    for ws in _appserver_ws_clients_raw:
-        try:
-            await ws.send_text(message)
-        except Exception:
-            stale.append(ws)
-    for ws in stale:
-        with suppress(Exception):
-            _appserver_ws_clients_raw.remove(ws)
 
 
 def _agent_pty_events_path(conversation_id: str) -> Path:
@@ -6462,23 +6450,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-
-
-@app.websocket("/ws/appserver")
-async def appserver_ws(websocket: WebSocket):
-    """Raw appserver WebSocket — only used for raw debug stream (mode=raw)."""
-    await websocket.accept()
-    mode = websocket.query_params.get("mode", "ui")
-    if mode == "raw":
-        _appserver_ws_clients_raw.append(websocket)
-    # UI mode clients should use Socket.IO /appserver namespace instead
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        with suppress(Exception):
-            if websocket in _appserver_ws_clients_raw:
-                _appserver_ws_clients_raw.remove(websocket)
 
 
 @app.websocket("/ws/pty/{conversation_id}")

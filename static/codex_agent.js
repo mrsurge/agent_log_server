@@ -115,8 +115,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let wsOpen = false;
   let wsReadyResolve = null;
   let wsReadyPromise = new Promise((resolve) => { wsReadyResolve = resolve; });
-  let wsReconnectTimer = null;
   let wsReconnectDelay = 1000;
+  let _socket = null; // Socket.IO instance (set in connectWS)
   let rpcId = 1;
   let modelList = []; // Cached model list with supportedReasoningEfforts
   let markdownEnabled = true; // Toggle for markdown rendering
@@ -195,10 +195,10 @@ document.addEventListener('DOMContentLoaded', () => {
       if (hash === lastDraftHash) return;
       lastDraftHash = hash;
       try {
-        await postJson('/api/appserver/conversation/draft', {
+        await sioCall('conversation_draft', {
           conversation_id: convoId,
           draft: text
-        });
+        }, { fallbackUrl: '/api/appserver/conversation/draft' });
         if (conversationMeta && conversationMeta.conversation_id === convoId) {
           conversationMeta.draft = text;
         }
@@ -231,7 +231,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Fire and forget - clear the draft from storage
     const convoId = conversationMeta?.conversation_id;
     if (convoId) {
-      postJson('/api/appserver/conversation/draft', {
+      sioCall('conversation_draft', {
         conversation_id: convoId,
         draft: ''
       }).catch(() => {});
@@ -243,10 +243,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!promptEl) return;
     if (draftDirty) return;
     try {
-      const r = await fetch('/api/appserver/conversation', { cache: 'no-store' });
-      if (!r.ok) return;
-      const meta = await r.json();
-      if (!meta || meta.conversation_id !== convoId) return;
+      const meta = await sioCall('conversation_get', { conversation_id: convoId }, {
+        fallbackUrl: '/api/appserver/conversation',
+        fallbackMethod: 'GET',
+      });
+      if (!meta || meta.ok === false || meta.conversation_id !== convoId) return;
       const serverDraft = meta.draft;
       if (typeof serverDraft !== 'string') return;
       const localText = getPromptText();
@@ -1601,10 +1602,10 @@ document.addEventListener('DOMContentLoaded', () => {
   async function saveApprovalQuick(value) {
     const approval = normalizeApprovalValue(value?.trim());
     if (!approval) return;
-    await postJson('/api/appserver/conversation', {
+    await sioCall('conversation_update', {
       conversation_id: conversationMeta?.conversation_id,
       settings: { approvalPolicy: approval },
-    });
+    }, { fallbackUrl: '/api/appserver/conversation' });
     conversationSettings.approvalPolicy = approval;
     if (footerApprovalValue) footerApprovalValue.textContent = approval;
   }
@@ -1683,9 +1684,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function fetchRollouts() {
     try {
-      const r = await fetch('/api/appserver/rollouts', { cache: 'no-store' });
-      if (!r.ok) throw new Error('failed to load rollouts');
-      const data = await r.json();
+      const data = await sioCall('get_rollouts', {}, {
+        fallbackUrl: '/api/appserver/rollouts',
+        fallbackMethod: 'GET',
+      });
       let items = Array.isArray(data?.items) ? data.items : [];
       const cwd = settingsCwdEl?.value?.trim();
       if (cwd) {
@@ -1704,9 +1706,10 @@ document.addEventListener('DOMContentLoaded', () => {
   async function loadRolloutPreview(rolloutId) {
     if (!rolloutId) return;
     try {
-      const r = await fetch(`/api/appserver/rollouts/${encodeURIComponent(rolloutId)}/preview`, { cache: 'no-store' });
-      if (!r.ok) throw new Error('failed to load rollout preview');
-      const data = await r.json();
+      const data = await sioCall('get_rollout_preview', { rollout_id: rolloutId }, {
+        fallbackUrl: `/api/appserver/rollouts/${encodeURIComponent(rolloutId)}/preview`,
+        fallbackMethod: 'GET',
+      });
       const items = Array.isArray(data?.items) ? data.items : [];
       pendingRollout = { id: rolloutId, items, token_total: data?.token_total ?? null };
       if (settingsRolloutEl) settingsRolloutEl.value = rolloutId;
@@ -1743,9 +1746,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function loadModelOptions() {
     try {
-      const r = await fetch('/api/appserver/models', { cache: 'no-store' });
-      if (!r.ok) return;
-      const data = await r.json();
+      const data = await sioCall('get_models', {}, {
+        fallbackUrl: '/api/appserver/models',
+        fallbackMethod: 'GET',
+      });
       const items = data?.result?.data || data?.result?.models || data?.data || data?.result || [];
       if (Array.isArray(items)) {
         modelList = items.filter(m => m && typeof m === 'object' && m.id);
@@ -1764,9 +1768,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Load agent options from extensions API
   async function loadAgentOptions() {
     try {
-      const r = await fetch('/api/extensions', { cache: 'no-store' });
-      if (!r.ok) return;
-      const data = await r.json();
+      const data = await sioCall('get_extensions', {}, {
+        fallbackUrl: '/api/extensions',
+        fallbackMethod: 'GET',
+      });
       const extensions = data?.extensions || [];
       // Build agent list: codex (default) + any loaded extensions
       const agents = ['codex'];
@@ -2283,7 +2288,9 @@ document.addEventListener('DOMContentLoaded', () => {
   async function requestContextCompact() {
     try {
       const convoId = conversationMeta?.conversation_id || null;
-      await postJson('/api/appserver/compact', convoId ? { conversation_id: convoId } : null);
+      await sioCall('compact', convoId ? { conversation_id: convoId } : {}, {
+        fallbackUrl: '/api/appserver/compact',
+      });
       setActivity('compact requested', true);
     } catch (err) {
       console.warn('compact failed', err);
@@ -4107,26 +4114,22 @@ document.addEventListener('DOMContentLoaded', () => {
     decline.textContent = 'Decline';
     accept.addEventListener('click', async () => {
       await respondApproval(evt.id, 'accept');
-      // Record to transcript
-      await postJson('/api/appserver/approval_record', {
+      await sioCall('approval_record', {
         status: 'accepted',
         diff: diffText,
         path: filePath,
         item_id: evt.id,
-      });
-      // Remove the approval card
+      }, { fallbackUrl: '/api/appserver/approval_record' });
       row.remove();
     });
     decline.addEventListener('click', async () => {
       await respondApproval(evt.id, 'decline');
-      // Record to transcript (will also broadcast diff_declined)
-      await postJson('/api/appserver/approval_record', {
+      await sioCall('approval_record', {
         status: 'declined',
         diff: diffText,
         path: filePath,
         item_id: evt.id,
-      });
-      // Remove the approval card
+      }, { fallbackUrl: '/api/appserver/approval_record' });
       row.remove();
     });
     actions.append(accept, decline);
@@ -4147,13 +4150,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
 	  async function fetchConversations() {
 		    try {
-		      const r = await fetch('/api/appserver/conversations', { cache: 'no-store' });
-		      if (!r.ok) return;
-		      const data = await r.json();
+		      const data = await sioCall('conversations_list', {}, {
+		        fallbackUrl: '/api/appserver/conversations',
+		        fallbackMethod: 'GET',
+		      });
 		      conversationList = data?.items || [];
 		      const ssotActiveId = data?.active_conversation_id || null;
 		      const highlightId = clientConversationId || conversationMeta?.conversation_id || ssotActiveId;
-		      // SSOT active_view is only a boot default; keep client-local view.
 		      if (!clientActiveView && data?.active_view) clientActiveView = data.active_view;
 		      renderConversationList(conversationList, highlightId);
 		      renderSplashTabs();
@@ -4164,10 +4167,8 @@ document.addEventListener('DOMContentLoaded', () => {
 		  }
 
 	  async function setActiveView(view) {
-	    // Client-local view, but also update SSOT so new clients inherit "last action wins"
-	    // (drawer open/closed) as the default boot view.
 	    try {
-	      await postJson('/api/appserver/view', { view });
+	      await sioCall('set_view', { view }, { fallbackUrl: '/api/appserver/view' });
 	    } catch {
 	      // ignore - SSOT is best-effort for boot defaults
 	    }
@@ -4192,10 +4193,10 @@ document.addEventListener('DOMContentLoaded', () => {
 	    resetTimeline();
 	    clientConversationId = conversationId;
 	    clientActiveView = view;
-	    // Update SSOT "active conversation" so new clients boot into the last selected conversation.
-	    // This should not be used as a guardrail by the client for sending.
 	    try {
-	      await postJson('/api/appserver/conversations/select', { conversation_id: conversationId, view });
+	      await sioCall('conversation_select', { conversation_id: conversationId, view }, {
+	        fallbackUrl: '/api/appserver/conversations/select',
+	      });
 	    } catch {
 	      // ignore - SSOT is best-effort for boot defaults
 	    }
@@ -4214,15 +4215,18 @@ document.addEventListener('DOMContentLoaded', () => {
       draftSaveTimer = null;
 	    }
 	    lastDraftHash = null;
-	    const meta = await postJson('/api/appserver/conversations', {});
+	    const meta = await sioCall('conversation_create', {}, {
+	      fallbackUrl: '/api/appserver/conversations',
+	    });
 	    if (meta?.conversation_id) {
 	      clientConversationId = meta.conversation_id;
 	      clientActiveView = 'conversation';
 	      conversationMeta = meta;
 	      conversationSettings = meta?.settings || {};
-	      // SSOT: new clients should boot into the latest created/selected conversation.
 	      try {
-	        await postJson('/api/appserver/conversations/select', { conversation_id: meta.conversation_id, view: 'conversation' });
+	        await sioCall('conversation_select', { conversation_id: meta.conversation_id, view: 'conversation' }, {
+	          fallbackUrl: '/api/appserver/conversations/select',
+	        });
 	      } catch {
 	        // ignore
 	      }
@@ -4239,7 +4243,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
 	  async function deleteConversation(conversationId) {
 	    if (!conversationId) return;
-	    await fetch(`/api/appserver/conversations/${conversationId}`, { method: 'DELETE' });
+	    await sioCall('conversation_delete', { conversation_id: conversationId }, {
+	      fallbackUrl: `/api/appserver/conversations/${conversationId}`,
+	      fallbackMethod: 'DELETE',
+	    });
 	    if (clientConversationId && clientConversationId === conversationId) {
 	      clientConversationId = null;
 	      clientActiveView = 'splash';
@@ -4319,7 +4326,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 	    const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
 	    if (isNewConversation) {
-	      const meta = await postJson('/api/appserver/conversations', {});
+	      const meta = await sioCall('conversation_create', {}, {
+	        fallbackUrl: '/api/appserver/conversations',
+	      });
 	      if (meta?.conversation_id) {
 	        clientConversationId = meta.conversation_id;
 	        clientActiveView = 'conversation';
@@ -4328,12 +4337,14 @@ document.addEventListener('DOMContentLoaded', () => {
 	      }
 	      pendingNewConversation = false;
 	    }
-	    await postJson('/api/appserver/conversation', { conversation_id: conversationMeta?.conversation_id, settings });
+	    await sioCall('conversation_update', {
+	      conversation_id: conversationMeta?.conversation_id, settings,
+	    }, { fallbackUrl: '/api/appserver/conversation' });
     if (pendingRollout?.id && Array.isArray(pendingRollout.items)) {
       setActivity('loading rollout', true);
-      await postJson('/api/appserver/conversations/bind-rollout', {
+      await sioCall('conversation_bind_rollout', {
         rollout_id: pendingRollout.id,
-      });
+      }, { fallbackUrl: '/api/appserver/conversations/bind-rollout' });
       pendingRollout = null;
       setActivity('rollout loaded', false);
     }
@@ -4358,13 +4369,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = { method };
     if (params !== undefined) payload.params = params;
     if (options.notify) {
-      await postJson('/api/appserver/rpc', payload);
+      await sioCall('rpc', payload, { fallbackUrl: '/api/appserver/rpc' });
       return null;
     }
     const id = nextRpcId();
     payload.id = id;
     await waitForWs();
-    await postJson('/api/appserver/rpc', payload);
+    await sioCall('rpc', payload, { fallbackUrl: '/api/appserver/rpc' });
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
@@ -4376,15 +4387,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function respondApproval(requestId, decision) {
     if (requestId === null || requestId === undefined) return;
-    // Ensure ID is sent as integer if it looks like one (JSON-RPC requires matching type)
     let id = requestId;
     if (typeof id === 'string' && /^\d+$/.test(id)) {
       id = parseInt(id, 10);
     }
-    await postJson('/api/appserver/rpc', {
-      jsonrpc: '2.0',
+    const convoId = conversationMeta?.conversation_id || null;
+    await sioCall('approval_response', {
+      conversation_id: convoId,
       id: id,
-      result: { decision },
+      decision,
+    }, {
+      fallbackUrl: '/api/appserver/rpc',
+      fallbackMethod: 'POST',
     });
   }
 
@@ -4413,14 +4427,60 @@ document.addEventListener('DOMContentLoaded', () => {
     return Boolean(ok);
   }
 
+  /**
+   * Send a Socket.IO event with ack and HTTP fallback.
+   * @param {string} event - SIO event name (e.g. 'send_message')
+   * @param {object} data - Payload to send
+   * @param {object} [options] - { fallbackUrl, fallbackMethod, timeoutMs }
+   * @returns {Promise<any>} Server response (ack value or HTTP JSON)
+   */
+  async function sioCall(event, data = {}, options = {}) {
+    const timeoutMs = options.timeoutMs || 10000;
+    // Try Socket.IO first if connected
+    if (_socket && _socket.connected) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`sioCall timeout: ${event}`));
+        }, timeoutMs);
+        _socket.emit(event, data, (ack) => {
+          clearTimeout(timer);
+          if (ack && ack.__error) {
+            resolve({ ok: false, error: ack.__error });
+          } else {
+            resolve(ack);
+          }
+        });
+      });
+    }
+    // Fallback to HTTP
+    if (options.fallbackUrl) {
+      const method = (options.fallbackMethod || 'POST').toUpperCase();
+      if (method === 'GET') {
+        const r = await fetch(options.fallbackUrl, { cache: 'no-store' });
+        return r.ok ? await r.json() : { ok: false, error: `HTTP ${r.status}` };
+      }
+      return postJson(options.fallbackUrl, data);
+    }
+    // No fallback — wait briefly for socket then retry
+    const ready = await waitForWs(3000);
+    if (ready && _socket && _socket.connected) {
+      return sioCall(event, data, { ...options, fallbackUrl: null });
+    }
+    return { ok: false, error: 'Socket.IO not connected and no fallback URL' };
+  }
 	  async function fetchConversation(conversationId = null) {
 	    try {
 	      const cid = conversationId || clientConversationId;
-	      const r = cid
-	        ? await fetch(`/api/appserver/conversations/${encodeURIComponent(cid)}/meta`, { cache: 'no-store' })
-	        : await fetch('/api/appserver/conversation', { cache: 'no-store' });
-	      if (!r.ok) return;
-	      conversationMeta = await r.json();
+	      const data = await sioCall('conversation_get', {
+	        conversation_id: cid || null,
+	      }, {
+	        fallbackUrl: cid
+	          ? `/api/appserver/conversations/${encodeURIComponent(cid)}/meta`
+	          : '/api/appserver/conversation',
+	        fallbackMethod: 'GET',
+	      });
+	      if (!data || data.ok === false) return;
+	      conversationMeta = data;
 	      conversationSettings = conversationMeta?.settings || {};
 	      if (!clientConversationId && conversationMeta?.conversation_id) {
 	        clientConversationId = conversationMeta.conversation_id;
@@ -4469,9 +4529,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function fetchStatus() {
     try {
-      const r = await fetch('/api/appserver/status', { cache: 'no-store' });
-      if (!r.ok) return;
-      const data = await r.json();
+      const data = await sioCall('get_status', {}, {
+        fallbackUrl: '/api/appserver/status',
+        fallbackMethod: 'GET',
+      });
       if (data && data.shell_id) {
         currentAppServerShellId = data.shell_id;
       }
@@ -4487,7 +4548,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function ensureInitialized() {
     if (initialized) return;
-    await postJson('/api/appserver/start', null);
+    await sioCall('app_start', {}, { fallbackUrl: '/api/appserver/start' });
     await waitForWs();
     try {
       await sendRpc('initialize', {
@@ -4504,15 +4565,6 @@ document.addEventListener('DOMContentLoaded', () => {
     initialized = true;
   }
 
-  function scheduleReconnect() {
-    if (wsReconnectTimer) return;
-    wsReconnectTimer = setTimeout(() => {
-      wsReconnectTimer = null;
-      wsReconnectDelay = Math.min(wsReconnectDelay * 1.6, 8000);
-      connectWS();
-    }, wsReconnectDelay);
-  }
-
   async function ensureThread() {
     await fetchConversation();
     if (currentThreadId) {
@@ -4524,10 +4576,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         await sendRpc('thread/resume', { threadId: currentThreadId });
         if (currentAppServerShellId) {
-          await postJson('/api/appserver/conversation', {
+          await sioCall('conversation_update', {
             conversation_id: conversationMeta?.conversation_id,
             settings: { thread_session_shell_id: currentAppServerShellId, thread_session_thread_id: currentThreadId },
-          });
+          }, { fallbackUrl: '/api/appserver/conversation' });
         }
         return currentThreadId;
       } catch {
@@ -4539,10 +4591,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (threadId) {
       currentThreadId = threadId;
       if (currentAppServerShellId) {
-        await postJson('/api/appserver/conversation', {
+        await sioCall('conversation_update', {
           conversation_id: conversationMeta?.conversation_id,
           settings: { thread_session_shell_id: currentAppServerShellId, thread_session_thread_id: threadId },
-        });
+        }, { fallbackUrl: '/api/appserver/conversation' });
       }
       return threadId;
     }
@@ -4558,11 +4610,10 @@ document.addEventListener('DOMContentLoaded', () => {
 	    }
 	    setActivity('sending', true);
 	    await ensureInitialized();
-	    // Use unified message endpoint - backend handles all thread resolution
-	    const result = await postJson('/api/appserver/message', {
+	    const result = await sioCall('send_message', {
 	      conversation_id: convoId,
 	      text,
-	    });
+	    }, { fallbackUrl: '/api/appserver/message' });
 	    if (!result?.ok) {
 	      console.error('sendUserMessage failed:', result?.error);
 	      setActivity(result?.error || 'send failed', true);
@@ -4587,7 +4638,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Just send the request and let events flow
     try {
       const endpoint = terminalMode ? '/api/mcp/agent-pty/exec' : '/api/appserver/shell/exec';
-      const resp = await postJson(endpoint, { command });
+      const resp = await sioCall('shell_exec', {
+        conversation_id: conversationMeta?.conversation_id,
+        command,
+        terminal_mode: !!terminalMode,
+      }, { fallbackUrl: endpoint });
       // Response includes callId - shell_end event will finalize the row
       // If error and no shell_end was received, show error
       if (resp.error && !shellRows.has(resp.callId)) {
@@ -4613,7 +4668,9 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       setActivity('interrupt', true);
       const convoId = conversationMeta?.conversation_id || null;
-      await postJson('/api/appserver/interrupt', convoId ? { conversation_id: convoId } : null);
+      await sioCall('interrupt', convoId ? { conversation_id: convoId } : {}, {
+        fallbackUrl: '/api/appserver/interrupt',
+      });
       setActivity('interrupt sent', true);
     } catch (err) {
       console.warn('interrupt failed', err);
@@ -4625,9 +4682,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const convoId = conversationMeta?.conversation_id || null;
     const cid = convoId ? `&conversation_id=${encodeURIComponent(convoId)}` : '';
     const url = `/api/appserver/transcript/range?offset=${offset}&limit=${limit}${cid}`;
-    const r = await fetch(url, { cache: 'no-store' });
-    if (!r.ok) return null;
-    return r.json();
+    const data = await sioCall('get_transcript_range', {
+      conversation_id: convoId,
+      offset,
+      limit,
+    }, { fallbackUrl: url, fallbackMethod: 'GET' });
+    if (!data || data.ok === false) return null;
+    return data;
   }
 
   async function loadOlderTranscript() {
@@ -4893,28 +4954,28 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     setPill(wsStatusEl, '…', 'warn');
-    const socket = io('/appserver', {
+    _socket = io('/appserver', {
       transports: ['websocket'],
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 500,
       reconnectionDelayMax: 5000,
     });
-    socket.on('connect', () => {
+    _socket.on('connect', () => {
       markWsOpen();
       setPill(wsStatusEl, '👍', 'ok');
       // Best-effort: refresh draft from SSOT on reconnect so stale tabs rehydrate.
       syncDraftFromServer(conversationMeta?.conversation_id);
     });
-    socket.on('disconnect', () => {
+    _socket.on('disconnect', () => {
       resetWsReady();
       setPill(wsStatusEl, '👎', 'err');
     });
-    socket.on('connect_error', () => {
+    _socket.on('connect_error', () => {
       resetWsReady();
       setPill(wsStatusEl, '👎', 'err');
     });
-    socket.on('appserver_event', (data) => {
+    _socket.on('appserver_event', (data) => {
       handleEvent(data);
     });
   }
@@ -5136,6 +5197,7 @@ document.addEventListener('DOMContentLoaded', () => {
       getPickerMode: () => pickerMode,
       setPickerMode: (val) => { pickerMode = val || 'cwd'; },
       saveApprovalQuick,
+      sioCall,
     },
     state: {
       get pendingNewConversation() { return pendingNewConversation; },
@@ -5147,12 +5209,12 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   startBtn?.addEventListener('click', async () => {
-    await postJson('/api/appserver/start', null);
+    await sioCall('app_start', {}, { fallbackUrl: '/api/appserver/start' });
     fetchStatus();
   });
 
   stopBtn?.addEventListener('click', async () => {
-    await postJson('/api/appserver/stop', null);
+    await sioCall('app_stop', {}, { fallbackUrl: '/api/appserver/stop' });
     fetchStatus();
   });
   (window.CodexAgentModules || []).forEach((fn) => {
@@ -5405,12 +5467,11 @@ document.addEventListener('DOMContentLoaded', () => {
 	    if (conversationSettings && typeof conversationSettings === 'object') {
 	      conversationSettings.markdown = enabled;
 	    }
-	    // Save to SSOT if we have an active conversation (explicit conversation_id so we don't depend on SSOT selection)
 	    if (conversationMeta?.conversation_id) {
-	      await postJson('/api/appserver/conversation', { 
+	      await sioCall('conversation_update', { 
 	        conversation_id: conversationMeta.conversation_id,
 	        settings: { ...conversationSettings, markdown: enabled } 
-	      });
+	      }, { fallbackUrl: '/api/appserver/conversation' });
 	    }
     // Re-render timeline immediately so the user sees the new markdown mode take effect.
     resetTimeline();
