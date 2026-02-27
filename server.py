@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/data/data/com.termux/files/usr/bin/python
 import asyncio
 import base64
 import json
@@ -50,7 +50,7 @@ async def _lifespan(app: FastAPI):
         # This keeps the backend stable even when the MCP stdio worker is session-scoped.
         await _get_or_start_shell_manager()
         agent_pty_monitor_task = asyncio.create_task(_agent_pty_monitor_loop(), name="agent-pty-monitor")
-        # Warm up ACP extensions in background (Gemini takes up to 60s to load)
+        # Warm up extensions in background (SDK client start, model listing, etc.)
         # Don't block server startup - first message will wait if needed
         async def _warmup_background():
             try:
@@ -74,6 +74,10 @@ async def _lifespan(app: FastAPI):
     # Cleanup on server shutdown: kill extension-owned subprocess shells.
     with suppress(Exception):
         await _terminate_agent_pty_conversation_shells(force=True)
+    # Cleanup Copilot SDK client
+    with suppress(Exception):
+        from extensions.copilot_sdk_client import shutdown_client
+        await shutdown_client()
     with suppress(Exception):
         await _stop_mcp_shell()
     with suppress(Exception):
@@ -1668,12 +1672,12 @@ async def _get_or_start_appserver_shell() -> Dict[str, Any]:
     orch = Orchestrator(mgr)
     cfg = _load_appserver_config()
     cwd = cfg.get("cwd") or "."
-    command = cfg.get("app_server_command") or "codex-app-server"
+    command = cfg.get("app_server_command") or "codex app-server"
     spec_path = Path(__file__).resolve().parent / "shellspec" / "app_server.yaml"
     shell = await orch.start_from_ref(
         f"{spec_path}#app_server",
         base_dir=spec_path.parent,
-        ctx={"CWD": cwd, "APP_SERVER_COMMAND": command},
+        ctx={"CWD": cwd},
         label="app-server:codex",
         wait_ready=False,
     )
@@ -3931,6 +3935,16 @@ async def codex_agent_ui() -> FastHTMLResponse:
                                         ),
                                         id="settings-rollout-row",
                                     ),
+                                    Label(
+                                        Span("Session"),
+                                        Div(
+                                            Input(type="text", id="settings-session", placeholder="(new session)", readonly=True),
+                                            Button("Resume", id="settings-session-browse", cls="btn ghost"),
+                                            cls="settings-row"
+                                        ),
+                                        id="settings-session-row",
+                                        style="display:none",
+                                    ),
                                     id="settings-codex-fields",
                                 ),
                                 Div(id="settings-extension-fields"),
@@ -4018,6 +4032,22 @@ async def codex_agent_ui() -> FastHTMLResponse:
                         ),
                         cls="picker-overlay hidden",
                         id="rollout-picker"
+                    ),
+                    Div(
+                        Div(
+                            Div(
+                                H3("Resume Session"),
+                                Button("×", id="session-picker-close", cls="btn ghost"),
+                                cls="picker-header"
+                            ),
+                            Div(
+                                Div(id="session-picker-list", cls="picker-list"),
+                                cls="picker-body"
+                            ),
+                            cls="picker-dialog"
+                        ),
+                        cls="picker-overlay hidden",
+                        id="session-picker"
                     ),
                     Div(
                         Div(
@@ -4293,6 +4323,22 @@ async def api_appserver_conversation_select(payload: Dict[str, Any] = Body(...))
                     _save_appserver_config(cfg)
     
     meta = _load_conversation_meta(convo_id)
+
+    # Resume Copilot SDK session if this conversation uses it
+    agent_type = (meta.get("settings") or {}).get("agent", "")
+    if agent_type == "copilot-sdk" and meta.get("thread_id"):
+        try:
+            from extensions.copilot_sdk_client import resume_session, has_session
+            if not has_session(convo_id):
+                cwd = (meta.get("settings") or {}).get("cwd", "~")
+                model = (meta.get("settings") or {}).get("model")
+                asyncio.create_task(
+                    resume_session(convo_id, cwd=cwd, model=model),
+                    name=f"copilot-resume:{convo_id[:8]}"
+                )
+        except ImportError:
+            pass
+
     async with _config_lock:
         cfg = _load_appserver_config()
         _add_conversation_to_config(convo_id, cfg)
@@ -5890,11 +5936,97 @@ async def api_extension_settings_schema(extension_id: str):
     return {"version": "1", "fields": []}
 
 
+@app.get("/api/extensions/copilot-sdk/models")
+async def api_copilot_sdk_models():
+    """List available models from the Copilot SDK."""
+    try:
+        from extensions.copilot_sdk_client import list_models
+        models = await list_models()
+        return {"models": models}
+    except ImportError:
+        return JSONResponse({"error": "Copilot SDK extension not loaded"}, status_code=503)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/extensions/copilot-sdk/sessions")
+async def api_copilot_sdk_sessions(cwd: Optional[str] = Query(None)):
+    """List Copilot SDK sessions, sorted by CWD relevance if provided."""
+    try:
+        from extensions.copilot_sdk_client import list_sessions
+        sessions = await list_sessions(cwd=cwd)
+        return {"sessions": sessions}
+    except ImportError:
+        return JSONResponse({"error": "Copilot SDK extension not loaded"}, status_code=503)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/extensions/copilot-sdk/sessions/resume")
+async def api_copilot_sdk_session_resume(payload: Dict[str, Any] = Body(...)):
+    """Resume a Copilot SDK session into a conversation."""
+    session_id = payload.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id")
+    
+    # Use provided conversation_id or create/get current one
+    conversation_id = payload.get("conversation_id")
+    if not conversation_id:
+        conversation_id = await _ensure_conversation()
+    
+    cwd = payload.get("cwd")
+    model = payload.get("model")
+    
+    try:
+        from extensions.copilot_sdk_client import resume_session_with_history
+        result = await resume_session_with_history(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            cwd=cwd,
+            model=model,
+        )
+        if not result.get("ok"):
+            return JSONResponse({"error": result.get("error", "Resume failed")}, status_code=500)
+        
+        # Write history items to transcript
+        items = result.pop("items", [])
+        if items:
+            await _write_transcript_entries(conversation_id, items)
+        
+        # Update config to point at this conversation
+        async with _config_lock:
+            cfg = _load_appserver_config()
+            cfg["conversation_id"] = conversation_id
+            cfg["thread_id"] = session_id
+            cfg["active_view"] = "conversation"
+            _save_appserver_config(cfg)
+        
+        return {
+            "ok": True,
+            "conversation_id": conversation_id,
+            "session_id": session_id,
+            "history_count": result.get("history_count", 0),
+        }
+    except ImportError:
+        return JSONResponse({"error": "Copilot SDK extension not loaded"}, status_code=503)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/extensions/debug/raw")
 async def api_extensions_debug_raw(limit: int = Query(50, gt=0, le=200)):
-    """Get raw ACP message buffer for debugging."""
-    from extensions.acp_client import get_acp_raw_buffer
-    return {"items": get_acp_raw_buffer(limit)}
+    """Get raw extension message buffer for debugging."""
+    try:
+        from extensions.copilot_sdk_client import get_raw_buffer
+        return {"items": get_raw_buffer(limit)}
+    except ImportError:
+        try:
+            from extensions.acp_client import get_acp_raw_buffer
+            return {"items": get_acp_raw_buffer(limit)}
+        except ImportError:
+            return {"items": []}
 
 
 @app.post("/api/shutdown")

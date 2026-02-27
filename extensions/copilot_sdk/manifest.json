@@ -1,0 +1,32 @@
+{
+  "id": "copilot-sdk",
+  "name": "GitHub Copilot",
+  "version": "1.0.0",
+  "type": "copilot_sdk",
+  "description": "GitHub Copilot CLI agent via the Python SDK",
+
+  "agent": {
+    "command": "copilot",
+    "args": [],
+    "env": {},
+    "eagerSessionInit": true
+  },
+
+  "capabilities": {
+    "sessionResume": true,
+    "streaming": true,
+    "modelListing": true,
+    "permissionHandling": true,
+    "hooks": true
+  },
+
+  "model": {
+    "name": "gpt-5.1-codex",
+    "provider": "github-copilot"
+  },
+
+  "ui": {
+    "icon": "copilot.svg",
+    "color": "#6e40c9"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "version": "1",
+  "description": "Settings schema for GitHub Copilot SDK extension",
+  "fields": [
+    {
+      "id": "cwd",
+      "type": "path",
+      "label": "Working Directory",
+      "placeholder": "~/project",
+      "default": "~",
+      "required": true,
+      "browse": true
+    },
+    {
+      "id": "model",
+      "type": "select",
+      "label": "Model",
+      "options": [],
+      "dynamic_source": "/api/extensions/copilot-sdk/models",
+      "default": ""
+    },
+    {
+      "id": "reasoning_effort",
+      "type": "select",
+      "label": "Reasoning Effort",
+      "options": [
+        {"value": "low", "label": "Low"},
+        {"value": "medium", "label": "Medium"},
+        {"value": "high", "label": "High"}
+      ],
+      "default": "medium"
+    }
+  ]
+}

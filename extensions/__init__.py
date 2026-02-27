@@ -5,7 +5,8 @@ Loads pluggable agent extensions from extensions/extensions.json.
 Each extension type maps to a handler module that implements handle_message().
 
 Currently supported types:
-- "acp": ACP protocol extensions (Gemini CLI, etc.) -> extensions.acp_client
+- "copilot_sdk": Copilot SDK extensions (GitHub Copilot CLI) -> extensions.copilot_sdk_client
+- "acp": ACP protocol extensions (legacy, deprecated) -> extensions.acp_client
 """
 
 import json
@@ -99,6 +100,24 @@ def _load_handler_for_type(
     meta_fns: Optional[Dict[str, Callable]],
 ) -> Optional[Any]:
     """Load the handler module for an extension type."""
+    if ext_type == "copilot_sdk":
+        try:
+            from extensions import copilot_sdk_client
+            copilot_sdk_client.init_copilot_manager(
+                extensions_dir,
+                server_root,
+                fws_getter,
+                broadcast_fn,
+                transcript_fn,
+                meta_fns,
+            )
+            return copilot_sdk_client
+        except Exception as e:
+            print(f"[Extensions] Failed to load Copilot SDK handler: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     if ext_type == "acp":
         try:
             from extensions import acp_client
@@ -114,8 +133,6 @@ def _load_handler_for_type(
         except Exception as e:
             print(f"[Extensions] Failed to load ACP handler: {e}")
             return None
-    
-    # Future: add more extension types here
     print(f"[Extensions] Unknown extension type: {ext_type}")
     return None
 
@@ -152,7 +169,14 @@ async def warm_up_extensions(timeout: float = 60.0) -> Dict[str, bool]:
     """
     results: Dict[str, bool] = {}
     
-    # Warm up ACP extensions
+    # Warm up Copilot SDK extensions
+    if "copilot_sdk" in _extension_handlers:
+        handler = _extension_handlers["copilot_sdk"]
+        if hasattr(handler, "warm_up_all_extensions"):
+            sdk_results = await handler.warm_up_all_extensions(timeout=timeout)
+            results.update(sdk_results)
+    
+    # Warm up ACP extensions (legacy)
     if "acp" in _extension_handlers:
         handler = _extension_handlers["acp"]
         if hasattr(handler, "warm_up_all_extensions"):
