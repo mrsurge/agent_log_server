@@ -1096,10 +1096,17 @@ document.addEventListener('DOMContentLoaded', () => {
       if (rel.startsWith('/')) rel = rel.slice(1);
       return rel || absPath;
     }
-    // Try to extract just the filename if path is too long
-    const parts = absPath.split('/');
-    if (parts.length > 3) {
-      return parts.slice(-2).join('/');
+    // Try expanding ~ to match against home-relative cwd
+    const home = '/data/data/com.termux/files/home';
+    if (absPath.startsWith(home + '/')) {
+      const cwdExpanded = cwd.startsWith('~') ? home + cwd.slice(1) : cwd;
+      if (cwdExpanded && absPath.startsWith(cwdExpanded)) {
+        let rel = absPath.slice(cwdExpanded.length);
+        if (rel.startsWith('/')) rel = rel.slice(1);
+        return rel || absPath;
+      }
+      // Show relative to home as ~/...
+      return '~/' + absPath.slice(home.length + 1);
     }
     return absPath;
   }
