@@ -1486,11 +1486,17 @@ document.addEventListener('DOMContentLoaded', () => {
 		    };
 		    let rel = null;
 		    if (typeof path === 'string' && path) {
-		      if (path.startsWith('/')) rel = toProjectRelativePath(path);
-		      else rel = path;
+		      const abs = path.startsWith('/') ? path : '/' + path;
+		      // Try project root first (editor's active project)
+		      rel = toProjectRelativePath(abs);
+		      // Try conversation CWD
+		      if (!rel) {
+		        const cwd = (conversationSettings?.cwd || '').replace(/\/+$/, '');
+		        if (cwd && abs.startsWith(cwd + '/')) rel = abs.slice(cwd.length + 1);
+		      }
 		    }
 		    if (rel) payload.rel = rel;
-		    else if (path) payload.path = path;
+		    else if (path) payload.path = path.startsWith('/') ? path : '/' + path;
 		    if (Number.isFinite(line)) payload.line = Number(line);
 		    if (Number.isFinite(column)) payload.column = Number(column);
 		    try {
@@ -1581,10 +1587,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (agentType === 'codex') {
       cwdOk = Boolean(settingsCwdEl?.value?.trim());
     } else {
-      // Check schema field for CWD
       const schemaVals = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
       cwdOk = Boolean(schemaVals.cwd?.trim());
     }
+    // Universal fallback: existing conversation already has CWD
+    if (!cwdOk) cwdOk = Boolean(conversationSettings?.cwd?.trim());
     if (!cwdOk) {
       setActivity('CWD required', true);
       return;
@@ -3420,11 +3427,22 @@ document.addEventListener('DOMContentLoaded', () => {
     const entry = getShellRow(evt.id);
     // Just show the command, skip cwd line (redundant)
     renderShellCmdRibbon(entry.cmdRibbon, evt.command || '');
+
+    // If event includes a file path, make the ribbon clickable (jump-to-file)
+    if (evt.path && entry.cmdRibbon) {
+      entry.cmdRibbon.style.cursor = 'pointer';
+      entry.cmdRibbon.title = evt.path;
+      entry.cmdRibbon.addEventListener('click', () => {
+        const line = evt.line || 1;
+        postTe2OpenRequest({ path: evt.path, line, column: 1 });
+      });
+    }
+
     entry.text = '';
     // Plain text mode - no xterm
     entry.termEl.textContent = '';
     lastEventType = 'shell';
-    setActivity('executing', true);
+    setActivity(evt.activity || 'executing', true);
     maybeAutoScroll();
   }
 
@@ -3489,7 +3507,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Update status
     setStatusDot(exitCode === 0 ? 'success' : 'error');
-    setActivity('idle', false);
+    // Don't clear activity label — let it persist until turn end or next tool overwrites it
     lastEventType = 'shell';
     maybeAutoScroll();
     
@@ -4267,10 +4285,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (agentType === 'codex') {
       cwd = settingsCwdEl?.value?.trim();
     } else {
-      // Get CWD from schema fields
+      // Get CWD from schema fields, fall back to saved settings for mid-flight edits
       const schemaVals = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
       cwd = schemaVals.cwd?.trim();
     }
+    // Universal fallback: existing conversation already has CWD saved
+    if (!cwd) cwd = conversationSettings?.cwd?.trim();
     if (!cwd) {
       setActivity('CWD required', true);
       return;
@@ -4301,9 +4321,14 @@ document.addEventListener('DOMContentLoaded', () => {
       };
     } else {
       // Non-codex: use schema values + common UI settings
-      const schemaVals = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
+      // Filter out empty/null values so server merge doesn't strip existing good settings
+      const schemaRaw = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
+      const schemaVals = Object.fromEntries(
+        Object.entries(schemaRaw).filter(([_, v]) => v !== '' && v != null)
+      );
       settings = {
         ...schemaVals,
+        cwd: schemaVals.cwd?.trim() || cwd,
         label: settingsLabelEl?.value?.trim() || null,
         commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
         markdown: mdEnabled,
@@ -4548,20 +4573,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function ensureInitialized() {
     if (initialized) return;
-    await sioCall('app_start', {}, { fallbackUrl: '/api/appserver/start' });
-    await waitForWs();
-    try {
-      await sendRpc('initialize', {
-        clientInfo: {
-          name: 'agent_log_server',
-          title: 'Agent Log Server',
-          version: '0.1.0',
-        }
-      });
-    } catch {
-      // ignore already initialized
+    const agentType = conversationSettings?.agent || 'codex';
+    if (agentType === 'codex') {
+      // Codex binary needs explicit start + JSON-RPC handshake
+      await sioCall('app_start', {}, { fallbackUrl: '/api/appserver/start' });
+      await waitForWs();
+      try {
+        await sendRpc('initialize', {
+          clientInfo: {
+            name: 'agent_log_server',
+            title: 'Agent Log Server',
+            version: '0.1.0',
+          }
+        });
+      } catch {
+        // ignore already initialized
+      }
+      await sendRpc('initialized', {}, { notify: true });
+    } else {
+      // Non-codex extensions manage their own process — just ensure SIO is up
+      await waitForWs();
     }
-    await sendRpc('initialized', {}, { notify: true });
     initialized = true;
   }
 

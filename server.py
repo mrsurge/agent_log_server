@@ -183,9 +183,14 @@ async def _sio_compact(sid, data):
 
 @socketio_server.on("conversation_get", namespace="/appserver")
 async def _sio_conversation_get(sid, data):
-    """Mirror of GET /api/appserver/conversation"""
+    """Mirror of GET /api/appserver/conversation or /conversations/{id}/meta"""
     try:
+        cid = data.get("conversation_id") if isinstance(data, dict) else None
+        if cid:
+            return await api_appserver_conversation_meta(cid)
         return await api_appserver_conversation()
+    except HTTPException as e:
+        return _sio_error(e.detail)
     except Exception as e:
         return _sio_error(str(e))
 
@@ -4566,14 +4571,7 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
                     print(f"[INFO] Hydrated {len(items)} transcript entries for {convo_id[:8]}")
         except Exception as e:
             print(f"[WARN] Session bind+hydrate failed: {e}")
-    elif agent_type and ext_loader.has_extension(agent_type):
-        # No session picked — check if agent requires eager init for new sessions
-        if ext_loader.requires_eager_session_init(agent_type):
-            cwd = final_settings.get("cwd", "~")
-            asyncio.create_task(
-                ext_loader.init_session(convo_id, agent_type, cwd),
-                name=f"eager-init:{convo_id}"
-            )
+    # No eager init — sessions are created on first message only (draft model)
     
     return meta
 
@@ -5615,17 +5613,26 @@ async def api_appserver_approval_record(payload: Dict[str, Any] = Body(...)):
 
 @app.post("/api/appserver/interrupt")
 async def api_appserver_interrupt(payload: Optional[Dict[str, Any]] = Body(None)):
-    info = await _get_or_start_appserver_shell()
-    await _ensure_appserver_reader(info["shell_id"])
-    await _ensure_appserver_initialized()
     convo_id = payload.get("conversation_id") if isinstance(payload, dict) else None
     if not isinstance(convo_id, str) or not convo_id:
         raise HTTPException(status_code=400, detail="Missing required field: conversation_id")
     convo_id = _sanitize_conversation_id(convo_id)
     meta = _load_conversation_meta(convo_id)
+
+    # Route by agent type — non-codex agents use ext_loader
+    agent_type = meta.get("settings", {}).get("agent", "codex")
+    if agent_type != "codex" and ext_loader.has_extension(agent_type):
+        result = await ext_loader.interrupt_session(agent_type, convo_id)
+        if not result.get("ok"):
+            raise HTTPException(status_code=409, detail=result.get("error", "Interrupt failed"))
+        return result
+
+    # Codex path: JSON-RPC turn/interrupt
+    info = await _get_or_start_appserver_shell()
+    await _ensure_appserver_reader(info["shell_id"])
+    await _ensure_appserver_initialized()
     thread_id = meta.get("thread_id")
     turn_id = meta.get("turn_id")
-
     if not thread_id or not turn_id:
         raise HTTPException(status_code=409, detail="No active turn to interrupt")
     await _rpc_request("turn/interrupt", params={"threadId": thread_id, "turnId": turn_id})

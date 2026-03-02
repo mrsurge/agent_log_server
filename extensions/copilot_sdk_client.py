@@ -417,10 +417,6 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
 
 # ── Session management ──────────────────────────────────────────────
 
-def requires_eager_session_init(extension_id: str) -> bool:
-    """Copilot SDK supports eager session init."""
-    return True
-
 
 def has_session(conversation_id: str) -> bool:
     return conversation_id in _sessions
@@ -477,12 +473,18 @@ async def init_session(
         _unsubs[conversation_id] = unsub
 
         # Store SDK session_id as thread_id in conversation meta (like codex)
+        # INVARIANT: thread_id is immutable once set — never overwrite
         if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
             meta = _meta_fns["load"](conversation_id)
             if meta:
-                meta["thread_id"] = sdk_session_id
-                meta["status"] = "active"
-                _meta_fns["save"](conversation_id, meta)
+                existing = meta.get("thread_id")
+                if existing and existing != sdk_session_id:
+                    print(f"[CopilotSDK] WARNING: init_session refusing to overwrite thread_id "
+                          f"{existing[:8]} with {sdk_session_id[:8]} for convo {conversation_id[:8]}")
+                else:
+                    meta["thread_id"] = sdk_session_id
+                    meta["status"] = "active"
+                    _meta_fns["save"](conversation_id, meta)
 
         print(f"[CopilotSDK] Session created: convo={conversation_id[:8]} sdk_session={sdk_session_id[:8]} cwd={cwd}")
         _add_to_raw_buffer("out", conversation_id, f"session_created sdk={sdk_session_id[:8]} cwd={cwd}")
@@ -565,9 +567,8 @@ async def resume_session(
 
     except Exception as e:
         print(f"[CopilotSDK] resume_session failed: {e}")
-        # If resume fails (session doesn't exist on SDK side), create a new one
-        cwd_resolved = cwd or os.path.expanduser("~")
-        return await init_session(conversation_id, "copilot-sdk", cwd_resolved)
+        _add_to_raw_buffer("err", conversation_id, f"resume_failed: {e}")
+        return {"ok": False, "error": f"Session resume failed: {e}"}
 
 
 # ── Message handling ────────────────────────────────────────────────
@@ -630,9 +631,38 @@ async def handle_message(
         return {"ok": True, "session_id": conversation_id}
 
     except Exception as e:
+        err_msg = str(e)
+        # SDK binary evicts inactive sessions — catch and retry via resume
+        if "Session not found" in err_msg or "session not found" in err_msg:
+            print(f"[CopilotSDK] Session evicted, attempting re-resume for {conversation_id[:8]}")
+            _add_to_raw_buffer("out", conversation_id, "session_evicted, re-resuming...")
+            # Clear stale in-memory state so resume rebuilds it
+            _sessions.pop(conversation_id, None)
+            _routers.pop(conversation_id, None)
+            if conversation_id in _unsubs:
+                try:
+                    _unsubs.pop(conversation_id)()
+                except Exception:
+                    pass
+            result = await resume_session(conversation_id, cwd=cwd, model=settings.get("model"))
+            if not result.get("ok"):
+                print(f"[CopilotSDK] Re-resume failed: {result}")
+                return result
+            session = _sessions.get(conversation_id)
+            router = _routers.get(conversation_id)
+            if not session or not router:
+                return {"ok": False, "error": "Session not found after re-resume"}
+            await router.on_turn_start(text)
+            try:
+                await session.send(MessageOptions(prompt=text))
+                return {"ok": True, "session_id": conversation_id}
+            except Exception as e2:
+                print(f"[CopilotSDK] Retry send failed: {e2}")
+                return {"ok": False, "error": str(e2)}
+
         print(f"[CopilotSDK] send failed: {e}")
         _add_to_raw_buffer("out", conversation_id, f"send_error: {e}")
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": err_msg}
 
 
 # ── Model listing ───────────────────────────────────────────────────
@@ -775,9 +805,15 @@ async def resume_session_with_history(
         return {"ok": False, "error": "Manager not initialized"}
 
     # 1. Bind thread_id into meta
+    # INVARIANT: thread_id is immutable once set — never overwrite
     if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
         meta = _meta_fns["load"](conversation_id)
         if meta:
+            existing = meta.get("thread_id")
+            if existing and existing != session_id:
+                print(f"[CopilotSDK] WARNING: resume_session_with_history refusing to overwrite "
+                      f"thread_id {existing[:8]} with {session_id[:8]} for convo {conversation_id[:8]}")
+                return {"ok": False, "error": f"Conversation already bound to thread {existing[:8]}"}
             meta["thread_id"] = session_id
             meta["status"] = "active"
             settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}

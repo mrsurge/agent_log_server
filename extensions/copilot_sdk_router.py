@@ -75,6 +75,7 @@ class CopilotEventRouter:
         # Block tracking for interleaved reasoning/message
         self._block_counter: int = 0
         self._last_block_type: Optional[str] = None
+        self._suppressed_tools: set = set()  # tool_call_ids for UI-only tools (e.g. report_intent)
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -295,27 +296,82 @@ class CopilotEventRouter:
 
     # ── Tool execution ──────────────────────────────────────────────
 
+    # Tools that are UI-only (routed to ribbon/status, not rendered as shell cards)
+    _UI_TOOLS = {"report_intent"}
+
+    # Tools that are "read-only explorers" — sanitized card + ribbon
+    _EXPLORE_TOOLS = {"view", "glob", "grep"}
+
+    def _sanitize_tool_label(self, tool_name: str, raw_args: Any) -> tuple:
+        """
+        Sanitize SDK tool call into (card_label, ribbon_label, path).
+        Returns (command for card header, activity label for left ribbon, file path or None).
+        """
+        args = raw_args if isinstance(raw_args, dict) else {}
+
+        if tool_name == "bash":
+            cmd = args.get("command", "")
+            desc = args.get("description", "")
+            ribbon = desc if desc else "executing"
+            return (cmd, ribbon, None)
+
+        if tool_name == "view":
+            path = args.get("path", "")
+            vrange = args.get("view_range", None)
+            # Build human-readable label
+            short_path = path.rsplit("/", 1)[-1] if path else ""
+            if vrange and isinstance(vrange, (list, tuple)) and len(vrange) >= 2:
+                label = f"{short_path}  Lines {vrange[0]}–{vrange[1]}"
+            elif vrange and isinstance(vrange, (list, tuple)) and len(vrange) == 1:
+                label = f"{short_path}  Line {vrange[0]}+"
+            elif short_path:
+                label = short_path
+            else:
+                label = "Exploring"
+            return (label, "Reading", path)
+
+        if tool_name in ("glob", "grep"):
+            pattern = args.get("pattern", "")
+            label = f"{tool_name} {pattern}" if pattern else tool_name
+            return (label, "Exploring", None)
+
+        # Default: tool_name + args as before
+        args_str = ""
+        if args:
+            parts = [f"{k}={v}" for k, v in args.items()]
+            args_str = " " + " ".join(parts)
+        elif isinstance(raw_args, str):
+            args_str = " " + raw_args
+        return (f"{tool_name}{args_str}", "executing", None)
+
     async def _handle_tool_start(self, event: SessionEvent) -> None:
         data = event.data
         # SDK uses data.tool_call_id as the stable tool call identifier
         tool_call_id = data.tool_call_id or str(event.id)
         tool_name = data.tool_name or data.mcp_tool_name or "tool"
-        # Build a command label from tool name + arguments (no truncation)
-        args_str = ""
-        raw_args = data.arguments
-        if raw_args:
+
+        # Intercept UI-only tools — route to ribbon, suppress shell card
+        if tool_name in self._UI_TOOLS:
+            raw_args = data.arguments
+            intent = ""
             if isinstance(raw_args, dict):
-                parts = []
-                for k, v in raw_args.items():
-                    parts.append(f"{k}={v}")
-                args_str = " " + " ".join(parts)
-            elif isinstance(raw_args, str):
-                args_str = " " + raw_args
-        command_label = f"{tool_name}{args_str}"
+                intent = raw_args.get("intent", "")
+            if intent:
+                await self._emit({
+                    "type": "thought",
+                    "conversation_id": self.conversation_id,
+                    "text": intent,
+                    "turn_id": self.current_turn_id,
+                })
+            self._suppressed_tools.add(tool_call_id)
+            return
+
+        raw_args = data.arguments
+        card_label, ribbon_label, file_path = self._sanitize_tool_label(tool_name, raw_args)
 
         self.tool_calls[tool_call_id] = {
             "id": tool_call_id,
-            "title": command_label,
+            "title": card_label,
             "tool_name": tool_name,
             "arguments": raw_args,
             "turn_id": self.current_turn_id,
@@ -325,18 +381,28 @@ class CopilotEventRouter:
         # Mark block type change so next message/reasoning delta gets a new ID
         self._last_block_type = "tool"
 
-        await self._emit({
+        shell_begin_evt = {
             "type": "shell_begin",
             "conversation_id": self.conversation_id,
             "id": tool_call_id,
             "turn_id": self.current_turn_id,
-            "command": command_label,
+            "command": card_label,
+            "activity": ribbon_label,
             "cwd": "",
-        })
+        }
+        if file_path:
+            shell_begin_evt["path"] = file_path
+        await self._emit(shell_begin_evt)
 
     async def _handle_tool_complete(self, event: SessionEvent) -> None:
         data = event.data
         tool_call_id = data.tool_call_id or str(event.parent_id or event.id)
+
+        # Suppressed UI-only tools — skip shell_end and transcript
+        if tool_call_id in self._suppressed_tools:
+            self._suppressed_tools.discard(tool_call_id)
+            return
+
         result_obj = data.result
         content = ""
         detailed = ""
@@ -348,6 +414,10 @@ class CopilotEventRouter:
         tool_call = self.tool_calls.get(tool_call_id, {})
         tool_name = (tool_call.get("tool_name") or "").lower()
         file_path = data.path or ""
+        if not file_path:
+            args = tool_call.get("arguments") or {}
+            if isinstance(args, dict):
+                file_path = args.get("path") or args.get("file_path") or ""
 
         await self._emit({
             "type": "shell_end",
@@ -392,6 +462,11 @@ class CopilotEventRouter:
     async def _handle_tool_progress(self, event: SessionEvent) -> None:
         data = event.data
         tool_call_id = data.tool_call_id or str(event.parent_id or event.id)
+
+        # Suppressed UI-only tools — skip shell_delta
+        if tool_call_id in self._suppressed_tools:
+            return
+
         # Progress can come via partial_output, progress_message, or content
         content = data.partial_output or data.progress_message or data.content or ""
         # For PARTIAL_RESULT events, check result object too
@@ -417,10 +492,9 @@ class CopilotEventRouter:
         intent = getattr(data, "intent", None) or ""
         if intent:
             await self._emit({
-                "type": "activity",
+                "type": "thought",
                 "conversation_id": self.conversation_id,
-                "label": intent,
-                "active": True,
+                "text": intent,
                 "turn_id": self.current_turn_id,
             })
 

@@ -203,37 +203,8 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
 
 
 def requires_eager_session_init(extension_id: str) -> bool:
-    """Check if an extension requires eager session initialization on settings save."""
-    ext_info = _extensions_registry.get(extension_id)
-    if not ext_info:
-        return False
-    
-    handler = _extension_handlers.get(ext_info["type"])
-    if handler and hasattr(handler, "requires_eager_session_init"):
-        return handler.requires_eager_session_init(extension_id)
-    
+    """Deprecated — eager init removed. Sessions init on first message only."""
     return False
-
-
-async def init_session(
-    conversation_id: str,
-    extension_id: str,
-    cwd: str,
-) -> Dict[str, Any]:
-    """
-    Initialize a session for an extension that requires eager init.
-    
-    Called when settings are saved for an extension with eagerSessionInit=true.
-    """
-    ext_info = _extensions_registry.get(extension_id)
-    if not ext_info:
-        return {"ok": False, "error": f"Unknown extension: {extension_id}"}
-    
-    handler = _extension_handlers.get(ext_info["type"])
-    if handler and hasattr(handler, "init_session"):
-        return await handler.init_session(conversation_id, extension_id, cwd)
-    
-    return {"ok": True}  # No-op for extensions that don't need it
 
 
 async def list_models(extension_id: str) -> Any:
@@ -308,6 +279,15 @@ async def shutdown_extension(extension_id: str) -> None:
     handler = get_handler(extension_id)
     if handler and hasattr(handler, "shutdown_client"):
         await handler.shutdown_client()
+
+
+async def interrupt_session(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+    """Interrupt/abort the active turn for an extension session."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "abort_session"):
+        ok = await handler.abort_session(conversation_id)
+        return {"ok": ok, "conversation_id": conversation_id}
+    return {"ok": False, "error": f"Extension {extension_id} does not support interrupt"}
 
 
 def get_raw_buffer(extension_id: str, limit: int = 50) -> Any:

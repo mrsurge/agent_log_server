@@ -664,13 +664,18 @@ async def _shared_acp_reader_loop(
                         if session:
                             session.session_id = session_id
                             session.ready = True
-                            # Store as thread_id in meta
+                            # Store as thread_id in meta (immutable once set)
                             if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
                                 meta = _meta_fns["load"](pending_convo_id)
                                 if meta:
-                                    meta["thread_id"] = session_id
-                                    meta["status"] = "active"
-                                    _meta_fns["save"](pending_convo_id, meta)
+                                    existing = meta.get("thread_id")
+                                    if existing and existing != session_id:
+                                        print(f"[ACP] WARNING: refusing to overwrite thread_id "
+                                              f"{existing[:8]} with {session_id[:8]}")
+                                    else:
+                                        meta["thread_id"] = session_id
+                                        meta["status"] = "active"
+                                        _meta_fns["save"](pending_convo_id, meta)
                     
                     # Route to the conversation's router
                     conversation_id = pending_convo_id
@@ -935,12 +940,8 @@ def get_extension_config(extension_id: str) -> Optional[Dict[str, Any]]:
 
 
 def requires_eager_session_init(extension_id: str) -> bool:
-    """Check if an extension requires eager session initialization."""
-    config = get_extension_config(extension_id)
-    if not config:
-        return False
-    agent_config = config.get("agent", {})
-    return agent_config.get("eagerSessionInit", False)
+    """Deprecated — eager init removed. Sessions init on first message only."""
+    return False
 
 
 async def init_session(

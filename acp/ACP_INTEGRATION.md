@@ -550,6 +550,126 @@ Frontend renders
 
 **Important:** `session.on()` is the ONE sync method in the SDK. The callback itself runs on the event loop (scheduled by `call_soon_threadsafe`), so `asyncio.get_running_loop()` works inside it.
 
+## Frontend Transport: Socket.IO Migration
+
+All frontend↔backend communication now uses Socket.IO (namespace `/appserver`). HTTP POST/GET calls have been replaced with `sioCall()`, a client-side helper that emits with ack callbacks.
+
+### `sioCall(event, data, options)`
+
+Promise wrapper for Socket.IO emit with ack:
+- Timeout: 10s default
+- HTTP fallback: `options.fallbackUrl` for graceful degradation
+- Server error format: `{"__error": "message"}` via `_sio_error()` helper
+
+### Events Migrated to SIO
+
+| Category | Events |
+|----------|--------|
+| Real-time | `send_message`, `send_shell_command`, `send_rpc`, `approval_response`, `interrupt_turn` |
+| Conversation CRUD | `conversation_create`, `conversation_get`, `conversation_update`, `conversation_delete`, `conversation_select`, `conversation_draft`, `conversation_bind_rollout` |
+| Data | `get_transcript`, `get_transcript_range`, `get_status`, `get_models`, `get_rollouts`, `get_rollout_preview`, `get_extensions`, `approval_record`, `conversations_list` |
+| App control | `app_start`, `app_stop` |
+| Extension | `get_extension_models`, `get_sessions`, `session_resume` |
+
+### What Remains on HTTP
+
+- PTY/MCP subsystem (`postJson()`)
+- Static assets
+- Filesystem operations
+- TE2 integration (`postTe2OpenRequest`)
+
+### Raw WebSocket Removal
+
+The `/ws/appserver` raw WebSocket endpoint has been removed. Only remaining WebSocket: `/ws/pty/{conversation_id}` for raw terminal data. The raw event buffer is retained for the debug endpoint (`/api/appserver/debug/raw`).
+
+## Interrupt Support
+
+SDK sessions can be interrupted via the existing interrupt endpoint:
+
+```
+POST /api/appserver/interrupt {conversation_id}
+    │
+    ├── agent == "codex" → existing Codex interrupt
+    └── agent in extensions → ext_loader.interrupt_session(ext_id, convo_id)
+                                  └── handler.abort_session(convo_id)
+                                        └── session.abort()
+```
+
+Added `interrupt_session()` pass-through in `extensions/__init__.py`.
+
+## Intent → Reasoning Ribbon
+
+SDK `INTENT` events are mapped to `type: "thought"` (not `type: "activity"`), which triggers both `setActivity()` (left status) and `setReasoningRibbon()` (right ribbon) on the frontend. This matches codex behavior where `**thought headers**` in reasoning are parsed to the ribbon.
+
+## Diff Path Resolution
+
+The SDK router extracts file paths for diff events from tool call arguments when `data.path` is empty (which is common for SDK tool completions):
+
+```python
+file_path = data.path or ""
+if not file_path:
+    args = tool_call.get("arguments") or {}
+    if isinstance(args, dict):
+        file_path = args.get("path") or args.get("file_path") or ""
+```
+
+This ensures diff cards have proper `data-path` attributes for TE2 "jump to file and line" functionality. The frontend's `toProjectRelativePath()` converts absolute paths to project-relative paths for the TE2 editor integration.
+
+## Agent-Aware Initialization
+
+`ensureInitialized()` in the frontend is agent-aware:
+- **Codex**: Full binary start + JSON-RPC handshake (`initialize`/`initialized`)
+- **Non-codex extensions**: Just `await waitForWs()` (near-instant, since SDK manages its own process)
+
+This eliminates the ~2s delay on first message for non-codex conversations.
+
+## Settings Save Safety
+
+### Empty Value Filtering
+
+Schema values are filtered before sending to the server to prevent the server's merge loop from stripping existing settings:
+
+```javascript
+// Filter out empty/null values — don't let blanks strip existing settings
+const schemaVals = Object.fromEntries(
+  Object.entries(schemaRaw).filter(([_, v]) => v !== '' && v != null)
+);
+```
+
+### Session Picker Exclusion
+
+`getSchemaValues()` skips `session_picker` fields entirely — they're one-time bindings, not persistent settings that should be re-sent on every save.
+
+### Schema Input Guard
+
+`renderSchemaFields()` has an `if (input)` guard before storing in `currentSchemaValues` — prevents `undefined` entries when `session_picker` is hidden (has thread). `getSchemaValues()` also null-guards each entry.
+
+## In-Memory State vs Disk State
+
+The SDK client maintains in-memory state that is NOT persisted to disk:
+
+| State | Storage | Survives Page Refresh | Survives Server Restart |
+|-------|---------|----------------------|------------------------|
+| `_sessions` dict | Python memory | ✅ (server still running) | ❌ |
+| `_routers` dict | Python memory | ✅ | ❌ |
+| `_pending_approvals` | Python memory | ✅ | ❌ |
+| `meta.json` (thread_id, settings) | Disk | ✅ | ✅ |
+| `transcript.jsonl` | Disk | ✅ | ✅ |
+
+**Critical implication:** Manual edits to `meta.json` (e.g., correcting a thread_id) require a server restart to take effect if the conversation already has an active session in `_sessions`.
+
+## Policy Settings
+
+Three configurable policies in `settings_schema.json`:
+
+| Setting | Options | Effect |
+|---------|---------|--------|
+| `approval_policy` | `auto-approve`, `suggest`, `always-ask` | Controls tool approval behavior |
+| `sandbox_policy` | `cwd-only`, `allow-all-paths`, `ask` | File access scope |
+| `web_policy` | `deny`, `allow`, `ask` | Network access |
+
+Enforced via `on_permission_request` and `pre_tool_use` hooks in the SDK session config.
+
 ## Known Issues
 
 1. **Ping warning** — `coroutine 'CopilotClient.ping' was never awaited` appears on startup. Cosmetic; doesn't affect functionality. Likely a uvloop/SDK interaction edge case.
@@ -559,6 +679,8 @@ Frontend renders
 3. **Lock initialization** — `asyncio.Lock()` must NOT be created at module import time (before uvloop takes over). Use lazy init via `_get_client_lock()`.
 
 4. **Delta events in hydration** — `hydrate_transcript()` only processes completed events (`ASSISTANT_MESSAGE`, `USER_MESSAGE`, `TOOL_EXECUTION_COMPLETE`). Delta events are skipped since we only need final content for transcript entries.
+
+5. **Large transcript payloads** — Conversations with 1MB+ command outputs can exceed the default 1MB WebSocket frame limit when proxied through TE2's `proxy_shell.py`. The upstream `websockets.connect()` call needs `max_size=16*1024*1024` (or similar) to handle these payloads.
 
 ## Migration from ACP
 

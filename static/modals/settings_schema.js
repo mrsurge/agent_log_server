@@ -292,8 +292,10 @@ window.CodexAgentModules.push((ctx) => {
           break;
       }
       
-      // Track for save
-      currentSchemaValues[field.id] = { input, type: field.type };
+      // Track for save (only if input was created)
+      if (input) {
+        currentSchemaValues[field.id] = { input, type: field.type };
+      }
       
       settingsExtensionFields.appendChild(label);
     });
@@ -305,6 +307,8 @@ window.CodexAgentModules.push((ctx) => {
   function getSchemaValues() {
     const values = {};
     Object.entries(currentSchemaValues).forEach(([id, { input, type }]) => {
+      if (!input) return;
+      if (type === 'session_picker') return; // one-time binding, not a persistent setting
       if (type === 'checkbox') {
         values[id] = input.checked;
       } else if (type === 'session_picker') {
