@@ -1,22 +1,31 @@
 """
 Extension Loader
 
-Loads pluggable agent extensions from extensions/extensions.json.
-Each extension type maps to a handler module that implements handle_message().
+Discovers and loads pluggable agent extensions by scanning subfolders for
+manifest.json files.  Each extension lives in its own directory under
+extensions/ with:
+    manifest.json   — metadata (id, name, type, enabled, capabilities)
+    client.py       — handler module (init_*_manager, handle_message, etc.)
+    router.py       — event translation (optional)
+    settings_schema.json — UI schema (optional)
 
-Currently supported types:
-- "copilot_sdk": Copilot SDK extensions (GitHub Copilot CLI) -> extensions.copilot_sdk_client
-- "acp": ACP protocol extensions (legacy, deprecated) -> extensions.acp_client
+extensions.json is checked first as an explicit override/ordering file.
+If absent, subfolders are scanned alphabetically.
 """
 
+import importlib
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-# Extension type -> handler module mapping
+# Extension type -> handler module
 _extension_handlers: Dict[str, Any] = {}
-_extensions_registry: Dict[str, Dict[str, Any]] = {}  # extension_id -> manifest info
+# extension_id -> registry info (id, name, type, path, manifest)
+_extensions_registry: Dict[str, Dict[str, Any]] = {}
 _initialized: bool = False
+
+# Callbacks stored for lazy init of discovered extensions
+_init_args: Dict[str, Any] = {}
 
 
 def load_extensions(
@@ -28,69 +37,106 @@ def load_extensions(
     meta_fns: Optional[Dict[str, Callable]] = None,
 ) -> None:
     """
-    Load all extensions from extensions.json and initialize handlers.
-    
-    Args:
-        extensions_dir: Path to static/extensions/
-        server_root: Path to server root
-        fws_getter: Async function to get framework_shells manager
-        broadcast_fn: Async function to broadcast WebSocket events
-        transcript_fn: Async function to append transcript entries
-        meta_fns: Optional dict with "load" and "save" functions for conversation meta
+    Discover and load extensions.
+
+    1. If extensions.json exists, load entries from it (explicit ordering).
+    2. Otherwise scan extensions/*/manifest.json (alphabetical).
+    3. For each enabled extension, import extensions.<folder>.client and
+       call its init function with the standard callback set.
     """
-    global _extension_handlers, _extensions_registry, _initialized
-    
-    extensions_json = extensions_dir / "extensions.json"
-    if not extensions_json.exists():
-        print("[Extensions] No extensions.json found")
-        _initialized = True
-        return
-    
-    try:
-        data = json.loads(extensions_json.read_text())
-    except Exception as e:
-        print(f"[Extensions] Failed to load extensions.json: {e}")
-        _initialized = True
-        return
-    
-    # Load each extension
-    for ext_info in data.get("extensions", []):
+    global _extension_handlers, _extensions_registry, _initialized, _init_args
+
+    _init_args = {
+        "extensions_dir": extensions_dir,
+        "server_root": server_root,
+        "fws_getter": fws_getter,
+        "broadcast_fn": broadcast_fn,
+        "transcript_fn": transcript_fn,
+        "meta_fns": meta_fns,
+    }
+
+    discovered = _discover_extensions(extensions_dir)
+
+    for ext_info in discovered:
         if not ext_info.get("enabled", True):
             continue
-        
-        ext_id = ext_info.get("id", "")
-        ext_type = ext_info.get("type", "")
-        
-        if not ext_id or not ext_type:
-            continue
-        
-        # Store in registry
+
+        ext_id = ext_info["id"]
+        ext_type = ext_info["type"]
+        folder = ext_info["folder"]
+
         _extensions_registry[ext_id] = {
             "id": ext_id,
             "name": ext_info.get("name", ext_id),
             "type": ext_type,
-            "path": ext_info.get("path", ""),
+            "path": folder,
         }
-        
-        # Initialize handler for this type if not already done
+
         if ext_type not in _extension_handlers:
-            handler = _load_handler_for_type(
-                ext_type,
-                extensions_dir,
-                server_root,
-                fws_getter,
-                broadcast_fn,
-                transcript_fn,
-                meta_fns,
-            )
+            handler = _load_handler(folder, ext_type, **_init_args)
             if handler:
                 _extension_handlers[ext_type] = handler
-    
+
     _initialized = True
-    print(f"[Extensions] Loaded {len(_extensions_registry)} extension(s): {list(_extensions_registry.keys())}")
+    print(f"[Extensions] Loaded {len(_extensions_registry)} extension(s): "
+          f"{list(_extensions_registry.keys())}")
 
 
-def _load_handler_for_type(
+def _discover_extensions(extensions_dir: Path) -> List[Dict[str, Any]]:
+    """Return list of extension info dicts from manifests."""
+    result: List[Dict[str, Any]] = []
+
+    # Strategy 1: explicit extensions.json
+    extensions_json = extensions_dir / "extensions.json"
+    if extensions_json.exists():
+        try:
+            data = json.loads(extensions_json.read_text())
+            for entry in data.get("extensions", []):
+                folder = entry.get("path", entry.get("id", ""))
+                manifest_path = extensions_dir / folder / "manifest.json"
+                manifest = {}
+                if manifest_path.exists():
+                    try:
+                        manifest = json.loads(manifest_path.read_text())
+                    except Exception:
+                        pass
+                result.append({
+                    "id": entry.get("id") or manifest.get("id", folder),
+                    "name": entry.get("name") or manifest.get("name", folder),
+                    "type": entry.get("type") or manifest.get("type", folder),
+                    "enabled": entry.get("enabled", manifest.get("enabled", True)),
+                    "folder": folder,
+                    "manifest": manifest,
+                })
+            return result
+        except Exception as e:
+            print(f"[Extensions] Failed to read extensions.json: {e}")
+
+    # Strategy 2: scan subfolders for manifest.json
+    for sub in sorted(extensions_dir.iterdir()):
+        if not sub.is_dir() or sub.name.startswith(("_", ".")):
+            continue
+        manifest_path = sub / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            result.append({
+                "id": manifest.get("id", sub.name),
+                "name": manifest.get("name", sub.name),
+                "type": manifest.get("type", sub.name),
+                "enabled": manifest.get("enabled", True),
+                "folder": sub.name,
+                "manifest": manifest,
+            })
+        except Exception as e:
+            print(f"[Extensions] Bad manifest in {sub.name}/: {e}")
+
+    return result
+
+
+def _load_handler(
+    folder: str,
     ext_type: str,
     extensions_dir: Path,
     server_root: Path,
@@ -99,42 +145,51 @@ def _load_handler_for_type(
     transcript_fn: Callable,
     meta_fns: Optional[Dict[str, Callable]],
 ) -> Optional[Any]:
-    """Load the handler module for an extension type."""
-    if ext_type == "copilot_sdk":
-        try:
-            from extensions import copilot_sdk_client
-            copilot_sdk_client.init_copilot_manager(
-                extensions_dir,
-                server_root,
-                fws_getter,
-                broadcast_fn,
-                transcript_fn,
-                meta_fns,
-            )
-            return copilot_sdk_client
-        except Exception as e:
-            print(f"[Extensions] Failed to load Copilot SDK handler: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+    """Dynamically import extensions.<folder>.client and call its init function."""
+    module_path = f"extensions.{folder}.client"
+    try:
+        mod = importlib.import_module(module_path)
+    except Exception as e:
+        print(f"[Extensions] Failed to import {module_path}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
-    if ext_type == "acp":
-        try:
-            from extensions import acp_client
-            acp_client.init_acp_manager(
-                extensions_dir,
-                server_root,
-                fws_getter,
-                broadcast_fn,
-                transcript_fn,
-                meta_fns,
-            )
-            return acp_client
-        except Exception as e:
-            print(f"[Extensions] Failed to load ACP handler: {e}")
-            return None
-    print(f"[Extensions] Unknown extension type: {ext_type}")
-    return None
+    # Convention: init function is init_<type>_manager(...)
+    init_fn_name = f"init_{ext_type}_manager"
+    init_fn = getattr(mod, init_fn_name, None)
+    if init_fn is None:
+        # Fallback: try init_<folder>_manager (folder may differ from type)
+        init_fn = getattr(mod, f"init_{folder}_manager", None)
+    if init_fn is None:
+        # Fallback: scan for any init_*_manager function
+        for attr in dir(mod):
+            if attr.startswith("init_") and attr.endswith("_manager") and callable(getattr(mod, attr)):
+                init_fn = getattr(mod, attr)
+                break
+    if init_fn is None:
+        # Last resort: try generic init_manager
+        init_fn = getattr(mod, "init_manager", None)
+    if init_fn is None:
+        print(f"[Extensions] {module_path} has no {init_fn_name}() or init_manager()")
+        return mod  # still return module — may work without init
+
+    try:
+        init_fn(
+            extensions_dir,
+            server_root,
+            fws_getter,
+            broadcast_fn,
+            transcript_fn,
+            meta_fns,
+        )
+    except Exception as e:
+        print(f"[Extensions] {init_fn_name}() failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+    return mod
 
 
 def get_handler(extension_id: str) -> Optional[Any]:

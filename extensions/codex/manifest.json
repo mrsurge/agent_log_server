@@ -1,0 +1,32 @@
+{
+  "id": "codex",
+  "name": "Codex App Server",
+  "version": "1.0.0",
+  "type": "codex_app_server",
+  "description": "Codex CLI agent via the app-server binary (JSON-RPC over stdio)",
+  "enabled": true,
+
+  "agent": {
+    "command": "codex",
+    "args": ["app-server"],
+    "shellspec": "shellspec/app_server.yaml#app_server"
+  },
+
+  "capabilities": {
+    "sessionResume": true,
+    "streaming": true,
+    "modelListing": true,
+    "permissionHandling": true,
+    "collabAgents": true
+  },
+
+  "model": {
+    "name": "gpt-5.1-codex",
+    "provider": "openai"
+  },
+
+  "ui": {
+    "icon": "codex.svg",
+    "color": "#10a37f"
+  }
+}

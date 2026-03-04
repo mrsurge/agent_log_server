@@ -46,6 +46,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsDiffSyntaxEl = document.getElementById('settings-diff-syntax');
   const settingsSemanticShellRibbonEl = document.getElementById('settings-semantic-shell-ribbon');
   const markdownToggleEl = document.getElementById('markdown-toggle');
+  const trackEditsToggleEl = document.getElementById('track-edits-toggle');
   const footerApprovalValue = document.getElementById('footer-approval-value');
   const footerApprovalToggle = document.getElementById('footer-approval-toggle');
   const footerApprovalOptions = document.getElementById('footer-approval-options');
@@ -120,6 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let rpcId = 1;
   let modelList = []; // Cached model list with supportedReasoningEfforts
   let markdownEnabled = true; // Toggle for markdown rendering
+  let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
   let useXterm = true; // Toggle for xterm.js vs text box rendering
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
   let semanticShellRibbonEnabled = false; // Tree-sitter semantic highlighting for shell command ribbons
@@ -146,6 +148,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let tokenCount = 0;
   let contextWindow = null;
   let autoScroll = true;
+  let _scrollProgrammatic = false; // Guard: prevent programmatic scroll from unpinning
   let normalizeTimer = null;
   let isNormalizing = false;
   let tributeInstance = null;
@@ -156,7 +159,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const planItems = new Map();
   let transcriptStart = 0;
   let transcriptEnd = 0;
-  let transcriptLimit = 120;
+  let transcriptLimit = 500;
   let transcriptLoading = false;
   let estimatedRowHeight = 28;
   let terminalMode = false;
@@ -177,6 +180,118 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastDraftHash = null;
   let draftDirty = false;
   let applyingDraft = false;
+
+  // ── Subagent containers ──────────────────────────────────────────
+  const subagentContainers = new Map(); // subagent_id -> { row, body, header, statusEl, items: [] }
+
+  function getSubagentContainer(id, name, intent) {
+    let sa = subagentContainers.get(id);
+    if (!sa) {
+      clearPlaceholder();
+      const row = document.createElement('div');
+      row.className = 'timeline-row subagent-card';
+      row.dataset.subagentId = id;
+
+      // Header is OUTSIDE body — always visible even when collapsed
+      const header = document.createElement('div');
+      header.className = 'subagent-header command-ribbon';
+      const label = document.createElement('span');
+      label.textContent = `${name || 'subagent'}: ${intent || 'working'}`;
+      const statusEl = document.createElement('span');
+      statusEl.className = 'subagent-status';
+      statusEl.textContent = '⏳ running';
+      header.append(label, statusEl);
+      row.appendChild(header);
+
+      const body = document.createElement('div');
+      body.className = 'subagent-body';
+      row.appendChild(body);
+
+      insertRow(row);
+      makeCollapsible(row, `subagent:${id}`, false);
+      // Whole header toggles collapse (no file-link conflict on subagent headers)
+      header.addEventListener('click', (e) => {
+        if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
+        row.classList.toggle('expanded');
+        if (row.classList.contains('expanded')) _expandedCards.add(`subagent:${id}`);
+        else _expandedCards.delete(`subagent:${id}`);
+        _saveExpandedCards();
+        maybeAutoScroll();
+      });
+      sa = { row, body, header, statusEl, label, items: [] };
+      subagentContainers.set(id, sa);
+    }
+    return sa;
+  }
+
+  function finalizeSubagent(id, summary, success) {
+    const sa = subagentContainers.get(id);
+    if (!sa) return;
+    sa.statusEl.textContent = success !== false ? '✓ done' : '✗ failed';
+    if (summary) {
+      const summaryEl = document.createElement('div');
+      summaryEl.className = 'subagent-summary';
+      summaryEl.style.cssText = 'padding: 4px 14px; font-size: 0.85em; opacity: 0.7; font-style: italic;';
+      summaryEl.textContent = summary;
+      sa.body.appendChild(summaryEl);
+    }
+  }
+
+  // ── Collapsible card helpers ──────────────────────────────────────
+  const _expandedCards = new Set(
+    JSON.parse(localStorage.getItem('expandedCards') || '[]')
+  );
+  function _saveExpandedCards() {
+    localStorage.setItem('expandedCards', JSON.stringify([..._expandedCards]));
+  }
+  function makeCollapsible(row, cardId, startExpanded) {
+    if (!row) return;
+    row.classList.add('collapsible');
+    const isExpanded = startExpanded || _expandedCards.has(cardId);
+    if (isExpanded) row.classList.add('expanded');
+
+    // Find or create ribbon to attach twisty + click handler
+    const ribbon = row.querySelector('.command-ribbon') || row.querySelector('.diff-path-label');
+    if (!ribbon) return;
+    let twistyEl = ribbon.querySelector('.twisty');
+    if (!twistyEl) {
+      twistyEl = document.createElement('span');
+      twistyEl.className = 'twisty';
+      twistyEl.textContent = '▶';
+      ribbon.appendChild(twistyEl);
+    }
+
+    // Helper: toggle expanded state + persist + scroll
+    function toggleCollapse() {
+      row.classList.toggle('expanded');
+      if (row.classList.contains('expanded')) {
+        _expandedCards.add(cardId);
+      } else {
+        _expandedCards.delete(cardId);
+      }
+      _saveExpandedCards();
+      maybeAutoScroll();
+    }
+
+    // Twisty click toggles collapse
+    twistyEl.style.pointerEvents = 'auto';
+    twistyEl.style.cursor = 'pointer';
+    twistyEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleCollapse();
+    });
+
+    // ALWAYS create a toggle zone on the right half — never wire the whole ribbon.
+    // Left side is reserved for file-link handlers (wired later or never).
+    // Right side is always the collapse toggle. They never overlap.
+    const toggleZone = document.createElement('span');
+    toggleZone.className = 'ribbon-toggle-zone';
+    ribbon.appendChild(toggleZone);
+    toggleZone.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleCollapse();
+    });
+  }
 
   // Note: underscore emphasis is handled by the markdown renderer; do not escape underscores
   // in the raw text stream, otherwise users will see literal backslashes in output.
@@ -535,6 +650,11 @@ document.addEventListener('DOMContentLoaded', () => {
     markdownEnabled = enabled;
     if (markdownToggleEl) markdownToggleEl.checked = enabled;
     if (settingsMarkdownEl) settingsMarkdownEl.checked = enabled;
+  }
+
+  function setTrackEditsEnabled(enabled) {
+    trackEditsEnabled = enabled;
+    if (trackEditsToggleEl) trackEditsToggleEl.checked = enabled;
   }
 
   function isXtermEnabled() {
@@ -970,6 +1090,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!el) return;
     const command = String(cmd || '');
 
+    // Preserve twisty + toggle-zone added by makeCollapsible before wiping content
+    const savedTwisty = el.querySelector('.twisty');
+    const savedToggle = el.querySelector('.ribbon-toggle-zone');
+
     // Prefer semantic highlighting when enabled and ready (Tree-sitter).
     if (isSemanticShellRibbonEnabled()) {
       if (!tsRibbonReady && !tsRibbonInitPromise) {
@@ -991,6 +1115,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
           }
           el.innerHTML = `<span class="shell-prompt">$ </span><code class="tsribbon">${html}</code>`;
+          if (savedTwisty) el.appendChild(savedTwisty);
+          if (savedToggle) el.appendChild(savedToggle);
           return;
         } catch (_) {
           // Fall through to hljs rendering.
@@ -1001,6 +1127,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Fallback: markdown-style highlight.js rendering (DOM code element + highlightElement).
     if (typeof hljs === 'undefined' || !command.trim()) {
       el.textContent = `$ ${command}`;
+      if (savedTwisty) el.appendChild(savedTwisty);
+      if (savedToggle) el.appendChild(savedToggle);
       return;
     }
     try {
@@ -1016,6 +1144,8 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (_) {
       el.textContent = `$ ${command}`;
     }
+    if (savedTwisty) el.appendChild(savedTwisty);
+    if (savedToggle) el.appendChild(savedToggle);
   }
 
   function setCommandRunning(running) {
@@ -1330,6 +1460,21 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     
     tributeInstance.attach(promptEl);
+
+    // Strip formatting on paste — keep only plain text (mention tokens are inserted programmatically)
+    promptEl.addEventListener('paste', (e) => {
+      e.preventDefault();
+      const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+      if (text) {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount) {
+          const range = sel.getRangeAt(0);
+          range.deleteContents();
+          range.insertNode(document.createTextNode(text));
+          range.collapse(false);
+        }
+      }
+    });
   }
 
   // Insert mention via button (manual insertion)
@@ -1478,39 +1623,32 @@ document.addEventListener('DOMContentLoaded', () => {
 	  }
 
 		  async function postTe2OpenRequest({ path, line, column }) {
-		    const url = '/api/te2/agent/open';
-		    await ensureProjectRootLoaded();
 		    const payload = {
 		      source: 'codex-agent',
 		      conversation_id: conversationMeta?.conversation_id || null,
 		    };
-		    let rel = null;
 		    if (typeof path === 'string' && path) {
-		      const abs = path.startsWith('/') ? path : '/' + path;
-		      // Try project root first (editor's active project)
-		      rel = toProjectRelativePath(abs);
-		      // Try conversation CWD
-		      if (!rel) {
+		      // Normalize: ensure absolute paths start with /
+		      let p = path;
+		      if (!p.startsWith('/') && /^(?:data|home|tmp|usr|var|etc|storage)\//.test(p)) {
+		        p = '/' + p;
+		      }
+		      if (p.startsWith('/')) {
+		        payload.path = p;
+		      } else {
+		        // Relative path — prepend conversation CWD to make absolute
 		        const cwd = (conversationSettings?.cwd || '').replace(/\/+$/, '');
-		        if (cwd && abs.startsWith(cwd + '/')) rel = abs.slice(cwd.length + 1);
+		        payload.path = cwd ? cwd + '/' + p : '/' + p;
 		      }
 		    }
-		    if (rel) payload.rel = rel;
-		    else if (path) payload.path = path.startsWith('/') ? path : '/' + path;
 		    if (Number.isFinite(line)) payload.line = Number(line);
 		    if (Number.isFinite(column)) payload.column = Number(column);
+		    console.log('[TE2_OPEN] payload:', JSON.stringify(payload), 'socket_connected:', !!(_socket && _socket.connected));
 		    try {
-		      const r = await fetch(url, {
-		        method: 'POST',
-		        headers: { 'Content-Type': 'application/json' },
-		        body: JSON.stringify(payload),
-		      });
-		      if (!r.ok) {
-		        const txt = await r.text().catch(() => '');
-		        console.warn('Failed to post TE2 open_request:', r.status, txt);
-		      }
+		      const result = await sioCall('te2_agent_open', payload);
+		      console.log('[TE2_OPEN] result:', JSON.stringify(result));
 		    } catch (e) {
-		      console.warn('Failed to post TE2 open_request:', e);
+		      console.warn('[TE2_OPEN] error:', e);
 		    }
 		  }
 
@@ -2037,7 +2175,9 @@ document.addEventListener('DOMContentLoaded', () => {
   function maybeAutoScroll(force) {
     if (!scrollContainer) return;
     if (autoScroll || force) {
+      _scrollProgrammatic = true;
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      requestAnimationFrame(() => { _scrollProgrammatic = false; });
     }
   }
 
@@ -2358,30 +2498,158 @@ document.addEventListener('DOMContentLoaded', () => {
     const truncateLines = conversationSettings?.commandOutputLines || 20;
     const pendingAgentPtyTerms = [];
     const agentPtyByBlock = new Map(); // blockId -> { row, termEl, cmd, buf }
+    // Track subagent containers for replay grouping
+    const replaySubagents = new Map(); // id -> { row, body, statusEl, label }
     items.forEach((entry) => {
       if (!entry || !entry.role) return;
+
+      // Subagent lifecycle entries
+      if (entry.role === 'subagent_start') {
+        // Check if a synthetic container already exists in the DOM
+        // (created by getTarget when subagent_start was outside the window)
+        const existing = timelineEl.querySelector(`.subagent-card[data-subagent-id="${entry.id}"]`);
+        if (existing) {
+          // Update the synthetic container's label with real name/intent
+          const lbl = existing.querySelector('.subagent-header span:first-child');
+          if (lbl) lbl.textContent = `${entry.name || 'subagent'}: ${entry.intent || 'working'}`;
+          return;
+        }
+        const row = document.createElement('div');
+        row.className = 'timeline-row subagent-card';
+        row.dataset.subagentId = entry.id;
+        // Header OUTSIDE body — always visible when collapsed
+        const header = document.createElement('div');
+        header.className = 'subagent-header command-ribbon';
+        const label = document.createElement('span');
+        label.textContent = `${entry.name || 'subagent'}: ${entry.intent || 'working'}`;
+        const statusEl = document.createElement('span');
+        statusEl.className = 'subagent-status';
+        statusEl.textContent = '⏳ running';
+        header.append(label, statusEl);
+        row.appendChild(header);
+        const body = document.createElement('div');
+        body.className = 'subagent-body';
+        row.appendChild(body);
+        makeCollapsible(row, `subagent:${entry.id}`, false);
+        // Whole header toggles (no file-link on subagent headers)
+        const saCardId = `subagent:${entry.id}`;
+        header.addEventListener('click', (e) => {
+          if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
+          row.classList.toggle('expanded');
+          if (row.classList.contains('expanded')) _expandedCards.add(saCardId);
+          else _expandedCards.delete(saCardId);
+          _saveExpandedCards();
+          maybeAutoScroll();
+        });
+        replaySubagents.set(entry.id, { row, body, statusEl, label });
+        fragment.appendChild(row);
+        return;
+      }
+      if (entry.role === 'subagent_end') {
+        let sa = replaySubagents.get(entry.id);
+        // Also check DOM for synthetic container from a prior render batch
+        if (!sa) {
+          const existing = timelineEl.querySelector(`.subagent-card[data-subagent-id="${entry.id}"]`);
+          if (existing) {
+            sa = {
+              statusEl: existing.querySelector('.subagent-status'),
+              body: existing.querySelector('.subagent-body'),
+            };
+          }
+        }
+        if (sa) {
+          if (sa.statusEl) sa.statusEl.textContent = entry.success !== false ? '✓ done' : '✗ failed';
+          if (entry.summary) {
+            const summaryEl = document.createElement('div');
+            summaryEl.className = 'subagent-summary';
+            summaryEl.style.cssText = 'padding: 4px 14px; font-size: 0.85em; opacity: 0.7; font-style: italic;';
+            summaryEl.textContent = entry.summary;
+            if (sa.body) sa.body.appendChild(summaryEl);
+          }
+        }
+        return;
+      }
+
+      // Helper: resolve target container (subagent body or main fragment)
+      // If subagent_start was outside the pagination window, create a
+      // synthetic container so child events still group correctly.
+      function getTarget() {
+        if (entry.subagent_id) {
+          console.log('[SUBAGENT-REPLAY] entry has subagent_id:', entry.subagent_id, 'role:', entry.role, 'map has:', replaySubagents.has(entry.subagent_id));
+          let sa = replaySubagents.get(entry.subagent_id);
+          if (!sa) {
+            console.log('[SUBAGENT-REPLAY] Creating synthetic container for:', entry.subagent_id);
+            // Synthetic subagent container (subagent_start was outside window)
+            const row = document.createElement('div');
+            row.className = 'timeline-row subagent-card';
+            row.dataset.subagentId = entry.subagent_id;
+            const header = document.createElement('div');
+            header.className = 'subagent-header command-ribbon';
+            const label = document.createElement('span');
+            label.textContent = 'subagent: (earlier in transcript)';
+            const statusEl = document.createElement('span');
+            statusEl.className = 'subagent-status';
+            statusEl.textContent = '✓ done';
+            header.append(label, statusEl);
+            row.appendChild(header);
+            const body = document.createElement('div');
+            body.className = 'subagent-body';
+            row.appendChild(body);
+            makeCollapsible(row, `subagent:${entry.subagent_id}`, true);
+            const saCardId = `subagent:${entry.subagent_id}`;
+            header.addEventListener('click', (e) => {
+              if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
+              row.classList.toggle('expanded');
+              if (row.classList.contains('expanded')) _expandedCards.add(saCardId);
+              else _expandedCards.delete(saCardId);
+              _saveExpandedCards();
+              maybeAutoScroll();
+            });
+            sa = { row, body, statusEl, label };
+            replaySubagents.set(entry.subagent_id, sa);
+            fragment.appendChild(row);
+          }
+          return sa.body;
+        }
+        return fragment;
+      }
+
       if (entry.role === 'reasoning') {
         const { row, body } = buildRow('reasoning', 'reasoning');
         const pre = document.createElement('pre');
         pre.textContent = entry.text || '';
         body.append(pre);
-        fragment.appendChild(row);
+        getTarget().appendChild(row);
         return;
       }
       if (entry.role === 'diff') {
         const { row, body } = buildRow('diff', 'diff');
-        // Show file path if available
-        if (entry.path) {
-          const pathDiv = document.createElement('div');
-          pathDiv.className = 'diff-path';
-          pathDiv.textContent = toRelativePath(entry.path);
-          body.append(pathDiv);
+        // Build ribbon — extract path from diff header if not provided
+        let diffPath = entry.path || '';
+        if (!diffPath && entry.text) {
+          const m = entry.text.match(/^diff --git a\/.+ b\/(.+)$/m);
+          if (m) diffPath = m[1];
         }
+        const pathDiv = document.createElement('div');
+        pathDiv.className = 'diff-path command-ribbon';
+        if (diffPath) {
+          pathDiv.innerHTML = `<strong>${escapeHtml(toRelativePath(diffPath))}</strong>`;
+          pathDiv.style.cursor = 'pointer';
+          pathDiv.dataset.hasClickHandler = 'true';
+          pathDiv.addEventListener('click', (e) => {
+            if (e.target.closest('.twisty')) return;
+            postTe2OpenRequest({ path: diffPath, line: 1, column: 1 });
+          });
+        } else {
+          pathDiv.innerHTML = '<strong>diff</strong>';
+        }
+        body.append(pathDiv);
         const pre = document.createElement('pre');
         pre.className = 'diff-block';
-        pre.innerHTML = formatDiff(entry.text || '', entry.path);
+        pre.innerHTML = formatDiff(entry.text || '', diffPath);
         body.append(pre);
-        fragment.appendChild(row);
+        makeCollapsible(row, `diff:${entry.id || diffPath || 'diff'}`, false);
+        getTarget().appendChild(row);
         return;
       }
       if (entry.role === 'command') {
@@ -2412,6 +2680,18 @@ document.addEventListener('DOMContentLoaded', () => {
           cmdRibbon.textContent = ribbonText;
         }
         body.appendChild(cmdRibbon);
+        // If entry has a path, make ribbon clickable (jump-to-file)
+        if (entry.path) {
+          cmdRibbon.style.cursor = 'pointer';
+          cmdRibbon.title = entry.path;
+          cmdRibbon.dataset.hasClickHandler = 'true';
+          const ePath = entry.path;
+          const eLine = entry.line || 1;
+          cmdRibbon.addEventListener('click', (e) => {
+            if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
+            postTe2OpenRequest({ path: ePath, line: eLine, column: 1 });
+          });
+        }
         // Output
         if (entry.output) {
           const hasAnsi = typeof entry.output === 'string' && entry.output.includes('\x1b[');
@@ -2467,10 +2747,10 @@ document.addEventListener('DOMContentLoaded', () => {
           body.appendChild(footer);
         }
         row.appendChild(body);
-        fragment.appendChild(row);
+        makeCollapsible(row, `cmd:${entry.id || entry.agent_block_id || cmd.slice(0, 40)}`, false);
+        getTarget().appendChild(row);
         return;
       }
-      // Plan entries (completed plan from turn) - collapsible
       if (entry.role === 'plan') {
         const { row, body } = buildRow('plan', 'plan');
         
@@ -2520,7 +2800,7 @@ document.addEventListener('DOMContentLoaded', () => {
           list.style.display = collapsed ? 'none' : 'flex';
         });
         
-        fragment.appendChild(row);
+        getTarget().appendChild(row);
         return;
       }
       // Token usage entries - update context display on replay
@@ -2613,7 +2893,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         row.appendChild(body);
-        fragment.appendChild(row);
+        getTarget().appendChild(row);
         
         setStatusDot(exitCode === 0 ? 'success' : 'error');
         return;
@@ -2642,7 +2922,7 @@ document.addEventListener('DOMContentLoaded', () => {
           body.appendChild(termEl);
 
           row.appendChild(body);
-          fragment.appendChild(row);
+          getTarget().appendChild(row);
           // Don't create xterm yet - element not in DOM. Will be created in RAF callback.
           const rec = { row, termEl, cmdRibbon, term: null, cmd, buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
           agentPtyByBlock.set(blockId, rec);
@@ -2675,7 +2955,7 @@ document.addEventListener('DOMContentLoaded', () => {
             body.appendChild(termEl);
 
             row.appendChild(body);
-            fragment.appendChild(row);
+            getTarget().appendChild(row);
             // Don't create xterm yet - element not in DOM
             rec = { row, termEl, cmdRibbon, term: null, cmd: '', buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
             agentPtyByBlock.set(blockId, rec);
@@ -2714,7 +2994,7 @@ document.addEventListener('DOMContentLoaded', () => {
         pre.className = 'error-text';
         pre.textContent = entry.text || '';
         body.appendChild(pre);
-        fragment.appendChild(row);
+        getTarget().appendChild(row);
         return;
       }
       // MCP tool call entries
@@ -2826,7 +3106,7 @@ document.addEventListener('DOMContentLoaded', () => {
           body.appendChild(footer);
         }
         row.appendChild(body);
-        fragment.appendChild(row);
+        getTarget().appendChild(row);
         return;
       }
       // Web search entries
@@ -2845,7 +3125,7 @@ document.addEventListener('DOMContentLoaded', () => {
           body.appendChild(queryPre);
         }
         row.appendChild(body);
-        fragment.appendChild(row);
+        getTarget().appendChild(row);
         return;
       }
       const label = entry.role === 'assistant' ? 'assistant' : entry.role;
@@ -2870,7 +3150,7 @@ document.addEventListener('DOMContentLoaded', () => {
         pre.textContent = entry.role === 'assistant' ? stripCitations(entry.text || '') : (entry.text || '');
         body.append(pre);
       }
-      fragment.appendChild(row);
+      getTarget().appendChild(row);
       incrementMessages();
     });
     clearPlaceholder();
@@ -2912,11 +3192,17 @@ document.addEventListener('DOMContentLoaded', () => {
     updateSpacerHeights();
   }
 
-  function getAssistantRow(id) {
+  function getAssistantRow(id, parentEl) {
     const key = id || 'assistant';
     let entry = assistantRows.get(key);
     if (!entry) {
-      const { body } = createRow('message', 'assistant');
+      const { row, body } = buildRow('message', 'assistant');
+      // If parentEl provided (subagent body), insert there instead of main timeline
+      if (parentEl) {
+        parentEl.appendChild(row);
+      } else {
+        insertRow(row);
+      }
       const container = document.createElement('div');
       container.className = 'markdown-body';
       body.append(container);
@@ -2936,9 +3222,9 @@ document.addEventListener('DOMContentLoaded', () => {
     return entry;
   }
 
-  function appendAssistantDelta(id, delta) {
+  function appendAssistantDelta(id, delta, parentEl) {
     if (!delta) return;
-    const entry = getAssistantRow(id);
+    const entry = getAssistantRow(id, parentEl);
     const cleanDelta = stripCitations(delta);
     if (entry.useMarkdown && entry.parser) {
       smd.parser_write(entry.parser, cleanDelta);
@@ -2948,7 +3234,7 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
-  function finalizeAssistant(id, text) {
+  function finalizeAssistant(id, text, parentEl) {
     const key = id || 'assistant';
     const entry = assistantRows.get(key);
     if (!entry) return;
@@ -2997,21 +3283,35 @@ document.addEventListener('DOMContentLoaded', () => {
     if (text) entry.pre.textContent = text;
   }
 
-  function getDiffRow(id, path) {
+  function getDiffRow(id, path, parentEl) {
     const key = id || 'diff';
     let entry = diffRows.get(key);
     if (!entry) {
-      const { body } = createRow('diff', 'diff');
+      const { row, body } = buildRow('diff', 'diff');
+      const pathLabel = document.createElement('div');
+      pathLabel.className = 'diff-path-label command-ribbon';
       if (path) {
-        const pathLabel = document.createElement('div');
-        pathLabel.className = 'diff-path-label';
         pathLabel.innerHTML = `<strong>${escapeHtml(toRelativePath(path))}</strong>`;
-        body.append(pathLabel);
+        pathLabel.style.cursor = 'pointer';
+        pathLabel.dataset.hasClickHandler = 'true';
+        pathLabel.addEventListener('click', (e) => {
+          if (e.target.closest('.twisty')) return;
+          postTe2OpenRequest({ path, line: 1, column: 1 });
+        });
+      } else {
+        pathLabel.innerHTML = '<strong>diff</strong>';
       }
+      body.append(pathLabel);
       const pre = document.createElement('pre');
       pre.className = 'diff-block';
       body.append(pre);
-      entry = { pre };
+      if (parentEl) {
+        parentEl.appendChild(row);
+      } else {
+        insertRow(row);
+      }
+      makeCollapsible(row, `diff:${key}`, false);
+      entry = { pre, row };
       diffRows.set(key, entry);
     }
     return entry;
@@ -3037,6 +3337,7 @@ document.addEventListener('DOMContentLoaded', () => {
       body.appendChild(argsPre);
       row.appendChild(body);
       insertRow(row);
+      makeCollapsible(row, `tool:${key}`, false);
       entry = { row, body, argsPre, header, resultEl: null };
       toolRows.set(key, entry);
     }
@@ -3391,7 +3692,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Shell streaming functions ---
   // Uses same styling as command-result (renderCommandResult)
-  function getShellRow(id) {
+  function getShellRow(id, parentEl) {
     let entry = shellRows.get(id);
     if (!entry) {
       clearPlaceholder();
@@ -3414,7 +3715,12 @@ document.addEventListener('DOMContentLoaded', () => {
       body.appendChild(termEl);
       
       row.appendChild(body);
-      insertRow(row);
+      if (parentEl) {
+        parentEl.appendChild(row);
+      } else {
+        insertRow(row);
+      }
+      makeCollapsible(row, `shell:${id}`, false);
       
       // No xterm for shell cards - plain text only
       entry = { row, cmdRibbon, term: null, termEl, text: '' };
@@ -3424,25 +3730,42 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderShellBegin(evt) {
-    const entry = getShellRow(evt.id);
+    // Route into subagent container if tagged
+    let parentEl = null;
+    if (evt.subagent_id) {
+      const sa = getSubagentContainer(evt.subagent_id, '', '');
+      parentEl = sa.body;
+      // Update subagent header with current action
+      sa.label.textContent = `${sa.label.textContent.split(':')[0]}: ${evt.command || 'working'}`;
+    }
+    const entry = getShellRow(evt.id, parentEl);
     // Just show the command, skip cwd line (redundant)
     renderShellCmdRibbon(entry.cmdRibbon, evt.command || '');
+
+    console.log('[SHELL_BEGIN] id=', evt.id, 'path=', evt.path, 'command=', evt.command, 'hasCmdRibbon=', !!entry.cmdRibbon);
 
     // If event includes a file path, make the ribbon clickable (jump-to-file)
     if (evt.path && entry.cmdRibbon) {
       entry.cmdRibbon.style.cursor = 'pointer';
       entry.cmdRibbon.title = evt.path;
-      entry.cmdRibbon.addEventListener('click', () => {
+      entry.cmdRibbon.addEventListener('click', (e) => {
+        console.log('[RIBBON_CLICK] FIRED', e.target.tagName, e.target.className);
+        console.log('[RIBBON_CLICK] twisty?', !!e.target.closest('.twisty'), 'toggle?', !!e.target.closest('.ribbon-toggle-zone'));
+        if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
         const line = evt.line || 1;
+        console.log('[RIBBON_CLICK] calling postTe2OpenRequest path=', evt.path, 'line=', line);
         postTe2OpenRequest({ path: evt.path, line, column: 1 });
       });
+      console.log('[RIBBON_CLICK] handler wired for path=', evt.path);
     }
 
     entry.text = '';
     // Plain text mode - no xterm
     entry.termEl.textContent = '';
     lastEventType = 'shell';
-    setActivity(evt.activity || 'executing', true);
+    if (!evt.subagent_id) {
+      setActivity(evt.activity || 'executing', true);
+    }
     maybeAutoScroll();
   }
 
@@ -3469,10 +3792,25 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const exitCode = evt.exitCode ?? 0;
 
+    // Update command ribbon if shell_end carries a refined label
+    const cmd = String(evt.command || '');
+    if (cmd && entry.cmdRibbon) {
+      renderShellCmdRibbon(entry.cmdRibbon, cmd);
+      // Add path click handler if provided and not already wired
+      if (evt.path && !entry.cmdRibbon.dataset.hasClickHandler) {
+        entry.cmdRibbon.style.cursor = 'pointer';
+        entry.cmdRibbon.title = evt.path;
+        entry.cmdRibbon.dataset.hasClickHandler = 'true';
+        entry.cmdRibbon.addEventListener('click', (e) => {
+          if (e.target.closest('.twisty')) return;
+          postTe2OpenRequest({ path: evt.path, line: evt.line || 1, column: 1 });
+        });
+      }
+    }
+
     // Prefer final stdout/stderr from the event so we can do syntax highlighting.
     const stdout = String(evt.stdout || '');
     const stderr = String(evt.stderr || '');
-    const cmd = String(evt.command || '');
     const lang = detectLangFromCommand(cmd);
     if (stdout || stderr) {
       if (lang && typeof hljs !== 'undefined') {
@@ -3516,7 +3854,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderShellBatchResult(evt) {
-    // Fallback - use same structure as renderCommandResult
+    // Fallback - shell_end without prior shell_begin
     clearPlaceholder();
     const row = document.createElement('div');
     row.className = 'timeline-row command-result';
@@ -3524,18 +3862,36 @@ document.addEventListener('DOMContentLoaded', () => {
     const body = document.createElement('div');
     body.className = 'body';
     
-    // Command ribbon
+    // Command ribbon — same polish as replay/shell_begin
     const cmdRibbon = document.createElement('div');
     cmdRibbon.className = 'command-ribbon';
-    cmdRibbon.textContent = `$ ${evt.command || '(shell)'}`;
+    const cmd = String(evt.command || '(shell)');
+    renderShellCmdRibbon(cmdRibbon, cmd);
+
+    // If event includes a file path, make ribbon clickable
+    if (evt.path) {
+      cmdRibbon.style.cursor = 'pointer';
+      cmdRibbon.title = evt.path;
+      cmdRibbon.dataset.hasClickHandler = 'true';
+      cmdRibbon.addEventListener('click', (e) => {
+        if (e.target.closest('.twisty')) return;
+        postTe2OpenRequest({ path: evt.path, line: evt.line || 1, column: 1 });
+      });
+    }
     body.appendChild(cmdRibbon);
     
+    // Route into subagent container if tagged
+    let parentEl = null;
+    if (evt.subagent_id) {
+      const sa = getSubagentContainer(evt.subagent_id, '', '');
+      parentEl = sa.body;
+    }
+
     // Output
     const pre = document.createElement('pre');
     pre.className = 'command-output';
     const stdout = String(evt.stdout || '');
     const stderr = String(evt.stderr || '');
-    const cmd = String(evt.command || '');
     const lang = detectLangFromCommand(cmd);
     if (stdout || stderr) {
       if (lang && typeof hljs !== 'undefined') {
@@ -3568,10 +3924,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     row.appendChild(body);
-    insertRow(row);
+    if (parentEl) {
+      parentEl.appendChild(row);
+    } else {
+      insertRow(row);
+    }
+    makeCollapsible(row, `shell-batch:${evt.id || cmd.slice(0, 40)}`, false);
     
     setStatusDot(exitCode === 0 ? 'success' : 'error');
-    setActivity('idle', false);
   }
 
   // Render a plan card (completed plan from turn) - collapsible
@@ -3899,6 +4259,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     row.appendChild(body);
+    makeCollapsible(row, `cmd:${agentBlockId || command.slice(0, 40)}`, false);
     
     // Insert before bottom spacer
     if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
@@ -3918,8 +4279,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function addDiff(id, text, path) {
-    const entry = getDiffRow(id, path);
+  function addDiff(id, text, path, parentEl) {
+    const entry = getDiffRow(id, path, parentEl);
     entry.pre.innerHTML = formatDiff(text || '', path);
     lastEventType = 'diff';
     maybeAutoScroll();
@@ -4317,6 +4678,7 @@ document.addEventListener('DOMContentLoaded', () => {
         useXterm: xtermEnabled,
         diffSyntax: diffSyntaxEnabled,
         semanticShellRibbon: semanticRibbonEnabled,
+        trackEdits: trackEditsEnabled,
         agent: agentType,
       };
     } else {
@@ -4335,6 +4697,7 @@ document.addEventListener('DOMContentLoaded', () => {
         useXterm: xtermEnabled,
         diffSyntax: diffSyntaxEnabled,
         semanticShellRibbon: semanticRibbonEnabled,
+        trackEdits: trackEditsEnabled,
         agent: agentType,
       };
     }
@@ -4525,6 +4888,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       // Sync markdown toggle from settings
       setMarkdownEnabled(conversationSettings?.markdown !== false);
+      // Sync track-edits toggle from settings
+      setTrackEditsEnabled(conversationSettings?.trackEdits === true);
       // Sync xterm toggle from settings
       setXtermEnabled(conversationSettings?.useXterm !== false);
       // Sync diff syntax toggle from settings
@@ -4729,16 +5094,23 @@ document.addEventListener('DOMContentLoaded', () => {
     transcriptLoading = true;
     try {
       const prevOffset = Math.max(0, transcriptStart - transcriptLimit);
-      const beforeHeight = scrollContainer?.scrollHeight || 0;
-      const data = await fetchTranscriptRange(prevOffset, transcriptStart - prevOffset);
-      if (data && Array.isArray(data.items)) {
+      const count = transcriptStart - prevOffset;
+      if (count <= 0) return;
+      const data = await fetchTranscriptRange(prevOffset, count);
+      if (data && Array.isArray(data.items) && data.items.length) {
         transcriptTotal = data.total || transcriptTotal;
         transcriptStart = data.offset ?? prevOffset;
+        // Snapshot scroll position BEFORE rendering (spacer will shrink, content will grow)
+        const oldScrollTop = scrollContainer?.scrollTop || 0;
+        const oldScrollHeight = scrollContainer?.scrollHeight || 0;
         renderTranscriptEntries(data.items, { prepend: true });
         transcriptEnd = Math.max(transcriptEnd, transcriptStart + (data.items?.length || 0));
-        const afterHeight = scrollContainer?.scrollHeight || 0;
+        // Compensate: keep the same content in view despite spacer resize + content insert
         if (scrollContainer) {
-          scrollContainer.scrollTop += (afterHeight - beforeHeight);
+          const newScrollHeight = scrollContainer.scrollHeight;
+          _scrollProgrammatic = true;
+          scrollContainer.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
+          requestAnimationFrame(() => { _scrollProgrammatic = false; });
         }
       }
     } finally {
@@ -4818,11 +5190,21 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       case 'assistant_delta':
         lastEventType = 'assistant';
-        appendAssistantDelta(evt.id, evt.delta || '');
+        if (evt.subagent_id) {
+          const sa = getSubagentContainer(evt.subagent_id, '', '');
+          appendAssistantDelta(evt.id, evt.delta || '', sa.body);
+        } else {
+          appendAssistantDelta(evt.id, evt.delta || '');
+        }
         return;
       case 'assistant_finalize':
         lastEventType = 'assistant';
-        finalizeAssistant(evt.id, evt.text || '');
+        if (evt.subagent_id) {
+          const sa = getSubagentContainer(evt.subagent_id, '', '');
+          finalizeAssistant(evt.id, evt.text || '', sa.body);
+        } else {
+          finalizeAssistant(evt.id, evt.text || '');
+        }
         setStatusDot('success');
         return;
       case 'reasoning_delta':
@@ -4835,7 +5217,19 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       case 'diff':
         lastEventType = 'diff';
-        addDiff(evt.id, evt.text || '', evt.path || '');
+        {
+          let dp = evt.path || '';
+          if (!dp && evt.text) {
+            const m = evt.text.match(/^diff --git a\/.+ b\/(.+)$/m);
+            if (m) dp = m[1];
+          }
+          if (evt.subagent_id) {
+            const sa = getSubagentContainer(evt.subagent_id, '', '');
+            addDiff(evt.id, evt.text || '', dp, sa.body);
+          } else {
+            addDiff(evt.id, evt.text || '', dp);
+          }
+        }
         return;
       case 'diff_declined':
         lastEventType = 'diff';
@@ -4883,6 +5277,17 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       case 'shell_end':
         renderShellEnd(evt);
+        return;
+      case 'subagent_start':
+        lastEventType = 'subagent';
+        getSubagentContainer(evt.id, evt.name || 'subagent', evt.intent || 'working');
+        setActivity(`subagent: ${evt.intent || evt.name || 'working'}`, true);
+        maybeAutoScroll();
+        return;
+      case 'subagent_end':
+        lastEventType = 'subagent';
+        finalizeSubagent(evt.id, evt.summary, evt.success);
+        maybeAutoScroll();
         return;
       case 'plan_update':
         lastEventType = 'plan';
@@ -5459,9 +5864,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
   scrollContainer?.addEventListener('scroll', () => {
     if (scrollContainer) {
-      const topSpacerHeight = topSpacerEl ? topSpacerEl.getBoundingClientRect().height : 0;
-      if (scrollContainer.scrollTop <= topSpacerHeight + 120) {
-        loadOlderTranscript();
+      if (!transcriptLoading && transcriptStart > 0) {
+        const topSpacerHeight = topSpacerEl ? topSpacerEl.getBoundingClientRect().height : 0;
+        if (scrollContainer.scrollTop <= topSpacerHeight + 120) {
+          loadOlderTranscript();
+        }
+      }
+      // Auto-unpin when user scrolls away from bottom
+      if (!_scrollProgrammatic && autoScroll && !isNearBottom()) {
+        autoScroll = false;
+        updateScrollButton();
+      }
+      // Auto-repin when user scrolls back to bottom
+      if (!_scrollProgrammatic && !autoScroll && isNearBottom()) {
+        autoScroll = true;
+        updateScrollButton();
       }
     }
   });
@@ -5469,6 +5886,11 @@ document.addEventListener('DOMContentLoaded', () => {
   scrollBtn?.addEventListener('click', () => {
     autoScroll = !autoScroll;
     updateScrollButton();
+    if (autoScroll) maybeAutoScroll(true);
+  });
+
+  // Re-pin to bottom on viewport resize (keyboard open/close, orientation change)
+  window.addEventListener('resize', () => {
     if (autoScroll) maybeAutoScroll(true);
   });
 
@@ -5508,6 +5930,21 @@ document.addEventListener('DOMContentLoaded', () => {
     // Re-render timeline immediately so the user sees the new markdown mode take effect.
     resetTimeline();
     await replayTranscript();
+  });
+
+  // Track-edits toggle in header - syncs with settings and saves to SSOT
+  trackEditsToggleEl?.addEventListener('change', async () => {
+    const enabled = trackEditsToggleEl.checked;
+    setTrackEditsEnabled(enabled);
+    if (conversationSettings && typeof conversationSettings === 'object') {
+      conversationSettings.trackEdits = enabled;
+    }
+    if (conversationMeta?.conversation_id) {
+      await sioCall('conversation_update', {
+        conversation_id: conversationMeta.conversation_id,
+        settings: { ...conversationSettings, trackEdits: enabled }
+      }, { fallbackUrl: '/api/appserver/conversation' });
+    }
   });
 
   // Sync markdown toggle when conversation loads

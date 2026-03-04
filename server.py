@@ -31,6 +31,8 @@ from framework_shells.api import fws_ui
 from framework_shells.orchestrator import Orchestrator
 
 import extensions as ext_loader
+from extensions.codex.router import route_collab_event
+from extensions.codex.protocol import COLLAB_EVENT_TYPES
 
 from fasthtml.common import (
     HTMLResponse as FastHTMLResponse,
@@ -60,6 +62,17 @@ async def _lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[Startup] Extension warm-up error: {e}")
         warmup_task = asyncio.create_task(_warmup_background(), name="extension-warmup")
+        # Try to connect to TE2 sidebar IPC on startup (non-blocking)
+        async def _sidebar_connect_background():
+            try:
+                sio = await _get_sidebar_sio()
+                if sio:
+                    print("[Startup] Sidebar IPC connected")
+                else:
+                    print("[Startup] Sidebar IPC not available (will retry on first open)")
+            except Exception as e:
+                print(f"[Startup] Sidebar IPC connect error: {e}")
+        asyncio.create_task(_sidebar_connect_background(), name="sidebar-ipc-connect")
     except Exception:
         pass
     yield
@@ -492,6 +505,19 @@ async def _sio_get_extension_models(sid, data):
             return _sio_error(f"Unknown extension: {ext_id}")
         return await ext_loader.list_models(ext_id)
     except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("te2_agent_open", namespace="/appserver")
+async def _sio_te2_agent_open(sid, data):
+    """User-initiated file open → sidebar:agent_open to TE2."""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        print(f"[Sidebar] te2_agent_open received: {payload}")
+        await _emit_sidebar_agent_open(payload)
+        return {"ok": True}
+    except Exception as e:
+        print(f"[Sidebar] te2_agent_open error: {e}")
         return _sio_error(str(e))
 
 
@@ -2246,6 +2272,118 @@ async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
     except Exception:
         pass
 
+    # On diff events, notify TE2 for edit tracking via sidebar websocket
+    # Only when ide_mode is on AND the conversation has trackEdits enabled
+    if event.get("type") == "diff" and _HOST_UI_STATE.get("ide_mode"):
+        convo_id = event.get("conversation_id", "")
+        track = False
+        if convo_id:
+            meta = _load_conversation_meta(convo_id)
+            settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+            track = settings.get("trackEdits", False)
+        if track:
+            path = event.get("path", "")
+            if path:
+                line = _extract_line_from_diff(event.get("text", ""))
+                await _emit_sidebar_agent_edit({
+                    "path": path,
+                    "line": line,
+                    "column": 1,
+                    "source": "appserver_diff",
+                    "conversation_id": event.get("conversation_id", ""),
+                })
+
+
+def _extract_line_from_diff(diff_text: str) -> int:
+    """Extract the first changed line number from a unified diff."""
+    import re
+    m = re.search(r'^@@\s*[+-]\d+(?:,\d+)?\s+\+(\d+)', diff_text, re.MULTILINE)
+    return int(m.group(1)) if m else 1
+
+
+# ── TE2 Sidebar IPC client ──────────────────────────────────────────────
+_sidebar_sio: Optional[socketio.AsyncClient] = None
+_sidebar_sio_lock = asyncio.Lock()
+
+
+async def _get_sidebar_sio() -> Optional[socketio.AsyncClient]:
+    """Lazily connect a SIO client to TE2's /sidebar_ipc namespace."""
+    global _sidebar_sio
+    async with _sidebar_sio_lock:
+        if _sidebar_sio and _sidebar_sio.connected:
+            return _sidebar_sio
+
+        # Clean up stale client before creating a new one
+        if _sidebar_sio:
+            print("[Sidebar] Cleaning up stale SIO client")
+            try:
+                await _sidebar_sio.disconnect()
+            except Exception:
+                pass
+            _sidebar_sio = None
+
+        te2_base = _te2_base_url()
+        if not te2_base:
+            print("[Sidebar] No TE2 base URL available")
+            return None
+
+        sio_path = "/ui_ipc_ws/socket.io/"
+        print(f"[Sidebar] Connecting to {te2_base} path={sio_path} ns=/sidebar_ipc")
+        try:
+            _sidebar_sio = socketio.AsyncClient()
+            await _sidebar_sio.connect(
+                f"{te2_base}?app_id=file_editor_cm6&source=appserver",
+                socketio_path=sio_path,
+                namespaces=["/sidebar_ipc"],
+                transports=["websocket"],
+            )
+            print(f"[Sidebar] Connected OK (connected={_sidebar_sio.connected})")
+            return _sidebar_sio
+        except Exception as e:
+            print(f"[Sidebar] Failed to connect to TE2 sidebar_ipc: {e}")
+            _sidebar_sio = None
+            return None
+
+
+async def _emit_sidebar_agent_edit(payload: Dict[str, Any]) -> None:
+    """Emit a sidebar:agent_edit event to TE2."""
+    try:
+        sio = await _get_sidebar_sio()
+        if sio:
+            print(f"[Sidebar] Emitting sidebar:agent_edit payload={payload}")
+            await sio.emit("sidebar:agent_edit", payload, namespace="/sidebar_ipc")
+        else:
+            print("[Sidebar] No SIO client for agent_edit")
+    except Exception as e:
+        print(f"[Sidebar] Failed to emit agent_edit: {e}")
+        global _sidebar_sio
+        try:
+            if _sidebar_sio:
+                await _sidebar_sio.disconnect()
+        except Exception:
+            pass
+        _sidebar_sio = None
+
+
+async def _emit_sidebar_agent_open(payload: Dict[str, Any]) -> None:
+    """Emit a sidebar:agent_open event to TE2 (user-initiated file open)."""
+    try:
+        sio = await _get_sidebar_sio()
+        if sio:
+            print(f"[Sidebar] Emitting sidebar:agent_open payload={payload}")
+            await sio.emit("sidebar:agent_open", payload, namespace="/sidebar_ipc")
+        else:
+            print("[Sidebar] No SIO client for agent_open")
+    except Exception as e:
+        print(f"[Sidebar] Failed to emit agent_open: {e}")
+        global _sidebar_sio
+        try:
+            if _sidebar_sio:
+                await _sidebar_sio.disconnect()
+        except Exception:
+            pass
+        _sidebar_sio = None
+
 
 async def _broadcast_appserver_raw(message: str) -> None:
     _appserver_raw_buffer.append(message)
@@ -2582,25 +2720,6 @@ async def _route_appserver_event(
             )
             if isinstance(thread_id_from_event, str) and thread_id_from_event:
                 await _set_thread_id(thread_id_from_event)
-            async with _config_lock:
-                cfg = _load_appserver_config()
-            shell_id = cfg.get("shell_id")
-            convo_id_local = cfg.get("conversation_id")
-            if (
-                isinstance(convo_id_local, str)
-                and convo_id_local
-                and isinstance(shell_id, str)
-                and shell_id
-                and _conversation_meta_path(convo_id_local).exists()
-            ):
-                meta = _load_conversation_meta(convo_id_local)
-                settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
-                if shell_id:
-                    settings["thread_session_shell_id"] = shell_id
-                if isinstance(thread_id_from_event, str) and thread_id_from_event:
-                    settings["thread_session_thread_id"] = thread_id_from_event
-                meta["settings"] = settings
-                _save_conversation_meta(convo_id_local, meta)
         except Exception:
             pass
         return convo_id, events
@@ -3384,6 +3503,24 @@ async def _route_appserver_event(
                 })
         return convo_id, events
 
+    # -------------------------------------------------------------------------
+    # SECTION: Collab / Subagent Events (routed via extensions/codex/router.py)
+    # -------------------------------------------------------------------------
+    _raw_etype = label_lower
+    if _raw_etype.startswith("codex/event/"):
+        _raw_etype = _raw_etype.split("codex/event/", 1)[-1]
+
+    if _raw_etype in COLLAB_EVENT_TYPES and isinstance(payload, dict):
+        collab_events = route_collab_event(_raw_etype, payload)
+        for ev in collab_events:
+            transcript_role = ev.pop("_transcript_role", None)
+            events.append(ev)
+            if convo_id and transcript_role:
+                await _append_transcript_entry(convo_id, {
+                    "role": transcript_role, **ev,
+                })
+        return convo_id, events
+
     # No handler matched - return empty events list
     return convo_id, events
 
@@ -3440,8 +3577,8 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
                         _pending_turn_starts.pop(req_id, None)
                         return
                     
-                    # Auto-resume on "conversation not found" for pending turn/start
-                    if "conversation not found" in error_msg and req_id in _pending_turn_starts:
+                    # Auto-resume on "thread/conversation not found" for pending turn/start
+                    if ("thread not found" in error_msg or "conversation not found" in error_msg) and req_id in _pending_turn_starts:
                         original_payload = _pending_turn_starts.pop(req_id)
                         thread_id = original_payload.get("params", {}).get("threadId")
                         if thread_id:
@@ -4134,6 +4271,11 @@ async def codex_agent_ui() -> FastHTMLResponse:
 	                                    Label(
 	                                        Input(type="checkbox", id="markdown-toggle", checked=True),
 	                                        Span("MD"),
+	                                        cls="toggle-label"
+	                                    ),
+	                                    Label(
+	                                        Input(type="checkbox", id="track-edits-toggle"),
+	                                        Span("📝"),
 	                                        cls="toggle-label"
 	                                    ),
 	                                    Span("👎", id="agent-ws", cls="pill warn"),
@@ -5367,53 +5509,19 @@ async def api_appserver_message(payload: AppserverMessageIn):
         await _ensure_appserver_initialized()
 
         if thread_id:
-            # Thread exists - only resume if this conversation is not already active in the
-            # current codex-app-server shell session.
-            current_shell_id = info.get("shell_id")
-            saved_shell_id = settings.get("thread_session_shell_id")
-            saved_thread_id = settings.get("thread_session_thread_id")
-            needs_resume = not (
-                isinstance(current_shell_id, str)
-                and current_shell_id
-                and isinstance(saved_shell_id, str)
-                and saved_shell_id
-                and current_shell_id == saved_shell_id
-                and isinstance(saved_thread_id, str)
-                and saved_thread_id
-                and saved_thread_id == thread_id
-            )
-
-            if needs_resume:
-                resume_params = inject_settings({"threadId": thread_id}, "thread/resume")
-                await _write_appserver({
-                    "id": base_id,
-                    "method": "thread/resume",
-                    "params": resume_params
-                })
-                # Brief wait for resume to register
-                await asyncio.sleep(0.3)
-                # Persist session marker so the *next* message can skip resume when appropriate.
-                try:
-                    meta_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
-                    if isinstance(current_shell_id, str) and current_shell_id:
-                        meta_settings["thread_session_shell_id"] = current_shell_id
-                    if isinstance(thread_id, str) and thread_id:
-                        meta_settings["thread_session_thread_id"] = thread_id
-                    meta["settings"] = meta_settings
-                    _save_conversation_meta(convo_id, meta)
-                except Exception:
-                    pass
-            
-            # Now send turn/start
+            # Send turn/start directly. If the thread isn't in the RPC
+            # server's memory, the reader auto-resumes via _pending_turn_starts.
             turn_params = inject_settings({
                 "threadId": thread_id,
                 "input": [{"type": "text", "text": text}]
             }, "turn/start")
-            await _write_appserver({
+            turn_payload = {
                 "id": base_id + 1,
                 "method": "turn/start",
                 "params": turn_params
-            })
+            }
+            _pending_turn_starts[str(base_id + 1)] = turn_payload.copy()
+            await _write_appserver(turn_payload)
         else:
             # No thread yet - start a new one
             start_params = inject_settings({}, "thread/start")
@@ -5444,23 +5552,13 @@ async def api_appserver_message(payload: AppserverMessageIn):
                 "threadId": thread_id,
                 "input": [{"type": "text", "text": text}]
             }, "turn/start")
-            await _write_appserver({
+            turn_payload = {
                 "id": base_id + 1,
                 "method": "turn/start",
                 "params": turn_params
-            })
-            # Persist session marker for the new thread.
-            try:
-                current_shell_id = info.get("shell_id")
-                meta_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
-                if isinstance(current_shell_id, str) and current_shell_id:
-                    meta_settings["thread_session_shell_id"] = current_shell_id
-                if isinstance(thread_id, str) and thread_id:
-                    meta_settings["thread_session_thread_id"] = thread_id
-                meta["settings"] = meta_settings
-                _save_conversation_meta(convo_id, meta)
-            except Exception:
-                pass
+            }
+            _pending_turn_starts[str(base_id + 1)] = turn_payload.copy()
+            await _write_appserver(turn_payload)
         
         return {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
     

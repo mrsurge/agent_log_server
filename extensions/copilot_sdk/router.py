@@ -76,16 +76,22 @@ class CopilotEventRouter:
         self._block_counter: int = 0
         self._last_block_type: Optional[str] = None
         self._suppressed_tools: set = set()  # tool_call_ids for UI-only tools (e.g. report_intent)
+        self._active_subagents: Dict[str, Dict[str, Any]] = {}  # tool_call_id -> subagent info
+        self._subagent_tool_ids: set = set()  # tool_call_ids that belong to a subagent
 
     def _next_seq(self) -> int:
         self._seq += 1
         return self._seq
 
     async def _emit(self, event: Dict[str, Any]) -> None:
+        # EVERY _emit() MUST HAVE A MATCHING _record() WITH THE SAME FIELDS.
+        # THE TRANSCRIPT IS THE REPLAY SOURCE. IF IT'S NOT RECORDED, IT DOESN'T EXIST ON PLAYBACK.
         event["seq"] = self._next_seq()
         await self.broadcast(event)
 
     async def _record(self, entry: Dict[str, Any]) -> None:
+        # EVERY _record() MUST MIRROR THE CORRESPONDING _emit() — SAME KEYS, SAME VALUES.
+        # REPLAY MUST BE AN EXACT MIRROR OF THE LIVE FEED. NO EXCEPTIONS.
         entry["seq"] = self._seq
         await self.append_transcript(self.conversation_id, entry)
 
@@ -134,15 +140,75 @@ class CopilotEventRouter:
             })
         # Subagent events
         elif etype == SessionEventType.SUBAGENT_STARTED:
-            await self._emit({
-                "type": "activity",
+            sa_id = getattr(data, "tool_call_id", None) or str(event.id)
+            intent = getattr(data, "intent", "") or ""
+            name = getattr(data, "agent_display_name", None) or getattr(data, "agent_name", None) or "subagent"
+            self._active_subagents[sa_id] = {"name": name, "intent": intent}
+            print(f"[SUBAGENT-DEBUG] SUBAGENT_STARTED: sa_id={sa_id} event.id={event.id} "
+                  f"data.tool_call_id={getattr(data, 'tool_call_id', None)} event.parent_id={event.parent_id}")
+            sa_evt = {
+                "type": "subagent_start",
                 "conversation_id": self.conversation_id,
-                "label": f"subagent: {getattr(data, 'intent', 'working')}",
-                "active": True,
+                "id": sa_id,
                 "turn_id": self.current_turn_id,
+                "name": name,
+                "intent": intent,
+            }
+            await self._emit(sa_evt)
+            await self._record({
+                "role": "subagent_start",
+                "id": sa_id,
+                "turn_id": self.current_turn_id,
+                "name": name,
+                "intent": intent,
+                "timestamp": utc_ts(),
             })
-        elif etype in (SessionEventType.SUBAGENT_COMPLETED, SessionEventType.SUBAGENT_FAILED):
-            pass  # Turn end will handle final state
+        elif etype == SessionEventType.SUBAGENT_SELECTED:
+            pass  # Selection happens before start, no UI needed
+        elif etype == SessionEventType.SUBAGENT_COMPLETED:
+            sa_id = getattr(data, "tool_call_id", None) or str(event.parent_id or event.id)
+            summary = getattr(data, "summary", "") or ""
+            success = getattr(data, "success", True)
+            self._active_subagents.pop(sa_id, None)
+            sa_evt = {
+                "type": "subagent_end",
+                "conversation_id": self.conversation_id,
+                "id": sa_id,
+                "turn_id": self.current_turn_id,
+                "summary": summary,
+                "success": success,
+            }
+            await self._emit(sa_evt)
+            await self._record({
+                "role": "subagent_end",
+                "id": sa_id,
+                "turn_id": self.current_turn_id,
+                "summary": summary,
+                "success": success,
+                "timestamp": utc_ts(),
+            })
+        elif etype == SessionEventType.SUBAGENT_FAILED:
+            sa_id = getattr(data, "tool_call_id", None) or str(event.parent_id or event.id)
+            error = getattr(data, "error", "") or getattr(data, "error_reason", "") or ""
+            self._active_subagents.pop(sa_id, None)
+            fail_summary = f"Failed: {error}" if error else "Failed"
+            sa_evt = {
+                "type": "subagent_end",
+                "conversation_id": self.conversation_id,
+                "id": sa_id,
+                "turn_id": self.current_turn_id,
+                "summary": fail_summary,
+                "success": False,
+            }
+            await self._emit(sa_evt)
+            await self._record({
+                "role": "subagent_end",
+                "id": sa_id,
+                "turn_id": self.current_turn_id,
+                "summary": fail_summary,
+                "success": False,
+                "timestamp": utc_ts(),
+            })
 
     # ── Message deltas ──────────────────────────────────────────────
 
@@ -158,13 +224,19 @@ class CopilotEventRouter:
             self._last_block_type = "message"
             self.current_message_id = f"msg_{self._turn_counter}_{self._block_counter}"
 
-        await self._emit({
+        # Resolve active subagent (most recently started)
+        subagent_id = list(self._active_subagents.keys())[-1] if self._active_subagents else None
+
+        evt = {
             "type": "assistant_delta",
             "conversation_id": self.conversation_id,
             "id": self.current_message_id,
             "delta": text,
             "turn_id": self.current_turn_id,
-        })
+        }
+        if subagent_id:
+            evt["subagent_id"] = subagent_id
+        await self._emit(evt)
 
     async def _handle_reasoning_delta(self, data: Any) -> None:
         text = getattr(data, "delta_content", None) or ""
@@ -194,21 +266,30 @@ class CopilotEventRouter:
         if not content:
             return
 
-        await self._emit({
+        # Resolve active subagent (most recently started)
+        subagent_id = list(self._active_subagents.keys())[-1] if self._active_subagents else None
+
+        finalize_evt = {
             "type": "assistant_finalize",
             "conversation_id": self.conversation_id,
             "id": self.current_message_id,
             "text": content,
             "turn_id": self.current_turn_id,
-        })
+        }
+        if subagent_id:
+            finalize_evt["subagent_id"] = subagent_id
+        await self._emit(finalize_evt)
 
-        await self._record({
+        record = {
             "role": "assistant",
             "id": self.current_message_id,
             "text": content,
             "timestamp": utc_ts(),
             "turn_id": self.current_turn_id,
-        })
+        }
+        if subagent_id:
+            record["subagent_id"] = subagent_id
+        await self._record(record)
 
         self.current_message_text = ""
 
@@ -335,6 +416,21 @@ class CopilotEventRouter:
             label = f"{tool_name} {pattern}" if pattern else tool_name
             return (label, "Exploring", None)
 
+        if tool_name in ("edit", "create"):
+            path = args.get("path", "")
+            short_path = path.rsplit("/", 1)[-1] if path else tool_name
+            label = f"{tool_name} {short_path}"
+            return (label, "Editing", path)
+
+        if tool_name == "apply_patch":
+            # Extract file path from patch content (*** Update File: /path)
+            patch_text = raw_args if isinstance(raw_args, str) else args.get("patch", "")
+            import re
+            m = re.search(r'\*\*\* (?:Update|Add|Delete) File: (.+)', str(patch_text))
+            path = m.group(1).strip() if m else ""
+            short_path = path.rsplit("/", 1)[-1] if path else "patch"
+            return (f"apply_patch {short_path}", "Patching", path)
+
         # Default: tool_name + args as before
         args_str = ""
         if args:
@@ -349,6 +445,20 @@ class CopilotEventRouter:
         # SDK uses data.tool_call_id as the stable tool call identifier
         tool_call_id = data.tool_call_id or str(event.id)
         tool_name = data.tool_name or data.mcp_tool_name or "tool"
+        parent_id = getattr(data, "parent_tool_call_id", None) or (str(event.parent_id) if event.parent_id else None)
+
+        # Check if this tool belongs to a subagent
+        subagent_id = None
+        if parent_id and parent_id in self._active_subagents:
+            subagent_id = parent_id
+            self._subagent_tool_ids.add(tool_call_id)
+        elif tool_call_id in self._subagent_tool_ids:
+            subagent_id = tool_call_id  # edge case
+        
+        # DEBUG: trace subagent linkage
+        if self._active_subagents:
+            print(f"[SUBAGENT-DEBUG] tool_start: tool_call_id={tool_call_id} parent_id={parent_id} "
+                  f"active_subagents={list(self._active_subagents.keys())} matched={subagent_id}")
 
         # Intercept UI-only tools — route to ribbon, suppress shell card
         if tool_name in self._UI_TOOLS:
@@ -376,6 +486,7 @@ class CopilotEventRouter:
             "arguments": raw_args,
             "turn_id": self.current_turn_id,
             "output": "",
+            "subagent_id": subagent_id,
         }
 
         # Mark block type change so next message/reasoning delta gets a new ID
@@ -392,6 +503,8 @@ class CopilotEventRouter:
         }
         if file_path:
             shell_begin_evt["path"] = file_path
+        if subagent_id:
+            shell_begin_evt["subagent_id"] = subagent_id
         await self._emit(shell_begin_evt)
 
     async def _handle_tool_complete(self, event: SessionEvent) -> None:
@@ -418,45 +531,102 @@ class CopilotEventRouter:
             args = tool_call.get("arguments") or {}
             if isinstance(args, dict):
                 file_path = args.get("path") or args.get("file_path") or ""
+        # apply_patch: extract path from "Modified/Added N file(s): /path" content
+        if not file_path and content:
+            import re
+            m = re.search(r'(?:Modified|Added|Deleted) \d+ file\(s\): (.+)', content)
+            if m:
+                file_path = m.group(1).strip()
 
-        await self._emit({
+        subagent_id = tool_call.get("subagent_id")
+
+        # Determine success/failure
+        has_error = bool(getattr(data, "error", None) or getattr(data, "error_reason", None))
+        exit_code = 1 if has_error else 0
+
+        # For edit/create/apply_patch tools: suppress verbose output, add status emoji
+        cmd_label = tool_call.get("title", "")
+        stdout = content
+        if tool_name in ("edit", "create", "apply_patch"):
+            status_emoji = "🔴" if has_error else "🟢"
+            # For apply_patch, extract just the file path from content
+            if tool_name == "apply_patch" and not has_error:
+                import re
+                m = re.search(r'(?:Modified|Added|Deleted) \d+ file\(s\): (.+)', content)
+                short = m.group(1).split('/')[-1] if m else content[:60]
+                cmd_label = f"apply_patch {short} {status_emoji}"
+            else:
+                cmd_label = f"{cmd_label} {status_emoji}"
+            # Only show error output, not the verbose echo
+            stdout = content if has_error else ""
+
+        shell_end_evt = {
             "type": "shell_end",
             "conversation_id": self.conversation_id,
             "id": tool_call_id,
             "turn_id": self.current_turn_id,
-            "exitCode": 0,
-            "stdout": content,
+            "exitCode": exit_code,
+            "stdout": stdout,
             "stderr": "",
-            "command": tool_call.get("title", ""),
-        })
+            "command": cmd_label,
+        }
+        if file_path:
+            shell_end_evt["path"] = file_path
+        if subagent_id:
+            shell_end_evt["subagent_id"] = subagent_id
+        await self._emit(shell_end_evt)
 
-        await self._record({
+        record_entry = {
             "role": "command",
             "id": tool_call_id,
             "turn_id": self.current_turn_id,
-            "command": tool_call.get("title", ""),
-            "output": content,
-            "status": "completed",
+            "command": cmd_label,
+            "output": stdout,
+            "status": "completed" if not has_error else "error",
             "timestamp": utc_ts(),
-        })
+            "subagent_id": subagent_id,
+        }
+        if file_path:
+            record_entry["path"] = file_path
+        await self._record(record_entry)
 
         # Emit diff for file-mutating tools only (not view/grep/read)
-        if detailed and tool_name in _FILE_CHANGE_TOOLS:
-            await self._emit({
+        diff_text = detailed
+        if not diff_text and tool_name in _FILE_CHANGE_TOOLS:
+            # apply_patch and similar tools may put diff in content or arguments
+            if content and (content.lstrip().startswith(("---", "@@", "diff ", "+++"))):
+                diff_text = content
+            if not diff_text:
+                raw_args = tool_call.get("arguments") or {}
+                if isinstance(raw_args, str):
+                    # Arguments may arrive as a JSON string
+                    try:
+                        import json
+                        raw_args = json.loads(raw_args)
+                    except Exception:
+                        raw_args = {}
+                if isinstance(raw_args, dict):
+                    diff_text = raw_args.get("patch") or raw_args.get("diff") or raw_args.get("content") or ""
+        if diff_text and tool_name in _FILE_CHANGE_TOOLS:
+            diff_evt = {
                 "type": "diff",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
                 "turn_id": self.current_turn_id,
                 "path": file_path,
-                "text": detailed,
-            })
+                "text": diff_text,
+            }
+            if subagent_id:
+                diff_evt["subagent_id"] = subagent_id
+            await self._emit(diff_evt)
             await self._record({
                 "role": "diff",
                 "id": tool_call_id,
                 "turn_id": self.current_turn_id,
                 "path": file_path,
-                "text": detailed,
+                "text": diff_text,
                 "timestamp": utc_ts(),
+                "subagent_id": subagent_id,
             })
 
     async def _handle_tool_progress(self, event: SessionEvent) -> None:
@@ -478,13 +648,17 @@ class CopilotEventRouter:
             if tool_call:
                 tool_call["output"] += content
 
-            await self._emit({
+            delta_evt = {
                 "type": "shell_delta",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
                 "turn_id": self.current_turn_id,
                 "delta": content,
-            })
+            }
+            subagent_id = tool_call.get("subagent_id") if tool_call else None
+            if subagent_id:
+                delta_evt["subagent_id"] = subagent_id
+            await self._emit(delta_evt)
 
     # ── Intent / usage / error ──────────────────────────────────────
 

@@ -1384,6 +1384,95 @@ body.terminal-mode #footer-terminal-toggle.pill {
   display: none;
 }
 
+/* ── Collapsible cards ──────────────────────────────────────────── */
+.command-ribbon {
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+}
+.command-ribbon .twisty {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.75em;
+  opacity: 0.5;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 2;
+}
+.command-ribbon:hover .twisty { opacity: 0.85; }
+/* Right-side toggle zone for ribbons with link handlers */
+.ribbon-toggle-zone {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  cursor: pointer;
+  z-index: 1;
+}
+.collapsible.expanded > .body > .command-ribbon .twisty {
+  transform: translateY(-50%) rotate(90deg);
+}
+/* Hide output when collapsed */
+.collapsible:not(.expanded) > .body > pre.command-output,
+.collapsible:not(.expanded) > .body > .command-output,
+.collapsible:not(.expanded) > .body > .command-footer,
+.collapsible:not(.expanded) > .body > pre.diff-block,
+.collapsible:not(.expanded) > .body > .mcp-tool-args,
+.collapsible:not(.expanded) > .body > .mcp-tool-result {
+  display: none;
+}
+/* Diff cards: collapse the diff block, keep path label */
+.collapsible:not(.expanded) > .body > .diff-path-label {
+  cursor: pointer;
+}
+
+/* Subagent container card */
+.subagent-card {
+  border-left: 4px solid #565e64;
+  margin: 0;
+}
+.subagent-card > .subagent-header {
+  background: #1e2428;
+  color: #a0b0b8;
+  padding: 8px 14px;
+  font-family: monospace;
+  font-size: 0.85em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+}
+.subagent-card > .subagent-header .twisty {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.75em;
+  opacity: 0.5;
+  transition: transform 0.15s ease;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.subagent-card.expanded > .subagent-header .twisty {
+  transform: translateY(-50%) rotate(90deg);
+}
+.subagent-card > .subagent-body {
+  padding-left: 10px;
+}
+.subagent-card:not(.expanded) > .subagent-body {
+  display: none;
+}
+.subagent-card > .subagent-header .subagent-status {
+  font-size: 0.8em;
+  opacity: 0.6;
+}
+
 /* Semantic shell ribbons (Tree-sitter): token classes in command ribbons only */
 .command-ribbon code.tsribbon {
   font-family: inherit;

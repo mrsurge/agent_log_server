@@ -31,7 +31,7 @@ from copilot import (
 )
 from copilot.types import SessionHooks
 
-from extensions.copilot_sdk_router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
+from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 
 
 # ── Global state ────────────────────────────────────────────────────

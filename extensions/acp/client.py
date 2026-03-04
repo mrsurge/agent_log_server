@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import acp
 
 if TYPE_CHECKING:
-    from extensions.acp_router import ACPEventRouter
+    from .router import ACPEventRouter
 
 
 @dataclass
@@ -522,7 +522,7 @@ async def handle_message(
     This is the main entry point called by server.py's extension router.
     Manages session lifecycle and delegates to ACPManager.
     """
-    from extensions.acp_router import ACPEventRouter, parse_acp_line
+    from .router import ACPEventRouter, parse_acp_line
     
     if not _manager or not _fws_getter or not _broadcast_fn or not _transcript_fn:
         return {"ok": False, "error": "ACP manager not initialized"}
@@ -564,7 +564,7 @@ async def _start_new_session(
     
     NOTE: This is a legacy fallback. The preferred path is warm_up_extension + init_session.
     """
-    from extensions.acp_router import ACPEventRouter
+    from .router import ACPEventRouter
     
     shell_id = await _manager.start_shell(conversation_id, agent_type, cwd, fws_mgr)
     if not shell_id:
@@ -610,7 +610,7 @@ async def _shared_acp_reader_loop(
     ONE reader per shared shell - demuxes incoming messages by sessionId
     and routes to the correct conversation's router.
     """
-    from extensions.acp_router import parse_acp_line
+    from .router import parse_acp_line
     
     state = fws_mgr.get_pipe_state(shell_id)
     if not state or not state.process.stdout:
@@ -1019,7 +1019,7 @@ async def init_session(
     _manager.sessions[conversation_id] = session
     
     # Create router for this conversation
-    from extensions.acp_router import ACPEventRouter
+    from .router import ACPEventRouter
     router = ACPEventRouter(
         conversation_id=conversation_id,
         broadcast_fn=_broadcast_fn,

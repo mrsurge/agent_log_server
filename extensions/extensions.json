@@ -7,6 +7,13 @@
       "type": "copilot_sdk",
       "path": "copilot_sdk",
       "enabled": true
+    },
+    {
+      "id": "codex",
+      "name": "Codex App Server",
+      "type": "codex_app_server",
+      "path": "codex",
+      "enabled": true
     }
   ]
 }
