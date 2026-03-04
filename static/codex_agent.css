@@ -655,6 +655,7 @@ textarea {
   min-height: 0;
   background: transparent;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .timeline {
@@ -1434,6 +1435,9 @@ body.terminal-mode #footer-terminal-toggle.pill {
 .subagent-card {
   border-left: 4px solid #565e64;
   margin: 0;
+  overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
 }
 .subagent-card > .subagent-header {
   background: #1e2428;
@@ -1464,6 +1468,11 @@ body.terminal-mode #footer-terminal-toggle.pill {
 }
 .subagent-card > .subagent-body {
   padding-left: 10px;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  word-break: break-word;
+  overflow: hidden;
+  min-width: 0;
 }
 .subagent-card:not(.expanded) > .subagent-body {
   display: none;

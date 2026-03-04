@@ -21,6 +21,15 @@ def utc_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_debug() -> bool:
+    """Check server DEBUG_MODE without circular import."""
+    try:
+        import server
+        return getattr(server, 'DEBUG_MODE', False)
+    except ImportError:
+        return False
+
+
 def _looks_like_diff(text: str) -> bool:
     """Check if text looks like a unified diff (not just any tool output)."""
     for line in text.splitlines()[:5]:
@@ -78,6 +87,7 @@ class CopilotEventRouter:
         self._suppressed_tools: set = set()  # tool_call_ids for UI-only tools (e.g. report_intent)
         self._active_subagents: Dict[str, Dict[str, Any]] = {}  # tool_call_id -> subagent info
         self._subagent_tool_ids: set = set()  # tool_call_ids that belong to a subagent
+        self._last_subagent_id: Optional[str] = None  # most recent subagent (survives completion)
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -99,6 +109,8 @@ class CopilotEventRouter:
         """Route a Copilot SDK SessionEvent to the appropriate handler."""
         etype = event.type
         data = event.data
+        if _is_debug():
+            print(f"[ROUTER-EVENT] type={etype} id={event.id} parent_id={event.parent_id} data_type={type(data).__name__}")
 
         if etype == SessionEventType.ASSISTANT_MESSAGE_DELTA:
             await self._handle_message_delta(data)
@@ -144,8 +156,10 @@ class CopilotEventRouter:
             intent = getattr(data, "intent", "") or ""
             name = getattr(data, "agent_display_name", None) or getattr(data, "agent_name", None) or "subagent"
             self._active_subagents[sa_id] = {"name": name, "intent": intent}
-            print(f"[SUBAGENT-DEBUG] SUBAGENT_STARTED: sa_id={sa_id} event.id={event.id} "
-                  f"data.tool_call_id={getattr(data, 'tool_call_id', None)} event.parent_id={event.parent_id}")
+            self._last_subagent_id = sa_id
+            if _is_debug():
+                print(f"[SUBAGENT-DEBUG] SUBAGENT_STARTED: sa_id={sa_id} event.id={event.id} "
+                      f"data.tool_call_id={getattr(data, 'tool_call_id', None)} event.parent_id={event.parent_id}")
             sa_evt = {
                 "type": "subagent_start",
                 "conversation_id": self.conversation_id,
@@ -224,8 +238,9 @@ class CopilotEventRouter:
             self._last_block_type = "message"
             self.current_message_id = f"msg_{self._turn_counter}_{self._block_counter}"
 
-        # Resolve active subagent (most recently started)
-        subagent_id = list(self._active_subagents.keys())[-1] if self._active_subagents else None
+        # Resolve active subagent, or fall back to last completed subagent
+        subagent_id = (list(self._active_subagents.keys())[-1] if self._active_subagents
+                       else self._last_subagent_id)
 
         evt = {
             "type": "assistant_delta",
@@ -266,8 +281,17 @@ class CopilotEventRouter:
         if not content:
             return
 
-        # Resolve active subagent (most recently started)
-        subagent_id = list(self._active_subagents.keys())[-1] if self._active_subagents else None
+        # Always bump block counter for each complete message.
+        # SDK sends ASSISTANT_MESSAGE (complete) without preceding deltas for
+        # subagent messages. Each complete message must get a unique ID.
+        if not self.current_message_text or content != self.current_message_text:
+            self._block_counter += 1
+            self._last_block_type = "message"
+            self.current_message_id = f"msg_{self._turn_counter}_{self._block_counter}"
+
+        # Resolve active subagent, or fall back to last completed subagent
+        subagent_id = (list(self._active_subagents.keys())[-1] if self._active_subagents
+                       else self._last_subagent_id)
 
         finalize_evt = {
             "type": "assistant_finalize",
@@ -312,6 +336,11 @@ class CopilotEventRouter:
 
     async def _handle_turn_start(self, data: Any) -> None:
         """SDK-initiated turn start (assistant begins processing)."""
+        # Reset block tracking so new turn's messages get fresh IDs
+        self._last_block_type = None
+        self.current_message_text = ""
+        self.current_thought_text = ""
+
         await self._emit({
             "type": "activity",
             "conversation_id": self.conversation_id,
@@ -335,20 +364,27 @@ class CopilotEventRouter:
 
         # Flush any pending message
         if self.current_message_text:
-            await self._emit({
+            subagent_id = self._last_subagent_id
+            flush_finalize = {
                 "type": "assistant_finalize",
                 "conversation_id": self.conversation_id,
                 "id": self.current_message_id,
                 "text": self.current_message_text,
                 "turn_id": self.current_turn_id,
-            })
-            await self._record({
+            }
+            if subagent_id:
+                flush_finalize["subagent_id"] = subagent_id
+            await self._emit(flush_finalize)
+            flush_record = {
                 "role": "assistant",
                 "id": self.current_message_id,
                 "text": self.current_message_text,
                 "timestamp": utc_ts(),
                 "turn_id": self.current_turn_id,
-            })
+            }
+            if subagent_id:
+                flush_record["subagent_id"] = subagent_id
+            await self._record(flush_record)
             self.current_message_text = ""
 
         await self._emit({
@@ -374,6 +410,8 @@ class CopilotEventRouter:
             "timestamp": utc_ts(),
             "turn_id": self.current_turn_id,
         })
+
+        self._last_subagent_id = None
 
     # ── Tool execution ──────────────────────────────────────────────
 
@@ -455,8 +493,7 @@ class CopilotEventRouter:
         elif tool_call_id in self._subagent_tool_ids:
             subagent_id = tool_call_id  # edge case
         
-        # DEBUG: trace subagent linkage
-        if self._active_subagents:
+        if self._active_subagents and _is_debug():
             print(f"[SUBAGENT-DEBUG] tool_start: tool_call_id={tool_call_id} parent_id={parent_id} "
                   f"active_subagents={list(self._active_subagents.keys())} matched={subagent_id}")
 

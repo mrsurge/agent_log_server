@@ -4214,6 +4214,8 @@ async def codex_agent_ui() -> FastHTMLResponse:
                 Script(src=_asset("/static/modals/warning_modal.js"), defer=True),
                 Script(src=_asset("/static/ui/conversation_drawer.js"), defer=True),
                 Script(src=_asset("/static/codex_agent.js"), type="module"),
+                Script(f"""import {{ initConsoleBridge }} from '{_asset("/static/js/console_bridge.js")}';
+initConsoleBridge({{ workerId: 'codex_agent' }});""", type="module"),
             ),
             Body(
                 Div(

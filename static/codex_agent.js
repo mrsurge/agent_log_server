@@ -85,6 +85,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   localStorage.setItem('last_tab', 'codex-agent');
   const mobileParam = new URLSearchParams(window.location.search).get('mobile');
+  const _dbg = new URLSearchParams(window.location.search).get('debug') === '1';
   if (mobileParam === '1' || mobileParam === 'true') {
     localStorage.setItem('codex_mobile_scale', '1');
   } else if (mobileParam === '0' || mobileParam === 'false') {
@@ -2575,10 +2576,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // synthetic container so child events still group correctly.
       function getTarget() {
         if (entry.subagent_id) {
-          console.log('[SUBAGENT-REPLAY] entry has subagent_id:', entry.subagent_id, 'role:', entry.role, 'map has:', replaySubagents.has(entry.subagent_id));
+          if (_dbg) console.log('[SUBAGENT-REPLAY] entry has subagent_id:', entry.subagent_id, 'role:', entry.role, 'map has:', replaySubagents.has(entry.subagent_id));
           let sa = replaySubagents.get(entry.subagent_id);
           if (!sa) {
-            console.log('[SUBAGENT-REPLAY] Creating synthetic container for:', entry.subagent_id);
+            if (_dbg) console.log('[SUBAGENT-REPLAY] Creating synthetic container for:', entry.subagent_id);
             // Synthetic subagent container (subagent_start was outside window)
             const row = document.createElement('div');
             row.className = 'timeline-row subagent-card';
@@ -3236,8 +3237,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function finalizeAssistant(id, text, parentEl) {
     const key = id || 'assistant';
-    const entry = assistantRows.get(key);
-    if (!entry) return;
+    let entry = assistantRows.get(key);
+    if (!entry) {
+      // No prior delta created this row (e.g. SDK sends ASSISTANT_MESSAGE complete, not deltas)
+      // Create the row now and feed the full text through the streaming parser
+      entry = getAssistantRow(id, parentEl);
+      if (text) appendAssistantDelta(id, text, parentEl);
+    }
     if (entry.useMarkdown && entry.parser) {
       // End the streaming parser
       smd.parser_end(entry.parser);
@@ -3742,21 +3748,21 @@ document.addEventListener('DOMContentLoaded', () => {
     // Just show the command, skip cwd line (redundant)
     renderShellCmdRibbon(entry.cmdRibbon, evt.command || '');
 
-    console.log('[SHELL_BEGIN] id=', evt.id, 'path=', evt.path, 'command=', evt.command, 'hasCmdRibbon=', !!entry.cmdRibbon);
+    if (_dbg) console.log('[SHELL_BEGIN] id=', evt.id, 'path=', evt.path, 'command=', evt.command, 'hasCmdRibbon=', !!entry.cmdRibbon);
 
     // If event includes a file path, make the ribbon clickable (jump-to-file)
     if (evt.path && entry.cmdRibbon) {
       entry.cmdRibbon.style.cursor = 'pointer';
       entry.cmdRibbon.title = evt.path;
       entry.cmdRibbon.addEventListener('click', (e) => {
-        console.log('[RIBBON_CLICK] FIRED', e.target.tagName, e.target.className);
-        console.log('[RIBBON_CLICK] twisty?', !!e.target.closest('.twisty'), 'toggle?', !!e.target.closest('.ribbon-toggle-zone'));
+        if (_dbg) console.log('[RIBBON_CLICK] FIRED', e.target.tagName, e.target.className);
+        if (_dbg) console.log('[RIBBON_CLICK] twisty?', !!e.target.closest('.twisty'), 'toggle?', !!e.target.closest('.ribbon-toggle-zone'));
         if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
         const line = evt.line || 1;
-        console.log('[RIBBON_CLICK] calling postTe2OpenRequest path=', evt.path, 'line=', line);
+        if (_dbg) console.log('[RIBBON_CLICK] calling postTe2OpenRequest path=', evt.path, 'line=', line);
         postTe2OpenRequest({ path: evt.path, line, column: 1 });
       });
-      console.log('[RIBBON_CLICK] handler wired for path=', evt.path);
+      if (_dbg) console.log('[RIBBON_CLICK] handler wired for path=', evt.path);
     }
 
     entry.text = '';
@@ -5005,6 +5011,9 @@ document.addEventListener('DOMContentLoaded', () => {
 	      setActivity('save settings first', true);
 	      return;
 	    }
+	    autoScroll = true;
+	    updateScrollButton();
+	    maybeAutoScroll(true);
 	    setActivity('sending', true);
 	    await ensureInitialized();
 	    const result = await sioCall('send_message', {
@@ -5190,6 +5199,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       case 'assistant_delta':
         lastEventType = 'assistant';
+        if (_dbg) console.log('[LIVE-MSG-DEBUG] assistant_delta:', evt.id, 'subagent_id:', evt.subagent_id, 'delta:', (evt.delta || '').slice(0, 50));
         if (evt.subagent_id) {
           const sa = getSubagentContainer(evt.subagent_id, '', '');
           appendAssistantDelta(evt.id, evt.delta || '', sa.body);
