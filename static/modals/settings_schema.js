@@ -140,6 +140,93 @@ window.CodexAgentModules.push((ctx) => {
     currentSchemaValues = {};
     
     if (!schema || !Array.isArray(schema.fields)) return;
+    const selectControls = {};
+    let modelItems = [];
+
+    const normalizeEffortList = (model) => {
+      const raw = model?.supported_reasoning_efforts ?? model?.supportedReasoningEfforts;
+      if (!Array.isArray(raw)) return [];
+      return raw
+        .map((item) => {
+          if (typeof item === 'string') return item;
+          if (item && typeof item === 'object') {
+            return item.reasoning_effort || item.reasoningEffort || item.value || '';
+          }
+          return '';
+        })
+        .filter(Boolean);
+    };
+
+    const setSelectOptions = (control, options) => {
+      if (!control?.listDiv || !control?.input) return;
+      control.listDiv.innerHTML = '';
+      (options || []).forEach((opt) => {
+        const optValue = typeof opt === 'object' ? opt.value : opt;
+        const optLabel = typeof opt === 'object' ? (opt.label || opt.value) : opt;
+        if (!optValue) return;
+        const optBtn = document.createElement('button');
+        optBtn.type = 'button';
+        optBtn.className = 'dropdown-item';
+        optBtn.textContent = optLabel;
+        optBtn.addEventListener('click', () => {
+          control.input.value = optValue;
+          if (ctx.helpers?.closeDropdownMenu) {
+            ctx.helpers.closeDropdownMenu(control.listDiv);
+          } else {
+            control.listDiv.classList.remove('open');
+          }
+          if (control.field?.id === 'model') syncReasoningEffortOptions();
+        });
+        control.listDiv.appendChild(optBtn);
+      });
+    };
+
+    const syncReasoningEffortOptions = () => {
+      const modelControl = selectControls.model;
+      const effortControl = selectControls.reasoning_effort;
+      if (!modelControl || !effortControl) return;
+      const selectedModelId = modelControl.input?.value || '';
+      if (!selectedModelId) {
+        setSelectOptions(effortControl, []);
+        effortControl.input.value = '';
+        effortControl.input.placeholder = 'Select model first';
+        return;
+      }
+      const model = modelItems.find((item) => {
+        if (!item || typeof item !== 'object') return false;
+        return (item.id || item.value) === selectedModelId;
+      });
+      if (!model) {
+        if (!modelItems.length) return;
+        setSelectOptions(effortControl, []);
+        effortControl.input.value = '';
+        effortControl.input.placeholder = 'Model capabilities unavailable';
+        return;
+      }
+      const supportedFlag = model?.capabilities?.supports?.reasoning_effort === true;
+      const modelEfforts = normalizeEffortList(model);
+      const supportsReasoningEffort = supportedFlag && modelEfforts.length > 0;
+      const options = supportsReasoningEffort ? modelEfforts : [];
+      const currentValue = effortControl.input.value;
+      const initialValue = effortControl.initialValue || '';
+      const initialModelId = modelControl.initialValue || '';
+      const defaultEffort = model.default_reasoning_effort || model.defaultReasoningEffort || options[0] || '';
+      setSelectOptions(effortControl, options.map((v) => ({ value: v, label: v })));
+      if (!supportsReasoningEffort) {
+        effortControl.input.value = '';
+        effortControl.input.placeholder = 'Not supported by selected model';
+        return;
+      }
+      effortControl.input.placeholder = effortControl.field?.placeholder || '';
+      let nextValue = defaultEffort;
+      if (!effortControl.initialValueApplied && selectedModelId === initialModelId && initialValue && options.includes(initialValue)) {
+        nextValue = initialValue;
+        effortControl.initialValueApplied = true;
+      } else if (currentValue && options.includes(currentValue)) {
+        nextValue = currentValue;
+      }
+      effortControl.input.value = nextValue;
+    };
     
     schema.fields.forEach(field => {
       const label = document.createElement('label');
@@ -232,24 +319,20 @@ window.CodexAgentModules.push((ctx) => {
           const listDiv = document.createElement('div');
           listDiv.className = 'dropdown-list';
           listDiv.id = `settings-ext-${field.id}-options`;
+          const selectControl = { field, input, listDiv, initialValue: value, initialValueApplied: false };
+          selectControls[field.id] = selectControl;
           
           // Build options (static or dynamic)
           const buildOptions = (options) => {
-            listDiv.innerHTML = '';
-            (options || []).forEach(opt => {
-              const optBtn = document.createElement('button');
-              optBtn.type = 'button';
-              optBtn.className = 'dropdown-item';
-              optBtn.textContent = typeof opt === 'object' ? opt.label : opt;
-              optBtn.addEventListener('click', () => {
-                input.value = typeof opt === 'object' ? opt.value : opt;
-                listDiv.classList.remove('open');
-              });
-              listDiv.appendChild(optBtn);
-            });
+            setSelectOptions(selectControl, options);
           };
           
-          buildOptions(field.options);
+          if (field.id === 'reasoning_effort') {
+            buildOptions([]);
+            input.placeholder = 'Select model first';
+          } else {
+            buildOptions(field.options);
+          }
           
           // Fetch dynamic options if configured
           if (field.dynamic_source) {
@@ -262,7 +345,11 @@ window.CodexAgentModules.push((ctx) => {
                 ? { value: m.id || m.value, label: m.name || m.label || m.id || m.value }
                 : { value: m, label: m });
               console.log(`[schema] built ${opts.length} options for ${field.id}`);
+              if (field.id === 'model') {
+                modelItems = items.filter((item) => item && typeof item === 'object');
+              }
               if (opts.length) buildOptions(opts);
+              if (field.id === 'model') syncReasoningEffortOptions();
             };
             // Extract extension_id from dynamic_source URL pattern /api/extensions/{id}/models
             const srcMatch = field.dynamic_source.match(/\/api\/extensions\/([^/]+)\/models/);
@@ -280,7 +367,11 @@ window.CodexAgentModules.push((ctx) => {
           
           toggleBtn.addEventListener('click', (e) => {
             e.preventDefault();
-            listDiv.classList.toggle('open');
+            if (ctx.helpers?.toggleDropdownMenu) {
+              ctx.helpers.toggleDropdownMenu(listDiv);
+            } else {
+              listDiv.classList.toggle('open');
+            }
           });
           
           selectDiv.appendChild(listDiv);
@@ -325,6 +416,8 @@ window.CodexAgentModules.push((ctx) => {
       
       settingsExtensionFields.appendChild(label);
     });
+
+    syncReasoningEffortOptions();
   }
   
   /**

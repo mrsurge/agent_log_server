@@ -13,6 +13,10 @@ import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.js';
 import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.js';
 import { bindSocketEvents } from './js/codex_agent/events/socket.js';
 import { bindEventRouter } from './js/codex_agent/events/router.js';
+import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
+import { bindPtyRuntime } from './js/codex_agent/pty/runtime.js';
+import { bindSettingsSaveFlow } from './js/codex_agent/settings/save_flow.js';
+import { bindSettingsUiFlow } from './js/codex_agent/settings/ui_flow.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   const statusEl = document.getElementById('agent-status');
@@ -135,6 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let _socket = null; // Socket.IO instance (set in connectWS)
   let rpcId = 1;
   let modelList = []; // Cached model list with supportedReasoningEfforts
+  let settingsUi = null;
   let markdownEnabled = true; // Toggle for markdown rendering
   let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
   let useXterm = true; // Toggle for xterm.js vs text box rendering
@@ -1711,78 +1716,12 @@ document.addEventListener('DOMContentLoaded', () => {
     el.textContent = label;
   }
 
-  async function openSettingsModal() {
-    if (!settingsModalEl) return;
-    if (pendingNewConversation) {
-      if (settingsCwdEl) {
-        const projectPrefill = (hostUi?.ideMode && splashTab === 'project' && typeof hostUi?.projectRoot === 'string' && hostUi.projectRoot)
-          ? hostUi.projectRoot
-          : '';
-        settingsCwdEl.value = projectPrefill;
-      }
-      if (settingsApprovalEl) settingsApprovalEl.value = '';
-      if (settingsSandboxEl) settingsSandboxEl.value = '';
-      if (settingsModelEl) settingsModelEl.value = '';
-      if (settingsEffortEl) settingsEffortEl.value = '';
-      if (settingsSummaryEl) settingsSummaryEl.value = '';
-      if (settingsLabelEl) settingsLabelEl.value = '';
-      if (settingsCommandLinesEl) settingsCommandLinesEl.value = '20';
-      if (settingsMarkdownEl) settingsMarkdownEl.checked = true;
-      if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || '';
-      if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = false;
-    } else {
-      if (settingsCwdEl) settingsCwdEl.value = conversationSettings?.cwd || '';
-      if (settingsApprovalEl) settingsApprovalEl.value = conversationSettings?.approvalPolicy || '';
-      if (settingsSandboxEl) settingsSandboxEl.value = conversationSettings?.sandboxPolicy || '';
-      if (settingsModelEl) settingsModelEl.value = conversationSettings?.model || '';
-      // Update effort options for the loaded model before setting effort value
-      updateEffortOptionsForModel(conversationSettings?.model);
-      if (settingsEffortEl) settingsEffortEl.value = conversationSettings?.effort || '';
-      if (settingsSummaryEl) settingsSummaryEl.value = conversationSettings?.summary || '';
-      if (settingsLabelEl) settingsLabelEl.value = conversationSettings?.label || '';
-      if (settingsCommandLinesEl) settingsCommandLinesEl.value = conversationSettings?.commandOutputLines || '20';
-      if (settingsMarkdownEl) settingsMarkdownEl.checked = conversationSettings?.markdown !== false;
-      if (settingsXtermEl) settingsXtermEl.checked = conversationSettings?.useXterm !== false;
-      if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = conversationSettings?.diffSyntax === true;
-      if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = conversationSettings?.semanticShellRibbon === true;
-      if (settingsRolloutEl) settingsRolloutEl.value = pendingRollout?.id || conversationSettings?.rolloutId || '';
-      if (settingsAgentEl) settingsAgentEl.value = conversationSettings?.agent || 'codex';
-    }
-    // Agent row: only show on new conversations (like rollout)
-    if (settingsAgentRowEl) {
-      const hasSavedSettings = !pendingNewConversation && conversationMeta?.settings && Object.values(conversationMeta.settings).some((v) => v);
-      const allowAgentSelect = !hasSavedSettings;
-      settingsAgentRowEl.style.display = allowAgentSelect ? 'block' : 'none';
-    }
-    if (settingsRolloutRowEl) {
-      const hasSavedSettings = !pendingNewConversation && conversationMeta?.settings && Object.values(conversationMeta.settings).some((v) => v);
-      const allowRollout = !hasSavedSettings;
-      settingsRolloutRowEl.style.display = allowRollout ? 'block' : 'none';
-    }
-    settingsModalEl.classList.remove('hidden');
-    // Update schema-based fields for current agent
-    const currentAgent = settingsAgentEl?.value || 'codex';
-    await onAgentSelectionChange(currentAgent);
+  async function openSettingsModal(...args) {
+    return settingsUi?.openSettingsModal(...args);
   }
 
-  function closeSettingsModal() {
-    if (!settingsModalEl) return;
-    const agentType = settingsAgentEl?.value?.trim() || 'codex';
-    let cwdOk;
-    if (agentType === 'codex') {
-      cwdOk = Boolean(settingsCwdEl?.value?.trim());
-    } else {
-      const schemaVals = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
-      cwdOk = Boolean(schemaVals.cwd?.trim());
-    }
-    // Universal fallback: existing conversation already has CWD
-    if (!cwdOk) cwdOk = Boolean(conversationSettings?.cwd?.trim());
-    if (!cwdOk) {
-      setActivity('CWD required', true);
-      return;
-    }
-    pendingNewConversation = false;
-    settingsModalEl.classList.add('hidden');
+  function closeSettingsModal(...args) {
+    return settingsUi?.closeSettingsModal(...args);
   }
 
   function normalizeApprovalValue(value) {
@@ -1802,340 +1741,149 @@ document.addEventListener('DOMContentLoaded', () => {
     if (footerApprovalValue) footerApprovalValue.textContent = approval;
   }
 
-  function openPicker(startPath, mode = 'cwd') {
-    if (!pickerOverlayEl) return;
-    pickerMode = mode || 'cwd';
-    if (pickerTitleEl) {
-      pickerTitleEl.textContent = pickerMode === 'mention' ? 'Mentioning' : 'Pick CWD';
-    }
-    pickerPath = startPath || settingsCwdEl?.value || '~';
-    pickerOverlayEl.classList.remove('hidden');
-    fetchPicker(pickerPath);
-    if (pickerFilterEl) {
-      pickerFilterEl.value = '';
-      setTimeout(() => pickerFilterEl.focus(), 0);
-    }
+  function openPicker(...args) {
+    return settingsUi?.openPicker(...args);
   }
 
-  function closePicker() {
-    if (!pickerOverlayEl) return;
-    pickerOverlayEl.classList.add('hidden');
-    pickerMode = 'cwd';
+  function closePicker(...args) {
+    return settingsUi?.closePicker(...args);
   }
 
-  function bindPickerFilter() {
-    if (!pickerFilterEl) return;
-    pickerFilterEl.addEventListener('input', () => {
-      if (filterTimer) clearTimeout(filterTimer);
-      filterTimer = setTimeout(() => {
-        applyPickerFilter();
-      }, 150);
-    });
+  function bindPickerFilter(...args) {
+    return settingsUi?.bindPickerFilter(...args);
   }
 
-  function openRolloutPicker() {
-    if (!rolloutOverlayEl) return;
-    const cwdOk = Boolean(settingsCwdEl?.value?.trim());
-    if (!cwdOk) {
-      setActivity('select CWD first', true);
-      return;
-    }
-    rolloutOverlayEl.classList.remove('hidden');
-    fetchRollouts();
+  function openRolloutPicker(...args) {
+    return settingsUi?.openRolloutPicker(...args);
   }
 
-  function closeRolloutPicker() {
-    if (!rolloutOverlayEl) return;
-    rolloutOverlayEl.classList.add('hidden');
+  function closeRolloutPicker(...args) {
+    return settingsUi?.closeRolloutPicker(...args);
   }
 
-  function renderRolloutList(items) {
-    if (!rolloutListEl) return;
-    rolloutListEl.innerHTML = '';
-    if (!items.length) {
-      const empty = document.createElement('div');
-      empty.className = 'picker-item';
-      empty.textContent = 'No rollouts found';
-      rolloutListEl.appendChild(empty);
-      return;
-    }
-    items.forEach((item) => {
-      const row = document.createElement('div');
-      row.className = 'picker-item rollout-item';
-      row.dataset.rolloutId = item?.id || '';
-      const idSpan = document.createElement('span');
-      idSpan.className = 'rollout-id';
-      idSpan.textContent = item?.short_id || item?.id || '';
-      const previewSpan = document.createElement('span');
-      previewSpan.className = 'rollout-preview';
-      previewSpan.textContent = item?.preview || '';
-      row.append(idSpan, previewSpan);
-      rolloutListEl.appendChild(row);
-    });
+  async function loadRolloutPreview(...args) {
+    return settingsUi?.loadRolloutPreview(...args);
   }
 
-  async function fetchRollouts() {
-    try {
-      const data = await sioCall('get_rollouts', {}, {
-        fallbackUrl: '/api/appserver/rollouts',
-        fallbackMethod: 'GET',
-      });
-      let items = Array.isArray(data?.items) ? data.items : [];
-      const cwd = settingsCwdEl?.value?.trim();
-      if (cwd) {
-        items = items.filter((item) => {
-          if (!item || !item.cwd) return false;
-          return String(item.cwd) === cwd;
-        });
-      }
-      renderRolloutList(items);
-    } catch (err) {
-      console.warn('rollout list failed', err);
-      renderRolloutList([]);
-    }
+  async function fetchRollouts(...args) {
+    return settingsUi?.fetchRollouts(...args);
   }
 
-  async function loadRolloutPreview(rolloutId) {
-    if (!rolloutId) return;
-    try {
-      const data = await sioCall('get_rollout_preview', { rollout_id: rolloutId }, {
-        fallbackUrl: `/api/appserver/rollouts/${encodeURIComponent(rolloutId)}/preview`,
-        fallbackMethod: 'GET',
-      });
-      const items = Array.isArray(data?.items) ? data.items : [];
-      pendingRollout = { id: rolloutId, items, token_total: data?.token_total ?? null };
-      if (settingsRolloutEl) settingsRolloutEl.value = rolloutId;
-      closeRolloutPicker();
-    } catch (err) {
-      console.warn('rollout preview failed', err);
-      setActivity('rollout failed', true);
-    }
+  function buildDropdown(...args) {
+    return settingsUi?.buildDropdown(...args);
   }
 
-  function buildDropdown(listEl, options, inputEl, onChange) {
-    if (!listEl) return;
-    listEl.innerHTML = '';
-    options.forEach((opt) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'dropdown-item';
-      btn.textContent = opt;
-      btn.addEventListener('click', () => {
-        if (inputEl) inputEl.value = opt;
-        closeDropdownMenu(listEl);
-        if (typeof onChange === 'function') onChange(opt);
-      });
-      listEl.appendChild(btn);
-    });
+  function updateDropdownOptions(...args) {
+    return settingsUi?.updateDropdownOptions(...args);
   }
 
-  function updateDropdownOptions(listEl, options, inputEl, onChange) {
-    if (!listEl) return;
-    listEl.innerHTML = '';
-    const values = Array.from(new Set(options.filter(Boolean)));
-    buildDropdown(listEl, values, inputEl, onChange);
+  async function loadModelOptions(...args) {
+    return settingsUi?.loadModelOptions(...args);
   }
 
-  async function loadModelOptions() {
-    try {
-      const data = await sioCall('get_models', {}, {
-        fallbackUrl: '/api/appserver/models',
-        fallbackMethod: 'GET',
-      });
-      const items = data?.result?.data || data?.result?.models || data?.data || data?.result || [];
-      if (Array.isArray(items)) {
-        modelList = items.filter(m => m && typeof m === 'object' && m.id);
-        const names = modelList.map(m => m.id);
-        if (names.length) {
-          updateDropdownOptions(settingsModelOptions, names, settingsModelEl, updateEffortOptionsForModel);
-        }
-        // Update effort options for currently selected model
-        updateEffortOptionsForModel(settingsModelEl?.value);
-      }
-    } catch {
-      // ignore
-    }
+  async function loadAgentOptions(...args) {
+    return settingsUi?.loadAgentOptions(...args);
   }
 
-  // Load agent options from extensions API
-  async function loadAgentOptions() {
-    try {
-      const data = await sioCall('get_extensions', {}, {
-        fallbackUrl: '/api/extensions',
-        fallbackMethod: 'GET',
-      });
-      const extensions = data?.extensions || [];
-      // Build agent list: codex (default) + any loaded extensions
-      const agents = ['codex'];
-      extensions.forEach(ext => {
-        if (ext?.id && ext?.name) {
-          agents.push(ext.id);
-        }
-      });
-      if (agents.length > 1) {
-        updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl, onAgentSelectionChange);
-      }
-    } catch {
-      // ignore - just use default 'codex'
-    }
+  async function onAgentSelectionChange(...args) {
+    return settingsUi?.onAgentSelectionChange(...args);
   }
 
-  // Called when agent selection changes in the dropdown
-  async function onAgentSelectionChange(agentId) {
-    // Delegate to schema module if available
-    if (window.CodexAgent?.helpers?.onAgentChange) {
-      await window.CodexAgent.helpers.onAgentChange(agentId);
-    }
+  function updateEffortOptionsForModel(...args) {
+    return settingsUi?.updateEffortOptionsForModel(...args);
   }
 
-  function updateEffortOptionsForModel(modelId) {
-    if (!modelId || !modelList.length) return;
-    const model = modelList.find(m => m.id === modelId);
-    if (!model || !Array.isArray(model.supportedReasoningEfforts)) {
-      // Fallback to default options if model not found
-      updateDropdownOptions(settingsEffortOptions, ['low', 'medium', 'high'], settingsEffortEl);
-      return;
-    }
-    const efforts = model.supportedReasoningEfforts.map(e => e.reasoningEffort).filter(Boolean);
-    if (efforts.length) {
-      updateDropdownOptions(settingsEffortOptions, efforts, settingsEffortEl);
-      // If current effort is not supported, clear it or set to default
-      const currentEffort = settingsEffortEl?.value;
-      if (currentEffort && !efforts.includes(currentEffort)) {
-        if (settingsEffortEl) {
-          settingsEffortEl.value = model.defaultReasoningEffort || efforts[0] || '';
-        }
-      }
-    }
+  function openDropdownMenu(...args) {
+    return settingsUi?.openDropdownMenu(...args);
   }
 
-  function openDropdownMenu(listEl) {
-    if (!listEl) return;
-    if (openDropdownEl && openDropdownEl !== listEl) {
-      closeDropdownMenu(openDropdownEl);
-    }
-    listEl.classList.add('open');
-    openDropdownEl = listEl;
+  function closeDropdownMenu(...args) {
+    return settingsUi?.closeDropdownMenu(...args);
   }
 
-  function closeDropdownMenu(listEl) {
-    if (!listEl) return;
-    listEl.classList.remove('open');
-    if (openDropdownEl === listEl) openDropdownEl = null;
+  function toggleDropdownMenu(...args) {
+    return settingsUi?.toggleDropdownMenu(...args);
   }
 
-  function toggleDropdownMenu(listEl) {
-    if (!listEl) return;
-    if (listEl.classList.contains('open')) {
-      closeDropdownMenu(listEl);
-    } else {
-      openDropdownMenu(listEl);
-    }
+  function setupDropdown(...args) {
+    return settingsUi?.setupDropdown(...args);
   }
 
-  function setupDropdown(inputEl, toggleEl, listEl, options) {
-    if (!listEl || !inputEl) return;
-    buildDropdown(listEl, options, inputEl);
-    toggleEl?.addEventListener('click', (evt) => {
-      evt.preventDefault();
-      toggleDropdownMenu(listEl);
-    });
+  async function fetchPicker(...args) {
+    return settingsUi?.fetchPicker(...args);
   }
 
-  async function fetchPicker(path) {
-    try {
-      const url = `/api/fs/list?path=${encodeURIComponent(path || '~')}`;
-      const r = await fetch(url, { cache: 'no-store' });
-      if (!r.ok) return;
-      const data = await r.json();
-      pickerPath = data?.path || path || '~';
-      pickerItems = Array.isArray(data?.items) ? data.items : [];
-      if (pickerPathEl) pickerPathEl.textContent = pickerPath;
-      applyPickerFilter();
-    } catch {
-      // ignore
-    }
+  async function fetchPickerSearch(...args) {
+    return settingsUi?.fetchPickerSearch(...args);
   }
 
-  async function fetchPickerSearch(query) {
-    try {
-      const root = conversationSettings?.cwd || settingsCwdEl?.value || pickerPath || '~';
-      const url = `/api/fs/search?query=${encodeURIComponent(query)}&root=${encodeURIComponent(root)}`;
-      const r = await fetch(url, { cache: 'no-store' });
-      if (!r.ok) return [];
-      const data = await r.json();
-      return Array.isArray(data?.items) ? data.items : [];
-    } catch {
-      return [];
-    }
+  function applyPickerFilter(...args) {
+    return settingsUi?.applyPickerFilter(...args);
   }
 
-  function applyPickerFilter() {
-    if (!pickerFilterEl) {
-      renderPickerList(pickerItems || []);
-      return;
-    }
-    const raw = pickerFilterEl.value || '';
-    if (!raw.trim()) {
-      renderPickerList(pickerItems || []);
-      return;
-    }
-    if (pickerMode === 'mention') {
-      fetchPickerSearch(raw).then(renderPickerList);
-      return;
-    }
-    let regex = null;
-    try {
-      regex = new RegExp(raw, 'i');
-    } catch {
-      renderPickerList([]);
-      return;
-    }
-    const items = (pickerItems || []).filter((item) => {
-      const target = `${item?.name || ''} ${item?.path || ''}`;
-      return regex.test(target);
-    });
-    renderPickerList(items);
-  }
-
-	  function renderPickerList(items) {
-	    if (!pickerListEl) return;
-	    pickerListEl.innerHTML = '';
-	    items.forEach((item) => {
-	      if (!item) return;
-	      const row = document.createElement('div');
-	      row.className = 'picker-item';
-	      const icon = document.createElement('span');
-	      icon.textContent = item.type === 'directory' ? '📁' : '📄';
-	      const name = document.createElement('span');
-	      name.textContent = item.name || item.path;
-	      if (pickerMode === 'mention') {
-	        const textWrap = document.createElement('span');
-	        textWrap.className = 'picker-item-text';
-	        name.className = 'picker-item-name';
-	        const path = document.createElement('span');
-	        path.className = 'picker-item-path';
-	        const cwd = conversationSettings?.cwd || '';
-	        const relPath = getRelativePath(item.path || item.name || '', cwd) || (item.path || item.name || '');
-	        path.textContent = relPath;
-	        textWrap.append(name, path);
-	        row.append(icon, textWrap);
-	      } else {
-	        row.append(icon, name);
-	      }
-	      row.addEventListener('click', () => {
-	        if (item.type === 'directory') {
-	          fetchPicker(item.path);
-	          return;
-	        }
-	        if (pickerMode === 'mention') {
-	          insertMention(item.path || item.name || '');
-	          closePicker();
-	        }
-	      });
-	      pickerListEl.appendChild(row);
-	    });
-	  }
+  settingsUi = bindSettingsUiFlow({
+    getState: () => ({
+      conversationMeta,
+      conversationSettings,
+      pendingNewConversation,
+      pendingRollout,
+      hostUi,
+      splashTab,
+      pickerPath,
+      pickerMode,
+      pickerItems,
+      filterTimer,
+      openDropdownEl,
+      modelList,
+    }),
+    setState: (patch) => {
+      if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
+      if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
+      if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
+      if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode;
+      if (patch.pickerItems !== undefined) pickerItems = patch.pickerItems;
+      if (patch.filterTimer !== undefined) filterTimer = patch.filterTimer;
+      if (patch.openDropdownEl !== undefined) openDropdownEl = patch.openDropdownEl;
+      if (patch.modelList !== undefined) modelList = patch.modelList;
+    },
+    elements: {
+      settingsModalEl,
+      settingsCwdEl,
+      settingsApprovalEl,
+      settingsSandboxEl,
+      settingsModelEl,
+      settingsEffortEl,
+      settingsSummaryEl,
+      settingsLabelEl,
+      settingsCommandLinesEl,
+      settingsMarkdownEl,
+      settingsXtermEl,
+      settingsDiffSyntaxEl,
+      settingsSemanticShellRibbonEl,
+      settingsAgentEl,
+      settingsAgentOptions,
+      settingsAgentRowEl,
+      settingsRolloutEl,
+      settingsRolloutRowEl,
+      settingsApprovalOptions,
+      settingsSandboxOptions,
+      settingsModelOptions,
+      settingsEffortOptions,
+      settingsSummaryOptions,
+      pickerOverlayEl,
+      pickerPathEl,
+      pickerListEl,
+      pickerTitleEl,
+      pickerFilterEl,
+      rolloutOverlayEl,
+      rolloutListEl,
+    },
+    sioCall,
+    setActivity,
+    getRelativePath,
+    insertMention,
+    getWindow: () => window,
+  });
 
   function isNearBottom() {
     if (!scrollContainer) return true;
@@ -4180,112 +3928,53 @@ document.addEventListener('DOMContentLoaded', () => {
     try { return JSON.parse(text); } catch { return text; }
   }
 
-  async function saveSettings() {
-    const agentType = settingsAgentEl?.value?.trim() || 'codex';
-    let cwd;
-    if (agentType === 'codex') {
-      cwd = settingsCwdEl?.value?.trim();
-    } else {
-      // Get CWD from schema fields, fall back to saved settings for mid-flight edits
-      const schemaVals = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
-      cwd = schemaVals.cwd?.trim();
-    }
-    // Universal fallback: existing conversation already has CWD saved
-    if (!cwd) cwd = conversationSettings?.cwd?.trim();
-    if (!cwd) {
-      setActivity('CWD required', true);
-      return;
-    }
-    const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || '20', 10);
-    const mdEnabled = settingsMarkdownEl?.checked !== false;
-    const xtermEnabled = settingsXtermEl?.checked !== false;
-    const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
-    const semanticRibbonEnabled = settingsSemanticShellRibbonEl?.checked === true;
-    
-    // Build settings object based on agent type
-    let settings;
-    if (agentType === 'codex') {
-      settings = {
-        cwd,
-        approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
-        sandboxPolicy: settingsSandboxEl?.value?.trim() || null,
-        model: settingsModelEl?.value?.trim() || null,
-        effort: settingsEffortEl?.value?.trim() || null,
-        summary: settingsSummaryEl?.value?.trim() || null,
-        label: settingsLabelEl?.value?.trim() || null,
-        commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
-        markdown: mdEnabled,
-        useXterm: xtermEnabled,
-        diffSyntax: diffSyntaxEnabled,
-        semanticShellRibbon: semanticRibbonEnabled,
-        trackEdits: trackEditsEnabled,
-        agent: agentType,
-      };
-    } else {
-      // Non-codex: use schema values + common UI settings
-      // Filter out empty/null values so server merge doesn't strip existing good settings
-      const schemaRaw = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
-      const schemaVals = Object.fromEntries(
-        Object.entries(schemaRaw).filter(([_, v]) => v !== '' && v != null)
-      );
-      settings = {
-        ...schemaVals,
-        cwd: schemaVals.cwd?.trim() || cwd,
-        label: settingsLabelEl?.value?.trim() || null,
-        commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
-        markdown: mdEnabled,
-        useXterm: xtermEnabled,
-        diffSyntax: diffSyntaxEnabled,
-        semanticShellRibbon: semanticRibbonEnabled,
-        trackEdits: trackEditsEnabled,
-        agent: agentType,
-      };
-    }
-    // Update local markdown state
-    setMarkdownEnabled(mdEnabled);
-    // Update xterm mode
-    setXtermEnabled(xtermEnabled);
-    // Update diff syntax highlight state
-    setDiffSyntaxEnabled(diffSyntaxEnabled);
-    // Update semantic shell ribbon state (Tree-sitter)
-    setSemanticShellRibbonEnabled(semanticRibbonEnabled);
-    if (semanticRibbonEnabled) {
-      await ensureTreeSitterRibbonReady();
-    }
-	    const isNewConversation = pendingNewConversation || !conversationMeta?.conversation_id;
-	    if (isNewConversation) {
-	      const meta = await sioCall('conversation_create', {}, {
-	        fallbackUrl: '/api/appserver/conversations',
-	      });
-	      if (meta?.conversation_id) {
-	        clientConversationId = meta.conversation_id;
-	        clientActiveView = 'conversation';
-	        conversationMeta = meta;
-	        conversationSettings = meta?.settings || {};
-	      }
-	      pendingNewConversation = false;
-	    }
-	    await sioCall('conversation_update', {
-	      conversation_id: conversationMeta?.conversation_id, settings,
-	    }, { fallbackUrl: '/api/appserver/conversation' });
-    if (pendingRollout?.id && Array.isArray(pendingRollout.items)) {
-      setActivity('loading rollout', true);
-      await sioCall('conversation_bind_rollout', {
-        rollout_id: pendingRollout.id,
-      }, { fallbackUrl: '/api/appserver/conversations/bind-rollout' });
-      pendingRollout = null;
-      setActivity('rollout loaded', false);
-    }
-	    closeSettingsModal();
-	    await fetchConversation(conversationMeta?.conversation_id);
-	    await fetchConversations();
-    if (isNewConversation) {
-      resetTimeline(); // Clear old transcript when switching to new conversation
-    }
-    await replayTranscript();
-    setDrawerOpen(true);
-    updateConversationHeaderLabel();
-  }
+  const { saveSettings } = bindSettingsSaveFlow({
+    getState: () => ({
+      conversationSettings,
+      conversationMeta,
+      pendingNewConversation,
+      pendingRollout,
+      trackEditsEnabled,
+    }),
+    setState: (patch) => {
+      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
+      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
+      if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
+      if (patch.clientActiveView !== undefined) clientActiveView = patch.clientActiveView;
+      if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
+      if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
+    },
+    elements: {
+      settingsAgentEl,
+      settingsCwdEl,
+      settingsCommandLinesEl,
+      settingsMarkdownEl,
+      settingsXtermEl,
+      settingsDiffSyntaxEl,
+      settingsSemanticShellRibbonEl,
+      settingsApprovalEl,
+      settingsSandboxEl,
+      settingsModelEl,
+      settingsEffortEl,
+      settingsSummaryEl,
+      settingsLabelEl,
+    },
+    normalizeApprovalValue,
+    setActivity,
+    setMarkdownEnabled,
+    setXtermEnabled,
+    setDiffSyntaxEnabled,
+    setSemanticShellRibbonEnabled,
+    ensureTreeSitterRibbonReady,
+    sioCall,
+    closeSettingsModal,
+    fetchConversation,
+    fetchConversations,
+    resetTimeline,
+    replayTranscript: (...args) => replayTranscript(...args),
+    setDrawerOpen,
+    updateConversationHeaderLabel,
+  });
 
   function nextRpcId() {
     const id = rpcId;
@@ -4467,147 +4156,38 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function ensureInitialized() {
-    if (initialized) return;
-    const agentType = conversationSettings?.agent || 'codex';
-    if (agentType === 'codex') {
-      // Codex binary needs explicit start + JSON-RPC handshake
-      await sioCall('app_start', {}, { fallbackUrl: '/api/appserver/start' });
-      await waitForWs();
-      try {
-        await sendRpc('initialize', {
-          clientInfo: {
-            name: 'agent_log_server',
-            title: 'Agent Log Server',
-            version: '0.1.0',
-          }
-        });
-      } catch {
-        // ignore already initialized
-      }
-      await sendRpc('initialized', {}, { notify: true });
-    } else {
-      // Non-codex extensions manage their own process — just ensure SIO is up
-      await waitForWs();
-    }
-    initialized = true;
-  }
-
-  async function ensureThread() {
-    await fetchConversation();
-    if (currentThreadId) {
-      try {
-        const savedShellId = conversationSettings?.thread_session_shell_id || null;
-        const savedThreadId = conversationSettings?.thread_session_thread_id || null;
-        if (currentAppServerShellId && savedShellId === currentAppServerShellId && savedThreadId === currentThreadId) {
-          return currentThreadId;
-        }
-        await sendRpc('thread/resume', { threadId: currentThreadId });
-        if (currentAppServerShellId) {
-          await sioCall('conversation_update', {
-            conversation_id: conversationMeta?.conversation_id,
-            settings: { thread_session_shell_id: currentAppServerShellId, thread_session_thread_id: currentThreadId },
-          }, { fallbackUrl: '/api/appserver/conversation' });
-        }
-        return currentThreadId;
-      } catch {
-        currentThreadId = null;
-      }
-    }
-    const result = await sendRpc('thread/start', {});
-    const threadId = result?.thread?.id;
-    if (threadId) {
-      currentThreadId = threadId;
-      if (currentAppServerShellId) {
-        await sioCall('conversation_update', {
-          conversation_id: conversationMeta?.conversation_id,
-          settings: { thread_session_shell_id: currentAppServerShellId, thread_session_thread_id: threadId },
-        }, { fallbackUrl: '/api/appserver/conversation' });
-      }
-      return threadId;
-    }
-    throw new Error('thread/start failed');
-  }
-
-	  async function sendUserMessage(text) {
-	    if (!text) return;
-	    const convoId = conversationMeta?.conversation_id;
-	    if (!convoId) {
-	      setActivity('save settings first', true);
-	      return;
-	    }
-	    autoScroll = true;
-	    updateScrollButton();
-	    maybeAutoScroll(true);
-	    setActivity('sending', true);
-	    await ensureInitialized();
-	    const result = await sioCall('send_message', {
-	      conversation_id: convoId,
-	      text,
-	    }, { fallbackUrl: '/api/appserver/message' });
-	    if (!result?.ok) {
-	      console.error('sendUserMessage failed:', result?.error);
-	      setActivity(result?.error || 'send failed', true);
-	    }
-	  }
-
-  // Direct shell command execution via !command
-  // Now uses streaming - shell_begin/delta/end events handle rendering
-  async function sendShellCommand(command) {
-    if (!command) return;
-    // Normalize contenteditable/mobile whitespace (NBSP etc) to avoid "command not found" surprises.
-    command = String(command)
-      .replace(/\u00A0/g, ' ')
-      .replace(/[ \t]+/g, ' ')
-      .trim();
-    if (!command) return;
-    if (!conversationMeta?.conversation_id) {
-      setActivity('save settings first', true);
-      return;
-    }
-    // Activity and row creation handled by shell_begin event from backend
-    // Just send the request and let events flow
-    try {
-      const endpoint = terminalMode ? '/api/mcp/agent-pty/exec' : '/api/appserver/shell/exec';
-      const resp = await sioCall('shell_exec', {
-        conversation_id: conversationMeta?.conversation_id,
-        command,
-        terminal_mode: !!terminalMode,
-      }, { fallbackUrl: endpoint });
-      // Response includes callId - shell_end event will finalize the row
-      // If error and no shell_end was received, show error
-      if (resp.error && !shellRows.has(resp.callId)) {
-        renderShellBatchResult({
-          exitCode: resp.exitCode || 1,
-          stdout: resp.stdout || '',
-          stderr: resp.stderr || resp.error,
-        });
-      }
-    } catch (err) {
-      // Network error - show batch result
-      renderShellBatchResult({
-        exitCode: 1,
-        stdout: '',
-        stderr: String(err),
-      });
-      setStatusDot('error');
-      setActivity('idle', false);
-    }
-  }
-
-  async function interruptTurn() {
-    try {
-      setActivity('interrupt', true);
-      const convoId = conversationMeta?.conversation_id || null;
-      await sioCall('interrupt', convoId ? { conversation_id: convoId } : {}, {
-        fallbackUrl: '/api/appserver/interrupt',
-      });
-      setActivity('interrupt sent', true);
-    } catch (err) {
-      console.warn('interrupt failed', err);
-      setActivity('interrupt failed', true);
-    }
-  }
+  const {
+    ensureInitialized,
+    ensureThread,
+    sendUserMessage,
+    sendShellCommand,
+    interruptTurn,
+  } = bindSessionFlow({
+    getState: () => ({
+      initialized,
+      conversationSettings,
+      currentThreadId,
+      currentAppServerShellId,
+      conversationMeta,
+      autoScroll,
+      terminalMode,
+    }),
+    setState: (patch) => {
+      if (patch.initialized !== undefined) initialized = patch.initialized;
+      if (patch.currentThreadId !== undefined) currentThreadId = patch.currentThreadId;
+      if (patch.autoScroll !== undefined) autoScroll = patch.autoScroll;
+    },
+    sioCall,
+    waitForWs,
+    sendRpc,
+    fetchConversation,
+    setActivity,
+    updateScrollButton,
+    maybeAutoScroll,
+    renderShellBatchResult,
+    setStatusDot,
+    shellRows,
+  });
 
   const {
     fetchTranscriptRange,
@@ -4704,131 +4284,28 @@ document.addEventListener('DOMContentLoaded', () => {
     renderPromptFromText,
   });
 
-  // Connect raw PTY WebSocket for user terminal (separate from agent transcript)
-  function connectPtyWebSocket() {
-    const convoId = conversationMeta?.conversation_id;
-    if (!convoId) return;
-
-    // If we're already connected/connecting for this conversation, don't reconnect.
-    // Reconnecting aggressively can create race conditions where an old socket's
-    // onclose fires after a new one is created, nulling out the new connection
-    // and/or duplicating streams.
-    if (
-      ptyWebSocket &&
-      ptyWebSocketConvoId === convoId &&
-      (ptyWebSocket.readyState === WebSocket.OPEN || ptyWebSocket.readyState === WebSocket.CONNECTING)
-    ) {
-      return;
-    }
-
-    // Close existing connection if any (conversation changed or prior socket dead)
-    if (ptyWebSocket) {
-      try {
-        // Detach handlers to avoid late events mutating global state
-        ptyWebSocket.onopen = null;
-        ptyWebSocket.onmessage = null;
-        ptyWebSocket.onerror = null;
-        ptyWebSocket.onclose = null;
-      } catch (_) {}
-      try { ptyWebSocket.close(); } catch (_) {}
-      ptyWebSocket = null;
-      ptyWebSocketConvoId = null;
-    }
-    
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/pty/${encodeURIComponent(convoId)}`;
-    
-    try {
-      const ws = new WebSocket(wsUrl);
-      ptyWebSocket = ws;
-      ptyWebSocketConvoId = convoId;
-      
-      ws.onopen = () => {
-        if (ptyWebSocket !== ws) return;
-        console.log('PTY WebSocket connected');
-        if (activeAgentPtyBlockId) {
-          const entry = agentBlockRows.get(activeAgentPtyBlockId);
-          if (entry) entry.hasRawStream = true;
-        }
-      };
-      
-      ws.onmessage = (event) => {
-        if (ptyWebSocket !== ws) return;
-        // Raw PTY output - for user terminal xterm rendering
-        // This is separate from agent transcript which uses screen_delta events
-        const data = event.data;
-        if (typeof data === 'string' && data) {
-          // Find active user terminal entry and write to it
-          // For now, we can use a dedicated user terminal or the active agent block in raw mode
-          handleUserPtyOutput(data);
-        }
-      };
-      
-      ws.onerror = (err) => {
-        if (ptyWebSocket !== ws) return;
-        console.error('PTY WebSocket error:', err);
-      };
-      
-      ws.onclose = () => {
-        if (ptyWebSocket !== ws) return;
-        console.log('PTY WebSocket closed');
-        ptyWebSocket = null;
-        ptyWebSocketConvoId = null;
-      };
-    } catch (e) {
-      console.error('Failed to connect PTY WebSocket:', e);
-    }
-  }
-
-  // Handle raw PTY output for user terminal
-  function handleUserPtyOutput(chunk) {
-    // Always keep the composer terminal in sync once created.
-    // When not in terminal mode it's hidden, but continuing to stream output
-    // avoids drift and removes the need for lossy rehydration on reopen.
-    if (composerTerm) {
-      if (composerPriming) {
-        // Buffer live output until priming completes to avoid race with reset/rehydrate.
-        if (composerPendingBytes < 256 * 1024) {
-          composerPendingChunks.push(chunk);
-          composerPendingBytes += chunk.length || 0;
-        }
-        return;
-      }
-      composerTerm.write(chunk);
-      return; // Composer xterm is exclusive display for live PTY in terminal mode
-    }
-    
-    // Route raw PTY output to the active agent block (raw mode) - for agent PTY, not user terminal
-    if (activeAgentPtyBlockId) {
-      const entry = agentBlockRows.get(activeAgentPtyBlockId);
-      if (entry) {
-        entry.hasRawStream = true;
-        if (!entry.term && useXterm) {
-          entry.term = createXterm(entry.termEl, 12);
-        }
-        if (useXterm && entry.term) {
-          entry.term.write(chunk);
-        } else if (!useXterm && entry.termEl) {
-          entry.text += chunk;
-          entry.termEl.textContent = entry.text;
-        }
-        maybeAutoScroll();
-        return;
-      }
-    }
-    // Fallback: find any raw-mode block
-    for (const [blockId, entry] of agentBlockRows) {
-      if (entry.renderMode === 'raw' && entry.term && useXterm) {
-        entry.hasRawStream = true;
-        entry.term.write(chunk);
-        maybeAutoScroll();
-        return;
-      }
-    }
-    // Fallback: if no raw-mode block, could create a dedicated user terminal
-    // For now, just log
-    // console.log('PTY output (no target):', chunk.substring(0, 50));
-  }
+  const { connectPtyWebSocket, handleUserPtyOutput } = bindPtyRuntime({
+    getState: () => ({
+      conversationMeta,
+      ptyWebSocket,
+      ptyWebSocketConvoId,
+      activeAgentPtyBlockId,
+      composerTerm,
+      composerPriming,
+      composerPendingBytes,
+      composerPendingChunks,
+      useXterm,
+    }),
+    setState: (patch) => {
+      if (patch.ptyWebSocket !== undefined) ptyWebSocket = patch.ptyWebSocket;
+      if (patch.ptyWebSocketConvoId !== undefined) ptyWebSocketConvoId = patch.ptyWebSocketConvoId;
+      if (patch.composerPendingBytes !== undefined) composerPendingBytes = patch.composerPendingBytes;
+    },
+    getWindow: () => window,
+    createXterm,
+    maybeAutoScroll,
+    getAgentBlockRows: () => agentBlockRows,
+  });
 
   setPill(statusEl, 'idle', 'warn');
   setCounter(counterMessagesEl, messageCount);
@@ -4922,6 +4399,9 @@ document.addEventListener('DOMContentLoaded', () => {
       setPickerMode: (val) => { pickerMode = val || 'cwd'; },
       saveApprovalQuick,
       sioCall,
+      openDropdownMenu,
+      closeDropdownMenu,
+      toggleDropdownMenu,
     },
     state: {
       get pendingNewConversation() { return pendingNewConversation; },

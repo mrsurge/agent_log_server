@@ -34,10 +34,10 @@ import extensions as ext_loader
 from extensions.codex.router import route_collab_event
 from extensions.codex.protocol import COLLAB_EVENT_TYPES
 
-from fasthtml.common import (
-    HTMLResponse as FastHTMLResponse,
+from fastcore.xml import (
     Html, Head, Body, Div, Section, Header, Footer, Main, H1, H2, H3, P, Button,
-    Span, Input, Textarea, Label, Small, A, Ul, Li, Code, Script, Link, Meta, to_xml
+    Span, Input, Textarea, Label, Small, A, Ul, Li, Code, Script, Link, Meta, to_xml,
+    NotStr,
 )
 
 @asynccontextmanager
@@ -97,7 +97,11 @@ async def _lifespan(app: FastAPI):
         await _stop_shell_manager()
 
 app = FastAPI(lifespan=_lifespan)
-socketio_server = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+socketio_server = socketio.AsyncServer(
+    async_mode="asgi",
+    cors_allowed_origins="*",
+    max_http_buffer_size=64 * 1024 * 1024,
+)
 socketio_app = socketio.ASGIApp(socketio_server, other_asgi_app=app)
 
 # Host-provided UI hints are runtime-only (not persisted). These are meant for iframe/drawer integration.
@@ -2331,6 +2335,17 @@ async def _get_sidebar_sio() -> Optional[socketio.AsyncClient]:
         print(f"[Sidebar] Connecting to {te2_base} path={sio_path} ns=/sidebar_ipc")
         try:
             _sidebar_sio = socketio.AsyncClient()
+
+            # Register handler for TE2 CWD push updates BEFORE connecting
+            @_sidebar_sio.on("sidebar:cwd_set", namespace="/sidebar_ipc")
+            async def _on_sidebar_cwd_set(data):
+                cwd = None
+                if isinstance(data, dict):
+                    cwd = data.get("cwd")
+                if isinstance(cwd, str) and cwd.strip():
+                    print(f"[Sidebar] CWD push from TE2: {cwd}")
+                    await _set_host_ui_state(project_root=cwd, ide_mode=True)
+
             await _sidebar_sio.connect(
                 f"{te2_base}?app_id=file_editor_cm6&source=appserver",
                 socketio_path=sio_path,
@@ -2338,6 +2353,23 @@ async def _get_sidebar_sio() -> Optional[socketio.AsyncClient]:
                 transports=["websocket"],
             )
             print(f"[Sidebar] Connected OK (connected={_sidebar_sio.connected})")
+
+            # Query TE2 for current workspace CWD
+            try:
+                resp = await _sidebar_sio.call(
+                    "sidebar:cwd_get",
+                    {"source": "codex_agent"},
+                    namespace="/sidebar_ipc",
+                    timeout=5,
+                )
+                if isinstance(resp, dict) and resp.get("ok"):
+                    cwd = resp.get("data", {}).get("cwd") if isinstance(resp.get("data"), dict) else None
+                    if isinstance(cwd, str) and cwd.strip():
+                        print(f"[Sidebar] Initial CWD from TE2: {cwd}")
+                        await _set_host_ui_state(project_root=cwd, ide_mode=True)
+            except Exception as e:
+                print(f"[Sidebar] CWD query failed (non-fatal): {e}")
+
             return _sidebar_sio
         except Exception as e:
             print(f"[Sidebar] Failed to connect to TE2 sidebar_ipc: {e}")
@@ -3944,8 +3976,8 @@ async def get_index(request: Request):
 
 
 @app.get("/appserver")
-async def appserver_ui() -> FastHTMLResponse:
-    return FastHTMLResponse(
+async def appserver_ui() -> HTMLResponse:
+    return HTMLResponse(
         to_xml(
             Html(
             Head(
@@ -4092,7 +4124,7 @@ def _codex_agent_version() -> str:
     paths = [
         Path(__file__).resolve(),
         Path(__file__).resolve().parent / "static" / "codex_agent.css",
-        Path(__file__).resolve().parent / "static" / "codex_agent.js",
+        Path(__file__).resolve().parent / "static" / "dist" / "codex_agent.js",
         Path(__file__).resolve().parent / CODEX_AGENT_ICON_PATH.lstrip("/"),
     ]
     parts: List[str] = []
@@ -4111,7 +4143,7 @@ def _codex_agent_sw() -> str:
     version = _codex_agent_version()
     start_url = f"{CODEX_AGENT_START_URL}?v={version}"
     css_url = _asset("/static/codex_agent.css")
-    js_url = _asset("/static/codex_agent.js")
+    js_url = _asset("/static/dist/codex_agent.js")
     icon_url = _asset(CODEX_AGENT_ICON_PATH)
     return f"""const CACHE_NAME = 'codexas-extension-{version}';
 const PRECACHE_URLS = [
@@ -4175,10 +4207,10 @@ self.addEventListener('fetch', (event) => {{
 
 @app.get("/codex-agent")
 @app.get("/codex-agent/")
-async def codex_agent_ui() -> FastHTMLResponse:
+async def codex_agent_ui() -> HTMLResponse:
     js_pill = Div(Span("JS"), Span("pending", id="js-status", cls="pill warn"), cls="status-pill footer-cell") if DEBUG_MODE else None
     version = _codex_agent_version()
-    return FastHTMLResponse(
+    return HTMLResponse(
         to_xml(
             Html(
             Head(
@@ -4206,16 +4238,21 @@ async def codex_agent_ui() -> FastHTMLResponse:
                 Script(src=_asset("/static/vendor/socket.io/socket.io.min.js")),
                 Script(src=_asset("/static/vendor/tribute.min.js")),
                 Script(src="https://cdn.jsdelivr.net/npm/streaming-markdown/smd.min.js", type="module"),
-                Script("window.addEventListener('load', () => console.log('socket.io', typeof io));", defer=True),
+                Script(NotStr("window.addEventListener('load', () => console.log('socket.io', typeof io));"), defer=True),
                 Script(src=_asset("/static/modals/settings_modal.js"), defer=True),
                 Script(src=_asset("/static/modals/settings_schema.js"), defer=True),
                 Script(src=_asset("/static/modals/cwd_picker.js"), defer=True),
                 Script(src=_asset("/static/modals/rollout_picker.js"), defer=True),
                 Script(src=_asset("/static/modals/warning_modal.js"), defer=True),
                 Script(src=_asset("/static/ui/conversation_drawer.js"), defer=True),
-                Script(src=_asset("/static/codex_agent.js"), type="module"),
-                Script(f"""import {{ initConsoleBridge }} from '{_asset("/static/js/console_bridge.js")}';
-initConsoleBridge({{ workerId: 'codex_agent' }});""", type="module"),
+                Script(src=_asset("/static/dist/codex_agent.js"), type="module"),
+                Script(NotStr(f"""import {{ initConsoleBridge }} from '{_asset("/static/js/console_bridge.js")}';
+try {{
+  const isProxied = window.location.pathname.startsWith('/api/app/');
+  if (isProxied) initConsoleBridge({{ workerId: 'codex_agent' }});
+}} catch (e) {{
+  console.warn('[console_bridge] init failed', e);
+}}"""), type="module"),
             ),
             Body(
                 Div(

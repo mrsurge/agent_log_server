@@ -691,6 +691,8 @@ async def list_models() -> List[Dict[str, Any]]:
                 "billing": _safe(getattr(m, "billing", None)),
                 "capabilities": _safe(getattr(m, "capabilities", None)),
                 "policy": _safe(getattr(m, "policy", None)),
+                "supported_reasoning_efforts": _safe(getattr(m, "supported_reasoning_efforts", None)),
+                "default_reasoning_effort": _safe(getattr(m, "default_reasoning_effort", None)),
             }
             for m in models
         ]
