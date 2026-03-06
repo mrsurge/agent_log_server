@@ -40,15 +40,26 @@ window.CodexAgentModules.push((ctx) => {
   async function fetchAndRenderSessions(sourceUrl) {
     if (!sessionPickerListEl) return;
     sessionPickerListEl.innerHTML = '<div class="picker-item">Loading…</div>';
+    console.log(`[schema] fetchSessions url=${sourceUrl} sioCall=${!!ctx.helpers?.sioCall}`);
     try {
-      const r = await fetch(sourceUrl, { cache: 'no-store' });
-      if (!r.ok) throw new Error('failed');
-      const data = await r.json();
+      let data;
+      // Route through SIO when available (proxy-safe)
+      const srcMatch = sourceUrl.match(/\/api\/extensions\/([^/]+)\/sessions/);
+      if (srcMatch && ctx.helpers?.sioCall) {
+        data = await ctx.helpers.sioCall('get_sessions', { extension_id: srcMatch[1] }, {
+          fallbackUrl: sourceUrl, fallbackMethod: 'GET',
+        });
+      } else {
+        const r = await fetch(sourceUrl, { cache: 'no-store' });
+        if (!r.ok) throw new Error('failed');
+        data = await r.json();
+      }
+      console.log(`[schema] sessions response`, data);
       const items = Array.isArray(data?.sessions) ? data.sessions
         : Array.isArray(data) ? data : [];
       renderSessionList(items);
     } catch (err) {
-      console.warn('session list failed', err);
+      console.warn('[schema] session list failed', err);
       renderSessionList([]);
     }
   }
@@ -103,13 +114,16 @@ window.CodexAgentModules.push((ctx) => {
    */
   async function loadSettingsSchema(extensionId) {
     if (schemaCache[extensionId]) {
+      console.log(`[schema] cache hit for ${extensionId}`);
       return schemaCache[extensionId];
     }
     
     try {
+      console.log(`[schema] loading schema for ${extensionId} sioCall=${!!ctx.helpers?.sioCall}`);
       const schema = ctx.helpers.sioCall
         ? await ctx.helpers.sioCall('get_extension_settings_schema', { extension_id: extensionId }, { fallbackUrl: `/api/extensions/${extensionId}/settings_schema`, fallbackMethod: 'GET' })
         : await fetch(`/api/extensions/${extensionId}/settings_schema`, { cache: 'no-store' }).then(r => r.ok ? r.json() : null);
+      console.log(`[schema] loaded schema for ${extensionId}`, schema ? Object.keys(schema) : null);
       schemaCache[extensionId] = schema;
       return schema;
     } catch {
@@ -240,16 +254,28 @@ window.CodexAgentModules.push((ctx) => {
           // Fetch dynamic options if configured
           if (field.dynamic_source) {
             const loadOpts = (data) => {
+              console.log(`[schema] loadOpts field=${field.id}`, data);
               if (!data) return;
-              const items = data.models || data.options || [];
+              const items = Array.isArray(data) ? data
+                : data.models || data.options || [];
               const opts = items.map(m => typeof m === 'object'
                 ? { value: m.id || m.value, label: m.name || m.label || m.id || m.value }
                 : { value: m, label: m });
+              console.log(`[schema] built ${opts.length} options for ${field.id}`);
               if (opts.length) buildOptions(opts);
             };
-            fetch(field.dynamic_source, { cache: 'no-store' })
-              .then(r => r.ok ? r.json() : null)
-              .then(loadOpts).catch(() => {});
+            // Extract extension_id from dynamic_source URL pattern /api/extensions/{id}/models
+            const srcMatch = field.dynamic_source.match(/\/api\/extensions\/([^/]+)\/models/);
+            console.log(`[schema] dynamic_source=${field.dynamic_source} srcMatch=${srcMatch?.[1]||'null'} sioCall=${!!ctx.helpers?.sioCall}`);
+            if (srcMatch && ctx.helpers?.sioCall) {
+              ctx.helpers.sioCall('get_extension_models', { extension_id: srcMatch[1] }, {
+                fallbackUrl: field.dynamic_source, fallbackMethod: 'GET',
+              }).then(loadOpts).catch(e => console.error(`[schema] sioCall models failed`, e));
+            } else {
+              fetch(field.dynamic_source, { cache: 'no-store' })
+                .then(r => { console.log(`[schema] fetch ${field.dynamic_source} status=${r.status}`); return r.ok ? r.json() : null; })
+                .then(loadOpts).catch(e => console.error(`[schema] fetch models failed`, e));
+            }
           }
           
           toggleBtn.addEventListener('click', (e) => {
@@ -343,7 +369,15 @@ window.CodexAgentModules.push((ctx) => {
       if (schema && !schema.useBuiltin) {
         // For new conversations, use empty values; for existing, use saved settings
         const isPending = window.CodexAgent?.state?.pendingNewConversation;
-        const settings = isPending ? {} : (window.CodexAgent?.state?.conversationSettings || {});
+        let settings = isPending ? {} : (window.CodexAgent?.state?.conversationSettings || {});
+        // Prefill CWD from project root when starting from the project tab
+        if (isPending) {
+          const st = window.CodexAgent?.state;
+          const hu = st?.hostUi;
+          if (hu?.ideMode && st?.splashTab === 'project' && typeof hu?.projectRoot === 'string' && hu.projectRoot) {
+            settings = { cwd: hu.projectRoot };
+          }
+        }
         renderSchemaFields(schema, settings);
       }
     }
