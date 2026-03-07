@@ -11,12 +11,18 @@ import { bindShellRender } from './js/codex_agent/shell_render.js';
 import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.js';
 import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.js';
 import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.js';
+import { bindDiffRendering } from './js/codex_agent/diff/rendering.js';
 import { bindSocketEvents } from './js/codex_agent/events/socket.js';
 import { bindEventRouter } from './js/codex_agent/events/router.js';
+import { bindPlanOverlay } from './js/codex_agent/plan_overlay.js';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
+import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
 import { bindPtyRuntime } from './js/codex_agent/pty/runtime.js';
+import { bindShellSemantic } from './js/codex_agent/shell_semantic.js';
 import { bindSettingsSaveFlow } from './js/codex_agent/settings/save_flow.js';
 import { bindSettingsUiFlow } from './js/codex_agent/settings/ui_flow.js';
+import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.js';
+import { bindInputFlow } from './js/codex_agent/boot/input_flow.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   const statusEl = document.getElementById('agent-status');
@@ -137,7 +143,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let wsReadyPromise = new Promise((resolve) => { wsReadyResolve = resolve; });
   let wsReconnectDelay = 1000;
   let _socket = null; // Socket.IO instance (set in connectWS)
-  let rpcId = 1;
   let modelList = []; // Cached model list with supportedReasoningEfforts
   let settingsUi = null;
   let markdownEnabled = true; // Toggle for markdown rendering
@@ -839,333 +844,27 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --- Tree-sitter semantic shell ribbon (optional) ---
-  let tsRibbonReady = false;
-  let tsRibbonInitPromise = null;
-  let tsRibbonParser = null;
-  let tsRibbonLang = null;
-  let tsRibbonQuery = null;
-  const tsRibbonCache = new Map(); // cmd -> html (simple LRU)
-  const TS_RIBBON_CACHE_MAX = 500;
+  const shellSemantic = bindShellSemantic({
+    getEnabled: () => semanticShellRibbonEnabled,
+    setEnabled: (enabled) => { semanticShellRibbonEnabled = enabled === true; },
+    getCheckboxEl: () => document.getElementById('settings-semantic-shell-ribbon'),
+    escapeHtml,
+  });
 
   function isSemanticShellRibbonEnabled() {
-    return semanticShellRibbonEnabled === true;
+    return shellSemantic.isSemanticShellRibbonEnabled();
   }
 
   function setSemanticShellRibbonEnabled(enabled) {
-    semanticShellRibbonEnabled = enabled === true;
-    const el = document.getElementById('settings-semantic-shell-ribbon');
-    if (el) el.checked = semanticShellRibbonEnabled;
-  }
-
-  function _tsNormalizeCaptureName(name) {
-    const raw = String(name || '').replace(/^@/, '');
-    return raw.replace(/[^\w.-]+/g, '-').replace(/\./g, '-');
-  }
-
-  function _tsMaybeCachePut(key, value) {
-    if (!key) return;
-    if (tsRibbonCache.has(key)) tsRibbonCache.delete(key);
-    tsRibbonCache.set(key, value);
-    while (tsRibbonCache.size > TS_RIBBON_CACHE_MAX) {
-      const first = tsRibbonCache.keys().next().value;
-      tsRibbonCache.delete(first);
-    }
-  }
-
-  function _utf8Len(cp) {
-    if (cp <= 0x7F) return 1;
-    if (cp <= 0x7FF) return 2;
-    if (cp <= 0xFFFF) return 3;
-    return 4;
-  }
-
-  function _buildJsIndexToUtf8ByteOffsets(text) {
-    const s = String(text || '');
-    const offsets = new Array(s.length + 1);
-    let byte = 0;
-    for (let i = 0; i < s.length; ) {
-      offsets[i] = byte;
-      const cp = s.codePointAt(i);
-      byte += _utf8Len(cp);
-      i += cp > 0xFFFF ? 2 : 1;
-    }
-    offsets[s.length] = byte;
-    for (let i = 1; i < offsets.length; i++) {
-      if (offsets[i] == null) offsets[i] = offsets[i - 1];
-    }
-    return offsets;
-  }
-
-  function _utf8ByteToJsIndex(offsets, byteIndex) {
-    const arr = offsets;
-    let lo = 0;
-    let hi = arr.length - 1;
-    const target = Math.max(0, Math.min(Number(byteIndex) || 0, arr[hi] || 0));
-    while (lo < hi) {
-      const mid = Math.floor((lo + hi + 1) / 2);
-      if (arr[mid] <= target) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo;
+    shellSemantic.setSemanticShellRibbonEnabled(enabled);
   }
 
   async function ensureTreeSitterRibbonReady() {
-    if (!isSemanticShellRibbonEnabled()) return false;
-    if (tsRibbonReady) return true;
-    if (tsRibbonInitPromise) return tsRibbonInitPromise;
-    tsRibbonInitPromise = (async () => {
-      // Load web-tree-sitter as an ES module (avoids global/version drift).
-      const mod = await import('/static/vendor/web-tree-sitter/web-tree-sitter.js');
-      const Parser = mod?.Parser;
-      const Language = mod?.Language;
-      const Query = mod?.Query;
-      if (!Parser || !Language || !Query) {
-        throw new Error('web-tree-sitter module did not export Parser/Language/Query');
-      }
-      await Parser.init({
-        locateFile: (file) => `/static/vendor/web-tree-sitter/${file}`,
-      });
-      tsRibbonLang = await Language.load('/static/vendor/tree-sitter-bash/tree-sitter-bash.wasm');
-      tsRibbonParser = new Parser();
-      tsRibbonParser.setLanguage(tsRibbonLang);
-      const r = await fetch('/static/vendor/tree-sitter-bash/highlights.scm', { cache: 'no-store' });
-      if (!r.ok) throw new Error('failed to load highlights.scm');
-      const scm = await r.text();
-      tsRibbonQuery = new Query(tsRibbonLang, scm);
-      tsRibbonReady = true;
-      return true;
-    })().catch((err) => {
-      console.warn('Tree-sitter ribbon init failed:', err);
-      tsRibbonReady = false;
-      tsRibbonInitPromise = null;
-      return false;
-    });
-    return tsRibbonInitPromise;
-  }
-
-  function _splitShellCString(cmd) {
-    // Heuristic: if command looks like `sh|bash|zsh -c|-lc "SCRIPT"` return script region.
-    const s = String(cmd || '');
-    const m = s.match(/\b(?:sh|bash|zsh|dash|ksh)\b/);
-    if (!m) return null;
-    const optIdx = s.search(/\s-[^\s]*c\b/); // -c, -lc, -xec, etc.
-    if (optIdx < 0) return null;
-    // Find first quote after the -c-ish option.
-    let i = optIdx;
-    while (i < s.length && s[i] !== '"' && s[i] !== "'") i++;
-    if (i >= s.length) return null;
-    const quote = s[i];
-    const startQuote = i;
-    i += 1;
-    let script = '';
-    for (; i < s.length; i++) {
-      const ch = s[i];
-      if (quote === '"' && ch === '\\' && i + 1 < s.length) {
-        script += ch + s[i + 1];
-        i += 1;
-        continue;
-      }
-      if (ch === quote) {
-        const endQuote = i;
-        return {
-          prefix: s.slice(0, startQuote),
-          quote,
-          script,
-          suffix: s.slice(endQuote + 1),
-        };
-      }
-      script += ch;
-    }
-    return null;
-  }
-
-  function splitQuotedSegments(text) {
-    const s = String(text || '');
-    const segs = [];
-    let buf = '';
-    let i = 0;
-
-    function pushText() {
-      if (buf) {
-        segs.push({ type: 'text', text: buf });
-        buf = '';
-      }
-    }
-
-    while (i < s.length) {
-      const ch = s[i];
-      if (ch !== '\'' && ch !== '"' && ch !== '`') {
-        buf += ch;
-        i += 1;
-        continue;
-      }
-
-      // Start of quoted region
-      const quote = ch;
-      pushText();
-      i += 1; // consume opening quote
-      let inner = '';
-
-      while (i < s.length) {
-        const c = s[i];
-        if (quote === '\'' ) {
-          // Single quotes: no escaping
-          if (c === '\'') break;
-          inner += c;
-          i += 1;
-          continue;
-        }
-        // Double/backtick: allow escapes
-        if (c === '\\' && i + 1 < s.length) {
-          inner += c + s[i + 1];
-          i += 2;
-          continue;
-        }
-        if (c === quote) break;
-        inner += c;
-        i += 1;
-      }
-
-      // If we never found the closing quote, treat the whole thing as plain text.
-      if (i >= s.length || s[i] !== quote) {
-        buf += quote + inner;
-        break;
-      }
-
-      // Consume closing quote
-      i += 1;
-      segs.push({ type: 'quote', quote, text: inner });
-    }
-
-    pushText();
-    return segs;
-  }
-
-  function treeSitterHighlightHtml(text) {
-    if (!tsRibbonReady || !tsRibbonParser || !tsRibbonQuery) {
-      return escapeHtml(text || '');
-    }
-    const input = String(text || '');
-    if (!input.trim()) return escapeHtml(input);
-    const cached = tsRibbonCache.get(input);
-    if (cached) return cached;
-
-    let tree;
-    try {
-      tree = tsRibbonParser.parse(input);
-    } catch (_) {
-      const escaped = escapeHtml(input);
-      _tsMaybeCachePut(input, escaped);
-      return escaped;
-    }
-
-    let captures = [];
-    try {
-      captures = tsRibbonQuery.captures(tree.rootNode) || [];
-    } catch (_) {
-      captures = [];
-    }
-
-    const offsets = _buildJsIndexToUtf8ByteOffsets(input);
-    const spans = [];
-    for (const cap of captures) {
-      const name = cap && (cap.name || cap.capture || cap[0]);
-      const node = cap && (cap.node || cap[1]);
-      const startB = node?.startIndex;
-      const endB = node?.endIndex;
-      if (startB == null || endB == null) continue;
-      const start = _utf8ByteToJsIndex(offsets, startB);
-      const end = _utf8ByteToJsIndex(offsets, endB);
-      if (end <= start) continue;
-      spans.push({
-        start,
-        end,
-        cls: `ts-${_tsNormalizeCaptureName(name)}`,
-        len: end - start,
-      });
-    }
-    // Sort by start, then prefer longer spans to reduce overlap junk.
-    spans.sort((a, b) => (a.start - b.start) || (b.len - a.len));
-    const picked = [];
-    let lastEnd = 0;
-    for (const sp of spans) {
-      if (sp.start < lastEnd) continue;
-      picked.push(sp);
-      lastEnd = sp.end;
-    }
-
-    let out = '';
-    let idx = 0;
-    for (const sp of picked) {
-      if (sp.start > idx) out += escapeHtml(input.slice(idx, sp.start));
-      out += `<span class="${sp.cls}">${escapeHtml(input.slice(sp.start, sp.end))}</span>`;
-      idx = sp.end;
-    }
-    if (idx < input.length) out += escapeHtml(input.slice(idx));
-    _tsMaybeCachePut(input, out);
-    return out;
+    return shellSemantic.ensureTreeSitterRibbonReady();
   }
 
   function renderShellCmdRibbon(el, cmd) {
-    if (!el) return;
-    const command = String(cmd || '');
-
-    // Preserve twisty + toggle-zone added by makeCollapsible before wiping content
-    const savedTwisty = el.querySelector('.twisty');
-    const savedToggle = el.querySelector('.ribbon-toggle-zone');
-
-    // Prefer semantic highlighting when enabled and ready (Tree-sitter).
-    if (isSemanticShellRibbonEnabled()) {
-      if (!tsRibbonReady && !tsRibbonInitPromise) {
-        // Fire-and-forget; replayTranscript awaits init explicitly.
-        ensureTreeSitterRibbonReady();
-      }
-      if (tsRibbonReady) {
-        try {
-          const segs = splitQuotedSegments(command);
-          let html = '';
-          for (const seg of segs) {
-            if (seg.type === 'text') {
-              html += treeSitterHighlightHtml(seg.text);
-            } else if (seg.type === 'quote') {
-              const q = escapeHtml(seg.quote);
-              html += `<span class="ts-quote">${q}</span>`;
-              html += `<span class="ts-quoted-inner">${treeSitterHighlightHtml(seg.text)}</span>`;
-              html += `<span class="ts-quote">${q}</span>`;
-            }
-          }
-          el.innerHTML = `<span class="shell-prompt">$ </span><code class="tsribbon">${html}</code>`;
-          if (savedTwisty) el.appendChild(savedTwisty);
-          if (savedToggle) el.appendChild(savedToggle);
-          return;
-        } catch (_) {
-          // Fall through to hljs rendering.
-        }
-      }
-    }
-
-    // Fallback: markdown-style highlight.js rendering (DOM code element + highlightElement).
-    if (typeof hljs === 'undefined' || !command.trim()) {
-      el.textContent = `$ ${command}`;
-      if (savedTwisty) el.appendChild(savedTwisty);
-      if (savedToggle) el.appendChild(savedToggle);
-      return;
-    }
-    try {
-      el.innerHTML = '';
-      const prefix = document.createElement('span');
-      prefix.className = 'shell-prompt';
-      prefix.textContent = '$ ';
-      const codeEl = document.createElement('code');
-      codeEl.className = 'language-bash';
-      codeEl.textContent = command;
-      el.append(prefix, codeEl);
-      hljs.highlightElement(codeEl);
-    } catch (_) {
-      el.textContent = `$ ${command}`;
-    }
-    if (savedTwisty) el.appendChild(savedTwisty);
-    if (savedToggle) el.appendChild(savedToggle);
+    return shellSemantic.renderShellCmdRibbon(el, cmd);
   }
 
   function setCommandRunning(running) {
@@ -1970,104 +1669,36 @@ document.addEventListener('DOMContentLoaded', () => {
     if (status) statusDotEl.classList.add(status);
   }
 
-  // Plan overlay (todo list) functions
+  const planOverlay = bindPlanOverlay({
+    timelineEl,
+    getState: () => ({
+      planOverlayEl,
+      planListEl,
+      planCollapsed,
+      planItems,
+      topSpacerEl,
+    }),
+    setState: (patch) => {
+      if (patch.planOverlayEl !== undefined) planOverlayEl = patch.planOverlayEl;
+      if (patch.planListEl !== undefined) planListEl = patch.planListEl;
+      if (patch.planCollapsed !== undefined) planCollapsed = patch.planCollapsed;
+    },
+  });
+
   function ensurePlanOverlay() {
-    if (planOverlayEl) return;
-    if (!timelineEl) return;
-    
-    planOverlayEl = document.createElement('div');
-    planOverlayEl.className = 'plan-overlay';
-    planOverlayEl.style.display = 'none';
-    
-    const header = document.createElement('div');
-    header.className = 'plan-header';
-    
-    const toggleBtn = document.createElement('span');
-    toggleBtn.className = 'plan-toggle';
-    toggleBtn.textContent = '[-]';
-    toggleBtn.addEventListener('click', () => {
-      planCollapsed = !planCollapsed;
-      toggleBtn.textContent = planCollapsed ? '[+]' : '[-]';
-      if (planListEl) planListEl.style.display = planCollapsed ? 'none' : 'block';
-    });
-    
-    const title = document.createElement('span');
-    title.className = 'plan-title';
-    title.textContent = 'Plan';
-    
-    header.append(toggleBtn, title);
-    
-    planListEl = document.createElement('div');
-    planListEl.className = 'plan-list';
-    
-    planOverlayEl.append(header, planListEl);
-    
-    // Insert at top of timeline (after spacer if present)
-    if (topSpacerEl && topSpacerEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(planOverlayEl, topSpacerEl.nextSibling);
-    } else {
-      timelineEl.prepend(planOverlayEl);
-    }
+    return planOverlay.ensurePlanOverlay();
   }
 
   function updatePlanItem(step, status) {
-    ensurePlanOverlay();
-    if (!planListEl) return;
-    
-    let itemEl = planItems.get(step);
-    if (!itemEl) {
-      itemEl = document.createElement('div');
-      itemEl.className = 'plan-item';
-      
-      const checkbox = document.createElement('span');
-      checkbox.className = 'plan-checkbox';
-      
-      const text = document.createElement('span');
-      text.className = 'plan-text';
-      text.textContent = step;
-      
-      itemEl.append(checkbox, text);
-      itemEl._checkbox = checkbox;
-      planListEl.appendChild(itemEl);
-      planItems.set(step, itemEl);
-    }
-    
-    // Update status
-    itemEl.classList.remove('pending', 'in_progress', 'completed');
-    itemEl.classList.add(status || 'pending');
-    
-    const checkbox = itemEl._checkbox;
-    if (checkbox) {
-      if (status === 'completed') {
-        checkbox.textContent = '☑';
-      } else if (status === 'in_progress') {
-        checkbox.textContent = '◐';
-      } else {
-        checkbox.textContent = '☐';
-      }
-    }
-    
-    // Show overlay
-    if (planOverlayEl) planOverlayEl.style.display = 'block';
+    return planOverlay.updatePlanItem(step, status);
   }
 
   function clearPlanOverlay() {
-    planItems.clear();
-    if (planListEl) planListEl.innerHTML = '';
-    if (planOverlayEl) planOverlayEl.style.display = 'none';
+    return planOverlay.clearPlanOverlay();
   }
 
   function finalizePlanToTranscript() {
-    // Store completed plan to transcript if there are items
-    if (planItems.size === 0) return;
-    const items = [];
-    planItems.forEach((el, step) => {
-      const status = el.classList.contains('completed') ? 'completed' :
-                     el.classList.contains('in_progress') ? 'in_progress' : 'pending';
-      items.push({ step, status });
-    });
-    // Could POST to backend here if needed
-    clearPlanOverlay();
+    return planOverlay.finalizePlanToTranscript();
   }
 
   function setCounter(el, value) {
@@ -3680,240 +3311,43 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  const diffRendering = bindDiffRendering({
+    getDiffRow,
+    createRow,
+    escapeHtml,
+    toRelativePath,
+    isDiffSyntaxEnabled: () => diffSyntaxHighlight === true,
+    setLastEventType: (value) => { lastEventType = value; },
+    maybeAutoScroll,
+    timelineEl,
+    postTe2OpenRequest,
+  });
+
   function addDiff(id, text, path, parentEl) {
-    const entry = getDiffRow(id, path, parentEl);
-    entry.pre.innerHTML = formatDiff(text || '', path);
-    lastEventType = 'diff';
-    maybeAutoScroll();
+    return diffRendering.addDiff(id, text, path, parentEl);
   }
 
   function addDeclinedDiff(id, text, path) {
-    const { row, body } = createRow('diff', 'diff-declined');
-    row.classList.add('declined');
-    if (path) {
-      const pathLabel = document.createElement('div');
-      pathLabel.className = 'declined-label';
-      pathLabel.innerHTML = `<strong>DECLINED:</strong> ${escapeHtml(toRelativePath(path))}`;
-      body.appendChild(pathLabel);
-    }
-    const pre = document.createElement('pre');
-    pre.className = 'diff-block';
-    pre.innerHTML = formatDiff(text || '', path);
-    body.appendChild(pre);
-    lastEventType = 'diff';
-    maybeAutoScroll();
+    return diffRendering.addDeclinedDiff(id, text, path);
   }
 
-	  function formatDiff(text, filePath) {
-	    if (!text) return '';
-	    
-	    // Multi-file diffs can arrive as a single unified diff blob (multiple diff --git sections)
-	    // but with only one `path` field at the event level. Track per-file boundaries so hunks/lines
-	    // are labeled/clickable with the correct file.
-	    const diffGitCount = (text.match(/^diff --git /gm) || []).length;
-	    const showFileHeaders = diffGitCount > 1 || !filePath;
-
-	    // First pass: compute max line numbers for proper padding
-	    let oldLine = 0;
-	    let newLine = 0;
-	    let maxOldLen = 1;
-    let maxNewLen = 1;
-    
-    text.split('\n').forEach((line) => {
-      if (line.startsWith('@@')) {
-        const match = line.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
-        if (match) {
-          oldLine = parseInt(match[1], 10);
-          const oldCount = parseInt(match[2] || '1', 10);
-          newLine = parseInt(match[3], 10);
-          const newCount = parseInt(match[4] || '1', 10);
-          // Max possible line numbers in this hunk
-          maxOldLen = Math.max(maxOldLen, String(oldLine + oldCount).length);
-          maxNewLen = Math.max(maxNewLen, String(newLine + newCount).length);
-        }
-      }
-    });
-    
-	    // Reset for second pass
-	    oldLine = 0;
-	    newLine = 0;
-
-	    let currentFilePath = filePath || null;
-	    const fileGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
-
-	    // Second pass: render lines
-	    return text.split('\n').map((line) => {
-	      let cls = 'diff-context';
-      let display = line;
-      let changeMarker = ' ';
-      let oldNo = '';
-      let newNo = '';
-
-	      if (line.startsWith('diff --git ')) {
-	        // Format: diff --git a/path b/path
-	        const parts = line.split(/\s+/);
-	        if (parts.length >= 4) {
-	          let bpath = parts[3];
-	          if (bpath.startsWith('b/')) bpath = bpath.slice(2);
-	          currentFilePath = bpath || currentFilePath;
-	        }
-	        // Reset counters for the new file; next @@ sets correct line numbers.
-	        oldLine = 0;
-	        newLine = 0;
-	        if (!showFileHeaders) return '';
-	        const relLabel = currentFilePath ? (toRelativePath(currentFilePath) || currentFilePath) : 'file';
-	        const safePath = currentFilePath ? escapeHtml(String(currentFilePath)) : '';
-	        return `<span class="diff-line diff-file" data-path="${safePath}" data-old-line="" data-new-line=""><span class="diff-gutter">${escapeHtml(fileGutter)}</span><span class="diff-text"><strong>${escapeHtml(relLabel)}</strong></span></span>`;
-	      }
-
-	      // Skip low-signal diff metadata lines (we render a file header row instead, above).
-	      if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('index ') || line.startsWith('new file mode') || line.startsWith('deleted file mode') || line.startsWith('similarity index') || line.startsWith('rename from') || line.startsWith('rename to')) {
-	        return '';
-	      }
-
-	      const activePath = currentFilePath || filePath || '';
-	      const safePath = activePath ? escapeHtml(String(activePath)) : '';
-
-	      if (line.startsWith('@@')) {
-	        cls = 'diff-hunk';
-	        const match = line.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)/);
-	        if (match) {
-          const oldStart = parseInt(match[1], 10);
-          const oldCount = parseInt(match[2] || '1', 10);
-          const newStart = parseInt(match[3], 10);
-          const newCount = parseInt(match[4] || '1', 10);
-          const oldEnd = Math.max(oldStart, oldStart + oldCount - 1);
-          const newEnd = Math.max(newStart, newStart + newCount - 1);
-          const oldRange = oldCount === 1 ? `${oldStart}` : `${oldStart}-${oldEnd}`;
-          const newRange = newCount === 1 ? `${newStart}` : `${newStart}-${newEnd}`;
-          const label = match[5] && match[5].trim() ? ` ${match[5].trim()}` : '';
-          display = `Lines ${oldRange} → ${newRange}${label}`;
-          oldLine = oldStart;
-          newLine = newStart;
-	        }
-	        // Hunk header gets special gutter
-	        const hunkGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
-	        return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${escapeHtml(String(oldLine || ''))}" data-new-line="${escapeHtml(String(newLine || ''))}"><span class="diff-gutter">${escapeHtml(hunkGutter)}</span><span class="diff-text">${escapeHtml(display)}</span></span>`;
-	      } else if (line.startsWith('+') && !line.startsWith('+++')) {
-	        cls = 'diff-add';
-	        changeMarker = '+';
-        newNo = String(newLine);
-        newLine += 1;
-        display = line.slice(1);
-      } else if (line.startsWith('-') && !line.startsWith('---')) {
-        cls = 'diff-del';
-        changeMarker = '-';
-        oldNo = String(oldLine);
-        oldLine += 1;
-        display = line.slice(1);
-      } else if (line.startsWith(' ')) {
-        changeMarker = ' ';
-        oldNo = String(oldLine);
-        newNo = String(newLine);
-        oldLine += 1;
-        newLine += 1;
-        display = line.slice(1);
-      } else {
-        // Empty line or other content
-        display = line;
-      }
-      
-      // Build gutter: "OLD│NEW± "
-      // Pad each number to max width, use spaces for missing numbers
-      const padOld = oldNo ? oldNo.padStart(maxOldLen, ' ') : ''.padStart(maxOldLen, ' ');
-      const padNew = newNo ? newNo.padStart(maxNewLen, ' ') : ''.padStart(maxNewLen, ' ');
-      const gutterText = `${padOld}│${padNew}${changeMarker} `;
-      
-      // Optionally syntax highlight the code
-      let codeHtml = escapeHtml(display);
-	      if (isDiffSyntaxEnabled() && typeof hljs !== 'undefined' && display.trim()) {
-	        try {
-	          const ext = activePath ? activePath.split('.').pop()?.toLowerCase() : '';
-	          // Map common extensions to hljs language names
-	          const extToLang = {
-	            'py': 'python', 'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript',
-            'jsx': 'javascript', 'rb': 'ruby', 'rs': 'rust', 'go': 'go', 'sh': 'bash',
-            'yml': 'yaml', 'md': 'markdown', 'htm': 'html',
-          };
-          const lang = extToLang[ext] || ext;
-          if (lang && hljs.getLanguage(lang)) {
-            codeHtml = hljs.highlight(display, { language: lang, ignoreIllegals: true }).value;
-          } else if (display.length > 10) {
-            // Only auto-detect for non-trivial lines
-            const auto = hljs.highlightAuto(display);
-            if (auto.relevance > 3) {
-              codeHtml = auto.value;
-            }
-          }
-        } catch (e) {
-          // Fall back to escaped text
-        }
-      }
-      
-      const dataOld = escapeHtml(String(oldNo || ''));
-      const dataNew = escapeHtml(String(newNo || ''));
-      return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${dataOld}" data-new-line="${dataNew}"><span class="diff-gutter">${escapeHtml(gutterText)}</span><span class="diff-text">${codeHtml}</span></span>`;
-    }).filter(line => line !== '').join('');
+  function formatDiff(text, filePath) {
+    return diffRendering.formatDiff(text, filePath);
   }
+
+  const rpcFlow = bindRpcFlow({
+    waitForWs: (...args) => waitForWs(...args),
+    sioCall,
+    getPending: () => pending,
+    getConversationId: () => conversationMeta?.conversation_id || null,
+    createRow,
+    escapeHtml,
+    formatDiff: (...args) => formatDiff(...args),
+    toRelativePath,
+  });
 
   function renderApproval(evt) {
-    const { row, body } = createRow(evt.kind === 'diff' ? 'diff' : 'approval', 'approval');
-    row.dataset.approvalId = evt.id;
-    const payload = evt.payload || {};
-    const lines = [];
-    let diffText = null;
-    let filePath = null;
-    if (payload.command) {
-      lines.push(`<div><strong>Command:</strong> ${escapeHtml(Array.isArray(payload.command) ? payload.command.join(' ') : String(payload.command))}</div>`);
-    }
-    if (payload.cwd) {
-      lines.push(`<div><strong>CWD:</strong> ${escapeHtml(String(payload.cwd))}</div>`);
-    }
-    if (payload.diff) {
-      diffText = payload.diff;
-      lines.push(`<pre class="diff-block">${formatDiff(payload.diff, payload.path)}</pre>`);
-    }
-    if (payload.changes && Array.isArray(payload.changes)) {
-      payload.changes.forEach((change) => {
-        if (change && change.diff) {
-          diffText = diffText || change.diff;
-          filePath = filePath || change.path;
-          lines.push(`<div><strong>${escapeHtml(toRelativePath(change.path) || 'file')}</strong></div><pre class="diff-block">${formatDiff(change.diff, change.path)}</pre>`);
-        }
-      });
-    }
-    body.innerHTML = lines.join('') || `<pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>`;
-
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-    const accept = document.createElement('button');
-    accept.className = 'btn tiny approve';
-    accept.textContent = 'Accept';
-    const decline = document.createElement('button');
-    decline.className = 'btn tiny decline';
-    decline.textContent = 'Decline';
-    accept.addEventListener('click', async () => {
-      await respondApproval(evt.id, 'accept');
-      await sioCall('approval_record', {
-        status: 'accepted',
-        diff: diffText,
-        path: filePath,
-        item_id: evt.id,
-      }, { fallbackUrl: '/api/appserver/approval_record' });
-      row.remove();
-    });
-    decline.addEventListener('click', async () => {
-      await respondApproval(evt.id, 'decline');
-      await sioCall('approval_record', {
-        status: 'declined',
-        diff: diffText,
-        path: filePath,
-        item_id: evt.id,
-      }, { fallbackUrl: '/api/appserver/approval_record' });
-      row.remove();
-    });
-    actions.append(accept, decline);
-    body.append(actions);
+    return rpcFlow.renderApproval(evt);
   }
 
   async function postJson(url, payload) {
@@ -3976,47 +3410,12 @@ document.addEventListener('DOMContentLoaded', () => {
     updateConversationHeaderLabel,
   });
 
-  function nextRpcId() {
-    const id = rpcId;
-    rpcId += 1;
-    return id;
-  }
-
   async function sendRpc(method, params, options = {}) {
-    const payload = { method };
-    if (params !== undefined) payload.params = params;
-    if (options.notify) {
-      await sioCall('rpc', payload, { fallbackUrl: '/api/appserver/rpc' });
-      return null;
-    }
-    const id = nextRpcId();
-    payload.id = id;
-    await waitForWs();
-    await sioCall('rpc', payload, { fallbackUrl: '/api/appserver/rpc' });
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error('rpc timeout'));
-      }, 15000);
-      pending.set(id, { resolve, reject, timer });
-    });
+    return rpcFlow.sendRpc(method, params, options);
   }
 
   async function respondApproval(requestId, decision) {
-    if (requestId === null || requestId === undefined) return;
-    let id = requestId;
-    if (typeof id === 'string' && /^\d+$/.test(id)) {
-      id = parseInt(id, 10);
-    }
-    const convoId = conversationMeta?.conversation_id || null;
-    await sioCall('approval_response', {
-      conversation_id: convoId,
-      id: id,
-      decision,
-    }, {
-      fallbackUrl: '/api/appserver/rpc',
-      fallbackMethod: 'POST',
-    });
+    return rpcFlow.respondApproval(requestId, decision);
   }
 
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
@@ -4307,76 +3706,80 @@ document.addEventListener('DOMContentLoaded', () => {
     getAgentBlockRows: () => agentBlockRows,
   });
 
-  setPill(statusEl, 'idle', 'warn');
-  setCounter(counterMessagesEl, messageCount);
-  setCounter(counterTokensEl, tokenCount);
-  updateScrollButton();
-  resetWsReady();
-  connectWS(handleEvent);
-  fetchHostUi();
-  bindPickerFilter();
-  setDrawerOpen(false); // Start closed to avoid race conditions
-  fetchConversation().then(async () => {
-    await fetchConversations();
-    if (activeView === 'conversation') {
-      resetTimeline(); // Reset timeline to ensure proper DOM order
-      await replayTranscript();
-      // Small delay to ensure DOM is ready before opening and scrolling
-      setTimeout(() => {
-        setDrawerOpen(true);
-        maybeAutoScroll(true);
-      }, 50);
-    } else {
-      ensureActivityRow(); // Only create activity row for non-conversation view
-    }
-  });
-  fetchStatus();
-
-  setupDropdown(settingsApprovalEl, settingsApprovalToggle, settingsApprovalOptions, [
-    'never',
-    'on-failure',
-    'untrusted',
-  ]);
-  setupDropdown(settingsSandboxEl, settingsSandboxToggle, settingsSandboxOptions, [
-    'workspaceWrite',
-    'readOnly',
-    'dangerFullAccess',
-    'externalSandbox',
-  ]);
-  setupDropdown(settingsModelEl, settingsModelToggle, settingsModelOptions, [
-    'gpt-5.1-codex',
-    'gpt-5-codex',
-    'gpt-4.1-codex',
-  ]);
-  setupDropdown(settingsEffortEl, settingsEffortToggle, settingsEffortOptions, [
-    'low',
-    'medium',
-    'high',
-  ]);
-  setupDropdown(settingsSummaryEl, settingsSummaryToggle, settingsSummaryOptions, [
-    'concise',
-    'detailed',
-    'auto',
-  ]);
-  
-  // Agent dropdown - starts with codex, loads extensions dynamically
-  setupDropdown(settingsAgentEl, settingsAgentToggle, settingsAgentOptions, ['codex']);
-  loadAgentOptions();
-  
-  loadModelOptions();
-
-  // Update effort options when model input changes (typing or paste)
-  if (settingsModelEl) {
-    settingsModelEl.addEventListener('input', () => {
-      updateEffortOptionsForModel(settingsModelEl.value);
-    });
-    settingsModelEl.addEventListener('change', () => {
-      updateEffortOptionsForModel(settingsModelEl.value);
-    });
-  }
-
-  window.CodexAgent = {
-    helpers: {
+  const {
+    initializeBoot,
+    setupSettingsBoot,
+    installCodexAgentGlobal,
+    bindStartStopButtons,
+    initExternalModules,
+    bindDropdownClose,
+  } = bindBootInitFlow({
+    getState: () => ({
+      messageCount,
+      tokenCount,
+      activeView,
+      pendingNewConversation,
+      pendingRollout,
+      conversationMeta,
+      conversationSettings,
+      splashTab,
+      hostUi,
+      pickerPath,
+      pickerMode,
+      openDropdownEl,
+    }),
+    setState: (patch) => {
+      if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
+      if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
+      if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
+      if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode;
+      if (patch.openDropdownEl !== undefined) openDropdownEl = patch.openDropdownEl;
+    },
+    elements: {
+      statusEl,
+      counterMessagesEl,
+      counterTokensEl,
+      settingsApprovalEl,
+      settingsApprovalToggle,
+      settingsApprovalOptions,
+      settingsSandboxEl,
+      settingsSandboxToggle,
+      settingsSandboxOptions,
+      settingsModelEl,
+      settingsModelToggle,
+      settingsModelOptions,
+      settingsEffortEl,
+      settingsEffortToggle,
+      settingsEffortOptions,
+      settingsSummaryEl,
+      settingsSummaryToggle,
+      settingsSummaryOptions,
+      settingsAgentEl,
+      settingsAgentToggle,
+      settingsAgentOptions,
+      startBtn,
+      stopBtn,
+    },
+    setPill,
+    setCounter,
+    updateScrollButton,
+    resetWsReady,
+    connectWS,
+    fetchHostUi,
+    bindPickerFilter,
+    setDrawerOpen,
+    fetchConversation,
+    fetchConversations,
+    resetTimeline,
+    replayTranscript: (...args) => replayTranscript(...args),
+    maybeAutoScroll,
+    ensureActivityRow,
+    fetchStatus,
+    setupDropdown,
+    loadAgentOptions,
+    loadModelOptions,
+    updateEffortOptionsForModel,
+    helperFns: {
       openSettingsModal,
       closeSettingsModal,
       saveSettings,
@@ -4387,313 +3790,96 @@ document.addEventListener('DOMContentLoaded', () => {
       loadRolloutPreview,
       setActiveView,
       setDrawerOpen,
-      setPendingNewConversation: (val) => { pendingNewConversation = Boolean(val); },
-      setPendingRollout: (val) => { pendingRollout = val; },
       fetchPicker,
       fetchRollouts,
       setActivity,
       insertMention,
-      getPickerPath: () => pickerPath,
-      setPickerPath: (val) => { pickerPath = val; },
-      getPickerMode: () => pickerMode,
-      setPickerMode: (val) => { pickerMode = val || 'cwd'; },
       saveApprovalQuick,
       sioCall,
       openDropdownMenu,
       closeDropdownMenu,
       toggleDropdownMenu,
     },
-    state: {
-      get pendingNewConversation() { return pendingNewConversation; },
-      set pendingNewConversation(val) { pendingNewConversation = Boolean(val); },
-      get pendingRollout() { return pendingRollout; },
-      get conversationMeta() { return conversationMeta; },
-      get conversationSettings() { return conversationSettings; },
-      get splashTab() { return splashTab; },
-      get hostUi() { return hostUi; },
+    closeDropdownMenu,
+    sioCall,
+    documentRef: document,
+    windowRef: window,
+  });
+
+  initializeBoot(handleEvent);
+  setupSettingsBoot();
+  installCodexAgentGlobal();
+  bindStartStopButtons();
+  initExternalModules();
+  bindDropdownClose();
+  const { dispatchInput, sendPtyStdin, bindInputHandlers, syncMarkdownFromSettings } = bindInputFlow({
+    getState: () => ({
+      terminalMode,
+      composerTerm,
+      commandRunning,
+      applyingDraft,
+      draftDirty,
+      conversationSettings,
+      conversationMeta,
+      isMobile,
+      transcriptLoading,
+      transcriptStart,
+      topSpacerEl,
+      scrollProgrammatic: _scrollProgrammatic,
+      autoScroll,
+      ptyWebSocket,
+    }),
+    setState: (patch) => {
+      if (patch.draftDirty !== undefined) draftDirty = patch.draftDirty;
+      if (patch.autoScroll !== undefined) autoScroll = patch.autoScroll;
+      if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
+      if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
+      if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
+      if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode;
     },
-  };
-
-  startBtn?.addEventListener('click', async () => {
-    await sioCall('app_start', {}, { fallbackUrl: '/api/appserver/start' });
-    fetchStatus();
+    elements: {
+      sendBtn,
+      footerTerminalToggleEl,
+      promptEl,
+      mentionPillEl,
+      hostCloseTopEl,
+      hostCloseDrawerEl,
+      contextRemainingEl,
+      interruptBtn,
+      scrollContainer,
+      scrollBtn,
+      timelineEl,
+      markdownToggleEl,
+      trackEditsToggleEl,
+      settingsCwdEl,
+    },
+    sendShellCommand,
+    sendUserMessage,
+    getPromptText,
+    clearPrompt,
+    clearDraft,
+    setTerminalMode,
+    postJson,
+    saveDraftDebounced,
+    openPicker,
+    sendHostCloseMessage,
+    bindSplashTabHandlers,
+    initTribute,
+    requestContextCompact,
+    interruptTurn,
+    updateScrollButton,
+    maybeAutoScroll,
+    isNearBottom,
+    loadOlderTranscript,
+    postTe2OpenRequest,
+    setMarkdownEnabled,
+    setTrackEditsEnabled,
+    resetTimeline,
+    replayTranscript: (...args) => replayTranscript(...args),
+    sioCall,
+    documentRef: document,
+    windowRef: window,
   });
 
-  stopBtn?.addEventListener('click', async () => {
-    await sioCall('app_stop', {}, { fallbackUrl: '/api/appserver/stop' });
-    fetchStatus();
-  });
-  (window.CodexAgentModules || []).forEach((fn) => {
-    try { fn(window.CodexAgent); } catch (err) { console.warn('module init failed', err); }
-  });
-
-  document.addEventListener('click', (evt) => {
-    if (!openDropdownEl) return;
-    const target = evt.target;
-    if (!(target instanceof HTMLElement)) return;
-    if (openDropdownEl.contains(target)) return;
-    if (target.classList.contains('dropdown-toggle')) return;
-    closeDropdownMenu(openDropdownEl);
-  });
-
-  // Helper to dispatch message or shell command based on ! prefix
-  async function dispatchInput(text) {
-    // Shell commands are explicit via ! prefix only.
-    // In terminalMode the composer xterm drives the PTY directly; we should not
-    // also route plain input through /api/appserver/shell/exec or it will create
-    // a duplicate `$ cmd` transcript row.
-    if (text.startsWith('!')) {
-      await sendShellCommand(text.slice(1).trim());
-    } else {
-      await sendUserMessage(text);
-    }
-  }
-
-  sendBtn?.addEventListener('click', async () => {
-    const text = getPromptText().trim();
-    if (!text) return;
-    clearPrompt();
-    clearDraft();
-    await dispatchInput(text);
-  });
-
-  footerTerminalToggleEl?.addEventListener('click', () => {
-    setTerminalMode(!terminalMode);
-    promptEl?.focus();
-  });
-
-  promptEl?.addEventListener('keydown', async (evt) => {
-    // When composer xterm is active, it handles all input - suppress promptEl
-    if (terminalMode && composerTerm) {
-      // xterm.onData() already sends keystrokes to PTY via WebSocket
-      // Don't let promptEl also handle Enter/keystrokes (prevents double input)
-      evt.preventDefault();
-      return;
-    }
-    // When command is running in terminal mode (but no composerTerm), stream keystrokes directly to PTY
-    if (commandRunning && terminalMode) {
-      evt.preventDefault();
-      let data = '';
-      if (evt.key === 'Enter') {
-        data = '\n';
-      } else if (evt.key === 'Backspace') {
-        data = '\x7f'; // DEL character
-      } else if (evt.key === 'Tab') {
-        data = '\t';
-      } else if (evt.key === 'Escape') {
-        data = '\x1b';
-      } else if (evt.key === 'ArrowUp') {
-        data = '\x1b[A';
-      } else if (evt.key === 'ArrowDown') {
-        data = '\x1b[B';
-      } else if (evt.key === 'ArrowRight') {
-        data = '\x1b[C';
-      } else if (evt.key === 'ArrowLeft') {
-        data = '\x1b[D';
-      } else if (evt.ctrlKey && evt.key.length === 1) {
-        // Ctrl+C, Ctrl+D, etc.
-        const code = evt.key.toUpperCase().charCodeAt(0) - 64;
-        if (code > 0 && code < 32) {
-          data = String.fromCharCode(code);
-        }
-      } else if (evt.key.length === 1) {
-        data = evt.key;
-      }
-      if (data) {
-        await sendPtyStdin(data);
-      }
-      return;
-    }
-    
-    if (evt.key === 'Enter' && !evt.shiftKey) {
-      if (isMobile && !terminalMode) {
-        // On mobile, Enter inserts newline (let default happen)
-        return;
-      }
-      evt.preventDefault();
-      const text = getPromptText().trim();
-      if (!text) return;
-      clearPrompt();
-      clearDraft();
-      await dispatchInput(text);
-      return;
-    }
-    if (evt.key === 'Enter' && evt.shiftKey) {
-      evt.preventDefault();
-      document.execCommand('insertLineBreak');
-    }
-  });
-
-  // Send stdin to PTY
-  async function sendPtyStdin(data) {
-    if (ptyWebSocket && ptyWebSocket.readyState === WebSocket.OPEN) {
-      ptyWebSocket.send(data);
-    } else {
-      // Fallback to HTTP POST
-      try {
-        await postJson('/api/pty/stdin', { data });
-      } catch (e) {
-        console.error('Failed to send PTY stdin:', e);
-      }
-    }
-  }
-
-	  promptEl?.addEventListener('input', () => {
-	    // When composer xterm is active, it handles all input - skip promptEl
-	    if (terminalMode && composerTerm) {
-	      return;
-	    }
-	    if (!applyingDraft) {
-	      draftDirty = true;
-	    }
-	    // When in stdin mode, send each character as it's typed
-	    if (commandRunning && terminalMode) {
-	      const text = getPromptText();
-	      if (text) {
-        clearPrompt();
-        sendPtyStdin(text);
-      }
-    }
-	    // Save draft with debounce (not in terminal/stdin mode)
-	    if (!commandRunning && !terminalMode) {
-	      saveDraftDebounced();
-	    }
-	    // Tribute handles @ mentions automatically
-	  });
-
-  promptEl?.addEventListener('click', (evt) => {
-    const target = evt.target;
-    if (!(target instanceof HTMLElement)) return;
-    if (target.classList.contains('mention-token')) {
-      // Show full path on click/tap
-      const path = target.dataset.path || target.title || target.textContent || '';
-      console.log('Mention path:', path);
-    }
-  });
-
-  mentionPillEl?.addEventListener('click', () => {
-    const startPath = conversationSettings?.cwd || settingsCwdEl?.value || '~';
-    openPicker(startPath, 'mention');
-  });
-
-  hostCloseTopEl?.addEventListener('click', () => {
-    sendHostCloseMessage();
-  });
-
-	  hostCloseDrawerEl?.addEventListener('click', () => {
-	    sendHostCloseMessage();
-	  });
-
-  bindSplashTabHandlers();
-
-  // Initialize Tribute for @ mentions
-  initTribute();
-
-  contextRemainingEl?.addEventListener('click', () => {
-    if (window.CodexAgent?.helpers?.openWarningModal) {
-      window.CodexAgent.helpers.openWarningModal({
-        title: 'Compact context?',
-        body: 'This will summarize the current conversation history to save context window.',
-        confirmText: 'Compact',
-        onConfirm: async () => {
-          await requestContextCompact();
-        },
-      });
-    }
-  });
-
-  interruptBtn?.addEventListener('click', async () => {
-    await interruptTurn();
-  });
-
-  scrollContainer?.addEventListener('scroll', () => {
-    if (scrollContainer) {
-      if (!transcriptLoading && transcriptStart > 0) {
-        const topSpacerHeight = topSpacerEl ? topSpacerEl.getBoundingClientRect().height : 0;
-        if (scrollContainer.scrollTop <= topSpacerHeight + 120) {
-          loadOlderTranscript();
-        }
-      }
-      // Auto-unpin when user scrolls away from bottom
-      if (!_scrollProgrammatic && autoScroll && !isNearBottom()) {
-        autoScroll = false;
-        updateScrollButton();
-      }
-      // Auto-repin when user scrolls back to bottom
-      if (!_scrollProgrammatic && !autoScroll && isNearBottom()) {
-        autoScroll = true;
-        updateScrollButton();
-      }
-    }
-  });
-
-  scrollBtn?.addEventListener('click', () => {
-    autoScroll = !autoScroll;
-    updateScrollButton();
-    if (autoScroll) maybeAutoScroll(true);
-  });
-
-  // Re-pin to bottom on viewport resize (keyboard open/close, orientation change)
-  window.addEventListener('resize', () => {
-    if (autoScroll) maybeAutoScroll(true);
-  });
-
-  timelineEl?.addEventListener('click', (evt) => {
-    const target = evt.target;
-    if (!(target instanceof HTMLElement)) return;
-    const lineEl = target.closest('.diff-line');
-    if (!(lineEl instanceof HTMLElement)) return;
-    const path = lineEl.getAttribute('data-path') || '';
-    const newLine = lineEl.getAttribute('data-new-line') || '';
-    const oldLine = lineEl.getAttribute('data-old-line') || '';
-    const line = parseInt(newLine || oldLine, 10);
-    if (!path || !Number.isFinite(line)) return;
-    // Avoid triggering on hunk headers (line numbers may be missing/0).
-    if (line <= 0) return;
-    // Tap highlight for touch-only WebViews (e.g. Gecko wrappers) where :hover may not show.
-    try {
-      lineEl.classList.add('tap-flash');
-      setTimeout(() => lineEl.classList.remove('tap-flash'), 180);
-    } catch {}
-    postTe2OpenRequest({ path, line, column: 1 });
-  });
-
-	  // Markdown toggle in header - syncs with settings and saves to SSOT
-	  markdownToggleEl?.addEventListener('change', async () => {
-	    const enabled = markdownToggleEl.checked;
-	    setMarkdownEnabled(enabled);
-	    if (conversationSettings && typeof conversationSettings === 'object') {
-	      conversationSettings.markdown = enabled;
-	    }
-	    if (conversationMeta?.conversation_id) {
-	      await sioCall('conversation_update', { 
-	        conversation_id: conversationMeta.conversation_id,
-	        settings: { ...conversationSettings, markdown: enabled } 
-	      }, { fallbackUrl: '/api/appserver/conversation' });
-	    }
-    // Re-render timeline immediately so the user sees the new markdown mode take effect.
-    resetTimeline();
-    await replayTranscript();
-  });
-
-  // Track-edits toggle in header - syncs with settings and saves to SSOT
-  trackEditsToggleEl?.addEventListener('change', async () => {
-    const enabled = trackEditsToggleEl.checked;
-    setTrackEditsEnabled(enabled);
-    if (conversationSettings && typeof conversationSettings === 'object') {
-      conversationSettings.trackEdits = enabled;
-    }
-    if (conversationMeta?.conversation_id) {
-      await sioCall('conversation_update', {
-        conversation_id: conversationMeta.conversation_id,
-        settings: { ...conversationSettings, trackEdits: enabled }
-      }, { fallbackUrl: '/api/appserver/conversation' });
-    }
-  });
-
-  // Sync markdown toggle when conversation loads
-  function syncMarkdownFromSettings() {
-    const enabled = conversationSettings?.markdown !== false;
-    setMarkdownEnabled(enabled);
-  }
+  bindInputHandlers();
 });
