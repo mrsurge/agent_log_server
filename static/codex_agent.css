@@ -1119,14 +1119,17 @@ textarea {
 }
 
 .timeline-sticky-overlay {
-  position: absolute;
+  position: sticky;
   top: 0;
   left: 0;
   right: 0;
+  height: 0;
   z-index: 9;
   display: none;
   pointer-events: none;
   overflow: visible;
+  background: transparent;
+  flex: none;
 }
 
 .timeline-sticky-underlay {
@@ -1146,12 +1149,6 @@ textarea {
   height: 100%;
 }
 
-.timeline-sticky-header {
-  margin: 0;
-  cursor: pointer;
-  user-select: none;
-}
-
 .timeline-sticky-header .ribbon-toggle-zone {
   display: none !important;
 }
@@ -1163,10 +1160,6 @@ textarea {
 .timeline-sticky-header[data-expanded="true"] .twisty {
   transform: translateY(-50%) rotate(90deg);
   opacity: 0.75;
-}
-
-.timeline-sticky-slot-bottom .timeline-sticky-header {
-  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.35);
 }
 
 .plan-checkbox {

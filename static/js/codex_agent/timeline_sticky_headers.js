@@ -36,6 +36,18 @@ function getHeaderForRow(row) {
   return null;
 }
 
+function getStickyHostClasses(row) {
+  const classes = ['timeline-sticky-slot-host'];
+  if (!row?.classList) return classes;
+  if (row.classList.contains('message-card')) classes.push('message-card');
+  if (row.classList.contains('user')) classes.push('user');
+  if (row.classList.contains('subagent-card')) classes.push('subagent-card');
+  if (row.classList.contains('expanded')) classes.push('expanded');
+  if (row.classList.contains('diff')) classes.push('diff');
+  if (row.classList.contains('declined')) classes.push('declined');
+  return classes;
+}
+
 function getStickyChainFromRow(row) {
   if (!row) return [];
   const subagents = [];
@@ -155,7 +167,7 @@ export function bindTimelineStickyHeaders(ctx) {
   let stickySlots = [];
   let stickyRows = [];
   let stickyUnderlays = [];
-  let lastScrollTop = timelineWrapEl.scrollTop || 0;
+  let visibleHeight = 0;
   let rowUidCounter = 0;
 
   const DEFAULT_ROW_HEIGHT = 42;
@@ -221,6 +233,7 @@ export function bindTimelineStickyHeaders(ctx) {
     lastKey = '';
     stickySourceRows = [];
     stickyHeights = [];
+    visibleHeight = 0;
     ensureSlotCount(0);
     container.style.display = 'none';
     container.style.height = '0px';
@@ -257,12 +270,14 @@ export function bindTimelineStickyHeaders(ctx) {
       el.style.pointerEvents = 'none';
     });
     clone.dataset.expanded = sourceHeader.dataset.expanded || (srcRow.classList.contains('expanded') ? 'true' : 'false');
+    host.className = getStickyHostClasses(srcRow).join(' ');
     host.replaceChildren(clone);
 
     const rowStyle = win.getComputedStyle(srcRow);
     underlay.style.backgroundColor = rowStyle.backgroundColor || '';
     underlay.style.backgroundImage = rowStyle.backgroundImage || '';
     underlay.style.borderLeft = rowStyle.borderLeft || '';
+    slot.style.cursor = win.getComputedStyle(sourceHeader).cursor || '';
 
     slot.dataset.stickyType = getStickyType(srcRow);
     slot._sourceRow = srcRow;
@@ -278,10 +293,7 @@ export function bindTimelineStickyHeaders(ctx) {
     return height;
   }
 
-  function applyPushTransforms(chain) {
-    const containerRect = container.getBoundingClientRect();
-    if (!isElementVisibleRect(containerRect)) return;
-
+  function applyPushTransforms(chain, hostTop) {
     let cumulativePush = 0;
     let baseTop = 0;
 
@@ -299,7 +311,7 @@ export function bindTimelineStickyHeaders(ctx) {
       const nextInfo = findNextTimelineRowAfterSubtree(srcRow);
       if (nextInfo?.row) {
         const nextRect = nextInfo.row.getBoundingClientRect();
-        const anchorY = containerRect.top + baseTop + height + cumulativePush + PUSH_TRIGGER_ADJUST_PX;
+        const anchorY = hostTop + baseTop + height + cumulativePush + PUSH_TRIGGER_ADJUST_PX;
         const overlap = nextRect.top - anchorY;
         if (overlap < 0) {
           push = Math.max(overlap, -height);
@@ -364,18 +376,19 @@ export function bindTimelineStickyHeaders(ctx) {
     }
 
     const topOffset = typeof getTopOffset === 'function' ? getTopOffset() : 0;
+    const hostTop = wrapRect.top + topOffset;
     container.style.display = 'block';
-    container.style.top = `${(timelineWrapEl.scrollTop || 0) + topOffset}px`;
+    container.style.top = `${topOffset}px`;
     ensureSlotCount(chain.length);
     stickySourceRows = chain.slice();
     stickyHeights = new Array(chain.length);
     chain.forEach((srcRow, depth) => {
       syncSlotFromSource(srcRow, depth);
     });
-    const totalHeight = stickyHeights.reduce((sum, height) => sum + (height || DEFAULT_ROW_HEIGHT), 0);
-    container.style.height = `${totalHeight + BOTTOM_SHADOW_PAD_PX}px`;
+    visibleHeight = stickyHeights.reduce((sum, height) => sum + (height || DEFAULT_ROW_HEIGHT), 0) + BOTTOM_SHADOW_PAD_PX;
+    container.style.height = '0px';
     lastKey = key;
-    applyPushTransforms(chain);
+    applyPushTransforms(chain, hostTop);
 
     if (needsStabilityResample && stabilityResampleBudget > 0) {
       stabilityResampleBudget -= 1;
@@ -393,8 +406,6 @@ export function bindTimelineStickyHeaders(ctx) {
   });
 
   function onScroll() {
-    const nextTop = timelineWrapEl.scrollTop || 0;
-    lastScrollTop = nextTop;
     scheduleUpdate();
   }
 
@@ -417,7 +428,7 @@ export function bindTimelineStickyHeaders(ctx) {
     },
     getVisibleHeight() {
       if (container.style.display === 'none') return 0;
-      return container.offsetHeight || 0;
+      return visibleHeight;
     },
   };
 }
