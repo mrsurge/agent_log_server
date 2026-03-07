@@ -656,6 +656,7 @@ textarea {
   background: transparent;
   overflow-y: auto;
   overflow-x: hidden;
+  position: relative;
 }
 
 .timeline {
@@ -739,6 +740,38 @@ textarea {
 
 .timeline-row.message.user {
   border-left: 4px solid #228b22;
+}
+
+.message-card {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.message-card > .message-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 14px;
+  background: #181423;
+  color: #e5dcff;
+  cursor: default;
+}
+
+.message-card.user > .message-header {
+  background: #122216;
+  color: #caefd2;
+}
+
+.message-card > .message-header .message-header-title {
+  flex: 1 1 auto;
+  font-family: monospace;
+}
+
+.message-card > .message-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 12px 14px;
 }
 
 .timeline-row.system {
@@ -1083,6 +1116,57 @@ textarea {
   padding: 4px 8px;
   border-radius: 4px;
   background: var(--surface, #16181f);
+}
+
+.timeline-sticky-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9;
+  display: none;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.timeline-sticky-underlay {
+  position: absolute;
+  top: 0;
+  border-bottom: 1px solid #12151d;
+  pointer-events: none;
+}
+
+.timeline-sticky-slot {
+  position: absolute;
+  pointer-events: auto;
+  overflow: hidden;
+}
+
+.timeline-sticky-slot-host {
+  height: 100%;
+}
+
+.timeline-sticky-header {
+  margin: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.timeline-sticky-header .ribbon-toggle-zone {
+  display: none !important;
+}
+
+.timeline-sticky-header .twisty {
+  pointer-events: none !important;
+}
+
+.timeline-sticky-header[data-expanded="true"] .twisty {
+  transform: translateY(-50%) rotate(90deg);
+  opacity: 0.75;
+}
+
+.timeline-sticky-slot-bottom .timeline-sticky-header {
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.35);
 }
 
 .plan-checkbox {

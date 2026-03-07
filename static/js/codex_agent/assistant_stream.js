@@ -3,7 +3,8 @@
 export function bindAssistantStream(ctx) {
   const {
     assistantRows,
-    buildRow,
+    buildMessageCard,
+    updateMessageCardHeader,
     insertRow,
     isMarkdownEnabled,
     createStreamingParser,
@@ -19,7 +20,7 @@ export function bindAssistantStream(ctx) {
     const key = id || 'assistant';
     let entry = assistantRows.get(key);
     if (!entry) {
-      const { row, body } = buildRow('message', 'assistant');
+      const { row, body } = buildMessageCard('assistant', '');
       // If parentEl provided (subagent body), insert there instead of main timeline
       if (parentEl) {
         parentEl.appendChild(row);
@@ -32,12 +33,12 @@ export function bindAssistantStream(ctx) {
       if (isMarkdownEnabled()) {
         // Create streaming markdown parser with default renderer
         const parser = createStreamingParser(container);
-        entry = { container, parser, useMarkdown: true, counted: false };
+        entry = { row, container, parser, useMarkdown: true, counted: false, rawText: '' };
       } else {
         // Plain text mode - use pre element
         const pre = document.createElement('pre');
         container.append(pre);
-        entry = { container, pre, useMarkdown: false, counted: false };
+        entry = { row, container, pre, useMarkdown: false, counted: false, rawText: '' };
       }
       assistantRows.set(key, entry);
     }
@@ -48,6 +49,8 @@ export function bindAssistantStream(ctx) {
     if (!delta) return;
     const entry = getAssistantRow(id, parentEl);
     const cleanDelta = stripCitations(delta);
+    entry.rawText = `${entry.rawText || ''}${cleanDelta}`;
+    updateMessageCardHeader(entry.row, 'assistant', entry.rawText);
     if (entry.useMarkdown && entry.parser) {
       streamWrite(entry.parser, cleanDelta);
     } else if (entry.pre) {
@@ -65,10 +68,15 @@ export function bindAssistantStream(ctx) {
       entry = getAssistantRow(id, parentEl);
       if (text) appendAssistantDelta(id, text, parentEl);
     }
+    const finalText = stripCitations(text || entry.rawText || '');
+    entry.rawText = finalText;
+    updateMessageCardHeader(entry.row, 'assistant', finalText);
     if (entry.useMarkdown && entry.parser) {
       // End the streaming parser
       streamEnd(entry.parser);
       highlightCode(entry.container);
+    } else if (entry.pre && finalText) {
+      entry.pre.textContent = finalText;
     }
     if (!entry.counted) {
       incrementMessages();

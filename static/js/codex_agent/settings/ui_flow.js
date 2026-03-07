@@ -19,6 +19,7 @@ export function bindSettingsUiFlow(ctx) {
     settingsEffortEl,
     settingsSummaryEl,
     settingsLabelEl,
+    settingsAliasEl,
     settingsCommandLinesEl,
     settingsMarkdownEl,
     settingsXtermEl,
@@ -59,6 +60,7 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsEffortEl) settingsEffortEl.value = '';
       if (settingsSummaryEl) settingsSummaryEl.value = '';
       if (settingsLabelEl) settingsLabelEl.value = '';
+      if (settingsAliasEl) settingsAliasEl.value = '';
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = '20';
       if (settingsMarkdownEl) settingsMarkdownEl.checked = true;
       if (settingsRolloutEl) settingsRolloutEl.value = state.pendingRollout?.id || '';
@@ -72,6 +74,7 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsEffortEl) settingsEffortEl.value = state.conversationSettings?.effort || '';
       if (settingsSummaryEl) settingsSummaryEl.value = state.conversationSettings?.summary || '';
       if (settingsLabelEl) settingsLabelEl.value = state.conversationSettings?.label || '';
+      if (settingsAliasEl) settingsAliasEl.value = state.conversationSettings?.alias || '';
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = state.conversationSettings?.commandOutputLines || '20';
       if (settingsMarkdownEl) settingsMarkdownEl.checked = state.conversationSettings?.markdown !== false;
       if (settingsXtermEl) settingsXtermEl.checked = state.conversationSettings?.useXterm !== false;

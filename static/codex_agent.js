@@ -15,6 +15,7 @@ import { bindDiffRendering } from './js/codex_agent/diff/rendering.js';
 import { bindSocketEvents } from './js/codex_agent/events/socket.js';
 import { bindEventRouter } from './js/codex_agent/events/router.js';
 import { bindPlanOverlay } from './js/codex_agent/plan_overlay.js';
+import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.js';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
 import { bindPtyRuntime } from './js/codex_agent/pty/runtime.js';
@@ -47,6 +48,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const contextRemainingEl = document.getElementById('context-remaining');
   const scrollBtn = document.getElementById('scroll-pin');
   const activeConversationEl = document.getElementById('active-conversation');
+  const conversationTitleEl = document.getElementById('conversation-title');
   const splashViewEl = document.getElementById('splash-view');
   const drawerEl = document.getElementById('conversation-drawer');
   const conversationListEl = document.getElementById('conversation-list');
@@ -64,6 +66,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsEffortEl = document.getElementById('settings-effort');
   const settingsSummaryEl = document.getElementById('settings-summary');
   const settingsLabelEl = document.getElementById('settings-label');
+  const settingsAliasEl = document.getElementById('settings-alias');
   const settingsCommandLinesEl = document.getElementById('settings-command-lines');
   const settingsMarkdownEl = document.getElementById('settings-markdown');
   const settingsXtermEl = document.getElementById('settings-xterm');
@@ -181,6 +184,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let planOverlayEl = null;
   let planListEl = null;
   let planCollapsed = false;
+  let timelineStickyHeaders = null;
   const planItems = new Map();
   let transcriptStart = 0;
   let transcriptEnd = 0;
@@ -233,15 +237,9 @@ document.addEventListener('DOMContentLoaded', () => {
       row.appendChild(body);
 
       insertRow(row);
-      makeCollapsible(row, `subagent:${id}`, false);
-      // Whole header toggles collapse (no file-link conflict on subagent headers)
-      header.addEventListener('click', (e) => {
-        if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
-        row.classList.toggle('expanded');
-        if (row.classList.contains('expanded')) _expandedCards.add(`subagent:${id}`);
-        else _expandedCards.delete(`subagent:${id}`);
-        _saveExpandedCards();
-        maybeAutoScroll();
+      makeCollapsible(row, `subagent:${id}`, false, {
+        headerEl: header,
+        fullHeaderToggle: true,
       });
       sa = { row, body, header, statusEl, label, items: [] };
       subagentContainers.set(id, sa);
@@ -269,36 +267,55 @@ document.addEventListener('DOMContentLoaded', () => {
   function _saveExpandedCards() {
     localStorage.setItem('expandedCards', JSON.stringify([..._expandedCards]));
   }
-  function makeCollapsible(row, cardId, startExpanded) {
+  function makeCollapsible(row, cardId, startExpanded, options = {}) {
     if (!row) return;
-    row.classList.add('collapsible');
-    const isExpanded = startExpanded || _expandedCards.has(cardId);
-    if (isExpanded) row.classList.add('expanded');
+    const {
+      headerEl = row.querySelector('.command-ribbon') || row.querySelector('.diff-path-label'),
+      persist = true,
+      fullHeaderToggle = false,
+      toggleZone = !fullHeaderToggle,
+      onToggle = null,
+    } = options;
+    if (!headerEl) return;
 
-    // Find or create ribbon to attach twisty + click handler
-    const ribbon = row.querySelector('.command-ribbon') || row.querySelector('.diff-path-label');
-    if (!ribbon) return;
-    let twistyEl = ribbon.querySelector('.twisty');
+    row.classList.add('collapsible');
+    const isExpanded = Boolean(startExpanded || (persist && cardId && _expandedCards.has(cardId)));
+    row.classList.toggle('expanded', isExpanded);
+
+    let twistyEl = headerEl.querySelector(':scope > .twisty') || headerEl.querySelector('.twisty');
     if (!twistyEl) {
       twistyEl = document.createElement('span');
       twistyEl.className = 'twisty';
       twistyEl.textContent = '▶';
-      ribbon.appendChild(twistyEl);
+      headerEl.appendChild(twistyEl);
     }
 
-    // Helper: toggle expanded state + persist + scroll
-    function toggleCollapse() {
-      row.classList.toggle('expanded');
-      if (row.classList.contains('expanded')) {
-        _expandedCards.add(cardId);
-      } else {
-        _expandedCards.delete(cardId);
-      }
+    function syncExpandedState(expanded) {
+      headerEl.dataset.expanded = expanded ? 'true' : 'false';
+    }
+
+    function persistExpandedState(expanded) {
+      if (!persist || !cardId) return;
+      if (expanded) _expandedCards.add(cardId);
+      else _expandedCards.delete(cardId);
       _saveExpandedCards();
-      maybeAutoScroll();
     }
 
-    // Twisty click toggles collapse
+    function toggleCollapse(forceExpanded) {
+      const expanded = typeof forceExpanded === 'boolean'
+        ? forceExpanded
+        : !row.classList.contains('expanded');
+      row.classList.toggle('expanded', expanded);
+      persistExpandedState(expanded);
+      syncExpandedState(expanded);
+      if (typeof onToggle === 'function') onToggle(expanded);
+      maybeAutoScroll();
+      return expanded;
+    }
+
+    row._toggleCollapse = toggleCollapse;
+    syncExpandedState(isExpanded);
+
     twistyEl.style.pointerEvents = 'auto';
     twistyEl.style.cursor = 'pointer';
     twistyEl.addEventListener('click', (e) => {
@@ -306,16 +323,25 @@ document.addEventListener('DOMContentLoaded', () => {
       toggleCollapse();
     });
 
-    // ALWAYS create a toggle zone on the right half — never wire the whole ribbon.
-    // Left side is reserved for file-link handlers (wired later or never).
-    // Right side is always the collapse toggle. They never overlap.
-    const toggleZone = document.createElement('span');
-    toggleZone.className = 'ribbon-toggle-zone';
-    ribbon.appendChild(toggleZone);
-    toggleZone.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleCollapse();
-    });
+    if (toggleZone) {
+      let toggleZoneEl = headerEl.querySelector(':scope > .ribbon-toggle-zone') || headerEl.querySelector('.ribbon-toggle-zone');
+      if (!toggleZoneEl) {
+        toggleZoneEl = document.createElement('span');
+        toggleZoneEl.className = 'ribbon-toggle-zone';
+        headerEl.appendChild(toggleZoneEl);
+      }
+      toggleZoneEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleCollapse();
+      });
+    }
+
+    if (fullHeaderToggle) {
+      headerEl.addEventListener('click', (e) => {
+        if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
+        toggleCollapse();
+      });
+    }
   }
 
   // Note: underscore emphasis is handled by the markdown renderer; do not escape underscores
@@ -1408,11 +1434,25 @@ document.addEventListener('DOMContentLoaded', () => {
     activeConversationEl.textContent = '';
   }
 
+  function getAssistantDisplayName() {
+    const alias = typeof conversationSettings?.alias === 'string' ? conversationSettings.alias.trim() : '';
+    return alias || 'assistant';
+  }
+
+  function getConversationHeaderTitle() {
+    const alias = typeof conversationSettings?.alias === 'string' ? conversationSettings.alias.trim() : '';
+    return alias || 'Conversation';
+  }
+
   function updateConversationHeaderLabel() {
+    if (conversationTitleEl) {
+      conversationTitleEl.textContent = getConversationHeaderTitle();
+    }
     const el = document.getElementById('conversation-label');
     if (!el) return;
     const label = conversationSettings?.label || '—';
     el.textContent = label;
+    refreshMessageCardHeaders();
   }
 
   async function openSettingsModal(...args) {
@@ -1554,6 +1594,7 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsEffortEl,
       settingsSummaryEl,
       settingsLabelEl,
+      settingsAliasEl,
       settingsCommandLinesEl,
       settingsMarkdownEl,
       settingsXtermEl,
@@ -1605,6 +1646,47 @@ document.addEventListener('DOMContentLoaded', () => {
     scrollBtn.classList.toggle('active', autoScroll);
   }
 
+  function getPlanOverlayOffset() {
+    if (!planOverlayEl || planOverlayEl.style.display === 'none') return 0;
+    const rect = planOverlayEl.getBoundingClientRect();
+    if (!rect.height) return 0;
+    const styles = window.getComputedStyle(planOverlayEl);
+    const marginBottom = parseFloat(styles.marginBottom || '0') || 0;
+    return rect.height + marginBottom;
+  }
+
+  function scrollRowToTop(row, { clearPinned = false } = {}) {
+    if (!row || !scrollContainer) return;
+    const wrapRect = scrollContainer.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const stickyOffset = timelineStickyHeaders?.getVisibleHeight?.() || 0;
+    const delta = rowRect.top - wrapRect.top - getPlanOverlayOffset() - stickyOffset;
+    _scrollProgrammatic = true;
+    scrollContainer.scrollTop += delta;
+    if (clearPinned) {
+      autoScroll = false;
+      updateScrollButton();
+    }
+    requestAnimationFrame(() => {
+      _scrollProgrammatic = false;
+      timelineStickyHeaders?.update?.();
+    });
+  }
+
+  timelineStickyHeaders = bindTimelineStickyHeaders({
+    timelineWrapEl,
+    timelineEl,
+    getTopOffset: () => getPlanOverlayOffset(),
+    onMessageHeaderClick: (row) => {
+      scrollRowToTop(row, { clearPinned: true });
+    },
+    onCollapsibleHeaderClick: (row) => {
+      row?._toggleCollapse?.();
+    },
+    documentRef: document,
+    windowRef: window,
+  });
+
   function ensureActivityRow() {
     // No longer needed - status ribbon is always present in HTML
     // Kept as no-op for compatibility
@@ -1632,6 +1714,53 @@ document.addEventListener('DOMContentLoaded', () => {
     body.className = 'body';
     row.append(meta, body);
     return { row, body };
+  }
+
+  function getMessageRoleLabel(role) {
+    if (role === 'assistant') return getAssistantDisplayName();
+    if (role === 'user') return 'user';
+    return role || 'message';
+  }
+
+  function updateMessageCardHeader(row, role, text) {
+    if (!row) return;
+    row.dataset.messageRole = role || 'message';
+    row._messageText = text || '';
+    const headerEl = row.querySelector(':scope > .message-header');
+    if (!headerEl) return;
+    const titleEl = headerEl.querySelector('.message-header-title');
+    if (titleEl) titleEl.textContent = getMessageRoleLabel(role);
+    headerEl.dataset.expanded = 'true';
+  }
+
+  function refreshMessageCardHeaders() {
+    if (!timelineEl) return;
+    timelineEl.querySelectorAll('.message-card').forEach((row) => {
+      updateMessageCardHeader(
+        row,
+        row.dataset.messageRole || row._messageRole || 'message',
+        row._messageText || '',
+      );
+    });
+  }
+
+  function buildMessageCard(role, text = '') {
+    const row = document.createElement('div');
+    row.className = `timeline-row message message-card ${role === 'user' ? 'user' : ''}`.trim();
+
+    const header = document.createElement('div');
+    header.className = 'message-header command-ribbon';
+    const title = document.createElement('span');
+    title.className = 'message-header-title';
+    header.append(title);
+
+    const body = document.createElement('div');
+    body.className = 'body message-body';
+
+    row.append(header, body);
+    row._messageRole = role || 'message';
+    updateMessageCardHeader(row, role, text);
+    return { row, body, header, title };
   }
 
   function createRow(kind, title, beforeEl) {
@@ -1780,6 +1909,7 @@ document.addEventListener('DOMContentLoaded', () => {
     timelineEl.appendChild(bottomSpacerEl);
     ensureActivityRow();
     maybeAutoScroll(true);
+    timelineStickyHeaders?.update?.();
   }
 
   async function requestContextCompact() {
@@ -1796,16 +1926,19 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function addMessage(role, text) {
-    const label = role === 'assistant' ? 'assistant' : role;
-    const { row, body } = buildRow('message', label);
-    if (role === 'user') row.classList.add('user');
+    const cleanText = role === 'assistant' ? stripCitations(text || '') : (text || '');
+    const useMessageCard = role === 'assistant' || role === 'user';
+    const { row, body } = useMessageCard
+      ? buildMessageCard(role, cleanText)
+      : buildRow('message', role === 'assistant' ? 'assistant' : role);
+    if (!useMessageCard && role === 'user') row.classList.add('user');
     insertRow(row);
     if ((role === 'assistant' || role === 'user') && isMarkdownEnabled()) {
-      const rendered = renderMarkdownBlock(role === 'assistant' ? stripCitations(text || '') : (text || ''));
+      const rendered = renderMarkdownBlock(cleanText);
       body.append(rendered);
     } else {
       const pre = document.createElement('pre');
-      pre.textContent = text || '';
+      pre.textContent = cleanText;
       body.append(pre);
     }
     incrementMessages();
@@ -1866,16 +1999,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const body = document.createElement('div');
         body.className = 'subagent-body';
         row.appendChild(body);
-        makeCollapsible(row, `subagent:${entry.id}`, false);
-        // Whole header toggles (no file-link on subagent headers)
-        const saCardId = `subagent:${entry.id}`;
-        header.addEventListener('click', (e) => {
-          if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
-          row.classList.toggle('expanded');
-          if (row.classList.contains('expanded')) _expandedCards.add(saCardId);
-          else _expandedCards.delete(saCardId);
-          _saveExpandedCards();
-          maybeAutoScroll();
+        makeCollapsible(row, `subagent:${entry.id}`, false, {
+          headerEl: header,
+          fullHeaderToggle: true,
         });
         replaySubagents.set(entry.id, { row, body, statusEl, label });
         fragment.appendChild(row);
@@ -1931,15 +2057,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const body = document.createElement('div');
             body.className = 'subagent-body';
             row.appendChild(body);
-            makeCollapsible(row, `subagent:${entry.subagent_id}`, true);
-            const saCardId = `subagent:${entry.subagent_id}`;
-            header.addEventListener('click', (e) => {
-              if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
-              row.classList.toggle('expanded');
-              if (row.classList.contains('expanded')) _expandedCards.add(saCardId);
-              else _expandedCards.delete(saCardId);
-              _saveExpandedCards();
-              maybeAutoScroll();
+            makeCollapsible(row, `subagent:${entry.subagent_id}`, true, {
+              headerEl: header,
+              fullHeaderToggle: true,
             });
             sa = { row, body, statusEl, label };
             replaySubagents.set(entry.subagent_id, sa);
@@ -1967,7 +2087,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (m) diffPath = m[1];
         }
         const pathDiv = document.createElement('div');
-        pathDiv.className = 'diff-path command-ribbon';
+        pathDiv.className = 'diff-path-label command-ribbon';
         if (diffPath) {
           pathDiv.innerHTML = `<strong>${escapeHtml(toRelativePath(diffPath))}</strong>`;
           pathDiv.style.cursor = 'pointer';
@@ -2451,15 +2571,18 @@ document.addEventListener('DOMContentLoaded', () => {
         getTarget().appendChild(row);
         return;
       }
-      const label = entry.role === 'assistant' ? 'assistant' : entry.role;
-      const { row, body } = buildRow('message', label);
-      if (entry.role === 'user') row.classList.add('user');
+      const cleanText = entry.role === 'assistant' ? stripCitations(entry.text || '') : (entry.text || '');
+      const useMessageCard = entry.role === 'assistant' || entry.role === 'user';
+      const { row, body } = useMessageCard
+        ? buildMessageCard(entry.role, cleanText)
+        : buildRow('message', entry.role === 'assistant' ? 'assistant' : entry.role);
+      if (!useMessageCard && entry.role === 'user') row.classList.add('user');
       if ((entry.role === 'assistant' || entry.role === 'user') && isMarkdownEnabled()) {
-        const container = renderMarkdownBlock(entry.role === 'assistant' ? stripCitations(entry.text || '') : (entry.text || ''));
+        const container = renderMarkdownBlock(cleanText);
         body.append(container);
       } else {
         const pre = document.createElement('pre');
-        pre.textContent = entry.role === 'assistant' ? stripCitations(entry.text || '') : (entry.text || '');
+        pre.textContent = cleanText;
         body.append(pre);
       }
       getTarget().appendChild(row);
@@ -2506,7 +2629,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const { getAssistantRow, appendAssistantDelta, finalizeAssistant } = bindAssistantStream({
     assistantRows,
-    buildRow,
+    buildMessageCard,
+    updateMessageCardHeader,
     insertRow,
     isMarkdownEnabled,
     createStreamingParser,
@@ -3392,6 +3516,7 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsEffortEl,
       settingsSummaryEl,
       settingsLabelEl,
+      settingsAliasEl,
     },
     normalizeApprovalValue,
     setActivity,

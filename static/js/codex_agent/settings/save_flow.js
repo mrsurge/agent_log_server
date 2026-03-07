@@ -36,6 +36,7 @@ export function bindSettingsSaveFlow(ctx) {
       settingsEffortEl,
       settingsSummaryEl,
       settingsLabelEl,
+      settingsAliasEl,
     } = elements;
 
     const agentType = settingsAgentEl?.value?.trim() || 'codex';
@@ -67,6 +68,7 @@ export function bindSettingsSaveFlow(ctx) {
         effort: settingsEffortEl?.value?.trim() || null,
         summary: settingsSummaryEl?.value?.trim() || null,
         label: settingsLabelEl?.value?.trim() || null,
+        alias: settingsAliasEl?.value?.trim() || null,
         commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
         markdown: mdEnabled,
         useXterm: xtermEnabled,
@@ -84,6 +86,7 @@ export function bindSettingsSaveFlow(ctx) {
         ...schemaVals,
         cwd: schemaVals.cwd?.trim() || cwd,
         label: settingsLabelEl?.value?.trim() || null,
+        alias: settingsAliasEl?.value?.trim() || null,
         commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
         markdown: mdEnabled,
         useXterm: xtermEnabled,
@@ -147,4 +150,3 @@ export function bindSettingsSaveFlow(ctx) {
 
   return { saveSettings };
 }
-

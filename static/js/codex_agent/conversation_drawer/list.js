@@ -60,7 +60,8 @@ export function createConversationDrawerList(ctx) {
       labelRow.className = 'conversation-label-line';
       labelRow.textContent = (meta.settings && meta.settings.label) ? meta.settings.label : '';
       const title = document.createElement('div');
-      title.textContent = meta.conversation_id || 'conversation';
+      const alias = typeof meta?.settings?.alias === 'string' ? meta.settings.alias.trim() : '';
+      title.textContent = alias || meta.conversation_id || 'conversation';
       const threadText = meta.thread_id ? `thread: ${meta.thread_id}` : 'thread: (none)';
       const cwdText = meta.settings && meta.settings.cwd ? `cwd: ${meta.settings.cwd}` : 'cwd: (default)';
       const statusText = meta.status ? `status: ${meta.status}` : 'status: none';
@@ -116,4 +117,3 @@ export function createConversationDrawerList(ctx) {
     renderConversationList,
   };
 }
-

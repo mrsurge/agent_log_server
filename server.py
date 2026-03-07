@@ -4302,7 +4302,7 @@ try {{
                         Section(
                             Div(
                                 Div(
-                                    H2("Conversation"),
+                                    H2("Conversation", id="conversation-title"),
                                     Div("—", id="conversation-label", cls="conversation-label"),
                                     cls="brand"
                                 ),
@@ -4486,6 +4486,10 @@ try {{
                                 Label(
                                     Span("Conversation Label"),
                                     Input(type="text", id="settings-label", placeholder="label"),
+                                ),
+                                Label(
+                                    Span("Assistant Alias"),
+                                    Input(type="text", id="settings-alias", placeholder="assistant"),
                                 ),
                                 Label(
                                     Span("Command Output Lines"),
@@ -5003,6 +5007,39 @@ def _detect_repo_root(start: Path) -> Path:
     return start
 
 
+def _logical_absolute_path(raw_path: Optional[str], fallback: str = "~") -> Path:
+    raw = raw_path if isinstance(raw_path, str) and raw_path.strip() else fallback
+    expanded = os.path.expanduser(raw)
+    return Path(os.path.abspath(expanded))
+
+
+def _resolved_existing_path(logical_path: Path, fallback: Optional[Path] = None) -> Path:
+    try:
+        return logical_path.resolve()
+    except Exception:
+        return fallback or logical_path
+
+
+def _logical_alias_for_resolved_ancestor(
+    logical_base: Path,
+    resolved_base: Path,
+    resolved_ancestor: Path,
+) -> Optional[Path]:
+    try:
+        rel_from_ancestor = resolved_base.relative_to(resolved_ancestor)
+    except ValueError:
+        return None
+    candidate = logical_base
+    for _ in rel_from_ancestor.parts:
+        candidate = candidate.parent
+    try:
+        if candidate.resolve() == resolved_ancestor:
+            return candidate
+    except Exception:
+        return None
+    return None
+
+
 def _rg_list_files(root: Path) -> List[str]:
     result = subprocess.run(
         ["rg", "--files", "--glob", "!.git/*"],
@@ -5016,11 +5053,8 @@ def _rg_list_files(root: Path) -> List[str]:
 
 @app.get("/api/fs/list")
 async def api_fs_list(path: Optional[str] = Query(None)):
-    target = path or "~"
-    try:
-        resolved = Path(os.path.expanduser(target)).resolve()
-    except Exception:
-        resolved = Path(os.path.expanduser("~")).resolve()
+    logical = _logical_absolute_path(path, fallback="~")
+    resolved = _resolved_existing_path(logical, fallback=_logical_absolute_path("~"))
     if not resolved.exists():
         raise HTTPException(status_code=404, detail="Path not found")
     if not resolved.is_dir():
@@ -5030,9 +5064,9 @@ async def api_fs_list(path: Optional[str] = Query(None)):
         with os.scandir(resolved) as it:
             for entry in it:
                 try:
-                    is_dir = entry.is_dir(follow_symlinks=False)
-                    is_file = entry.is_file(follow_symlinks=False)
                     is_link = entry.is_symlink()
+                    is_dir = entry.is_dir(follow_symlinks=True)
+                    is_file = entry.is_file(follow_symlinks=True)
                 except Exception:
                     is_dir = False
                     is_file = False
@@ -5047,15 +5081,16 @@ async def api_fs_list(path: Optional[str] = Query(None)):
                     entry_type = "other"
                 items.append({
                     "name": entry.name,
-                    "path": str(Path(resolved) / entry.name),
+                    "path": str(logical / entry.name),
                     "type": entry_type,
+                    "is_symlink": is_link,
                 })
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to list directory")
 
     items.sort(key=lambda item: (0 if item["type"] == "directory" else 1, item["name"].lower()))
-    parent = str(resolved.parent) if resolved.parent != resolved else None
-    return {"path": str(resolved), "parent": parent, "items": items}
+    parent = str(logical.parent) if logical.parent != logical else None
+    return {"path": str(logical), "parent": parent, "items": items}
 
 
 @app.get("/api/fs/search")
@@ -5069,15 +5104,17 @@ async def api_fs_search(query: str = Query(...), root: Optional[str] = Query(Non
     async with _config_lock:
         cfg = _load_appserver_config()
     base = root or cfg.get("cwd") or os.getcwd()
-    try:
-        resolved = Path(os.path.expanduser(base)).resolve()
-    except Exception:
-        resolved = Path(os.getcwd()).resolve()
+    logical_base = _logical_absolute_path(base, fallback=os.getcwd())
+    resolved = _resolved_existing_path(logical_base, fallback=_logical_absolute_path(os.getcwd()))
     if not resolved.exists():
         raise HTTPException(status_code=404, detail="Root not found")
     if not resolved.is_dir():
         raise HTTPException(status_code=400, detail="Root is not a directory")
     repo_root = _detect_repo_root(resolved)
+    logical_repo_root = _logical_alias_for_resolved_ancestor(logical_base, resolved, repo_root)
+    if logical_repo_root is None:
+        repo_root = resolved
+        logical_repo_root = logical_base
     try:
         files = _rg_list_files(repo_root)
     except Exception:
@@ -5085,11 +5122,13 @@ async def api_fs_search(query: str = Query(...), root: Optional[str] = Query(Non
     items: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for rel in files:
-        full = str((repo_root / rel).resolve())
+        full_path = (repo_root / rel)
+        full = str(_resolved_existing_path(full_path, fallback=full_path))
+        logical_full = str(logical_repo_root / rel)
         if pattern.search(rel) or pattern.search(full):
             if full not in seen:
                 seen.add(full)
-                items.append({"name": Path(rel).name, "path": full, "type": "file"})
+                items.append({"name": Path(rel).name, "path": logical_full, "type": "file"})
                 if len(items) >= limit:
                     break
         parts = Path(rel).parents
@@ -5097,18 +5136,20 @@ async def api_fs_search(query: str = Query(...), root: Optional[str] = Query(Non
             if parent == Path("."):
                 continue
             parent_rel = str(parent)
-            parent_full = str((repo_root / parent_rel).resolve())
+            parent_full_path = (repo_root / parent_rel)
+            parent_full = str(_resolved_existing_path(parent_full_path, fallback=parent_full_path))
+            logical_parent = str(logical_repo_root / parent_rel)
             if parent_full in seen:
                 continue
             if pattern.search(parent_rel) or pattern.search(parent_full):
                 seen.add(parent_full)
-                items.append({"name": Path(parent_rel).name, "path": parent_full, "type": "directory"})
+                items.append({"name": Path(parent_rel).name, "path": logical_parent, "type": "directory"})
                 if len(items) >= limit:
                     break
         if len(items) >= limit:
             break
     items.sort(key=lambda item: (0 if item["type"] == "directory" else 1, item["name"].lower()))
-    return {"root": str(repo_root), "items": items}
+    return {"root": str(logical_repo_root), "items": items}
 
 
 @app.get("/api/appserver/transcript")
