@@ -9,6 +9,7 @@ export function bindBootInitFlow(ctx) {
     resetWsReady,
     connectWS,
     fetchHostUi,
+    fetchAppConfig,
     bindPickerFilter,
     setDrawerOpen,
     fetchConversation,
@@ -64,6 +65,7 @@ export function bindBootInitFlow(ctx) {
     resetWsReady();
     connectWS(handleEvent);
     fetchHostUi();
+    fetchAppConfig();
     bindPickerFilter();
     setDrawerOpen(false);
     fetchConversation().then(async () => {
@@ -141,6 +143,7 @@ export function bindBootInitFlow(ctx) {
         get conversationSettings() { return getState().conversationSettings; },
         get splashTab() { return getState().splashTab; },
         get hostUi() { return getState().hostUi; },
+        get appConfig() { return getState().appConfig; },
       },
     };
     windowRef.CodexAgent = api;

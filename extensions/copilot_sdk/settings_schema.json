@@ -39,6 +39,23 @@
       "default": "medium"
     },
     {
+      "id": "developer_instructions",
+      "type": "textarea",
+      "label": "Developer Instructions",
+      "placeholder": "Additional runtime instructions appended to the Copilot SDK system prompt",
+      "rows": 6,
+      "default": ""
+    },
+    {
+      "id": "mcp_servers",
+      "type": "json",
+      "label": "MCP Servers",
+      "placeholder": "{\"my-server\": {\"command\": [\"uvx\", \"my-mcp-server\"]}}",
+      "rows": 8,
+      "json_kind": "object",
+      "default": ""
+    },
+    {
       "id": "approval_policy",
       "type": "select",
       "label": "Approval Policy",

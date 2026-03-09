@@ -20,6 +20,7 @@ import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
 import { bindPtyRuntime } from './js/codex_agent/pty/runtime.js';
 import { bindShellSemantic } from './js/codex_agent/shell_semantic.js';
+import { formatJsonSetting, parseJsonSetting } from './js/codex_agent/settings/runtime_helpers.js';
 import { bindSettingsSaveFlow } from './js/codex_agent/settings/save_flow.js';
 import { bindSettingsUiFlow } from './js/codex_agent/settings/ui_flow.js';
 import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.js';
@@ -55,6 +56,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const conversationCreateBtn = document.getElementById('conversation-create');
   const conversationBackBtn = document.getElementById('conversation-back');
   const conversationSettingsBtn = document.getElementById('conversation-settings');
+  const splashSettingsModalEl = document.getElementById('splash-settings-modal');
+  const splashSettingsUserNameEl = document.getElementById('splash-settings-user-name');
+  const splashSettingsTe2McpIntegrationEl = document.getElementById('splash-settings-te2-mcp-integration');
   const settingsModalEl = document.getElementById('settings-modal');
   const settingsCloseBtn = document.getElementById('settings-close');
   const settingsCancelBtn = document.getElementById('settings-cancel');
@@ -65,6 +69,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsModelEl = document.getElementById('settings-model');
   const settingsEffortEl = document.getElementById('settings-effort');
   const settingsSummaryEl = document.getElementById('settings-summary');
+  const settingsDeveloperInstructionsEl = document.getElementById('settings-developer-instructions');
   const settingsLabelEl = document.getElementById('settings-label');
   const settingsAliasEl = document.getElementById('settings-alias');
   const settingsCommandLinesEl = document.getElementById('settings-command-lines');
@@ -72,6 +77,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsXtermEl = document.getElementById('settings-xterm');
   const settingsDiffSyntaxEl = document.getElementById('settings-diff-syntax');
   const settingsSemanticShellRibbonEl = document.getElementById('settings-semantic-shell-ribbon');
+  const settingsTe2McpIntegrationEl = document.getElementById('settings-te2-mcp-integration');
   const markdownToggleEl = document.getElementById('markdown-toggle');
   const trackEditsToggleEl = document.getElementById('track-edits-toggle');
   const footerApprovalValue = document.getElementById('footer-approval-value');
@@ -125,6 +131,8 @@ document.addEventListener('DOMContentLoaded', () => {
 	  let conversationMeta = {};
 		  let conversationSettings = {};
 		  let conversationList = [];
+		  let conversationPreviewCache = {};
+		  let appConfig = {};
 		  let activeView = 'splash';
 		  // Client-local selection (do not treat SSOT active conversation as an authority after boot).
 		  let clientConversationId = null;
@@ -1076,13 +1084,26 @@ document.addEventListener('DOMContentLoaded', () => {
       const absPath = el.dataset.abs || '';
       const fallback = el.dataset.path || el.textContent || '';
       const cwd = conversationSettings?.cwd || conversationMeta?.cwd || '';
+      let pathStr = '';
       if (absPath && cwd) {
         const best = getRelativePath(absPath, cwd);
-        // Serialize as relative iff abs is within conversation CWD; otherwise serialize as abs.
-        const out = (best !== absPath) ? best : absPath;
-        return out ? `\`${out}\`` : '';
+        pathStr = (best !== absPath) ? best : absPath;
+      } else {
+        pathStr = fallback;
       }
-      return fallback ? `\`${fallback}\`` : '';
+      if (!pathStr) return '';
+      // Append line info: path:42 or path:42-48
+      const line = el.dataset.line;
+      const endLine = el.dataset.endLine;
+      if (line) {
+        pathStr += ':' + line;
+        if (endLine && endLine !== line) pathStr += '-' + endLine;
+      }
+      const content = el.dataset.content || '';
+      if (content) {
+        return '`' + pathStr + '`\n```\n' + content + '\n```';
+      }
+      return '`' + pathStr + '`';
     }
     if (el.tagName === 'BR') return '\n';
     let out = '';
@@ -1223,12 +1244,21 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Insert mention via button (manual insertion)
-  function insertMention(path) {
+  function insertMention(path, opts) {
     if (!promptEl || !path) return;
+    opts = opts || {};
     const { absPath, bestPath, cwd } = toMentionAbsAndBestPath(String(path || ''));
     const relPath = getRelativePath(absPath, cwd);
     const displayPath = relPath || bestPath || absPath;
-    const display = String(displayPath || '').split('/').filter(Boolean).pop() || displayPath;
+    const filename = String(displayPath || '').split('/').filter(Boolean).pop() || displayPath;
+    // Build display: file.js:42-48 or file.js:42 or file.js
+    let display = filename;
+    if (opts.lineNo != null) {
+      display += ':' + opts.lineNo;
+      if (opts.endLineNo != null && opts.endLineNo !== opts.lineNo) {
+        display += '-' + opts.endLineNo;
+      }
+    }
     
     const token = document.createElement('span');
     token.className = 'mention-token';
@@ -1236,6 +1266,11 @@ document.addEventListener('DOMContentLoaded', () => {
     token.dataset.abs = absPath || '';
     token.dataset.path = displayPath || '';
     token.title = absPath || '';
+    if (opts.lineNo != null) token.dataset.line = String(opts.lineNo);
+    if (opts.endLineNo != null) token.dataset.endLine = String(opts.endLineNo);
+    if (opts.col != null) token.dataset.col = String(opts.col);
+    if (opts.endCol != null) token.dataset.endCol = String(opts.endCol);
+    if (opts.content) token.dataset.content = String(opts.content);
     token.textContent = display;
     
     const selection = window.getSelection();
@@ -1335,9 +1370,15 @@ document.addEventListener('DOMContentLoaded', () => {
     conversationListEl,
     getHostUi: () => hostUi,
     getSplashTab: () => splashTab,
+    getConversationPreview: (conversationId) => {
+      if (!conversationId) return null;
+      return conversationPreviewCache?.[conversationId] || null;
+    },
     sioCall,
     getState: () => ({
       conversationList,
+      conversationPreviewCache,
+      appConfig,
       clientConversationId,
       conversationMeta,
       clientActiveView,
@@ -1349,6 +1390,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }),
     setState: (patch) => {
       if (patch.conversationList !== undefined) conversationList = patch.conversationList;
+      if (patch.conversationPreviewCache !== undefined) conversationPreviewCache = patch.conversationPreviewCache;
+      if (patch.appConfig !== undefined) appConfig = patch.appConfig;
       if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
       if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
       if (patch.clientActiveView !== undefined) clientActiveView = patch.clientActiveView;
@@ -1434,6 +1477,11 @@ document.addEventListener('DOMContentLoaded', () => {
     activeConversationEl.textContent = '';
   }
 
+  function getUserDisplayName() {
+    const userName = typeof appConfig?.user_name === 'string' ? appConfig.user_name.trim() : '';
+    return userName || 'user';
+  }
+
   function getAssistantDisplayName() {
     const alias = typeof conversationSettings?.alias === 'string' ? conversationSettings.alias.trim() : '';
     return alias || 'assistant';
@@ -1457,6 +1505,63 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function openSettingsModal(...args) {
     return settingsUi?.openSettingsModal(...args);
+  }
+
+  function applyAppConfig(cfg) {
+    appConfig = (cfg && typeof cfg === 'object') ? cfg : {};
+    if (splashSettingsUserNameEl) {
+      splashSettingsUserNameEl.value = typeof appConfig?.user_name === 'string' ? appConfig.user_name : '';
+    }
+    if (splashSettingsTe2McpIntegrationEl) {
+      splashSettingsTe2McpIntegrationEl.checked = appConfig?.te2_mcp_integration === true;
+    }
+    refreshMessageCardHeaders();
+  }
+
+  async function fetchAppConfig() {
+    try {
+      const data = await sioCall('get_config', {}, {
+        fallbackUrl: '/api/appserver/config',
+        fallbackMethod: 'GET',
+      });
+      if (!data || data.ok === false) return null;
+      applyAppConfig(data);
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  function openSplashSettingsModal() {
+    if (!splashSettingsModalEl) return;
+    if (splashSettingsUserNameEl) {
+      splashSettingsUserNameEl.value = typeof appConfig?.user_name === 'string' ? appConfig.user_name : '';
+    }
+    if (splashSettingsTe2McpIntegrationEl) {
+      splashSettingsTe2McpIntegrationEl.checked = appConfig?.te2_mcp_integration === true;
+    }
+    splashSettingsModalEl.classList.remove('hidden');
+  }
+
+  function closeSplashSettingsModal() {
+    if (!splashSettingsModalEl) return;
+    splashSettingsModalEl.classList.add('hidden');
+  }
+
+  async function saveSplashSettings() {
+    try {
+      const data = await sioCall('update_config', {
+        user_name: splashSettingsUserNameEl?.value?.trim() || null,
+        te2_mcp_integration: splashSettingsTe2McpIntegrationEl?.checked === true,
+      }, {
+        fallbackUrl: '/api/appserver/config',
+      });
+      if (!data || data.ok === false) return;
+      applyAppConfig(data);
+      closeSplashSettingsModal();
+    } catch {
+      // ignore
+    }
   }
 
   function closeSettingsModal(...args) {
@@ -1593,6 +1698,7 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsModelEl,
       settingsEffortEl,
       settingsSummaryEl,
+      settingsDeveloperInstructionsEl,
       settingsLabelEl,
       settingsAliasEl,
       settingsCommandLinesEl,
@@ -1600,6 +1706,7 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsXtermEl,
       settingsDiffSyntaxEl,
       settingsSemanticShellRibbonEl,
+      settingsTe2McpIntegrationEl,
       settingsAgentEl,
       settingsAgentOptions,
       settingsAgentRowEl,
@@ -1718,7 +1825,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function getMessageRoleLabel(role) {
     if (role === 'assistant') return getAssistantDisplayName();
-    if (role === 'user') return 'user';
+    if (role === 'user') return getUserDisplayName();
     return role || 'message';
   }
 
@@ -3510,11 +3617,13 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsXtermEl,
       settingsDiffSyntaxEl,
       settingsSemanticShellRibbonEl,
+      settingsTe2McpIntegrationEl,
       settingsApprovalEl,
       settingsSandboxEl,
       settingsModelEl,
       settingsEffortEl,
       settingsSummaryEl,
+      settingsDeveloperInstructionsEl,
       settingsLabelEl,
       settingsAliasEl,
     },
@@ -3750,11 +3859,15 @@ document.addEventListener('DOMContentLoaded', () => {
       activeView,
       splashTab,
       conversationList,
+      conversationPreviewCache,
+      appConfig,
       lastDraftHash,
       draftDirty,
     }),
     setState: (patch) => {
       if (patch.hostUi !== undefined) hostUi = patch.hostUi;
+      if (patch.conversationPreviewCache !== undefined) conversationPreviewCache = patch.conversationPreviewCache;
+      if (patch.appConfig !== undefined) appConfig = patch.appConfig;
       if (patch.contextWindow !== undefined) contextWindow = patch.contextWindow;
       if (patch.lastDraftHash !== undefined) lastDraftHash = patch.lastDraftHash;
       if (patch.draftDirty !== undefined) draftDirty = patch.draftDirty;
@@ -3847,6 +3960,7 @@ document.addEventListener('DOMContentLoaded', () => {
       pendingRollout,
       conversationMeta,
       conversationSettings,
+      appConfig,
       splashTab,
       hostUi,
       pickerPath,
@@ -3856,6 +3970,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setState: (patch) => {
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
       if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
+      if (patch.appConfig !== undefined) appConfig = patch.appConfig;
       if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
       if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode;
       if (patch.openDropdownEl !== undefined) openDropdownEl = patch.openDropdownEl;
@@ -3891,6 +4006,7 @@ document.addEventListener('DOMContentLoaded', () => {
     resetWsReady,
     connectWS,
     fetchHostUi,
+    fetchAppConfig,
     bindPickerFilter,
     setDrawerOpen,
     fetchConversation,
@@ -3908,6 +4024,9 @@ document.addEventListener('DOMContentLoaded', () => {
       openSettingsModal,
       closeSettingsModal,
       saveSettings,
+      openSplashSettingsModal,
+      closeSplashSettingsModal,
+      saveSplashSettings,
       openPicker,
       closePicker,
       openRolloutPicker,
@@ -3917,13 +4036,16 @@ document.addEventListener('DOMContentLoaded', () => {
       setDrawerOpen,
       fetchPicker,
       fetchRollouts,
-      setActivity,
-      insertMention,
-      saveApprovalQuick,
-      sioCall,
-      openDropdownMenu,
-      closeDropdownMenu,
-      toggleDropdownMenu,
+        setActivity,
+        insertMention,
+        saveApprovalQuick,
+        sioCall,
+        fetchAppConfig,
+        formatJsonSetting,
+        parseJsonSetting,
+        openDropdownMenu,
+        closeDropdownMenu,
+        toggleDropdownMenu,
     },
     closeDropdownMenu,
     sioCall,

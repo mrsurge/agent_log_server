@@ -30,11 +30,13 @@ export function bindSettingsSaveFlow(ctx) {
       settingsXtermEl,
       settingsDiffSyntaxEl,
       settingsSemanticShellRibbonEl,
+      settingsTe2McpIntegrationEl,
       settingsApprovalEl,
       settingsSandboxEl,
       settingsModelEl,
       settingsEffortEl,
       settingsSummaryEl,
+      settingsDeveloperInstructionsEl,
       settingsLabelEl,
       settingsAliasEl,
     } = elements;
@@ -44,7 +46,10 @@ export function bindSettingsSaveFlow(ctx) {
     if (agentType === 'codex') {
       cwd = settingsCwdEl?.value?.trim();
     } else {
-      const schemaVals = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
+      const schemaVals =
+        window.CodexAgent?.helpers?.getSchemaRawValues?.()
+        || window.CodexAgent?.helpers?.getSchemaValues?.()
+        || {};
       cwd = schemaVals.cwd?.trim();
     }
     if (!cwd) cwd = state.conversationSettings?.cwd?.trim();
@@ -67,6 +72,7 @@ export function bindSettingsSaveFlow(ctx) {
         model: settingsModelEl?.value?.trim() || null,
         effort: settingsEffortEl?.value?.trim() || null,
         summary: settingsSummaryEl?.value?.trim() || null,
+        developer_instructions: settingsDeveloperInstructionsEl?.value?.trim() || null,
         label: settingsLabelEl?.value?.trim() || null,
         alias: settingsAliasEl?.value?.trim() || null,
         commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
@@ -74,11 +80,21 @@ export function bindSettingsSaveFlow(ctx) {
         useXterm: xtermEnabled,
         diffSyntax: diffSyntaxEnabled,
         semanticShellRibbon: semanticRibbonEnabled,
+        te2_mcp_integration: settingsTe2McpIntegrationEl?.checked === true,
         trackEdits: state.trackEditsEnabled,
         agent: agentType,
       };
     } else {
-      const schemaRaw = window.CodexAgent?.helpers?.getSchemaValues?.() || {};
+      let schemaRaw;
+      try {
+        schemaRaw =
+          window.CodexAgent?.helpers?.getSchemaParsedValues?.()
+          || window.CodexAgent?.helpers?.getSchemaValues?.()
+          || {};
+      } catch (err) {
+        setActivity(err instanceof Error ? err.message : String(err), true);
+        return;
+      }
       const schemaVals = Object.fromEntries(
         Object.entries(schemaRaw).filter(([_, v]) => v !== '' && v != null)
       );
@@ -92,6 +108,7 @@ export function bindSettingsSaveFlow(ctx) {
         useXterm: xtermEnabled,
         diffSyntax: diffSyntaxEnabled,
         semanticShellRibbon: semanticRibbonEnabled,
+        te2_mcp_integration: settingsTe2McpIntegrationEl?.checked === true,
         trackEdits: state.trackEditsEnabled,
         agent: agentType,
       };

@@ -284,6 +284,7 @@ async def resume_session_with_history(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Resume a session and hydrate transcript. Handler must implement resume_session_with_history()."""
     handler = get_handler(extension_id)
@@ -293,6 +294,7 @@ async def resume_session_with_history(
             conversation_id=conversation_id,
             cwd=cwd,
             model=model,
+            settings=settings,
         )
     return {"ok": False, "error": f"Extension {extension_id} does not support session resume"}
 
@@ -303,6 +305,7 @@ async def hydrate_transcript(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Get flat transcript entries for an existing session (port-in).
 
@@ -318,6 +321,7 @@ async def hydrate_transcript(
             conversation_id=conversation_id,
             cwd=cwd,
             model=model,
+            settings=settings,
         )
     return []
 

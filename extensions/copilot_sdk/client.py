@@ -32,6 +32,13 @@ from copilot import (
 from copilot.types import SessionHooks
 
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
+from te2_runtime import (
+    build_copilot_mcp_servers,
+    build_effective_developer_instructions,
+    build_te2_mcp_streamable_http_url,
+    TE2_MCP_SERVER_NAME,
+    te2_mcp_integration_enabled,
+)
 
 
 # ── Global state ────────────────────────────────────────────────────
@@ -58,6 +65,10 @@ _sessions: Dict[str, CopilotSession] = {}
 _routers: Dict[str, CopilotEventRouter] = {}
 # Event unsubscribe fns: conversation_id -> unsubscribe callable
 _unsubs: Dict[str, Callable] = {}
+# Runtime signature tracking: conversation_id -> signature of effective session config inputs
+_runtime_signatures: Dict[str, str] = {}
+# Per-conversation session locks: serialize init/resume/send/destroy per conversation.
+_session_locks: Dict[str, asyncio.Lock] = {}
 
 # Ready state
 _ready_event: Optional[asyncio.Event] = None
@@ -65,7 +76,7 @@ _initialized: bool = False
 
 # Debug buffer (circular)
 _raw_buffer: List[Dict[str, Any]] = []
-_RAW_BUFFER_MAX = 200
+_RAW_BUFFER_MAX = 2000
 
 
 def _add_to_raw_buffer(direction: str, conversation_id: str, data: Any) -> None:
@@ -84,6 +95,40 @@ def get_raw_buffer(limit: int = 50) -> List[Dict[str, Any]]:
     return _raw_buffer[-limit:]
 
 
+def _get_session_lock(conversation_id: str) -> asyncio.Lock:
+    lock = _session_locks.get(conversation_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_locks[conversation_id] = lock
+    return lock
+
+
+def _summarize_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    mcp_servers = config.get("mcp_servers")
+    te2_cfg = mcp_servers.get("te2-mcp") if isinstance(mcp_servers, dict) else None
+    system_message = config.get("system_message")
+    system_content = system_message.get("content") if isinstance(system_message, dict) else ""
+    return {
+        "model": config.get("model"),
+        "working_directory": config.get("working_directory"),
+        "reasoning_effort": config.get("reasoning_effort"),
+        "streaming": config.get("streaming") is True,
+        "has_system_message": bool(system_message),
+        "system_message_mode": system_message.get("mode") if isinstance(system_message, dict) else None,
+        "system_message_chars": len(system_content) if isinstance(system_content, str) else 0,
+        "mcp_server_names": sorted(mcp_servers.keys()) if isinstance(mcp_servers, dict) else [],
+        "te2_mcp_present": isinstance(te2_cfg, dict),
+        "te2_mcp_type": te2_cfg.get("type") if isinstance(te2_cfg, dict) else None,
+        "te2_mcp_url": te2_cfg.get("url") if isinstance(te2_cfg, dict) else None,
+    }
+
+
+def _log_runtime_config(stage: str, conversation_id: str, config: Dict[str, Any]) -> None:
+    summary = _summarize_runtime_config(config)
+    print(f"[CopilotSDK] {stage} config convo={conversation_id[:8]} summary={summary}")
+    _add_to_raw_buffer("out", conversation_id, f"{stage}_config {summary}")
+
+
 # ── Permission / Approval handler ───────────────────────────────────
 
 # Pending approval futures: request_id -> asyncio.Future
@@ -97,6 +142,113 @@ def _get_conversation_settings(conversation_id: str) -> Dict[str, Any]:
         if meta and isinstance(meta.get("settings"), dict):
             return meta["settings"]
     return {}
+
+
+def _merge_runtime_settings(
+    conversation_id: str,
+    settings: Optional[Dict[str, Any]] = None,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    merged = dict(_get_conversation_settings(conversation_id))
+    if isinstance(settings, dict):
+        merged.update(settings)
+    if cwd:
+        merged["cwd"] = cwd
+    if model:
+        merged["model"] = model
+    return merged
+
+
+def _runtime_signature_payload(
+    conversation_id: str,
+    settings: Optional[Dict[str, Any]] = None,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
+    te2_enabled = te2_mcp_integration_enabled(merged)
+    return {
+        "cwd": merged.get("cwd"),
+        "model": merged.get("model"),
+        "reasoning_effort": merged.get("reasoning_effort") or merged.get("effort"),
+        "developer_instructions": build_effective_developer_instructions(
+            merged.get("developer_instructions"),
+            te2_enabled=te2_enabled,
+        ),
+        "mcp_servers": build_copilot_mcp_servers(
+            merged.get("mcp_servers"),
+            te2_enabled=te2_enabled,
+            base_url=merged.get("te2_base_url"),
+        ),
+    }
+
+
+def _runtime_signature(
+    conversation_id: str,
+    settings: Optional[Dict[str, Any]] = None,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+) -> str:
+    payload = _runtime_signature_payload(conversation_id, settings=settings, cwd=cwd, model=model)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _build_session_runtime_config(
+    conversation_id: str,
+    settings: Optional[Dict[str, Any]] = None,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
+    config: Dict[str, Any] = {
+        "streaming": True,
+        "on_permission_request": _make_permission_handler(conversation_id),
+        "hooks": SessionHooks(
+            on_pre_tool_use=_make_pre_tool_use_hook(conversation_id),
+        ),
+    }
+
+    working_directory = merged.get("cwd")
+    if isinstance(working_directory, str) and working_directory.strip():
+        resolved = os.path.expanduser(working_directory) if working_directory.startswith("~") else working_directory
+        config["working_directory"] = resolved
+
+    model_id = merged.get("model")
+    if isinstance(model_id, str) and model_id.strip():
+        config["model"] = model_id.strip()
+
+    reasoning_effort = merged.get("reasoning_effort") or merged.get("effort")
+    if isinstance(reasoning_effort, str) and reasoning_effort.strip():
+        config["reasoning_effort"] = reasoning_effort.strip()
+
+    developer_instructions = build_effective_developer_instructions(
+        merged.get("developer_instructions"),
+        te2_enabled=te2_mcp_integration_enabled(merged),
+    )
+    if developer_instructions:
+        config["system_message"] = {
+            "mode": "append",
+            "content": developer_instructions,
+        }
+
+    mcp_servers = build_copilot_mcp_servers(
+        merged.get("mcp_servers"),
+        te2_enabled=te2_mcp_integration_enabled(merged),
+        base_url=merged.get("te2_base_url"),
+    )
+    if mcp_servers is not None:
+        te2_cfg = mcp_servers.get(TE2_MCP_SERVER_NAME) if isinstance(mcp_servers, dict) else None
+        if isinstance(te2_cfg, dict):
+            mcp_servers[TE2_MCP_SERVER_NAME] = {
+                **te2_cfg,
+                "type": "http",
+                "url": build_te2_mcp_streamable_http_url(merged.get("te2_base_url") or ""),
+            }
+        if mcp_servers:
+            config["mcp_servers"] = mcp_servers
+
+    return config
 
 
 def resolve_approval(request_id: str, decision: str) -> None:
@@ -425,7 +577,18 @@ def has_session(conversation_id: str) -> bool:
 async def init_session(
     conversation_id: str,
     extension_id: str,
-    cwd: str,
+    cwd: Optional[str],
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    async with _get_session_lock(conversation_id):
+        return await _init_session_unlocked(conversation_id, extension_id, cwd, settings=settings)
+
+
+async def _init_session_unlocked(
+    conversation_id: str,
+    extension_id: str,
+    cwd: Optional[str],
+    settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new Copilot session for a conversation.
@@ -440,11 +603,13 @@ async def init_session(
         session = _sessions[conversation_id]
         return {"ok": True, "session_id": session.session_id, "already_initialized": True}
 
-    if cwd.startswith("~"):
-        cwd = os.path.expanduser(cwd)
-
     try:
         client = await _ensure_client()
+        runtime_signature = _runtime_signature(
+            conversation_id,
+            settings=settings,
+            cwd=cwd,
+        )
 
         # Create router for this conversation
         router = CopilotEventRouter(
@@ -454,19 +619,18 @@ async def init_session(
         )
         _routers[conversation_id] = router
 
-        # Let SDK generate its own session_id (don't pass ours)
-        session = await client.create_session(
-            SessionConfig(
-                streaming=True,
-                working_directory=cwd,
-                on_permission_request=_make_permission_handler(conversation_id),
-                hooks=SessionHooks(
-                    on_pre_tool_use=_make_pre_tool_use_hook(conversation_id),
-                ),
-            ),
+        config = _build_session_runtime_config(
+            conversation_id,
+            settings=settings,
+            cwd=cwd,
         )
+        _log_runtime_config("create_session", conversation_id, config)
+
+        # Let SDK generate its own session_id (don't pass ours)
+        session = await client.create_session(config)
         sdk_session_id = session.session_id
         _sessions[conversation_id] = session
+        _runtime_signatures[conversation_id] = runtime_signature
 
         # Subscribe to events
         unsub = session.on(_make_event_handler(conversation_id))
@@ -486,8 +650,9 @@ async def init_session(
                     meta["status"] = "active"
                     _meta_fns["save"](conversation_id, meta)
 
-        print(f"[CopilotSDK] Session created: convo={conversation_id[:8]} sdk_session={sdk_session_id[:8]} cwd={cwd}")
-        _add_to_raw_buffer("out", conversation_id, f"session_created sdk={sdk_session_id[:8]} cwd={cwd}")
+        resolved_cwd = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd).get("cwd")
+        print(f"[CopilotSDK] Session created: convo={conversation_id[:8]} sdk_session={sdk_session_id[:8]} cwd={resolved_cwd}")
+        _add_to_raw_buffer("out", conversation_id, f"session_created sdk={sdk_session_id[:8]} cwd={resolved_cwd}")
         return {"ok": True, "session_id": sdk_session_id}
 
     except Exception as e:
@@ -501,6 +666,22 @@ async def resume_session(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    async with _get_session_lock(conversation_id):
+        return await _resume_session_unlocked(
+            conversation_id,
+            cwd=cwd,
+            model=model,
+            settings=settings,
+        )
+
+
+async def _resume_session_unlocked(
+    conversation_id: str,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Resume an existing Copilot session (survives server restarts).
@@ -528,6 +709,12 @@ async def resume_session(
 
     try:
         client = await _ensure_client()
+        runtime_signature = _runtime_signature(
+            conversation_id,
+            settings=settings,
+            cwd=cwd,
+            model=model,
+        )
 
         # Create router keyed by our conversation_id
         router = CopilotEventRouter(
@@ -537,18 +724,13 @@ async def resume_session(
         )
         _routers[conversation_id] = router
 
-        config: ResumeSessionConfig = {
-            "streaming": True,
-            "on_permission_request": _make_permission_handler(conversation_id),
-            "hooks": SessionHooks(
-                on_pre_tool_use=_make_pre_tool_use_hook(conversation_id),
-            ),
-        }
-        if cwd:
-            resolved = os.path.expanduser(cwd) if cwd.startswith("~") else cwd
-            config["working_directory"] = resolved
-        if model:
-            config["model"] = model
+        config = _build_session_runtime_config(
+            conversation_id,
+            settings=settings,
+            cwd=cwd,
+            model=model,
+        )
+        _log_runtime_config("resume_session", conversation_id, config)
 
         # Resume using the real SDK session ID
         session = await client.resume_session(
@@ -557,6 +739,7 @@ async def resume_session(
         )
         # Key in-memory by our conversation_id
         _sessions[conversation_id] = session
+        _runtime_signatures[conversation_id] = runtime_signature
 
         unsub = session.on(_make_event_handler(conversation_id))
         _unsubs[conversation_id] = unsub
@@ -585,84 +768,118 @@ async def handle_message(
     Main entry point called by server.py extension router.
     Follows the codex pattern: lazy resume on first message, not on conversation select.
     """
-    if not _broadcast_fn or not _transcript_fn:
-        return {"ok": False, "error": "Manager not initialized"}
+    async with _get_session_lock(conversation_id):
+        if not _broadcast_fn or not _transcript_fn:
+            return {"ok": False, "error": "Manager not initialized"}
 
-    cwd = settings.get("cwd") or os.path.expanduser("~")
-
-    # Ensure session exists — lazy resume or init
-    if conversation_id not in _sessions:
-        # Check if this conversation already has a thread_id (needs resume, not init)
-        thread_id = None
-        if _meta_fns and "load" in _meta_fns:
-            meta = _meta_fns["load"](conversation_id)
-            if meta:
-                thread_id = meta.get("thread_id")
-
-        if thread_id:
-            # Existing session — resume it (like codex thread/resume)
-            result = await resume_session(conversation_id, cwd=cwd, model=settings.get("model"))
-        else:
-            # Brand new conversation — create a fresh session
-            result = await init_session(conversation_id, agent_type, cwd)
-
-        if not result.get("ok"):
-            return result
-
-    session = _sessions.get(conversation_id)
-    if not session:
-        return {"ok": False, "error": "Session not found after init"}
-
-    router = _routers.get(conversation_id)
-    if not router:
-        return {"ok": False, "error": "Router not found"}
-
-    # Notify router of turn start
-    await router.on_turn_start(text)
-
-    try:
-        _add_to_raw_buffer("out", conversation_id, f"prompt: {text[:200]}")
-
-        # Fire-and-forget send — events come via session.on() handler
-        await session.send(
-            MessageOptions(prompt=text),
+        cwd = settings.get("cwd") or os.path.expanduser("~")
+        desired_signature = _runtime_signature(
+            conversation_id,
+            settings=settings,
+            cwd=cwd,
+            model=settings.get("model"),
         )
 
-        return {"ok": True, "session_id": conversation_id}
+        # Ensure session exists — lazy resume or init
+        if conversation_id not in _sessions:
+            # Check if this conversation already has a thread_id (needs resume, not init)
+            thread_id = None
+            if _meta_fns and "load" in _meta_fns:
+                meta = _meta_fns["load"](conversation_id)
+                if meta:
+                    thread_id = meta.get("thread_id")
 
-    except Exception as e:
-        err_msg = str(e)
-        # SDK binary evicts inactive sessions — catch and retry via resume
-        if "Session not found" in err_msg or "session not found" in err_msg:
-            print(f"[CopilotSDK] Session evicted, attempting re-resume for {conversation_id[:8]}")
-            _add_to_raw_buffer("out", conversation_id, "session_evicted, re-resuming...")
-            # Clear stale in-memory state so resume rebuilds it
-            _sessions.pop(conversation_id, None)
-            _routers.pop(conversation_id, None)
-            if conversation_id in _unsubs:
-                try:
-                    _unsubs.pop(conversation_id)()
-                except Exception:
-                    pass
-            result = await resume_session(conversation_id, cwd=cwd, model=settings.get("model"))
+            if thread_id:
+                # Existing session — resume it (like codex thread/resume)
+                result = await _resume_session_unlocked(
+                    conversation_id,
+                    cwd=cwd,
+                    model=settings.get("model"),
+                    settings=settings,
+                )
+            else:
+                # Brand new conversation — create a fresh session
+                result = await _init_session_unlocked(
+                    conversation_id,
+                    agent_type,
+                    cwd,
+                    settings=settings,
+                )
+
             if not result.get("ok"):
-                print(f"[CopilotSDK] Re-resume failed: {result}")
                 return result
-            session = _sessions.get(conversation_id)
-            router = _routers.get(conversation_id)
-            if not session or not router:
-                return {"ok": False, "error": "Session not found after re-resume"}
-            await router.on_turn_start(text)
-            try:
-                await session.send(MessageOptions(prompt=text))
-                return {"ok": True, "session_id": conversation_id}
-            except Exception as e2:
-                print(f"[CopilotSDK] Retry send failed: {e2}")
-                return {"ok": False, "error": str(e2)}
+        elif _runtime_signatures.get(conversation_id) != desired_signature:
+            _add_to_raw_buffer("out", conversation_id, "runtime_changed, re-resuming session")
+            await _destroy_session_unlocked(conversation_id)
+            result = await _resume_session_unlocked(
+                conversation_id,
+                cwd=cwd,
+                model=settings.get("model"),
+                settings=settings,
+            )
+            if not result.get("ok"):
+                return result
 
-        print(f"[CopilotSDK] send failed: {e}")
-        _add_to_raw_buffer("out", conversation_id, f"send_error: {e}")
-        return {"ok": False, "error": err_msg}
+        session = _sessions.get(conversation_id)
+        if not session:
+            return {"ok": False, "error": "Session not found after init"}
+
+        router = _routers.get(conversation_id)
+        if not router:
+            return {"ok": False, "error": "Router not found"}
+
+        # Notify router of turn start
+        await router.on_turn_start(text)
+
+        try:
+            _add_to_raw_buffer("out", conversation_id, f"prompt: {text[:200]}")
+
+            # Fire-and-forget send — events come via session.on() handler
+            await session.send(
+                MessageOptions(prompt=text),
+            )
+
+            return {"ok": True, "session_id": conversation_id}
+
+        except Exception as e:
+            err_msg = str(e)
+            # SDK binary evicts inactive sessions — catch and retry via resume
+            if "Session not found" in err_msg or "session not found" in err_msg:
+                print(f"[CopilotSDK] Session evicted, attempting re-resume for {conversation_id[:8]}")
+                _add_to_raw_buffer("out", conversation_id, "session_evicted, re-resuming...")
+                # Clear stale in-memory state so resume rebuilds it
+                _sessions.pop(conversation_id, None)
+                _routers.pop(conversation_id, None)
+                _runtime_signatures.pop(conversation_id, None)
+                if conversation_id in _unsubs:
+                    try:
+                        _unsubs.pop(conversation_id)()
+                    except Exception:
+                        pass
+                result = await _resume_session_unlocked(
+                    conversation_id,
+                    cwd=cwd,
+                    model=settings.get("model"),
+                    settings=settings,
+                )
+                if not result.get("ok"):
+                    print(f"[CopilotSDK] Re-resume failed: {result}")
+                    return result
+                session = _sessions.get(conversation_id)
+                router = _routers.get(conversation_id)
+                if not session or not router:
+                    return {"ok": False, "error": "Session not found after re-resume"}
+                await router.on_turn_start(text)
+                try:
+                    await session.send(MessageOptions(prompt=text))
+                    return {"ok": True, "session_id": conversation_id}
+                except Exception as e2:
+                    print(f"[CopilotSDK] Retry send failed: {e2}")
+                    return {"ok": False, "error": str(e2)}
+
+            print(f"[CopilotSDK] send failed: {e}")
+            _add_to_raw_buffer("out", conversation_id, f"send_error: {e}")
+            return {"ok": False, "error": err_msg}
 
 
 # ── Model listing ───────────────────────────────────────────────────
@@ -793,6 +1010,7 @@ async def resume_session_with_history(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Bind a Copilot SDK session to a conversation.
@@ -818,17 +1036,27 @@ async def resume_session_with_history(
                 return {"ok": False, "error": f"Conversation already bound to thread {existing[:8]}"}
             meta["thread_id"] = session_id
             meta["status"] = "active"
-            settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
-            settings["agent"] = "copilot-sdk"
+            merged_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+            if isinstance(merged_settings, dict):
+                merged_settings = dict(merged_settings)
+            else:
+                merged_settings = {}
+            merged_settings["agent"] = "copilot-sdk"
             if cwd:
-                settings["cwd"] = cwd
+                merged_settings["cwd"] = cwd
             if model:
-                settings["model"] = model
-            meta["settings"] = settings
+                merged_settings["model"] = model
+            if isinstance(settings, dict):
+                for key, value in settings.items():
+                    if value is None or value == "":
+                        merged_settings.pop(key, None)
+                    else:
+                        merged_settings[key] = value
+            meta["settings"] = merged_settings
             _meta_fns["save"](conversation_id, meta)
 
     # 2. Resume the SDK session (creates in-memory session + router)
-    result = await resume_session(conversation_id, cwd=cwd, model=model)
+    result = await resume_session(conversation_id, cwd=cwd, model=model, settings=settings)
     if not result.get("ok"):
         print(f"[CopilotSDK] resume_session_with_history: resume failed: {result}")
         return result
@@ -846,6 +1074,7 @@ async def hydrate_transcript(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Build flat transcript entries from an existing SDK session's history.
@@ -863,7 +1092,7 @@ async def hydrate_transcript(
     session = _sessions.get(conversation_id)
     if not session:
         # Try resuming first
-        result = await resume_session(conversation_id, cwd=cwd, model=model)
+        result = await resume_session(conversation_id, cwd=cwd, model=model, settings=settings)
         if not result.get("ok"):
             print(f"[CopilotSDK] hydrate_transcript: resume failed: {result}")
             return []
@@ -949,6 +1178,11 @@ async def hydrate_transcript(
 # ── Cleanup ─────────────────────────────────────────────────────────
 
 async def destroy_session(conversation_id: str) -> bool:
+    async with _get_session_lock(conversation_id):
+        return await _destroy_session_unlocked(conversation_id)
+
+
+async def _destroy_session_unlocked(conversation_id: str) -> bool:
     """Destroy a session (keeps data on disk for resume)."""
     unsub = _unsubs.pop(conversation_id, None)
     if unsub:
@@ -956,6 +1190,7 @@ async def destroy_session(conversation_id: str) -> bool:
 
     session = _sessions.pop(conversation_id, None)
     _routers.pop(conversation_id, None)
+    _runtime_signatures.pop(conversation_id, None)
 
     if session:
         try:

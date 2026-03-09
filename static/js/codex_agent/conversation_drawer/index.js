@@ -8,6 +8,7 @@ export function bindConversationDrawer(ctx) {
     conversationListEl: ctx.conversationListEl,
     getHostUi: ctx.getHostUi,
     getSplashTab: ctx.getSplashTab,
+    getConversationPreview: ctx.getConversationPreview,
     selectConversation: (...args) => actionsRef?.selectConversation?.(...args),
     selectConversationWithView: (...args) => actionsRef?.selectConversationWithView?.(...args),
     openSettingsModal: ctx.openSettingsModal,
@@ -39,4 +40,3 @@ export function bindConversationDrawer(ctx) {
     ...actions,
   };
 }
-

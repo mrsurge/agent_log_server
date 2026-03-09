@@ -262,6 +262,11 @@ export function bindTimelineStickyHeaders(ctx) {
       underlay.style.right = '0px';
     }
 
+    const slotZ = 1000 - depth;
+    slot.style.zIndex = `${slotZ}`;
+    underlay.style.zIndex = `${slotZ - 1}`;
+    underlay.style.top = '0px';
+
     const clone = sourceHeader.cloneNode(true);
     clone.classList.add('timeline-sticky-header');
     clone.querySelectorAll('.ribbon-toggle-zone').forEach((el) => el.remove());
@@ -276,7 +281,9 @@ export function bindTimelineStickyHeaders(ctx) {
     const rowStyle = win.getComputedStyle(srcRow);
     underlay.style.backgroundColor = rowStyle.backgroundColor || '';
     underlay.style.backgroundImage = rowStyle.backgroundImage || '';
-    underlay.style.borderLeft = rowStyle.borderLeft || '';
+    underlay.style.borderLeft = srcRow.classList.contains('subagent-card')
+      ? 'none'
+      : (rowStyle.borderLeft || '');
     slot.style.cursor = win.getComputedStyle(sourceHeader).cursor || '';
 
     slot.dataset.stickyType = getStickyType(srcRow);

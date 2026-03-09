@@ -18,6 +18,7 @@ export function bindSettingsUiFlow(ctx) {
     settingsModelEl,
     settingsEffortEl,
     settingsSummaryEl,
+    settingsDeveloperInstructionsEl,
     settingsLabelEl,
     settingsAliasEl,
     settingsCommandLinesEl,
@@ -25,6 +26,7 @@ export function bindSettingsUiFlow(ctx) {
     settingsXtermEl,
     settingsDiffSyntaxEl,
     settingsSemanticShellRibbonEl,
+    settingsTe2McpIntegrationEl,
     settingsAgentEl,
     settingsAgentOptions,
     settingsAgentRowEl,
@@ -59,12 +61,14 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsModelEl) settingsModelEl.value = '';
       if (settingsEffortEl) settingsEffortEl.value = '';
       if (settingsSummaryEl) settingsSummaryEl.value = '';
+      if (settingsDeveloperInstructionsEl) settingsDeveloperInstructionsEl.value = '';
       if (settingsLabelEl) settingsLabelEl.value = '';
       if (settingsAliasEl) settingsAliasEl.value = '';
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = '20';
       if (settingsMarkdownEl) settingsMarkdownEl.checked = true;
       if (settingsRolloutEl) settingsRolloutEl.value = state.pendingRollout?.id || '';
       if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = false;
+      if (settingsTe2McpIntegrationEl) settingsTe2McpIntegrationEl.checked = false;
     } else {
       if (settingsCwdEl) settingsCwdEl.value = state.conversationSettings?.cwd || '';
       if (settingsApprovalEl) settingsApprovalEl.value = state.conversationSettings?.approvalPolicy || '';
@@ -73,6 +77,7 @@ export function bindSettingsUiFlow(ctx) {
       updateEffortOptionsForModel(state.conversationSettings?.model);
       if (settingsEffortEl) settingsEffortEl.value = state.conversationSettings?.effort || '';
       if (settingsSummaryEl) settingsSummaryEl.value = state.conversationSettings?.summary || '';
+      if (settingsDeveloperInstructionsEl) settingsDeveloperInstructionsEl.value = state.conversationSettings?.developer_instructions || '';
       if (settingsLabelEl) settingsLabelEl.value = state.conversationSettings?.label || '';
       if (settingsAliasEl) settingsAliasEl.value = state.conversationSettings?.alias || '';
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = state.conversationSettings?.commandOutputLines || '20';
@@ -80,6 +85,7 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsXtermEl) settingsXtermEl.checked = state.conversationSettings?.useXterm !== false;
       if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = state.conversationSettings?.diffSyntax === true;
       if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = state.conversationSettings?.semanticShellRibbon === true;
+      if (settingsTe2McpIntegrationEl) settingsTe2McpIntegrationEl.checked = state.conversationSettings?.te2_mcp_integration === true;
       if (settingsRolloutEl) settingsRolloutEl.value = state.pendingRollout?.id || state.conversationSettings?.rolloutId || '';
       if (settingsAgentEl) settingsAgentEl.value = state.conversationSettings?.agent || 'codex';
     }
@@ -104,7 +110,10 @@ export function bindSettingsUiFlow(ctx) {
     if (agentType === 'codex') {
       cwdOk = Boolean(settingsCwdEl?.value?.trim());
     } else {
-      const schemaVals = getWindow()?.CodexAgent?.helpers?.getSchemaValues?.() || {};
+      const schemaVals =
+        getWindow()?.CodexAgent?.helpers?.getSchemaRawValues?.()
+        || getWindow()?.CodexAgent?.helpers?.getSchemaValues?.()
+        || {};
       cwdOk = Boolean(schemaVals.cwd?.trim());
     }
     if (!cwdOk) cwdOk = Boolean(state.conversationSettings?.cwd?.trim());

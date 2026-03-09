@@ -18,6 +18,8 @@ import socketio
 import binascii
 import urllib.request
 import urllib.error
+import shutil
+import tomlkit
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException, Depends
@@ -33,6 +35,13 @@ from framework_shells.orchestrator import Orchestrator
 import extensions as ext_loader
 from extensions.codex.router import route_collab_event
 from extensions.codex.protocol import COLLAB_EVENT_TYPES
+from te2_runtime import (
+    TE2_MCP_SERVER_NAME,
+    build_codex_thread_config,
+    build_effective_developer_instructions,
+    build_te2_mcp_streamable_http_url,
+    te2_mcp_integration_enabled,
+)
 
 from fastcore.xml import (
     Html, Head, Body, Div, Section, Header, Footer, Main, H1, H2, H3, P, Button,
@@ -45,6 +54,13 @@ async def _lifespan(app: FastAPI):
     agent_pty_monitor_task: Optional[asyncio.Task] = None
     warmup_task: Optional[asyncio.Task] = None
     try:
+        _sync_te2_console_bridge_cache()
+        _sync_te2_fws_readme_cache()
+        _sync_te2_proxy_shell_readme_cache()
+        try:
+            _sync_codex_te2_mcp_from_app_config()
+        except Exception as e:
+            print(f"[Startup] Codex TE2 MCP config sync error: {e}")
         info = await _get_or_start_appserver_shell()
         await _ensure_appserver_reader(info["shell_id"])
         await _ensure_appserver_initialized()
@@ -147,7 +163,12 @@ async def _sio_send_message(sid, data):
         if agent_type != "codex":
             handler = ext_loader.get_handler(agent_type)
             if handler and hasattr(handler, "handle_message"):
-                return await handler.handle_message(convo_id, text, agent_type, settings)
+                return await handler.handle_message(
+                    convo_id,
+                    text,
+                    agent_type,
+                    _materialize_extension_runtime_settings(settings),
+                )
         # Delegate to the HTTP handler for codex (complex RPC logic)
         return await api_appserver_message(AppserverMessageIn(conversation_id=convo_id, text=text))
     except Exception as e:
@@ -311,6 +332,26 @@ async def _sio_set_view(sid, data):
         return _sio_error(str(e))
 
 
+@socketio_server.on("get_config", namespace="/appserver")
+async def _sio_get_config(sid, data):
+    """Mirror of GET /api/appserver/config"""
+    try:
+        return await api_appserver_config()
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("update_config", namespace="/appserver")
+async def _sio_update_config(sid, data):
+    """Mirror of POST /api/appserver/config"""
+    try:
+        return await api_appserver_config_update(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 @socketio_server.on("get_models", namespace="/appserver")
 async def _sio_get_models(sid, data):
     """Mirror of GET /api/appserver/models"""
@@ -390,10 +431,17 @@ async def _sio_session_resume(sid, data):
         if not session_id:
             return _sio_error("Missing session_id")
         conversation_id = data.get("conversation_id") or await _ensure_conversation()
+        bind_settings = _merge_extension_bind_settings(
+            conversation_id,
+            cwd=data.get("cwd"),
+            model=data.get("model"),
+            settings=data.get("settings"),
+        )
         # 1. Bind
         result = await ext_loader.resume_session_with_history(
             ext_id, session_id=session_id, conversation_id=conversation_id,
             cwd=data.get("cwd"), model=data.get("model"),
+            settings=bind_settings,
         )
         if not result.get("ok"):
             return result
@@ -401,6 +449,7 @@ async def _sio_session_resume(sid, data):
         items = await ext_loader.hydrate_transcript(
             ext_id, session_id=session_id, conversation_id=conversation_id,
             cwd=data.get("cwd"), model=data.get("model"),
+            settings=bind_settings,
         )
         if items:
             await _write_transcript_entries(conversation_id, items)
@@ -592,8 +641,15 @@ def _asset(url: str) -> str:
         return url
 # Persist app server config under ~/.cache/app_server.
 CONFIG_PATH = Path(os.path.expanduser("~/.cache/app_server/app_server_config.json"))
+CODEX_CONFIG_PATH = Path(os.path.expanduser("~/.codex/config.toml"))
 LEGACY_TRANSCRIPT_DIR = CONFIG_PATH.parent / "transcripts"
 CONVERSATION_DIR = CONFIG_PATH.parent / "conversations"
+TE2_CONSOLE_BRIDGE_SOURCE_PATH = Path(__file__).resolve().parent / "te2_assets" / "console_bridge.js"
+TE2_CONSOLE_BRIDGE_CACHE_PATH = CONFIG_PATH.parent / "te2_console_bridge.js"
+TE2_FWS_README_SOURCE_PATH = Path(__file__).resolve().parent / "te2_assets" / "framework_shells_README.md"
+TE2_FWS_README_CACHE_PATH = CONFIG_PATH.parent / "framework_shells_README.md"
+TE2_PROXY_SHELL_README_SOURCE_PATH = Path(__file__).resolve().parent / "te2_assets" / "proxy_shell_wrapper_README.md"
+TE2_PROXY_SHELL_README_CACHE_PATH = CONFIG_PATH.parent / "proxy_shell_wrapper_README.md"
 _transcript_lock = asyncio.Lock()
 _transcript_seen: set[tuple[str, str, str]] = set()
 
@@ -610,6 +666,8 @@ def _default_appserver_config() -> Dict[str, Any]:
         "shell_id": None,
         "mcp_shell_id": None,
         "shell_manager_shell_id": None,
+        "user_name": None,
+        "te2_mcp_integration": False,
     }
 
 
@@ -632,6 +690,79 @@ def _load_appserver_config() -> Dict[str, Any]:
 def _save_appserver_config(cfg: Dict[str, Any]) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _sync_cached_asset(label: str, source_path: Path, cache_path: Path) -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not source_path.exists():
+        print(f"[Startup] {label} source missing: {source_path}")
+        return
+    try:
+        source_stat = source_path.stat()
+        target_stat = cache_path.stat() if cache_path.exists() else None
+        if (
+            target_stat is not None
+            and target_stat.st_size == source_stat.st_size
+            and int(target_stat.st_mtime) >= int(source_stat.st_mtime)
+        ):
+            return
+        shutil.copy2(source_path, cache_path)
+    except Exception as e:
+        print(f"[Startup] {label} cache sync error: {e}")
+
+
+def _sync_te2_console_bridge_cache() -> None:
+    _sync_cached_asset("TE2 console bridge", TE2_CONSOLE_BRIDGE_SOURCE_PATH, TE2_CONSOLE_BRIDGE_CACHE_PATH)
+
+
+def _sync_te2_fws_readme_cache() -> None:
+    _sync_cached_asset("Framework-shells README", TE2_FWS_README_SOURCE_PATH, TE2_FWS_README_CACHE_PATH)
+
+
+def _sync_te2_proxy_shell_readme_cache() -> None:
+    _sync_cached_asset(
+        "Proxy shell wrapper README",
+        TE2_PROXY_SHELL_README_SOURCE_PATH,
+        TE2_PROXY_SHELL_README_CACHE_PATH,
+    )
+
+
+def _write_codex_te2_mcp_config(enabled: bool) -> None:
+    CODEX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if CODEX_CONFIG_PATH.exists():
+        raw = CODEX_CONFIG_PATH.read_text(encoding="utf-8")
+        doc = tomlkit.parse(raw) if raw.strip() else tomlkit.document()
+    else:
+        doc = tomlkit.document()
+
+    mcp_servers = doc.get("mcp_servers")
+    if not isinstance(mcp_servers, dict):
+        mcp_servers = tomlkit.table()
+        doc["mcp_servers"] = mcp_servers
+
+    if enabled:
+        te2_table = tomlkit.table()
+        te2_table["url"] = build_te2_mcp_streamable_http_url(_te2_base_url())
+        mcp_servers[TE2_MCP_SERVER_NAME] = te2_table
+    else:
+        mcp_servers.pop(TE2_MCP_SERVER_NAME, None)
+        if not list(mcp_servers):
+            doc.pop("mcp_servers", None)
+
+    CODEX_CONFIG_PATH.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+
+def _sync_codex_te2_mcp_from_app_config() -> None:
+    cfg = _load_appserver_config()
+    _write_codex_te2_mcp_config(cfg.get("te2_mcp_integration") is True)
+
+
+def _apply_codex_app_defaults(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    merged = dict(settings) if isinstance(settings, dict) else {}
+    if "te2_mcp_integration" not in merged:
+        cfg = _load_appserver_config()
+        merged["te2_mcp_integration"] = cfg.get("te2_mcp_integration") is True
+    return merged
 
 
 def _normalize_conversation_list(cfg: Dict[str, Any]) -> List[str]:
@@ -938,6 +1069,101 @@ def _save_conversation_meta(conversation_id: str, meta: Dict[str, Any]) -> None:
     path = _conversation_meta_path(conversation_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+_PREVIEW_TEXT_MAX = 160
+
+
+def _normalize_preview_text(text: Any, max_len: int = _PREVIEW_TEXT_MAX) -> str:
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    text = _ansi_strip(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if max_len > 1 and len(text) > max_len:
+        text = f"{text[:max_len - 1].rstrip()}…"
+    return text
+
+
+def _preview_tool_label(event: Dict[str, Any]) -> str:
+    server = _normalize_preview_text(event.get("server"), 64)
+    tool = _normalize_preview_text(event.get("tool"), 64)
+    if server and tool:
+        return f"{server}:{tool}"
+    return tool or server or "tool"
+
+
+def _preview_from_event(event: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    if not isinstance(event, dict):
+        return None
+    evt_type = str(event.get("type") or "").strip().lower()
+    if not evt_type:
+        return None
+
+    if evt_type == "assistant_finalize":
+        text = _normalize_preview_text(event.get("text"))
+        return {"type": "assistant", "text": text} if text else None
+
+    if evt_type == "message" and str(event.get("role") or "").strip().lower() == "assistant":
+        text = _normalize_preview_text(event.get("text"))
+        return {"type": "assistant", "text": text} if text else None
+
+    if evt_type in {"tool_begin", "tool_end"}:
+        arguments = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
+        tool_name = str(event.get("tool") or "").strip().lower()
+        if tool_name in {"command", "shell"}:
+            command = _normalize_preview_text(arguments.get("command") or event.get("command"))
+            return {"type": "tool", "text": f"$ {command}"} if command else None
+        if tool_name == "web_search":
+            query = _normalize_preview_text(event.get("query") or arguments.get("query"))
+            return {"type": "tool", "text": f"web_search: {query}"} if query else {"type": "tool", "text": "web_search"}
+        return {"type": "tool", "text": _preview_tool_label(event)}
+
+    if evt_type in {"shell_begin", "shell_end", "command_result"}:
+        command = _normalize_preview_text(event.get("command"))
+        if command:
+            return {"type": "tool", "text": f"$ {command}"}
+        output = _normalize_preview_text(event.get("output") or event.get("stdout") or event.get("stderr"))
+        return {"type": "tool", "text": output} if output else None
+
+    if evt_type == "subagent_start":
+        name = _normalize_preview_text(event.get("name") or "subagent", 48)
+        intent = _normalize_preview_text(event.get("intent") or "working", 120)
+        return {"type": "subagent", "text": f"{name}: {intent}"}
+
+    if evt_type == "subagent_end":
+        summary = _normalize_preview_text(event.get("summary"))
+        if summary:
+            return {"type": "subagent", "text": summary}
+        return {"type": "subagent", "text": "subagent failed" if event.get("success") is False else "subagent done"}
+
+    return None
+
+
+def _store_conversation_preview_from_event(event: Dict[str, Any]) -> None:
+    if not isinstance(event, dict):
+        return
+    convo_id = event.get("conversation_id")
+    if not isinstance(convo_id, str) or not convo_id.strip():
+        return
+    convo_id = _sanitize_conversation_id(convo_id.strip())
+    if not convo_id or not _conversation_meta_path(convo_id).exists():
+        return
+    preview = _preview_from_event(event)
+    if not preview or not preview.get("text"):
+        return
+    meta = _load_conversation_meta(convo_id)
+    current = meta.get("last_preview") if isinstance(meta.get("last_preview"), dict) else {}
+    next_preview = {
+        "type": preview.get("type") or "event",
+        "text": preview["text"],
+        "updated_at": utc_ts(),
+    }
+    if current.get("type") == next_preview["type"] and current.get("text") == next_preview["text"]:
+        return
+    meta["last_preview"] = next_preview
+    _save_conversation_meta(convo_id, meta)
 
 
 # =============================================================================
@@ -1771,6 +1997,18 @@ def _get_turn_id(payload: Any) -> Optional[str]:
     return None
 
 
+def _extract_thread_id_from_rpc_result(payload: Any) -> Optional[str]:
+    if isinstance(payload, dict):
+        thread = payload.get("thread")
+        if isinstance(thread, dict) and thread.get("id"):
+            return str(thread["id"])
+        for key in ("threadId", "thread_id", "id"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
 def _get_item_id(payload: Any) -> Optional[str]:
     if isinstance(payload, dict):
         for key in ("itemId", "item_id", "id"):
@@ -2271,30 +2509,44 @@ async def _terminate_agent_pty_conversation_shells(*, force: bool = True) -> Dic
 
 async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
     """Broadcast an event to all connected frontends via Socket.IO."""
+    if not isinstance(event, dict):
+        return
+    evt = dict(event)
+    evt_type = str(evt.get("type") or "").strip().lower()
+    if evt_type in {"shell_begin", "shell_end"}:
+        shell_state = _shell_call_ids.get(str(evt.get("id") or ""))
+        if isinstance(shell_state, dict):
+            if not evt.get("conversation_id") and shell_state.get("convo_id"):
+                evt["conversation_id"] = shell_state.get("convo_id")
+            if not evt.get("command") and shell_state.get("command"):
+                evt["command"] = shell_state.get("command")
+            if not evt.get("cwd") and shell_state.get("cwd"):
+                evt["cwd"] = shell_state.get("cwd")
+    _store_conversation_preview_from_event(evt)
     try:
-        await socketio_server.emit("appserver_event", event, namespace="/appserver")
+        await socketio_server.emit("appserver_event", evt, namespace="/appserver")
     except Exception:
         pass
 
     # On diff events, notify TE2 for edit tracking via sidebar websocket
     # Only when ide_mode is on AND the conversation has trackEdits enabled
-    if event.get("type") == "diff" and _HOST_UI_STATE.get("ide_mode"):
-        convo_id = event.get("conversation_id", "")
+    if evt.get("type") == "diff" and _HOST_UI_STATE.get("ide_mode"):
+        convo_id = evt.get("conversation_id", "")
         track = False
         if convo_id:
             meta = _load_conversation_meta(convo_id)
             settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
             track = settings.get("trackEdits", False)
         if track:
-            path = event.get("path", "")
+            path = evt.get("path", "")
             if path:
-                line = _extract_line_from_diff(event.get("text", ""))
+                line = _extract_line_from_diff(evt.get("text", ""))
                 await _emit_sidebar_agent_edit({
                     "path": path,
                     "line": line,
                     "column": 1,
                     "source": "appserver_diff",
-                    "conversation_id": event.get("conversation_id", ""),
+                    "conversation_id": evt.get("conversation_id", ""),
                 })
 
 
@@ -3609,12 +3861,24 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
                         _pending_turn_starts.pop(req_id, None)
                         return
                     
-                    # Auto-resume on "thread/conversation not found" for pending turn/start
-                    if ("thread not found" in error_msg or "conversation not found" in error_msg) and req_id in _pending_turn_starts:
+                    lowered_error = error_msg.lower()
+
+                    # Auto-resume on startup-not-ready errors for pending turn/start
+                    if (
+                        (
+                            "thread not found" in lowered_error
+                            or "conversation not found" in lowered_error
+                            or "no rollout found" in lowered_error
+                        )
+                        and req_id in _pending_turn_starts
+                    ):
                         original_payload = _pending_turn_starts.pop(req_id)
                         thread_id = original_payload.get("params", {}).get("threadId")
                         if thread_id:
-                            print(f"[DEBUG] Auto-resuming thread {thread_id} after 'conversation not found'")
+                            print(
+                                f"[DEBUG] Auto-resuming thread {thread_id} after startup error: {error_msg}",
+                                flush=True,
+                            )
                             asyncio.create_task(_auto_resume_and_retry(thread_id, original_payload))
                             return  # Don't broadcast error to frontend
                     
@@ -3732,18 +3996,147 @@ async def _write_appserver(payload: Dict[str, Any]) -> None:
     print(f"[DEBUG] Write complete")
 
 
+def _inject_codex_runtime_settings(
+    params: Dict[str, Any],
+    method: str,
+    settings: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(params, dict):
+        params = {}
+    settings = _apply_codex_app_defaults(settings)
+
+    if method == "turn/start":
+        for key in ("model", "cwd", "approvalPolicy", "sandboxPolicy", "summary"):
+            if key in settings and settings[key] and key not in params:
+                params[key] = settings[key]
+        effort = settings.get("effort") or settings.get("reasoning_effort")
+        if effort and "effort" not in params:
+            params["effort"] = effort
+        return params
+
+    if method in ("thread/start", "thread/resume"):
+        for key in ("model", "cwd", "approvalPolicy"):
+            if key in settings and settings[key] and key not in params:
+                params[key] = settings[key]
+        if "sandbox" not in params:
+            sandbox_value = settings.get("sandbox") or settings.get("sandboxPolicy")
+            if sandbox_value:
+                params["sandbox"] = sandbox_value
+        if method == "thread/start":
+            effort = settings.get("effort") or settings.get("reasoning_effort")
+            if effort and "reasoningEffort" not in params:
+                params["reasoningEffort"] = effort
+        effective_developer_instructions = build_effective_developer_instructions(
+            settings.get("developer_instructions"),
+            te2_enabled=te2_mcp_integration_enabled(settings),
+        )
+        if effective_developer_instructions and "developerInstructions" not in params:
+            params["developerInstructions"] = effective_developer_instructions
+        effective_config = build_codex_thread_config(
+            settings.get("config"),
+            te2_enabled=te2_mcp_integration_enabled(settings),
+            base_url=_te2_base_url() if te2_mcp_integration_enabled(settings) else None,
+        )
+        if effective_config:
+            current_config = params.get("config")
+            if isinstance(current_config, dict):
+                merged_config = dict(current_config)
+                merged_config.update(effective_config)
+                current_mcp = current_config.get("mcp_servers")
+                next_mcp = effective_config.get("mcp_servers")
+                if isinstance(current_mcp, dict) and isinstance(next_mcp, dict):
+                    merged_mcp = dict(current_mcp)
+                    merged_mcp.update(next_mcp)
+                    merged_config["mcp_servers"] = merged_mcp
+                params["config"] = merged_config
+            elif "config" not in params:
+                params["config"] = effective_config
+    return params
+
+
+def _materialize_extension_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(settings, dict):
+        return {}
+    merged = dict(settings)
+    if te2_mcp_integration_enabled(merged):
+        merged["te2_base_url"] = _te2_base_url()
+    return merged
+
+
+def _codex_thread_runtime_signature(settings: Optional[Dict[str, Any]]) -> str:
+    effective_settings = _apply_codex_app_defaults(settings)
+    effective_config = build_codex_thread_config(
+        effective_settings.get("config"),
+        te2_enabled=te2_mcp_integration_enabled(effective_settings),
+        base_url=_te2_base_url() if te2_mcp_integration_enabled(effective_settings) else None,
+        force_te2_mcp_entry=True,
+    )
+    payload = {
+        "developerInstructions": build_effective_developer_instructions(
+            effective_settings.get("developer_instructions"),
+            te2_enabled=te2_mcp_integration_enabled(effective_settings),
+        ),
+        "config": effective_config,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _build_codex_thread_reconfigure_params(thread_id: str, settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    effective_settings = _apply_codex_app_defaults(settings)
+    params: Dict[str, Any] = {"threadId": thread_id}
+    for key in ("model", "cwd", "approvalPolicy"):
+        value = effective_settings.get(key)
+        if value:
+            params[key] = value
+    sandbox_value = effective_settings.get("sandbox") or effective_settings.get("sandboxPolicy")
+    if sandbox_value:
+        params["sandbox"] = sandbox_value
+    params["developerInstructions"] = build_effective_developer_instructions(
+        effective_settings.get("developer_instructions"),
+        te2_enabled=te2_mcp_integration_enabled(effective_settings),
+    )
+    params["config"] = build_codex_thread_config(
+        effective_settings.get("config"),
+        te2_enabled=te2_mcp_integration_enabled(effective_settings),
+        base_url=_te2_base_url() if te2_mcp_integration_enabled(effective_settings) else None,
+        force_te2_mcp_entry=True,
+    )
+    return params
+
+
+def _merge_extension_bind_settings(
+    conversation_id: str,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    meta = _load_conversation_meta(conversation_id)
+    if meta and isinstance(meta.get("settings"), dict):
+        merged.update(meta["settings"])
+    if isinstance(settings, dict):
+        for key, value in settings.items():
+            if value is None or value == "":
+                continue
+            merged[key] = value
+    if isinstance(cwd, str) and cwd.strip():
+        merged["cwd"] = cwd
+    if isinstance(model, str) and model.strip():
+        merged["model"] = model
+    return _materialize_extension_runtime_settings(merged)
+
+
 async def _auto_resume_and_retry(thread_id: str, original_payload: Dict[str, Any]) -> None:
     """Auto-resume a thread and retry the original turn/start request.
     
-    Called when codex-app-server returns "conversation not found" for a turn/start.
+    Called when codex-app-server returns a startup-not-ready error for turn/start.
     Silently resumes the thread and re-sends the original request.
     """
     try:
         # Build thread/resume request
-        resume_id = int(datetime.now(timezone.utc).timestamp() * 1000)
         resume_payload: Dict[str, Any] = {
-            "id": resume_id,
-            "method": "thread/resume",
             "params": {"threadId": thread_id}
         }
         
@@ -3754,16 +4147,14 @@ async def _auto_resume_and_retry(thread_id: str, original_payload: Dict[str, Any
         if convo_id:
             meta = _load_conversation_meta(convo_id)
             settings = meta.get("settings", {})
-            params = resume_payload["params"]
-            for key in ("model", "cwd", "approvalPolicy", "sandbox"):
-                if key in settings and settings[key] and key not in params:
-                    params[key] = settings[key]
+            resume_payload["params"] = _inject_codex_runtime_settings(
+                resume_payload["params"],
+                "thread/resume",
+                settings,
+            )
         
         print(f"[DEBUG] Sending thread/resume for {thread_id}")
-        await _write_appserver(resume_payload)
-        
-        # Wait briefly for resume to complete before retrying
-        await asyncio.sleep(0.5)
+        await _rpc_request("thread/resume", params=resume_payload["params"], timeout=10.0)
         
         # Re-send original turn/start with a new request ID
         retry_id = int(datetime.now(timezone.utc).timestamp() * 1000) + 1
@@ -4245,6 +4636,7 @@ async def codex_agent_ui() -> HTMLResponse:
                 Script(src=_asset("/static/modals/rollout_picker.js"), defer=True),
                 Script(src=_asset("/static/modals/warning_modal.js"), defer=True),
                 Script(src=_asset("/static/ui/conversation_drawer.js"), defer=True),
+                Script(src=_asset("/static/ui/splash_settings.js"), defer=True),
                 Script(src=_asset("/static/dist/codex_agent.js"), type="module"),
                 Script(NotStr(f"""import {{ initConsoleBridge }} from '{_asset("/static/js/console_bridge.js")}';
 try {{
@@ -4270,6 +4662,7 @@ try {{
 	                            ),
 	                            Button("Start", id="agent-start", cls="btn"),
 	                            Button("Stop", id="agent-stop", cls="btn ghost"),
+                                Button("⚙", id="splash-settings", cls="btn ghost", title="Splash settings"),
 	                            Button("×", id="host-close-top", cls="btn ghost host-close-btn"),
 	                            cls="toolbar"
 	                        ),
@@ -4417,6 +4810,14 @@ try {{
                                     ),
                                     id="settings-agent-row",
                                 ),
+                                Label(
+                                    Span("Conversation Label"),
+                                    Input(type="text", id="settings-label", placeholder="label"),
+                                ),
+                                Label(
+                                    Span("Assistant Alias"),
+                                    Input(type="text", id="settings-alias", placeholder="assistant"),
+                                ),
                                 Div(
                                     Label(
                                         Span("CWD"),
@@ -4472,25 +4873,25 @@ try {{
                                         ),
                                     ),
                                     Label(
+                                        Span("Developer Instructions"),
+                                        Textarea(
+                                            id="settings-developer-instructions",
+                                            cls="settings-textarea",
+                                            placeholder="Additional runtime instructions applied when Codex starts or resumes a thread",
+                                        ),
+                                    ),
+                                    Label(
                                         Span("Rollout"),
                                         Div(
                                             Input(type="text", id="settings-rollout", placeholder="(unselected)", readonly=True),
                                             Button("Pick", id="settings-rollout-browse", cls="btn ghost"),
                                             cls="settings-row"
-                                        ),
-                                        id="settings-rollout-row",
                                     ),
+                                    id="settings-rollout-row",
+                                ),
                                     id="settings-codex-fields",
                                 ),
                                 Div(id="settings-extension-fields"),
-                                Label(
-                                    Span("Conversation Label"),
-                                    Input(type="text", id="settings-label", placeholder="label"),
-                                ),
-                                Label(
-                                    Span("Assistant Alias"),
-                                    Input(type="text", id="settings-alias", placeholder="assistant"),
-                                ),
                                 Label(
                                     Span("Command Output Lines"),
                                     Input(type="number", id="settings-command-lines", placeholder="20", value="20", min="1", max="500"),
@@ -4515,6 +4916,11 @@ try {{
                                     Input(type="checkbox", id="settings-semantic-shell-ribbon", checked=False),
                                     cls="settings-checkbox-row"
                                 ),
+                                Label(
+                                    Span("TE2 MCP Integration"),
+                                    Input(type="checkbox", id="settings-te2-mcp-integration", checked=False),
+                                    cls="settings-checkbox-row"
+                                ),
                                 cls="settings-body"
                             ),
                             Div(
@@ -4526,6 +4932,35 @@ try {{
                         ),
                         cls="settings-overlay hidden",
                         id="settings-modal"
+                    ),
+                    Div(
+                        Div(
+                            Div(
+                                H3("Splash Settings"),
+                                Button("×", id="splash-settings-close", cls="btn ghost"),
+                                cls="settings-header"
+                            ),
+                            Div(
+                                Label(
+                                    Span("User Name"),
+                                    Input(type="text", id="splash-settings-user-name", placeholder="User"),
+                                ),
+                                Label(
+                                    Span("TE2 MCP Integration"),
+                                    Input(type="checkbox", id="splash-settings-te2-mcp-integration", checked=False),
+                                    cls="settings-checkbox-row"
+                                ),
+                                cls="settings-body"
+                            ),
+                            Div(
+                                Button("Cancel", id="splash-settings-cancel", cls="btn ghost"),
+                                Button("Save", id="splash-settings-save", cls="btn primary"),
+                                cls="settings-footer"
+                            ),
+                            cls="settings-dialog"
+                        ),
+                        cls="settings-overlay hidden",
+                        id="splash-settings-modal"
                     ),
                     Div(
                         Div(
@@ -4730,6 +5165,12 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
     if picked_session and agent_type and ext_loader.has_extension(agent_type):
         cwd = final_settings.get("cwd", "~")
         model = final_settings.get("model")
+        bind_settings = _merge_extension_bind_settings(
+            convo_id,
+            cwd=cwd,
+            model=model,
+            settings=final_settings,
+        )
         try:
             # 1. Bind: resume the extension session
             bind_result = await ext_loader.resume_session_with_history(
@@ -4738,6 +5179,7 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
                 conversation_id=convo_id,
                 cwd=cwd,
                 model=model,
+                settings=bind_settings,
             )
             if not bind_result.get("ok"):
                 print(f"[WARN] Session bind failed: {bind_result}")
@@ -4749,6 +5191,7 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
                     conversation_id=convo_id,
                     cwd=cwd,
                     model=model,
+                    settings=bind_settings,
                 )
                 # 3. Write to transcript.jsonl (same as bind-rollout)
                 if items:
@@ -5278,9 +5721,21 @@ async def api_appserver_rollout_preview(rollout_id: str):
 async def api_appserver_config_update(payload: Dict[str, Any] = Body(...)):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Config payload must be a JSON object")
+    if "user_name" in payload:
+        user_name = payload.get("user_name")
+        if user_name is None:
+            payload["user_name"] = None
+        elif isinstance(user_name, str):
+            payload["user_name"] = user_name.strip() or None
+        else:
+            raise HTTPException(status_code=400, detail="user_name must be a string or null")
+    if "te2_mcp_integration" in payload:
+        payload["te2_mcp_integration"] = payload.get("te2_mcp_integration") is True
     async with _config_lock:
         cfg = _load_appserver_config()
         cfg.update(payload)
+        if "te2_mcp_integration" in payload:
+            _write_codex_te2_mcp_config(cfg.get("te2_mcp_integration") is True)
         _save_appserver_config(cfg)
         return cfg
 
@@ -5494,9 +5949,25 @@ async def _emit_shell_events_from_agent_block(conversation_id: str, block: Dict[
     else:
         stdout = block.get("stdout") or ""
     
-    await _broadcast_appserver_ui({"type": "shell_begin", "id": call_id, "command": cmd, "cwd": cwd, "stream": "stdout"})
+    await _broadcast_appserver_ui({
+        "type": "shell_begin",
+        "id": call_id,
+        "command": cmd,
+        "cwd": cwd,
+        "stream": "stdout",
+        "conversation_id": conversation_id,
+    })
     exit_code = block.get("exit_code") if isinstance(block.get("exit_code"), int) else 0
-    await _broadcast_appserver_ui({"type": "shell_end", "id": call_id, "exitCode": exit_code, "stdout": stdout, "stderr": ""})
+    await _broadcast_appserver_ui({
+        "type": "shell_end",
+        "id": call_id,
+        "command": cmd,
+        "cwd": cwd,
+        "exitCode": exit_code,
+        "stdout": stdout,
+        "stderr": "",
+        "conversation_id": conversation_id,
+    })
 
 
 # =============================================================================
@@ -5541,46 +6012,22 @@ async def api_appserver_message(payload: AppserverMessageIn):
     if agent_type != "codex":
         handler = ext_loader.get_handler(agent_type)
         if handler and hasattr(handler, "handle_message"):
-            return await handler.handle_message(convo_id, text, agent_type, settings)
+            return await handler.handle_message(
+                convo_id,
+                text,
+                agent_type,
+                _materialize_extension_runtime_settings(settings),
+            )
     
     # Default: route to codex-app-server
     thread_id = meta.get("thread_id")
 
-    # Generate request IDs
+    # Generate request IDs for async turn/start writes.
     base_id = int(datetime.now(timezone.utc).timestamp() * 1000)
 
     # Helper to inject settings into params
     def inject_settings(params: Dict[str, Any], method: str) -> Dict[str, Any]:
-        # NOTE: Codex App Server uses different field names for different methods:
-        # - thread/resume: sandbox (SandboxMode)
-        # - turn/start: sandboxPolicy (SandboxPolicy)
-        if method == "turn/start":
-            for key in ("model", "cwd", "approvalPolicy", "sandboxPolicy", "summary"):
-                if key in settings and settings[key] and key not in params:
-                    params[key] = settings[key]
-            if "effort" in settings and settings["effort"] and "effort" not in params:
-                params["effort"] = settings["effort"]
-        elif method == "thread/start":
-            # thread/start uses `sandbox` (SandboxMode)
-            for key in ("model", "cwd", "approvalPolicy"):
-                if key in settings and settings[key] and key not in params:
-                    params[key] = settings[key]
-            # Best-effort: map sandboxPolicy -> sandbox for thread/start/resume if only sandboxPolicy is present.
-            if "sandbox" not in params:
-                sb = settings.get("sandbox") or settings.get("sandboxPolicy")
-                if sb:
-                    params["sandbox"] = sb
-            if "effort" in settings and settings["effort"] and "reasoningEffort" not in params:
-                params["reasoningEffort"] = settings["effort"]
-        elif method == "thread/resume":
-            for key in ("model", "cwd", "approvalPolicy"):
-                if key in settings and settings[key] and key not in params:
-                    params[key] = settings[key]
-            if "sandbox" not in params:
-                sb = settings.get("sandbox") or settings.get("sandboxPolicy")
-                if sb:
-                    params["sandbox"] = sb
-        return params
+        return _inject_codex_runtime_settings(params, method, settings)
     
     try:
         # Ensure the codex-app-server framework shell is running and reader is attached.
@@ -5589,6 +6036,12 @@ async def api_appserver_message(payload: AppserverMessageIn):
         await _ensure_appserver_initialized()
 
         if thread_id:
+            current_signature = _codex_thread_runtime_signature(settings)
+            if meta.get("thread_runtime_signature") != current_signature:
+                resume_params = _build_codex_thread_reconfigure_params(thread_id, settings)
+                await _rpc_request("thread/resume", params=resume_params)
+                meta["thread_runtime_signature"] = current_signature
+                _save_conversation_meta(convo_id, meta)
             # Send turn/start directly. If the thread isn't in the RPC
             # server's memory, the reader auto-resumes via _pending_turn_starts.
             turn_params = inject_settings({
@@ -5603,29 +6056,33 @@ async def api_appserver_message(payload: AppserverMessageIn):
             _pending_turn_starts[str(base_id + 1)] = turn_payload.copy()
             await _write_appserver(turn_payload)
         else:
-            # No thread yet - start a new one
+            # No thread yet - negotiate a new one synchronously on the backend.
             start_params = inject_settings({}, "thread/start")
-            await _write_appserver({
-                "id": base_id,
-                "method": "thread/start",
-                "params": start_params
-            })
-            # Wait for thread/started response to get thread_id
-            # The thread_id will be captured by _set_thread_id from the response
-            await asyncio.sleep(0.5)
-            
-            # Re-load meta to get the new thread_id
-            meta = _load_conversation_meta(convo_id)
-            thread_id = meta.get("thread_id")
-            
+            start_result = await _rpc_request("thread/start", params=start_params, timeout=15.0)
+            thread_id = _extract_thread_id_from_rpc_result(start_result)
+
             if not thread_id:
-                # Fallback: check config
-                async with _config_lock:
-                    cfg = _load_appserver_config()
-                thread_id = cfg.get("thread_id")
-            
+                # Fallback to persisted state if the response shape changes.
+                meta = _load_conversation_meta(convo_id)
+                thread_id = meta.get("thread_id")
+                if not thread_id:
+                    async with _config_lock:
+                        cfg = _load_appserver_config()
+                    thread_id = cfg.get("thread_id")
+
             if not thread_id:
                 return {"ok": False, "error": "Failed to start thread - no thread_id received"}
+
+            meta["thread_id"] = thread_id
+            meta["status"] = "active"
+
+            meta["thread_runtime_signature"] = _codex_thread_runtime_signature(settings)
+            _save_conversation_meta(convo_id, meta)
+
+            async with _config_lock:
+                cfg = _load_appserver_config()
+                cfg["thread_id"] = thread_id
+                _save_appserver_config(cfg)
             
             # Send turn/start with new thread
             turn_params = inject_settings({
@@ -5682,34 +6139,7 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
             meta = _load_conversation_meta(convo_id)
             settings = meta.get("settings", {})
             params = payload.get("params", {})
-            
-            # Different params supported by different methods:
-            # thread/resume: model, cwd, approvalPolicy, sandbox (NOT reasoningEffort)
-            # thread/start: model, cwd, approvalPolicy, sandbox, reasoningEffort
-            # turn/start: model, cwd, approvalPolicy, sandboxPolicy, effort, summary
-            
-            if method == "turn/start":
-                # turn/start uses 'effort' not 'reasoningEffort'
-                for key in ("model", "cwd", "approvalPolicy", "sandboxPolicy", "summary"):
-                    if key in settings and settings[key] and key not in params:
-                        params[key] = settings[key]
-                # Map our 'effort' setting to turn/start's 'effort' param
-                if "effort" in settings and settings["effort"] and "effort" not in params:
-                    params["effort"] = settings["effort"]
-            elif method == "thread/start":
-                # thread/start uses 'reasoningEffort'
-                for key in ("model", "cwd", "approvalPolicy", "sandbox"):
-                    if key in settings and settings[key] and key not in params:
-                        params[key] = settings[key]
-                if "effort" in settings and settings["effort"] and "reasoningEffort" not in params:
-                    params["reasoningEffort"] = settings["effort"]
-            else:  # thread/resume
-                # thread/resume does NOT support reasoningEffort - only model, cwd, approvalPolicy, sandbox
-                for key in ("model", "cwd", "approvalPolicy", "sandbox"):
-                    if key in settings and settings[key] and key not in params:
-                        params[key] = settings[key]
-            
-            payload["params"] = params
+            payload["params"] = _inject_codex_runtime_settings(params, method, settings)
             print(f"[DEBUG] SSOT injection for {method}: {params}")
     
     # Inject pending command context envelope on turn/start
@@ -5834,14 +6264,6 @@ async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
     # Generate tracking ID for streaming
     call_id = f"shell_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     
-    # Emit shell_begin immediately so frontend can create streaming row
-    await _broadcast_appserver_ui({
-        "type": "shell_begin",
-        "id": call_id,
-        "command": command,
-        "cwd": cwd,
-    })
-    
     # Split command into array for shell execution
     # Using shell=True style by wrapping in sh -c
     cmd_array = ["sh", "-c", command]
@@ -5855,6 +6277,15 @@ async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
     
     # Track this call_id for routing deltas
     _shell_call_ids[call_id] = {"command": command, "cwd": cwd, "convo_id": convo_id}
+
+    # Emit shell_begin immediately so frontend can create streaming row
+    await _broadcast_appserver_ui({
+        "type": "shell_begin",
+        "id": call_id,
+        "command": command,
+        "cwd": cwd,
+        "conversation_id": convo_id,
+    })
     
     try:
         result = await _rpc_request("command/exec", params=params, timeout=35.0)
@@ -5866,9 +6297,12 @@ async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
         await _broadcast_appserver_ui({
             "type": "shell_end",
             "id": call_id,
+            "command": command,
+            "cwd": cwd,
             "exitCode": exit_code,
             "stdout": stdout,
             "stderr": stderr,
+            "conversation_id": convo_id,
         })
         
         # Write to transcript
@@ -5889,10 +6323,13 @@ async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
         await _broadcast_appserver_ui({
             "type": "shell_end",
             "id": call_id,
+            "command": command,
+            "cwd": cwd,
             "exitCode": 1,
             "stdout": "",
             "stderr": error_msg,
             "error": True,
+            "conversation_id": convo_id,
         })
         if convo_id:
             await _append_transcript_entry(convo_id, {
@@ -5956,8 +6393,32 @@ async def api_appserver_mention(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     queued = True
+    # Extract optional rich-mention fields (line, col, content).
+    line_no = payload.get("lineNo")
+    end_line_no = payload.get("endLineNo")
+    col = payload.get("col")
+    end_col = payload.get("endCol")
+    content = payload.get("content")
+    # Truncate content to 20 lines max.
+    if isinstance(content, str):
+        lines = content.split("\n")
+        if len(lines) > 20:
+            content = "\n".join(lines[:20]) + f"\n... (truncated, {len(lines)} total lines)"
+
+    mention_evt: Dict[str, Any] = {"type": "mention_insert", "path": path, "conversation_id": conversation_id}
+    if line_no is not None:
+        mention_evt["lineNo"] = int(line_no)
+    if end_line_no is not None:
+        mention_evt["endLineNo"] = int(end_line_no)
+    if col is not None:
+        mention_evt["col"] = int(col)
+    if end_col is not None:
+        mention_evt["endCol"] = int(end_col)
+    if content:
+        mention_evt["content"] = str(content)
+
     if active_view == "conversation" and active_conversation_id == conversation_id:
-        await _broadcast_appserver_ui({"type": "mention_insert", "path": path, "conversation_id": conversation_id})
+        await _broadcast_appserver_ui(mention_evt)
         queued = False
     else:
         # Drawer closed (or different conversation active): append into the draft buffer
@@ -5966,7 +6427,15 @@ async def api_appserver_mention(payload: Dict[str, Any] = Body(...)):
         draft = meta.get("draft")
         if not isinstance(draft, str):
             draft = ""
-        token = f"`{path}`"
+        # Build draft token: `path:line` or `path:line-endLine` or just `path`
+        path_token = path
+        if line_no is not None:
+            path_token += f":{int(line_no)}"
+            if end_line_no is not None and int(end_line_no) != int(line_no):
+                path_token += f"-{int(end_line_no)}"
+        token = f"`{path_token}`"
+        if content:
+            token += f"\n```\n{str(content)}\n```"
         if draft and not draft.endswith((" ", "\n", "\t")):
             draft = draft + " " + token
         else:
@@ -6558,6 +7027,12 @@ async def api_extension_session_resume(extension_id: str, payload: Dict[str, Any
         conversation_id = await _ensure_conversation()
     
     try:
+        bind_settings = _merge_extension_bind_settings(
+            conversation_id,
+            cwd=payload.get("cwd"),
+            model=payload.get("model"),
+            settings=payload.get("settings"),
+        )
         # 1. Bind: resume the SDK session
         result = await ext_loader.resume_session_with_history(
             extension_id,
@@ -6565,6 +7040,7 @@ async def api_extension_session_resume(extension_id: str, payload: Dict[str, Any
             conversation_id=conversation_id,
             cwd=payload.get("cwd"),
             model=payload.get("model"),
+            settings=bind_settings,
         )
         if not result.get("ok"):
             return JSONResponse({"error": result.get("error", "Resume failed")}, status_code=500)
@@ -6576,6 +7052,7 @@ async def api_extension_session_resume(extension_id: str, payload: Dict[str, Any
             conversation_id=conversation_id,
             cwd=payload.get("cwd"),
             model=payload.get("model"),
+            settings=bind_settings,
         )
         if items:
             await _write_transcript_entries(conversation_id, items)

@@ -51,9 +51,110 @@ export function bindEventRouter(ctx) {
     renderPromptFromText,
   } = ctx;
 
+  function normalizePreviewText(text, maxLen = 160) {
+    if (text == null) return '';
+    const normalized = String(text).replace(/\s+/g, ' ').trim();
+    if (!normalized) return '';
+    if (maxLen > 1 && normalized.length > maxLen) {
+      return `${normalized.slice(0, maxLen - 1).trimEnd()}…`;
+    }
+    return normalized;
+  }
+
+  function buildToolPreviewText(evt) {
+    const toolName = typeof evt?.tool === 'string' ? evt.tool.trim() : '';
+    const serverName = typeof evt?.server === 'string' ? evt.server.trim() : '';
+    const args = evt?.arguments && typeof evt.arguments === 'object' ? evt.arguments : {};
+    if (toolName === 'command' || toolName === 'shell') {
+      const command = normalizePreviewText(args.command || evt.command || '');
+      return command ? `$ ${command}` : '$ command';
+    }
+    if (toolName === 'web_search') {
+      const query = normalizePreviewText(evt.query || args.query || '');
+      return query ? `web_search: ${query}` : 'web_search';
+    }
+    return normalizePreviewText([serverName, toolName].filter(Boolean).join(':') || toolName || serverName || 'tool', 120);
+  }
+
+  function buildPreviewFromEvent(evt, currentPreview) {
+    const evtType = typeof evt?.type === 'string' ? evt.type : '';
+    switch (evtType) {
+      case 'assistant_delta': {
+        const sourceId = evt.id || 'assistant';
+        const rawDelta = typeof evt.delta === 'string' ? evt.delta : '';
+        if (!rawDelta.trim()) return null;
+        const currentRaw = currentPreview?.type === 'assistant' && currentPreview?.source_id === sourceId
+          ? String(currentPreview.raw_text || '')
+          : '';
+        const nextRaw = `${currentRaw}${rawDelta}`.slice(0, 400);
+        const text = normalizePreviewText(nextRaw);
+        return text ? { type: 'assistant', text, source_id: sourceId, raw_text: nextRaw } : null;
+      }
+      case 'assistant_finalize': {
+        const rawText = typeof evt.text === 'string' ? evt.text.slice(0, 400) : '';
+        const text = normalizePreviewText(rawText);
+        return text ? { type: 'assistant', text, source_id: evt.id || 'assistant', raw_text: rawText } : null;
+      }
+      case 'message': {
+        if ((evt.role || '').toLowerCase() !== 'assistant') return null;
+        const rawText = typeof evt.text === 'string' ? evt.text.slice(0, 400) : '';
+        const text = normalizePreviewText(rawText);
+        return text ? { type: 'assistant', text, source_id: evt.id || 'assistant', raw_text: rawText } : null;
+      }
+      case 'tool_begin':
+      case 'tool_end': {
+        const text = buildToolPreviewText(evt);
+        return text ? { type: 'tool', text } : null;
+      }
+      case 'shell_begin':
+      case 'shell_end':
+      case 'command_result': {
+        const command = normalizePreviewText(evt.command || '', 140);
+        if (command) return { type: 'tool', text: `$ ${command}` };
+        const output = normalizePreviewText(evt.output || evt.stdout || evt.stderr || '', 140);
+        return output ? { type: 'tool', text: output } : null;
+      }
+      case 'subagent_start': {
+        const name = normalizePreviewText(evt.name || 'subagent', 48);
+        const intent = normalizePreviewText(evt.intent || 'working', 120);
+        return { type: 'subagent', text: `${name}: ${intent}` };
+      }
+      case 'subagent_end': {
+        const summary = normalizePreviewText(evt.summary || '', 160);
+        if (summary) return { type: 'subagent', text: summary };
+        return { type: 'subagent', text: evt.success === false ? 'subagent failed' : 'subagent done' };
+      }
+      default:
+        return null;
+    }
+  }
+
+  function updateConversationPreview(evt) {
+    const convoId = typeof evt?.conversation_id === 'string' ? evt.conversation_id.trim() : '';
+    if (!convoId) return;
+    const state = getState();
+    const cache = state.conversationPreviewCache && typeof state.conversationPreviewCache === 'object'
+      ? state.conversationPreviewCache
+      : {};
+    const currentPreview = cache[convoId] || null;
+    const nextPreview = buildPreviewFromEvent(evt, currentPreview);
+    if (!nextPreview?.text) return;
+    if (
+      currentPreview
+      && currentPreview.type === nextPreview.type
+      && currentPreview.text === nextPreview.text
+      && currentPreview.source_id === nextPreview.source_id
+    ) {
+      return;
+    }
+    setState({ conversationPreviewCache: { ...cache, [convoId]: nextPreview } });
+    renderConversationList(state.conversationList, state.conversationMeta?.conversation_id || null);
+  }
+
   function handleEvent(evt) {
     if (!evt || typeof evt !== 'object') return;
     const state = getState();
+    updateConversationPreview(evt);
 
     // Filter events by conversation_id - only render events for active conversation
     const activeConvoId = state.conversationMeta?.conversation_id;
@@ -243,7 +344,13 @@ export function bindEventRouter(ctx) {
         const s = getState();
         if (!s.conversationMeta?.conversation_id) return;
         if (evt.conversation_id && evt.conversation_id !== s.conversationMeta.conversation_id) return;
-        insertMention(evt.path || '');
+        insertMention(evt.path || '', {
+          lineNo: evt.lineNo,
+          endLineNo: evt.endLineNo,
+          col: evt.col,
+          endCol: evt.endCol,
+          content: evt.content,
+        });
         return;
       }
       case 'draft_update': {
@@ -295,4 +402,3 @@ export function bindEventRouter(ctx) {
 
   return { handleEvent };
 }
-

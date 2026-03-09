@@ -7,3 +7,4 @@ python-socketio
 pyte
 fastmcp
 github-copilot-sdk
+tomlkit

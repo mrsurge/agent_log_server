@@ -3,6 +3,7 @@ export function createConversationDrawerList(ctx) {
     conversationListEl,
     getHostUi,
     getSplashTab,
+    getConversationPreview,
     selectConversation,
     selectConversationWithView,
     openSettingsModal,
@@ -71,7 +72,16 @@ export function createConversationDrawerList(ctx) {
       cwdRow.textContent = cwdText;
       const statusRow = document.createElement('div');
       statusRow.textContent = statusText;
-      info.append(labelRow, title, threadRow, cwdRow, statusRow);
+      const preview = (typeof getConversationPreview === 'function' ? getConversationPreview(meta?.conversation_id) : null) || meta?.last_preview || null;
+      const previewText = typeof preview?.text === 'string' ? preview.text.trim() : '';
+      const previewRow = document.createElement('div');
+      previewRow.className = 'conversation-preview-line';
+      previewRow.textContent = previewText;
+      if (previewText) {
+        info.append(labelRow, title, threadRow, cwdRow, statusRow, previewRow);
+      } else {
+        info.append(labelRow, title, threadRow, cwdRow, statusRow);
+      }
 
       const actions = document.createElement('div');
       actions.className = 'conversation-actions';

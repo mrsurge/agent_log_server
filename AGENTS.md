@@ -76,6 +76,24 @@ result = await list_models()
 
 ---
 
+# INVARIANT: EVERY _emit() MUST HAVE A MATCHING _record() — REPLAY IS A MIRROR OF LIVE
+
+**THIS IS NON-NEGOTIABLE. VIOLATING THIS WILL BREAK PLAYBACK AND WASTE HOURS OF DEBUGGING.**
+
+In any extension router (`extensions/*/router.py`), every call to `self._emit(event)` that sends data to the live frontend **MUST** have a corresponding `self._record(entry)` that writes the **SAME fields** to the transcript log. The transcript is the **sole source** for replay. If a field exists in the live event but not in the transcript record, **it will not exist on playback**.
+
+### The rule:
+- `_emit()` sends to the live frontend via SIO
+- `_record()` writes to `transcript.jsonl` for replay
+- **BOTH must carry the same keys and values** — `path`, `line`, `subagent_id`, `command`, `output`, ALL of them
+- If you add a field to `_emit()`, you add it to `_record()` in the same function, same block, no exceptions
+- If you add a field to `shell_begin`, it must also appear in the `role: "command"` transcript record
+
+### Why:
+The frontend renders cards identically for live and replay. If the transcript is missing `path`, the replay card has no file-link click handler. If it's missing `subagent_id`, the replay card won't nest under its subagent. **The transcript must be a complete serialization of the live event stream.**
+
+---
+
 **3. Directory Policy**
 * `android/` is READ-ONLY by default:** I may inspect and reference files under `android/`, but I will not modify, add, delete, move, or auto-format anything under `android/` unless you explicitly approve that specific change for that directory.
 
@@ -114,6 +132,7 @@ It is always a good idea for me to at least check the last few messages before b
 # **There is no "we can't do this unless we do that, so we're not doing it". there is only, "we can't do this unless we do that... so we're going to do that".**
 -
 **FOR TE2 AGENTS (THIS PROBABLY MEANS YOU) IN 'CODE CM6'... DO NOT USE *CHEAP* NATIVE BROWSER DROP-DOWNS. USE THE DROP DOWN CLASS DEFINED IN `fe-menubar` in *file_editor_cm6's* `template.html`**
+
 # Agent Log MCP Tool Exception
 Requests from the user to interact with the agent log (posting messages, reading messages, deleting messages, etc.) do not require the confirmation-of-understanding workflow. I have permission to execute agent log MCP tool calls immediately to the best of my understanding without seeking prior approval.
 

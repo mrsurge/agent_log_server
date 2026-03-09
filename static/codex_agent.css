@@ -116,6 +116,13 @@ body.drawer-open {
   min-height: 0;
 }
 
+.splash-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .splash-tabs {
   display: none;
   gap: 8px;
@@ -183,6 +190,12 @@ body.drawer-open {
   color: #b7ffcd;
   font-size: 11px;
   letter-spacing: 0.3px;
+}
+
+.conversation-preview-line {
+  color: #8b949e;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .footer-dropdown {
@@ -371,6 +384,15 @@ body.drawer-open {
 
 .settings-row input {
   flex: 1;
+}
+
+.settings-textarea {
+  width: 100%;
+  min-height: 140px;
+}
+
+.settings-json-input {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 .dropdown-field {
@@ -1130,6 +1152,7 @@ textarea {
   overflow: visible;
   background: transparent;
   flex: none;
+  font-size: 14px;
 }
 
 .timeline-sticky-underlay {
@@ -1149,6 +1172,13 @@ textarea {
   height: 100%;
 }
 
+.timeline-sticky-slot-host.subagent-card {
+  border-left: none;
+  margin: 0;
+  overflow: visible;
+  max-width: none;
+}
+
 .timeline-sticky-header .ribbon-toggle-zone {
   display: none !important;
 }
@@ -1160,6 +1190,10 @@ textarea {
 .timeline-sticky-header[data-expanded="true"] .twisty {
   transform: translateY(-50%) rotate(90deg);
   opacity: 0.75;
+}
+
+.timeline-sticky-slot-bottom .timeline-sticky-header {
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.35);
 }
 
 .plan-checkbox {

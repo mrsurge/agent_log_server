@@ -282,7 +282,8 @@ window.CodexAgentModules.push((ctx) => {
           input.id = `settings-ext-${field.id}`;
           input.placeholder = field.placeholder || '(new session)';
           input.readOnly = true;
-          input.value = '';
+          input.value = value || '';
+          input.dataset.sessionId = value || '';
           sessionDiv.appendChild(input);
           
           const resumeBtn = document.createElement('button');
@@ -397,6 +398,34 @@ window.CodexAgentModules.push((ctx) => {
           if (field.max !== undefined) input.max = field.max;
           label.appendChild(input);
           break;
+
+        case 'textarea':
+          input = document.createElement('textarea');
+          input.id = `settings-ext-${field.id}`;
+          input.className = 'settings-textarea';
+          input.placeholder = field.placeholder || '';
+          input.rows = field.rows || 6;
+          input.value = value == null ? '' : String(value);
+          label.appendChild(input);
+          break;
+
+        case 'json':
+          input = document.createElement('textarea');
+          input.id = `settings-ext-${field.id}`;
+          input.className = 'settings-textarea settings-json-input';
+          input.placeholder = field.placeholder || '';
+          input.rows = field.rows || 8;
+          if (ctx.helpers?.formatJsonSetting) {
+            input.value = ctx.helpers.formatJsonSetting(value);
+          } else if (typeof value === 'string') {
+            input.value = value;
+          } else if (value == null || value === '') {
+            input.value = '';
+          } else {
+            input.value = JSON.stringify(value, null, 2);
+          }
+          label.appendChild(input);
+          break;
           
         case 'text':
         default:
@@ -411,7 +440,7 @@ window.CodexAgentModules.push((ctx) => {
       
       // Track for save (only if input was created)
       if (input) {
-        currentSchemaValues[field.id] = { input, type: field.type };
+        currentSchemaValues[field.id] = { input, type: field.type, field };
       }
       
       settingsExtensionFields.appendChild(label);
@@ -423,21 +452,41 @@ window.CodexAgentModules.push((ctx) => {
   /**
    * Get current values from schema fields
    */
-  function getSchemaValues() {
+  function collectSchemaValues(parseStructured = false) {
     const values = {};
-    Object.entries(currentSchemaValues).forEach(([id, { input, type }]) => {
+    Object.entries(currentSchemaValues).forEach(([id, { input, type, field }]) => {
       if (!input) return;
-      if (type === 'session_picker') return; // one-time binding, not a persistent setting
+      if (type === 'session_picker') {
+        values[id] = input.dataset.sessionId || input.value || '';
+        return;
+      }
       if (type === 'checkbox') {
         values[id] = input.checked;
-      } else if (type === 'session_picker') {
-        // Return full session ID from dataset, not truncated display value
-        values[id] = input.dataset.sessionId || '';
+      } else if (parseStructured && type === 'json') {
+        const parsed = ctx.helpers?.parseJsonSetting
+          ? ctx.helpers.parseJsonSetting(input.value, field?.label || field?.id || id)
+          : JSON.parse(input.value || 'null');
+        if (field?.json_kind === 'object' && parsed != null && (Array.isArray(parsed) || typeof parsed !== 'object')) {
+          throw new Error(`${field.label || field.id || id} must be a JSON object`);
+        }
+        values[id] = parsed;
       } else {
         values[id] = input.value;
       }
     });
     return values;
+  }
+
+  function getSchemaRawValues() {
+    return collectSchemaValues(false);
+  }
+
+  function getSchemaParsedValues() {
+    return collectSchemaValues(true);
+  }
+
+  function getSchemaValues() {
+    return getSchemaRawValues();
   }
   
   /**
@@ -480,6 +529,8 @@ window.CodexAgentModules.push((ctx) => {
   ctx.helpers = ctx.helpers || {};
   ctx.helpers.loadSettingsSchema = loadSettingsSchema;
   ctx.helpers.renderSchemaFields = renderSchemaFields;
+  ctx.helpers.getSchemaRawValues = getSchemaRawValues;
+  ctx.helpers.getSchemaParsedValues = getSchemaParsedValues;
   ctx.helpers.getSchemaValues = getSchemaValues;
   ctx.helpers.onAgentChange = onAgentChange;
 });
