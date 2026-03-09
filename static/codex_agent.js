@@ -1045,16 +1045,54 @@ document.addEventListener('DOMContentLoaded', () => {
     return { absPath, bestPath, cwd };
   }
 
-  function createMentionToken(rawPath) {
-    const { absPath, bestPath } = toMentionAbsAndBestPath(String(rawPath || ''));
+  function createMentionToken(rawPath, opts) {
+    opts = opts || {};
+    let pathOnly = String(rawPath || '');
+    let parsedLine, parsedEndLine;
+    // Parse line info from path string like "path:42-50"
+    const lineMatch = pathOnly.match(/^(.+):(\d+)(?:-(\d+))?$/);
+    if (lineMatch) {
+      pathOnly = lineMatch[1];
+      parsedLine = lineMatch[2];
+      parsedEndLine = lineMatch[3] || null;
+    }
+
+    const { absPath, bestPath } = toMentionAbsAndBestPath(pathOnly);
     const span = document.createElement('span');
     span.className = 'mention-token';
     span.dataset.abs = absPath || '';
     span.dataset.path = bestPath || '';
-    const display = String(bestPath || '').split('/').filter(Boolean).pop() || bestPath || absPath;
-    span.textContent = display;
-    span.title = absPath || bestPath || '';
     span.setAttribute('contenteditable', 'false');
+    span.title = absPath || bestPath || '';
+
+    const line = opts.line || parsedLine;
+    const endLine = opts.endLine || parsedEndLine;
+    if (line) span.dataset.line = String(line);
+    if (endLine) span.dataset.endLine = String(endLine);
+    if (opts.col) span.dataset.col = String(opts.col);
+    if (opts.endCol) span.dataset.endCol = String(opts.endCol);
+
+    const display = String(bestPath || '').split('/').filter(Boolean).pop() || bestPath || absPath;
+    let displayText = display;
+    if (line) {
+      displayText += ':' + line;
+      if (endLine && endLine !== line) displayText += '-' + endLine;
+    }
+
+    const content = opts.content || '';
+    if (content) {
+      span.dataset.content = content;
+      // Pill text as a text node so the code block is separate
+      span.appendChild(document.createTextNode(displayText));
+      // Visual code block preview inside the token
+      const codeEl = document.createElement('code');
+      codeEl.className = 'mention-content-preview';
+      codeEl.textContent = content;
+      span.appendChild(codeEl);
+    } else {
+      span.textContent = displayText;
+    }
+
     return span;
   }
 
@@ -1062,16 +1100,24 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!promptEl) return;
     applyingDraft = true;
     promptEl.innerHTML = '';
-    const parts = String(text || '').split(/(`[^`]+`)/g);
-    parts.forEach((part) => {
-      if (!part) return;
-      if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
-        const path = part.slice(1, -1);
-        promptEl.appendChild(createMentionToken(path));
-      } else {
-        appendTextWithBreaks(promptEl, part);
-      }
-    });
+    // Match `path` tokens, optionally followed by a fenced code block
+    const tokenPattern = /`([^`]+)`(?:\n```\n([\s\S]*?)\n```)?/g;
+    const str = String(text || '');
+    let lastIndex = 0;
+    let match;
+
+    while ((match = tokenPattern.exec(str)) !== null) {
+      const before = str.slice(lastIndex, match.index);
+      if (before) appendTextWithBreaks(promptEl, before);
+
+      const rawPath = match[1];
+      const content = match[2] || '';
+      promptEl.appendChild(createMentionToken(rawPath, content ? { content } : undefined));
+      lastIndex = tokenPattern.lastIndex;
+    }
+
+    const remaining = str.slice(lastIndex);
+    if (remaining) appendTextWithBreaks(promptEl, remaining);
     applyingDraft = false;
   }
 
