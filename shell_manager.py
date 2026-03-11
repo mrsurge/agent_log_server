@@ -18,13 +18,21 @@ from framework_shells import get_manager as get_framework_shell_manager
 from framework_shells.orchestrator import Orchestrator
 
 
+def _runtime_root() -> Path:
+    here = Path(__file__).resolve().parent
+    package_root = here / "agent_log_server"
+    if package_root.exists():
+        return package_root
+    return here
+
+
 def _ensure_framework_shells_secret() -> None:
     """Derive a stable secret from cwd/repo root if not already set."""
     # Prefer SIGWINCH delivery after resize_pty() for dtach-backed PTYs.
     os.environ.setdefault("FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE", "1")
     if os.environ.get("FRAMEWORK_SHELLS_SECRET"):
         return
-    repo_root = str(Path(__file__).resolve().parent)
+    repo_root = str(_runtime_root())
     fingerprint = hashlib.sha256(repo_root.encode("utf-8")).hexdigest()[:16]
     base_dir = Path(os.path.expanduser("~/.cache/framework_shells"))
     secret_dir = base_dir / "runtimes" / fingerprint
@@ -271,7 +279,7 @@ async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         marker_path = _marker_path(conversation_id)
         _write_rcfile(rcfile, marker_path)
         ctx = {
-            "PROJECT_ROOT": str(Path(__file__).resolve().parent),
+            "PROJECT_ROOT": str(_runtime_root()),
             "CONVERSATION_ID": conversation_id,
             "RCFILE": str(rcfile),
             "CWD": cwd or str(Path.cwd()),
@@ -281,7 +289,7 @@ async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         spec_ref = "shellspec/mcp_agent_pty.yaml#agent_pty_shell"
         rec = await Orchestrator(mgr).start_from_ref(
             spec_ref,
-            base_dir=Path(__file__).resolve().parent,
+            base_dir=_runtime_root(),
             ctx=ctx,
             label=label,
             env_overrides=env_overrides,

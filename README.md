@@ -1,10 +1,22 @@
 # Agent Log Server
 
-A FastAPI + FastHTML server for AI agent orchestration and conversation management. The primary feature is the **Codex Agent UI** — a web-based interface for interacting with OpenAI's `codex-app-server` CLI.
+A FastAPI server with a `fastcore.xml`-generated UI for AI agent orchestration and conversation management. The primary feature is the **Codex Agent UI** — a web-based interface for interacting with OpenAI's `codex-app-server` CLI.
 
-## Codex Agent UI (`/codex-agent`)
+## Device Litmus (Symlink-Resolved CWD)
 
-The main feature is a rich conversational interface mounted at `/codex-agent/`. It acts as a bridge and UI layer between the `codex-app-server` binary and a web frontend.
+- Date: `2026-02-26`
+- Logical CWD (`pwd`): `/data/data/com.termux/files/home/mrselect6/worktrees/agent_log_server`
+- Physical CWD (`pwd -P` / `readlink -f .`): `/data/data/com.termux/files/home/agent_log_server`
+
+This repo is confirmed to run from a symlinked worktree path on this device. Any new IPC/transport features should treat path identity canonically (resolved path) when deriving socket paths, locks, and process-group keys.
+
+## Codex Agent UI (`/`)
+
+The main feature is a rich conversational interface mounted at `/`. It acts as a bridge and UI layer between the `codex-app-server` binary and a web frontend.
+
+- Canonical app UI: `/`
+- Legacy agent log page: `/agent-log`
+- Compatibility redirect: `/codex-agent` → `/`
 
 ### Architecture
 
@@ -18,7 +30,7 @@ The main feature is a rich conversational interface mounted at `/codex-agent/`. 
                                │ WebSocket (events) + REST (actions)
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Python Server (server.py)                        │
+│             Python Server (`agent_log_server/server.py`)            │
 │  - Translates codex events → frontend-friendly format               │
 │  - Manages conversation state (SSOT sidecar)                        │
 │  - Stores internal transcript (richer than rollout)                 │
@@ -51,12 +63,12 @@ The main feature is a rich conversational interface mounted at `/codex-agent/`. 
 
 The Codex Agent UI is a full PWA with:
 
-- **Web App Manifest** (`/codex-agent/manifest.json`) — enables "Add to Home Screen" on mobile and desktop
-- **Service Worker** (`/codex-agent/sw.js`) — caches static assets for offline access
+- **Web App Manifest** (`/manifest.json`) — enables "Add to Home Screen" on mobile and desktop
+- **Service Worker** (`/sw.js`) — caches static assets for offline access
 - **Standalone display** — runs in its own window without browser chrome when installed
 - **Theme color** — dark theme (#0d0f13) for native app feel
 
-To install: visit `/codex-agent/` in Chrome/Edge/Safari and use the browser's "Install" or "Add to Home Screen" option.
+To install: visit `/` in Chrome/Edge/Safari and use the browser's "Install" or "Add to Home Screen" option.
 
 ### Transcript Entry Types
 
@@ -108,24 +120,31 @@ curl -sS "http://127.0.0.1:12356/api/messages?limit=100"
 
 ---
 
-## Run
+## Install From Git
+
+```bash
+pip install "git+<repo-url>"
+codex-agent --log agent_chat.log.jsonl --port 12356
+```
+
+## Run From Repo
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 
-python server.py --log agent_chat.log.jsonl --port 12356
+python -m agent_log_server --log agent_chat.log.jsonl --port 12356
 ```
 
-Open the Codex Agent UI: `http://127.0.0.1:12356/codex-agent/`
+Open the Codex Agent UI: `http://127.0.0.1:12356/`
 
 ## Framework Shells Integration
 
 The server uses **Framework Shells** for process orchestration. You can also launch via the FWS CLI:
 
 ```bash
-python -m framework_shells.cli.main up shellspec/agent_log.yaml
+python -m framework_shells.cli.main up agent_log_server/shellspec/agent_log.yaml
 ```
 
 ## Roadmap (WIP)

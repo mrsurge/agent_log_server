@@ -1,10 +1,11 @@
 fastapi>=0.110
 uvicorn>=0.27
-python-fasthtml>=0.6
+python-socketio>=5.11
+jinja2>=3.1
+fastcore>=1.7
 framework-shells @ git+https://github.com/mrsurge/framework-shells
 pyte>=0.8.0
-python-socketio
-pyte
 fastmcp
 github-copilot-sdk
-tomlkit
+tomlkit>=0.13
+httpx>=0.27
