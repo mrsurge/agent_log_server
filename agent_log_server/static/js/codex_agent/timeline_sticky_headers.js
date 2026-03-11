@@ -1,0 +1,441 @@
+function isElementVisibleRect(rect) {
+  return !!(rect && rect.width > 0 && rect.height > 0);
+}
+
+function closestTimelineRow(timelineEl, el) {
+  if (!el || !el.closest) return null;
+  const row = el.closest('.timeline-row');
+  if (!row) return null;
+  if (!timelineEl || !timelineEl.contains(row)) return null;
+  return row;
+}
+
+function isStickySourceRow(row) {
+  if (!row?.classList) return false;
+  return row.classList.contains('subagent-card')
+    || row.classList.contains('diff')
+    || row.classList.contains('message-card');
+}
+
+function getStickyType(row) {
+  if (row?.classList?.contains('message-card')) return 'message';
+  return 'collapsible';
+}
+
+function getHeaderForRow(row) {
+  if (!row) return null;
+  if (row.classList.contains('message-card')) {
+    return row.querySelector(':scope > .message-header');
+  }
+  if (row.classList.contains('subagent-card')) {
+    return row.querySelector(':scope > .subagent-header');
+  }
+  if (row.classList.contains('diff')) {
+    return row.querySelector(':scope > .body > .diff-path-label, :scope > .body > .diff-path');
+  }
+  return null;
+}
+
+function getStickyHostClasses(row) {
+  const classes = ['timeline-sticky-slot-host'];
+  if (!row?.classList) return classes;
+  if (row.classList.contains('message-card')) classes.push('message-card');
+  if (row.classList.contains('user')) classes.push('user');
+  if (row.classList.contains('subagent-card')) classes.push('subagent-card');
+  if (row.classList.contains('expanded')) classes.push('expanded');
+  if (row.classList.contains('diff')) classes.push('diff');
+  if (row.classList.contains('declined')) classes.push('declined');
+  return classes;
+}
+
+function getStickyChainFromRow(row) {
+  if (!row) return [];
+  const subagents = [];
+  let cursor = row.parentElement?.closest('.subagent-card') || null;
+  while (cursor) {
+    subagents.push(cursor);
+    cursor = cursor.parentElement?.closest('.subagent-card') || null;
+  }
+  subagents.reverse();
+  const chain = [...subagents];
+  if (isStickySourceRow(row) && chain[chain.length - 1] !== row) {
+    chain.push(row);
+  }
+  return chain;
+}
+
+function findNextTimelineRowAfterSubtree(row) {
+  if (!row) return null;
+  let cursor = row;
+  let climbed = 0;
+  while (cursor) {
+    let sibling = cursor.nextElementSibling;
+    while (sibling) {
+      if (sibling.classList?.contains('timeline-row')) {
+        return { row: sibling, climbed };
+      }
+      sibling = sibling.nextElementSibling;
+    }
+    cursor = cursor.parentElement?.closest('.timeline-row') || null;
+    climbed += 1;
+  }
+  return null;
+}
+
+function getDirectTimelineRows(containerEl) {
+  if (!containerEl?.children) return [];
+  return Array.from(containerEl.children).filter((child) => child.classList?.contains('timeline-row'));
+}
+
+function getHeaderHeight(row) {
+  const header = getHeaderForRow(row);
+  if (!header) return 0;
+  const rect = header.getBoundingClientRect();
+  return Math.max(0, Math.round(rect.height || header.offsetHeight || 0));
+}
+
+function rowStillSpansBoundary(row, boundaryY) {
+  if (!row) return false;
+  const rect = row.getBoundingClientRect();
+  return rect.bottom > boundaryY;
+}
+
+function findActiveSourceRow(containerEl, boundaryY) {
+  const rows = getDirectTimelineRows(containerEl);
+  let active = null;
+  for (const row of rows) {
+    if (!isStickySourceRow(row)) continue;
+    const header = getHeaderForRow(row);
+    if (!header) continue;
+    const headerRect = header.getBoundingClientRect();
+    if (headerRect.top <= boundaryY && rowStillSpansBoundary(row, boundaryY)) {
+      active = row;
+    }
+  }
+  return active;
+}
+
+function computeStickyChain(boundaryY, containerEl, chain = []) {
+  const activeRow = findActiveSourceRow(containerEl, boundaryY);
+  if (!activeRow) return chain;
+  chain.push(activeRow);
+  if (!activeRow.classList?.contains('subagent-card')) return chain;
+  if (!activeRow.classList.contains('expanded')) return chain;
+  const body = activeRow.querySelector(':scope > .subagent-body');
+  if (!body) return chain;
+  const headerHeight = getHeaderHeight(activeRow);
+  if (!headerHeight) return chain;
+  return computeStickyChain(boundaryY + headerHeight, body, chain);
+}
+
+export function bindTimelineStickyHeaders(ctx) {
+  const {
+    timelineWrapEl,
+    timelineEl,
+    getTopOffset,
+    onMessageHeaderClick,
+    onCollapsibleHeaderClick,
+    documentRef,
+    windowRef,
+  } = ctx;
+
+  if (!timelineWrapEl || !timelineEl) {
+    return {
+      update() {},
+      destroy() {},
+      getVisibleHeight() { return 0; },
+    };
+  }
+
+  const doc = documentRef || document;
+  const win = windowRef || window;
+  let container = timelineWrapEl.querySelector('.timeline-sticky-overlay');
+  if (!container) {
+    container = doc.createElement('div');
+    container.className = 'timeline-sticky-overlay';
+    timelineWrapEl.insertBefore(container, timelineEl);
+  }
+
+  let disposed = false;
+  let rafId = null;
+  let lastKey = '';
+  let pendingKey = '';
+  let pendingKeyFrames = 0;
+  let stabilityResampleBudget = 0;
+  let stickySourceRows = [];
+  let stickyHeights = [];
+  let stickySlots = [];
+  let stickyRows = [];
+  let stickyUnderlays = [];
+  let visibleHeight = 0;
+  let rowUidCounter = 0;
+
+  const DEFAULT_ROW_HEIGHT = 42;
+  const PUSH_TRIGGER_ADJUST_PX = 8;
+  const KEY_STABILITY_FRAMES = 2;
+  const BOTTOM_SHADOW_PAD_PX = 8;
+
+  function getRowUid(row) {
+    if (!row) return '';
+    if (!row._timelineStickyUid) {
+      row._timelineStickyUid = `timeline-sticky-${rowUidCounter += 1}`;
+    }
+    return row._timelineStickyUid;
+  }
+
+  function scheduleUpdate() {
+    if (disposed || rafId) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      updateNow();
+    });
+  }
+
+  function ensureSlotCount(count) {
+    while (stickySlots.length < count) {
+      const underlay = doc.createElement('div');
+      underlay.className = 'timeline-sticky-underlay';
+      container.appendChild(underlay);
+      stickyUnderlays.push(underlay);
+
+      const slot = doc.createElement('div');
+      slot.className = 'timeline-sticky-slot';
+      const host = doc.createElement('div');
+      host.className = 'timeline-sticky-slot-host';
+      slot.appendChild(host);
+      slot.addEventListener('click', (event) => {
+        const sourceRow = slot._sourceRow;
+        if (!sourceRow) return;
+        if (slot.dataset.stickyType === 'message') {
+          if (typeof onMessageHeaderClick === 'function') onMessageHeaderClick(sourceRow, event);
+        } else if (typeof onCollapsibleHeaderClick === 'function') {
+          onCollapsibleHeaderClick(sourceRow, event);
+        }
+        scheduleUpdate();
+      });
+      container.appendChild(slot);
+      stickySlots.push(slot);
+      stickyRows.push(host);
+    }
+
+    while (stickySlots.length > count) {
+      const slot = stickySlots.pop();
+      if (slot) slot._sourceRow = null;
+      slot?.remove();
+      stickyRows.pop();
+
+      const underlay = stickyUnderlays.pop();
+      underlay?.remove();
+    }
+  }
+
+  function clearOverlay() {
+    lastKey = '';
+    stickySourceRows = [];
+    stickyHeights = [];
+    visibleHeight = 0;
+    ensureSlotCount(0);
+    container.style.display = 'none';
+    container.style.height = '0px';
+  }
+
+  function syncSlotFromSource(srcRow, depth) {
+    const underlay = stickyUnderlays[depth];
+    const slot = stickySlots[depth];
+    const host = stickyRows[depth];
+    const sourceHeader = getHeaderForRow(srcRow);
+    if (!underlay || !slot || !host || !sourceHeader) return DEFAULT_ROW_HEIGHT;
+
+    const wrapRect = timelineWrapEl.getBoundingClientRect();
+    const headerRect = sourceHeader.getBoundingClientRect();
+    if (isElementVisibleRect(wrapRect) && isElementVisibleRect(headerRect)) {
+      const left = Math.max(0, Math.round(headerRect.left - wrapRect.left));
+      const right = Math.max(0, Math.round(wrapRect.right - headerRect.right));
+      slot.style.left = `${left}px`;
+      slot.style.right = `${right}px`;
+      underlay.style.left = `${left}px`;
+      underlay.style.right = `${right}px`;
+    } else {
+      slot.style.left = '0px';
+      slot.style.right = '0px';
+      underlay.style.left = '0px';
+      underlay.style.right = '0px';
+    }
+
+    const slotZ = 1000 - depth;
+    slot.style.zIndex = `${slotZ}`;
+    underlay.style.zIndex = `${slotZ - 1}`;
+    underlay.style.top = '0px';
+
+    const clone = sourceHeader.cloneNode(true);
+    clone.classList.add('timeline-sticky-header');
+    clone.querySelectorAll('.ribbon-toggle-zone').forEach((el) => el.remove());
+    clone.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
+    clone.querySelectorAll('.twisty').forEach((el) => {
+      el.style.pointerEvents = 'none';
+    });
+    clone.dataset.expanded = sourceHeader.dataset.expanded || (srcRow.classList.contains('expanded') ? 'true' : 'false');
+    host.className = getStickyHostClasses(srcRow).join(' ');
+    host.replaceChildren(clone);
+
+    const rowStyle = win.getComputedStyle(srcRow);
+    underlay.style.backgroundColor = rowStyle.backgroundColor || '';
+    underlay.style.backgroundImage = rowStyle.backgroundImage || '';
+    underlay.style.borderLeft = srcRow.classList.contains('subagent-card')
+      ? 'none'
+      : (rowStyle.borderLeft || '');
+    slot.style.cursor = win.getComputedStyle(sourceHeader).cursor || '';
+
+    slot.dataset.stickyType = getStickyType(srcRow);
+    slot._sourceRow = srcRow;
+    slot.dataset.rowId = getRowUid(srcRow);
+    underlay.dataset.rowId = getRowUid(srcRow);
+
+    const height = Math.max(
+      24,
+      Math.round(headerRect.height || sourceHeader.offsetHeight || DEFAULT_ROW_HEIGHT),
+    );
+    stickyHeights[depth] = height;
+    slot.style.height = `${height}px`;
+    return height;
+  }
+
+  function applyPushTransforms(chain, hostTop) {
+    let cumulativePush = 0;
+    let baseTop = 0;
+
+    chain.forEach((srcRow, depth) => {
+      const slot = stickySlots[depth];
+      const underlay = stickyUnderlays[depth];
+      if (!slot || !underlay) return;
+
+      const height = stickyHeights[depth] || DEFAULT_ROW_HEIGHT;
+      slot.style.top = `${baseTop}px`;
+      slot.style.height = `${height}px`;
+      slot.classList.toggle('timeline-sticky-slot-bottom', depth === chain.length - 1);
+
+      let push = 0;
+      const nextInfo = findNextTimelineRowAfterSubtree(srcRow);
+      if (nextInfo?.row) {
+        const nextRect = nextInfo.row.getBoundingClientRect();
+        const anchorY = hostTop + baseTop + height + cumulativePush + PUSH_TRIGGER_ADJUST_PX;
+        const overlap = nextRect.top - anchorY;
+        if (overlap < 0) {
+          push = Math.max(overlap, -height);
+        }
+      }
+
+      const translateY = cumulativePush + push;
+      slot.style.transform = `translateY(${translateY}px)`;
+      underlay.style.height = `${Math.max(0, baseTop + translateY + height * 0.5)}px`;
+
+      cumulativePush += push;
+      baseTop += height;
+    });
+  }
+
+  function updateNow() {
+    if (disposed) return;
+
+    const wrapRect = timelineWrapEl.getBoundingClientRect();
+    if (!isElementVisibleRect(wrapRect)) {
+      clearOverlay();
+      return;
+    }
+
+    const captureTop = wrapRect.top + (typeof getTopOffset === 'function' ? getTopOffset() : 0);
+    const rawChain = computeStickyChain(captureTop, timelineEl, []);
+    const rawKey = rawChain.map(getRowUid).join('|');
+    let chain = rawChain;
+    let key = rawKey;
+    let needsStabilityResample = false;
+
+    if (rawKey && lastKey && rawKey !== lastKey && stickySourceRows.length) {
+      if (rawKey === pendingKey) {
+        pendingKeyFrames += 1;
+      } else {
+        pendingKey = rawKey;
+        pendingKeyFrames = 1;
+      }
+
+      if (pendingKeyFrames < KEY_STABILITY_FRAMES) {
+        chain = stickySourceRows;
+        key = lastKey;
+        needsStabilityResample = true;
+        stabilityResampleBudget = Math.max(
+          stabilityResampleBudget,
+          KEY_STABILITY_FRAMES - pendingKeyFrames,
+        );
+      } else {
+        pendingKey = '';
+        pendingKeyFrames = 0;
+        stabilityResampleBudget = 0;
+      }
+    } else {
+      pendingKey = '';
+      pendingKeyFrames = 0;
+      stabilityResampleBudget = 0;
+    }
+
+    if (!key || !chain.length) {
+      clearOverlay();
+      return;
+    }
+
+    const topOffset = typeof getTopOffset === 'function' ? getTopOffset() : 0;
+    const hostTop = wrapRect.top + topOffset;
+    container.style.display = 'block';
+    container.style.top = `${topOffset}px`;
+    ensureSlotCount(chain.length);
+    stickySourceRows = chain.slice();
+    stickyHeights = new Array(chain.length);
+    chain.forEach((srcRow, depth) => {
+      syncSlotFromSource(srcRow, depth);
+    });
+    visibleHeight = stickyHeights.reduce((sum, height) => sum + (height || DEFAULT_ROW_HEIGHT), 0) + BOTTOM_SHADOW_PAD_PX;
+    container.style.height = '0px';
+    lastKey = key;
+    applyPushTransforms(chain, hostTop);
+
+    if (needsStabilityResample && stabilityResampleBudget > 0) {
+      stabilityResampleBudget -= 1;
+      scheduleUpdate();
+    }
+  }
+
+  const observer = new MutationObserver(scheduleUpdate);
+  observer.observe(timelineEl, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['class', 'data-expanded'],
+  });
+
+  function onScroll() {
+    scheduleUpdate();
+  }
+
+  timelineWrapEl.addEventListener('scroll', onScroll, { passive: true });
+  win.addEventListener('resize', scheduleUpdate);
+  scheduleUpdate();
+
+  return {
+    update: scheduleUpdate,
+    destroy() {
+      disposed = true;
+      observer.disconnect();
+      timelineWrapEl.removeEventListener('scroll', onScroll);
+      win.removeEventListener('resize', scheduleUpdate);
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      container.remove();
+    },
+    getVisibleHeight() {
+      if (container.style.display === 'none') return 0;
+      return visibleHeight;
+    },
+  };
+}

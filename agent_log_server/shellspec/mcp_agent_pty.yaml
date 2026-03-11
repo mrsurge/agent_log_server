@@ -1,0 +1,40 @@
+version: "1"
+shells:
+  mcp_agent_pty:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["codex_agent", "mcp", "agent-pty"]
+    env:
+      FRAMEWORK_SHELLS_RUN_ID: "app-server"
+      MCP_TRANSPORT: "streamable-http"
+      FASTMCP_HOST: "127.0.0.1"
+      FASTMCP_PORT: "12360"
+      FASTMCP_STREAMABLE_HTTP_PATH: "/mcp"
+    command:
+      - python
+      - mcp_agent_pty_server.py
+    labels:
+      app: "mcp-agent-pty"
+  agent_pty_shell:
+    backend: dtach
+    cwd: ${ctx:CWD}
+    subgroups:
+      - codex_agent
+      - agent-pty
+      - conversation:${ctx:CONVERSATION_ID}
+    command:
+      - bash
+      - --rcfile
+      - ${ctx:RCFILE}
+      - -i
+  shell_manager:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["codex_agent", "mcp", "shell-manager"]
+    env:
+      FRAMEWORK_SHELLS_RUN_ID: "app-server"
+      SHELL_MANAGER_HOST: "127.0.0.1"
+      SHELL_MANAGER_PORT: "12361"
+    command:
+      - python
+      - shell_manager.py

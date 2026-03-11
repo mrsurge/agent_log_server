@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-log-server"
+version = "0.1.0"
+description = "FastAPI server for Codex Agent UI, agent log, and TE2-hosted orchestration."
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[project.scripts]
+codex-agent = "agent_log_server.server:main"
+
+[project.optional-dependencies]
+acp = ["acp"]
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["agent_index", "mcp_agent_pty_server", "shell_manager", "te2_runtime"]
+zip-safe = false
+
+[tool.setuptools.packages.find]
+include = ["agent_log_server*", "extensions*", "te2_services*"]
+
+[tool.setuptools.package-data]
+agent_log_server = [
+  "static/*",
+  "static/**/*",
+  "templates/*",
+  "templates/**/*",
+  "shellspec/*",
+  "shellspec/**/*",
+  "te2_assets/*",
+  "te2_assets/**/*",
+]
+extensions = ["*.json", "*/*.json"]
+"extensions.acp" = ["*.json"]
+"extensions.codex" = ["*.json"]
+"extensions.copilot_sdk" = ["*.json"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
