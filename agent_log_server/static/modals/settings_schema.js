@@ -203,9 +203,8 @@ window.CodexAgentModules.push((ctx) => {
         effortControl.input.placeholder = 'Model capabilities unavailable';
         return;
       }
-      const supportedFlag = model?.capabilities?.supports?.reasoning_effort === true;
       const modelEfforts = normalizeEffortList(model);
-      const supportsReasoningEffort = supportedFlag && modelEfforts.length > 0;
+      const supportsReasoningEffort = modelEfforts.length > 0;
       const options = supportsReasoningEffort ? modelEfforts : [];
       const currentValue = effortControl.input.value;
       const initialValue = effortControl.initialValue || '';
@@ -348,6 +347,9 @@ window.CodexAgentModules.push((ctx) => {
               console.log(`[schema] built ${opts.length} options for ${field.id}`);
               if (field.id === 'model') {
                 modelItems = items.filter((item) => item && typeof item === 'object');
+                if (!input.value) {
+                  input.placeholder = field.placeholder || 'Use server default';
+                }
               }
               if (opts.length) buildOptions(opts);
               if (field.id === 'model') syncReasoningEffortOptions();

@@ -270,6 +270,38 @@ async def list_models(extension_id: str) -> Any:
     return {"models": []}
 
 
+async def get_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
+    """Get a dynamic settings schema for an extension when supported."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "get_settings_schema"):
+        return await handler.get_settings_schema(extension_id=extension_id)
+    return None
+
+
+async def route_event(
+    extension_id: str,
+    label: Optional[str],
+    payload: Any,
+    conversation_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Route a live backend event through an extension-owned router when supported."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "route_event"):
+        return await handler.route_event(
+            extension_id=extension_id,
+            label=label,
+            payload=payload,
+            conversation_id=conversation_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            request_id=request_id,
+        )
+    return {"handled": False}
+
+
 async def list_sessions(extension_id: str, cwd: Optional[str] = None) -> Any:
     """List sessions for an extension. Handler must implement list_sessions()."""
     handler = get_handler(extension_id)
@@ -326,11 +358,25 @@ async def hydrate_transcript(
     return []
 
 
-def resolve_approval(extension_id: str, request_id: str, decision: str) -> None:
+def resolve_approval(extension_id: str, request_id: str, decision: str) -> bool:
     """Resolve an approval request. Handler must implement resolve_approval()."""
     handler = get_handler(extension_id)
     if handler and hasattr(handler, "resolve_approval"):
-        handler.resolve_approval(request_id, decision)
+        return bool(handler.resolve_approval(request_id, decision))
+    return False
+
+
+def validate_pending_approval(
+    extension_id: str,
+    conversation_id: str,
+    request_id: str,
+    descriptor: Dict[str, Any],
+) -> bool:
+    """Validate whether a persisted approval is still actionable for an extension."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "validate_pending_approval"):
+        return bool(handler.validate_pending_approval(conversation_id, request_id, descriptor))
+    return False
 
 
 async def shutdown_extension(extension_id: str) -> None:

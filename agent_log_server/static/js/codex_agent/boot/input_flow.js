@@ -21,6 +21,8 @@ export function bindInputFlow(ctx) {
     maybeAutoScroll,
     isNearBottom,
     loadOlderTranscript,
+    fetchConversation,
+    restorePendingApprovals,
     postTe2OpenRequest,
     setMarkdownEnabled,
     setTrackEditsEnabled,
@@ -209,9 +211,11 @@ export function bindInputFlow(ctx) {
         conversation_id: state.conversationMeta.conversation_id,
         settings: { ...state.conversationSettings, markdown: enabled },
       }, { fallbackUrl: '/api/appserver/conversation' });
+      await fetchConversation(state.conversationMeta.conversation_id);
     }
     resetTimeline();
     await replayTranscript();
+    restorePendingApprovals();
   }
 
   async function handleTrackEditsToggle() {

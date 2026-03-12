@@ -40,23 +40,25 @@ export function bindRpcFlow(ctx) {
 
   async function respondApproval(requestId, decision) {
     if (requestId === null || requestId === undefined) return;
-    let id = requestId;
-    if (typeof id === 'string' && /^\d+$/.test(id)) {
-      id = parseInt(id, 10);
+    try {
+      return await sioCall('approval_response', {
+        conversation_id: getConversationId() || null,
+        request_id: String(requestId),
+        decision,
+      }, {
+        fallbackUrl: '/api/appserver/approval_response',
+        fallbackMethod: 'POST',
+      });
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error || 'approval failed') };
     }
-    await sioCall('approval_response', {
-      conversation_id: getConversationId() || null,
-      id,
-      decision,
-    }, {
-      fallbackUrl: '/api/appserver/rpc',
-      fallbackMethod: 'POST',
-    });
   }
 
   function renderApproval(evt) {
+    const requestId = evt?.request_id || evt?.id;
+    if (requestId === null || requestId === undefined || requestId === '') return null;
     const { row, body } = createRow(evt.kind === 'diff' ? 'diff' : 'approval', 'approval');
-    row.dataset.approvalId = evt.id;
+    row.dataset.approvalId = String(requestId);
     const payload = evt.payload || {};
     const lines = [];
     let diffText = null;
@@ -91,22 +93,24 @@ export function bindRpcFlow(ctx) {
     decline.className = 'btn tiny decline';
     decline.textContent = 'Decline';
     accept.addEventListener('click', async () => {
-      await respondApproval(evt.id, 'accept');
+      const response = await respondApproval(requestId, 'accept');
+      if (!response || response.ok === false) return;
       await sioCall('approval_record', {
         status: 'accepted',
         diff: diffText,
         path: filePath,
-        item_id: evt.id,
+        request_id: String(requestId),
       }, { fallbackUrl: '/api/appserver/approval_record' });
       row.remove();
     });
     decline.addEventListener('click', async () => {
-      await respondApproval(evt.id, 'decline');
+      const response = await respondApproval(requestId, 'decline');
+      if (!response || response.ok === false) return;
       await sioCall('approval_record', {
         status: 'declined',
         diff: diffText,
         path: filePath,
-        item_id: evt.id,
+        request_id: String(requestId),
       }, { fallbackUrl: '/api/appserver/approval_record' });
       row.remove();
     });

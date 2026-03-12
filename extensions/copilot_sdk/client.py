@@ -144,6 +144,30 @@ def _get_conversation_settings(conversation_id: str) -> Dict[str, Any]:
     return {}
 
 
+def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -> None:
+    if _meta_fns and "upsert_pending_approval" in _meta_fns:
+        _meta_fns["upsert_pending_approval"](conversation_id, descriptor)
+        return
+    if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
+        meta = _meta_fns["load"](conversation_id)
+        pending = meta.get("pending_approvals") if isinstance(meta.get("pending_approvals"), dict) else {}
+        pending[str(descriptor.get("request_id") or "")] = descriptor
+        meta["pending_approvals"] = pending
+        _meta_fns["save"](conversation_id, meta)
+
+
+def _remove_pending_approval(conversation_id: str, request_id: str) -> None:
+    if _meta_fns and "remove_pending_approval" in _meta_fns:
+        _meta_fns["remove_pending_approval"](conversation_id, request_id)
+        return
+    if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
+        meta = _meta_fns["load"](conversation_id)
+        pending = meta.get("pending_approvals") if isinstance(meta.get("pending_approvals"), dict) else {}
+        pending.pop(str(request_id or ""), None)
+        meta["pending_approvals"] = pending
+        _meta_fns["save"](conversation_id, meta)
+
+
 def _merge_runtime_settings(
     conversation_id: str,
     settings: Optional[Dict[str, Any]] = None,
@@ -251,11 +275,32 @@ def _build_session_runtime_config(
     return config
 
 
-def resolve_approval(request_id: str, decision: str) -> None:
+def resolve_approval(request_id: str, decision: str) -> bool:
     """Called from WS handler when user responds to an approval request."""
     fut = _pending_approvals.pop(request_id, None)
     if fut and not fut.done():
         fut.set_result(decision)
+        return True
+    return False
+
+
+def validate_pending_approval(conversation_id: str, request_id: str, descriptor: Dict[str, Any]) -> bool:
+    if not isinstance(descriptor, dict):
+        return False
+    runtime_signature = descriptor.get("runtime_signature")
+    current_signature = _runtime_signatures.get(conversation_id)
+    if runtime_signature and not current_signature:
+        return False
+    if runtime_signature and current_signature and runtime_signature != current_signature:
+        return False
+    descriptor_thread_id = descriptor.get("thread_id")
+    session = _sessions.get(conversation_id)
+    current_session_id = getattr(session, "session_id", None) if session else None
+    if descriptor_thread_id and current_session_id and descriptor_thread_id != current_session_id:
+        return False
+    if descriptor_thread_id and not current_session_id:
+        return False
+    return request_id in _pending_approvals
 
 
 def _build_preview_diff(payload: Dict[str, Any], args: Dict[str, Any]) -> None:
@@ -362,12 +407,29 @@ def _make_permission_handler(conversation_id: str) -> Callable:
         fut: asyncio.Future = loop.create_future()
         _pending_approvals[request_id] = fut
 
+        runtime_signature = _runtime_signatures.get(conversation_id) or _runtime_signature(conversation_id)
+        session = _sessions.get(conversation_id)
+        descriptor = {
+            "request_id": request_id,
+            "agent": "copilot-sdk",
+            "kind": kind,
+            "payload": payload,
+            "thread_id": getattr(session, "session_id", None),
+            "turn_id": router.current_turn_id if router else "",
+            "runtime_signature": runtime_signature,
+            "runtime_instance_id": getattr(session, "session_id", None),
+            "transcript_anchor": {"turn_id": router.current_turn_id if router else ""},
+            "source": "live",
+        }
+        _upsert_pending_approval(conversation_id, descriptor)
+
         # Broadcast approval_request to frontend
         if _broadcast_fn:
             await _broadcast_fn({
                 "type": "approval",
                 "conversation_id": conversation_id,
                 "id": request_id,
+                "request_id": request_id,
                 "kind": kind,
                 "tool_call_id": tool_call_id,
                 "turn_id": router.current_turn_id if router else "",
@@ -384,6 +446,7 @@ def _make_permission_handler(conversation_id: str) -> Callable:
                 decision = await asyncio.wait_for(fut, timeout=120.0)
             except asyncio.TimeoutError:
                 _pending_approvals.pop(request_id, None)
+                _remove_pending_approval(conversation_id, request_id)
                 print(f"[CopilotSDK] Approval timeout for {request_id}, auto-approving")
                 decision = "accept"
 

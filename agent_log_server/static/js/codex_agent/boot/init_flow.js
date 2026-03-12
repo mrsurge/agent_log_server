@@ -16,6 +16,7 @@ export function bindBootInitFlow(ctx) {
     fetchConversations,
     resetTimeline,
     replayTranscript,
+    restorePendingApprovals,
     maybeAutoScroll,
     ensureActivityRow,
     fetchStatus,
@@ -73,6 +74,7 @@ export function bindBootInitFlow(ctx) {
       if (getState().activeView === 'conversation') {
         resetTimeline();
         await replayTranscript();
+        restorePendingApprovals();
         setTimeout(() => {
           setDrawerOpen(true);
           maybeAutoScroll(true);

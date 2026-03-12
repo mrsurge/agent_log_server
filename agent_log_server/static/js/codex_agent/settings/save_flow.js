@@ -16,6 +16,7 @@ export function bindSettingsSaveFlow(ctx) {
     fetchConversations,
     resetTimeline,
     replayTranscript,
+    restorePendingApprovals,
     setDrawerOpen,
     updateConversationHeaderLabel,
   } = ctx;
@@ -161,6 +162,7 @@ export function bindSettingsSaveFlow(ctx) {
       resetTimeline();
     }
     await replayTranscript();
+    restorePendingApprovals();
     setDrawerOpen(true);
     updateConversationHeaderLabel();
   }

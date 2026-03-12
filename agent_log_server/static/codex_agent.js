@@ -1468,6 +1468,7 @@ document.addEventListener('DOMContentLoaded', () => {
     resetTimeline,
     fetchConversation,
     replayTranscript: (...args) => replayTranscript(...args),
+    restorePendingApprovals,
     setDrawerOpen,
     applyHostUi,
     openSettingsModal,
@@ -3646,6 +3647,30 @@ document.addEventListener('DOMContentLoaded', () => {
     return rpcFlow.renderApproval(evt);
   }
 
+  function restorePendingApprovals() {
+    if (!timelineEl) return;
+    timelineEl.querySelectorAll('.timeline-row[data-approval-id]').forEach((row) => row.remove());
+    const pending = conversationMeta?.pending_approvals;
+    if (!pending || typeof pending !== 'object') return;
+    const items = Object.values(pending)
+      .filter((entry) => entry && typeof entry === 'object' && (entry.request_id || entry.id))
+      .sort((a, b) => String(a?.created_at || '').localeCompare(String(b?.created_at || '')));
+    items.forEach((entry) => {
+      const requestId = entry.request_id || entry.id;
+      if (!requestId) return;
+      renderApproval({
+        type: 'approval',
+        id: requestId,
+        request_id: requestId,
+        kind: entry.kind || entry.payload?.kind || 'unknown',
+        payload: entry.payload || {},
+        turn_id: entry.turn_id || '',
+        conversation_id: conversationMeta?.conversation_id || null,
+      });
+    });
+    timelineStickyHeaders?.update?.();
+  }
+
   async function postJson(url, payload) {
     const r = await fetch(url, {
       method: 'POST',
@@ -3705,6 +3730,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConversations,
     resetTimeline,
     replayTranscript: (...args) => replayTranscript(...args),
+    restorePendingApprovals,
     setDrawerOpen,
     updateConversationHeaderLabel,
   });
@@ -4082,6 +4108,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConversations,
     resetTimeline,
     replayTranscript: (...args) => replayTranscript(...args),
+    restorePendingApprovals,
     maybeAutoScroll,
     ensureActivityRow,
     fetchStatus,
@@ -4187,6 +4214,8 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     isNearBottom,
     loadOlderTranscript,
+    fetchConversation,
+    restorePendingApprovals,
     postTe2OpenRequest,
     setMarkdownEnabled,
     setTrackEditsEnabled,

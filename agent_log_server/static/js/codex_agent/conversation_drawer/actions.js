@@ -6,6 +6,7 @@ export function createConversationDrawerActions(ctx) {
     resetTimeline,
     fetchConversation,
     replayTranscript,
+    restorePendingApprovals,
     setDrawerOpen,
     applyHostUi,
     openSettingsModal,
@@ -118,6 +119,7 @@ export function createConversationDrawerActions(ctx) {
     await fetchConversation(conversationId);
     await fetchConversations();
     await replayTranscript();
+    restorePendingApprovals();
     setDrawerOpen(view === 'conversation');
     setState({
       activeView: view,
@@ -157,6 +159,7 @@ export function createConversationDrawerActions(ctx) {
     await fetchConversations();
     resetTimeline();
     await replayTranscript();
+    restorePendingApprovals();
     setDrawerOpen(true);
     setState({ activeView: 'conversation' });
     applyHostUi();

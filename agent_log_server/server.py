@@ -33,8 +33,6 @@ from framework_shells.api import fws_ui
 from framework_shells.orchestrator import Orchestrator
 
 import extensions as ext_loader
-from extensions.codex.router import route_collab_event
-from extensions.codex.protocol import COLLAB_EVENT_TYPES
 from te2_runtime import (
     TE2_MCP_SERVER_NAME,
     build_codex_thread_config,
@@ -504,24 +502,9 @@ async def _sio_approval_record(sid, data):
 
 @socketio_server.on("approval_response", namespace="/appserver")
 async def _sio_approval_response(sid, data):
-    """Generic: resolve approval for any extension agent."""
+    """Mirror of POST /api/appserver/approval_response."""
     try:
-        request_id = data.get("request_id")
-        decision = data.get("decision", "decline")
-        if not request_id:
-            return _sio_error("Missing request_id")
-        # Determine agent type from active conversation
-        async with _config_lock:
-            cfg = _load_appserver_config()
-        cid = cfg.get("conversation_id")
-        if not cid:
-            return _sio_error("No active conversation")
-        meta = _load_conversation_meta(cid)
-        agent = (meta.get("settings") or {}).get("agent", "codex")
-        if not ext_loader.has_extension(agent):
-            return _sio_error(f"No extension for agent: {agent}")
-        ext_loader.resolve_approval(agent, request_id, decision)
-        return {"ok": True}
+        return await api_appserver_approval_response(data)
     except Exception as e:
         return _sio_error(str(e))
 
@@ -766,6 +749,66 @@ def _apply_codex_app_defaults(settings: Optional[Dict[str, Any]]) -> Dict[str, A
     return merged
 
 
+def _normalize_codex_approval_policy(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized == "unlessTrusted":
+        normalized = "untrusted"
+    if normalized in {"untrusted", "on-failure", "on-request", "never"}:
+        return normalized
+    return None
+
+
+def _normalize_codex_thread_sandbox(value: Any) -> Optional[str]:
+    if isinstance(value, dict):
+        type_name = value.get("type")
+        if type_name == "dangerFullAccess":
+            return "danger-full-access"
+        if type_name == "readOnly":
+            return "read-only"
+        if type_name == "workspaceWrite":
+            return "workspace-write"
+        return None
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    normalized = {
+        "dangerFullAccess": "danger-full-access",
+        "readOnly": "read-only",
+        "workspaceWrite": "workspace-write",
+    }.get(normalized, normalized)
+    if normalized in {"read-only", "workspace-write", "danger-full-access"}:
+        return normalized
+    return None
+
+
+def _normalize_codex_turn_sandbox_policy(value: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(value, dict):
+        type_name = value.get("type")
+        if type_name in {"dangerFullAccess", "readOnly", "workspaceWrite", "externalSandbox"}:
+            return dict(value)
+        return None
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if normalized == "externalSandbox":
+            return {"type": "externalSandbox"}
+        normalized = _normalize_codex_thread_sandbox(normalized)
+        if normalized == "danger-full-access":
+            return {"type": "dangerFullAccess"}
+        if normalized == "read-only":
+            return {"type": "readOnly"}
+        if normalized == "workspace-write":
+            return {"type": "workspaceWrite"}
+    return None
+
+
 def _normalize_conversation_list(cfg: Dict[str, Any]) -> List[str]:
     conversations = cfg.get("conversations")
     if not isinstance(conversations, list):
@@ -851,6 +894,7 @@ def _default_conversation_meta(conversation_id: str) -> Dict[str, Any]:
         "conversation_id": conversation_id,
         "created_at": utc_ts(),
         "thread_id": None,
+        "pending_approvals": {},
         "settings": {},
         "status": "draft",
     }
@@ -1070,6 +1114,239 @@ def _save_conversation_meta(conversation_id: str, meta: Dict[str, Any]) -> None:
     path = _conversation_meta_path(conversation_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _ensure_pending_approvals(meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    pending = meta.get("pending_approvals")
+    if not isinstance(pending, dict):
+        pending = {}
+        meta["pending_approvals"] = pending
+        return pending
+    normalized: Dict[str, Dict[str, Any]] = {}
+    changed = False
+    for raw_request_id, descriptor in pending.items():
+        request_id = str(raw_request_id or "").strip()
+        if not request_id or not isinstance(descriptor, dict):
+            changed = True
+            continue
+        normalized[request_id] = descriptor
+    if changed or len(normalized) != len(pending):
+        meta["pending_approvals"] = normalized
+        return normalized
+    return pending
+
+
+def _codex_runtime_instance_id(meta: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
+    value = settings.get("appserver_shell_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _build_pending_approval_descriptor(
+    conversation_id: str,
+    request_id: Any,
+    *,
+    agent: Optional[str] = None,
+    kind: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    thread_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    runtime_signature: Optional[str] = None,
+    runtime_instance_id: Optional[str] = None,
+    transcript_anchor: Optional[Dict[str, Any]] = None,
+    source: str = "live",
+    meta: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    request_id_text = str(request_id or "").strip()
+    if not request_id_text:
+        return None
+    if meta is None:
+        meta = _load_conversation_meta(conversation_id)
+    if not isinstance(meta, dict):
+        meta = _default_conversation_meta(conversation_id)
+    settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+    agent_id = str(agent or settings.get("agent") or "codex").strip() or "codex"
+    resolved_thread_id = thread_id if thread_id is not None else meta.get("thread_id")
+    if runtime_signature is None and agent_id == "codex":
+        current_sig = meta.get("thread_runtime_signature")
+        runtime_signature = str(current_sig).strip() if isinstance(current_sig, str) and current_sig.strip() else None
+    if runtime_instance_id is None and agent_id == "codex":
+        runtime_instance_id = _codex_runtime_instance_id(meta)
+    anchor: Dict[str, Any] = {}
+    if isinstance(transcript_anchor, dict):
+        anchor.update(transcript_anchor)
+    if turn_id and not anchor.get("turn_id"):
+        anchor["turn_id"] = turn_id
+    return {
+        "request_id": request_id_text,
+        "agent": agent_id,
+        "kind": str(kind or "unknown"),
+        "status": "pending",
+        "payload": dict(payload) if isinstance(payload, dict) else {},
+        "conversation_id": conversation_id,
+        "thread_id": resolved_thread_id,
+        "turn_id": turn_id,
+        "runtime_signature": runtime_signature,
+        "runtime_instance_id": runtime_instance_id,
+        "transcript_anchor": anchor,
+        "source": source or "live",
+    }
+
+
+def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(descriptor, dict):
+        return None
+    request_id = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
+    if not request_id:
+        return None
+    meta = _load_conversation_meta(conversation_id)
+    pending = _ensure_pending_approvals(meta)
+    existing = pending.get(request_id) if isinstance(pending.get(request_id), dict) else {}
+    normalized = _build_pending_approval_descriptor(
+        conversation_id,
+        request_id,
+        agent=descriptor.get("agent"),
+        kind=descriptor.get("kind"),
+        payload=descriptor.get("payload") if isinstance(descriptor.get("payload"), dict) else {},
+        thread_id=descriptor.get("thread_id"),
+        turn_id=descriptor.get("turn_id"),
+        runtime_signature=descriptor.get("runtime_signature"),
+        runtime_instance_id=descriptor.get("runtime_instance_id"),
+        transcript_anchor=descriptor.get("transcript_anchor") if isinstance(descriptor.get("transcript_anchor"), dict) else {},
+        source=str(descriptor.get("source") or existing.get("source") or "live"),
+        meta=meta,
+    )
+    if not normalized:
+        return None
+    normalized["status"] = "pending"
+    normalized["created_at"] = existing.get("created_at") or descriptor.get("created_at") or utc_ts()
+    normalized["updated_at"] = utc_ts()
+    pending[request_id] = normalized
+    meta["pending_approvals"] = pending
+    _save_conversation_meta(conversation_id, meta)
+    return normalized
+
+
+def _remove_pending_approval(conversation_id: str, request_id: Any) -> bool:
+    request_id_text = str(request_id or "").strip()
+    if not request_id_text or not _conversation_meta_path(conversation_id).exists():
+        return False
+    meta = _load_conversation_meta(conversation_id)
+    pending = _ensure_pending_approvals(meta)
+    if request_id_text not in pending:
+        return False
+    pending.pop(request_id_text, None)
+    meta["pending_approvals"] = pending
+    _save_conversation_meta(conversation_id, meta)
+    return True
+
+
+async def _resolve_codex_approval(request_id: str, decision: str) -> bool:
+    request_id_text = str(request_id or "").strip()
+    if not request_id_text:
+        return False
+    result = {"decision": "accept" if decision == "accept" else "decline"}
+    payload = {"id": int(request_id_text) if request_id_text.isdigit() else request_id_text, "result": result}
+    await _write_appserver(payload)
+    return True
+
+
+async def _validate_pending_approval_descriptor(
+    conversation_id: str,
+    request_id: str,
+    descriptor: Dict[str, Any],
+    *,
+    meta: Optional[Dict[str, Any]] = None,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> bool:
+    if not isinstance(descriptor, dict):
+        return False
+    request_id_text = str(request_id or "").strip()
+    if not request_id_text:
+        return False
+    if meta is None:
+        meta = _load_conversation_meta(conversation_id)
+    if descriptor.get("conversation_id") and descriptor.get("conversation_id") != conversation_id:
+        return False
+    pending_thread_id = descriptor.get("thread_id")
+    current_thread_id = meta.get("thread_id")
+    if pending_thread_id and current_thread_id and pending_thread_id != current_thread_id:
+        return False
+    agent = str(descriptor.get("agent") or ((meta.get("settings") or {}).get("agent") or "codex")).strip() or "codex"
+    if agent == "codex":
+        current_signature = meta.get("thread_runtime_signature")
+        descriptor_signature = descriptor.get("runtime_signature")
+        if descriptor_signature and not current_signature:
+            return False
+        if descriptor_signature and current_signature and descriptor_signature != current_signature:
+            return False
+        if cfg is None:
+            async with _config_lock:
+                cfg = _load_appserver_config()
+        current_shell_id = _appserver_shell_id or cfg.get("shell_id")
+        descriptor_shell_id = descriptor.get("runtime_instance_id")
+        if descriptor_shell_id and not current_shell_id:
+            return False
+        if descriptor_shell_id and current_shell_id and descriptor_shell_id != current_shell_id:
+            return False
+        if not current_shell_id:
+            return False
+        try:
+            mgr = await _get_fws_manager()
+            shell = await mgr.get_shell(current_shell_id)
+        except Exception:
+            return False
+        return bool(shell and shell.status == "running")
+    if ext_loader.has_extension(agent):
+        try:
+            return bool(ext_loader.validate_pending_approval(agent, conversation_id, request_id_text, descriptor))
+        except Exception:
+            return False
+    return False
+
+
+async def _validate_conversation_pending_approvals(
+    conversation_id: str,
+    meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if meta is None:
+        meta = _load_conversation_meta(conversation_id)
+    if not isinstance(meta, dict):
+        meta = _default_conversation_meta(conversation_id)
+    pending = _ensure_pending_approvals(meta)
+    if not pending:
+        meta["pending_approvals"] = {}
+        return meta
+    async with _config_lock:
+        cfg = _load_appserver_config()
+    valid: Dict[str, Dict[str, Any]] = {}
+    changed = False
+    for raw_request_id, descriptor in list(pending.items()):
+        request_id = str(raw_request_id or "").strip()
+        if not request_id or not isinstance(descriptor, dict):
+            changed = True
+            continue
+        ok = await _validate_pending_approval_descriptor(
+            conversation_id,
+            request_id,
+            descriptor,
+            meta=meta,
+            cfg=cfg,
+        )
+        if ok:
+            normalized = dict(descriptor)
+            normalized["request_id"] = request_id
+            valid[request_id] = normalized
+        else:
+            changed = True
+    if changed or valid != pending:
+        meta["pending_approvals"] = valid
+        _save_conversation_meta(conversation_id, meta)
+    else:
+        meta["pending_approvals"] = valid
+    return meta
 
 
 _PREVIEW_TEXT_MAX = 160
@@ -2978,6 +3255,51 @@ async def _route_appserver_event(
 
     label_lower = label.lower()
 
+    agent_type = "codex"
+    if convo_id and _conversation_meta_path(convo_id).exists():
+        meta = _load_conversation_meta(convo_id)
+        settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
+        if isinstance(settings.get("agent"), str) and settings["agent"].strip():
+            agent_type = settings["agent"].strip()
+
+    event_type = label_lower.split("codex/event/", 1)[-1] if label_lower.startswith("codex/event/") else ""
+    delegate_to_extension = agent_type != "codex" or event_type.startswith("collab_")
+
+    if delegate_to_extension and ext_loader.has_extension(agent_type):
+        routed = await ext_loader.route_event(
+            agent_type,
+            label=label,
+            payload=payload,
+            conversation_id=convo_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            request_id=request_id,
+        )
+        if isinstance(routed, dict) and routed.get("handled"):
+            resolved_convo_id = routed.get("conversation_id") or convo_id
+            transcript_entries = routed.get("transcript_entries")
+            if resolved_convo_id and isinstance(transcript_entries, list):
+                for entry in transcript_entries:
+                    if isinstance(entry, dict):
+                        await _append_transcript_entry(resolved_convo_id, entry)
+            next_turn_id = routed.get("set_turn_id")
+            if next_turn_id is not None:
+                await _set_turn_id(next_turn_id)
+                if resolved_convo_id:
+                    try:
+                        _set_conversation_turn_id(resolved_convo_id, next_turn_id)
+                    except Exception:
+                        pass
+            elif routed.get("clear_turn_id"):
+                await _set_turn_id(None)
+                if resolved_convo_id:
+                    try:
+                        _set_conversation_turn_id(resolved_convo_id, None)
+                    except Exception:
+                        pass
+            routed_events = routed.get("events")
+            return resolved_convo_id, routed_events if isinstance(routed_events, list) else events
+
     # -------------------------------------------------------------------------
     # SECTION: Approval Events (Frontend only - user interaction required)
     # -------------------------------------------------------------------------
@@ -2993,16 +3315,30 @@ async def _route_appserver_event(
             if resolved_id is None and item_id:
                 resolved_id = _approval_request_map.get(str(item_id))
             cached = _approval_item_cache.get(str(item_id)) if item_id else {}
+            approval_payload = {
+                "command": payload.get("command") or payload.get("parsedCmd") or payload.get("cmd") or cached.get("command"),
+                "cwd": payload.get("cwd") or cached.get("cwd"),
+                "reason": payload.get("reason"),
+                "risk": payload.get("risk"),
+            }
+            if resolved_id is not None:
+                descriptor = _build_pending_approval_descriptor(
+                    convo_id,
+                    resolved_id,
+                    kind="command",
+                    payload=approval_payload,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    source="live",
+                )
+                if descriptor:
+                    _upsert_pending_approval(convo_id, descriptor)
             events.append({
                 "type": "approval",
                 "kind": "command",
                 "id": resolved_id,
-                "payload": {
-                    "command": payload.get("command") or payload.get("parsedCmd") or payload.get("cmd") or cached.get("command"),
-                    "cwd": payload.get("cwd") or cached.get("cwd"),
-                    "reason": payload.get("reason"),
-                    "risk": payload.get("risk"),
-                },
+                "request_id": resolved_id,
+                "payload": approval_payload,
             })
             events.append({"type": "activity", "label": "approval", "active": True})
         return convo_id, events
@@ -3033,15 +3369,29 @@ async def _route_appserver_event(
             if resolved_id is None and item_id:
                 resolved_id = _approval_request_map.get(str(item_id))
             cached = _approval_item_cache.get(str(item_id)) if item_id else {}
+            approval_payload = {
+                "diff": payload.get("diff") or payload.get("patch") or payload.get("unified_diff") or cached.get("diff"),
+                "changes": payload.get("changes") or cached.get("changes"),
+                "reason": payload.get("reason"),
+            }
+            if resolved_id is not None:
+                descriptor = _build_pending_approval_descriptor(
+                    convo_id,
+                    resolved_id,
+                    kind="diff",
+                    payload=approval_payload,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    source="live",
+                )
+                if descriptor:
+                    _upsert_pending_approval(convo_id, descriptor)
             events.append({
                 "type": "approval",
                 "kind": "diff",
                 "id": resolved_id,
-                "payload": {
-                    "diff": payload.get("diff") or payload.get("patch") or payload.get("unified_diff") or cached.get("diff"),
-                    "changes": payload.get("changes") or cached.get("changes"),
-                    "reason": payload.get("reason"),
-                },
+                "request_id": resolved_id,
+                "payload": approval_payload,
             })
             events.append({"type": "activity", "label": "approval", "active": True})
         return convo_id, events
@@ -3851,24 +4201,6 @@ async def _route_appserver_event(
                 })
         return convo_id, events
 
-    # -------------------------------------------------------------------------
-    # SECTION: Collab / Subagent Events (routed via extensions/codex/router.py)
-    # -------------------------------------------------------------------------
-    _raw_etype = label_lower
-    if _raw_etype.startswith("codex/event/"):
-        _raw_etype = _raw_etype.split("codex/event/", 1)[-1]
-
-    if _raw_etype in COLLAB_EVENT_TYPES and isinstance(payload, dict):
-        collab_events = route_collab_event(_raw_etype, payload)
-        for ev in collab_events:
-            transcript_role = ev.pop("_transcript_role", None)
-            events.append(ev)
-            if convo_id and transcript_role:
-                await _append_transcript_entry(convo_id, {
-                    "role": transcript_role, **ev,
-                })
-        return convo_id, events
-
     # No handler matched - return empty events list
     return convo_id, events
 
@@ -4068,22 +4400,35 @@ def _inject_codex_runtime_settings(
     if not isinstance(params, dict):
         params = {}
     settings = _apply_codex_app_defaults(settings)
+    approval_value = _normalize_codex_approval_policy(settings.get("approvalPolicy"))
 
     if method == "turn/start":
-        for key in ("model", "cwd", "approvalPolicy", "sandboxPolicy", "summary"):
+        for key in ("model", "cwd", "summary"):
             if key in settings and settings[key] and key not in params:
                 params[key] = settings[key]
+        if approval_value and "approvalPolicy" not in params:
+            params["approvalPolicy"] = approval_value
+        if "sandboxPolicy" not in params:
+            sandbox_policy = _normalize_codex_turn_sandbox_policy(
+                settings.get("sandboxPolicy") or settings.get("sandbox")
+            )
+            if sandbox_policy:
+                params["sandboxPolicy"] = sandbox_policy
         effort = settings.get("effort") or settings.get("reasoning_effort")
         if effort and "effort" not in params:
             params["effort"] = effort
         return params
 
     if method in ("thread/start", "thread/resume"):
-        for key in ("model", "cwd", "approvalPolicy"):
+        for key in ("model", "cwd"):
             if key in settings and settings[key] and key not in params:
                 params[key] = settings[key]
+        if approval_value and "approvalPolicy" not in params:
+            params["approvalPolicy"] = approval_value
         if "sandbox" not in params:
-            sandbox_value = settings.get("sandbox") or settings.get("sandboxPolicy")
+            sandbox_value = _normalize_codex_thread_sandbox(
+                settings.get("sandbox") or settings.get("sandboxPolicy")
+            )
             if sandbox_value:
                 params["sandbox"] = sandbox_value
         if method == "thread/start":
@@ -4136,6 +4481,12 @@ def _codex_thread_runtime_signature(settings: Optional[Dict[str, Any]]) -> str:
         force_te2_mcp_entry=True,
     )
     payload = {
+        "model": effective_settings.get("model"),
+        "cwd": effective_settings.get("cwd"),
+        "approvalPolicy": _normalize_codex_approval_policy(effective_settings.get("approvalPolicy")),
+        "sandbox": _normalize_codex_thread_sandbox(
+            effective_settings.get("sandbox") or effective_settings.get("sandboxPolicy")
+        ),
         "developerInstructions": build_effective_developer_instructions(
             effective_settings.get("developer_instructions"),
             te2_enabled=te2_mcp_integration_enabled(effective_settings),
@@ -4150,11 +4501,16 @@ def _codex_thread_runtime_signature(settings: Optional[Dict[str, Any]]) -> str:
 def _build_codex_thread_reconfigure_params(thread_id: str, settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     effective_settings = _apply_codex_app_defaults(settings)
     params: Dict[str, Any] = {"threadId": thread_id}
-    for key in ("model", "cwd", "approvalPolicy"):
+    for key in ("model", "cwd"):
         value = effective_settings.get(key)
         if value:
             params[key] = value
-    sandbox_value = effective_settings.get("sandbox") or effective_settings.get("sandboxPolicy")
+    approval_value = _normalize_codex_approval_policy(effective_settings.get("approvalPolicy"))
+    if approval_value:
+        params["approvalPolicy"] = approval_value
+    sandbox_value = _normalize_codex_thread_sandbox(
+        effective_settings.get("sandbox") or effective_settings.get("sandboxPolicy")
+    )
     if sandbox_value:
         params["sandbox"] = sandbox_value
     params["developerInstructions"] = build_effective_developer_instructions(
@@ -5201,11 +5557,12 @@ async def api_appserver_conversation():
     convo_id = cfg.get("conversation_id")
     meta = None
     if convo_id and _conversation_meta_path(convo_id).exists():
-        meta = _load_conversation_meta(convo_id)
+        meta = await _validate_conversation_pending_approvals(convo_id, _load_conversation_meta(convo_id))
     if not meta:
         meta = {
             "conversation_id": convo_id,
             "thread_id": None,
+            "pending_approvals": {},
             "settings": {},
             "status": "none",
         }
@@ -5219,7 +5576,7 @@ async def api_appserver_conversation_meta(conversation_id: str):
     convo_id = _sanitize_conversation_id(conversation_id)
     if not convo_id or not _conversation_meta_path(convo_id).exists():
         raise HTTPException(status_code=404, detail="Conversation not found")
-    meta = _load_conversation_meta(convo_id)
+    meta = await _validate_conversation_pending_approvals(convo_id, _load_conversation_meta(convo_id))
     return meta
 
 
@@ -5382,9 +5739,9 @@ async def api_appserver_conversations():
         if not convo_id:
             continue
         if _conversation_meta_path(convo_id).exists():
-            meta = _load_conversation_meta(convo_id)
+            meta = await _validate_conversation_pending_approvals(convo_id, _load_conversation_meta(convo_id))
         else:
-            meta = {"conversation_id": convo_id, "thread_id": None, "settings": {}, "status": "none"}
+            meta = {"conversation_id": convo_id, "thread_id": None, "pending_approvals": {}, "settings": {}, "status": "none"}
         items.append(meta)
     return {"items": items, "active_conversation_id": cfg.get("conversation_id"), "active_view": cfg.get("active_view", "splash")}
 
@@ -6304,7 +6661,7 @@ async def api_appserver_approval_record(payload: Dict[str, Any] = Body(...)):
     status = payload.get("status")  # "accepted" or "declined"
     diff = payload.get("diff")
     path = payload.get("path")
-    item_id = payload.get("item_id")
+    request_id = payload.get("request_id", payload.get("item_id"))
     if status not in ("accepted", "declined"):
         raise HTTPException(status_code=400, detail="Invalid status")
     cfg = _load_appserver_config()
@@ -6315,18 +6672,64 @@ async def api_appserver_approval_record(payload: Dict[str, Any] = Body(...)):
             "status": status,
             "diff": diff,
             "path": path,
-            "item_id": item_id,
+            "request_id": request_id,
+            "item_id": request_id,
             "event": "approval_decision",
         })
     # If declined, broadcast a declined diff event to the UI
     if status == "declined" and diff:
         await _broadcast_appserver_ui({
             "type": "diff_declined",
-            "id": item_id,
+            "id": request_id,
             "text": diff,
             "path": path,
         })
     return {"ok": True}
+
+
+@app.post("/api/appserver/approval_response")
+async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
+    """Resolve a pending approval and clear durable meta state on success."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    request_id_raw = payload.get("request_id", payload.get("id"))
+    request_id = str(request_id_raw or "").strip()
+    if not request_id:
+        raise HTTPException(status_code=400, detail="Missing request_id")
+    decision = "accept" if str(payload.get("decision") or "decline").strip().lower() == "accept" else "decline"
+    conversation_id = payload.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        async with _config_lock:
+            cfg = _load_appserver_config()
+        conversation_id = cfg.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        raise HTTPException(status_code=404, detail="No conversation available for approval resolution")
+    conversation_id = _sanitize_conversation_id(conversation_id.strip())
+    if not conversation_id or not _conversation_meta_path(conversation_id).exists():
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    meta = await _validate_conversation_pending_approvals(conversation_id, _load_conversation_meta(conversation_id))
+    pending = _ensure_pending_approvals(meta)
+    descriptor = pending.get(request_id)
+    if not isinstance(descriptor, dict):
+        raise HTTPException(status_code=409, detail="Approval is no longer pending")
+
+    agent = str(descriptor.get("agent") or ((meta.get("settings") or {}).get("agent") or "codex")).strip() or "codex"
+    resolved = False
+    if agent == "codex":
+        resolved = await _resolve_codex_approval(request_id, decision)
+    elif ext_loader.has_extension(agent):
+        resolved = bool(ext_loader.resolve_approval(agent, request_id, decision))
+    else:
+        _remove_pending_approval(conversation_id, request_id)
+        raise HTTPException(status_code=409, detail=f"No approval resolver for agent: {agent}")
+
+    if not resolved:
+        _remove_pending_approval(conversation_id, request_id)
+        raise HTTPException(status_code=409, detail="Approval is stale or no longer actionable")
+
+    _remove_pending_approval(conversation_id, request_id)
+    return {"ok": True, "conversation_id": conversation_id, "request_id": request_id, "decision": decision}
 
 
 @app.post("/api/appserver/interrupt")
@@ -7077,6 +7480,8 @@ def _init_extensions():
             meta_fns={
                 "load": _load_conversation_meta,
                 "save": _save_conversation_meta,
+                "upsert_pending_approval": _upsert_pending_approval,
+                "remove_pending_approval": _remove_pending_approval,
             },
         )
 
@@ -7106,12 +7511,19 @@ async def api_extension_get(extension_id: str):
 @app.get("/api/extensions/{extension_id}/settings_schema")
 async def api_extension_settings_schema(extension_id: str):
     """Get settings schema for an extension."""
-    # Special case: codex has no schema (hardcoded in frontend)
+    # Special case: legacy codex keeps the built-in modal path.
     if extension_id == "codex":
         return {"version": "1", "fields": [], "useBuiltin": True}
     
     if not ext_loader.has_extension(extension_id):
         return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
+
+    try:
+        dynamic_schema = await ext_loader.get_settings_schema(extension_id)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to build schema: {e}"}, status_code=500)
+    if isinstance(dynamic_schema, dict):
+        return dynamic_schema
     
     # Find extension path and load settings_schema.json
     exts = ext_loader.list_extensions()
@@ -7119,7 +7531,7 @@ async def api_extension_settings_schema(extension_id: str):
         if ext["id"] == extension_id:
             ext_path = ext.get("path", "")
             if ext_path:
-                schema_file = Path(__file__).parent / "extensions" / ext_path / "settings_schema.json"
+                schema_file = Path(ext_loader.__file__).resolve().parent / ext_path / "settings_schema.json"
                 if schema_file.exists():
                     try:
                         return json.loads(schema_file.read_text())

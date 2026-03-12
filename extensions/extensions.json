@@ -14,6 +14,13 @@
       "type": "codex_app_server",
       "path": "codex",
       "enabled": true
+    },
+    {
+      "id": "codex-ext-testing",
+      "name": "Codex Extension Testing",
+      "type": "codex_app_server",
+      "path": "codex",
+      "enabled": true
     }
   ]
 }

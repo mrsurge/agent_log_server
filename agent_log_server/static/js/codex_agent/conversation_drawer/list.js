@@ -33,14 +33,22 @@ export function createConversationDrawerList(ctx) {
     if (projectBtn) projectBtn.classList.toggle('active', splashTab === 'project');
   }
 
+  function getConversationAgentText(meta) {
+    const agent = typeof meta?.settings?.agent === 'string' ? meta.settings.agent.trim() : '';
+    if (!agent || agent === 'codex') return '';
+    return agent;
+  }
+
   function getConversationDisplay(meta) {
     const alias = typeof meta?.settings?.alias === 'string' ? meta.settings.alias.trim() : '';
     const labelText = (meta?.settings && meta.settings.label) ? meta.settings.label : '';
+    const titleBase = alias || meta?.conversation_id || 'conversation';
+    const agentText = getConversationAgentText(meta);
     const preview = (typeof getConversationPreview === 'function' ? getConversationPreview(meta?.conversation_id) : null) || meta?.last_preview || null;
     const previewText = typeof preview?.text === 'string' ? preview.text.trim() : '';
     return {
       labelText,
-      titleText: alias || meta?.conversation_id || 'conversation',
+      titleText: agentText ? `${titleBase} - ${agentText}` : titleBase,
       threadText: meta?.thread_id ? `thread: ${meta.thread_id}` : 'thread: (none)',
       cwdText: meta?.settings?.cwd ? `cwd: ${meta.settings.cwd}` : 'cwd: (default)',
       statusText: meta?.status ? `status: ${meta.status}` : 'status: none',
