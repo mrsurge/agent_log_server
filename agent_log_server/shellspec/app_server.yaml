@@ -9,3 +9,19 @@ shells:
       - app-server
     labels:
       app: "codex-app-server"
+  app_server_observed:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["codex_agent", "app_server", "codex", "observed"]
+    command:
+      - python
+      - -u
+      - -m
+      - agent_log_server.rpc_stdio_mirror
+      - --label
+      - codex-app-server
+      - --
+      - codex
+      - app-server
+    labels:
+      app: "codex-app-server-observed"

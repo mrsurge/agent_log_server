@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from .router import route_event as route_codex_event
 from .runtime_protocol import (
     RuntimeProtocol,
     build_request_params,
@@ -291,14 +290,14 @@ async def route_event(
     turn_id: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    protocol = await get_runtime_protocol()
-    return route_codex_event(
-        protocol,
+    transport = _ensure_transport()
+    return await transport.route_event(
         label=label,
         payload=payload,
+        conversation_id=conversation_id,
         thread_id=thread_id,
         turn_id=turn_id,
-        extract_item_text=_server_module()._extract_item_text,
+        request_id=request_id,
     )
 
 
@@ -494,8 +493,52 @@ async def hydrate_transcript(
     model: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    _add_to_raw_buffer("out", conversation_id, f"hydrate_transcript noop session={session_id[:8]}")
-    return []
+    server = _server_module()
+    path = server._find_rollout_path(session_id)
+    if not path:
+        _add_to_raw_buffer("err", conversation_id, f"hydrate_transcript rollout_not_found session={session_id[:8]}")
+        return []
+    preview = await asyncio.to_thread(server._rollout_preview_entries, path, 200000)
+    items = preview.get("items", []) if isinstance(preview, dict) else []
+    _add_to_raw_buffer("out", conversation_id, f"hydrate_transcript imported={len(items)} session={session_id[:8]}")
+    return items if isinstance(items, list) else []
+
+
+def resolve_approval(request_id: str, decision: str) -> bool:
+    transport = _transport
+    if transport is None:
+        return False
+    return transport.resolve_approval(request_id, decision)
+
+
+def validate_pending_approval(conversation_id: str, request_id: str, descriptor: Dict[str, Any]) -> bool:
+    if not isinstance(descriptor, dict):
+        return False
+    transport = _transport
+    if transport is None:
+        return False
+    meta = _meta_fns["load"](conversation_id) if _meta_fns and "load" in _meta_fns else {}
+    if descriptor.get("conversation_id") and descriptor.get("conversation_id") != conversation_id:
+        return False
+    pending_thread_id = descriptor.get("thread_id")
+    current_thread_id = meta.get("thread_id") if isinstance(meta, dict) else None
+    if pending_thread_id and current_thread_id and pending_thread_id != current_thread_id:
+        return False
+    if pending_thread_id and not current_thread_id:
+        return False
+    runtime_signature = descriptor.get("runtime_signature")
+    current_signature = meta.get("thread_runtime_signature") if isinstance(meta, dict) else None
+    if runtime_signature and not current_signature:
+        return False
+    if runtime_signature and current_signature and runtime_signature != current_signature:
+        return False
+    runtime_instance_id = descriptor.get("runtime_instance_id")
+    current_instance_id = transport.runtime_instance_id()
+    if runtime_instance_id and not current_instance_id:
+        return False
+    if runtime_instance_id and current_instance_id and runtime_instance_id != current_instance_id:
+        return False
+    return transport.has_pending_approval(request_id)
 
 
 async def abort_session(conversation_id: str) -> bool:

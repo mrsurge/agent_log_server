@@ -313,8 +313,12 @@ def _build_preview_diff(payload: Dict[str, Any], args: Dict[str, Any]) -> None:
 
     file_path = args.get("path") or args.get("file_path") or args.get("file") or ""
     old_str = args.get("old_str")
+    if old_str is None:
+        old_str = args.get("oldString") or args.get("old_text") or args.get("oldText")
     new_str = args.get("new_str")
-    file_text = args.get("file_text") or args.get("content") or args.get("new_content")
+    if new_str is None:
+        new_str = args.get("newString") or args.get("new_text") or args.get("newText")
+    file_text = args.get("file_text") or args.get("content") or args.get("new_content") or args.get("fileText")
     command = args.get("command") or args.get("cmd")
 
     if old_str is not None and new_str is not None:
@@ -395,12 +399,31 @@ def _make_permission_handler(conversation_id: str) -> Callable:
         if tool_name:
             payload["tool_name"] = tool_name
         raw_args = tool_info.get("arguments")
-        if raw_args:
-            payload["arguments"] = raw_args
+        normalized_args = raw_args
+        if isinstance(raw_args, str):
+            try:
+                normalized_args = json.loads(raw_args)
+            except Exception:
+                normalized_args = raw_args
+        if normalized_args:
+            payload["arguments"] = normalized_args
+        if isinstance(request, dict):
+            request_fields = {
+                key: value
+                for key, value in request.items()
+                if key not in ("kind", "toolCallId")
+            }
+            if request_fields:
+                payload["request"] = request_fields
+            payload["path"] = payload.get("path") or request_fields.get("path") or request_fields.get("file_path") or request_fields.get("filePath") or request_fields.get("file")
+            payload["cwd"] = payload.get("cwd") or request_fields.get("cwd")
+            payload["diff"] = payload.get("diff") or request_fields.get("diff") or request_fields.get("patch") or request_fields.get("unified_diff")
+            if not payload.get("changes") and request_fields.get("changes") is not None:
+                payload["changes"] = request_fields.get("changes")
 
         # Compute a preview diff from tool arguments if possible
-        if isinstance(raw_args, dict):
-            _build_preview_diff(payload, raw_args)
+        if isinstance(normalized_args, dict):
+            _build_preview_diff(payload, normalized_args)
 
         # Create a Future that the WS handler will resolve
         loop = asyncio.get_running_loop()
@@ -409,6 +432,17 @@ def _make_permission_handler(conversation_id: str) -> Callable:
 
         runtime_signature = _runtime_signatures.get(conversation_id) or _runtime_signature(conversation_id)
         session = _sessions.get(conversation_id)
+        approval_event = {
+            "type": "approval",
+            "conversation_id": conversation_id,
+            "id": request_id,
+            "request_id": request_id,
+            "kind": kind,
+            "tool_call_id": tool_call_id,
+            "turn_id": router.current_turn_id if router else "",
+            "payload": payload,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
         descriptor = {
             "request_id": request_id,
             "agent": "copilot-sdk",
@@ -420,21 +454,14 @@ def _make_permission_handler(conversation_id: str) -> Callable:
             "runtime_instance_id": getattr(session, "session_id", None),
             "transcript_anchor": {"turn_id": router.current_turn_id if router else ""},
             "source": "live",
+            "created_at": approval_event["created_at"],
+            "render_event": approval_event,
         }
         _upsert_pending_approval(conversation_id, descriptor)
 
         # Broadcast approval_request to frontend
         if _broadcast_fn:
-            await _broadcast_fn({
-                "type": "approval",
-                "conversation_id": conversation_id,
-                "id": request_id,
-                "request_id": request_id,
-                "kind": kind,
-                "tool_call_id": tool_call_id,
-                "turn_id": router.current_turn_id if router else "",
-                "payload": payload,
-            })
+            await _broadcast_fn(approval_event)
 
         # Wait based on policy
         if policy == "always-ask":

@@ -23,6 +23,7 @@ export function bindBootInitFlow(ctx) {
     setupDropdown,
     loadAgentOptions,
     loadModelOptions,
+    loadRuntimeOptions,
     updateEffortOptionsForModel,
     helperFns,
     closeDropdownMenu,
@@ -87,17 +88,8 @@ export function bindBootInitFlow(ctx) {
   }
 
   function setupSettingsBoot() {
-    setupDropdown(settingsApprovalEl, settingsApprovalToggle, settingsApprovalOptions, [
-      'never',
-      'on-failure',
-      'untrusted',
-    ]);
-    setupDropdown(settingsSandboxEl, settingsSandboxToggle, settingsSandboxOptions, [
-      'workspaceWrite',
-      'readOnly',
-      'dangerFullAccess',
-      'externalSandbox',
-    ]);
+    setupDropdown(settingsApprovalEl, settingsApprovalToggle, settingsApprovalOptions, []);
+    setupDropdown(settingsSandboxEl, settingsSandboxToggle, settingsSandboxOptions, []);
     setupDropdown(settingsModelEl, settingsModelToggle, settingsModelOptions, [
       'gpt-5.1-codex',
       'gpt-5-codex',
@@ -116,6 +108,10 @@ export function bindBootInitFlow(ctx) {
     setupDropdown(settingsAgentEl, settingsAgentToggle, settingsAgentOptions, ['codex']);
     loadAgentOptions();
     loadModelOptions();
+    loadRuntimeOptions(
+      getState().conversationSettings?.agent || getState().conversationMeta?.settings?.agent || 'codex',
+      getState().conversationMeta?.conversation_id,
+    );
     if (settingsModelEl) {
       settingsModelEl.addEventListener('input', () => {
         updateEffortOptionsForModel(settingsModelEl.value);

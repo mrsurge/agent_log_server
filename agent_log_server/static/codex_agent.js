@@ -144,7 +144,6 @@ document.addEventListener('DOMContentLoaded', () => {
       let miniConversationDrawerOpen = false;
 		  let hostUi = { showClose: false, parentOrigin: null };
 		  let splashTab = 'all'; // 'all' | 'project'
-		  let currentThreadId = null;
   let pendingNewConversation = false;
   let pendingRollout = null;
   let lastEventType = null;
@@ -160,6 +159,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let wsReconnectDelay = 1000;
   let _socket = null; // Socket.IO instance (set in connectWS)
   let modelList = []; // Cached model list with supportedReasoningEfforts
+  let runtimeOptions = {};
   let settingsUi = null;
   let markdownEnabled = true; // Toggle for markdown rendering
   let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
@@ -170,7 +170,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let ptyWebSocket = null; // Raw PTY WebSocket connection
   let ptyWebSocketConvoId = null; // conversation_id currently bound to ptyWebSocket
   let activeAgentPtyBlockId = null;
-  let currentAppServerShellId = null;
   const pending = new Map();
 
   // Detect mobile for input behavior
@@ -1639,15 +1638,93 @@ document.addEventListener('DOMContentLoaded', () => {
     return value;
   }
 
+  function normalizeRuntimeOptionDescriptor(kind) {
+    const raw = runtimeOptions?.[kind];
+    if (!raw || typeof raw !== 'object') return null;
+    const settingKey = typeof raw.settingKey === 'string' ? raw.settingKey.trim() : '';
+    const options = Array.isArray(raw.options)
+      ? raw.options
+          .map((item) => {
+            if (typeof item === 'string') {
+              const text = item.trim();
+              return text ? { value: text, label: text } : null;
+            }
+            if (!item || typeof item !== 'object') return null;
+            const value = typeof item.value === 'string' ? item.value.trim() : '';
+            if (!value) return null;
+            const label = typeof item.label === 'string' && item.label.trim() ? item.label.trim() : value;
+            return { value, label };
+          })
+          .filter(Boolean)
+      : [];
+    return {
+      settingKey,
+      options,
+      current: typeof raw.current === 'string' ? raw.current.trim() : '',
+      default: typeof raw.default === 'string' ? raw.default.trim() : '',
+    };
+  }
+
+  function getRuntimeSettingKey(kind, fallbackKey) {
+    return normalizeRuntimeOptionDescriptor(kind)?.settingKey || fallbackKey;
+  }
+
+  function getConversationSettingByRuntimeKey(kind, fallbackKey) {
+    const key = getRuntimeSettingKey(kind, fallbackKey);
+    if (!key || !conversationSettings || typeof conversationSettings !== 'object') return '';
+    const value = conversationSettings[key];
+    return typeof value === 'string' ? value : '';
+  }
+
+  function getRuntimeOptionLabel(kind, value) {
+    if (!value) return '';
+    const descriptor = normalizeRuntimeOptionDescriptor(kind);
+    const match = descriptor?.options?.find((option) => option.value === value);
+    return match?.label || value;
+  }
+
+  function renderFooterApprovalOptions() {
+    if (!footerApprovalValue || !footerApprovalOptions) return;
+    footerApprovalOptions.innerHTML = '';
+    const descriptor = normalizeRuntimeOptionDescriptor('approval');
+    const options = descriptor?.options || [];
+    options.forEach((option) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dropdown-item';
+      btn.dataset.value = option.value;
+      btn.textContent = option.label;
+      footerApprovalOptions.appendChild(btn);
+    });
+    const currentValue = getConversationSettingByRuntimeKey('approval', 'approvalPolicy')
+      || descriptor?.current
+      || descriptor?.default
+      || '';
+    footerApprovalValue.textContent = getRuntimeOptionLabel('approval', currentValue) || currentValue || 'default';
+  }
+
   async function saveApprovalQuick(value) {
     const approval = normalizeApprovalValue(value?.trim());
     if (!approval) return;
+    const settingKey = getRuntimeSettingKey('approval', 'approvalPolicy');
     await sioCall('conversation_update', {
       conversation_id: conversationMeta?.conversation_id,
-      settings: { approvalPolicy: approval },
+      settings: { [settingKey]: approval },
     }, { fallbackUrl: '/api/appserver/conversation' });
-    conversationSettings.approvalPolicy = approval;
-    if (footerApprovalValue) footerApprovalValue.textContent = approval;
+    conversationSettings = {
+      ...(conversationSettings || {}),
+      [settingKey]: approval,
+    };
+    if (runtimeOptions?.approval && typeof runtimeOptions.approval === 'object') {
+      runtimeOptions = {
+        ...runtimeOptions,
+        approval: {
+          ...runtimeOptions.approval,
+          current: approval,
+        },
+      };
+    }
+    renderFooterApprovalOptions();
   }
 
   function openPicker(...args) {
@@ -1688,6 +1765,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function loadModelOptions(...args) {
     return settingsUi?.loadModelOptions(...args);
+  }
+
+  async function loadRuntimeOptions(...args) {
+    return settingsUi?.loadRuntimeOptions(...args);
   }
 
   async function loadAgentOptions(...args) {
@@ -1744,6 +1825,7 @@ document.addEventListener('DOMContentLoaded', () => {
       filterTimer,
       openDropdownEl,
       modelList,
+      runtimeOptions,
     }),
     setState: (patch) => {
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
@@ -1754,6 +1836,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.filterTimer !== undefined) filterTimer = patch.filterTimer;
       if (patch.openDropdownEl !== undefined) openDropdownEl = patch.openDropdownEl;
       if (patch.modelList !== undefined) modelList = patch.modelList;
+      if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
     },
     elements: {
       settingsModalEl,
@@ -3654,19 +3737,29 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!pending || typeof pending !== 'object') return;
     const items = Object.values(pending)
       .filter((entry) => entry && typeof entry === 'object' && (entry.request_id || entry.id))
-      .sort((a, b) => String(a?.created_at || '').localeCompare(String(b?.created_at || '')));
+      .sort((a, b) => String(a?.created_at || a?.render_event?.created_at || '').localeCompare(String(b?.created_at || b?.render_event?.created_at || '')));
     items.forEach((entry) => {
       const requestId = entry.request_id || entry.id;
       if (!requestId) return;
-      renderApproval({
-        type: 'approval',
-        id: requestId,
-        request_id: requestId,
-        kind: entry.kind || entry.payload?.kind || 'unknown',
-        payload: entry.payload || {},
-        turn_id: entry.turn_id || '',
-        conversation_id: conversationMeta?.conversation_id || null,
-      });
+      const liveEvent = entry.render_event && typeof entry.render_event === 'object'
+        ? { ...entry.render_event }
+        : {
+            type: 'approval',
+            id: requestId,
+            request_id: requestId,
+            kind: entry.kind || entry.payload?.kind || 'unknown',
+            payload: entry.payload || {},
+            turn_id: entry.turn_id || '',
+            conversation_id: conversationMeta?.conversation_id || null,
+          };
+      liveEvent.type = 'approval';
+      liveEvent.id = liveEvent.id ?? requestId;
+      liveEvent.request_id = liveEvent.request_id ?? requestId;
+      liveEvent.kind = liveEvent.kind || entry.kind || liveEvent.payload?.kind || 'unknown';
+      liveEvent.payload = (liveEvent.payload && typeof liveEvent.payload === 'object') ? liveEvent.payload : (entry.payload || {});
+      liveEvent.turn_id = liveEvent.turn_id || entry.turn_id || '';
+      liveEvent.conversation_id = liveEvent.conversation_id || conversationMeta?.conversation_id || null;
+      renderApproval(liveEvent);
     });
     timelineStickyHeaders?.update?.();
   }
@@ -3690,6 +3783,7 @@ document.addEventListener('DOMContentLoaded', () => {
       pendingNewConversation,
       pendingRollout,
       trackEditsEnabled,
+      runtimeOptions,
     }),
     setState: (patch) => {
       if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
@@ -3824,15 +3918,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (activeView !== 'conversation') {
           miniConversationDrawerOpen = false;
         }
+	      await loadRuntimeOptions(
+	        conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex',
+	        conversationMeta?.conversation_id,
+	      );
 	      setDrawerOpen(activeView === 'conversation');
 	      applyHostUi();
 	      updateActiveConversationLabel();
-	      if (footerApprovalValue) footerApprovalValue.textContent = conversationSettings?.approvalPolicy || 'default';
-	      if (conversationMeta && conversationMeta.thread_id) {
-	        currentThreadId = conversationMeta.thread_id;
-      } else {
-        currentThreadId = null;
-      }
+	      renderFooterApprovalOptions();
       // Sync markdown toggle from settings
       setMarkdownEnabled(conversationSettings?.markdown !== false);
       // Sync track-edits toggle from settings
@@ -3870,9 +3963,6 @@ document.addEventListener('DOMContentLoaded', () => {
         fallbackUrl: '/api/appserver/status',
         fallbackMethod: 'GET',
       });
-      if (data && data.shell_id) {
-        currentAppServerShellId = data.shell_id;
-      }
       if (data.running) {
         setPill(statusEl, 'running', 'ok');
       } else {
@@ -3885,7 +3975,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const {
     ensureInitialized,
-    ensureThread,
     sendUserMessage,
     sendShellCommand,
     interruptTurn,
@@ -3893,21 +3982,16 @@ document.addEventListener('DOMContentLoaded', () => {
     getState: () => ({
       initialized,
       conversationSettings,
-      currentThreadId,
-      currentAppServerShellId,
       conversationMeta,
       autoScroll,
       terminalMode,
     }),
     setState: (patch) => {
       if (patch.initialized !== undefined) initialized = patch.initialized;
-      if (patch.currentThreadId !== undefined) currentThreadId = patch.currentThreadId;
       if (patch.autoScroll !== undefined) autoScroll = patch.autoScroll;
     },
     sioCall,
     waitForWs,
-    sendRpc,
-    fetchConversation,
     setActivity,
     updateScrollButton,
     maybeAutoScroll,
@@ -4061,6 +4145,7 @@ document.addEventListener('DOMContentLoaded', () => {
       pickerPath,
       pickerMode,
       openDropdownEl,
+      runtimeOptions,
     }),
     setState: (patch) => {
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
@@ -4069,6 +4154,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
       if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode;
       if (patch.openDropdownEl !== undefined) openDropdownEl = patch.openDropdownEl;
+      if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
     },
     elements: {
       statusEl,
@@ -4115,6 +4201,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupDropdown,
     loadAgentOptions,
     loadModelOptions,
+    loadRuntimeOptions,
     updateEffortOptionsForModel,
     helperFns: {
       openSettingsModal,

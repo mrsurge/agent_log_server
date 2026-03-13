@@ -4,8 +4,6 @@ export function bindSessionFlow(ctx) {
     setState,
     sioCall,
     waitForWs,
-    sendRpc,
-    fetchConversation,
     setActivity,
     updateScrollButton,
     maybeAutoScroll,
@@ -17,64 +15,8 @@ export function bindSessionFlow(ctx) {
   async function ensureInitialized() {
     const state = getState();
     if (state.initialized) return;
-    const agentType = state.conversationSettings?.agent || 'codex';
-    if (agentType === 'codex') {
-      await sioCall('app_start', {}, { fallbackUrl: '/api/appserver/start' });
-      await waitForWs();
-      try {
-        await sendRpc('initialize', {
-          clientInfo: {
-            name: 'agent_log_server',
-            title: 'Agent Log Server',
-            version: '0.1.0',
-          }
-        });
-      } catch {
-        // ignore already initialized
-      }
-      await sendRpc('initialized', {}, { notify: true });
-    } else {
-      await waitForWs();
-    }
+    await waitForWs();
     setState({ initialized: true });
-  }
-
-  async function ensureThread() {
-    await fetchConversation();
-    let state = getState();
-    if (state.currentThreadId) {
-      try {
-        const savedShellId = state.conversationSettings?.thread_session_shell_id || null;
-        const savedThreadId = state.conversationSettings?.thread_session_thread_id || null;
-        if (state.currentAppServerShellId && savedShellId === state.currentAppServerShellId && savedThreadId === state.currentThreadId) {
-          return state.currentThreadId;
-        }
-        await sendRpc('thread/resume', { threadId: state.currentThreadId });
-        if (state.currentAppServerShellId) {
-          await sioCall('conversation_update', {
-            conversation_id: state.conversationMeta?.conversation_id,
-            settings: { thread_session_shell_id: state.currentAppServerShellId, thread_session_thread_id: state.currentThreadId },
-          }, { fallbackUrl: '/api/appserver/conversation' });
-        }
-        return state.currentThreadId;
-      } catch {
-        setState({ currentThreadId: null });
-      }
-    }
-    const result = await sendRpc('thread/start', {});
-    const threadId = result?.thread?.id;
-    state = getState();
-    if (threadId) {
-      setState({ currentThreadId: threadId });
-      if (state.currentAppServerShellId) {
-        await sioCall('conversation_update', {
-          conversation_id: state.conversationMeta?.conversation_id,
-          settings: { thread_session_shell_id: state.currentAppServerShellId, thread_session_thread_id: threadId },
-        }, { fallbackUrl: '/api/appserver/conversation' });
-      }
-      return threadId;
-    }
-    throw new Error('thread/start failed');
   }
 
   async function sendUserMessage(text) {
@@ -154,10 +96,8 @@ export function bindSessionFlow(ctx) {
 
   return {
     ensureInitialized,
-    ensureThread,
     sendUserMessage,
     sendShellCommand,
     interruptTurn,
   };
 }
-

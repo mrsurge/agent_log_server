@@ -362,6 +362,21 @@ async def _sio_get_models(sid, data):
         return _sio_error(str(e))
 
 
+@socketio_server.on("get_runtime_options", namespace="/appserver")
+async def _sio_get_runtime_options(sid, data):
+    """Mirror of GET /api/appserver/runtime_options"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        return await api_appserver_runtime_options(
+            conversation_id=payload.get("conversation_id"),
+            agent=payload.get("agent"),
+        )
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 @socketio_server.on("get_rollouts", namespace="/appserver")
 async def _sio_get_rollouts(sid, data):
     """Mirror of GET /api/appserver/rollouts"""
@@ -809,6 +824,29 @@ def _normalize_codex_turn_sandbox_policy(value: Any) -> Optional[Dict[str, Any]]
     return None
 
 
+def _runtime_option_descriptor(
+    setting_key: str,
+    values: List[str],
+    *,
+    current: Optional[str] = None,
+    default: Optional[str] = None,
+) -> Dict[str, Any]:
+    options: List[Dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if not text:
+            continue
+        options.append({"value": text, "label": text})
+    return {
+        "settingKey": setting_key,
+        "options": options,
+        "current": current or "",
+        "default": default or "",
+    }
+
+
 def _normalize_conversation_list(cfg: Dict[str, Any]) -> List[str]:
     conversations = cfg.get("conversations")
     if not isinstance(conversations, list):
@@ -1157,6 +1195,8 @@ def _build_pending_approval_descriptor(
     runtime_instance_id: Optional[str] = None,
     transcript_anchor: Optional[Dict[str, Any]] = None,
     source: str = "live",
+    created_at: Optional[str] = None,
+    render_event: Optional[Dict[str, Any]] = None,
     meta: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     request_id_text = str(request_id or "").strip()
@@ -1179,12 +1219,42 @@ def _build_pending_approval_descriptor(
         anchor.update(transcript_anchor)
     if turn_id and not anchor.get("turn_id"):
         anchor["turn_id"] = turn_id
+    created_at_value = str(created_at or "").strip()
+    if not created_at_value:
+        created_at_value = datetime.now(timezone.utc).isoformat()
+    resolved_kind = str(kind or "unknown")
+    resolved_payload = dict(payload) if isinstance(payload, dict) else {}
+    normalized_render_event: Dict[str, Any]
+    if isinstance(render_event, dict):
+        normalized_render_event = dict(render_event)
+    else:
+        normalized_render_event = {
+            "type": "approval",
+            "conversation_id": conversation_id,
+            "id": request_id_text,
+            "request_id": request_id_text,
+            "kind": resolved_kind,
+            "payload": resolved_payload,
+            "turn_id": turn_id,
+        }
+    normalized_render_event["type"] = "approval"
+    normalized_render_event["conversation_id"] = normalized_render_event.get("conversation_id") or conversation_id
+    normalized_render_event["id"] = normalized_render_event.get("id") or request_id_text
+    normalized_render_event["request_id"] = normalized_render_event.get("request_id") or request_id_text
+    normalized_render_event["kind"] = normalized_render_event.get("kind") or resolved_kind
+    normalized_render_event["payload"] = (
+        dict(normalized_render_event.get("payload"))
+        if isinstance(normalized_render_event.get("payload"), dict)
+        else resolved_payload
+    )
+    normalized_render_event["turn_id"] = normalized_render_event.get("turn_id") or turn_id
+    normalized_render_event["created_at"] = str(normalized_render_event.get("created_at") or created_at_value)
     return {
         "request_id": request_id_text,
         "agent": agent_id,
-        "kind": str(kind or "unknown"),
+        "kind": resolved_kind,
         "status": "pending",
-        "payload": dict(payload) if isinstance(payload, dict) else {},
+        "payload": resolved_payload,
         "conversation_id": conversation_id,
         "thread_id": resolved_thread_id,
         "turn_id": turn_id,
@@ -1192,6 +1262,8 @@ def _build_pending_approval_descriptor(
         "runtime_instance_id": runtime_instance_id,
         "transcript_anchor": anchor,
         "source": source or "live",
+        "created_at": created_at_value,
+        "render_event": normalized_render_event,
     }
 
 
@@ -1216,6 +1288,8 @@ def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -
         runtime_instance_id=descriptor.get("runtime_instance_id"),
         transcript_anchor=descriptor.get("transcript_anchor") if isinstance(descriptor.get("transcript_anchor"), dict) else {},
         source=str(descriptor.get("source") or existing.get("source") or "live"),
+        created_at=descriptor.get("created_at") or existing.get("created_at"),
+        render_event=descriptor.get("render_event") if isinstance(descriptor.get("render_event"), dict) else existing.get("render_event"),
         meta=meta,
     )
     if not normalized:
@@ -3321,6 +3395,16 @@ async def _route_appserver_event(
                 "reason": payload.get("reason"),
                 "risk": payload.get("risk"),
             }
+            approval_event = {
+                "type": "approval",
+                "kind": "command",
+                "id": resolved_id,
+                "request_id": resolved_id,
+                "payload": approval_payload,
+                "conversation_id": convo_id,
+                "turn_id": turn_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
             if resolved_id is not None:
                 descriptor = _build_pending_approval_descriptor(
                     convo_id,
@@ -3330,16 +3414,12 @@ async def _route_appserver_event(
                     thread_id=thread_id,
                     turn_id=turn_id,
                     source="live",
+                    created_at=approval_event["created_at"],
+                    render_event=approval_event,
                 )
                 if descriptor:
                     _upsert_pending_approval(convo_id, descriptor)
-            events.append({
-                "type": "approval",
-                "kind": "command",
-                "id": resolved_id,
-                "request_id": resolved_id,
-                "payload": approval_payload,
-            })
+            events.append(approval_event)
             events.append({"type": "activity", "label": "approval", "active": True})
         return convo_id, events
 
@@ -3374,6 +3454,16 @@ async def _route_appserver_event(
                 "changes": payload.get("changes") or cached.get("changes"),
                 "reason": payload.get("reason"),
             }
+            approval_event = {
+                "type": "approval",
+                "kind": "diff",
+                "id": resolved_id,
+                "request_id": resolved_id,
+                "payload": approval_payload,
+                "conversation_id": convo_id,
+                "turn_id": turn_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
             if resolved_id is not None:
                 descriptor = _build_pending_approval_descriptor(
                     convo_id,
@@ -3383,16 +3473,12 @@ async def _route_appserver_event(
                     thread_id=thread_id,
                     turn_id=turn_id,
                     source="live",
+                    created_at=approval_event["created_at"],
+                    render_event=approval_event,
                 )
                 if descriptor:
                     _upsert_pending_approval(convo_id, descriptor)
-            events.append({
-                "type": "approval",
-                "kind": "diff",
-                "id": resolved_id,
-                "request_id": resolved_id,
-                "payload": approval_payload,
-            })
+            events.append(approval_event)
             events.append({"type": "activity", "label": "approval", "active": True})
         return convo_id, events
 
@@ -4877,11 +4963,11 @@ async def appserver_ui() -> HTMLResponse:
                             H2("Policy"),
                             Label(
                                 Span("Sandbox"),
-                                Input(type="text", id="policy-sandbox", placeholder="workspace-write"),
+                                Input(type="text", id="policy-sandbox", placeholder="Use runtime default"),
                             ),
                             Label(
                                 Span("Approval"),
-                                Input(type="text", id="policy-approval", placeholder="on-failure"),
+                                Input(type="text", id="policy-approval", placeholder="Use runtime default"),
                             ),
                             cls="panel"
                         ),
@@ -5286,7 +5372,7 @@ try {{
                                     Label(
                                         Span("Approval Policy"),
                                         Div(
-                                            Input(type="text", id="settings-approval", placeholder="on-failure"),
+                                            Input(type="text", id="settings-approval", placeholder="Use runtime default"),
                                             Button("▾", id="settings-approval-toggle", cls="btn ghost dropdown-toggle"),
                                             Div(id="settings-approval-options", cls="dropdown-list"),
                                             cls="dropdown-field"
@@ -5295,7 +5381,7 @@ try {{
                                     Label(
                                         Span("Sandbox Policy"),
                                         Div(
-                                            Input(type="text", id="settings-sandbox", placeholder="workspaceWrite"),
+                                            Input(type="text", id="settings-sandbox", placeholder="Use runtime default"),
                                             Button("▾", id="settings-sandbox-toggle", cls="btn ghost dropdown-toggle"),
                                             Div(id="settings-sandbox-options", cls="dropdown-list"),
                                             cls="dropdown-field"
@@ -7352,6 +7438,80 @@ async def api_appserver_models():
         _model_list_cache_time = time.time()
     
     return {"data": models}
+
+
+@app.get("/api/appserver/runtime_options")
+async def api_appserver_runtime_options(
+    conversation_id: Optional[str] = Query(None),
+    agent: Optional[str] = Query(None),
+):
+    resolved_agent = str(agent or "").strip()
+    resolved_conversation_id = str(conversation_id or "").strip()
+    meta: Optional[Dict[str, Any]] = None
+
+    if resolved_conversation_id:
+        safe_id = _sanitize_conversation_id(resolved_conversation_id)
+        if safe_id and _conversation_meta_path(safe_id).exists():
+            resolved_conversation_id = safe_id
+            meta = _load_conversation_meta(safe_id)
+            if not resolved_agent:
+                settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+                saved_agent = settings.get("agent")
+                if isinstance(saved_agent, str) and saved_agent.strip():
+                    resolved_agent = saved_agent.strip()
+        else:
+            resolved_conversation_id = ""
+
+    if not resolved_agent:
+        async with _config_lock:
+            cfg = _load_appserver_config()
+        cfg_conversation_id = cfg.get("conversation_id")
+        if isinstance(cfg_conversation_id, str) and cfg_conversation_id.strip():
+            safe_id = _sanitize_conversation_id(cfg_conversation_id.strip())
+            if safe_id and _conversation_meta_path(safe_id).exists():
+                resolved_conversation_id = safe_id
+                meta = _load_conversation_meta(safe_id)
+                settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+                saved_agent = settings.get("agent")
+                if isinstance(saved_agent, str) and saved_agent.strip():
+                    resolved_agent = saved_agent.strip()
+
+    if not resolved_agent:
+        resolved_agent = "codex"
+
+    settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
+
+    if ext_loader.has_extension(resolved_agent):
+        result = await ext_loader.get_runtime_options(
+            resolved_agent,
+            conversation_id=resolved_conversation_id or None,
+            settings=settings,
+        )
+        if isinstance(result, dict):
+            result.setdefault("agent", resolved_agent)
+            return result
+
+    approval_value = _normalize_codex_approval_policy(settings.get("approvalPolicy")) if isinstance(settings, dict) else None
+    sandbox_value = (
+        _normalize_codex_thread_sandbox(settings.get("sandbox") or settings.get("sandboxPolicy"))
+        if isinstance(settings, dict)
+        else None
+    )
+    return {
+        "agent": resolved_agent,
+        "approval": _runtime_option_descriptor(
+            "approvalPolicy",
+            ["never", "on-request", "untrusted"],
+            current=approval_value,
+            default="on-request",
+        ),
+        "sandbox": _runtime_option_descriptor(
+            "sandboxPolicy",
+            ["workspace-write", "read-only", "danger-full-access", "externalSandbox"],
+            current=sandbox_value,
+            default="workspace-write",
+        ),
+    }
 
 
 @app.get("/api/appserver/debug/raw")

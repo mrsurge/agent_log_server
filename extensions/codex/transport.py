@@ -2,12 +2,13 @@ import asyncio
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from framework_shells.orchestrator import Orchestrator
 
-from .router import route_event as route_codex_event
+from .router import CodexEventRouter
 from .runtime_protocol import get_runtime_protocol
 
 _TRANSPORT_LABEL = "app-server:codex-extension"
@@ -105,7 +106,12 @@ class CodexAppServerTransport:
         self._rpc_waiters: Dict[str, asyncio.Future] = {}
         self._request_conversations: Dict[str, Optional[str]] = {}
         self._resumed_threads: set[str] = set()
+        self._thread_conversations: Dict[str, str] = {}
+        self._turn_conversations: Dict[str, str] = {}
+        self._pending_approval_requests: Dict[str, Dict[str, Any]] = {}
         self._request_counter = int(time.time() * 1000)
+        self._stdin: Optional[Any] = None
+        self._router = CodexEventRouter()
 
     def is_ready(self) -> bool:
         return bool(
@@ -133,6 +139,11 @@ class CodexAppServerTransport:
             self._shell_id = None
             self._initialized = False
             self._resumed_threads.clear()
+            self._thread_conversations.clear()
+            self._turn_conversations.clear()
+            self._pending_approval_requests.clear()
+            self._router.reset()
+            self._stdin = None
             self._fail_waiters("transport stopped")
             if shell_id:
                 mgr = await self._fws_getter()
@@ -147,6 +158,48 @@ class CodexAppServerTransport:
     def mark_thread_ready(self, thread_id: Optional[str]) -> None:
         if isinstance(thread_id, str) and thread_id:
             self._resumed_threads.add(thread_id)
+
+    def runtime_instance_id(self) -> Optional[str]:
+        return self._shell_id
+
+    def has_pending_approval(self, request_id: str) -> bool:
+        request_id_text = str(request_id or "").strip()
+        return bool(request_id_text and request_id_text in self._pending_approval_requests)
+
+    def resolve_approval(self, request_id: str, decision: str) -> bool:
+        request_id_text = str(request_id or "").strip()
+        if not request_id_text:
+            return False
+        pending = self._pending_approval_requests.pop(request_id_text, None)
+        if not pending:
+            return False
+        writer = self._stdin
+        if writer is None or not self._shell_id:
+            self._pending_approval_requests[request_id_text] = pending
+            return False
+
+        response_id: Any = int(request_id_text) if request_id_text.isdigit() else request_id_text
+        result_payload: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": response_id,
+            "result": {
+                "decision": "accept" if str(decision).strip().lower() == "accept" else "decline",
+            },
+        }
+        line = json.dumps(result_payload, ensure_ascii=False)
+        try:
+            self._raw_log_fn("out", pending.get("conversation_id") or self.get_raw_label(), line)
+            writer.write((line + "\n").encode("utf-8"))
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                loop.create_task(writer.drain())
+            return True
+        except Exception:
+            self._pending_approval_requests[request_id_text] = pending
+            return False
 
     async def rpc_request(
         self,
@@ -223,8 +276,9 @@ class CodexAppServerTransport:
 
         if self._shell_id:
             shell = await mgr.get_shell(self._shell_id)
-            if shell and shell.status == "running":
+            if shell and shell.status == "running" and getattr(shell, "spec_id", "") == "app_server_observed":
                 return self._shell_id
+            self._shell_id = None
 
         adopted = await self._adopt_existing_shell(mgr)
         if adopted:
@@ -245,6 +299,8 @@ class CodexAppServerTransport:
                 continue
             if (rec.label or "") != _TRANSPORT_LABEL:
                 continue
+            if getattr(rec, "spec_id", "") != "app_server_observed":
+                continue
             return rec.id
         return None
 
@@ -252,7 +308,7 @@ class CodexAppServerTransport:
         spec_path = self._server_root / "shellspec" / "app_server.yaml"
         orch = Orchestrator(mgr)
         shell = await orch.start_from_ref(
-            f"{spec_path}#app_server",
+            f"{spec_path}#app_server_observed",
             base_dir=spec_path.parent,
             ctx={"CWD": self._shell_cwd()},
             label=_TRANSPORT_LABEL,
@@ -266,6 +322,8 @@ class CodexAppServerTransport:
         self._fail_waiters("transport restarted")
         self._initialized = False
         self._resumed_threads.clear()
+        self._thread_conversations.clear()
+        self._turn_conversations.clear()
         try:
             await mgr.terminate_shell(shell_id, force=True)
         except Exception:
@@ -286,6 +344,7 @@ class CodexAppServerTransport:
         state = mgr.get_pipe_state(shell_id)
         if not state or not state.process.stdout:
             raise RuntimeError("codex extension transport pipe not available")
+        self._stdin = state.process.stdin
         self._reader_task = asyncio.create_task(
             self._reader_loop(shell_id),
             name="codex-extension-reader",
@@ -334,7 +393,9 @@ class CodexAppServerTransport:
         mgr = await self._fws_getter()
         state = mgr.get_pipe_state(shell_id)
         if not state or not state.process.stdin:
+            self._stdin = None
             raise RuntimeError("codex extension transport pipe not available")
+        self._stdin = state.process.stdin
         line = json.dumps(payload, ensure_ascii=False)
         self._raw_log_fn("out", conversation_id or self.get_raw_label(), line)
         state.process.stdin.write((line + "\n").encode("utf-8"))
@@ -373,6 +434,13 @@ class CodexAppServerTransport:
                 req_id = str(parsed.get("id"))
                 conversation_id = self._request_conversations.get(req_id)
                 self._raw_log_fn("in", conversation_id or self.get_raw_label(), text)
+                if conversation_id and isinstance(parsed.get("result"), dict):
+                    result = parsed.get("result")
+                    self._remember_bindings(
+                        conversation_id=conversation_id,
+                        thread_id=self._get_thread_id(result, fallback=None),
+                        turn_id=self._get_turn_id(result),
+                    )
                 waiter = self._rpc_waiters.get(req_id)
                 if waiter and not waiter.done():
                     waiter.set_result(parsed)
@@ -454,10 +522,49 @@ class CodexAppServerTransport:
         finally:
             self._initialized = False
             self._resumed_threads.clear()
+            self._thread_conversations.clear()
+            self._turn_conversations.clear()
+            self._pending_approval_requests.clear()
+            self._router.reset()
+            self._stdin = None
             self._fail_waiters("transport reader stopped")
             if self._shell_id == shell_id:
                 self._shell_id = None
             self._reader_task = None
+
+    async def route_event(
+        self,
+        label: str,
+        payload: Any,
+        *,
+        conversation_id: Optional[str],
+        thread_id: Optional[str],
+        turn_id: Optional[str],
+        request_id: Optional[str],
+    ) -> Dict[str, Any]:
+        protocol = await get_runtime_protocol()
+        routed_payload = dict(payload) if isinstance(payload, dict) else payload
+        if request_id is not None and isinstance(routed_payload, dict) and routed_payload.get("_request_id") is None:
+            routed_payload["_request_id"] = str(request_id)
+        routed = self._router.route_event(
+            protocol,
+            label=label,
+            payload=routed_payload,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            extract_item_text=_extract_item_text,
+        )
+        if conversation_id and isinstance(routed, dict):
+            descriptors = routed.get("approval_descriptors")
+            if isinstance(descriptors, list):
+                for descriptor in descriptors:
+                    if isinstance(descriptor, dict):
+                        self._persist_pending_approval(conversation_id, descriptor)
+            clear_ids = routed.get("clear_live_approval_ids")
+            if isinstance(clear_ids, list):
+                for pending_id in clear_ids:
+                    self._pending_approval_requests.pop(str(pending_id or "").strip(), None)
+        return routed
 
     async def _route_transport_event(
         self,
@@ -469,14 +576,13 @@ class CodexAppServerTransport:
         turn_id: Optional[str],
         request_id: Optional[str],
     ) -> None:
-        protocol = await get_runtime_protocol()
-        routed = route_codex_event(
-            protocol,
+        routed = await self.route_event(
             label=label,
             payload=payload,
+            conversation_id=conversation_id,
             thread_id=thread_id,
             turn_id=turn_id,
-            extract_item_text=_extract_item_text,
+            request_id=request_id,
         )
         if not isinstance(routed, dict) or not routed.get("handled"):
             return
@@ -506,6 +612,54 @@ class CodexAppServerTransport:
                     outbound["request_id"] = request_id
                 await self._broadcast_fn(outbound)
 
+    def _persist_pending_approval(self, conversation_id: str, descriptor: Dict[str, Any]) -> None:
+        request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
+        if not request_id_text:
+            return
+        meta = self._load_meta(conversation_id) or {}
+        settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+        created_at = str(descriptor.get("created_at") or datetime.now(timezone.utc).isoformat())
+        render_event = dict(descriptor.get("render_event") or {})
+        render_event["type"] = "approval"
+        render_event["conversation_id"] = render_event.get("conversation_id") or conversation_id
+        render_event["id"] = render_event.get("id") or request_id_text
+        render_event["request_id"] = render_event.get("request_id") or request_id_text
+        if descriptor.get("turn_id") and not render_event.get("turn_id"):
+            render_event["turn_id"] = descriptor.get("turn_id")
+        if not render_event.get("created_at"):
+            render_event["created_at"] = created_at
+
+        persisted = {
+            "request_id": request_id_text,
+            "agent": settings.get("agent") or "codex",
+            "kind": descriptor.get("kind") or "unknown",
+            "payload": dict(descriptor.get("payload") or {}),
+            "thread_id": descriptor.get("thread_id") or meta.get("thread_id"),
+            "turn_id": descriptor.get("turn_id"),
+            "runtime_signature": descriptor.get("runtime_signature") or meta.get("thread_runtime_signature"),
+            "runtime_instance_id": descriptor.get("runtime_instance_id") or self.runtime_instance_id(),
+            "transcript_anchor": dict(descriptor.get("transcript_anchor") or {"turn_id": descriptor.get("turn_id")}),
+            "source": descriptor.get("source") or "live",
+            "created_at": created_at,
+            "render_event": render_event,
+        }
+
+        upsert = self._meta_fns.get("upsert_pending_approval")
+        if callable(upsert):
+            upsert(conversation_id, persisted)
+        else:
+            meta = meta if isinstance(meta, dict) else {}
+            pending = meta.get("pending_approvals") if isinstance(meta.get("pending_approvals"), dict) else {}
+            pending[request_id_text] = persisted
+            meta["pending_approvals"] = pending
+            self._save_meta(conversation_id, meta)
+
+        self._pending_approval_requests[request_id_text] = {
+            "conversation_id": conversation_id,
+            "kind": persisted.get("kind"),
+            "thread_id": persisted.get("thread_id"),
+        }
+
     def _resolve_conversation_id(
         self,
         raw_conversation_id: Optional[str],
@@ -513,6 +667,16 @@ class CodexAppServerTransport:
     ) -> Optional[str]:
         if isinstance(raw_conversation_id, str) and self._conversation_exists(raw_conversation_id):
             return raw_conversation_id
+        turn_id = self._get_turn_id(payload)
+        if turn_id:
+            mapped = self._turn_conversations.get(turn_id)
+            if mapped:
+                return mapped
+        thread_id = self._get_thread_id(payload, fallback=raw_conversation_id)
+        if thread_id:
+            mapped = self._thread_conversations.get(thread_id)
+            if mapped:
+                return mapped
         if isinstance(raw_conversation_id, str):
             found = self._find_conversation_by_thread_id(raw_conversation_id)
             if found:
@@ -520,7 +684,6 @@ class CodexAppServerTransport:
         thread_id = self._get_thread_id(payload, fallback=None)
         if thread_id:
             return self._find_conversation_by_thread_id(thread_id)
-        turn_id = self._get_turn_id(payload)
         if turn_id:
             return self._find_conversation_by_turn_id(turn_id)
         return None
@@ -605,6 +768,7 @@ class CodexAppServerTransport:
     def _persist_thread_id(self, conversation_id: str, thread_id: str) -> None:
         if not conversation_id or not thread_id:
             return
+        self._thread_conversations[thread_id] = conversation_id
         meta = self._load_meta(conversation_id)
         if not isinstance(meta, dict):
             return
@@ -622,6 +786,8 @@ class CodexAppServerTransport:
             self._save_meta(conversation_id, meta)
 
     def _persist_turn_id(self, conversation_id: str, turn_id: Optional[str]) -> None:
+        if turn_id:
+            self._turn_conversations[turn_id] = conversation_id
         meta = self._load_meta(conversation_id)
         if not isinstance(meta, dict):
             return
@@ -635,6 +801,20 @@ class CodexAppServerTransport:
             changed = True
         if changed:
             self._save_meta(conversation_id, meta)
+
+    def _remember_bindings(
+        self,
+        *,
+        conversation_id: Optional[str],
+        thread_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+    ) -> None:
+        if not conversation_id:
+            return
+        if isinstance(thread_id, str) and thread_id:
+            self._thread_conversations[thread_id] = conversation_id
+        if isinstance(turn_id, str) and turn_id:
+            self._turn_conversations[turn_id] = conversation_id
 
     def _get_thread_id(self, payload: Any, fallback: Optional[str]) -> Optional[str]:
         if isinstance(payload, dict):

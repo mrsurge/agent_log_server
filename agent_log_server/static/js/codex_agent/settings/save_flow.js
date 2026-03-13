@@ -66,10 +66,12 @@ export function bindSettingsSaveFlow(ctx) {
 
     let settings;
     if (agentType === 'codex') {
+      const approvalKey = state.runtimeOptions?.approval?.settingKey || 'approvalPolicy';
+      const sandboxKey = state.runtimeOptions?.sandbox?.settingKey || 'sandboxPolicy';
       settings = {
         cwd,
-        approvalPolicy: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
-        sandboxPolicy: settingsSandboxEl?.value?.trim() || null,
+        [approvalKey]: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
+        [sandboxKey]: settingsSandboxEl?.value?.trim() || null,
         model: settingsModelEl?.value?.trim() || null,
         effort: settingsEffortEl?.value?.trim() || null,
         summary: settingsSummaryEl?.value?.trim() || null,

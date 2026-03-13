@@ -518,6 +518,14 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Dict[
                 "browse": True,
             },
             {
+                "id": "session",
+                "type": "session_picker",
+                "label": "Session",
+                "placeholder": "(new session)",
+                "source": f"/api/extensions/{extension_id}/sessions",
+                "resume_endpoint": f"/api/extensions/{extension_id}/sessions/resume",
+            },
+            {
                 "id": "model",
                 "type": "select",
                 "label": "Model",

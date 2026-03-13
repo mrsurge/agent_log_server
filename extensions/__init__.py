@@ -278,6 +278,75 @@ async def get_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _runtime_option_from_schema_field(field: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(field, dict):
+        return None
+    options_raw = field.get("options")
+    options: List[Dict[str, Any]] = []
+    if isinstance(options_raw, list):
+        for item in options_raw:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    options.append({"value": text, "label": text})
+                continue
+            if not isinstance(item, dict):
+                continue
+            value = item.get("value")
+            if not isinstance(value, str) or not value.strip():
+                continue
+            label = item.get("label")
+            if not isinstance(label, str) or not label.strip():
+                label = value
+            option: Dict[str, Any] = {
+                "value": value.strip(),
+                "label": label.strip(),
+            }
+            if item.get("deprecated") is True:
+                option["deprecated"] = True
+            options.append(option)
+    return {
+        "settingKey": field.get("id"),
+        "label": field.get("label") or field.get("id") or "",
+        "default": field.get("default") if isinstance(field.get("default"), str) else "",
+        "options": options,
+    }
+
+
+async def get_runtime_options(
+    extension_id: str,
+    conversation_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Get generic runtime-option descriptors for shared frontend controls."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "get_runtime_options"):
+        return await handler.get_runtime_options(
+            extension_id=extension_id,
+            conversation_id=conversation_id,
+            settings=settings,
+        )
+
+    schema = await get_settings_schema(extension_id)
+    fields = schema.get("fields") if isinstance(schema, dict) else None
+    if not isinstance(fields, list):
+        return {"agent": extension_id}
+
+    approval_field = next(
+        (field for field in fields if isinstance(field, dict) and field.get("id") in {"approvalPolicy", "approval_policy"}),
+        None,
+    )
+    sandbox_field = next(
+        (field for field in fields if isinstance(field, dict) and field.get("id") in {"sandboxPolicy", "sandbox_policy", "sandbox"}),
+        None,
+    )
+    return {
+        "agent": extension_id,
+        "approval": _runtime_option_from_schema_field(approval_field),
+        "sandbox": _runtime_option_from_schema_field(sandbox_field),
+    }
+
+
 async def route_event(
     extension_id: str,
     label: Optional[str],

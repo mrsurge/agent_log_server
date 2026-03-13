@@ -46,6 +46,97 @@ export function bindSettingsUiFlow(ctx) {
     rolloutListEl,
   } = elements;
 
+  function normalizeRuntimeOption(option) {
+    if (!option || typeof option !== 'object') return null;
+    const settingKey = typeof option.settingKey === 'string' ? option.settingKey.trim() : '';
+    const options = Array.isArray(option.options)
+      ? option.options
+          .map((item) => {
+            if (typeof item === 'string') {
+              const text = item.trim();
+              return text ? { value: text, label: text } : null;
+            }
+            if (!item || typeof item !== 'object') return null;
+            const value = typeof item.value === 'string' ? item.value.trim() : '';
+            if (!value) return null;
+            const label = typeof item.label === 'string' && item.label.trim() ? item.label.trim() : value;
+            return { value, label };
+          })
+          .filter(Boolean)
+      : [];
+    return {
+      settingKey,
+      options,
+      current: typeof option.current === 'string' ? option.current : '',
+      default: typeof option.default === 'string' ? option.default : '',
+    };
+  }
+
+  function getSettingValueByKey(settings, key) {
+    if (!settings || typeof settings !== 'object' || !key) return '';
+    const value = settings[key];
+    return typeof value === 'string' ? value : '';
+  }
+
+  function applyRuntimeOptions(runtimeOptions) {
+    const state = getState();
+    const approval = normalizeRuntimeOption(runtimeOptions?.approval);
+    const sandbox = normalizeRuntimeOption(runtimeOptions?.sandbox);
+    if (approval) {
+      updateDropdownOptions(settingsApprovalOptions, approval.options, settingsApprovalEl);
+      if (settingsApprovalEl) {
+        settingsApprovalEl.placeholder = approval.default || 'Use runtime default';
+        settingsApprovalEl.value = getSettingValueByKey(state.conversationSettings, approval.settingKey)
+          || approval.current
+          || settingsApprovalEl.value
+          || '';
+      }
+    } else {
+      updateDropdownOptions(settingsApprovalOptions, [], settingsApprovalEl);
+    }
+    if (sandbox) {
+      updateDropdownOptions(settingsSandboxOptions, sandbox.options, settingsSandboxEl);
+      if (settingsSandboxEl) {
+        settingsSandboxEl.placeholder = sandbox.default || 'Use runtime default';
+        settingsSandboxEl.value = getSettingValueByKey(state.conversationSettings, sandbox.settingKey)
+          || sandbox.current
+          || settingsSandboxEl.value
+          || '';
+      }
+    } else {
+      updateDropdownOptions(settingsSandboxOptions, [], settingsSandboxEl);
+    }
+  }
+
+  async function loadRuntimeOptions(agentId, conversationId) {
+    const agent = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : '';
+    const conversation_id = typeof conversationId === 'string' && conversationId.trim() ? conversationId.trim() : '';
+    try {
+      const query = new URLSearchParams();
+      if (conversation_id) query.set('conversation_id', conversation_id);
+      if (agent) query.set('agent', agent);
+      const fallbackUrl = query.size
+        ? `/api/appserver/runtime_options?${query.toString()}`
+        : '/api/appserver/runtime_options';
+      const data = await sioCall('get_runtime_options', {
+        conversation_id: conversation_id || null,
+        agent: agent || null,
+      }, {
+        fallbackUrl,
+        fallbackMethod: 'GET',
+      });
+      const next = (data && typeof data === 'object') ? data : {};
+      setState({ runtimeOptions: next });
+      applyRuntimeOptions(next);
+      return next;
+    } catch {
+      const next = {};
+      setState({ runtimeOptions: next });
+      applyRuntimeOptions(next);
+      return next;
+    }
+  }
+
   async function openSettingsModal() {
     if (!settingsModalEl) return;
     const state = getState();
@@ -71,8 +162,8 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsTe2McpIntegrationEl) settingsTe2McpIntegrationEl.checked = false;
     } else {
       if (settingsCwdEl) settingsCwdEl.value = state.conversationSettings?.cwd || '';
-      if (settingsApprovalEl) settingsApprovalEl.value = state.conversationSettings?.approvalPolicy || '';
-      if (settingsSandboxEl) settingsSandboxEl.value = state.conversationSettings?.sandboxPolicy || '';
+      if (settingsApprovalEl) settingsApprovalEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.approval?.settingKey) || state.conversationSettings?.approvalPolicy || '';
+      if (settingsSandboxEl) settingsSandboxEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.sandbox?.settingKey) || state.conversationSettings?.sandboxPolicy || '';
       if (settingsModelEl) settingsModelEl.value = state.conversationSettings?.model || '';
       updateEffortOptionsForModel(state.conversationSettings?.model);
       if (settingsEffortEl) settingsEffortEl.value = state.conversationSettings?.effort || '';
@@ -241,18 +332,34 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
+  function normalizeDropdownOption(option) {
+    if (typeof option === 'string') {
+      const text = option.trim();
+      return text ? { value: text, label: text } : null;
+    }
+    if (!option || typeof option !== 'object') return null;
+    const value = typeof option.value === 'string' ? option.value.trim() : '';
+    if (!value) return null;
+    const label = typeof option.label === 'string' && option.label.trim() ? option.label.trim() : value;
+    return { value, label };
+  }
+
   function buildDropdown(listEl, options, inputEl, onChange) {
     if (!listEl) return;
     listEl.innerHTML = '';
-    options.forEach((opt) => {
+    (options || [])
+      .map(normalizeDropdownOption)
+      .filter(Boolean)
+      .forEach((opt) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'dropdown-item';
-      btn.textContent = opt;
+      btn.dataset.value = opt.value;
+      btn.textContent = opt.label;
       btn.addEventListener('click', () => {
-        if (inputEl) inputEl.value = opt;
+        if (inputEl) inputEl.value = opt.value;
         closeDropdownMenu(listEl);
-        if (typeof onChange === 'function') onChange(opt);
+        if (typeof onChange === 'function') onChange(opt.value);
       });
       listEl.appendChild(btn);
     });
@@ -260,8 +367,14 @@ export function bindSettingsUiFlow(ctx) {
 
   function updateDropdownOptions(listEl, options, inputEl, onChange) {
     if (!listEl) return;
-    listEl.innerHTML = '';
-    const values = Array.from(new Set((options || []).filter(Boolean)));
+    const seen = new Set();
+    const values = [];
+    (options || []).forEach((option) => {
+      const normalized = normalizeDropdownOption(option);
+      if (!normalized || seen.has(normalized.value)) return;
+      seen.add(normalized.value);
+      values.push(normalized);
+    });
     buildDropdown(listEl, values, inputEl, onChange);
   }
 
@@ -309,6 +422,7 @@ export function bindSettingsUiFlow(ctx) {
     if (win.CodexAgent?.helpers?.onAgentChange) {
       await win.CodexAgent.helpers.onAgentChange(agentId);
     }
+    await loadRuntimeOptions(agentId, getState().conversationMeta?.conversation_id);
   }
 
   function normalizeModelEfforts(model) {
@@ -495,6 +609,7 @@ export function bindSettingsUiFlow(ctx) {
     buildDropdown,
     updateDropdownOptions,
     loadModelOptions,
+    loadRuntimeOptions,
     loadAgentOptions,
     onAgentSelectionChange,
     updateEffortOptionsForModel,
