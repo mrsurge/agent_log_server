@@ -59,33 +59,27 @@
       "id": "approval_policy",
       "type": "select",
       "label": "Approval Policy",
-      "options": [
-        {"value": "auto-approve", "label": "Auto-Approve"},
-        {"value": "suggest", "label": "Suggest (auto-approve on timeout)"},
-        {"value": "always-ask", "label": "Always Ask"}
-      ],
+      "options": [],
+      "dynamic_source": "/api/appserver/runtime_options",
+      "dynamic_options_key": "approval",
       "default": "suggest"
     },
     {
       "id": "sandbox_policy",
       "type": "select",
       "label": "Directory Trust",
-      "options": [
-        {"value": "cwd-only", "label": "CWD Only"},
-        {"value": "allow-all-paths", "label": "Allow All Paths"},
-        {"value": "ask", "label": "Ask"}
-      ],
+      "options": [],
+      "dynamic_source": "/api/appserver/runtime_options",
+      "dynamic_options_key": "sandbox",
       "default": "cwd-only"
     },
     {
       "id": "web_policy",
       "type": "select",
       "label": "Web Access",
-      "options": [
-        {"value": "deny", "label": "Deny"},
-        {"value": "allow", "label": "Allow"},
-        {"value": "ask", "label": "Ask"}
-      ],
+      "options": [],
+      "dynamic_source": "/api/appserver/runtime_options",
+      "dynamic_options_key": "web",
       "default": "deny"
     }
   ]

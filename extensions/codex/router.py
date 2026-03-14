@@ -1063,50 +1063,10 @@ class CodexEventRouter:
                     }],
                 }
 
-        if event_type == "exec_approval_request" and isinstance(payload, dict):
-            item_id = payload.get("call_id")
-            request_id_text = str(payload.get("approval_id") or item_id or "").strip()
-            item_state = self._get_item_state(item_id if isinstance(item_id, str) else None, thread_id, turn_id)
-            if request_id_text and item_id:
-                self._approval_request_map[str(item_id)] = request_id_text
-                item_state["approval_request_id"] = request_id_text
-            payload_data = {
-                "command": payload.get("parsed_cmd") or payload.get("command") or item_state.get("command"),
-                "cwd": payload.get("cwd") or item_state.get("cwd"),
-                "reason": payload.get("reason"),
-                "risk": payload.get("risk"),
-            }
-            return self._tool_request_result(
-                request_id=request_id_text or str(item_id or ""),
-                kind="command",
-                payload={key: value for key, value in payload_data.items() if value not in (None, "", [])},
-                thread_id=thread_id,
-                turn_id=turn_id,
-            )
-
-        if event_type == "apply_patch_approval_request" and isinstance(payload, dict):
-            item_id = payload.get("call_id")
-            request_id_text = str(payload.get("id") or item_id or "").strip()
-            item_state = self._get_item_state(item_id if isinstance(item_id, str) else None, thread_id, turn_id)
-            if request_id_text and item_id:
-                self._approval_request_map[str(item_id)] = request_id_text
-                item_state["approval_request_id"] = request_id_text
-            diff_text, path = _extract_diff_with_path({
-                "changes": payload.get("changes") or item_state.get("changes"),
-                "path": item_state.get("path"),
-            })
-            return self._tool_request_result(
-                request_id=request_id_text or str(item_id or ""),
-                kind="diff",
-                payload={
-                    "diff": diff_text,
-                    "changes": payload.get("changes") or item_state.get("changes"),
-                    "reason": payload.get("reason"),
-                    "path": path or item_state.get("path"),
-                },
-                thread_id=thread_id,
-                turn_id=turn_id,
-            )
+        if event_type in {"exec_approval_request", "apply_patch_approval_request"} and isinstance(payload, dict):
+            # These codex/event wrappers mirror approval context but do not carry the actionable
+            # JSON-RPC request id; only item/*/requestApproval should create live approval cards.
+            return {"handled": True, "events": [], "transcript_entries": []}
 
         return result
 

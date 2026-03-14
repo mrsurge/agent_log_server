@@ -15,6 +15,7 @@ Key advantages over ACP:
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable, Awaitable
@@ -78,6 +79,25 @@ _initialized: bool = False
 _raw_buffer: List[Dict[str, Any]] = []
 _RAW_BUFFER_MAX = 2000
 
+_APPROVAL_POLICY_OPTIONS: List[Dict[str, str]] = [
+    {"value": "auto-approve", "label": "Auto-Approve"},
+    {"value": "suggest", "label": "Suggest (auto-approve on timeout)"},
+    {"value": "always-ask", "label": "Always Ask"},
+]
+_SANDBOX_POLICY_OPTIONS: List[Dict[str, str]] = [
+    {"value": "cwd-only", "label": "CWD Only"},
+    {"value": "allow-all-paths", "label": "Allow All Paths"},
+    {"value": "ask", "label": "Ask"},
+]
+_WEB_POLICY_OPTIONS: List[Dict[str, str]] = [
+    {"value": "deny", "label": "Deny"},
+    {"value": "allow", "label": "Allow"},
+    {"value": "ask", "label": "Ask"},
+]
+_DEFAULT_APPROVAL_POLICY = "suggest"
+_DEFAULT_SANDBOX_POLICY = "cwd-only"
+_DEFAULT_WEB_POLICY = "deny"
+
 
 def _add_to_raw_buffer(direction: str, conversation_id: str, data: Any) -> None:
     entry = {
@@ -111,6 +131,7 @@ def _summarize_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "model": config.get("model"),
         "working_directory": config.get("working_directory"),
+        "config_dir": config.get("config_dir"),
         "reasoning_effort": config.get("reasoning_effort"),
         "streaming": config.get("streaming") is True,
         "has_system_message": bool(system_message),
@@ -184,6 +205,20 @@ def _merge_runtime_settings(
     return merged
 
 
+def _copilot_config_dir() -> str:
+    return str(Path.home() / ".copilot")
+
+
+def _resolve_external_copilot_cli_path() -> Optional[str]:
+    env_path = os.environ.get("COPILOT_CLI_PATH")
+    if isinstance(env_path, str) and env_path.strip():
+        return os.path.abspath(os.path.expanduser(env_path.strip()))
+    resolved = shutil.which("copilot")
+    if resolved:
+        return os.path.abspath(resolved)
+    return None
+
+
 def _runtime_signature_payload(
     conversation_id: str,
     settings: Optional[Dict[str, Any]] = None,
@@ -191,21 +226,24 @@ def _runtime_signature_payload(
     model: Optional[str] = None,
 ) -> Dict[str, Any]:
     merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
-    te2_enabled = te2_mcp_integration_enabled(merged)
-    return {
+    payload = {
         "cwd": merged.get("cwd"),
         "model": merged.get("model"),
-        "reasoning_effort": merged.get("reasoning_effort") or merged.get("effort"),
-        "developer_instructions": build_effective_developer_instructions(
-            merged.get("developer_instructions"),
-            te2_enabled=te2_enabled,
-        ),
-        "mcp_servers": build_copilot_mcp_servers(
-            merged.get("mcp_servers"),
-            te2_enabled=te2_enabled,
-            base_url=merged.get("te2_base_url"),
-        ),
+        "config_dir": _copilot_config_dir(),
     }
+
+    te2_enabled = te2_mcp_integration_enabled(merged)
+    payload["reasoning_effort"] = merged.get("reasoning_effort") or merged.get("effort")
+    payload["developer_instructions"] = build_effective_developer_instructions(
+        merged.get("developer_instructions"),
+        te2_enabled=te2_enabled,
+    )
+    payload["mcp_servers"] = build_copilot_mcp_servers(
+        merged.get("mcp_servers"),
+        te2_enabled=te2_enabled,
+        base_url=merged.get("te2_base_url"),
+    )
+    return payload
 
 
 def _runtime_signature(
@@ -227,6 +265,7 @@ def _build_session_runtime_config(
     merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
     config: Dict[str, Any] = {
         "streaming": True,
+        "config_dir": _copilot_config_dir(),
         "on_permission_request": _make_permission_handler(conversation_id),
         "hooks": SessionHooks(
             on_pre_tool_use=_make_pre_tool_use_hook(conversation_id),
@@ -273,6 +312,95 @@ def _build_session_runtime_config(
             config["mcp_servers"] = mcp_servers
 
     return config
+
+
+def _session_event_paths(session_id: str) -> List[Path]:
+    root = Path(_copilot_config_dir()) / "session-state"
+    return [
+        root / session_id / "events.jsonl",
+        root / f"{session_id}.jsonl",
+    ]
+
+
+def _sanitize_session_attachments(session_id: str) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"session_id": session_id, "records_rewritten": 0, "paths": []}
+    for path in _session_event_paths(session_id):
+        if not path.is_file():
+            continue
+        tmp = path.with_name(f".{path.name}.tmp")
+        rewritten = 0
+        with path.open("r", encoding="utf-8", errors="ignore") as src, tmp.open("w", encoding="utf-8") as dst:
+            for line in src:
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    dst.write(line)
+                    continue
+                data = record.get("data")
+                if isinstance(data, dict) and "attachments" in data and data.get("attachments") is None:
+                    data["attachments"] = []
+                    rewritten += 1
+                    dst.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n")
+                else:
+                    dst.write(line)
+        if rewritten:
+            tmp.replace(path)
+        else:
+            tmp.unlink(missing_ok=True)
+        result["records_rewritten"] += rewritten
+        result["paths"].append({"path": str(path), "rewritten": rewritten})
+    return result
+
+
+def _runtime_option_descriptor(
+    setting_key: str,
+    label: str,
+    options: List[Dict[str, str]],
+    current: Optional[str],
+    default: str,
+) -> Dict[str, Any]:
+    return {
+        "settingKey": setting_key,
+        "label": label,
+        "options": [dict(item) for item in options],
+        "current": current or "",
+        "default": default,
+    }
+
+
+async def get_runtime_options(
+    extension_id: str,
+    conversation_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    merged = _merge_runtime_settings(
+        conversation_id or "",
+        settings=settings,
+    ) if conversation_id else dict(settings or {})
+    return {
+        "agent": extension_id,
+        "approval": _runtime_option_descriptor(
+            "approval_policy",
+            "Approval Policy",
+            _APPROVAL_POLICY_OPTIONS,
+            merged.get("approval_policy") if isinstance(merged.get("approval_policy"), str) else None,
+            _DEFAULT_APPROVAL_POLICY,
+        ),
+        "sandbox": _runtime_option_descriptor(
+            "sandbox_policy",
+            "Directory Trust",
+            _SANDBOX_POLICY_OPTIONS,
+            merged.get("sandbox_policy") if isinstance(merged.get("sandbox_policy"), str) else None,
+            _DEFAULT_SANDBOX_POLICY,
+        ),
+        "web": _runtime_option_descriptor(
+            "web_policy",
+            "Web Access",
+            _WEB_POLICY_OPTIONS,
+            merged.get("web_policy") if isinstance(merged.get("web_policy"), str) else None,
+            _DEFAULT_WEB_POLICY,
+        ),
+    }
 
 
 def resolve_approval(request_id: str, decision: str) -> bool:
@@ -368,17 +496,17 @@ def _make_permission_handler(conversation_id: str) -> Callable:
         request: PermissionRequest,
         context: Dict[str, str],
     ) -> PermissionRequestResult:
-        kind = request.get("kind", "unknown")
-        tool_call_id = request.get("toolCallId", "")
+        kind = getattr(request, "kind", "unknown") or "unknown"
+        tool_call_id = getattr(request, "tool_call_id", "") or ""
         _add_to_raw_buffer("in", conversation_id, f"permission_request: {kind} tool={tool_call_id}")
 
         settings = _get_conversation_settings(conversation_id)
-        policy = settings.get("approval_policy", "suggest")
+        policy = settings.get("approval_policy", _DEFAULT_APPROVAL_POLICY)
 
         # Auto-approve: no user interaction needed
         if policy == "auto-approve":
             print(f"[CopilotSDK] Auto-approving {kind} tool={tool_call_id} convo={conversation_id[:8]}")
-            return {"kind": "approved", "rules": []}
+            return PermissionRequestResult(kind="approved", rules=[])
 
         print(f"[CopilotSDK] Permission request: kind={kind} tool={tool_call_id} policy={policy} convo={conversation_id[:8]}")
 
@@ -407,19 +535,21 @@ def _make_permission_handler(conversation_id: str) -> Callable:
                 normalized_args = raw_args
         if normalized_args:
             payload["arguments"] = normalized_args
-        if isinstance(request, dict):
-            request_fields = {
-                key: value
-                for key, value in request.items()
-                if key not in ("kind", "toolCallId")
-            }
-            if request_fields:
-                payload["request"] = request_fields
-            payload["path"] = payload.get("path") or request_fields.get("path") or request_fields.get("file_path") or request_fields.get("filePath") or request_fields.get("file")
-            payload["cwd"] = payload.get("cwd") or request_fields.get("cwd")
-            payload["diff"] = payload.get("diff") or request_fields.get("diff") or request_fields.get("patch") or request_fields.get("unified_diff")
-            if not payload.get("changes") and request_fields.get("changes") is not None:
-                payload["changes"] = request_fields.get("changes")
+        # Extract request fields from the PermissionRequest dataclass
+        request_fields: Dict[str, Any] = {}
+        for field_name in ("path", "file_name", "diff", "new_file_contents",
+                           "full_command_text", "args", "server_name",
+                           "intention", "subject", "read_only"):
+            val = getattr(request, field_name, None)
+            if val is not None:
+                request_fields[field_name] = val
+        if request_fields:
+            payload["request"] = request_fields
+        payload["path"] = payload.get("path") or request_fields.get("path") or request_fields.get("file_name")
+        payload["cwd"] = payload.get("cwd") or request_fields.get("cwd")
+        payload["diff"] = payload.get("diff") or request_fields.get("diff")
+        if not payload.get("changes") and request_fields.get("new_file_contents") is not None:
+            payload["changes"] = request_fields.get("new_file_contents")
 
         # Compute a preview diff from tool arguments if possible
         if isinstance(normalized_args, dict):
@@ -478,9 +608,9 @@ def _make_permission_handler(conversation_id: str) -> Callable:
                 decision = "accept"
 
         if decision == "accept":
-            return {"kind": "approved", "rules": []}
+            return PermissionRequestResult(kind="approved", rules=[])
         else:
-            return {"kind": "denied-interactively-by-user", "rules": []}
+            return PermissionRequestResult(kind="denied-interactively-by-user", rules=[])
 
     return handler
 
@@ -518,7 +648,7 @@ def _make_pre_tool_use_hook(conversation_id: str) -> Callable:
         settings = _get_conversation_settings(conversation_id)
 
         # ── Web policy check ──
-        web_policy = settings.get("web_policy", "deny")
+        web_policy = settings.get("web_policy", _DEFAULT_WEB_POLICY)
         if tool_name.lower() in _WEB_TOOLS or any(w in tool_name.lower() for w in ("web", "fetch", "url", "http")):
             if web_policy == "deny":
                 print(f"[CopilotSDK] Web tool '{tool_name}' denied by web_policy convo={conversation_id[:8]}")
@@ -528,7 +658,7 @@ def _make_pre_tool_use_hook(conversation_id: str) -> Callable:
             # "allow" → fall through
 
         # ── Sandbox / directory trust check ──
-        sandbox_policy = settings.get("sandbox_policy", "cwd-only")
+        sandbox_policy = settings.get("sandbox_policy", _DEFAULT_SANDBOX_POLICY)
         if sandbox_policy != "allow-all-paths" and tool_name.lower() in _FILE_TOOLS:
             cwd = settings.get("cwd") or os.path.expanduser("~")
             cwd = os.path.realpath(os.path.expanduser(cwd))
@@ -602,14 +732,18 @@ async def _ensure_client() -> CopilotClient:
     global _client
     async with _get_client_lock():
         if _client is None:
-            _client = CopilotClient({
+            client_options: Dict[str, Any] = {
                 "use_stdio": True,
                 "auto_start": True,
                 "auto_restart": True,
                 "log_level": "info",
-            })
+            }
+            cli_path = _resolve_external_copilot_cli_path()
+            if cli_path:
+                client_options["cli_path"] = cli_path
+            _client = CopilotClient(client_options)
             await _client.start()
-            print(f"[CopilotSDK] Client started, state={_client.get_state()}")
+            print(f"[CopilotSDK] Client started, state={_client.get_state()} cli_path={cli_path or 'bundled/default'}")
         return _client
 
 
@@ -799,6 +933,9 @@ async def _resume_session_unlocked(
 
     try:
         client = await _ensure_client()
+        sanitize_result = _sanitize_session_attachments(str(sdk_session_id))
+        if sanitize_result.get("records_rewritten"):
+            _add_to_raw_buffer("out", conversation_id, f"sanitize_session_attachments {sanitize_result}")
         runtime_signature = _runtime_signature(
             conversation_id,
             settings=settings,
@@ -844,6 +981,47 @@ async def _resume_session_unlocked(
         return {"ok": False, "error": f"Session resume failed: {e}"}
 
 
+def _register_attached_session(
+    client: CopilotClient,
+    conversation_id: str,
+    sdk_session_id: str,
+    runtime_signature: str,
+    config: Dict[str, Any],
+) -> CopilotSession:
+    """
+    Attach to a known SDK session id without issuing session.resume first.
+
+    This preserves the send-first contract: try the turn against the persisted
+    session id, and only fall back to session.resume if the CLI reports that the
+    session is not currently loaded.
+    """
+    router = CopilotEventRouter(
+        conversation_id=conversation_id,
+        broadcast_fn=_broadcast_fn,
+        transcript_fn=_transcript_fn,
+    )
+    _routers[conversation_id] = router
+
+    session = CopilotSession(sdk_session_id, client._client)  # type: ignore[attr-defined]
+    session._register_permission_handler(config.get("on_permission_request"))
+    hooks = config.get("hooks")
+    if hooks:
+        session._register_hooks(hooks)
+    on_user_input_request = config.get("on_user_input_request")
+    if on_user_input_request:
+        session._register_user_input_handler(on_user_input_request)
+
+    with client._sessions_lock:  # type: ignore[attr-defined]
+        client._sessions[sdk_session_id] = session  # type: ignore[attr-defined]
+
+    _sessions[conversation_id] = session
+    _runtime_signatures[conversation_id] = runtime_signature
+    unsub = session.on(_make_event_handler(conversation_id))
+    _unsubs[conversation_id] = unsub
+    _add_to_raw_buffer("out", conversation_id, f"session_attached sdk={sdk_session_id[:8]}")
+    return session
+
+
 # ── Message handling ────────────────────────────────────────────────
 
 async def handle_message(
@@ -869,23 +1047,31 @@ async def handle_message(
             cwd=cwd,
             model=settings.get("model"),
         )
+        config = _build_session_runtime_config(
+            conversation_id,
+            settings=settings,
+            cwd=cwd,
+            model=settings.get("model"),
+        )
 
-        # Ensure session exists — lazy resume or init
+        # Ensure session exists — attach/send first for known sessions, init for new ones
         if conversation_id not in _sessions:
-            # Check if this conversation already has a thread_id (needs resume, not init)
+            # Check if this conversation already has a thread_id.
             thread_id = None
+            result: Dict[str, Any] = {"ok": True}
             if _meta_fns and "load" in _meta_fns:
                 meta = _meta_fns["load"](conversation_id)
                 if meta:
                     thread_id = meta.get("thread_id")
 
             if thread_id:
-                # Existing session — resume it (like codex thread/resume)
-                result = await _resume_session_unlocked(
+                client = await _ensure_client()
+                _register_attached_session(
+                    client,
                     conversation_id,
-                    cwd=cwd,
-                    model=settings.get("model"),
-                    settings=settings,
+                    str(thread_id),
+                    desired_signature,
+                    config,
                 )
             else:
                 # Brand new conversation — create a fresh session
@@ -926,7 +1112,7 @@ async def handle_message(
 
             # Fire-and-forget send — events come via session.on() handler
             await session.send(
-                MessageOptions(prompt=text),
+                MessageOptions(prompt=text, attachments=[]),
             )
 
             return {"ok": True, "session_id": conversation_id}
@@ -938,7 +1124,7 @@ async def handle_message(
                 print(f"[CopilotSDK] Session evicted, attempting re-resume for {conversation_id[:8]}")
                 _add_to_raw_buffer("out", conversation_id, "session_evicted, re-resuming...")
                 # Clear stale in-memory state so resume rebuilds it
-                _sessions.pop(conversation_id, None)
+                stale_session = _sessions.pop(conversation_id, None)
                 _routers.pop(conversation_id, None)
                 _runtime_signatures.pop(conversation_id, None)
                 if conversation_id in _unsubs:
@@ -946,6 +1132,9 @@ async def handle_message(
                         _unsubs.pop(conversation_id)()
                     except Exception:
                         pass
+                if stale_session and _client:
+                    with _client._sessions_lock:  # type: ignore[attr-defined]
+                        _client._sessions.pop(stale_session.session_id, None)  # type: ignore[attr-defined]
                 result = await _resume_session_unlocked(
                     conversation_id,
                     cwd=cwd,
@@ -961,7 +1150,7 @@ async def handle_message(
                     return {"ok": False, "error": "Session not found after re-resume"}
                 await router.on_turn_start(text)
                 try:
-                    await session.send(MessageOptions(prompt=text))
+                    await session.send(MessageOptions(prompt=text, attachments=[]))
                     return {"ok": True, "session_id": conversation_id}
                 except Exception as e2:
                     print(f"[CopilotSDK] Retry send failed: {e2}")
@@ -1281,6 +1470,10 @@ async def _destroy_session_unlocked(conversation_id: str) -> bool:
     session = _sessions.pop(conversation_id, None)
     _routers.pop(conversation_id, None)
     _runtime_signatures.pop(conversation_id, None)
+
+    if session and _client:
+        with _client._sessions_lock:  # type: ignore[attr-defined]
+            _client._sessions.pop(session.session_id, None)  # type: ignore[attr-defined]
 
     if session:
         try:

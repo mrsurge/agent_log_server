@@ -157,6 +157,35 @@ window.CodexAgentModules.push((ctx) => {
         .filter(Boolean);
     };
 
+    const normalizeDynamicSelectOptions = (field, data) => {
+      if (!data) return { items: [], options: [], current: '', defaultValue: '' };
+      if (field.dynamic_options_key && typeof data === 'object' && !Array.isArray(data)) {
+        const descriptor = data[field.dynamic_options_key];
+        const items = Array.isArray(descriptor?.options) ? descriptor.options : [];
+        const options = items.map((item) => {
+          if (typeof item === 'string') return { value: item, label: item };
+          if (!item || typeof item !== 'object') return null;
+          const value = typeof item.value === 'string' ? item.value : '';
+          if (!value) return null;
+          return {
+            value,
+            label: (typeof item.label === 'string' && item.label) ? item.label : value,
+          };
+        }).filter(Boolean);
+        return {
+          items,
+          options,
+          current: typeof descriptor?.current === 'string' ? descriptor.current : '',
+          defaultValue: typeof descriptor?.default === 'string' ? descriptor.default : '',
+        };
+      }
+      const items = Array.isArray(data) ? data : data.models || data.options || [];
+      const options = items.map((item) => typeof item === 'object'
+        ? { value: item.id || item.value, label: item.name || item.label || item.id || item.value }
+        : { value: item, label: item });
+      return { items, options, current: '', defaultValue: '' };
+    };
+
     const setSelectOptions = (control, options) => {
       if (!control?.listDiv || !control?.input) return;
       control.listDiv.innerHTML = '';
@@ -339,31 +368,53 @@ window.CodexAgentModules.push((ctx) => {
             const loadOpts = (data) => {
               console.log(`[schema] loadOpts field=${field.id}`, data);
               if (!data) return;
-              const items = Array.isArray(data) ? data
-                : data.models || data.options || [];
-              const opts = items.map(m => typeof m === 'object'
-                ? { value: m.id || m.value, label: m.name || m.label || m.id || m.value }
-                : { value: m, label: m });
+              const { items, options: opts, current, defaultValue } = normalizeDynamicSelectOptions(field, data);
               console.log(`[schema] built ${opts.length} options for ${field.id}`);
               if (field.id === 'model') {
                 modelItems = items.filter((item) => item && typeof item === 'object');
                 if (!input.value) {
                   input.placeholder = field.placeholder || 'Use server default';
                 }
+              } else if (!input.value) {
+                input.placeholder = defaultValue || field.placeholder || '';
+                if (current) input.value = current;
               }
               if (opts.length) buildOptions(opts);
               if (field.id === 'model') syncReasoningEffortOptions();
             };
-            // Extract extension_id from dynamic_source URL pattern /api/extensions/{id}/models
+            const selectedAgent = settingsAgentEl?.value?.trim() || '';
+            const conversationId = window.CodexAgent?.state?.conversationMeta?.conversation_id || '';
+            const dynamicSource = typeof field.dynamic_source === 'string' ? field.dynamic_source : '';
+            const runtimeOptionsSource = dynamicSource.includes('appserver')
+              && dynamicSource.includes('runtime_options');
             const srcMatch = field.dynamic_source.match(/\/api\/extensions\/([^/]+)\/models/);
-            console.log(`[schema] dynamic_source=${field.dynamic_source} srcMatch=${srcMatch?.[1]||'null'} sioCall=${!!ctx.helpers?.sioCall}`);
-            if (srcMatch && ctx.helpers?.sioCall) {
+            console.log(`[schema] dynamic_source=${field.dynamic_source} srcMatch=${srcMatch?.[1]||'null'} runtimeOptions=${runtimeOptionsSource} sioCall=${!!ctx.helpers?.sioCall}`);
+            if (runtimeOptionsSource && ctx.helpers?.sioCall) {
+              const payload = {
+                conversation_id: conversationId || null,
+                agent: selectedAgent || null,
+              };
+              const query = new URLSearchParams();
+              if (conversationId) query.set('conversation_id', conversationId);
+              if (selectedAgent) query.set('agent', selectedAgent);
+              const fallbackUrl = query.size
+                ? `${field.dynamic_source}?${query.toString()}`
+                : field.dynamic_source;
+              ctx.helpers.sioCall('get_runtime_options', payload, {
+                fallbackUrl,
+                fallbackMethod: 'GET',
+              }).then(loadOpts).catch(e => console.error(`[schema] sioCall runtime options failed`, e));
+            } else if (srcMatch && ctx.helpers?.sioCall) {
               ctx.helpers.sioCall('get_extension_models', { extension_id: srcMatch[1] }, {
                 fallbackUrl: field.dynamic_source, fallbackMethod: 'GET',
               }).then(loadOpts).catch(e => console.error(`[schema] sioCall models failed`, e));
             } else {
-              fetch(field.dynamic_source, { cache: 'no-store' })
-                .then(r => { console.log(`[schema] fetch ${field.dynamic_source} status=${r.status}`); return r.ok ? r.json() : null; })
+              const query = new URLSearchParams();
+              if (runtimeOptionsSource && conversationId) query.set('conversation_id', conversationId);
+              if (runtimeOptionsSource && selectedAgent) query.set('agent', selectedAgent);
+              const fetchUrl = query.size ? `${field.dynamic_source}?${query.toString()}` : field.dynamic_source;
+              fetch(fetchUrl, { cache: 'no-store' })
+                .then(r => { console.log(`[schema] fetch ${fetchUrl} status=${r.status}`); return r.ok ? r.json() : null; })
                 .then(loadOpts).catch(e => console.error(`[schema] fetch models failed`, e));
             }
           }
