@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Codex Agent Server is a FastHTML-based Python server that acts as a **bridge and UI layer** between the OpenAI Codex CLI (`codex-app-server` binary) and a web-based frontend. It provides a rich conversational interface for interacting with AI coding agents.
+The Codex Agent Server is a FastAPI + `fastcore.xml` Python server that acts as a **bridge and UI layer** between the OpenAI Codex CLI (`codex-app-server` binary) and a web-based frontend. It provides a rich conversational interface for interacting with AI coding agents.
 
 ### Core Architecture
 
@@ -12,11 +12,11 @@ The Codex Agent Server is a FastHTML-based Python server that acts as a **bridge
 │  ┌─────────────────────────────────────────────────────────────────┐│
 │  │                    codex_agent.js                               ││
 │  │  - Dumb renderer (displays what backend tells it)               ││
-│  │  - WebSocket client for real-time updates                       ││
-│  │  - REST client for actions (send message, approve, etc.)        ││
+│  │  - Socket.IO client for live updates and actions                ││
+│  │  - HTTP fallback for the same app-level actions                 ││
 │  └─────────────────────────────────────────────────────────────────┘│
 └──────────────────────────────┬──────────────────────────────────────┘
-                               │ WebSocket (events) + REST (actions)
+                               │ Socket.IO + HTTP fallback
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Python Server (server.py)                        │
@@ -45,21 +45,24 @@ The Codex Agent Server is a FastHTML-based Python server that acts as a **bridge
 
 ### 1. SSOT Conversation Configuration Sidecar
 
-The **Single Source of Truth (SSOT)** sidecar is a JSON file that stores the current conversation's configuration. Located at `conversations/<id>/conversation_meta.json`.
+The **Single Source of Truth (SSOT)** sidecar is a JSON file that stores the current conversation's configuration. Located at `conversations/<id>/meta.json`.
 
 ```json
 {
   "conversation_id": "uuid",
-  "thread_id": "codex-thread-id",    // null if draft
-  "label": "user-friendly name",
-  "model": "gpt-5.2-codex",
-  "approval": "never|always|unlessTrusted",
-  "reasoning_effort": "low|medium|high",
-  "rollout_path": "/path/to/rollout.jsonl",
-  "cwd": "/working/directory",
+  "thread_id": "codex-thread-id",
   "created_at": "ISO timestamp",
-  "pinned": false,
-  "command_output_lines": 20
+  "pending_approvals": {},
+  "settings": {
+    "agent": "codex",
+    "cwd": "/working/directory",
+    "approvalPolicy": "on-request",
+    "sandboxPolicy": "workspace-write",
+    "model": "gpt-5-codex",
+    "effort": "medium",
+    "label": "user-friendly name"
+  },
+  "status": "draft|active"
 }
 ```
 
@@ -111,13 +114,13 @@ When loading a rollout, the `thread_id` is extracted and set immediately, so rol
 ```
 Frontend                    Python Server                 codex-app-server
    │                              │                              │
-   │ POST /api/appserver/rpc      │                              │
-   │ {method: "turn/submit",      │                              │
-   │  params: {message: "..."}}   │                              │
+   │ SIO/HTTP: send_message       │                              │
+   │ {conversation_id, text}      │                              │
    │─────────────────────────────>│                              │
    │                              │                              │
-   │                              │ Write JSON + newline         │
-   │                              │ to stdin                     │
+   │                              │ Load meta.json               │
+   │                              │ Resolve thread/start/resume  │
+   │                              │ Send turn/start              │
    │                              │─────────────────────────────>│
    │                              │                              │
    │                              │ stdout: turn/started         │
@@ -140,6 +143,8 @@ Frontend                    Python Server                 codex-app-server
    │<─────────────────────────────│                              │
 ```
 
+The frontend only knows `conversation_id` on the normal send path. Thread lifecycle is negotiated by the Python runtime.
+
 ### B. File Change Approval Flow
 
 ```
@@ -151,21 +156,27 @@ codex-app-server              Python Server                    Frontend
       │  changes: [...]}             │                              │
       │─────────────────────────────>│                              │
       │                              │                              │
-      │                              │ WS: approval_request         │
-      │                              │ {requestId: 0, diff: "..."}  │
+      │                              │ Persist pending approval     │
+      │                              │ into meta.json               │
+      │                              │                              │
+      │                              │ WS: appserver_event          │
+      │                              │ {type: "approval", ...}      │
       │                              │─────────────────────────────>│
       │                              │                              │
       │                              │      [User clicks Accept]    │
       │                              │                              │
-      │                              │ POST /api/appserver/rpc      │
-      │                              │ {id: 0, result:              │
-      │                              │  {decision: "accept"}}       │
+      │                              │ SIO/HTTP: approval_response  │
+      │                              │ {request_id: 0,              │
+      │                              │  decision: "accept"}         │
       │                              │<─────────────────────────────│
       │                              │                              │
       │ stdin: JSON-RPC response     │                              │
       │ {id: 0, result:              │                              │
       │  {decision: "accept"}}       │                              │
       │<─────────────────────────────│                              │
+      │                              │                              │
+      │                              │ Remove pending approval      │
+      │                              │ from meta.json               │
       │                              │                              │
       │ [applies patch]              │                              │
       │                              │                              │
@@ -182,6 +193,8 @@ codex-app-server              Python Server                    Frontend
       │                              │─────────────────────────────>│
 ```
 
+The exact live approval card payload is also persisted in `meta.json.pending_approvals[request_id].render_event` so replay uses the same data the live UI saw.
+
 ### C. Conversation Switching
 
 ```
@@ -191,12 +204,14 @@ Frontend                    Python Server                 codex-app-server
    │ {id: "new-convo-id"}         │                              │
    │─────────────────────────────>│                              │
    │                              │                              │
-   │                              │ Load conversation_meta.json  │
+   │                              │ Load meta.json               │
    │                              │ from conversations/<id>/     │
    │                              │                              │
    │                              │ If has rollout_path:         │
    │                              │   Parse rollout, extract     │
    │                              │   thread_id                  │
+   │                              │ Validate pending approvals   │
+   │                              │ for replay                   │
    │                              │                              │
    │ 200 OK                       │                              │
    │<─────────────────────────────│                              │
@@ -227,7 +242,7 @@ Frontend                    Python Server
    │                              │
    │                              │ Generate UUID
    │                              │ Create conversations/<id>/
-   │                              │ Write conversation_meta.json
+   │                              │ Write meta.json
    │                              │ Create empty transcript.jsonl
    │                              │
    │ {id: "new-uuid"}             │
@@ -252,7 +267,7 @@ Frontend                    Python Server
 | `item/completed` | Item ends | Full item data |
 | `item/agentMessage/delta` | Streaming text | `delta` (text chunk) |
 | `item/reasoning/summaryTextDelta` | Reasoning stream | `delta` |
-| `item/fileChange/requestApproval` | Needs approval | `itemId`, changes, diff |
+| `item/fileChange/requestApproval` | Needs approval | `itemId`, `reason`, `grantRoot` (diff comes from prior `fileChange` item state) |
 | `thread/started` | New thread created | `thread` object with `id` |
 | `thread/tokenUsage/updated` | Token counts | Usage stats |
 | `account/rateLimits/updated` | Rate limit info | Percentages, reset times |
@@ -267,7 +282,7 @@ Frontend                    Python Server
 | `agent_reasoning_delta` | Thinking streaming |
 | `exec_command_begin` | Shell command starting |
 | `exec_command_end` | Shell command finished |
-| `apply_patch_approval_request` | File change needs approval |
+| `apply_patch_approval_request` | Legacy approval-context mirror (non-actionable without the matching JSON-RPC request id) |
 
 ## Frontend Components
 
@@ -277,7 +292,7 @@ Main JavaScript file handling all frontend logic:
 
 **Key Functions:**
 - `initSocketIO()` - Establishes WebSocket connection
-- `sendRpc(method, params)` - Sends JSON-RPC to backend
+- `sendUserMessage(text)` - Sends a generic conversation-scoped message
 - `respondApproval(requestId, decision)` - Handles approval buttons
 - `renderDiff(diffText)` - Parses and renders unified diffs
 - `renderTranscriptEntries(entries)` - Renders transcript items
@@ -330,15 +345,17 @@ Main JavaScript file handling all frontend logic:
 
 ```
 agent_log_server/
-├── server.py                 # Main server
-├── static/
-│   ├── codex_agent.js       # Frontend logic
-│   └── codex_agent.css      # Styles
-├── templates/
-│   └── codex_agent.html     # Main page template
+├── agent_log_server/
+│   ├── server.py             # Main server
+│   ├── static/
+│   │   ├── codex_agent.js    # Frontend logic
+│   │   └── codex_agent.css   # Styles
+│   ├── templates/
+│   │   └── template.html     # Legacy agent log page
+│   └── shellspec/
 ├── conversations/           # Conversation data
 │   └── <uuid>/
-│       ├── conversation_meta.json
+│       ├── meta.json
 │       └── transcript.jsonl
 └── my-schema/              # JSON schemas for validation
 ```
@@ -363,8 +380,11 @@ agent_log_server/
 | Mode | Behavior |
 |------|----------|
 | `never` | Auto-approve everything (YOLO mode) |
-| `always` | Require approval for all changes |
-| `unlessTrusted` | Approve trusted commands, ask for others |
+| `on-request` | Ask when the runtime explicitly requires approval |
+| `untrusted` | Auto-approve trusted actions, ask for untrusted ones |
+| `on-failure` | Older compatibility value; do not advertise it in new UI flows |
+
+Approval and sandbox option lists should come from the backend runtime contract, not from frontend hardcoded arrays.
 
 ### Reasoning Effort
 
@@ -439,16 +459,16 @@ When debug mode is enabled (`--debug` flag or via toggle endpoint), raw events a
 
 | Event | Data | Description |
 |-------|------|-------------|
-| `codex_event` | `{type, data}` | Generic codex event |
+| `appserver_event` | `{type, ...}` | Generic live event stream |
 | `server_status` | `{status}` | Server state change |
-| `approval_request` | `{requestId, diff, path}` | Needs user approval |
+| `appserver_event` approval payload | `{type: "approval", request_id, payload}` | Needs user approval |
 | `plan` | `{steps: [{step, status}]}` | Completed plan from turn |
 | `error` | `{message}` | Error from codex-app-server |
 | `warning` | `{message}` | Warning from codex-app-server |
 
 ### Client → Server
 
-The client primarily uses REST endpoints, not WebSocket for sending data.
+The client prefers Socket.IO application events with HTTP fallback for the same actions.
 
 ## Diff Rendering
 
@@ -500,6 +520,7 @@ Output is truncated to `command_output_lines` setting (default: 20 lines).
 **Solution:**
 - Only render `turn_diff` events (long diffs with context)
 - Skip short diffs from `item/fileChange` events
+- Ignore `apply_patch_approval_request` for live approval cards; it mirrors diff context but not the actionable request id
 - Deduplicate by content hash (`seenDiffs` Set)
 - Extract filename from `--- a/filename` header or `path` field
 - Show relative paths, strip git prefixes
@@ -522,6 +543,7 @@ Output is truncated to `command_output_lines` setting (default: 20 lines).
 
 **Solution:**
 - Fixed JSON-RPC response format to match request ID
+- Treat `item/*/requestApproval` as the canonical actionable approval event and ignore the legacy `codex/event/*_approval_request` wrappers for live cards
 - Remove approval card from DOM after decision
 - Record approval status to transcript: `{"role": "approval", "status": "accepted|declined", ...}`
 - Declined approvals show with red left border accent
@@ -691,34 +713,39 @@ Different RPC methods accept different parameters (per codex-app-server schema):
 **Key Behavior:**
 - Changing `model` mid-conversation: Takes effect on next `thread/resume` or `turn/start`
 - Changing `effort` (reasoning level) mid-conversation: Takes effect on next `turn/start` only (not on resume)
+- Changing `summary` (reasoning summary mode) mid-conversation: Takes effect on next `turn/start` only (not on resume)
+- In `codex-ext-testing`, `summary` is now surfaced in the runtime-generated settings schema and persisted in SSOT/meta with enum values `auto`, `concise`, `detailed`, and `none`
 - Settings are read fresh from SSOT on each RPC, enabling mid-conversation changes
 - Multi-device/tab support: Backend always uses current SSOT, frontend validates conversation ID before sending
 
-### Thread Resume Gating via “Thread Session Marker” (Implemented)
+### Backend-Owned Send/Resume Strategy (Current Behavior)
 
-**Problem:** `thread/resume` was being invoked more often than needed. In codex-app-server, `thread/resume` creates a new conversation session, which re-initializes MCP and can spawn additional stdio MCP server processes. Once a thread is already active for the current app-server run, re-resuming is redundant.
+**Problem:** the frontend should not decide whether a thread is or is not loaded in app-server memory.
 
 **Solution:**
-- The system writes a **thread session marker** into SSOT after a successful `thread/start` or `thread/resume`.
-- The marker is a pair: `{ thread_session_shell_id, thread_session_thread_id }`.
-- On first message after a restart/reconnect, the frontend compares:
-  - current app-server shell id (from `/api/appserver/status`) vs `thread_session_shell_id`
-  - current thread id vs `thread_session_thread_id`
-- Only when either differs does it call `thread/resume`. Otherwise it goes straight to `turn/start`.
-
-**SSOT Setting:**
-```json
-{
-  "settings": {
-    "thread_session_shell_id": "fs_<timestamp>_<rand>",
-    "thread_session_thread_id": "<thread_id>"
-  }
-}
-```
+- frontend sends a generic `send_message` against `conversation_id`
+- backend checks `meta.json.thread_id`
+- if there is no thread yet, backend performs `thread/start` and then `turn/start`
+- if there is a thread and the transport has not resumed it yet, or thread-level runtime settings changed, backend performs `thread/resume` and then `turn/start`
+- if there is a thread already ready with the same thread-level settings, backend sends `turn/start` directly
+- turn-only settings such as `effort` and `summary` ride on `turn/start` and do not force a thread resume by themselves
 
 **Behavior Summary:**
-- **Same marker:** No resume; reuse the existing thread session.
-- **Marker changed/missing:** Resume once, then update SSOT.
+- frontend stays `conversation_id`-only
+- backend owns thread lifecycle
+- backend also owns the split between thread-level settings and turn-only overrides
+- the same ownership model matches extension backends that use session IDs instead of thread IDs
+
+### Generic Runtime Options (Implemented)
+
+Approval and sandbox dropdowns in the shared frontend are driven by a backend runtime-options contract.
+
+- frontend asks generically for runtime options
+- backend resolves the active agent from `meta.json.settings.agent`
+- legacy Codex answers internally
+- extensions answer through generic hooks in `extensions/__init__.py`
+
+This keeps shared frontend files platform-agnostic while still reflecting runtime-supported values such as `on-request`.
 
 ### Dynamic Model/Effort Dropdowns (Implemented)
 
@@ -951,21 +978,36 @@ All extension HTTP endpoints use `{extension_id}` path parameters:
 | `approval_response` | `{request_id, decision}` | Resolve approval (reads agent from meta) |
 | `get_extension_models` | `{extension_id}` | List models |
 
-### Session Hydration: bind-rollout Pattern
+### New session from port-in vs existing conversation hydration
 
-When a user picks an existing session to bind to a new conversation, the server follows the **same pattern** as Codex rollout binding:
+There are two different flows that are easy to conflate:
+
+- **new session from port-in**
+  - bind an external rollout/session into a fresh local conversation
+  - import flat transcript entries before the response returns
+- **existing conversation hydration**
+  - replay an already-local `transcript.jsonl`
+  - uses the platform-agnostic replay helpers
+
+Reference patterns:
 
 ```
-Codex bind-rollout:
-  1. _rollout_preview_entries(path)   → List[{role, text, ts}]   (reads JSONL file)
-  2. _write_transcript_entries(items) → writes transcript.jsonl
+Legacy Codex port-in:
+  1. _rollout_preview_entries(path)                         → List[{role, text, ts}]
+  2. _write_transcript_entries(items)                       → writes transcript.jsonl
 
-Extension hydrate_transcript:
-  1. ext_loader.hydrate_transcript(ext_id, session_id, ...) → List[{role, text, ts}]  (calls SDK)
-  2. _write_transcript_entries(items)  → writes transcript.jsonl  (SAME function!)
+Copilot SDK port-in:
+  1. ext_loader.resume_session_with_history(ext_id, ...)    → bind + resume
+  2. ext_loader.hydrate_transcript(ext_id, session_id, ...) → List[{role, text, ts}]  (SDK history)
+  3. _write_transcript_entries(items)                       → writes transcript.jsonl
+
+codex-ext-testing port-in:
+  1. ext_loader.resume_session_with_history(ext_id, ...)    → bind + resume
+  2. ext_loader.hydrate_transcript(ext_id, session_id, ...) → List[{role, text, ts}]  (internal rollout import helper)
+  3. _write_transcript_entries(items)                       → writes transcript.jsonl
 ```
 
-**Critical:** Hydration MUST complete before the HTTP response returns. The frontend transitions to conversation view and calls `replayTranscript()` immediately — if transcript isn't written yet, the view is empty. (This was a race condition when hydration was `asyncio.create_task()` fire-and-forget.)
+**Critical:** Port-in hydration MUST complete before the HTTP response returns. The frontend transitions to conversation view and calls `replayTranscript()` immediately — if transcript is not written yet, the view is empty.
 
 ### ext_loader Pass-Through Methods
 
@@ -976,20 +1018,34 @@ Extension hydrate_transcript:
 | `list_models(ext_id)` | `async → List` | Get available models |
 | `list_sessions(ext_id, cwd)` | `async → List` | Get resumable sessions |
 | `resume_session_with_history(ext_id, session_id, convo_id, ...)` | `async → Dict` | Bind session to conversation |
-| `hydrate_transcript(ext_id, session_id, convo_id, ...)` | `async → List[Dict]` | Build flat transcript entries |
+| `hydrate_transcript(ext_id, session_id, convo_id, ...)` | `async → List[Dict]` | Build flat transcript entries for a new session from port-in |
+| `get_runtime_options(ext_id, conversation_id, settings)` | `async → Dict` | Return generic approval/sandbox descriptors |
 | `resolve_approval(ext_id, request_id, decision)` | `sync → None` | Resolve pending approval |
 | `shutdown_extension(ext_id)` | `async → None` | Graceful shutdown |
 | `get_raw_buffer(ext_id, limit)` | `sync → List` | Debug buffer |
 
 All follow the same pattern: `get_handler(ext_id) → hasattr(handler, method) → handler.method(...)`.
 
+### codex-ext-testing today
+
+`codex-ext-testing` is the extension-owned Codex path:
+
+- settings modal fields are generated dynamically from the installed Codex app-server JSON schema
+- session browse uses the generic `session_picker` flow
+- bind/import uses the same generic `resume_session_with_history(...)` + `hydrate_transcript(...)` contract as Copilot, but the Codex implementation reuses internal rollout import helpers
+- live send/resume/interrupt uses an extension-owned framework-shell transport
+- that transport starts from `app_server_observed` and runs `python -m agent_log_server.rpc_stdio_mirror -- codex app-server`
+- the wrapper preserves the real stdout pipe for JSON-RPC parsing while mirroring RPC stdin/stdout to stderr for framework-shell observability
+
+The remaining major extension-owned slices are tool-call rendering and approval plumbing.
+
 ### Adding a New Extension
 
-1. Create `extensions/<name>_client.py` with `handle_message()`, `hydrate_transcript()`, etc.
-2. Create `extensions/<name>/manifest.json` and `settings_schema.json`
-3. Add entry to `extensions/extensions.json`
-4. Add handler type to `_load_handler_for_type()` in `extensions/__init__.py`
-5. **Do NOT touch** `server.py`, `codex_agent.js`, or `settings_schema.js`
+1. Create `extensions/<name>/client.py` and optional helpers such as `router.py`, `transport.py`, or runtime-schema helpers
+2. Create `extensions/<name>/manifest.json` and either `settings_schema.json` or a dynamic `get_settings_schema()` hook
+3. Add an entry to `extensions/extensions.json`
+4. Keep backend transport/session ownership inside the extension so the frontend can stay unified
+5. **Do NOT touch** `server.py`, `codex_agent.js`, or `settings_schema.js` with extension-specific protocol logic
 
 ## MCP Agent PTY Integration
 

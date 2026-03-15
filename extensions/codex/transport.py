@@ -166,7 +166,7 @@ class CodexAppServerTransport:
         request_id_text = str(request_id or "").strip()
         return bool(request_id_text and request_id_text in self._pending_approval_requests)
 
-    def resolve_approval(self, request_id: str, decision: str) -> bool:
+    def resolve_approval(self, request_id: str, resolution: Any) -> bool:
         request_id_text = str(request_id or "").strip()
         if not request_id_text:
             return False
@@ -177,6 +177,13 @@ class CodexAppServerTransport:
         if writer is None or not self._shell_id:
             self._pending_approval_requests[request_id_text] = pending
             return False
+
+        decision = resolution
+        if isinstance(resolution, dict):
+            if isinstance(resolution.get("result"), dict):
+                decision = resolution["result"].get("decision")
+            else:
+                decision = resolution.get("decision")
 
         response_id: Any = int(request_id_text) if request_id_text.isdigit() else request_id_text
         result_payload: Dict[str, Any] = {
@@ -462,7 +469,22 @@ class CodexAppServerTransport:
             elif isinstance(parsed, dict):
                 if "method" in parsed:
                     label = parsed.get("method")
-                    payload = parsed.get("params", parsed)
+                    params = parsed.get("params", parsed)
+                    payload = params
+                    if isinstance(params, dict):
+                        param_conversation_id = params.get("conversationId")
+                        if isinstance(param_conversation_id, str) and param_conversation_id:
+                            raw_conversation_id = param_conversation_id
+                        if (
+                            isinstance(label, str)
+                            and label.startswith("codex/event/collab_")
+                            and isinstance(params.get("msg"), dict)
+                        ):
+                            payload = dict(params["msg"])
+                            for key in ("id", "conversationId", "conversation_id", "threadId", "thread_id", "turnId", "turn_id"):
+                                value = params.get(key)
+                                if value is not None and payload.get(key) is None:
+                                    payload[key] = value
                     if parsed.get("id") is not None:
                         request_id = str(parsed.get("id"))
                 elif isinstance(parsed.get("msg"), dict):
@@ -560,6 +582,14 @@ class CodexAppServerTransport:
                 for descriptor in descriptors:
                     if isinstance(descriptor, dict):
                         self._persist_pending_approval(conversation_id, descriptor)
+            bind_thread_ids = routed.get("bind_thread_ids")
+            if isinstance(bind_thread_ids, list):
+                for bound_thread_id in bind_thread_ids:
+                    if isinstance(bound_thread_id, str) and bound_thread_id:
+                        self._remember_bindings(
+                            conversation_id=conversation_id,
+                            thread_id=bound_thread_id,
+                        )
             clear_ids = routed.get("clear_live_approval_ids")
             if isinstance(clear_ids, list):
                 for pending_id in clear_ids:
@@ -821,7 +851,7 @@ class CodexAppServerTransport:
             thread = payload.get("thread")
             if isinstance(thread, dict) and isinstance(thread.get("id"), str) and thread.get("id"):
                 return thread["id"]
-            for key in ("threadId", "thread_id", "conversationId", "conversation_id"):
+            for key in ("threadId", "thread_id", "conversationId", "conversation_id", "sender_thread_id"):
                 value = payload.get(key)
                 if isinstance(value, str) and value:
                     return value

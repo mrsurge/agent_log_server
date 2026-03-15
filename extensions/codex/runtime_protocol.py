@@ -2,12 +2,13 @@ import asyncio
 import contextlib
 import json
 import os
+import platform
 import re
 import shutil
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from te2_runtime import (
     build_codex_thread_config,
@@ -21,6 +22,46 @@ _runtime_lock: Optional[asyncio.Lock] = None
 _runtime_protocol: Optional["RuntimeProtocol"] = None
 
 
+_SEMANTIC_SUFFIXES = {
+    "archived",
+    "begin",
+    "call",
+    "changed",
+    "closed",
+    "completed",
+    "delta",
+    "end",
+    "outputdelta",
+    "request",
+    "requestapproval",
+    "requestuserinput",
+    "resolved",
+    "started",
+    "terminalinteraction",
+    "unarchived",
+    "updated",
+}
+
+_THREAD_BINDING_FIELDS = ("new_thread_id", "receiver_thread_id")
+
+
+@dataclass(frozen=True)
+class ProtocolSemanticSpec:
+    name: str
+    category: str
+    subject: str
+    phase: Optional[str]
+    properties: Tuple[str, ...]
+    call_id_field: Optional[str] = None
+    prompt_field: Optional[str] = None
+    status_field: Optional[str] = None
+    sender_thread_field: Optional[str] = None
+    thread_binding_fields: Tuple[str, ...] = ()
+
+    def has_property(self, key: str) -> bool:
+        return key in self.properties
+
+
 @dataclass
 class RuntimeProtocol:
     version: str
@@ -29,8 +70,12 @@ class RuntimeProtocol:
     schema_path: Path
     definitions: Dict[str, Any]
     request_params: Dict[str, Dict[str, Any]]
+    server_requests: Dict[str, Dict[str, Any]]
     notifications: Dict[str, Dict[str, Any]]
     events: Dict[str, Dict[str, Any]]
+    server_request_semantics: Dict[str, ProtocolSemanticSpec]
+    notification_semantics: Dict[str, ProtocolSemanticSpec]
+    event_semantics: Dict[str, ProtocolSemanticSpec]
     settings_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def request_schema(self, method: str) -> Optional[Dict[str, Any]]:
@@ -38,6 +83,18 @@ class RuntimeProtocol:
 
     def notification_schema(self, method: str) -> Optional[Dict[str, Any]]:
         return self.notifications.get(method.lower())
+
+    def server_request_schema(self, method: str) -> Optional[Dict[str, Any]]:
+        return self.server_requests.get(method.lower())
+
+    def server_request_spec(self, method: str) -> Optional[ProtocolSemanticSpec]:
+        return self.server_request_semantics.get(method.lower())
+
+    def has_server_request(self, method: str) -> bool:
+        return method.lower() in self.server_requests
+
+    def notification_spec(self, method: str) -> Optional[ProtocolSemanticSpec]:
+        return self.notification_semantics.get(method.lower())
 
     def has_notification(self, method: str) -> bool:
         return method.lower() in self.notifications
@@ -47,6 +104,9 @@ class RuntimeProtocol:
 
     def event_schema(self, event_type: str) -> Optional[Dict[str, Any]]:
         return self.events.get(event_type)
+
+    def event_spec(self, event_type: str) -> Optional[ProtocolSemanticSpec]:
+        return self.event_semantics.get(event_type)
 
 
 def configure_runtime_protocol(
@@ -72,6 +132,10 @@ def _cache_root() -> Path:
 
 def _schema_bundle_path(cache_dir: Path) -> Path:
     return cache_dir / "codex_app_server_protocol.v2.schemas.json"
+
+
+def _legacy_schema_bundle_path(cache_dir: Path) -> Path:
+    return cache_dir / "codex_app_server_protocol.schemas.json"
 
 
 def _version_key(raw_version: str) -> str:
@@ -115,12 +179,107 @@ def _expand_path(raw: Any) -> Optional[str]:
     return os.path.expanduser(text) if text.startswith("~") else text
 
 
-async def _run_process(*args: str, timeout: float) -> str:
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+def _codex_binary_path() -> str:
+    return shutil.which("codex") or "<not found>"
+
+
+def _is_android_termux() -> bool:
+    system_info = platform.platform()
+    uname = platform.uname()
+    prefix = os.environ.get("PREFIX", "")
+    markers = " ".join(
+        (
+            system_info,
+            getattr(uname, "system", ""),
+            getattr(uname, "release", ""),
+            prefix,
+        )
+    ).lower()
+    return "android" in markers or "termux" in markers or "com.termux" in markers
+
+
+def _recommended_codex_package() -> str:
+    return "@mmmbuto/codex-cli-termux" if _is_android_termux() else "@openai/codex"
+
+
+def _recommended_codex_install_command() -> str:
+    return f"npm install -g {_recommended_codex_package()}"
+
+
+def _generated_schema_files(root: Path, limit: int = 24) -> List[str]:
+    if not root.exists():
+        return []
+    files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+    if len(files) <= limit:
+        return files
+    overflow = len(files) - limit
+    return files[:limit] + [f"... (+{overflow} more)"]
+
+
+def _codex_runtime_context() -> str:
+    prefix = os.environ.get("PREFIX", "")
+    parts = [f"platform={platform.platform()}"]
+    if prefix:
+        parts.append(f"PREFIX={prefix}")
+    return "; ".join(parts)
+
+
+def _format_codex_unavailable_message(error: str) -> str:
+    return "\n".join(
+        (
+            f"codex CLI unavailable: {error}",
+            f"codex binary: {_codex_binary_path()}",
+            _codex_runtime_context(),
+            f"Repair command: {_recommended_codex_install_command()}",
+        )
     )
+
+
+def _format_schema_generation_failure(
+    *,
+    version_raw: str,
+    version_key: str,
+    temp_dir: Path,
+    expected_schema: Path,
+    command_error: Optional[str] = None,
+) -> str:
+    legacy_schema = _legacy_schema_bundle_path(temp_dir)
+    generated_files = _generated_schema_files(temp_dir)
+    lines = [
+        f"schema bundle missing expected file: {expected_schema}",
+        f"codex binary: {_codex_binary_path()}",
+        f"codex --version: {version_raw}",
+        _codex_runtime_context(),
+    ]
+    if version_key == "0.0.0":
+        lines.append(
+            "Detected Codex version key 0.0.0, which usually indicates an incompatible or placeholder CLI build."
+        )
+    if command_error:
+        lines.append(f"schema generation command error: {command_error}")
+    if legacy_schema.exists() and not expected_schema.exists():
+        lines.append(
+            f"Found legacy schema bundle {legacy_schema.name} but not {expected_schema.name}; "
+            "the installed Codex CLI does not match the v2 schema layout expected by this extension."
+        )
+    if generated_files:
+        lines.append("Generated files:")
+        lines.extend(f"  - {entry}" for entry in generated_files)
+    else:
+        lines.append("Generated files: none")
+    lines.append(f"Repair command: {_recommended_codex_install_command()}")
+    return "\n".join(lines)
+
+
+async def _run_process(*args: str, timeout: float) -> str:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"command not found: {args[0]}") from exc
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -141,7 +300,10 @@ def _cleanup_old_cache_dirs(root: Path, keep_name: str) -> None:
 
 
 async def _ensure_schema_bundle() -> tuple[str, str, Path]:
-    version_raw = await _run_process("codex", "--version", timeout=15.0)
+    try:
+        version_raw = await _run_process("codex", "--version", timeout=15.0)
+    except RuntimeError as exc:
+        raise RuntimeError(_format_codex_unavailable_message(str(exc))) from exc
     version_key = _version_key(version_raw)
     cache_root = _cache_root()
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -154,18 +316,34 @@ async def _ensure_schema_bundle() -> tuple[str, str, Path]:
     temp_dir = cache_root / f".tmp-{version_key}-{uuid.uuid4().hex}"
     temp_dir.mkdir(parents=True, exist_ok=True)
     try:
-        await _run_process(
-            "codex",
-            "app-server",
-            "generate-json-schema",
-            "--out",
-            str(temp_dir),
-            timeout=60.0,
-        )
+        try:
+            await _run_process(
+                "codex",
+                "app-server",
+                "generate-json-schema",
+                "--out",
+                str(temp_dir),
+                timeout=60.0,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                _format_schema_generation_failure(
+                    version_raw=version_raw,
+                    version_key=version_key,
+                    temp_dir=temp_dir,
+                    expected_schema=_schema_bundle_path(temp_dir),
+                    command_error=str(exc),
+                )
+            ) from exc
         generated_schema = _schema_bundle_path(temp_dir)
         if not generated_schema.exists():
             raise RuntimeError(
-                f"schema bundle missing expected file: {generated_schema}"
+                _format_schema_generation_failure(
+                    version_raw=version_raw,
+                    version_key=version_key,
+                    temp_dir=temp_dir,
+                    expected_schema=generated_schema,
+                )
             )
         if cache_dir.exists():
             shutil.rmtree(cache_dir, ignore_errors=True)
@@ -254,9 +432,95 @@ def _schema_tagged_union_variants(spec: Any, definitions: Dict[str, Any]) -> Dic
     return variants
 
 
+def _semantic_tokens(name: str, separator: str) -> List[str]:
+    tokens: List[str] = []
+    for part in name.split(separator):
+        normalized = _normalize_identifier(part)
+        collapsed = re.sub(r"[^a-z0-9]+", "", normalized)
+        if collapsed:
+            tokens.append(collapsed)
+    return tokens
+
+
+def _build_semantic_spec(name: str, schema: Dict[str, Any], *, separator: str) -> ProtocolSemanticSpec:
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    properties = tuple(key for key in props if key not in {"type", "method"})
+    property_set = set(properties)
+
+    tokens = _semantic_tokens(name, separator)
+    category = tokens[0] if tokens else ""
+    phase = tokens[-1] if tokens and tokens[-1] in _SEMANTIC_SUFFIXES else None
+    if phase:
+        subject_tokens = tokens[1:-1]
+    else:
+        subject_tokens = tokens[1:]
+    subject = "_".join(subject_tokens) if subject_tokens else category
+
+    thread_binding_fields = tuple(field for field in _THREAD_BINDING_FIELDS if field in property_set)
+    call_id_field = "call_id" if "call_id" in property_set else ("id" if "id" in property_set else None)
+    prompt_field = "prompt" if "prompt" in property_set else None
+    status_field = "status" if "status" in property_set else None
+    sender_thread_field = "sender_thread_id" if "sender_thread_id" in property_set else None
+
+    return ProtocolSemanticSpec(
+        name=name,
+        category=category,
+        subject=subject,
+        phase=phase,
+        properties=properties,
+        call_id_field=call_id_field,
+        prompt_field=prompt_field,
+        status_field=status_field,
+        sender_thread_field=sender_thread_field,
+        thread_binding_fields=thread_binding_fields,
+    )
+
+
+def _build_notification_semantics(notifications: Dict[str, Dict[str, Any]]) -> Dict[str, ProtocolSemanticSpec]:
+    return {
+        name.lower(): _build_semantic_spec(name.lower(), schema, separator="/")
+        for name, schema in notifications.items()
+    }
+
+
+def _build_server_request_semantics(server_requests: Dict[str, Dict[str, Any]]) -> Dict[str, ProtocolSemanticSpec]:
+    return {
+        name.lower(): _build_semantic_spec(name.lower(), schema, separator="/")
+        for name, schema in server_requests.items()
+    }
+
+
+def _build_event_semantics(events: Dict[str, Dict[str, Any]]) -> Dict[str, ProtocolSemanticSpec]:
+    return {
+        name: _build_semantic_spec(name, schema, separator="_")
+        for name, schema in events.items()
+    }
+
+
 def _build_request_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     registry: Dict[str, Dict[str, Any]] = {}
     union = definitions.get("ClientRequest", {})
+    for variant in union.get("oneOf") or []:
+        if not isinstance(variant, dict):
+            continue
+        props = variant.get("properties")
+        if not isinstance(props, dict):
+            continue
+        method_prop = props.get("method")
+        params_prop = props.get("params")
+        method_values = method_prop.get("enum") if isinstance(method_prop, dict) else None
+        if not isinstance(method_values, list) or not method_values:
+            continue
+        method = method_values[0]
+        if isinstance(method, str):
+            registry[method.lower()] = _resolve_schema(params_prop, definitions)
+    return registry
+
+
+def _build_server_request_registry(schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    registry: Dict[str, Dict[str, Any]] = {}
+    definitions = schema.get("definitions") if isinstance(schema.get("definitions"), dict) else {}
+    union = schema
     for variant in union.get("oneOf") or []:
         if not isinstance(variant, dict):
             continue
@@ -501,6 +765,7 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Dict[
     approval_values = _schema_string_enums(thread_props.get("approvalPolicy", {}), protocol.definitions)
     sandbox_values = _schema_string_enums(thread_props.get("sandbox", {}), protocol.definitions)
     effort_values = _schema_string_enums(turn_props.get("effort", {}), protocol.definitions)
+    summary_values = _schema_string_enums(turn_props.get("summary", {}), protocol.definitions)
 
     schema = {
         "version": "1",
@@ -543,6 +808,14 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Dict[
                 "default": "",
             },
             {
+                "id": "summary",
+                "type": "select",
+                "label": "Reasoning Summary",
+                "options": _schema_options(summary_values),
+                "placeholder": "Use model default",
+                "default": "",
+            },
+            {
                 "id": "approvalPolicy",
                 "type": "select",
                 "label": "Approval Policy",
@@ -582,17 +855,31 @@ async def get_runtime_protocol() -> RuntimeProtocol:
             return _runtime_protocol
         version, version_key, schema_path = await _ensure_schema_bundle()
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        server_request_path = schema_path.parent / "ServerRequest.json"
+        server_request_schema = (
+            json.loads(server_request_path.read_text(encoding="utf-8"))
+            if server_request_path.exists()
+            else {"oneOf": [], "definitions": schema.get("definitions") if isinstance(schema.get("definitions"), dict) else {}}
+        )
         definitions = schema.get("definitions")
         if not isinstance(definitions, dict):
             raise RuntimeError(f"runtime schema missing definitions: {schema_path}")
+        request_params = _build_request_registry(definitions)
+        server_requests = _build_server_request_registry(server_request_schema)
+        notifications = _build_notification_registry(definitions)
+        events = _build_event_registry(definitions)
         _runtime_protocol = RuntimeProtocol(
             version=version,
             version_key=version_key,
             cache_dir=schema_path.parent,
             schema_path=schema_path,
             definitions=definitions,
-            request_params=_build_request_registry(definitions),
-            notifications=_build_notification_registry(definitions),
-            events=_build_event_registry(definitions),
+            request_params=request_params,
+            server_requests=server_requests,
+            notifications=notifications,
+            events=events,
+            server_request_semantics=_build_server_request_semantics(server_requests),
+            notification_semantics=_build_notification_semantics(notifications),
+            event_semantics=_build_event_semantics(events),
         )
         return _runtime_protocol

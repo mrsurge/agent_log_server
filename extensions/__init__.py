@@ -427,11 +427,11 @@ async def hydrate_transcript(
     return []
 
 
-def resolve_approval(extension_id: str, request_id: str, decision: str) -> bool:
+def resolve_approval(extension_id: str, request_id: str, resolution: Any) -> bool:
     """Resolve an approval request. Handler must implement resolve_approval()."""
     handler = get_handler(extension_id)
     if handler and hasattr(handler, "resolve_approval"):
-        return bool(handler.resolve_approval(request_id, decision))
+        return bool(handler.resolve_approval(request_id, resolution))
     return False
 
 

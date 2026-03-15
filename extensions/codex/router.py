@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .runtime_protocol import RuntimeProtocol
+from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
 
 
 def utc_ts() -> str:
@@ -16,132 +16,127 @@ def _event_type_from_label(label_lower: str) -> Optional[str]:
     return None
 
 
-def _extract_known_event_fields(
-    protocol: RuntimeProtocol,
-    event_type: str,
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    schema = protocol.event_schema(event_type)
-    if not isinstance(schema, dict):
+def _extract_known_fields(spec: Optional[ProtocolSemanticSpec], payload: Dict[str, Any]) -> Dict[str, Any]:
+    if spec is None:
         return {}
-    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
     fields: Dict[str, Any] = {}
-    for key in props:
-        if key == "type":
-            continue
+    for key in spec.properties:
         value = payload.get(key)
         if value is not None:
             fields[key] = value
     return fields
 
 
-def _collab_events(
-    protocol: RuntimeProtocol,
-    event_type: str,
-    payload: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    if not event_type.startswith("collab_"):
-        return []
+def _subagent_display_name(fields: Dict[str, Any], call_id: str) -> str:
+    nickname = fields.get("receiver_agent_nickname") or fields.get("new_agent_nickname")
+    role = fields.get("receiver_agent_role") or fields.get("new_agent_role")
+    if not nickname and not role:
+        for record in _collab_agent_records(fields):
+            nickname = record.get("agent_nickname") or record.get("receiver_agent_nickname")
+            role = record.get("agent_role") or record.get("receiver_agent_role")
+            if nickname or role:
+                break
+    if isinstance(nickname, str) and nickname.strip():
+        if isinstance(role, str) and role.strip():
+            return f"{nickname.strip()} ({role.strip()})"
+        return nickname.strip()
+    if isinstance(role, str) and role.strip():
+        return role.strip()
+    receiver = fields.get("receiver_thread_id") or fields.get("new_thread_id")
+    if isinstance(receiver, str) and receiver:
+        return f"subagent-{receiver[:8]}"
+    return "subagent"
 
-    fields = _extract_known_event_fields(protocol, event_type, payload)
-    call_id = str(fields.get("call_id") or "")
-    ts = utc_ts()
 
-    if event_type == "collab_agent_spawn_begin":
-        name = f"subagent-{call_id[:8]}" if call_id else "subagent"
-        return [{
-            "type": "subagent_start",
-            "name": name,
-            "intent": fields.get("prompt", ""),
-            "timestamp": ts,
-            "_transcript_entry": {
-                "role": "subagent_start",
-                "id": call_id,
-                "name": name,
-                "intent": fields.get("prompt", ""),
-                "timestamp": ts,
-            },
-        }]
+def _collab_agent_records(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for key in ("receiver_agents", "agent_statuses"):
+        value = fields.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict):
+                records.append(item)
+    return records
 
-    if event_type == "collab_agent_spawn_end":
-        status = fields.get("status", {})
-        success = status.get("type") == "success" if isinstance(status, dict) else status == "success"
-        summary = f"spawn {'succeeded' if success else 'failed'}"
-        return [{
-            "type": "subagent_end",
-            "id": call_id,
-            "success": success,
-            "summary": summary,
-            "timestamp": ts,
-            "_transcript_entry": {
-                "role": "subagent_end",
-                "id": call_id,
-                "success": success,
-                "summary": summary,
-                "timestamp": ts,
-            },
-        }]
 
-    if event_type == "collab_agent_interaction_begin":
-        receiver = str(fields.get("receiver_thread_id") or "")
-        name = f"collab-{receiver[:8]}" if receiver else f"collab-{call_id[:8] or 'subagent'}"
-        return [{
-            "type": "subagent_start",
-            "id": call_id,
-            "name": name,
-            "intent": fields.get("prompt", ""),
-            "timestamp": ts,
-            "_transcript_entry": {
-                "role": "subagent_start",
-                "id": call_id,
-                "name": name,
-                "intent": fields.get("prompt", ""),
-                "timestamp": ts,
-            },
-        }]
+def _collab_thread_ids(fields: Dict[str, Any]) -> List[str]:
+    thread_ids: List[str] = []
 
-    if event_type == "collab_agent_interaction_end":
-        status = fields.get("status", {})
-        success = status.get("type") == "success" if isinstance(status, dict) else status == "success"
-        summary = fields.get("prompt", "interaction ended")
-        return [{
-            "type": "subagent_end",
-            "id": call_id,
-            "success": success,
-            "summary": summary,
-            "timestamp": ts,
-            "_transcript_entry": {
-                "role": "subagent_end",
-                "id": call_id,
-                "success": success,
-                "summary": summary,
-                "timestamp": ts,
-            },
-        }]
+    def add(value: Any) -> None:
+        if isinstance(value, str) and value and value not in thread_ids:
+            thread_ids.append(value)
 
-    if event_type == "collab_close_end":
-        return [{
-            "type": "subagent_end",
-            "id": call_id,
-            "success": True,
-            "summary": "subagent closed",
-            "timestamp": ts,
-            "_transcript_entry": {
-                "role": "subagent_end",
-                "id": call_id,
-                "success": True,
-                "summary": "subagent closed",
-                "timestamp": ts,
-            },
-        }]
+    add(fields.get("new_thread_id"))
+    add(fields.get("receiver_thread_id"))
 
-    if event_type in {"collab_waiting_begin", "collab_resume_begin", "collab_close_begin"}:
-        return [{"type": "activity", "label": f"collab: {event_type.replace('collab_', '')}", "active": True}]
+    receiver_thread_ids = fields.get("receiver_thread_ids")
+    if isinstance(receiver_thread_ids, list):
+        for item in receiver_thread_ids:
+            add(item)
 
-    if event_type in {"collab_waiting_end", "collab_resume_end"}:
-        return [{"type": "activity", "label": "processing", "active": True}]
+    for record in _collab_agent_records(fields):
+        add(record.get("thread_id"))
 
-    return []
+    statuses = fields.get("statuses")
+    if isinstance(statuses, dict):
+        for candidate in statuses.keys():
+            add(candidate)
+
+    return thread_ids
+
+
+def _collab_status_for_thread(fields: Dict[str, Any], thread_id: str) -> Any:
+    for record in _collab_agent_records(fields):
+        if record.get("thread_id") == thread_id and record.get("status") is not None:
+            return record.get("status")
+
+    statuses = fields.get("statuses")
+    if isinstance(statuses, dict):
+        status = statuses.get(thread_id)
+        if status is not None:
+            return status
+
+    return fields.get("status")
+
+
+def _subagent_terminal_summary(name: str, status: Any, *, success_text: str, failure_text: str) -> str:
+    if isinstance(status, dict):
+        errored = status.get("errored")
+        if isinstance(errored, str) and errored.strip():
+            return f"Failed: {errored.strip()}"
+    if status == "shutdown":
+        return "subagent shutdown"
+    if status == "not_found":
+        return "subagent not found"
+    return success_text if _agent_status_success(status) else failure_text
+
+
+def _agent_status_is_terminal(status: Any) -> bool:
+    if isinstance(status, dict):
+        return "completed" in status or "errored" in status
+    return status in {"shutdown", "not_found"}
+
+
+def _agent_status_success(status: Any) -> bool:
+    if isinstance(status, dict):
+        return "completed" in status
+    return False
+
+
+def _agent_status_summary(status: Any, default: str) -> str:
+    if isinstance(status, dict):
+        completed = status.get("completed")
+        if isinstance(completed, str) and completed.strip():
+            return completed.strip()
+        errored = status.get("errored")
+        if isinstance(errored, str) and errored.strip():
+            return f"Failed: {errored.strip()}"
+    if status == "shutdown":
+        return "subagent shutdown"
+    if status == "not_found":
+        return "subagent not found"
+    return default
 
 
 def _direct_event_text(payload: Dict[str, Any]) -> Optional[str]:
@@ -359,11 +354,15 @@ class CodexEventRouter:
         self._turn_states: Dict[str, Dict[str, Any]] = {}
         self._item_states: Dict[str, Dict[str, Any]] = {}
         self._approval_request_map: Dict[str, str] = {}
+        self._subagent_states: Dict[str, Dict[str, Any]] = {}
+        self._thread_subagent_ids: Dict[str, str] = {}
 
     def reset(self) -> None:
         self._turn_states.clear()
         self._item_states.clear()
         self._approval_request_map.clear()
+        self._subagent_states.clear()
+        self._thread_subagent_ids.clear()
 
     def _turn_key(self, thread_id: Optional[str], turn_id: Optional[str]) -> str:
         return f"{thread_id or 'unknown'}:{turn_id or 'unknown'}"
@@ -398,12 +397,347 @@ class CodexEventRouter:
             state["thread_id"] = thread_id or state.get("thread_id")
             state["turn_id"] = turn_id or state.get("turn_id")
             state["turn_key"] = self._turn_key(thread_id or state.get("thread_id"), turn_id or state.get("turn_id"))
+        subagent_id = self._subagent_id_for_context(thread_id)
+        if subagent_id:
+            state["subagent_id"] = subagent_id
         return state
 
     def _clear_item_state(self, item_id: Optional[str]) -> Dict[str, Any]:
         if not item_id:
             return {}
         return self._item_states.pop(item_id, {})
+
+    def _ensure_subagent_state(
+        self,
+        subagent_id: str,
+        *,
+        name: Optional[str] = None,
+        intent: Optional[str] = None,
+        parent_thread_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        state = self._subagent_states.get(subagent_id)
+        if state is None:
+            state = {
+                "id": subagent_id,
+                "name": name or "subagent",
+                "intent": intent or "",
+                "parent_thread_id": parent_thread_id,
+                "thread_ids": set(),
+                "started": False,
+                "ended": False,
+                "active": False,
+            }
+            self._subagent_states[subagent_id] = state
+        if isinstance(name, str) and name.strip():
+            state["name"] = name.strip()
+        if isinstance(intent, str) and intent.strip():
+            state["intent"] = intent.strip()
+        if isinstance(parent_thread_id, str) and parent_thread_id:
+            state["parent_thread_id"] = parent_thread_id
+        return state
+
+    def _bind_subagent_thread(self, subagent_id: str, thread_id: Optional[str]) -> None:
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        state = self._ensure_subagent_state(subagent_id)
+        thread_ids = state.setdefault("thread_ids", set())
+        if isinstance(thread_ids, set):
+            thread_ids.add(thread_id)
+        self._thread_subagent_ids[thread_id] = subagent_id
+
+    def _subagent_id_for_context(self, thread_id: Optional[str]) -> Optional[str]:
+        if not isinstance(thread_id, str) or not thread_id:
+            return None
+        return self._thread_subagent_ids.get(thread_id)
+
+    def _decorate_event(self, entry: Dict[str, Any], subagent_id: Optional[str]) -> Dict[str, Any]:
+        if subagent_id:
+            entry["subagent_id"] = subagent_id
+        return entry
+
+    def _decorate_transcript_entry(self, entry: Dict[str, Any], subagent_id: Optional[str]) -> Dict[str, Any]:
+        if subagent_id:
+            entry["subagent_id"] = subagent_id
+        return entry
+
+    def _decorate_routed_result(
+        self,
+        routed: Dict[str, Any],
+        *,
+        thread_id: Optional[str],
+        item_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        subagent_id = None
+        if isinstance(item_state, dict):
+            candidate = item_state.get("subagent_id")
+            if isinstance(candidate, str) and candidate:
+                subagent_id = candidate
+        if not subagent_id:
+            subagent_id = self._subagent_id_for_context(thread_id)
+        if not subagent_id:
+            return routed
+
+        event_types = {"assistant_delta", "assistant_finalize", "message", "tool_begin", "tool_delta", "tool_end", "tool_interaction", "command_result", "diff", "approval"}
+        transcript_roles = {"assistant", "user", "command", "diff", "reasoning"}
+
+        for event in routed.get("events", []):
+            if not isinstance(event, dict) or event.get("subagent_id"):
+                continue
+            if event.get("type") in event_types:
+                event["subagent_id"] = subagent_id
+
+        for entry in routed.get("transcript_entries", []):
+            if not isinstance(entry, dict) or entry.get("subagent_id"):
+                continue
+            if entry.get("role") in transcript_roles:
+                entry["subagent_id"] = subagent_id
+
+        descriptors = routed.get("approval_descriptors")
+        if isinstance(descriptors, list):
+            for descriptor in descriptors:
+                if not isinstance(descriptor, dict):
+                    continue
+                render_event = descriptor.get("render_event")
+                if isinstance(render_event, dict) and not render_event.get("subagent_id"):
+                    render_event["subagent_id"] = subagent_id
+        return routed
+
+    def _route_collab_event(
+        self,
+        protocol: RuntimeProtocol,
+        event_type: str,
+        payload: Dict[str, Any],
+        thread_id: Optional[str],
+        turn_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        event_spec = protocol.event_spec(event_type)
+        if event_spec is None or event_spec.category != "collab":
+            return None
+        fields = _extract_known_fields(event_spec, payload)
+        call_id = str(fields.get(event_spec.call_id_field or "call_id") or "").strip()
+        if not call_id:
+            return {"handled": True, "events": [], "transcript_entries": []}
+
+        prompt = fields.get(event_spec.prompt_field or "prompt")
+        prompt_text = prompt.strip() if isinstance(prompt, str) else ""
+        sender_thread_id = fields.get(event_spec.sender_thread_field or "sender_thread_id")
+        sender_thread_text = sender_thread_id if isinstance(sender_thread_id, str) and sender_thread_id else thread_id
+        collab_thread_ids = _collab_thread_ids(fields)
+        subagent_id = None
+        for candidate in collab_thread_ids:
+            subagent_id = self._subagent_id_for_context(candidate)
+            if subagent_id:
+                break
+        if not subagent_id:
+            subagent_id = call_id
+
+        name = _subagent_display_name(fields, subagent_id)
+        state = self._ensure_subagent_state(
+            subagent_id,
+            name=name,
+            intent=prompt_text,
+            parent_thread_id=sender_thread_text,
+        )
+
+        bind_thread_ids: List[str] = []
+        for candidate in collab_thread_ids:
+            self._bind_subagent_thread(subagent_id, candidate)
+            if candidate not in bind_thread_ids:
+                bind_thread_ids.append(candidate)
+
+        ts = utc_ts()
+        events: List[Dict[str, Any]] = []
+        transcript_entries: List[Dict[str, Any]] = []
+
+        def emit_start(target_id: str, target_state: Dict[str, Any]) -> None:
+            if target_state.get("started") and not target_state.get("ended"):
+                return
+            target_state["started"] = True
+            target_state["ended"] = False
+            target_state["active"] = True
+            display_name = str(target_state.get("name") or name or "subagent")
+            display_intent = str(target_state.get("intent") or prompt_text or "")
+            events.append({
+                "type": "subagent_start",
+                "id": target_id,
+                "name": display_name,
+                "intent": display_intent,
+                "turn_id": turn_id,
+                "timestamp": ts,
+            })
+            transcript_entries.append({
+                "role": "subagent_start",
+                "id": target_id,
+                "name": display_name,
+                "intent": display_intent,
+                "turn_id": turn_id,
+                "timestamp": ts,
+            })
+
+        def emit_end(target_id: str, target_state: Dict[str, Any], success: bool, summary: str) -> None:
+            if target_state.get("ended"):
+                return
+            target_state["active"] = False
+            target_state["ended"] = True
+            events.append({
+                "type": "subagent_end",
+                "id": target_id,
+                "turn_id": turn_id,
+                "success": success,
+                "summary": summary,
+                "timestamp": ts,
+            })
+            transcript_entries.append({
+                "role": "subagent_end",
+                "id": target_id,
+                "turn_id": turn_id,
+                "success": success,
+                "summary": summary,
+                "timestamp": ts,
+            })
+
+        if event_spec.subject == "agent_spawn" and event_spec.phase == "begin":
+            events.append({"type": "activity", "label": "spawning subagent", "active": True})
+        elif event_spec.subject == "agent_spawn" and event_spec.phase == "end":
+            status = fields.get(event_spec.status_field or "status")
+            emit_start(subagent_id, state)
+            if _agent_status_is_terminal(status):
+                emit_end(
+                    subagent_id,
+                    state,
+                    _agent_status_success(status),
+                    _subagent_terminal_summary(
+                        str(state.get("name") or name or "subagent"),
+                        status,
+                        success_text="spawn completed",
+                        failure_text="spawn failed",
+                    ),
+                )
+        elif event_spec.subject == "agent_interaction" and event_spec.phase == "begin":
+            emit_start(subagent_id, state)
+        elif event_spec.subject == "agent_interaction" and event_spec.phase == "end":
+            status = fields.get(event_spec.status_field or "status")
+            display_name = str(state.get("name") or name or "subagent")
+            emit_end(
+                subagent_id,
+                state,
+                _agent_status_success(status) if _agent_status_is_terminal(status) else True,
+                _subagent_terminal_summary(
+                    display_name,
+                    status,
+                    success_text=f"{display_name} finished",
+                    failure_text=f"{display_name} failed",
+                ),
+            )
+        elif event_spec.subject == "close" and event_spec.phase == "end":
+            emit_end(subagent_id, state, True, "subagent closed")
+        elif event_spec.subject in {"waiting", "resume", "close"} and event_spec.phase == "begin":
+            activity_label = event_spec.subject.replace("_", " ")
+            events.append({"type": "activity", "label": f"collab: {activity_label}", "active": True})
+        elif event_spec.subject in {"waiting", "resume"} and event_spec.phase == "end":
+            ended_any = False
+            for candidate in collab_thread_ids or [thread_id]:
+                if not isinstance(candidate, str) or not candidate:
+                    continue
+                target_id = self._subagent_id_for_context(candidate) or subagent_id
+                target_name = _subagent_display_name(fields, target_id)
+                target_state = self._ensure_subagent_state(
+                    target_id,
+                    name=target_name,
+                    intent=prompt_text,
+                    parent_thread_id=sender_thread_text,
+                )
+                status = _collab_status_for_thread(fields, candidate)
+                if status is None:
+                    continue
+                display_name = str(target_state.get("name") or target_name or "subagent")
+                emit_end(
+                    target_id,
+                    target_state,
+                    _agent_status_success(status),
+                    _subagent_terminal_summary(
+                        display_name,
+                        status,
+                        success_text=f"{display_name} finished",
+                        failure_text=f"{display_name} failed",
+                    ),
+                )
+                ended_any = True
+            if not ended_any:
+                events.append({"type": "activity", "label": "processing", "active": True})
+
+        return {
+            "handled": True,
+            "events": events,
+            "transcript_entries": transcript_entries,
+            "bind_thread_ids": bind_thread_ids,
+        }
+
+    def _token_usage_result(
+        self,
+        *,
+        label_lower: str,
+        payload: Dict[str, Any],
+        turn_id: Optional[str],
+    ) -> Dict[str, Any]:
+        total = None
+        input_tokens = None
+        cached_input_tokens = None
+        context_window = None
+
+        if isinstance(payload.get("info"), dict):
+            info = payload["info"]
+            usage = info.get("last_token_usage") or {}
+            if isinstance(usage, dict):
+                total = usage.get("input_tokens")
+                input_tokens = usage.get("input_tokens")
+                cached_input_tokens = usage.get("cached_input_tokens")
+            context_window = info.get("model_context_window")
+
+        if total is None and isinstance(payload.get("tokenUsage"), dict):
+            token_usage = payload["tokenUsage"]
+            last_breakdown = token_usage.get("last") or {}
+            if isinstance(last_breakdown, dict):
+                total = last_breakdown.get("inputTokens") or last_breakdown.get("input_tokens")
+                input_tokens = last_breakdown.get("inputTokens") or last_breakdown.get("input_tokens")
+                cached_input_tokens = last_breakdown.get("cachedInputTokens") or last_breakdown.get("cached_input_tokens")
+            context_window = token_usage.get("modelContextWindow") or token_usage.get("model_context_window")
+
+        if total is None:
+            total = payload.get("total") or payload.get("total_tokens") or payload.get("tokenCount")
+        if context_window is None:
+            context_window = payload.get("model_context_window") or payload.get("modelContextWindow")
+
+        if not isinstance(total, (int, float)):
+            return {"handled": True, "events": [], "transcript_entries": []}
+
+        total_int = int(total)
+        event: Dict[str, Any] = {"type": "token_count", "total": total_int}
+        transcript_entry: Dict[str, Any] = {
+            "role": "token_usage",
+            "total": total_int,
+            "event": label_lower,
+            "turn_id": turn_id,
+        }
+
+        if isinstance(input_tokens, (int, float)) and isinstance(cached_input_tokens, (int, float)):
+            active_context = max(0, int(input_tokens) - int(cached_input_tokens))
+            event["active_context"] = active_context
+            event["input_tokens"] = int(input_tokens)
+            event["cached_input_tokens"] = int(cached_input_tokens)
+            transcript_entry["active_context"] = active_context
+            transcript_entry["input_tokens"] = int(input_tokens)
+            transcript_entry["cached_input_tokens"] = int(cached_input_tokens)
+
+        if isinstance(context_window, (int, float)):
+            event["context_window"] = int(context_window)
+            transcript_entry["context_window"] = int(context_window)
+
+        return {
+            "handled": True,
+            "events": [event],
+            "transcript_entries": [transcript_entry],
+        }
 
     def _emit_diff_entries(
         self,
@@ -418,6 +752,7 @@ class CodexEventRouter:
     ) -> None:
         turn_state = self._get_turn_state(thread_id, turn_id)
         diff_hashes = turn_state.setdefault("diff_hashes", set())
+        subagent_id = self._subagent_id_for_context(thread_id)
         for section_path, section_text in _split_unified_diff_by_file(diff_text):
             if not section_text:
                 continue
@@ -432,20 +767,20 @@ class CodexEventRouter:
                 diff_id = f"item:{item_id}:{diff_hash[:12]}"
             else:
                 diff_id = f"diff:{diff_hash[:12]}"
-            result["events"].append({
+            result["events"].append(self._decorate_event({
                 "type": "diff",
                 "id": diff_id,
                 "text": section_text,
                 "path": effective_path,
-            })
-            result["transcript_entries"].append({
+            }, subagent_id))
+            result["transcript_entries"].append(self._decorate_transcript_entry({
                 "role": "diff",
                 "text": section_text,
                 "path": effective_path,
                 "item_id": diff_id,
                 "turn_id": turn_id,
                 "event": event_name,
-            })
+            }, subagent_id))
 
     def _tool_request_result(
         self,
@@ -456,6 +791,7 @@ class CodexEventRouter:
         thread_id: Optional[str],
         turn_id: Optional[str],
     ) -> Dict[str, Any]:
+        subagent_id = self._subagent_id_for_context(thread_id)
         approval_event = {
             "type": "approval",
             "kind": kind,
@@ -465,6 +801,8 @@ class CodexEventRouter:
             "turn_id": turn_id,
             "created_at": utc_ts(),
         }
+        if subagent_id:
+            approval_event["subagent_id"] = subagent_id
         return {
             "handled": True,
             "events": [
@@ -505,31 +843,26 @@ class CodexEventRouter:
 
         label_lower = label.lower()
         event_type = _event_type_from_label(label_lower)
+        event_spec = protocol.event_spec(event_type) if event_type else None
+        notification_spec = protocol.notification_spec(label_lower)
+        request_spec = protocol.server_request_spec(label_lower)
 
-        if event_type and protocol.has_event_type(event_type) and isinstance(payload, dict):
-            collab = _collab_events(protocol, event_type, payload)
-            if collab:
-                transcript_entries = []
-                events = []
-                for event in collab:
-                    transcript_entry = event.pop("_transcript_entry", None)
-                    if isinstance(transcript_entry, dict):
-                        transcript_entries.append(transcript_entry)
-                    events.append(event)
-                return {
-                    "handled": True,
-                    "events": events,
-                    "transcript_entries": transcript_entries,
-                }
+        if event_spec is not None and isinstance(payload, dict):
+            collab = self._route_collab_event(protocol, event_type, payload, thread_id, turn_id)
+            if collab is not None:
+                return collab
 
-        if label_lower == "thread/started" and protocol.has_notification("thread/started"):
+        if notification_spec and notification_spec.category == "thread" and notification_spec.subject == "thread" and notification_spec.phase == "started":
+            thread_obj = payload.get("thread") if isinstance(payload, dict) and isinstance(payload.get("thread"), dict) else {}
+            next_thread_id = thread_obj.get("id") if isinstance(thread_obj.get("id"), str) else None
             return {
                 "handled": True,
                 "events": [{"type": "activity", "label": "thread started", "active": True}],
                 "transcript_entries": [],
+                "bind_thread_ids": [next_thread_id] if next_thread_id else [],
             }
 
-        if label_lower == "turn/started" and protocol.has_notification("turn/started") and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "turn" and notification_spec.subject == "turn" and notification_spec.phase == "started" and isinstance(payload, dict):
             next_turn_id = turn_id
             turn_obj = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
             if isinstance(turn_obj, dict):
@@ -542,7 +875,7 @@ class CodexEventRouter:
                 "transcript_entries": [],
             }
 
-        if label_lower == "turn/completed" and protocol.has_notification("turn/completed") and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "turn" and notification_spec.subject == "turn" and notification_spec.phase == "completed" and isinstance(payload, dict):
             turn_status, turn_error = _normalize_turn_status(payload)
             if turn_status == "failed":
                 ribbon_status = "error"
@@ -573,7 +906,10 @@ class CodexEventRouter:
                 }],
             }
 
-        if label_lower in {"turn/diff/updated", "codex/event/turn_diff"} and isinstance(payload, dict):
+        if (
+            (notification_spec and notification_spec.category == "turn" and notification_spec.subject == "diff" and notification_spec.phase == "updated")
+            or label_lower == "codex/event/turn_diff"
+        ) and isinstance(payload, dict):
             diff_text, path = _extract_diff_with_path(payload)
             if diff_text:
                 result["handled"] = True
@@ -588,7 +924,13 @@ class CodexEventRouter:
                 )
             return result if result["handled"] else {"handled": True, "events": [], "transcript_entries": []}
 
-        if label_lower == "item/started" and protocol.has_notification("item/started") and isinstance(payload, dict):
+        if (
+            (notification_spec and notification_spec.category == "thread" and notification_spec.subject == "tokenusage" and notification_spec.phase == "updated")
+            or label_lower == "codex/event/token_count"
+        ) and isinstance(payload, dict):
+            return self._token_usage_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
+
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "item" and notification_spec.phase == "started" and isinstance(payload, dict):
             item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
             if not isinstance(item, dict):
                 return result
@@ -620,7 +962,7 @@ class CodexEventRouter:
                     "cwd": cwd,
                     "output_buffer": "",
                 })
-                return {
+                return self._decorate_routed_result({
                     "handled": True,
                     "events": [
                         {
@@ -632,7 +974,7 @@ class CodexEventRouter:
                         {"type": "activity", "label": "running command", "active": True},
                     ],
                     "transcript_entries": [],
-                }
+                }, thread_id=thread_id, item_state=item_state)
 
             if item_type == "filechange":
                 changes = item.get("changes")
@@ -650,7 +992,7 @@ class CodexEventRouter:
                 if paths:
                     arguments["paths"] = paths
                     arguments["change_count"] = len(paths)
-                return {
+                return self._decorate_routed_result({
                     "handled": True,
                     "events": [
                         {
@@ -662,7 +1004,7 @@ class CodexEventRouter:
                         {"type": "activity", "label": "preparing diff", "active": True},
                     ],
                     "transcript_entries": [],
-                }
+                }, thread_id=thread_id, item_state=item_state)
 
             if item_type in {"mcptoolcall", "websearch", "imageview"}:
                 tool_name = item.get("tool")
@@ -681,7 +1023,7 @@ class CodexEventRouter:
                     "arguments": arguments,
                 })
                 activity_label = f"calling {tool_name}" if isinstance(tool_name, str) and tool_name else "calling tool"
-                return {
+                return self._decorate_routed_result({
                     "handled": True,
                     "events": [
                         {
@@ -694,28 +1036,28 @@ class CodexEventRouter:
                         {"type": "activity", "label": activity_label, "active": True},
                     ],
                     "transcript_entries": [],
-                }
+                }, thread_id=thread_id, item_state=item_state)
 
-        if label_lower == "item/agentmessage/delta" and protocol.has_notification("item/agentmessage/delta") and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "agentmessage" and notification_spec.phase == "delta" and isinstance(payload, dict):
             delta = payload.get("delta")
             if isinstance(delta, str):
                 item_id = _assistant_id(payload, thread_id, turn_id)
-                return {
+                return self._decorate_routed_result({
                     "handled": True,
                     "events": [
                         {"type": "assistant_delta", "id": item_id, "delta": delta},
                         {"type": "activity", "label": "responding", "active": True},
                     ],
                     "transcript_entries": [],
-                }
+                }, thread_id=thread_id)
 
-        if label_lower == "item/commandexecution/outputdelta" and protocol.has_notification("item/commandexecution/outputdelta") and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "outputdelta" and isinstance(payload, dict):
             item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
             state = self._get_item_state(item_id, thread_id, turn_id)
             delta = _normalize_output(payload.get("delta"))
             if delta:
                 state["output_buffer"] = f"{state.get('output_buffer', '')}{delta}"
-                return {
+                return self._decorate_routed_result({
                     "handled": True,
                     "events": [{
                         "type": "tool_delta",
@@ -724,16 +1066,16 @@ class CodexEventRouter:
                         "delta": delta,
                     }],
                     "transcript_entries": [],
-                }
+                }, thread_id=thread_id, item_state=state)
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        if label_lower == "item/filechange/outputdelta" and protocol.has_notification("item/filechange/outputdelta") and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "filechange" and notification_spec.phase == "outputdelta" and isinstance(payload, dict):
             item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
             state = self._get_item_state(item_id, thread_id, turn_id)
             delta = _normalize_output(payload.get("delta"))
             if delta:
                 state["output_buffer"] = f"{state.get('output_buffer', '')}{delta}"
-                return {
+                return self._decorate_routed_result({
                     "handled": True,
                     "events": [{
                         "type": "tool_delta",
@@ -742,12 +1084,12 @@ class CodexEventRouter:
                         "delta": delta,
                     }],
                     "transcript_entries": [],
-                }
+                }, thread_id=thread_id, item_state=state)
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        if label_lower == "item/commandexecution/terminalinteraction" and protocol.has_notification("item/commandexecution/terminalinteraction") and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "terminalinteraction" and isinstance(payload, dict):
             item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
-            return {
+            return self._decorate_routed_result({
                 "handled": True,
                 "events": [{
                     "type": "tool_interaction",
@@ -760,9 +1102,9 @@ class CodexEventRouter:
                     },
                 }],
                 "transcript_entries": [],
-            }
+            }, thread_id=thread_id)
 
-        if label_lower == "item/completed" and protocol.has_notification("item/completed") and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "item" and notification_spec.phase == "completed" and isinstance(payload, dict):
             item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
             if not isinstance(item, dict):
                 return result
@@ -773,7 +1115,7 @@ class CodexEventRouter:
             if extract_item_text:
                 entry = extract_item_text(item)
                 if entry and entry.get("role") == "assistant":
-                    return {
+                    return self._decorate_routed_result({
                         "handled": True,
                         "events": [{"type": "assistant_finalize", "id": item_id or _assistant_id(item, thread_id, turn_id), "text": entry["text"]}],
                         "transcript_entries": [{
@@ -783,7 +1125,7 @@ class CodexEventRouter:
                             "turn_id": turn_id,
                             "event": label_lower,
                         }],
-                    }
+                    }, thread_id=thread_id, item_state=item_state)
 
             if item_type == "commandexecution":
                 command = item.get("command") or item.get("parsedCmd") or item_state.get("command") or ""
@@ -840,7 +1182,7 @@ class CodexEventRouter:
                 if approval_request_id:
                     routed["clear_live_approval_ids"] = [approval_request_id]
                     self._approval_request_map.pop(str(item_id), None)
-                return routed
+                return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
 
             if item_type == "filechange":
                 changes = item.get("changes") if item.get("changes") is not None else item_state.get("changes")
@@ -884,7 +1226,7 @@ class CodexEventRouter:
                 if approval_request_id:
                     routed["clear_live_approval_ids"] = [approval_request_id]
                     self._approval_request_map.pop(str(item_id), None)
-                return routed
+                return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
 
             if item_type in {"mcptoolcall", "websearch", "imageview"}:
                 tool_name = item.get("tool") or item_state.get("tool") or item_type
@@ -902,7 +1244,7 @@ class CodexEventRouter:
                 output = _stringify_value(result_value or {"status": status or "completed"})
                 is_error = bool(error) or status in {"failed", "error"}
                 command_label = f"{server_name}:{tool_name}" if server_name else str(tool_name)
-                return {
+                return self._decorate_routed_result({
                     "handled": True,
                     "events": [
                         {
@@ -925,11 +1267,11 @@ class CodexEventRouter:
                         "turn_id": turn_id,
                         "event": label_lower,
                     }],
-                }
+                }, thread_id=thread_id, item_state=item_state)
 
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        if label_lower == "item/tool/call" and isinstance(payload, dict):
+        if request_spec and request_spec.category == "item" and request_spec.subject == "tool" and request_spec.phase == "call" and isinstance(payload, dict):
             tool_id = payload.get("callId") or payload.get("call_id") or payload.get("id")
             if not isinstance(tool_id, str) or not tool_id:
                 tool_id = _assistant_id(payload, thread_id, turn_id)
@@ -941,7 +1283,7 @@ class CodexEventRouter:
                 "tool": tool_name,
                 "arguments": arguments,
             })
-            return {
+            return self._decorate_routed_result({
                 "handled": True,
                 "events": [{
                     "type": "tool_begin",
@@ -950,9 +1292,9 @@ class CodexEventRouter:
                     "arguments": arguments,
                 }],
                 "transcript_entries": [],
-            }
+            }, thread_id=thread_id, item_state=item_state)
 
-        if label_lower == "item/tool/requestuserinput" and isinstance(payload, dict):
+        if request_spec and request_spec.category == "item" and request_spec.subject == "tool" and request_spec.phase == "requestuserinput" and isinstance(payload, dict):
             message = payload.get("message") or "Tool requested user input"
             return {
                 "handled": True,
@@ -963,7 +1305,7 @@ class CodexEventRouter:
                 "transcript_entries": [],
             }
 
-        if label_lower == "item/commandexecution/requestapproval" and isinstance(payload, dict):
+        if request_spec and request_spec.category == "item" and request_spec.subject == "commandexecution" and request_spec.phase == "requestapproval" and isinstance(payload, dict):
             request_id = payload.get("_request_id")
             if request_id is None:
                 request_id = payload.get("id")
@@ -979,15 +1321,15 @@ class CodexEventRouter:
                 "reason": payload.get("reason"),
                 "risk": payload.get("risk"),
             }
-            return self._tool_request_result(
+            return self._decorate_routed_result(self._tool_request_result(
                 request_id=request_id_text or str(item_id or ""),
                 kind="command",
                 payload={key: value for key, value in payload_data.items() if value not in (None, "", [])},
                 thread_id=thread_id,
                 turn_id=turn_id,
-            )
+            ), thread_id=thread_id, item_state=item_state)
 
-        if label_lower == "item/filechange/requestapproval" and isinstance(payload, dict):
+        if request_spec and request_spec.category == "item" and request_spec.subject == "filechange" and request_spec.phase == "requestapproval" and isinstance(payload, dict):
             request_id = payload.get("_request_id")
             if request_id is None:
                 request_id = payload.get("id")
@@ -1010,15 +1352,15 @@ class CodexEventRouter:
                 "reason": payload.get("reason"),
                 "path": path or item_state.get("path"),
             }
-            return self._tool_request_result(
+            return self._decorate_routed_result(self._tool_request_result(
                 request_id=request_id_text or str(item_id or ""),
                 kind="diff",
                 payload={key: value for key, value in payload_data.items() if value not in (None, "", [], {})},
                 thread_id=thread_id,
                 turn_id=turn_id,
-            )
+            ), thread_id=thread_id, item_state=item_state)
 
-        if event_type == "user_message" and protocol.has_event_type(event_type) and isinstance(payload, dict):
+        if event_spec and event_spec.category == "user" and event_spec.subject == "message" and isinstance(payload, dict):
             text = _direct_event_text(payload)
             if text:
                 item_id = _assistant_id(payload, thread_id, turn_id)
@@ -1034,24 +1376,24 @@ class CodexEventRouter:
                     }],
                 }
 
-        if event_type in {"agent_message_content_delta", "agent_message_delta"} and protocol.has_event_type(event_type) and isinstance(payload, dict):
+        if event_spec and event_spec.category == "agent" and event_spec.subject in {"message", "message_content"} and event_spec.phase == "delta" and isinstance(payload, dict):
             delta = payload.get("delta")
             if isinstance(delta, str):
                 item_id = _assistant_id(payload, thread_id, turn_id)
-                return {
+                return self._decorate_routed_result({
                     "handled": True,
                     "events": [
                         {"type": "assistant_delta", "id": item_id, "delta": delta},
                         {"type": "activity", "label": "responding", "active": True},
                     ],
                     "transcript_entries": [],
-                }
+                }, thread_id=thread_id)
 
-        if event_type == "agent_message" and protocol.has_event_type(event_type) and isinstance(payload, dict):
+        if event_spec and event_spec.category == "agent" and event_spec.subject == "message" and event_spec.phase is None and isinstance(payload, dict):
             text = _direct_event_text(payload)
             if text:
                 item_id = _assistant_id(payload, thread_id, turn_id)
-                return {
+                return self._decorate_routed_result({
                     "handled": True,
                     "events": [{"type": "assistant_finalize", "id": item_id, "text": text}],
                     "transcript_entries": [{
@@ -1061,9 +1403,12 @@ class CodexEventRouter:
                         "turn_id": turn_id,
                         "event": label_lower,
                     }],
-                }
+                }, thread_id=thread_id)
 
-        if event_type in {"exec_approval_request", "apply_patch_approval_request"} and isinstance(payload, dict):
+        if event_spec and event_spec.phase == "request" and isinstance(payload, dict) and (
+            (event_spec.category == "exec" and event_spec.subject == "approval")
+            or (event_spec.category == "apply" and event_spec.subject == "patch_approval")
+        ):
             # These codex/event wrappers mirror approval context but do not carry the actionable
             # JSON-RPC request id; only item/*/requestApproval should create live approval cards.
             return {"handled": True, "events": [], "transcript_entries": []}

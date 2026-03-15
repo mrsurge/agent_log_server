@@ -1317,10 +1317,16 @@ def _remove_pending_approval(conversation_id: str, request_id: Any) -> bool:
     return True
 
 
-async def _resolve_codex_approval(request_id: str, decision: str) -> bool:
+async def _resolve_codex_approval(request_id: str, resolution: Any) -> bool:
     request_id_text = str(request_id or "").strip()
     if not request_id_text:
         return False
+    decision = resolution
+    if isinstance(resolution, dict):
+        if isinstance(resolution.get("result"), dict):
+            decision = resolution["result"].get("decision")
+        else:
+            decision = resolution.get("decision")
     result = {"decision": "accept" if decision == "accept" else "decline"}
     payload = {"id": int(request_id_text) if request_id_text.isdigit() else request_id_text, "result": result}
     await _write_appserver(payload)
@@ -3336,8 +3342,7 @@ async def _route_appserver_event(
         if isinstance(settings.get("agent"), str) and settings["agent"].strip():
             agent_type = settings["agent"].strip()
 
-    event_type = label_lower.split("codex/event/", 1)[-1] if label_lower.startswith("codex/event/") else ""
-    delegate_to_extension = agent_type != "codex" or event_type.startswith("collab_")
+    delegate_to_extension = ext_loader.has_extension(agent_type)
 
     if delegate_to_extension and ext_loader.has_extension(agent_type):
         routed = await ext_loader.route_event(
@@ -6676,9 +6681,12 @@ async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
             agent = (meta.get("settings") or {}).get("agent", "codex")
             if agent != "codex" and ext_loader.has_extension(agent):
                 request_id = str(payload.get("id", ""))
-                decision = (payload.get("result") or {}).get("decision", "decline")
+                result_payload = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                decision = result_payload.get("decision", "decline")
+                resolution = dict(result_payload)
+                resolution["decision"] = "accept" if str(decision).strip().lower() == "accept" else "decline"
                 try:
-                    ext_loader.resolve_approval(agent, request_id, decision)
+                    ext_loader.resolve_approval(agent, request_id, resolution)
                     return {"ok": True}
                 except Exception as e:
                     print(f"[WARN] Extension approval routing failed: {e}")
@@ -6782,7 +6790,12 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
     request_id = str(request_id_raw or "").strip()
     if not request_id:
         raise HTTPException(status_code=400, detail="Missing request_id")
-    decision = "accept" if str(payload.get("decision") or "decline").strip().lower() == "accept" else "decline"
+    resolution = dict(payload.get("result")) if isinstance(payload.get("result"), dict) else {}
+    for key in ("decision", "kind", "rules", "feedback", "message", "path"):
+        if key in payload and key not in resolution:
+            resolution[key] = payload.get(key)
+    decision = "accept" if str(resolution.get("decision") or "decline").strip().lower() == "accept" else "decline"
+    resolution["decision"] = decision
     conversation_id = payload.get("conversation_id")
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         async with _config_lock:
@@ -6803,9 +6816,9 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
     agent = str(descriptor.get("agent") or ((meta.get("settings") or {}).get("agent") or "codex")).strip() or "codex"
     resolved = False
     if agent == "codex":
-        resolved = await _resolve_codex_approval(request_id, decision)
+        resolved = await _resolve_codex_approval(request_id, resolution)
     elif ext_loader.has_extension(agent):
-        resolved = bool(ext_loader.resolve_approval(agent, request_id, decision))
+        resolved = bool(ext_loader.resolve_approval(agent, request_id, resolution))
     else:
         _remove_pending_approval(conversation_id, request_id)
         raise HTTPException(status_code=409, detail=f"No approval resolver for agent: {agent}")
@@ -6815,7 +6828,13 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=409, detail="Approval is stale or no longer actionable")
 
     _remove_pending_approval(conversation_id, request_id)
-    return {"ok": True, "conversation_id": conversation_id, "request_id": request_id, "decision": decision}
+    return {
+        "ok": True,
+        "conversation_id": conversation_id,
+        "request_id": request_id,
+        "decision": decision,
+        "result": resolution,
+    }
 
 
 @app.post("/api/appserver/interrupt")

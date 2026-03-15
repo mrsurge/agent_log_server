@@ -5,6 +5,7 @@ export function bindRpcFlow(ctx) {
     getPending,
     getConversationId,
     createRow,
+    getSubagentContainer,
     escapeHtml,
     formatDiff,
     toRelativePath,
@@ -57,7 +58,15 @@ export function bindRpcFlow(ctx) {
   function renderApproval(evt) {
     const requestId = evt?.request_id || evt?.id;
     if (requestId === null || requestId === undefined || requestId === '') return null;
-    const { row, body } = createRow(evt.kind === 'diff' ? 'diff' : 'approval', 'approval');
+    const parentEl = evt?.subagent_id
+      ? getSubagentContainer(evt.subagent_id, '', '').body
+      : null;
+    const { row, body } = createRow(
+      evt.kind === 'diff' ? 'diff' : 'approval',
+      'approval',
+      undefined,
+      parentEl,
+    );
     row.dataset.approvalId = String(requestId);
     const payload = evt.payload || {};
     const lines = [];

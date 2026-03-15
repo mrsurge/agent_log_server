@@ -1,7 +1,7 @@
 """
 Copilot SDK Client Handler for Extension System
 
-Manages Copilot CLI agent sessions via the github-copilot-sdk Python package.
+Manages Copilot CLI agent sessions via the vendored Copilot SDK source.
 Replaces the ACP client handler with a cleaner, SDK-managed approach.
 
 Key advantages over ACP:
@@ -16,11 +16,13 @@ import asyncio
 import json
 import os
 import shutil
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Callable, Awaitable, get_args
 
-from copilot import (
+from ._vendor.copilot import (
     CopilotClient,
     CopilotSession,
     SessionConfig,
@@ -30,7 +32,7 @@ from copilot import (
     PermissionRequest,
     PermissionRequestResult,
 )
-from copilot.types import SessionHooks
+from ._vendor.copilot.types import SessionHooks, PermissionRequestResultKind
 
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from te2_runtime import (
@@ -153,7 +155,8 @@ def _log_runtime_config(stage: str, conversation_id: str, config: Dict[str, Any]
 # ── Permission / Approval handler ───────────────────────────────────
 
 # Pending approval futures: request_id -> asyncio.Future
-_pending_approvals: Dict[str, asyncio.Future] = {}
+_pending_approvals: Dict[str, asyncio.Future[Any]] = {}
+_PERMISSION_RESULT_KIND_VALUES = set(get_args(PermissionRequestResultKind))
 
 
 def _get_conversation_settings(conversation_id: str) -> Dict[str, Any]:
@@ -187,6 +190,88 @@ def _remove_pending_approval(conversation_id: str, request_id: str) -> None:
         pending.pop(str(request_id or ""), None)
         meta["pending_approvals"] = pending
         _meta_fns["save"](conversation_id, meta)
+
+
+def _json_safe_sdk_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
+        return _json_safe_sdk_value(value.to_dict())
+    if is_dataclass(value):
+        return {key: _json_safe_sdk_value(val) for key, val in asdict(value).items() if val is not None}
+    if isinstance(value, dict):
+        return {str(key): _json_safe_sdk_value(val) for key, val in value.items() if val is not None}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_sdk_value(item) for item in value]
+    return value
+
+
+def _normalize_permission_kind(kind: Any) -> str:
+    normalized = _json_safe_sdk_value(kind)
+    if isinstance(normalized, str) and normalized.strip():
+        return normalized.strip()
+    return "unknown"
+
+
+def _extract_permission_request_fields(request: PermissionRequest) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {}
+    for field_name in getattr(request, "__dataclass_fields__", {}) or {}:
+        value = getattr(request, field_name, None)
+        if value is None:
+            continue
+        fields[field_name] = _json_safe_sdk_value(value)
+    return fields
+
+
+def _decision_to_permission_result(decision: Any) -> PermissionRequestResult:
+    decision_text = str(decision or "").strip().lower()
+    if decision_text == "accept":
+        return PermissionRequestResult(kind="approved", rules=[])
+    return PermissionRequestResult(kind="denied-interactively-by-user", rules=[])
+
+
+def _normalize_permission_resolution(resolution: Any) -> PermissionRequestResult:
+    if isinstance(resolution, PermissionRequestResult):
+        return resolution
+
+    result_payload = resolution
+    if isinstance(resolution, dict) and isinstance(resolution.get("result"), dict):
+        result_payload = resolution.get("result")
+
+    if not isinstance(result_payload, dict):
+        return _decision_to_permission_result(result_payload)
+
+    decision_text = str(
+        result_payload.get("decision")
+        or (resolution.get("decision") if isinstance(resolution, dict) else "")
+        or ""
+    ).strip().lower()
+    kind_text = str(result_payload.get("kind") or "").strip()
+    if kind_text not in _PERMISSION_RESULT_KIND_VALUES:
+        kind_text = ""
+    if not kind_text:
+        kind_text = "approved" if decision_text == "accept" else "denied-interactively-by-user"
+
+    rules = result_payload.get("rules")
+    if not isinstance(rules, list):
+        rules = []
+    feedback = result_payload.get("feedback")
+    if feedback is not None and not isinstance(feedback, str):
+        feedback = str(feedback)
+    message = result_payload.get("message")
+    if message is not None and not isinstance(message, str):
+        message = str(message)
+    path = result_payload.get("path")
+    if path is not None and not isinstance(path, str):
+        path = str(path)
+
+    return PermissionRequestResult(
+        kind=kind_text,
+        rules=rules,
+        feedback=feedback,
+        message=message,
+        path=path,
+    )
 
 
 def _merge_runtime_settings(
@@ -403,11 +488,11 @@ async def get_runtime_options(
     }
 
 
-def resolve_approval(request_id: str, decision: str) -> bool:
+def resolve_approval(request_id: str, resolution: Any) -> bool:
     """Called from WS handler when user responds to an approval request."""
     fut = _pending_approvals.pop(request_id, None)
     if fut and not fut.done():
-        fut.set_result(decision)
+        fut.set_result(_normalize_permission_resolution(resolution))
         return True
     return False
 
@@ -496,7 +581,7 @@ def _make_permission_handler(conversation_id: str) -> Callable:
         request: PermissionRequest,
         context: Dict[str, str],
     ) -> PermissionRequestResult:
-        kind = getattr(request, "kind", "unknown") or "unknown"
+        kind = _normalize_permission_kind(getattr(request, "kind", "unknown"))
         tool_call_id = getattr(request, "tool_call_id", "") or ""
         _add_to_raw_buffer("in", conversation_id, f"permission_request: {kind} tool={tool_call_id}")
 
@@ -534,20 +619,16 @@ def _make_permission_handler(conversation_id: str) -> Callable:
             except Exception:
                 normalized_args = raw_args
         if normalized_args:
-            payload["arguments"] = normalized_args
-        # Extract request fields from the PermissionRequest dataclass
-        request_fields: Dict[str, Any] = {}
-        for field_name in ("path", "file_name", "diff", "new_file_contents",
-                           "full_command_text", "args", "server_name",
-                           "intention", "subject", "read_only"):
-            val = getattr(request, field_name, None)
-            if val is not None:
-                request_fields[field_name] = val
+            payload["arguments"] = _json_safe_sdk_value(normalized_args)
+        request_fields = _extract_permission_request_fields(request)
         if request_fields:
             payload["request"] = request_fields
         payload["path"] = payload.get("path") or request_fields.get("path") or request_fields.get("file_name")
         payload["cwd"] = payload.get("cwd") or request_fields.get("cwd")
         payload["diff"] = payload.get("diff") or request_fields.get("diff")
+        for field_name in ("can_offer_session_approval", "possible_paths", "possible_urls", "warning", "intention"):
+            if field_name in request_fields and field_name not in payload:
+                payload[field_name] = request_fields[field_name]
         if not payload.get("changes") and request_fields.get("new_file_contents") is not None:
             payload["changes"] = request_fields.get("new_file_contents")
 
@@ -557,7 +638,7 @@ def _make_permission_handler(conversation_id: str) -> Callable:
 
         # Create a Future that the WS handler will resolve
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
+        fut: asyncio.Future[Any] = loop.create_future()
         _pending_approvals[request_id] = fut
 
         runtime_signature = _runtime_signatures.get(conversation_id) or _runtime_signature(conversation_id)
@@ -573,6 +654,9 @@ def _make_permission_handler(conversation_id: str) -> Callable:
             "payload": payload,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        subagent_id = tool_info.get("subagent_id")
+        if isinstance(subagent_id, str) and subagent_id:
+            approval_event["subagent_id"] = subagent_id
         descriptor = {
             "request_id": request_id,
             "agent": "copilot-sdk",
@@ -596,21 +680,18 @@ def _make_permission_handler(conversation_id: str) -> Callable:
         # Wait based on policy
         if policy == "always-ask":
             # No timeout — wait indefinitely for user decision
-            decision = await fut
+            permission_result = await fut
         else:
             # "suggest" — auto-approve after 120s timeout
             try:
-                decision = await asyncio.wait_for(fut, timeout=120.0)
+                permission_result = await asyncio.wait_for(fut, timeout=120.0)
             except asyncio.TimeoutError:
                 _pending_approvals.pop(request_id, None)
                 _remove_pending_approval(conversation_id, request_id)
                 print(f"[CopilotSDK] Approval timeout for {request_id}, auto-approving")
-                decision = "accept"
+                permission_result = PermissionRequestResult(kind="approved", rules=[])
 
-        if decision == "accept":
-            return PermissionRequestResult(kind="approved", rules=[])
-        else:
-            return PermissionRequestResult(kind="denied-interactively-by-user", rules=[])
+        return _normalize_permission_resolution(permission_result)
 
     return handler
 
@@ -1365,7 +1446,7 @@ async def hydrate_transcript(
 
     Returns a list — server.py writes them to transcript.jsonl.
     """
-    from copilot.generated.session_events import SessionEventType
+    from ._vendor.copilot.generated.session_events import SessionEventType
 
     # Ensure session is resumed so we can call get_messages()
     session = _sessions.get(conversation_id)

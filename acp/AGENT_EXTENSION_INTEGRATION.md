@@ -393,6 +393,8 @@ That logic lives in `extensions/codex/runtime_protocol.py`.
   - includes generic field types such as:
     - `session_picker`
     - dynamic `model`
+    - `reasoning_effort`
+    - `summary` (`auto`, `concise`, `detailed`, `none`)
     - `approvalPolicy`
     - `sandboxPolicy`
     - `developer_instructions`
@@ -403,6 +405,9 @@ That logic lives in `extensions/codex/runtime_protocol.py`.
     - `thread/resume`
     - `turn/start`
     - `turn/interrupt`
+  - the same helper also keeps turn-only settings in the right lane:
+    - thread-level settings participate in `thread/start`, `thread/resume`, and the thread runtime signature
+    - turn-level settings such as reasoning effort and reasoning summary are persisted through the generic schema/meta flow but only emitted on `turn/start`
 
 - **runtime signature tracking**
   - thread-level runtime settings are hashed from the protocol-shaped payload, not from a handwritten config subset
@@ -414,9 +419,11 @@ That logic lives in `extensions/codex/runtime_protocol.py`.
 
 - **`handle_message(...)`**
   - ensures the app-server shell is ready
-  - starts or resumes a thread
-  - sends `turn/start`
-  - persists thread runtime signature
+  - starts a thread when no `thread_id` exists yet
+  - resumes an existing thread before send only when the transport lost that thread or thread-level runtime settings changed
+  - sends the user message with `turn/start`
+  - applies turn-only settings such as reasoning effort and reasoning summary on `turn/start`
+  - persists the thread runtime signature for the thread-level settings only
 
 - **`list_models()`**
   - reuses the app-server `model/list` data
@@ -460,6 +467,7 @@ What works now:
 - runtime schema generation from the installed binary
 - versioned schema cache
 - dynamic schema-driven settings
+- runtime-schema-backed reasoning summary setting persisted through the shared settings/meta flow
 - session picker / new session from port-in
 - request building from runtime schema
 - extension-owned app-server transport

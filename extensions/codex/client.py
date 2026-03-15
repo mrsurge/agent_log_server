@@ -504,11 +504,11 @@ async def hydrate_transcript(
     return items if isinstance(items, list) else []
 
 
-def resolve_approval(request_id: str, decision: str) -> bool:
+def resolve_approval(request_id: str, resolution: Any) -> bool:
     transport = _transport
     if transport is None:
         return False
-    return transport.resolve_approval(request_id, decision)
+    return transport.resolve_approval(request_id, resolution)
 
 
 def validate_pending_approval(conversation_id: str, request_id: str, descriptor: Dict[str, Any]) -> bool:

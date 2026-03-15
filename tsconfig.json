@@ -11,6 +11,10 @@
     "skipLibCheck": true
   },
   "include": [
-    "static/**/*.js"
+    "agent_log_server/static/**/*.js"
+  ],
+  "exclude": [
+    "agent_log_server/static/dist/**",
+    "agent_log_server/static/vendor/**"
   ]
 }

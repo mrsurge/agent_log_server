@@ -196,7 +196,12 @@ export function bindEventRouter(ctx) {
         return;
       case 'message':
         setLastEventType('message');
-        addMessage(evt.role || 'message', evt.text || '');
+        if (evt.subagent_id) {
+          const sa = getSubagentContainer(evt.subagent_id, '', '');
+          addMessage(evt.role || 'message', evt.text || '', sa.body);
+        } else {
+          addMessage(evt.role || 'message', evt.text || '');
+        }
         return;
       case 'assistant_delta':
         setLastEventType('assistant');

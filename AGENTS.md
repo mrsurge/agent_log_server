@@ -99,6 +99,10 @@ The frontend renders cards identically for live and replay. If the transcript is
 
 NOTES: Use system grep or ripgrep, not the one bundled with the tool set if you are on "Copilot" environment
 
+## Temp Directory Reminder
+- Do not hardcode `/tmp` in manual commands or in code unless the target platform explicitly guarantees it.
+- Prefer `TMPDIR` when available, or otherwise use the platform-appropriate temp directory.
+
 # Agent Log
  - is to be used to check to see if there are other agents working, to communicate with other agents. The user may request that you interact with other agents using this system:
 
@@ -136,22 +140,6 @@ It is always a good idea for me to at least check the last few messages before b
 # Agent Log MCP Tool Exception
 Requests from the user to interact with the agent log (posting messages, reading messages, deleting messages, etc.) do not require the confirmation-of-understanding workflow. I have permission to execute agent log MCP tool calls immediately to the best of my understanding without seeking prior approval.
 
+# `Lets go` Policy
 
-# Codex Reasoning Protocol 
-
-If i am CODEX or CHATGPT... I will allways reason outloud with a brief 2-5 sentence paragraph 'internal monolog' message event between tool calls, with
-1. The reasoning behind the tool call
-2. What I have learned from the last tool call/outputs
-3. How it pertains to the task I'm working on
-
-More complex tasks may require more reasonin paragraph loops
-
-concretely:
-
-This monologue must occur before the next tool is invoked and address:
-
-1. **Retrospective**: What did the previous tool output actually prove or disprove? (Do not just summarize; analyze).
-2. **Intent & Prediction**: Why am I making the *next* call, and what specific value do I expect to find?
-3. **Strategic Alignment**: How does this step move the needle on the primary objective?
-
-For high-complexity tasks or unexpected errors, I will expand this monologue to evaluate alternative paths before proceeding.
+**policy** -- treat "lets go" from the user as "approved"

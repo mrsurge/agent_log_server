@@ -259,6 +259,11 @@ document.addEventListener('DOMContentLoaded', () => {
     return sa;
   }
 
+  function getLiveEventParent(evt) {
+    if (!evt || !evt.subagent_id) return null;
+    return getSubagentContainer(evt.subagent_id, '', '').body;
+  }
+
   function finalizeSubagent(id, summary, success) {
     const sa = subagentContainers.get(id);
     if (!sa) return;
@@ -2018,9 +2023,15 @@ document.addEventListener('DOMContentLoaded', () => {
     return { row, body, header, title };
   }
 
-  function createRow(kind, title, beforeEl) {
+  function createRow(kind, title, beforeEl, parentEl = null) {
     const { row, body } = buildRow(kind, title);
-    insertRow(row, beforeEl);
+    if (parentEl) {
+      clearPlaceholder();
+      if (row.parentElement !== parentEl) parentEl.appendChild(row);
+      maybeAutoScroll();
+    } else {
+      insertRow(row, beforeEl);
+    }
     return { row, body };
   }
 
@@ -2109,8 +2120,6 @@ document.addEventListener('DOMContentLoaded', () => {
       contextRemainingEl.textContent = '—';
       return;
     }
-    // Debug: log values to console
-    console.log('updateContextRemaining:', { total, windowSize, pct: Math.round((total / windowSize) * 100) });
     const pct = Math.min(100, Math.round((Number(total) / Number(windowSize)) * 100));
     contextRemainingEl.textContent = `${pct}%`;
     // Color code based on usage
@@ -2181,14 +2190,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function addMessage(role, text) {
+  function addMessage(role, text, parentEl = null) {
     const cleanText = role === 'assistant' ? stripCitations(text || '') : (text || '');
     const useMessageCard = role === 'assistant' || role === 'user';
     const { row, body } = useMessageCard
       ? buildMessageCard(role, cleanText)
       : buildRow('message', role === 'assistant' ? 'assistant' : role);
     if (!useMessageCard && role === 'user') row.classList.add('user');
-    insertRow(row);
+    if (parentEl) {
+      clearPlaceholder();
+      parentEl.appendChild(row);
+    } else {
+      insertRow(row);
+    }
     if ((role === 'assistant' || role === 'user') && isMarkdownEnabled()) {
       const rendered = renderMarkdownBlock(cleanText);
       body.append(rendered);
@@ -2961,7 +2975,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return entry;
   }
 
-  function getToolRow(id, label) {
+  function getToolRow(id, label, parentEl = null) {
     const key = id || `tool:${label || 'tool'}`;
     let entry = toolRows.get(key);
     if (!entry) {
@@ -2980,10 +2994,19 @@ document.addEventListener('DOMContentLoaded', () => {
       argsPre.textContent = '';
       body.appendChild(argsPre);
       row.appendChild(body);
-      insertRow(row);
+      if (parentEl) {
+        clearPlaceholder();
+        parentEl.appendChild(row);
+      } else {
+        insertRow(row);
+      }
       makeCollapsible(row, `tool:${key}`, false);
-      entry = { row, body, argsPre, header, resultEl: null };
+      entry = { row, body, argsPre, header, resultEl: null, streamEl: null, interactionEl: null };
       toolRows.set(key, entry);
+    } else if (parentEl && entry.row.parentElement !== parentEl) {
+      clearPlaceholder();
+      parentEl.appendChild(entry.row);
+      maybeAutoScroll();
     }
     return entry;
   }
@@ -2994,7 +3017,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
     const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
-    const entry = getToolRow(evt.id, label);
+    const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
     // Format arguments
     const args = evt.arguments || evt.payload || {};
     const argEntries = Object.entries(args);
@@ -3046,13 +3069,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const toolName = evt.tool || 'tool';
     // Skip command tools - they're redundant with command cards
     if (toolName === 'command' || toolName === 'shell') return;
-    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`);
+    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`, getLiveEventParent(evt));
     const delta = evt.delta || '';
-    if (delta && entry.resultEl) {
-      // Append to result element if it exists
-      if (entry.resultEl.tagName === 'PRE') {
-        entry.resultEl.textContent += delta;
+    if (delta) {
+      if (!entry.streamEl) {
+        const streamPre = document.createElement('pre');
+        streamPre.className = 'mcp-tool-content';
+        entry.body.appendChild(streamPre);
+        entry.streamEl = streamPre;
       }
+      entry.streamEl.textContent += delta;
     }
     lastEventType = 'tool';
     maybeAutoScroll();
@@ -3064,10 +3090,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
     const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
-    const entry = getToolRow(evt.id, label);
+    const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
     // Handle both old payload format and new result format
     const result = evt.result ?? evt.payload ?? null;
-    console.log('[renderToolEnd]', toolName, 'result type:', typeof result, 'isObject:', result && typeof result === 'object', 'result:', result);
     const durationMs = evt.duration_ms ?? (result && result.duration_ms) ?? (result && result.durationMs);
     const isError = evt.is_error || (result && result.isError) || false;
     
@@ -3118,7 +3143,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     lastEventType = 'tool';
     // Update status dot based on error state
-    const exitCode = result.exit_code ?? result.exitCode;
+    const exitCode = result && (result.exit_code ?? result.exitCode);
     if (!isError && (exitCode === 0 || exitCode === undefined || exitCode === null)) {
       setStatusDot('success');
     } else {
@@ -3127,14 +3152,20 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderToolInteraction(evt) {
-    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`);
+    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`, getLiveEventParent(evt));
     const payload = evt.payload || {};
     const stdin = payload.stdin ? `stdin: ${payload.stdin}` : '';
     const stdout = payload.stdout ? `stdout: ${payload.stdout}` : '';
     const pid = payload.pid ? `pid=${payload.pid}` : '';
     const parts = [pid, stdin, stdout].filter(Boolean);
     if (parts.length) {
-      entry.pre.textContent += `[io] ${parts.join(' ')}\n`;
+      if (!entry.interactionEl) {
+        const interactionPre = document.createElement('pre');
+        interactionPre.className = 'mcp-tool-content';
+        entry.body.appendChild(interactionPre);
+        entry.interactionEl = interactionPre;
+      }
+      entry.interactionEl.textContent += `[io] ${parts.join(' ')}\n`;
     }
     lastEventType = 'tool';
   }
@@ -3672,9 +3703,13 @@ document.addEventListener('DOMContentLoaded', () => {
     
     row.appendChild(body);
     makeCollapsible(row, `cmd:${agentBlockId || command.slice(0, 40)}`, false);
-    
-    // Insert before bottom spacer
-    if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
+
+    const parentEl = getLiveEventParent(evt);
+    if (parentEl) {
+      clearPlaceholder();
+      parentEl.appendChild(row);
+      maybeAutoScroll();
+    } else if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
       timelineEl.insertBefore(row, bottomSpacerEl);
     } else {
       timelineEl.appendChild(row);
@@ -3721,6 +3756,7 @@ document.addEventListener('DOMContentLoaded', () => {
     getPending: () => pending,
     getConversationId: () => conversationMeta?.conversation_id || null,
     createRow,
+    getSubagentContainer,
     escapeHtml,
     formatDiff: (...args) => formatDiff(...args),
     toRelativePath,
