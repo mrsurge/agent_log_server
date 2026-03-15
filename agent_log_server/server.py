@@ -538,11 +538,16 @@ async def _sio_get_transcript(sid, data):
 async def _sio_get_transcript_range(sid, data):
     """Mirror of GET /api/appserver/transcript/range"""
     try:
-        cid = data.get("conversation_id")
-        offset = data.get("offset", 0)
-        limit = data.get("limit", 120)
+        payload = data if isinstance(data, dict) else {}
+        cid = payload.get("conversation_id")
+        offset = payload.get("offset", 0)
+        limit = payload.get("limit", 120)
+        include_internal = _coerce_query_bool(payload.get("include_internal", False))
         return await api_appserver_transcript_range(
-            conversation_id=cid, offset=offset, limit=min(limit, 500)
+            conversation_id=cid,
+            offset=offset,
+            limit=min(limit, 500),
+            include_internal=include_internal,
         )
     except Exception as e:
         return _sio_error(str(e))
@@ -1502,6 +1507,8 @@ def _preview_from_event(event: Dict[str, Any]) -> Optional[Dict[str, str]]:
 def _store_conversation_preview_from_event(event: Dict[str, Any]) -> None:
     if not isinstance(event, dict):
         return
+    if _is_internal_transcript_item(event):
+        return
     convo_id = event.get("conversation_id")
     if not isinstance(convo_id, str) or not convo_id.strip():
         return
@@ -1747,6 +1754,25 @@ def _sanitize_transcript_item(item: Dict[str, Any]) -> Dict[str, Any]:
             item = dict(item)  # Shallow copy
             item["text"] = text
     return item
+
+
+def _is_internal_transcript_item(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    internal = item.get("internal")
+    if internal is True:
+        return True
+    if isinstance(internal, str) and internal.strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    visibility = item.get("visibility")
+    return isinstance(visibility, str) and visibility.strip().lower() == "internal"
+
+
+def _coerce_query_bool(value: Any) -> bool:
+    candidate = getattr(value, "default", value)
+    if isinstance(candidate, str):
+        return candidate.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(candidate)
 
 
 def _latest_legacy_transcript() -> Optional[Path]:
@@ -6185,7 +6211,9 @@ async def api_appserver_transcript_range(
     conversation_id: Optional[str] = Query(None),
     offset: int = Query(0),
     limit: int = Query(120, gt=0, le=500),
+    include_internal: bool = Query(False),
 ):
+    include_internal = _coerce_query_bool(include_internal)
     async with _config_lock:
         cfg = _load_appserver_config()
         convo_id = conversation_id or cfg.get("conversation_id")
@@ -6208,6 +6236,8 @@ async def api_appserver_transcript_range(
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not include_internal and _is_internal_transcript_item(record):
+                    continue
                 total += 1
                 buf.append(_sanitize_transcript_item(record))
         items = list(buf)
@@ -6223,6 +6253,8 @@ async def api_appserver_transcript_range(
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not include_internal and _is_internal_transcript_item(record):
                     continue
                 if total >= start and total < end:
                     items.append(_sanitize_transcript_item(record))

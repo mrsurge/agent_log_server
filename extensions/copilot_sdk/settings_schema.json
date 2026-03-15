@@ -56,6 +56,12 @@
       "default": ""
     },
     {
+      "id": "debug_trace",
+      "type": "checkbox",
+      "label": "Internal Debug Trace",
+      "default": false
+    },
+    {
       "id": "approval_policy",
       "type": "select",
       "label": "Approval Policy",

@@ -37,6 +37,11 @@ These rules matter more than any individual implementation detail:
 5. **Live event output and transcript output must match**
    Any router that emits frontend events must write equivalent transcript entries for replay parity. Missing transcript fields become replay bugs.
 
+6. **Internal-only debug data must be explicitly tagged**
+   - use `internal: true` on both the live event and the transcript entry
+   - normal frontend live-play, replay, and conversation-preview paths must ignore internal-tagged records
+   - `/api/appserver/transcript/range` hides internal-tagged rows by default; opt in with `include_internal=true` when you need to inspect them directly
+
 ## Terms used in this repo
 
 - **new session from port-in**
@@ -329,6 +334,7 @@ That makes it a good example of an extension whose backend transport is fully hi
   - `session.on(...)` streams SDK events into `CopilotEventRouter.route_event(...)`
   - router translates deltas, reasoning, tool calls, subagents, usage, and approvals
   - live `_emit()` and transcript `_record()` stay in parity
+  - optional `debug_trace` settings emit structured `debug_trace` records on the internal-only lane for Copilot provenance debugging without polluting normal replay
 
 ### Why this is the best "full" example
 

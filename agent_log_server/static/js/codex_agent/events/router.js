@@ -62,6 +62,15 @@ export function bindEventRouter(ctx) {
     return normalized;
   }
 
+  function isInternalEvent(evt) {
+    if (!evt || typeof evt !== 'object') return false;
+    if (evt.internal === true) return true;
+    if (typeof evt.internal === 'string' && ['1', 'true', 'yes', 'on'].includes(evt.internal.trim().toLowerCase())) {
+      return true;
+    }
+    return typeof evt.visibility === 'string' && evt.visibility.trim().toLowerCase() === 'internal';
+  }
+
   function buildToolPreviewText(evt) {
     const toolName = typeof evt?.tool === 'string' ? evt.tool.trim() : '';
     const serverName = typeof evt?.server === 'string' ? evt.server.trim() : '';
@@ -155,6 +164,7 @@ export function bindEventRouter(ctx) {
 
   function handleEvent(evt) {
     if (!evt || typeof evt !== 'object') return;
+    if (isInternalEvent(evt)) return;
     const state = getState();
     updateConversationPreview(evt);
 
@@ -225,11 +235,21 @@ export function bindEventRouter(ctx) {
         return;
       case 'reasoning_delta':
         setLastEventType('reasoning');
-        appendReasoningDelta(evt.id, evt.delta || '');
+        if (evt.subagent_id) {
+          const sa = getSubagentContainer(evt.subagent_id, '', '');
+          appendReasoningDelta(evt.id, evt.delta || '', sa.body);
+        } else {
+          appendReasoningDelta(evt.id, evt.delta || '');
+        }
         return;
       case 'reasoning_finalize':
         setLastEventType('reasoning');
-        finalizeReasoning(evt.id, evt.text || '');
+        if (evt.subagent_id) {
+          const sa = getSubagentContainer(evt.subagent_id, '', '');
+          finalizeReasoning(evt.id, evt.text || '', sa.body);
+        } else {
+          finalizeReasoning(evt.id, evt.text || '');
+        }
         return;
       case 'diff': {
         setLastEventType('diff');

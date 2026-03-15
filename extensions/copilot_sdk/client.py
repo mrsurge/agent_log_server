@@ -290,6 +290,19 @@ def _merge_runtime_settings(
     return merged
 
 
+def _copilot_debug_trace_enabled(
+    conversation_id: str,
+    settings: Optional[Dict[str, Any]] = None,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+) -> bool:
+    merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
+    raw = merged.get("debug_trace")
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
+
+
 def _copilot_config_dir() -> str:
     return str(Path.home() / ".copilot")
 
@@ -921,6 +934,11 @@ async def _init_session_unlocked(
             conversation_id=conversation_id,
             broadcast_fn=_broadcast_fn,
             transcript_fn=_transcript_fn,
+            debug_trace=_copilot_debug_trace_enabled(
+                conversation_id,
+                settings=settings,
+                cwd=cwd,
+            ),
         )
         _routers[conversation_id] = router
 
@@ -1029,6 +1047,12 @@ async def _resume_session_unlocked(
             conversation_id=conversation_id,
             broadcast_fn=_broadcast_fn,
             transcript_fn=_transcript_fn,
+            debug_trace=_copilot_debug_trace_enabled(
+                conversation_id,
+                settings=settings,
+                cwd=cwd,
+                model=model,
+            ),
         )
         _routers[conversation_id] = router
 
@@ -1068,6 +1092,7 @@ def _register_attached_session(
     sdk_session_id: str,
     runtime_signature: str,
     config: Dict[str, Any],
+    debug_trace: bool = False,
 ) -> CopilotSession:
     """
     Attach to a known SDK session id without issuing session.resume first.
@@ -1080,6 +1105,7 @@ def _register_attached_session(
         conversation_id=conversation_id,
         broadcast_fn=_broadcast_fn,
         transcript_fn=_transcript_fn,
+        debug_trace=debug_trace,
     )
     _routers[conversation_id] = router
 
@@ -1153,6 +1179,12 @@ async def handle_message(
                     str(thread_id),
                     desired_signature,
                     config,
+                    debug_trace=_copilot_debug_trace_enabled(
+                        conversation_id,
+                        settings=settings,
+                        cwd=cwd,
+                        model=settings.get("model"),
+                    ),
                 )
             else:
                 # Brand new conversation — create a fresh session
@@ -1184,6 +1216,14 @@ async def handle_message(
         router = _routers.get(conversation_id)
         if not router:
             return {"ok": False, "error": "Router not found"}
+        router.set_debug_trace(
+            _copilot_debug_trace_enabled(
+                conversation_id,
+                settings=settings,
+                cwd=cwd,
+                model=settings.get("model"),
+            )
+        )
 
         # Notify router of turn start
         await router.on_turn_start(text)

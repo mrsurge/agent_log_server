@@ -2231,6 +2231,15 @@ document.addEventListener('DOMContentLoaded', () => {
     },
   });
 
+  function isInternalTranscriptItem(entry) {
+    if (!entry || typeof entry !== 'object') return false;
+    if (entry.internal === true) return true;
+    if (typeof entry.internal === 'string' && ['1', 'true', 'yes', 'on'].includes(entry.internal.trim().toLowerCase())) {
+      return true;
+    }
+    return typeof entry.visibility === 'string' && entry.visibility.trim().toLowerCase() === 'internal';
+  }
+
   function renderTranscriptEntries(items, opts = {}) {
     if (!items || !items.length || !timelineEl) return;
     const fragment = document.createDocumentFragment();
@@ -2240,6 +2249,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Track subagent containers for replay grouping
     const replaySubagents = new Map(); // id -> { row, body, statusEl, label }
     items.forEach((entry) => {
+      if (isInternalTranscriptItem(entry)) return;
       if (!entry || !entry.role) return;
 
       // Subagent lifecycle entries
@@ -2912,33 +2922,35 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
   });
 
-  function getReasoningRow(id) {
+  function getReasoningRow(id, parentEl = null) {
     const key = id || 'reasoning';
     let entry = reasoningRows.get(key);
     if (!entry) {
-      const { body } = createRow('reasoning', 'reasoning');
+      const { row, body } = createRow('reasoning', 'reasoning', undefined, parentEl);
       const pre = document.createElement('pre');
       pre.textContent = '';
       body.append(pre);
-      entry = { pre };
+      entry = { row, body, pre };
       reasoningRows.set(key, entry);
+    } else if (parentEl && entry.row && entry.row.parentElement !== parentEl) {
+      parentEl.appendChild(entry.row);
     }
     return entry;
   }
 
-  function appendReasoningDelta(id, delta) {
+  function appendReasoningDelta(id, delta, parentEl = null) {
     if (delta === undefined || delta === null) return;
-    const entry = getReasoningRow(id);
+    const entry = getReasoningRow(id, parentEl);
     entry.pre.textContent += delta;
     lastEventType = 'reasoning';
     maybeAutoScroll();
   }
 
-  function finalizeReasoning(id, text) {
-    const key = id || 'reasoning';
-    const entry = reasoningRows.get(key);
-    if (!entry) return;
+  function finalizeReasoning(id, text, parentEl = null) {
+    const entry = getReasoningRow(id, parentEl);
     if (text) entry.pre.textContent = text;
+    lastEventType = 'reasoning';
+    maybeAutoScroll();
   }
 
   function getDiffRow(id, path, parentEl) {

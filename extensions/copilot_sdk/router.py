@@ -66,10 +66,12 @@ class CopilotEventRouter:
         conversation_id: str,
         broadcast_fn: Callable[[Dict[str, Any]], Awaitable[None]],
         transcript_fn: Callable[[str, Dict[str, Any]], Awaitable[None]],
+        debug_trace: bool = False,
     ):
         self.conversation_id = conversation_id
         self.broadcast = broadcast_fn
         self.append_transcript = transcript_fn
+        self.debug_trace = self._coerce_bool(debug_trace)
 
         # State tracking
         self.current_turn_id: Optional[str] = None
@@ -87,11 +89,21 @@ class CopilotEventRouter:
         self._last_block_type: Optional[str] = None
         self._suppressed_tools: set = set()  # tool_call_ids for UI-only tools (e.g. report_intent)
         self._active_subagents: Dict[str, Dict[str, Any]] = {}  # tool_call_id -> subagent info
+        self._known_subagent_ids: set = set()  # all seen subagent ids for validation
         self._subagent_tool_ids: set = set()  # tool_call_ids that belong to a subagent
 
     def _next_seq(self) -> int:
         self._seq += 1
         return self._seq
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def set_debug_trace(self, enabled: Any) -> None:
+        self.debug_trace = self._coerce_bool(enabled)
 
     async def _emit(self, event: Dict[str, Any]) -> None:
         # EVERY _emit() MUST HAVE A MATCHING _record() WITH THE SAME FIELDS.
@@ -112,12 +124,18 @@ class CopilotEventRouter:
         text = str(value).strip()
         return text or None
 
+    def _is_known_subagent_id(self, value: Any) -> bool:
+        candidate = self._normalize_id(value)
+        if not candidate:
+            return False
+        return candidate in self._active_subagents or candidate in self._known_subagent_ids
+
     def _resolve_message_subagent_id(self, event: SessionEvent) -> Optional[str]:
         data = event.data
-        return (
-            self._normalize_id(getattr(data, "parent_tool_call_id", None))
-            or self._normalize_id(getattr(event, "parent_id", None))
-        )
+        candidate = self._normalize_id(getattr(data, "parent_tool_call_id", None))
+        if candidate and self._is_known_subagent_id(candidate):
+            return candidate
+        return None
 
     def _resolve_subagent_event_id(
         self,
@@ -129,15 +147,43 @@ class CopilotEventRouter:
         for candidate in (
             getattr(data, "tool_call_id", None),
             getattr(data, "parent_tool_call_id", None),
-            getattr(event, "parent_id", None),
-            getattr(event, "id", None),
         ):
             resolved = self._normalize_id(candidate)
-            if resolved:
+            if resolved and self._is_known_subagent_id(resolved):
                 return resolved
         if allow_single_active and len(self._active_subagents) == 1:
             return next(iter(self._active_subagents))
         return None
+
+    async def _trace_subagent_provenance(
+        self,
+        event: SessionEvent,
+        *,
+        scope: str,
+        decision: str,
+        resolved_subagent_id: Optional[str] = None,
+    ) -> None:
+        if not self.debug_trace:
+            return
+        data = event.data
+        payload = {
+            "type": "debug_trace",
+            "role": "debug_trace",
+            "internal": True,
+            "conversation_id": self.conversation_id,
+            "scope": scope,
+            "decision": decision,
+            "event_type": getattr(event.type, "value", str(event.type)),
+            "sdk_event_id": self._normalize_id(getattr(event, "id", None)),
+            "parent_id": self._normalize_id(getattr(event, "parent_id", None)),
+            "tool_call_id": self._normalize_id(getattr(data, "tool_call_id", None)),
+            "parent_tool_call_id": self._normalize_id(getattr(data, "parent_tool_call_id", None)),
+            "resolved_subagent_id": self._normalize_id(resolved_subagent_id),
+            "turn_id": self.current_turn_id,
+            "active_subagent_ids": sorted(str(key) for key in self._active_subagents.keys()),
+        }
+        await self._emit(dict(payload))
+        await self._record(dict(payload))
 
     async def _emit_subagent_end(self, subagent_id: str, *, summary: str, success: bool) -> None:
         subagent_event = {
@@ -209,6 +255,13 @@ class CopilotEventRouter:
             intent = getattr(data, "intent", "") or ""
             name = getattr(data, "agent_display_name", None) or getattr(data, "agent_name", None) or "subagent"
             self._active_subagents[sa_id] = {"name": name, "intent": intent}
+            self._known_subagent_ids.add(sa_id)
+            await self._trace_subagent_provenance(
+                event,
+                scope="subagent_lifecycle",
+                decision="subagent_started_registered",
+                resolved_subagent_id=sa_id,
+            )
             if _is_debug():
                 print(f"[SUBAGENT-DEBUG] SUBAGENT_STARTED: sa_id={sa_id} event.id={event.id} "
                       f"data.tool_call_id={getattr(data, 'tool_call_id', None)} event.parent_id={event.parent_id}")
@@ -233,6 +286,12 @@ class CopilotEventRouter:
             pass  # Selection happens before start, no UI needed
         elif etype == SessionEventType.SUBAGENT_DESELECTED:
             sa_id = self._resolve_subagent_event_id(event, allow_single_active=True)
+            await self._trace_subagent_provenance(
+                event,
+                scope="subagent_lifecycle",
+                decision="subagent_deselected_resolved" if sa_id else "subagent_deselected_unresolved",
+                resolved_subagent_id=sa_id,
+            )
             if sa_id and sa_id in self._active_subagents:
                 self._active_subagents.pop(sa_id, None)
                 await self._emit_subagent_end(sa_id, summary="", success=True)
@@ -240,6 +299,12 @@ class CopilotEventRouter:
             sa_id = self._resolve_subagent_event_id(event, allow_single_active=True)
             summary = getattr(data, "summary", "") or ""
             success = getattr(data, "success", True)
+            await self._trace_subagent_provenance(
+                event,
+                scope="subagent_lifecycle",
+                decision="subagent_completed_resolved" if sa_id else "subagent_completed_unresolved",
+                resolved_subagent_id=sa_id,
+            )
             if sa_id:
                 self._active_subagents.pop(sa_id, None)
                 await self._emit_subagent_end(sa_id, summary=summary, success=success)
@@ -247,6 +312,12 @@ class CopilotEventRouter:
             sa_id = self._resolve_subagent_event_id(event, allow_single_active=True)
             error = getattr(data, "error", "") or getattr(data, "error_reason", "") or ""
             fail_summary = f"Failed: {error}" if error else "Failed"
+            await self._trace_subagent_provenance(
+                event,
+                scope="subagent_lifecycle",
+                decision="subagent_failed_resolved" if sa_id else "subagent_failed_unresolved",
+                resolved_subagent_id=sa_id,
+            )
             if sa_id:
                 self._active_subagents.pop(sa_id, None)
                 await self._emit_subagent_end(sa_id, summary=fail_summary, success=False)
@@ -259,19 +330,29 @@ class CopilotEventRouter:
         if not text:
             return
 
+        started_new_message = False
         if self._last_block_type != "message":
             self._block_counter += 1
             self._last_block_type = "message"
             self.current_message_id = f"msg_{self._turn_counter}_{self._block_counter}"
             self.current_message_subagent_id = None
+            started_new_message = True
 
         self.current_message_text += text
 
-        subagent_id = self._resolve_message_subagent_id(event)
-        if subagent_id:
-            self.current_message_subagent_id = subagent_id
+        resolved_subagent_id = self._resolve_message_subagent_id(event)
+        if resolved_subagent_id:
+            self.current_message_subagent_id = resolved_subagent_id
+            subagent_id = resolved_subagent_id
         else:
             subagent_id = self.current_message_subagent_id
+        if started_new_message:
+            await self._trace_subagent_provenance(
+                event,
+                scope="message_provenance",
+                decision="message_bound_from_parent_tool_call" if subagent_id else "message_top_level",
+                resolved_subagent_id=subagent_id,
+            )
 
         evt = {
             "type": "assistant_delta",
@@ -313,6 +394,7 @@ class CopilotEventRouter:
         if not content:
             return
 
+        trace_needed = False
         # Always bump block counter for each complete message.
         # SDK sends ASSISTANT_MESSAGE (complete) without preceding deltas for
         # subagent messages. Each complete message must get a unique ID.
@@ -321,12 +403,21 @@ class CopilotEventRouter:
             self._last_block_type = "message"
             self.current_message_id = f"msg_{self._turn_counter}_{self._block_counter}"
             self.current_message_subagent_id = None
+            trace_needed = True
 
-        subagent_id = self._resolve_message_subagent_id(event)
-        if subagent_id:
-            self.current_message_subagent_id = subagent_id
+        resolved_subagent_id = self._resolve_message_subagent_id(event)
+        if resolved_subagent_id:
+            self.current_message_subagent_id = resolved_subagent_id
+            subagent_id = resolved_subagent_id
         else:
             subagent_id = self.current_message_subagent_id
+        if trace_needed:
+            await self._trace_subagent_provenance(
+                event,
+                scope="message_provenance",
+                decision="message_complete_bound_from_parent_tool_call" if subagent_id else "message_complete_top_level",
+                resolved_subagent_id=subagent_id,
+            )
 
         finalize_evt = {
             "type": "assistant_finalize",
@@ -528,6 +619,18 @@ class CopilotEventRouter:
             self._subagent_tool_ids.add(tool_call_id)
         elif tool_call_id in self._subagent_tool_ids:
             subagent_id = tool_call_id  # edge case
+        await self._trace_subagent_provenance(
+            event,
+            scope="tool_provenance",
+            decision=(
+                "tool_bound_from_parent_tool_call"
+                if parent_id and subagent_id == parent_id
+                else "tool_bound_from_tool_call_id"
+                if subagent_id
+                else "tool_top_level"
+            ),
+            resolved_subagent_id=subagent_id,
+        )
         
         if self._active_subagents and _is_debug():
             print(f"[SUBAGENT-DEBUG] tool_start: tool_call_id={tool_call_id} parent_id={parent_id} "
