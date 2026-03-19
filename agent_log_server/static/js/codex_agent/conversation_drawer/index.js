@@ -25,6 +25,7 @@ export function bindConversationDrawer(ctx) {
     resetTimeline: ctx.resetTimeline,
     fetchConversation: ctx.fetchConversation,
     replayTranscript: ctx.replayTranscript,
+    refreshPlanSurface: ctx.refreshPlanSurface,
     restorePendingApprovals: ctx.restorePendingApprovals,
     setDrawerOpen: ctx.setDrawerOpen,
     applyHostUi: ctx.applyHostUi,

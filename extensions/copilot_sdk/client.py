@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -42,6 +43,7 @@ from te2_runtime import (
     TE2_MCP_SERVER_NAME,
     te2_mcp_integration_enabled,
 )
+from watchfiles import awatch
 
 
 # ── Global state ────────────────────────────────────────────────────
@@ -72,6 +74,13 @@ _unsubs: Dict[str, Callable] = {}
 _runtime_signatures: Dict[str, str] = {}
 # Per-conversation session locks: serialize init/resume/send/destroy per conversation.
 _session_locks: Dict[str, asyncio.Lock] = {}
+# Live todo watch tasks keyed by conversation_id.
+_todo_watch_tasks: Dict[str, asyncio.Task[None]] = {}
+_todo_watch_sessions: Dict[str, str] = {}
+_todo_signatures: Dict[str, str] = {}
+_plan_doc_signatures: Dict[str, str] = {}
+# Latest known plan-document state keyed by conversation_id.
+_plan_doc_state: Dict[str, Dict[str, Any]] = {}
 
 # Ready state
 _ready_event: Optional[asyncio.Event] = None
@@ -99,6 +108,10 @@ _WEB_POLICY_OPTIONS: List[Dict[str, str]] = [
 _DEFAULT_APPROVAL_POLICY = "suggest"
 _DEFAULT_SANDBOX_POLICY = "cwd-only"
 _DEFAULT_WEB_POLICY = "deny"
+_COPILOT_SESSION_STATE_ROOT = Path.home() / ".copilot" / "session-state"
+_COPILOT_TODO_FILENAMES = frozenset({"session.db", "session.db-wal", "session.db-shm"})
+_COPILOT_PLAN_FILENAME = "plan.md"
+_COPILOT_SESSION_STATE_READ_SETTLE_SECONDS = 0.10
 
 
 def _add_to_raw_buffer(direction: str, conversation_id: str, data: Any) -> None:
@@ -166,6 +179,441 @@ def _get_conversation_settings(conversation_id: str) -> Dict[str, Any]:
         if meta and isinstance(meta.get("settings"), dict):
             return meta["settings"]
     return {}
+
+
+def _resolve_sdk_session_id(conversation_id: str) -> Optional[str]:
+    session = _sessions.get(conversation_id)
+    if session is not None and isinstance(session.session_id, str) and session.session_id:
+        return session.session_id
+    if _meta_fns and "load" in _meta_fns:
+        meta = _meta_fns["load"](conversation_id)
+        if isinstance(meta, dict):
+            thread_id = meta.get("thread_id")
+            if isinstance(thread_id, str) and thread_id:
+                return thread_id
+    return None
+
+
+def _copilot_session_dir(session_id: str) -> Path:
+    return _COPILOT_SESSION_STATE_ROOT / session_id
+
+
+def _copilot_session_db_path(session_id: str) -> Path:
+    return _copilot_session_dir(session_id) / "session.db"
+
+
+def _copilot_plan_doc_path(session_id: str) -> Path:
+    return _copilot_session_dir(session_id) / _COPILOT_PLAN_FILENAME
+
+
+def _persist_meta_plan_exists(conversation_id: str, plan_exists: bool) -> None:
+    if not _meta_fns or "load" not in _meta_fns or "save" not in _meta_fns:
+        return
+    meta = _meta_fns["load"](conversation_id)
+    if not isinstance(meta, dict):
+        return
+    normalized = bool(plan_exists)
+    if meta.get("plan_exists") is normalized:
+        return
+    meta["plan_exists"] = normalized
+    _meta_fns["save"](conversation_id, meta)
+
+
+def _plan_doc_signature(plan_exists: bool, plan_content: str) -> str:
+    return json.dumps(
+        [bool(plan_exists), plan_content if isinstance(plan_content, str) else ""],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def _default_plan_doc_state(source: str = "unknown") -> Dict[str, Any]:
+    return {
+        "plan_exists": False,
+        "plan_content": "",
+        "plan_path": None,
+        "plan_source": source,
+    }
+
+
+def _get_plan_doc_state(conversation_id: str) -> Dict[str, Any]:
+    state = _plan_doc_state.get(conversation_id)
+    if not isinstance(state, dict):
+        return _default_plan_doc_state()
+    return {
+        "plan_exists": bool(state.get("plan_exists")),
+        "plan_content": state.get("plan_content") if isinstance(state.get("plan_content"), str) else "",
+        "plan_path": state.get("plan_path") if isinstance(state.get("plan_path"), str) and state.get("plan_path") else None,
+        "plan_source": state.get("plan_source") if isinstance(state.get("plan_source"), str) and state.get("plan_source") else "unknown",
+    }
+
+
+def _set_plan_doc_state(
+    conversation_id: str,
+    *,
+    plan_exists: bool,
+    plan_content: str,
+    plan_path: Optional[str],
+    plan_source: str,
+) -> Dict[str, Any]:
+    state = {
+        "plan_exists": bool(plan_exists),
+        "plan_content": plan_content if isinstance(plan_content, str) else "",
+        "plan_path": plan_path if isinstance(plan_path, str) and plan_path else None,
+        "plan_source": plan_source if isinstance(plan_source, str) and plan_source else "unknown",
+    }
+    _plan_doc_state[conversation_id] = state
+    _persist_meta_plan_exists(conversation_id, state["plan_exists"])
+    return state
+
+
+def _normalize_todo_status(status: Any) -> str:
+    if isinstance(status, str):
+        normalized = status.strip().lower()
+        if normalized in {"done", "completed", "complete"}:
+            return "completed"
+        if normalized in {"in_progress", "inprogress", "in progress"}:
+            return "in_progress"
+    return "pending"
+
+
+def _todo_step_text(todo_id: Any, title: Any, description: Any) -> str:
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+    if isinstance(todo_id, str) and todo_id.strip():
+        return todo_id.strip()
+    return "Untitled todo"
+
+
+def _read_todo_snapshot_sync(sdk_session_id: str) -> Dict[str, Any]:
+    db_path = _copilot_session_db_path(sdk_session_id)
+    if not db_path.is_file():
+        return {
+            "steps": [],
+            "signature": "[]",
+            "db_path": str(db_path),
+            "source": "session_db_missing",
+        }
+
+    db_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(db_uri, uri=True, timeout=1.0)
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+              rowid,
+              id,
+              title,
+              description,
+              status,
+              created_at,
+              updated_at
+            FROM todos
+            ORDER BY
+              CASE WHEN created_at IS NULL OR created_at = '' THEN 1 ELSE 0 END,
+              created_at,
+              rowid
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    steps: List[Dict[str, str]] = []
+    signature_rows: List[Dict[str, str]] = []
+    for rowid, todo_id, title, description, status, created_at, updated_at in rows:
+        step_text = _todo_step_text(todo_id, title, description)
+        normalized_status = _normalize_todo_status(status)
+        steps.append({
+            "step": step_text,
+            "status": normalized_status,
+        })
+        signature_rows.append({
+            "id": str(todo_id or rowid),
+            "step": step_text,
+            "status": normalized_status,
+            "created_at": str(created_at or ""),
+            "updated_at": str(updated_at or ""),
+        })
+
+    return {
+        "steps": steps,
+        "signature": json.dumps(signature_rows, separators=(",", ":"), ensure_ascii=False),
+        "db_path": str(db_path),
+        "source": "session_db",
+    }
+
+
+async def _read_todo_snapshot(
+    conversation_id: str,
+    sdk_session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    resolved_session_id = sdk_session_id or _resolve_sdk_session_id(conversation_id)
+    if not isinstance(resolved_session_id, str) or not resolved_session_id:
+        return {
+            "steps": [],
+            "signature": "[]",
+            "db_path": None,
+            "source": "missing_session",
+        }
+
+    try:
+        snapshot = await asyncio.to_thread(_read_todo_snapshot_sync, resolved_session_id)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        print(f"[CopilotSDK] todo DB read failed for {conversation_id[:8]}: {exc}")
+        _add_to_raw_buffer("err", conversation_id, f"todo_db_read_failed: {exc}")
+        return {
+            "steps": [],
+            "signature": "[]",
+            "db_path": str(_copilot_session_db_path(resolved_session_id)),
+            "source": "session_db_error",
+        }
+
+    snapshot["session_id"] = resolved_session_id
+    return snapshot
+
+
+def _read_plan_doc_snapshot_sync(sdk_session_id: str) -> Dict[str, Any]:
+    plan_path = _copilot_plan_doc_path(sdk_session_id)
+    if not plan_path.is_file():
+        return {
+            "plan_exists": False,
+            "plan_content": "",
+            "plan_path": None,
+            "plan_source": "session_file_missing",
+            "signature": _plan_doc_signature(False, ""),
+        }
+
+    content = plan_path.read_text(encoding="utf-8")
+    plan_exists = bool(content.strip())
+    return {
+        "plan_exists": plan_exists,
+        "plan_content": content,
+        "plan_path": str(plan_path),
+        "plan_source": "session_file",
+        "signature": _plan_doc_signature(plan_exists, content),
+    }
+
+
+async def _read_plan_doc_snapshot(
+    conversation_id: str,
+    sdk_session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    resolved_session_id = sdk_session_id or _resolve_sdk_session_id(conversation_id)
+    if not isinstance(resolved_session_id, str) or not resolved_session_id:
+        return {
+            **_default_plan_doc_state("missing_session"),
+            "signature": _plan_doc_signature(False, ""),
+            "session_id": None,
+        }
+
+    try:
+        snapshot = await asyncio.to_thread(_read_plan_doc_snapshot_sync, resolved_session_id)
+    except OSError as exc:
+        print(f"[CopilotSDK] plan.md read failed for {conversation_id[:8]}: {exc}")
+        _add_to_raw_buffer("err", conversation_id, f"plan_doc_read_failed: {exc}")
+        return {
+            **_default_plan_doc_state("session_file_error"),
+            "signature": _plan_doc_signature(False, ""),
+            "session_id": resolved_session_id,
+        }
+
+    snapshot["session_id"] = resolved_session_id
+    return snapshot
+
+
+def _apply_plan_doc_snapshot(conversation_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return _set_plan_doc_state(
+        conversation_id,
+        plan_exists=bool(snapshot.get("plan_exists")),
+        plan_content=snapshot.get("plan_content") if isinstance(snapshot.get("plan_content"), str) else "",
+        plan_path=snapshot.get("plan_path") if isinstance(snapshot.get("plan_path"), str) else None,
+        plan_source=snapshot.get("plan_source") if isinstance(snapshot.get("plan_source"), str) else "unknown",
+    )
+
+
+def _select_plan_doc_state_for_read(
+    conversation_id: str,
+    disk_snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    cached_state = _get_plan_doc_state(conversation_id)
+    disk_content = disk_snapshot.get("plan_content") if isinstance(disk_snapshot.get("plan_content"), str) else ""
+    disk_exists = bool(disk_snapshot.get("plan_exists"))
+    cached_exists = bool(cached_state.get("plan_exists"))
+
+    if disk_exists:
+        if (
+            cached_exists
+            and cached_state.get("plan_source") == "sdk"
+            and isinstance(cached_state.get("plan_content"), str)
+            and cached_state["plan_content"] != disk_content
+        ):
+            return cached_state
+        return _apply_plan_doc_snapshot(conversation_id, disk_snapshot)
+
+    if cached_exists and cached_state.get("plan_source") == "sdk":
+        return cached_state
+
+    return _apply_plan_doc_snapshot(conversation_id, disk_snapshot)
+
+
+def _build_plan_state_payload(
+    conversation_id: str,
+    todo_snapshot: Dict[str, Any],
+    *,
+    include_plan_content: bool,
+) -> Dict[str, Any]:
+    plan_state = _get_plan_doc_state(conversation_id)
+    payload: Dict[str, Any] = {
+        "has_plan": True,
+        "has_todo": True,
+        "plan_exists": bool(plan_state["plan_exists"]),
+        "plan_steps": list(todo_snapshot.get("steps") or []),
+        "plan_path": plan_state["plan_path"],
+        "plan_source": plan_state["plan_source"],
+        "todo_source": todo_snapshot.get("source"),
+    }
+    if include_plan_content or not plan_state["plan_exists"]:
+        payload["plan_content"] = plan_state["plan_content"]
+    return payload
+
+
+async def _emit_todo_plan_state(
+    conversation_id: str,
+    sdk_session_id: str,
+    *,
+    force: bool = False,
+    derive_plan_operation: bool = False,
+) -> None:
+    if _broadcast_fn is None:
+        return
+    previous_plan_state = _get_plan_doc_state(conversation_id)
+    previous_todo_signature = _todo_signatures.get(conversation_id)
+    previous_plan_signature = _plan_doc_signatures.get(conversation_id)
+    plan_snapshot = await _read_plan_doc_snapshot(conversation_id, sdk_session_id=sdk_session_id)
+    plan_state = _select_plan_doc_state_for_read(conversation_id, plan_snapshot)
+    plan_signature = _plan_doc_signature(
+        bool(plan_state.get("plan_exists")),
+        plan_state.get("plan_content") if isinstance(plan_state.get("plan_content"), str) else "",
+    )
+    snapshot = await _read_todo_snapshot(conversation_id, sdk_session_id=sdk_session_id)
+    todo_signature = snapshot.get("signature") if isinstance(snapshot.get("signature"), str) else "[]"
+    changed_todo = previous_todo_signature != todo_signature
+    changed_plan = previous_plan_signature != plan_signature
+    if not force and not changed_todo and not changed_plan:
+        return
+    _todo_signatures[conversation_id] = todo_signature
+    _plan_doc_signatures[conversation_id] = plan_signature
+    payload = _build_plan_state_payload(
+        conversation_id,
+        snapshot,
+        include_plan_content=False,
+    )
+    if derive_plan_operation and changed_plan:
+        previous_exists = bool(previous_plan_state.get("plan_exists"))
+        current_exists = bool(plan_state.get("plan_exists"))
+        if not previous_exists and current_exists:
+            payload["plan_operation"] = "create"
+        elif previous_exists and not current_exists:
+            payload["plan_operation"] = "delete"
+        else:
+            payload["plan_operation"] = "update"
+    payload.update({
+        "type": "plan_state",
+        "conversation_id": conversation_id,
+    })
+    await _broadcast_fn(payload)
+
+
+async def _watch_todo_db_changes(conversation_id: str, sdk_session_id: str) -> None:
+    await _emit_todo_plan_state(conversation_id, sdk_session_id, force=True)
+    session_dir = _copilot_session_dir(sdk_session_id)
+    if not session_dir.is_dir():
+        raise RuntimeError(f"Copilot session dir missing for todo watch: {session_dir}")
+
+    try:
+        async for changes in awatch(session_dir, recursive=False, debounce=200, step=50):
+            relevant = False
+            for _change, changed_path in changes:
+                changed_name = Path(changed_path).name
+                if changed_name in _COPILOT_TODO_FILENAMES or changed_name == _COPILOT_PLAN_FILENAME:
+                    relevant = True
+                    break
+            if not relevant:
+                continue
+            await asyncio.sleep(_COPILOT_SESSION_STATE_READ_SETTLE_SECONDS)
+            await _emit_todo_plan_state(
+                conversation_id,
+                sdk_session_id,
+                derive_plan_operation=any(
+                    Path(changed_path).name == _COPILOT_PLAN_FILENAME for _change, changed_path in changes
+                ),
+            )
+    except asyncio.CancelledError:
+        raise
+
+
+async def _stop_todo_watch(conversation_id: str) -> None:
+    task = _todo_watch_tasks.pop(conversation_id, None)
+    _todo_watch_sessions.pop(conversation_id, None)
+    _todo_signatures.pop(conversation_id, None)
+    _plan_doc_signatures.pop(conversation_id, None)
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+async def _ensure_todo_watch(conversation_id: str, sdk_session_id: str) -> None:
+    existing_task = _todo_watch_tasks.get(conversation_id)
+    existing_session_id = _todo_watch_sessions.get(conversation_id)
+    if (
+        existing_task is not None
+        and not existing_task.done()
+        and existing_session_id == sdk_session_id
+    ):
+        return
+
+    await _stop_todo_watch(conversation_id)
+    _todo_watch_sessions[conversation_id] = sdk_session_id
+    task = asyncio.create_task(
+        _watch_todo_db_changes(conversation_id, sdk_session_id),
+        name=f"copilot-todo-watch-{conversation_id[:8]}",
+    )
+    _todo_watch_tasks[conversation_id] = task
+
+
+async def _build_live_plan_state(
+    conversation_id: str,
+    plan_doc_update: Dict[str, Any],
+) -> Dict[str, Any]:
+    plan_state = _set_plan_doc_state(
+        conversation_id,
+        plan_exists=bool(plan_doc_update.get("plan_exists")),
+        plan_content=plan_doc_update.get("plan_content") if isinstance(plan_doc_update.get("plan_content"), str) else "",
+        plan_path=plan_doc_update.get("plan_path") if isinstance(plan_doc_update.get("plan_path"), str) else None,
+        plan_source=plan_doc_update.get("plan_source") if isinstance(plan_doc_update.get("plan_source"), str) else "sdk",
+    )
+    _plan_doc_signatures[conversation_id] = _plan_doc_signature(
+        bool(plan_state.get("plan_exists")),
+        plan_state.get("plan_content") if isinstance(plan_state.get("plan_content"), str) else "",
+    )
+    sdk_session_id = _resolve_sdk_session_id(conversation_id)
+    if isinstance(sdk_session_id, str) and sdk_session_id:
+        await _ensure_todo_watch(conversation_id, sdk_session_id)
+    snapshot = await _read_todo_snapshot(conversation_id, sdk_session_id=sdk_session_id)
+    signature = snapshot.get("signature")
+    if isinstance(signature, str):
+        _todo_signatures[conversation_id] = signature
+    return _build_plan_state_payload(
+        conversation_id,
+        snapshot,
+        include_plan_content=True,
+    )
 
 
 def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -> None:
@@ -499,6 +947,43 @@ async def get_runtime_options(
             _DEFAULT_WEB_POLICY,
         ),
     }
+
+
+async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+    async with _get_session_lock(conversation_id):
+        sdk_session_id = _resolve_sdk_session_id(conversation_id)
+        if not isinstance(sdk_session_id, str) or not sdk_session_id:
+            return {
+                "has_plan": True,
+                "has_todo": True,
+                "plan_exists": False,
+                "plan_content": "",
+                "plan_steps": [],
+                "todo_source": "missing_session",
+                "plan_source": "missing_session",
+            }
+
+        plan_snapshot = await _read_plan_doc_snapshot(conversation_id, sdk_session_id=sdk_session_id)
+        plan_doc_state = _select_plan_doc_state_for_read(conversation_id, plan_snapshot)
+        _plan_doc_signatures[conversation_id] = _plan_doc_signature(
+            bool(plan_doc_state.get("plan_exists")),
+            plan_doc_state.get("plan_content") if isinstance(plan_doc_state.get("plan_content"), str) else "",
+        )
+
+        if _broadcast_fn is not None:
+            await _ensure_todo_watch(conversation_id, sdk_session_id)
+
+        todo_snapshot = await _read_todo_snapshot(conversation_id, sdk_session_id=sdk_session_id)
+        payload = _build_plan_state_payload(
+            conversation_id,
+            todo_snapshot,
+            include_plan_content=True,
+        )
+        payload["plan_exists"] = bool(plan_doc_state["plan_exists"])
+        payload["plan_content"] = plan_doc_state["plan_content"]
+        payload["plan_path"] = plan_doc_state["plan_path"]
+        payload["plan_source"] = plan_doc_state["plan_source"]
+        return payload
 
 
 def resolve_approval(request_id: str, resolution: Any) -> bool:
@@ -939,6 +1424,7 @@ async def _init_session_unlocked(
                 settings=settings,
                 cwd=cwd,
             ),
+            plan_state_provider=_build_live_plan_state,
         )
         _routers[conversation_id] = router
 
@@ -972,6 +1458,8 @@ async def _init_session_unlocked(
                     meta["thread_id"] = sdk_session_id
                     meta["status"] = "active"
                     _meta_fns["save"](conversation_id, meta)
+
+        await _ensure_todo_watch(conversation_id, sdk_session_id)
 
         resolved_cwd = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd).get("cwd")
         print(f"[CopilotSDK] Session created: convo={conversation_id[:8]} sdk_session={sdk_session_id[:8]} cwd={resolved_cwd}")
@@ -1053,6 +1541,7 @@ async def _resume_session_unlocked(
                 cwd=cwd,
                 model=model,
             ),
+            plan_state_provider=_build_live_plan_state,
         )
         _routers[conversation_id] = router
 
@@ -1075,6 +1564,8 @@ async def _resume_session_unlocked(
 
         unsub = session.on(_make_event_handler(conversation_id))
         _unsubs[conversation_id] = unsub
+
+        await _ensure_todo_watch(conversation_id, str(sdk_session_id))
 
         print(f"[CopilotSDK] Session resumed: convo={conversation_id[:8]} sdk_session={sdk_session_id[:8]}")
         _add_to_raw_buffer("out", conversation_id, f"session_resumed sdk={sdk_session_id[:8]}")
@@ -1106,6 +1597,7 @@ def _register_attached_session(
         broadcast_fn=_broadcast_fn,
         transcript_fn=_transcript_fn,
         debug_trace=debug_trace,
+        plan_state_provider=_build_live_plan_state,
     )
     _routers[conversation_id] = router
 
@@ -1186,6 +1678,7 @@ async def handle_message(
                         model=settings.get("model"),
                     ),
                 )
+                await _ensure_todo_watch(conversation_id, str(thread_id))
             else:
                 # Brand new conversation — create a fresh session
                 result = await _init_session_unlocked(
@@ -1411,6 +1904,7 @@ async def resume_session_with_history(
     cwd: Optional[str] = None,
     model: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
+    extension_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Bind a Copilot SDK session to a conversation.
@@ -1588,9 +2082,12 @@ async def _destroy_session_unlocked(conversation_id: str) -> bool:
     if unsub:
         unsub()
 
+    await _stop_todo_watch(conversation_id)
+
     session = _sessions.pop(conversation_id, None)
     _routers.pop(conversation_id, None)
     _runtime_signatures.pop(conversation_id, None)
+    _plan_doc_state.pop(conversation_id, None)
 
     if session and _client:
         with _client._sessions_lock:  # type: ignore[attr-defined]
@@ -1619,6 +2116,8 @@ async def delete_session(conversation_id: str) -> bool:
 async def stop_client() -> None:
     """Stop the global CopilotClient (server shutdown)."""
     global _client
+    for conversation_id in list(_todo_watch_tasks.keys()):
+        await _stop_todo_watch(conversation_id)
     if _client:
         try:
             errors = await _client.stop()

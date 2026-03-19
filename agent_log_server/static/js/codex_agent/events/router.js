@@ -37,7 +37,9 @@ export function bindEventRouter(ctx) {
     renderShellEnd,
     finalizeSubagent,
     maybeAutoScroll,
-    updatePlanItem,
+    handleLivePlanState,
+    handleLiveTodoUpdate,
+    restorePlanOverlay,
     renderPlanCard,
     clearPlanOverlay,
     updateTokens,
@@ -178,9 +180,6 @@ export function bindEventRouter(ctx) {
       case 'activity':
         setLastEventType('activity');
         setActivity(evt.label || 'idle', Boolean(evt.active));
-        if (!evt.active && evt.label === 'idle') {
-          finalizePlanToTranscript();
-        }
         return;
       case 'error':
         setLastEventType('error');
@@ -326,7 +325,11 @@ export function bindEventRouter(ctx) {
         return;
       case 'plan_update':
         setLastEventType('plan');
-        updatePlanItem(evt.step, evt.status);
+        handleLiveTodoUpdate(evt);
+        return;
+      case 'plan_state':
+        setLastEventType('plan');
+        handleLivePlanState(evt);
         return;
       case 'plan':
         setLastEventType('plan');

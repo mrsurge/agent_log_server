@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .plan_utils import normalize_plan_steps, render_plan_markdown
 from .runtime_protocol import (
     RuntimeProtocol,
     build_request_params,
@@ -28,8 +29,7 @@ from te2_runtime import te2_mcp_integration_enabled
 _broadcast_fn: Optional[Callable] = None
 _transcript_fn: Optional[Callable] = None
 _meta_fns: Optional[Dict[str, Callable]] = None
-_extensions_dir: Optional[Path] = None
-_server_root: Optional[Path] = None
+_registered_extension_ids: set[str] = set()
 _ready_extensions: set[str] = set()
 _transport: Optional[CodexAppServerTransport] = None
 
@@ -60,36 +60,6 @@ def get_raw_buffer(limit: int = 50) -> List[Dict[str, Any]]:
 
 def _server_module():
     return importlib.import_module("agent_log_server.server")
-
-
-def _codex_extension_ids() -> List[str]:
-    if not _extensions_dir:
-        return ["codex"]
-    config_path = _extensions_dir / "extensions.json"
-    if not config_path.exists():
-        return ["codex"]
-    try:
-        data = json.loads(config_path.read_text())
-    except Exception:
-        return ["codex"]
-    results: List[str] = []
-    for entry in data.get("extensions", []):
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("type") != "codex_app_server":
-            continue
-        ext_id = entry.get("id")
-        if isinstance(ext_id, str) and ext_id:
-            results.append(ext_id)
-    return results or ["codex"]
-
-
-def _default_extension_id() -> str:
-    ids = _codex_extension_ids()
-    for ext_id in ids:
-        if ext_id != "codex":
-            return ext_id
-    return ids[0]
 
 
 def _merge_runtime_settings(
@@ -142,7 +112,7 @@ def _extract_thread_id_from_result(payload: Any) -> Optional[str]:
 
 
 def _mark_transport_ready() -> None:
-    for ext_id in _codex_extension_ids():
+    for ext_id in _registered_extension_ids:
         _ready_extensions.add(ext_id)
 
 
@@ -179,6 +149,41 @@ def _sort_session_entries(entries: List[Dict[str, Any]], cwd: Optional[str]) -> 
     return sorted(entries, key=relevance)
 
 
+def _build_plan_state(
+    steps: List[Dict[str, str]],
+    *,
+    explanation: Optional[str] = None,
+    source: str,
+) -> Dict[str, Any]:
+    normalized_steps = normalize_plan_steps(steps)
+    return {
+        "has_plan": False,
+        "has_todo": True,
+        "plan_exists": False,
+        "plan_content": render_plan_markdown(normalized_steps, explanation),
+        "plan_steps": normalized_steps,
+        "plan_source": source,
+    }
+
+
+def _latest_transcript_plan(conversation_id: str) -> Optional[Dict[str, Any]]:
+    transcript_path = _server_module()._conversation_transcript_path(conversation_id)
+    if not isinstance(transcript_path, Path) or not transcript_path.is_file():
+        return None
+    try:
+        lines = transcript_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return None
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(entry, dict) and entry.get("role") == "plan":
+            return entry
+    return None
+
+
 def init_codex_app_server_manager(
     extensions_dir: Path,
     server_root: Path,
@@ -186,12 +191,17 @@ def init_codex_app_server_manager(
     broadcast_fn: Callable,
     transcript_fn: Callable,
     meta_fns: Optional[Dict[str, Callable]] = None,
+    registered_extension_ids: Optional[List[str]] = None,
 ) -> None:
     global _broadcast_fn, _transcript_fn, _meta_fns
-    global _extensions_dir, _server_root, _transport
+    global _registered_extension_ids, _transport
 
-    _extensions_dir = extensions_dir
-    _server_root = server_root
+    _registered_extension_ids = {
+        ext_id
+        for ext_id in (registered_extension_ids or [])
+        if isinstance(ext_id, str) and ext_id
+    }
+    _ready_extensions.clear()
     _broadcast_fn = broadcast_fn
     _transcript_fn = transcript_fn
     _meta_fns = meta_fns
@@ -208,7 +218,7 @@ def init_codex_app_server_manager(
 
 
 async def warm_up_all_extensions(timeout: float = 60.0) -> Dict[str, bool]:
-    results = {ext_id: False for ext_id in _codex_extension_ids()}
+    results = {ext_id: False for ext_id in sorted(_registered_extension_ids)}
     try:
         await asyncio.wait_for(get_runtime_protocol(), timeout=timeout)
         await asyncio.wait_for(_ensure_transport_ready(), timeout=timeout)
@@ -226,8 +236,14 @@ def is_extension_ready(extension_id: str) -> bool:
 async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool:
     if is_extension_ready(extension_id):
         return True
-    results = await warm_up_all_extensions(timeout=timeout)
-    return bool(results.get(extension_id))
+    try:
+        await asyncio.wait_for(get_runtime_protocol(), timeout=timeout)
+        await asyncio.wait_for(_ensure_transport_ready(), timeout=timeout)
+    except Exception as exc:
+        print(f"[Codex] wait_extension_ready failed for {extension_id}: {exc}")
+        return False
+    _ready_extensions.add(extension_id)
+    return True
 
 
 async def get_settings_schema(extension_id: str) -> Dict[str, Any]:
@@ -299,6 +315,50 @@ async def route_event(
         turn_id=turn_id,
         request_id=request_id,
     )
+
+
+async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+    if not _meta_fns or "load" not in _meta_fns:
+        return {
+            "has_plan": False,
+            "has_todo": True,
+            "plan_exists": False,
+            "plan_content": "",
+            "plan_steps": [],
+            "plan_source": "unavailable",
+        }
+
+    meta = _meta_fns["load"](conversation_id)
+    active_plan = meta.get("active_plan") if isinstance(meta, dict) and isinstance(meta.get("active_plan"), dict) else None
+    if isinstance(active_plan, dict):
+        active_steps = normalize_plan_steps(active_plan.get("steps"))
+        if active_steps:
+            explanation = active_plan.get("explanation")
+            return _build_plan_state(
+                active_steps,
+                explanation=explanation if isinstance(explanation, str) else None,
+                source="active_meta",
+            )
+
+    transcript_plan = _latest_transcript_plan(conversation_id)
+    if isinstance(transcript_plan, dict):
+        steps = normalize_plan_steps(transcript_plan.get("steps"))
+        if steps:
+            explanation = transcript_plan.get("explanation")
+            return _build_plan_state(
+                steps,
+                explanation=explanation if isinstance(explanation, str) else None,
+                source="transcript",
+            )
+
+    return {
+        "has_plan": False,
+        "has_todo": True,
+        "plan_exists": False,
+        "plan_content": "",
+        "plan_steps": [],
+        "plan_source": "none",
+    }
 
 
 async def resume_session(
@@ -450,6 +510,7 @@ async def resume_session_with_history(
     cwd: Optional[str] = None,
     model: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
+    extension_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not _meta_fns or "load" not in _meta_fns or "save" not in _meta_fns:
         return {"ok": False, "error": "Manager not initialized"}
@@ -467,8 +528,8 @@ async def resume_session_with_history(
         cwd=cwd,
         model=model,
     )
-    if not merged_settings.get("agent"):
-        merged_settings["agent"] = _default_extension_id()
+    if isinstance(extension_id, str) and extension_id:
+        merged_settings["agent"] = extension_id
 
     meta["thread_id"] = session_id
     meta["status"] = "active"

@@ -6,6 +6,7 @@ export function createConversationDrawerActions(ctx) {
     resetTimeline,
     fetchConversation,
     replayTranscript,
+    refreshPlanSurface,
     restorePendingApprovals,
     setDrawerOpen,
     applyHostUi,
@@ -119,6 +120,7 @@ export function createConversationDrawerActions(ctx) {
     await fetchConversation(conversationId);
     await fetchConversations();
     await replayTranscript();
+    await refreshPlanSurface?.();
     restorePendingApprovals();
     setDrawerOpen(view === 'conversation');
     setState({
@@ -159,6 +161,7 @@ export function createConversationDrawerActions(ctx) {
     await fetchConversations();
     resetTimeline();
     await replayTranscript();
+    await refreshPlanSurface?.();
     restorePendingApprovals();
     setDrawerOpen(true);
     setState({ activeView: 'conversation' });

@@ -456,6 +456,7 @@ That logic lives in `extensions/codex/runtime_protocol.py`.
     - user messages
     - assistant deltas/finalization
     - collab subagent lifecycle events
+  - routed results may also include a generic `meta_patch` object; `server.py` applies it to `meta.json` so extensions can persist conversation-local live state without adding extension-specific backend code
 
 ### framework_shells interaction
 

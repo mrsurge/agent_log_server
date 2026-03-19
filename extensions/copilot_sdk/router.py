@@ -67,11 +67,13 @@ class CopilotEventRouter:
         broadcast_fn: Callable[[Dict[str, Any]], Awaitable[None]],
         transcript_fn: Callable[[str, Dict[str, Any]], Awaitable[None]],
         debug_trace: bool = False,
+        plan_state_provider: Optional[Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
     ):
         self.conversation_id = conversation_id
         self.broadcast = broadcast_fn
         self.append_transcript = transcript_fn
         self.debug_trace = self._coerce_bool(debug_trace)
+        self.plan_state_provider = plan_state_provider
 
         # State tracking
         self.current_turn_id: Optional[str] = None
@@ -249,6 +251,8 @@ class CopilotEventRouter:
                 "active": False,
                 "turn_id": self.current_turn_id,
             })
+        elif etype == SessionEventType.SESSION_PLAN_CHANGED:
+            await self._handle_plan_changed(data)
         # Subagent events
         elif etype == SessionEventType.SUBAGENT_STARTED:
             sa_id = getattr(data, "tool_call_id", None) or str(event.id)
@@ -891,6 +895,36 @@ class CopilotEventRouter:
             "conversation_id": self.conversation_id,
             "label": msg,
             "active": True,
+            "turn_id": self.current_turn_id,
+        })
+
+    async def _handle_plan_changed(self, data: Any) -> None:
+        plan_content = getattr(data, "plan_content", None)
+        content = plan_content if isinstance(plan_content, str) else ""
+        plan_doc_update = {
+            "plan_exists": bool(content.strip()),
+            "plan_content": content,
+            "plan_path": getattr(data, "path", None) if isinstance(getattr(data, "path", None), str) else None,
+            "plan_source": "sdk",
+        }
+        if self.plan_state_provider is not None:
+            state = await self.plan_state_provider(self.conversation_id, plan_doc_update)
+        else:
+            state = {
+                "has_plan": True,
+                "has_todo": True,
+                "plan_exists": bool(content.strip()),
+                "plan_content": content,
+                "plan_steps": [],
+                "plan_path": plan_doc_update["plan_path"],
+                "plan_source": "sdk",
+            }
+        await self._emit({
+            "type": "plan_state",
+            "conversation_id": self.conversation_id,
+            **state,
+            "plan_operation": getattr(getattr(data, "operation", None), "value", getattr(data, "operation", None)),
+            "recommended_action": getattr(data, "recommended_action", None),
             "turn_id": self.current_turn_id,
         })
 

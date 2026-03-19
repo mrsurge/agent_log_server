@@ -422,6 +422,27 @@ async def _sio_get_extension_settings_schema(sid, data):
         return _sio_error(str(e))
 
 
+@socketio_server.on("get_extension_plan", namespace="/appserver")
+async def _sio_get_extension_plan(sid, data):
+    """Mirror of GET /api/extensions/{id}/plan"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        eid = payload.get("extension_id", "")
+        conversation_id = payload.get("conversation_id")
+        result = await api_extension_plan(extension_id=eid, conversation_id=conversation_id)
+        if isinstance(result, JSONResponse):
+            try:
+                body = json.loads(result.body.decode("utf-8"))
+                return {"ok": False, **body}
+            except Exception:
+                return _sio_error("Failed to read extension plan")
+        return result
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 @socketio_server.on("get_sessions", namespace="/appserver")
 async def _sio_get_sessions(sid, data):
     """Generic: list sessions for any extension."""
@@ -938,6 +959,7 @@ def _default_conversation_meta(conversation_id: str) -> Dict[str, Any]:
         "created_at": utc_ts(),
         "thread_id": None,
         "pending_approvals": {},
+        "active_plan": None,
         "settings": {},
         "status": "draft",
     }
@@ -1830,6 +1852,32 @@ async def _update_conversation_meta(patch: Dict[str, Any]) -> Dict[str, Any]:
     meta = _load_conversation_meta(convo_id)
     meta.update(patch)
     _save_conversation_meta(convo_id, meta)
+    return meta
+
+
+def _apply_conversation_meta_patch(conversation_id: str, patch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return None
+    if not isinstance(patch, dict):
+        return None
+    convo_id = _sanitize_conversation_id(conversation_id)
+    if not convo_id or not _conversation_meta_path(convo_id).exists():
+        return None
+    meta = _load_conversation_meta(convo_id)
+    changed = False
+    for key, value in patch.items():
+        if not isinstance(key, str) or not key:
+            continue
+        if value is None:
+            if key in meta:
+                meta.pop(key, None)
+                changed = True
+            continue
+        if meta.get(key) != value:
+            meta[key] = value
+            changed = True
+    if changed:
+        _save_conversation_meta(convo_id, meta)
     return meta
 
 
@@ -3387,6 +3435,9 @@ async def _route_appserver_event(
                 for entry in transcript_entries:
                     if isinstance(entry, dict):
                         await _append_transcript_entry(resolved_convo_id, entry)
+            meta_patch = routed.get("meta_patch")
+            if resolved_convo_id and isinstance(meta_patch, dict):
+                _apply_conversation_meta_patch(resolved_convo_id, meta_patch)
             next_turn_id = routed.get("set_turn_id")
             if next_turn_id is not None:
                 await _set_turn_id(next_turn_id)
@@ -5617,6 +5668,26 @@ try {{
                         cls="settings-overlay hidden",
                         id="warning-modal"
                     ),
+                    Div(
+                        Div(
+                            Div(
+                                H3("Plan"),
+                                Button("×", id="plan-close", cls="btn ghost"),
+                                cls="settings-header"
+                            ),
+                            Div(
+                                Div(id="plan-body", cls="markdown-body plan-modal-body"),
+                                cls="settings-body"
+                            ),
+                            Div(
+                                Button("Close", id="plan-dismiss", cls="btn primary"),
+                                cls="settings-footer"
+                            ),
+                            cls="settings-dialog"
+                        ),
+                        cls="settings-overlay hidden",
+                        id="plan-modal"
+                    ),
                     cls="appshell"
                 )
             )
@@ -7711,11 +7782,9 @@ async def api_extension_get(extension_id: str):
     """Get extension details."""
     if not ext_loader.has_extension(extension_id):
         return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    # Return basic info from registry
-    exts = ext_loader.list_extensions()
-    for ext in exts:
-        if ext["id"] == extension_id:
-            return ext
+    ext = ext_loader.get_extension_info(extension_id)
+    if isinstance(ext, dict):
+        return ext
     return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
 
 
@@ -7735,21 +7804,14 @@ async def api_extension_settings_schema(extension_id: str):
         return JSONResponse({"error": f"Failed to build schema: {e}"}, status_code=500)
     if isinstance(dynamic_schema, dict):
         return dynamic_schema
-    
-    # Find extension path and load settings_schema.json
-    exts = ext_loader.list_extensions()
-    for ext in exts:
-        if ext["id"] == extension_id:
-            ext_path = ext.get("path", "")
-            if ext_path:
-                schema_file = Path(ext_loader.__file__).resolve().parent / ext_path / "settings_schema.json"
-                if schema_file.exists():
-                    try:
-                        return json.loads(schema_file.read_text())
-                    except Exception as e:
-                        return JSONResponse({"error": f"Failed to load schema: {e}"}, status_code=500)
-            break
-    
+
+    try:
+        static_schema = ext_loader.get_static_settings_schema(extension_id)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to load schema: {e}"}, status_code=500)
+    if isinstance(static_schema, dict):
+        return static_schema
+
     # No schema found - return empty (extension has no custom settings)
     return {"version": "1", "fields": []}
 
@@ -7765,6 +7827,34 @@ async def api_extension_models(extension_id: str):
         if isinstance(result, list):
             return {"models": result}
         return result if isinstance(result, dict) else {"models": result}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/extensions/{extension_id}/plan")
+async def api_extension_plan(extension_id: str, conversation_id: Optional[str] = Query(None)):
+    """Read extension-backed plan state for a conversation."""
+    if not ext_loader.has_extension(extension_id):
+        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
+    convo_id = conversation_id
+    if not convo_id:
+        convo_id = await _ensure_conversation(create_if_missing=False)
+    if not convo_id:
+        raise HTTPException(status_code=400, detail="Missing conversation_id")
+    try:
+        result = await ext_loader.read_plan(extension_id, convo_id)
+        if isinstance(result, dict):
+            result.setdefault("conversation_id", convo_id)
+            result.setdefault("extension_id", extension_id)
+            return result
+        return {
+            "conversation_id": convo_id,
+            "extension_id": extension_id,
+            "has_plan": False,
+            "plan_exists": False,
+            "plan_content": "",
+            "plan_steps": [],
+        }
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

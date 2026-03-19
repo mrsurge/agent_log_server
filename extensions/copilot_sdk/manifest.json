@@ -17,7 +17,9 @@
     "streaming": true,
     "modelListing": true,
     "permissionHandling": true,
-    "hooks": true
+    "hooks": true,
+    "hasPlan": true,
+    "hasTodo": true
   },
 
   "model": {

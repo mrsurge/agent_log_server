@@ -17,7 +17,9 @@
     "streaming": true,
     "modelListing": true,
     "permissionHandling": true,
-    "collabAgents": true
+    "collabAgents": true,
+    "hasPlan": false,
+    "hasTodo": true
   },
 
   "model": {

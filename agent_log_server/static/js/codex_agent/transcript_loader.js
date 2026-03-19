@@ -11,6 +11,7 @@ export function bindTranscriptLoader(ctx) {
     ensureTreeSitterRibbonReady,
     maybeAutoScroll,
     setLastEventType,
+    refreshPlanSurface,
   } = ctx;
 
   async function fetchTranscriptRange(offset, limit) {
@@ -81,6 +82,7 @@ export function bindTranscriptLoader(ctx) {
       });
       renderTranscriptEntries(data.items, { prepend: false });
       setTranscriptState({ transcriptEnd });
+      if (refreshPlanSurface) await refreshPlanSurface();
       if (setLastEventType) setLastEventType(null);
       // Delay scroll to ensure DOM is fully rendered
       requestAnimationFrame(() => {

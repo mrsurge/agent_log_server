@@ -15,6 +15,7 @@ import { bindDiffRendering } from './js/codex_agent/diff/rendering.js';
 import { bindSocketEvents } from './js/codex_agent/events/socket.js';
 import { bindEventRouter } from './js/codex_agent/events/router.js';
 import { bindPlanOverlay } from './js/codex_agent/plan_overlay.js';
+import { bindPlanModal } from './js/codex_agent/plan_modal.js';
 import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.js';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
@@ -116,9 +117,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const rolloutOverlayEl = document.getElementById('rollout-picker');
 	  const rolloutCloseBtn = document.getElementById('rollout-close');
 	  const rolloutListEl = document.getElementById('rollout-list');
-	  const mentionPillEl = document.getElementById('mention-pill');
-	  const hostCloseTopEl = document.getElementById('host-close-top');
-	  const hostCloseDrawerEl = document.getElementById('host-close-drawer');
+  const mentionPillEl = document.getElementById('mention-pill');
+  const hostCloseTopEl = document.getElementById('host-close-top');
+  const hostCloseDrawerEl = document.getElementById('host-close-drawer');
+  const planModalEl = document.getElementById('plan-modal');
+  const planCloseBtn = document.getElementById('plan-close');
+  const planDismissBtn = document.getElementById('plan-dismiss');
+  const planBodyEl = document.getElementById('plan-body');
 
   localStorage.setItem('last_tab', 'codex-agent');
   const mobileParam = new URLSearchParams(window.location.search).get('mobile');
@@ -160,6 +165,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let _socket = null; // Socket.IO instance (set in connectWS)
   let modelList = []; // Cached model list with supportedReasoningEfforts
   let runtimeOptions = {};
+  let planDocState = { has_plan: false, plan_exists: false, plan_content: '', plan_path: null, plan_source: null };
+  let todoState = { has_todo: false, plan_steps: [] };
+  let planFetchSerial = 0;
   let settingsUi = null;
   let markdownEnabled = true; // Toggle for markdown rendering
   let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
@@ -1472,6 +1480,7 @@ document.addEventListener('DOMContentLoaded', () => {
     resetTimeline,
     fetchConversation,
     replayTranscript: (...args) => replayTranscript(...args),
+    refreshPlanSurface: (...args) => refreshPlanSurface(...args),
     restorePendingApprovals,
     setDrawerOpen,
     applyHostUi,
@@ -2071,6 +2080,7 @@ document.addEventListener('DOMContentLoaded', () => {
       planListEl,
       planCollapsed,
       planItems,
+      planState: currentPlanState(),
       topSpacerEl,
     }),
     setState: (patch) => {
@@ -2078,6 +2088,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.planListEl !== undefined) planListEl = patch.planListEl;
       if (patch.planCollapsed !== undefined) planCollapsed = patch.planCollapsed;
     },
+    persistCollapsedState: (collapsed) => persistPlanCollapsedState(collapsed),
+    openPlanModal: () => openPlanModal(),
   });
 
   function ensurePlanOverlay() {
@@ -2094,6 +2106,257 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function finalizePlanToTranscript() {
     return planOverlay.finalizePlanToTranscript();
+  }
+
+  function syncPlanOverlayUi() {
+    return planOverlay.syncPlanOverlayUi();
+  }
+
+  function restorePlanOverlay(snapshot) {
+    return planOverlay.restorePlanOverlay(snapshot);
+  }
+
+  function createEmptyPlanDocumentState(hasPlan = Boolean(runtimeOptions?.has_plan)) {
+    return {
+      has_plan: Boolean(hasPlan),
+      plan_exists: false,
+      plan_content: '',
+      plan_path: null,
+      plan_source: null,
+    };
+  }
+
+  function createEmptyTodoState(hasTodo = Boolean(runtimeOptions?.has_todo)) {
+    return {
+      has_todo: Boolean(hasTodo),
+      plan_steps: [],
+    };
+  }
+
+  function createEmptyPlanState(
+    hasPlan = Boolean(runtimeOptions?.has_plan),
+    hasTodo = Boolean(runtimeOptions?.has_todo),
+  ) {
+    return {
+      ...createEmptyPlanDocumentState(hasPlan),
+      ...createEmptyTodoState(hasTodo),
+    };
+  }
+
+  function currentPlanState() {
+    return {
+      has_plan: Boolean(planDocState?.has_plan ?? runtimeOptions?.has_plan),
+      has_todo: Boolean(todoState?.has_todo ?? runtimeOptions?.has_todo),
+      plan_exists: Boolean(planDocState?.plan_exists),
+      plan_content: typeof planDocState?.plan_content === 'string' ? planDocState.plan_content : '',
+      plan_steps: Array.isArray(todoState?.plan_steps) ? todoState.plan_steps : [],
+      plan_path: typeof planDocState?.plan_path === 'string' ? planDocState.plan_path : null,
+      plan_source: typeof planDocState?.plan_source === 'string' ? planDocState.plan_source : null,
+    };
+  }
+
+  function normalizePlanDocumentState(nextState) {
+    const next = nextState && typeof nextState === 'object' ? nextState : {};
+    const hasPlan = next.has_plan ?? planDocState.has_plan ?? Boolean(runtimeOptions?.has_plan);
+    const planContent = typeof next.plan_content === 'string'
+      ? next.plan_content
+      : (next.plan_exists === false ? '' : (planDocState.plan_content || ''));
+    const planExists = next.plan_exists ?? (Boolean(hasPlan) && Boolean(planContent.trim()));
+    return {
+      ...planDocState,
+      has_plan: Boolean(hasPlan),
+      plan_exists: Boolean(planExists),
+      plan_content: Boolean(planExists) ? planContent : '',
+      plan_path: Boolean(planExists)
+        ? (typeof next.plan_path === 'string' ? next.plan_path : (planDocState.plan_path || null))
+        : null,
+      plan_source: typeof next.plan_source === 'string' ? next.plan_source : (planDocState.plan_source || null),
+    };
+  }
+
+  function normalizeTodoState(nextState) {
+    const next = nextState && typeof nextState === 'object' ? nextState : {};
+    const hasTodo = next.has_todo ?? todoState.has_todo ?? Boolean(runtimeOptions?.has_todo);
+    const rawSteps = Array.isArray(next.plan_steps)
+      ? next.plan_steps
+      : (Array.isArray(next.steps) ? next.steps : (todoState.plan_steps || []));
+    const steps = rawSteps
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null;
+        const step = typeof item.step === 'string' ? item.step : '';
+        if (!step) return null;
+        return {
+          step,
+          status: typeof item.status === 'string' ? item.status : 'pending',
+        };
+      })
+      .filter(Boolean);
+    return {
+      has_todo: Boolean(hasTodo),
+      plan_steps: steps,
+    };
+  }
+
+  function currentExtensionId() {
+    return conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex';
+  }
+
+  function syncPlanSurface({ renderModal = false } = {}) {
+    const mergedState = currentPlanState();
+    if (mergedState.plan_exists || (mergedState.has_todo && mergedState.plan_steps.length > 0)) {
+      ensurePlanOverlay();
+    }
+    if (mergedState.has_todo && mergedState.plan_steps.length > 0) {
+      restorePlanOverlay({ steps: mergedState.plan_steps });
+    } else {
+      clearPlanOverlay();
+    }
+    syncPlanOverlayUi();
+    if (renderModal && planModal.isPlanModalOpen()) {
+      renderPlanModal();
+    }
+    return mergedState;
+  }
+
+  function applyAuthoritativePlanState(nextState) {
+    planDocState = normalizePlanDocumentState(nextState);
+    todoState = normalizeTodoState(nextState);
+    return syncPlanSurface({ renderModal: true });
+  }
+
+  function applyTodoState(nextState) {
+    todoState = normalizeTodoState(nextState);
+    return syncPlanSurface();
+  }
+
+  function updateTodoStateStep(step, status) {
+    const normalizedStep = typeof step === 'string' ? step : '';
+    if (!normalizedStep) return currentPlanState();
+    const normalizedStatus = typeof status === 'string' && status ? status : 'pending';
+    const steps = Array.isArray(todoState.plan_steps) ? [...todoState.plan_steps] : [];
+    const existingIndex = steps.findIndex((item) => item && item.step === normalizedStep);
+    const nextItem = { step: normalizedStep, status: normalizedStatus };
+    if (existingIndex >= 0) {
+      steps[existingIndex] = nextItem;
+    } else {
+      steps.push(nextItem);
+    }
+    todoState = {
+      has_todo: true,
+      plan_steps: steps,
+    };
+    return syncPlanSurface();
+  }
+
+  function handleLiveTodoUpdate(nextState) {
+    const next = nextState && typeof nextState === 'object' ? nextState : {};
+    if (Array.isArray(next.plan_steps) || Array.isArray(next.steps)) {
+      return applyTodoState(next);
+    }
+    if (typeof next.step === 'string' && next.step) {
+      return updateTodoStateStep(next.step, next.status);
+    }
+    return currentPlanState();
+  }
+
+  function handleLivePlanState(nextState) {
+    const next = nextState && typeof nextState === 'object' ? nextState : {};
+    handleLiveTodoUpdate(next);
+    const operation = typeof next.plan_operation === 'string' ? next.plan_operation.trim().toLowerCase() : '';
+    const modalOpen = planModal.isPlanModalOpen();
+    if (operation === 'create' || operation === 'delete' || (operation === 'update' && modalOpen)) {
+      const refreshPromise = refreshPlanSurface(true);
+      if (refreshPromise && typeof refreshPromise.catch === 'function') {
+        refreshPromise.catch((err) => console.warn('failed to refresh authoritative plan state', err));
+      }
+      return refreshPromise;
+    }
+    return currentPlanState();
+  }
+
+  async function fetchPlanState(force = false) {
+    const convoId = conversationMeta?.conversation_id || null;
+    const extensionId = currentExtensionId();
+    const hasPlanCapability = Boolean(runtimeOptions?.has_plan);
+    const hasTodoCapability = Boolean(runtimeOptions?.has_todo);
+    const hasStateCapability = hasPlanCapability || hasTodoCapability;
+    if (!convoId || !extensionId || !hasStateCapability) {
+      return applyAuthoritativePlanState(createEmptyPlanState(hasPlanCapability, hasTodoCapability));
+    }
+    const requestSerial = ++planFetchSerial;
+    try {
+      const data = await sioCall('get_extension_plan', {
+        extension_id: extensionId,
+        conversation_id: convoId,
+        force,
+      });
+      if (requestSerial !== planFetchSerial) return currentPlanState();
+      if (!data || data.ok === false) {
+        console.warn('failed to fetch plan state', data?.error || 'unknown error');
+        return currentPlanState();
+      }
+      return applyAuthoritativePlanState(data);
+    } catch (err) {
+      if (requestSerial !== planFetchSerial) return currentPlanState();
+      console.warn('failed to refresh plan state', err);
+      return currentPlanState();
+    }
+  }
+
+  async function refreshPlanSurface(force = false) {
+    return fetchPlanState(force);
+  }
+
+  const planModal = bindPlanModal({
+    elements: {
+      planModalEl,
+      planCloseBtn,
+      planDismissBtn,
+      planBodyEl,
+    },
+    getState: () => ({ planState: currentPlanState() }),
+    renderMarkdownInto,
+    highlightCode,
+  });
+
+  function openPlanModal() {
+    return planModal.openPlanModal();
+  }
+
+  function closePlanModal() {
+    return planModal.closePlanModal();
+  }
+
+  function renderPlanModal() {
+    return planModal.renderPlanModal();
+  }
+
+  async function persistPlanCollapsedState(collapsed) {
+    planCollapsed = Boolean(collapsed);
+    conversationSettings = {
+      ...(conversationSettings || {}),
+      planOverlayCollapsed: planCollapsed,
+    };
+    if (conversationMeta && typeof conversationMeta === 'object') {
+      conversationMeta = {
+        ...conversationMeta,
+        settings: conversationSettings,
+      };
+    }
+    const convoId = conversationMeta?.conversation_id || null;
+    if (!convoId) return;
+    try {
+      await sioCall('conversation_update', {
+        conversation_id: convoId,
+        settings: {
+          planOverlayCollapsed: planCollapsed,
+        },
+      }, {
+        fallbackUrl: '/api/appserver/conversation',
+      });
+    } catch (err) {
+      console.warn('failed to persist plan overlay collapse state', err);
+    }
   }
 
   function setCounter(el, value) {
@@ -2145,6 +2408,9 @@ document.addEventListener('DOMContentLoaded', () => {
     planOverlayEl = null;
     planListEl = null;
     planItems.clear();
+    planDocState = createEmptyPlanDocumentState(Boolean(runtimeOptions?.has_plan));
+    todoState = createEmptyTodoState(Boolean(runtimeOptions?.has_todo));
+    closePlanModal();
     topSpacerEl = document.createElement('div');
     topSpacerEl.className = 'timeline-spacer';
     bottomSpacerEl = document.createElement('div');
@@ -3872,6 +4138,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConversations,
     resetTimeline,
     replayTranscript: (...args) => replayTranscript(...args),
+    refreshPlanSurface: (...args) => refreshPlanSurface(...args),
     restorePendingApprovals,
     setDrawerOpen,
     updateConversationHeaderLabel,
@@ -3956,6 +4223,8 @@ document.addEventListener('DOMContentLoaded', () => {
 	      if (!data || data.ok === false) return;
 	      conversationMeta = data;
 	      conversationSettings = conversationMeta?.settings || {};
+          planCollapsed = conversationSettings?.planOverlayCollapsed === true;
+          syncPlanOverlayUi();
 	      if (!clientConversationId && conversationMeta?.conversation_id) {
 	        clientConversationId = conversationMeta.conversation_id;
 	      }
@@ -3966,11 +4235,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (activeView !== 'conversation') {
           miniConversationDrawerOpen = false;
         }
-	      await loadRuntimeOptions(
-	        conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex',
-	        conversationMeta?.conversation_id,
-	      );
-	      setDrawerOpen(activeView === 'conversation');
+      await loadRuntimeOptions(
+        conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex',
+        conversationMeta?.conversation_id,
+      );
+      closePlanModal();
+      applyAuthoritativePlanState(createEmptyPlanState(Boolean(runtimeOptions?.has_plan), Boolean(runtimeOptions?.has_todo)));
+      setDrawerOpen(activeView === 'conversation');
 	      applyHostUi();
 	      updateActiveConversationLabel();
 	      renderFooterApprovalOptions();
@@ -4076,6 +4347,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ensureTreeSitterRibbonReady,
     maybeAutoScroll,
     setLastEventType: (v) => { lastEventType = v; },
+    refreshPlanSurface,
   });
 
   const { handleEvent } = bindEventRouter({
@@ -4133,7 +4405,8 @@ document.addEventListener('DOMContentLoaded', () => {
     renderShellEnd,
     finalizeSubagent,
     maybeAutoScroll,
-    updatePlanItem,
+    handleLivePlanState,
+    handleLiveTodoUpdate,
     renderPlanCard,
     clearPlanOverlay,
     updateTokens,
@@ -4242,6 +4515,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConversations,
     resetTimeline,
     replayTranscript: (...args) => replayTranscript(...args),
+    refreshPlanSurface: (...args) => refreshPlanSurface(...args),
     restorePendingApprovals,
     maybeAutoScroll,
     ensureActivityRow,
@@ -4351,6 +4625,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadOlderTranscript,
     fetchConversation,
     restorePendingApprovals,
+    refreshPlanSurface: (...args) => refreshPlanSurface(...args),
     postTe2OpenRequest,
     setMarkdownEnabled,
     setTrackEditsEnabled,

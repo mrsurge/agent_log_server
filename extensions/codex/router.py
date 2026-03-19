@@ -1,9 +1,9 @@
 import hashlib
-import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .plan_utils import normalize_plan_steps, plan_signature, render_plan_markdown
 from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
 
 
@@ -462,6 +462,9 @@ class CodexEventRouter:
                 "thread_id": thread_id,
                 "turn_id": turn_id,
                 "diff_hashes": set(),
+                "plan_steps": [],
+                "plan_signature": None,
+                "plan_explanation": None,
             }
             self._turn_states[key] = state
         return state
@@ -581,6 +584,74 @@ class CodexEventRouter:
         turn_state["reasoning_buffer"] = ""
         turn_state["reasoning_id"] = None
         turn_state["thought_buffer"] = ""
+
+    def _plan_update_result(
+        self,
+        *,
+        label_lower: str,
+        payload: Dict[str, Any],
+        thread_id: Optional[str],
+        turn_id: Optional[str],
+    ) -> Dict[str, Any]:
+        turn_state = self._get_turn_state(thread_id, turn_id)
+        steps = normalize_plan_steps(payload.get("plan"))
+        explanation_raw = payload.get("explanation")
+        explanation = explanation_raw.strip() if isinstance(explanation_raw, str) and explanation_raw.strip() else None
+        signature = plan_signature(steps, explanation)
+        if turn_state.get("plan_signature") == signature:
+            return {"handled": True, "events": [], "transcript_entries": []}
+
+        turn_state["plan_steps"] = steps
+        turn_state["plan_signature"] = signature
+        turn_state["plan_explanation"] = explanation
+
+        events: List[Dict[str, Any]] = []
+        if steps:
+            plan_content = render_plan_markdown(steps, explanation)
+            events.append({
+                "type": "plan_state",
+                "has_plan": False,
+                "has_todo": True,
+                "plan_exists": False,
+                "plan_content": plan_content,
+                "plan_steps": steps,
+            })
+            plan_event: Dict[str, Any] = {
+                "type": "plan_update",
+                "steps": steps,
+            }
+            if explanation:
+                plan_event["explanation"] = explanation
+            events.append(plan_event)
+            events.append({"type": "activity", "label": "planning", "active": True})
+        else:
+            events.append({
+                "type": "plan_state",
+                "has_plan": False,
+                "has_todo": True,
+                "plan_exists": False,
+                "plan_content": "",
+                "plan_steps": [],
+            })
+
+        active_plan: Optional[Dict[str, Any]]
+        if steps:
+            active_plan = {
+                "steps": steps,
+                "turn_id": turn_id,
+                "updated_at": utc_ts(),
+            }
+            if explanation:
+                active_plan["explanation"] = explanation
+        else:
+            active_plan = None
+
+        return {
+            "handled": True,
+            "events": events,
+            "transcript_entries": [],
+            "meta_patch": {"active_plan": active_plan},
+        }
 
     def _decorate_event(self, entry: Dict[str, Any], subagent_id: Optional[str]) -> Dict[str, Any]:
         if subagent_id:
@@ -1018,9 +1089,24 @@ class CodexEventRouter:
                 "set_turn_id": next_turn_id,
                 "events": [{"type": "activity", "label": "turn started", "active": True}],
                 "transcript_entries": [],
+                "meta_patch": {"active_plan": None},
             }
 
+        if (
+            (notification_spec and notification_spec.category == "turn" and notification_spec.subject == "plan" and notification_spec.phase == "updated")
+            or (event_spec and event_spec.category == "plan" and event_spec.subject == "update")
+        ) and isinstance(payload, dict):
+            return self._plan_update_result(
+                label_lower=label_lower,
+                payload=payload,
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+
         if notification_spec and notification_spec.category == "turn" and notification_spec.subject == "turn" and notification_spec.phase == "completed" and isinstance(payload, dict):
+            turn_state = self._get_turn_state(thread_id, turn_id)
+            plan_steps = turn_state.get("plan_steps")
+            plan_explanation = turn_state.get("plan_explanation")
             turn_status, turn_error = _normalize_turn_status(payload)
             if turn_status == "failed":
                 ribbon_status = "error"
@@ -1029,26 +1115,54 @@ class CodexEventRouter:
             else:
                 ribbon_status = "success"
             self._turn_states.pop(self._turn_key(thread_id, turn_id), None)
+            events: List[Dict[str, Any]] = [
+                {
+                    "type": "status",
+                    "status": ribbon_status,
+                    "turn_status": turn_status,
+                    "error": turn_error,
+                },
+                {"type": "activity", "label": "idle", "active": False},
+            ]
+            transcript_entries: List[Dict[str, Any]] = [{
+                "role": "status",
+                "status": ribbon_status,
+                "turn_status": turn_status,
+                "turn_id": turn_id,
+                "error": turn_error,
+                "event": label_lower,
+            }]
+            if isinstance(plan_steps, list) and plan_steps:
+                plan_content = render_plan_markdown(plan_steps, plan_explanation if isinstance(plan_explanation, str) else None)
+                events.append({
+                    "type": "plan_state",
+                    "has_plan": False,
+                    "has_todo": True,
+                    "plan_exists": False,
+                    "plan_content": plan_content,
+                    "plan_steps": plan_steps,
+                })
+                plan_event: Dict[str, Any] = {
+                    "type": "plan",
+                    "steps": plan_steps,
+                }
+                plan_entry: Dict[str, Any] = {
+                    "role": "plan",
+                    "steps": plan_steps,
+                    "turn_id": turn_id,
+                    "event": label_lower,
+                }
+                if isinstance(plan_explanation, str) and plan_explanation:
+                    plan_event["explanation"] = plan_explanation
+                    plan_entry["explanation"] = plan_explanation
+                events.append(plan_event)
+                transcript_entries.append(plan_entry)
             return {
                 "handled": True,
                 "clear_turn_id": True,
-                "events": [
-                    {
-                        "type": "status",
-                        "status": ribbon_status,
-                        "turn_status": turn_status,
-                        "error": turn_error,
-                    },
-                    {"type": "activity", "label": "idle", "active": False},
-                ],
-                "transcript_entries": [{
-                    "role": "status",
-                    "status": ribbon_status,
-                    "turn_status": turn_status,
-                    "turn_id": turn_id,
-                    "error": turn_error,
-                    "event": label_lower,
-                }],
+                "events": events,
+                "transcript_entries": transcript_entries,
+                "meta_patch": {"active_plan": None},
             }
 
         if (
@@ -1209,6 +1323,9 @@ class CodexEventRouter:
                     ],
                     "transcript_entries": [],
                 }, thread_id=thread_id)
+
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "plan" and notification_spec.phase == "delta":
+            return {"handled": True, "events": [], "transcript_entries": []}
 
         if notification_spec and notification_spec.category == "item" and isinstance(payload, dict):
             spec_name = notification_spec.name

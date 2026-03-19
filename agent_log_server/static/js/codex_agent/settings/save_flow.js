@@ -16,6 +16,7 @@ export function bindSettingsSaveFlow(ctx) {
     fetchConversations,
     resetTimeline,
     replayTranscript,
+    refreshPlanSurface,
     restorePendingApprovals,
     setDrawerOpen,
     updateConversationHeaderLabel,
@@ -164,6 +165,7 @@ export function bindSettingsSaveFlow(ctx) {
       resetTimeline();
     }
     await replayTranscript();
+    await refreshPlanSurface?.();
     restorePendingApprovals();
     setDrawerOpen(true);
     updateConversationHeaderLabel();

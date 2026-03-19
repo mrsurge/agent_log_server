@@ -14,6 +14,7 @@ If absent, subfolders are scanned alphabetically.
 """
 
 import importlib
+import inspect
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -26,6 +27,15 @@ _initialized: bool = False
 
 # Callbacks stored for lazy init of discovered extensions
 _init_args: Dict[str, Any] = {}
+
+
+def _manifest_capability_flag(manifest: Any, *names: str) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    capabilities = manifest.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return False
+    return any(bool(capabilities.get(name)) for name in names)
 
 
 def load_extensions(
@@ -57,6 +67,12 @@ def load_extensions(
 
     discovered = _discover_extensions(extensions_dir)
 
+    enabled_by_type: Dict[str, List[Dict[str, Any]]] = {}
+    for ext_info in discovered:
+        if not ext_info.get("enabled", True):
+            continue
+        enabled_by_type.setdefault(ext_info["type"], []).append(ext_info)
+
     for ext_info in discovered:
         if not ext_info.get("enabled", True):
             continue
@@ -70,10 +86,19 @@ def load_extensions(
             "name": ext_info.get("name", ext_id),
             "type": ext_type,
             "path": folder,
+            "capabilities": ext_info.get("manifest", {}).get("capabilities", {}) if isinstance(ext_info.get("manifest"), dict) else {},
+            "ui": ext_info.get("manifest", {}).get("ui", {}) if isinstance(ext_info.get("manifest"), dict) else {},
+            "has_plan": _manifest_capability_flag(ext_info.get("manifest"), "hasPlan", "has_plan"),
+            "has_todo": _manifest_capability_flag(ext_info.get("manifest"), "hasTodo", "has_todo"),
         }
 
         if ext_type not in _extension_handlers:
-            handler = _load_handler(folder, ext_type, **_init_args)
+            handler = _load_handler(
+                folder,
+                ext_type,
+                handler_extensions=enabled_by_type.get(ext_type, []),
+                **_init_args,
+            )
             if handler:
                 _extension_handlers[ext_type] = handler
 
@@ -144,6 +169,7 @@ def _load_handler(
     broadcast_fn: Callable,
     transcript_fn: Callable,
     meta_fns: Optional[Dict[str, Callable]],
+    handler_extensions: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Any]:
     """Dynamically import extensions.<folder>.client and call its init function."""
     module_path = f"extensions.{folder}.client"
@@ -174,6 +200,21 @@ def _load_handler(
         print(f"[Extensions] {module_path} has no {init_fn_name}() or init_manager()")
         return mod  # still return module — may work without init
 
+    init_kwargs: Dict[str, Any] = {}
+    try:
+        init_signature = inspect.signature(init_fn)
+    except (TypeError, ValueError):
+        init_signature = None
+    if init_signature and "registered_extension_ids" in init_signature.parameters:
+        init_kwargs["registered_extension_ids"] = [
+            ext_id
+            for ext_id in (
+                entry.get("id") if isinstance(entry, dict) else None
+                for entry in (handler_extensions or [])
+            )
+            if isinstance(ext_id, str) and ext_id
+        ]
+
     try:
         init_fn(
             extensions_dir,
@@ -182,6 +223,7 @@ def _load_handler(
             broadcast_fn,
             transcript_fn,
             meta_fns,
+            **init_kwargs,
         )
     except Exception as e:
         print(f"[Extensions] {init_fn_name}() failed: {e}")
@@ -208,6 +250,36 @@ def has_extension(extension_id: str) -> bool:
 def list_extensions() -> List[Dict[str, Any]]:
     """List all registered extensions."""
     return list(_extensions_registry.values())
+
+
+def get_extension_info(extension_id: str) -> Optional[Dict[str, Any]]:
+    """Return registry metadata for one extension."""
+    info = _extensions_registry.get(extension_id)
+    if not isinstance(info, dict):
+        return None
+    return dict(info)
+
+
+def _extension_root(extension_id: str) -> Optional[Path]:
+    info = _extensions_registry.get(extension_id)
+    ext_path = info.get("path") if isinstance(info, dict) else None
+    extensions_dir = _init_args.get("extensions_dir")
+    if not isinstance(ext_path, str) or not ext_path:
+        return None
+    if not isinstance(extensions_dir, Path):
+        return None
+    return extensions_dir / ext_path
+
+
+def get_static_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
+    """Load settings_schema.json through loader-owned extension metadata."""
+    extension_root = _extension_root(extension_id)
+    if extension_root is None:
+        return None
+    schema_file = extension_root / "settings_schema.json"
+    if not schema_file.is_file():
+        return None
+    return json.loads(schema_file.read_text(encoding="utf-8"))
 
 
 def is_initialized() -> bool:
@@ -319,18 +391,32 @@ async def get_runtime_options(
     settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Get generic runtime-option descriptors for shared frontend controls."""
+    ext_info = _extensions_registry.get(extension_id) or {}
     handler = get_handler(extension_id)
     if handler and hasattr(handler, "get_runtime_options"):
-        return await handler.get_runtime_options(
+        result = await handler.get_runtime_options(
             extension_id=extension_id,
             conversation_id=conversation_id,
             settings=settings,
         )
+        if isinstance(result, dict):
+            result.setdefault("has_plan", bool(ext_info.get("has_plan")))
+            result.setdefault("has_todo", bool(ext_info.get("has_todo")))
+            return result
+        return {
+            "agent": extension_id,
+            "has_plan": bool(ext_info.get("has_plan")),
+            "has_todo": bool(ext_info.get("has_todo")),
+        }
 
     schema = await get_settings_schema(extension_id)
     fields = schema.get("fields") if isinstance(schema, dict) else None
     if not isinstance(fields, list):
-        return {"agent": extension_id}
+        return {
+            "agent": extension_id,
+            "has_plan": bool(ext_info.get("has_plan")),
+            "has_todo": bool(ext_info.get("has_todo")),
+        }
 
     approval_field = next(
         (field for field in fields if isinstance(field, dict) and field.get("id") in {"approvalPolicy", "approval_policy"}),
@@ -342,6 +428,8 @@ async def get_runtime_options(
     )
     return {
         "agent": extension_id,
+        "has_plan": bool(ext_info.get("has_plan")),
+        "has_todo": bool(ext_info.get("has_todo")),
         "approval": _runtime_option_from_schema_field(approval_field),
         "sandbox": _runtime_option_from_schema_field(sandbox_field),
     }
@@ -371,6 +459,28 @@ async def route_event(
     return {"handled": False}
 
 
+async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+    """Read current plan state for an extension conversation when supported."""
+    ext_info = _extensions_registry.get(extension_id) or {}
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "read_plan"):
+        result = await handler.read_plan(
+            extension_id=extension_id,
+            conversation_id=conversation_id,
+        )
+        if isinstance(result, dict):
+            result.setdefault("has_plan", bool(ext_info.get("has_plan")))
+            result.setdefault("has_todo", bool(ext_info.get("has_todo")))
+            return result
+    return {
+        "has_plan": bool(ext_info.get("has_plan")),
+        "has_todo": bool(ext_info.get("has_todo")),
+        "plan_exists": False,
+        "plan_content": "",
+        "plan_steps": [],
+    }
+
+
 async def list_sessions(extension_id: str, cwd: Optional[str] = None) -> Any:
     """List sessions for an extension. Handler must implement list_sessions()."""
     handler = get_handler(extension_id)
@@ -391,6 +501,7 @@ async def resume_session_with_history(
     handler = get_handler(extension_id)
     if handler and hasattr(handler, "resume_session_with_history"):
         return await handler.resume_session_with_history(
+            extension_id=extension_id,
             session_id=session_id,
             conversation_id=conversation_id,
             cwd=cwd,

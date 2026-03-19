@@ -23,6 +23,7 @@ export function bindInputFlow(ctx) {
     loadOlderTranscript,
     fetchConversation,
     restorePendingApprovals,
+    refreshPlanSurface,
     postTe2OpenRequest,
     setMarkdownEnabled,
     setTrackEditsEnabled,
@@ -215,6 +216,7 @@ export function bindInputFlow(ctx) {
     }
     resetTimeline();
     await replayTranscript();
+    await refreshPlanSurface?.();
     restorePendingApprovals();
   }
 
