@@ -107,6 +107,44 @@ class CopilotEventRouter:
     def set_debug_trace(self, enabled: Any) -> None:
         self.debug_trace = self._coerce_bool(enabled)
 
+    @staticmethod
+    def _normalize_mode_kind(value: Any) -> Optional[str]:
+        candidate = getattr(value, "value", value)
+        if candidate is None:
+            return None
+        text = str(candidate).strip()
+        return text or None
+
+    async def _emit_mode(
+        self,
+        kind_raw: Any,
+        *,
+        source: str,
+        previous_raw: Any = None,
+    ) -> None:
+        kind = self._normalize_mode_kind(kind_raw)
+        if not kind:
+            return
+        previous_kind = self._normalize_mode_kind(previous_raw)
+        event = {
+            "type": "mode",
+            "conversation_id": self.conversation_id,
+            "kind": kind,
+            "turn_id": self.current_turn_id,
+        }
+        entry = {
+            "role": "mode",
+            "kind": kind,
+            "turn_id": self.current_turn_id,
+            "timestamp": utc_ts(),
+            "event": source,
+        }
+        if previous_kind:
+            event["previous_kind"] = previous_kind
+            entry["previous_kind"] = previous_kind
+        await self._emit(event)
+        await self._record(entry)
+
     async def _emit(self, event: Dict[str, Any]) -> None:
         # EVERY _emit() MUST HAVE A MATCHING _record() WITH THE SAME FIELDS.
         # THE TRANSCRIPT IS THE REPLAY SOURCE. IF IT'S NOT RECORDED, IT DOESN'T EXIST ON PLAYBACK.
@@ -251,6 +289,8 @@ class CopilotEventRouter:
                 "active": False,
                 "turn_id": self.current_turn_id,
             })
+        elif etype == SessionEventType.SESSION_MODE_CHANGED:
+            await self._handle_mode_changed(data)
         elif etype == SessionEventType.SESSION_PLAN_CHANGED:
             await self._handle_plan_changed(data)
         # Subagent events
@@ -472,6 +512,11 @@ class CopilotEventRouter:
         self.current_message_text = ""
         self.current_message_subagent_id = None
         self.current_thought_text = ""
+
+        await self._emit_mode(
+            getattr(data, "agent_mode", None),
+            source="assistant.turn_start",
+        )
 
         await self._emit({
             "type": "activity",
@@ -927,6 +972,13 @@ class CopilotEventRouter:
             "recommended_action": getattr(data, "recommended_action", None),
             "turn_id": self.current_turn_id,
         })
+
+    async def _handle_mode_changed(self, data: Any) -> None:
+        await self._emit_mode(
+            getattr(data, "new_mode", None) or getattr(data, "mode", None),
+            source="session.mode_changed",
+            previous_raw=getattr(data, "previous_mode", None),
+        )
 
     # ── Called externally by client ─────────────────────────────────
 

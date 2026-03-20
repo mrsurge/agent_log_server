@@ -68,7 +68,12 @@
       "options": [],
       "dynamic_source": "/api/appserver/runtime_options",
       "dynamic_options_key": "approval",
-      "default": "suggest"
+      "default": "suggest",
+      "runtime_option": {
+        "kind": "approval",
+        "footer": true,
+        "footer_label": "Approval"
+      }
     },
     {
       "id": "sandbox_policy",
@@ -77,7 +82,10 @@
       "options": [],
       "dynamic_source": "/api/appserver/runtime_options",
       "dynamic_options_key": "sandbox",
-      "default": "cwd-only"
+      "default": "cwd-only",
+      "runtime_option": {
+        "kind": "sandbox"
+      }
     },
     {
       "id": "web_policy",
@@ -86,7 +94,29 @@
       "options": [],
       "dynamic_source": "/api/appserver/runtime_options",
       "dynamic_options_key": "web",
-      "default": "deny"
+      "default": "deny",
+      "runtime_option": {
+        "kind": "web"
+      }
+    },
+    {
+      "id": "mode",
+      "type": "select",
+      "label": "Mode",
+      "options": [],
+      "dynamic_source": "/api/appserver/runtime_options",
+      "dynamic_options_key": "mode",
+      "default": "interactive",
+      "runtime_option": {
+        "kind": "mode",
+        "footer": true,
+        "footer_label": "Mode",
+        "accents": {
+          "plan": "ok",
+          "interactive": "warn",
+          "autopilot": "warn"
+        }
+      }
     }
   ]
 }

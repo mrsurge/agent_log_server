@@ -1,0 +1,64 @@
+{
+  "id": "codex-ext-testing",
+  "name": "Codex Extension Testing",
+  "version": "1.0.0",
+  "type": "codex_ext_testing",
+  "description": "Codex CLI extension via the app-server binary (JSON-RPC over stdio)",
+  "enabled": true,
+
+  "agent": {
+    "command": "codex",
+    "args": ["app-server"],
+    "shellspec": "shellspec/app_server.yaml#app_server"
+  },
+
+  "capabilities": {
+    "sessionResume": true,
+    "streaming": true,
+    "modelListing": true,
+    "permissionHandling": true,
+    "collabAgents": true,
+    "hasPlan": false,
+    "hasTodo": true,
+    "hasPlanModes": true
+  },
+
+  "dependencies": {
+    "has_check": true,
+    "has_install": true
+  },
+
+  "model": {
+    "name": "gpt-5.1-codex",
+    "provider": "openai"
+  },
+
+  "ui": {
+    "icon": "codex.svg",
+    "color": "#10a37f",
+    "requestCards": [
+      {
+        "id": "codex-ext-testing-rich-approval",
+        "module": "ui/request_cards/codex_ext_testing_request_card.js",
+        "export": "renderRequestCard",
+        "matches": [
+          {
+            "requestMethod": "item/commandExecution/requestApproval"
+          },
+          {
+            "requestMethod": "item/fileChange/requestApproval"
+          },
+          {
+            "requestMethod": "item/tool/requestUserInput"
+          },
+          {
+            "requestMethod": "item/tool/call"
+          },
+          {
+            "requestMethod": "mcpServer/elicitation/request"
+          }
+        ]
+      }
+    ]
+  }
+}

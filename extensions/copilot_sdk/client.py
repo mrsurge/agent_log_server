@@ -33,6 +33,7 @@ from ._vendor.copilot import (
     PermissionRequest,
     PermissionRequestResult,
 )
+from ._vendor.copilot.generated.rpc import SessionModeSetParams, Mode as SessionMode
 from ._vendor.copilot.types import SessionHooks, PermissionRequestResultKind
 
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
@@ -105,9 +106,15 @@ _WEB_POLICY_OPTIONS: List[Dict[str, str]] = [
     {"value": "allow", "label": "Allow"},
     {"value": "ask", "label": "Ask"},
 ]
+_MODE_OPTIONS: List[Dict[str, str]] = [
+    {"value": "interactive", "label": "Interactive"},
+    {"value": "plan", "label": "Plan"},
+    {"value": "autopilot", "label": "Autopilot"},
+]
 _DEFAULT_APPROVAL_POLICY = "suggest"
 _DEFAULT_SANDBOX_POLICY = "cwd-only"
 _DEFAULT_WEB_POLICY = "deny"
+_DEFAULT_MODE = "interactive"
 _COPILOT_SESSION_STATE_ROOT = Path.home() / ".copilot" / "session-state"
 _COPILOT_TODO_FILENAMES = frozenset({"session.db", "session.db-wal", "session.db-shm"})
 _COPILOT_PLAN_FILENAME = "plan.md"
@@ -860,6 +867,29 @@ def _build_session_runtime_config(
     return config
 
 
+def _normalize_mode_value(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if text in {"interactive", "plan", "autopilot"}:
+        return text
+    return None
+
+
+async def _apply_session_mode(
+    session: CopilotSession,
+    settings: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    desired_mode = _normalize_mode_value(settings.get("mode")) if isinstance(settings, dict) else None
+    if not desired_mode:
+        return None
+    result = await session.rpc.mode.set(SessionModeSetParams(mode=SessionMode(desired_mode)))
+    applied = getattr(result, "mode", None)
+    if isinstance(getattr(applied, "value", None), str):
+        return applied.value
+    return _normalize_mode_value(applied)
+
+
 def _session_event_paths(session_id: str) -> List[Path]:
     root = Path(_copilot_config_dir()) / "session-state"
     return [
@@ -945,6 +975,13 @@ async def get_runtime_options(
             _WEB_POLICY_OPTIONS,
             merged.get("web_policy") if isinstance(merged.get("web_policy"), str) else None,
             _DEFAULT_WEB_POLICY,
+        ),
+        "mode": _runtime_option_descriptor(
+            "mode",
+            "Mode",
+            _MODE_OPTIONS,
+            _normalize_mode_value(merged.get("mode")),
+            _DEFAULT_MODE,
         ),
     }
 
@@ -1717,6 +1754,9 @@ async def handle_message(
                 model=settings.get("model"),
             )
         )
+        applied_mode = await _apply_session_mode(session, settings=settings)
+        if applied_mode:
+            settings["mode"] = applied_mode
 
         # Notify router of turn start
         await router.on_turn_start(text)

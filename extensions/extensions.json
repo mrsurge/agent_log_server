@@ -9,17 +9,10 @@
       "enabled": true
     },
     {
-      "id": "codex",
-      "name": "Codex App Server",
-      "type": "codex_app_server",
-      "path": "codex",
-      "enabled": true
-    },
-    {
       "id": "codex-ext-testing",
       "name": "Codex Extension Testing",
-      "type": "codex_app_server",
-      "path": "codex",
+      "type": "codex_ext_testing",
+      "path": "codex_ext_testing",
       "enabled": true
     }
   ]

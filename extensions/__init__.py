@@ -16,7 +16,7 @@ If absent, subfolders are scanned alphabetically.
 import importlib
 import inspect
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional
 
 # Extension type -> handler module
@@ -29,6 +29,15 @@ _initialized: bool = False
 _init_args: Dict[str, Any] = {}
 
 
+def _deep_merge_manifest(base: Any, override: Any) -> Any:
+    if isinstance(base, dict) and isinstance(override, dict):
+        merged = dict(base)
+        for key, value in override.items():
+            merged[key] = _deep_merge_manifest(merged.get(key), value)
+        return merged
+    return override
+
+
 def _manifest_capability_flag(manifest: Any, *names: str) -> bool:
     if not isinstance(manifest, dict):
         return False
@@ -36,6 +45,81 @@ def _manifest_capability_flag(manifest: Any, *names: str) -> bool:
     if not isinstance(capabilities, dict):
         return False
     return any(bool(capabilities.get(name)) for name in names)
+
+
+def _normalize_runtime_options_list(options_raw: Any) -> List[Dict[str, Any]]:
+    options: List[Dict[str, Any]] = []
+    if not isinstance(options_raw, list):
+        return options
+    for item in options_raw:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                options.append({"value": text, "label": text})
+            continue
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        label = item.get("label")
+        if not isinstance(label, str) or not label.strip():
+            label = value
+        option: Dict[str, Any] = {
+            "value": value.strip(),
+            "label": label.strip(),
+        }
+        if item.get("deprecated") is True:
+            option["deprecated"] = True
+        options.append(option)
+    return options
+
+
+def _schema_runtime_option_meta(field: Dict[str, Any]) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    runtime_option = field.get("runtime_option")
+    if isinstance(runtime_option, str):
+        text = runtime_option.strip()
+        if text:
+            meta["kind"] = text
+    elif isinstance(runtime_option, dict):
+        kind = runtime_option.get("kind")
+        if isinstance(kind, str) and kind.strip():
+            meta["kind"] = kind.strip()
+        if runtime_option.get("footer") is True:
+            meta["footer"] = True
+        footer_label = runtime_option.get("footer_label")
+        if isinstance(footer_label, str) and footer_label.strip():
+            meta["footerLabel"] = footer_label.strip()
+        accents_raw = runtime_option.get("accents")
+        if isinstance(accents_raw, dict):
+            accents: Dict[str, str] = {}
+            for key, value in accents_raw.items():
+                if not isinstance(key, str) or not key.strip():
+                    continue
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                accents[key.strip()] = value.strip()
+            if accents:
+                meta["accents"] = accents
+    dynamic_options_key = field.get("dynamic_options_key")
+    if isinstance(dynamic_options_key, str) and dynamic_options_key.strip():
+        meta["dynamicOptionsKey"] = dynamic_options_key.strip()
+    return meta
+
+
+def _runtime_option_runtime_key(field: Dict[str, Any]) -> Optional[str]:
+    meta = _schema_runtime_option_meta(field)
+    kind = meta.get("kind")
+    if isinstance(kind, str) and kind.strip():
+        return kind.strip()
+    dynamic_key = meta.get("dynamicOptionsKey")
+    if isinstance(dynamic_key, str) and dynamic_key.strip():
+        return dynamic_key.strip()
+    field_id = field.get("id")
+    if isinstance(field_id, str) and field_id.strip():
+        return field_id.strip()
+    return None
 
 
 def load_extensions(
@@ -89,6 +173,7 @@ def load_extensions(
             "ui": manifest.get("ui", {}) if isinstance(manifest, dict) else {},
             "has_plan": _manifest_capability_flag(manifest, "hasPlan", "has_plan"),
             "has_todo": _manifest_capability_flag(manifest, "hasTodo", "has_todo"),
+            "has_plan_modes": _manifest_capability_flag(manifest, "hasPlanModes", "has_plan_modes"),
             "default_enabled": default_enabled,
             "enabled": default_enabled,
             "dependency_status": "unchecked",
@@ -142,6 +227,8 @@ def _discover_extensions(extensions_dir: Path) -> List[Dict[str, Any]]:
                         manifest = json.loads(manifest_path.read_text())
                     except Exception:
                         pass
+                if isinstance(entry.get("manifest_overrides"), dict):
+                    manifest = _deep_merge_manifest(manifest, entry["manifest_overrides"])
                 result.append({
                     "id": entry.get("id") or manifest.get("id", folder),
                     "name": entry.get("name") or manifest.get("name", folder),
@@ -445,6 +532,24 @@ def get_static_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
     return json.loads(schema_file.read_text(encoding="utf-8"))
 
 
+def get_extension_asset_path(extension_id: str, asset_path: str) -> Optional[Path]:
+    extension_root = _extension_root(extension_id)
+    if extension_root is None:
+        return None
+    normalized = str(PurePosixPath(str(asset_path or "")).as_posix()).lstrip("/")
+    parts = PurePosixPath(normalized).parts
+    if not parts or parts[0] not in {"ui", "static"}:
+        return None
+    candidate = (extension_root / normalized).resolve()
+    try:
+        candidate.relative_to(extension_root.resolve())
+    except ValueError:
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
 def is_initialized() -> bool:
     """Check if extensions have been loaded."""
     return _initialized
@@ -535,39 +640,154 @@ async def get_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _runtime_option_from_schema_field(field: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _normalize_request_card_entries(manifest: Any) -> List[Dict[str, Any]]:
+    if not isinstance(manifest, dict):
+        return []
+    ui = manifest.get("ui") if isinstance(manifest.get("ui"), dict) else {}
+    raw_entries = ui.get("requestCards")
+    if not isinstance(raw_entries, list):
+        raw_entries = ui.get("request_cards")
+    if not isinstance(raw_entries, list):
+        raw_entries = manifest.get("requestCards")
+    if not isinstance(raw_entries, list):
+        raw_entries = manifest.get("request_cards")
+    if not isinstance(raw_entries, list):
+        return []
+
+    entries: List[Dict[str, Any]] = []
+    for index, raw_entry in enumerate(raw_entries):
+        if not isinstance(raw_entry, dict):
+            continue
+        module_path = raw_entry.get("module") or raw_entry.get("module_path")
+        if not isinstance(module_path, str) or not module_path.strip():
+            continue
+        raw_matches = raw_entry.get("matches")
+        if not isinstance(raw_matches, list) and isinstance(raw_entry.get("match"), dict):
+            raw_matches = [raw_entry["match"]]
+        matches: List[Dict[str, Any]] = []
+        if isinstance(raw_matches, list):
+            for raw_match in raw_matches:
+                if not isinstance(raw_match, dict):
+                    continue
+                match: Dict[str, Any] = {}
+                request_method = raw_match.get("requestMethod") or raw_match.get("request_method")
+                if isinstance(request_method, str) and request_method.strip():
+                    match["request_method"] = request_method.strip().lower()
+                kind = raw_match.get("kind")
+                if isinstance(kind, str) and kind.strip():
+                    match["kind"] = kind.strip()
+                if match:
+                    matches.append(match)
+        entries.append({
+            "id": raw_entry.get("id") or f"request-card-{index}",
+            "module": module_path.strip().lstrip("/"),
+            "export": raw_entry.get("export") or raw_entry.get("exportName") or "renderRequestCard",
+            "matches": matches,
+        })
+    return entries
+
+
+async def get_request_cards(extension_id: str) -> Dict[str, Any]:
+    info = get_extension_info(extension_id) or {}
+    manifest = info.get("manifest") if isinstance(info.get("manifest"), dict) else {}
+    cards = _normalize_request_card_entries(manifest)
+    schemas: Dict[str, Any] = {}
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "get_request_card_schemas"):
+        result = await handler.get_request_card_schemas(extension_id=extension_id)
+        if isinstance(result, dict):
+            schemas = result
+    return {
+        "cards": cards,
+        "schemas": schemas,
+    }
+
+
+def _runtime_option_from_schema_field(
+    field: Optional[Dict[str, Any]],
+    settings: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     if not isinstance(field, dict):
         return None
-    options_raw = field.get("options")
-    options: List[Dict[str, Any]] = []
-    if isinstance(options_raw, list):
-        for item in options_raw:
-            if isinstance(item, str):
-                text = item.strip()
-                if text:
-                    options.append({"value": text, "label": text})
+    setting_key = field.get("id")
+    if not isinstance(setting_key, str) or not setting_key.strip():
+        return None
+    descriptor: Dict[str, Any] = {
+        "settingKey": setting_key.strip(),
+        "runtimeKey": _runtime_option_runtime_key(field) or setting_key.strip(),
+        "label": field.get("label") or setting_key.strip(),
+        "type": field.get("type") if isinstance(field.get("type"), str) else "",
+        "default": field.get("default"),
+        "current": settings.get(setting_key) if isinstance(settings, dict) else None,
+        "options": _normalize_runtime_options_list(field.get("options")),
+    }
+    meta = _schema_runtime_option_meta(field)
+    if meta.get("footer") is True:
+        descriptor["footer"] = True
+    if isinstance(meta.get("footerLabel"), str):
+        descriptor["footerLabel"] = meta["footerLabel"]
+    accents = meta.get("accents")
+    if isinstance(accents, dict) and accents:
+        descriptor["accents"] = dict(accents)
+    if isinstance(meta.get("dynamicOptionsKey"), str):
+        descriptor["dynamicOptionsKey"] = meta["dynamicOptionsKey"]
+    return descriptor
+
+
+def _merge_runtime_option_descriptor(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key in ("settingKey", "runtimeKey", "label", "type", "default", "current", "dynamicOptionsKey", "footerLabel"):
+        if key not in override:
+            continue
+        value = override.get(key)
+        if key in {"settingKey", "runtimeKey", "label", "type", "dynamicOptionsKey", "footerLabel"}:
+            if isinstance(value, str) and value.strip():
+                merged[key] = value.strip()
+            continue
+        if value is not None:
+            merged[key] = value
+    if override.get("footer") is True:
+        merged["footer"] = True
+    options = _normalize_runtime_options_list(override.get("options"))
+    if options:
+        merged["options"] = options
+    accents_raw = override.get("accents")
+    if isinstance(accents_raw, dict):
+        accents: Dict[str, str] = {}
+        for key, value in accents_raw.items():
+            if not isinstance(key, str) or not key.strip():
                 continue
-            if not isinstance(item, dict):
-                continue
-            value = item.get("value")
             if not isinstance(value, str) or not value.strip():
                 continue
-            label = item.get("label")
-            if not isinstance(label, str) or not label.strip():
-                label = value
-            option: Dict[str, Any] = {
-                "value": value.strip(),
-                "label": label.strip(),
-            }
-            if item.get("deprecated") is True:
-                option["deprecated"] = True
-            options.append(option)
-    return {
-        "settingKey": field.get("id"),
-        "label": field.get("label") or field.get("id") or "",
-        "default": field.get("default") if isinstance(field.get("default"), str) else "",
-        "options": options,
-    }
+            accents[key.strip()] = value.strip()
+        if accents:
+            merged["accents"] = accents
+    return merged
+
+
+def _runtime_descriptors_from_schema(
+    fields: List[Any],
+    settings: Optional[Dict[str, Any]],
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, str], List[str]]:
+    descriptors: Dict[str, Dict[str, Any]] = {}
+    aliases: Dict[str, str] = {}
+    quick_controls: List[str] = []
+    for raw_field in fields:
+        if not isinstance(raw_field, dict):
+            continue
+        descriptor = _runtime_option_from_schema_field(raw_field, settings=settings)
+        if not isinstance(descriptor, dict):
+            continue
+        field_id = descriptor.get("settingKey")
+        runtime_key = descriptor.get("runtimeKey")
+        if not isinstance(field_id, str) or not field_id:
+            continue
+        descriptors[field_id] = descriptor
+        if isinstance(runtime_key, str) and runtime_key:
+            aliases.setdefault(runtime_key, field_id)
+            if descriptor.get("footer") is True and runtime_key not in quick_controls:
+                quick_controls.append(runtime_key)
+    return descriptors, aliases, quick_controls
 
 
 async def get_runtime_options(
@@ -577,46 +797,89 @@ async def get_runtime_options(
 ) -> Dict[str, Any]:
     """Get generic runtime-option descriptors for shared frontend controls."""
     ext_info = _extensions_registry.get(extension_id) or {}
+    schema = await get_settings_schema(extension_id)
+    fields = schema.get("fields") if isinstance(schema, dict) else None
+    schema_fields = fields if isinstance(fields, list) else []
+    schema_descriptors, schema_aliases, schema_quick_controls = _runtime_descriptors_from_schema(
+        schema_fields,
+        settings,
+    )
     handler = get_handler(extension_id)
+    result: Dict[str, Any] = {}
     if handler and hasattr(handler, "get_runtime_options"):
-        result = await handler.get_runtime_options(
+        raw_result = await handler.get_runtime_options(
             extension_id=extension_id,
             conversation_id=conversation_id,
             settings=settings,
         )
-        if isinstance(result, dict):
-            result.setdefault("has_plan", bool(ext_info.get("has_plan")))
-            result.setdefault("has_todo", bool(ext_info.get("has_todo")))
-            return result
-        return {
-            "agent": extension_id,
-            "has_plan": bool(ext_info.get("has_plan")),
-            "has_todo": bool(ext_info.get("has_todo")),
-        }
+        if isinstance(raw_result, dict):
+            result = dict(raw_result)
 
-    schema = await get_settings_schema(extension_id)
-    fields = schema.get("fields") if isinstance(schema, dict) else None
-    if not isinstance(fields, list):
-        return {
-            "agent": extension_id,
-            "has_plan": bool(ext_info.get("has_plan")),
-            "has_todo": bool(ext_info.get("has_todo")),
-        }
+    result.setdefault("agent", extension_id)
+    result.setdefault("has_plan", bool(ext_info.get("has_plan")))
+    result.setdefault("has_todo", bool(ext_info.get("has_todo")))
+    result.setdefault("has_plan_modes", bool(ext_info.get("has_plan_modes")))
 
-    approval_field = next(
-        (field for field in fields if isinstance(field, dict) and field.get("id") in {"approvalPolicy", "approval_policy"}),
-        None,
-    )
-    sandbox_field = next(
-        (field for field in fields if isinstance(field, dict) and field.get("id") in {"sandboxPolicy", "sandbox_policy", "sandbox"}),
-        None,
-    )
+    merged_fields: Dict[str, Dict[str, Any]] = {}
+    existing_fields = result.get("fields")
+    if isinstance(existing_fields, dict):
+        for key, value in existing_fields.items():
+            if isinstance(key, str) and isinstance(value, dict):
+                merged_fields[key] = dict(value)
+
+    for field_id, descriptor in schema_descriptors.items():
+        merged_descriptor = dict(descriptor)
+        existing_descriptor = merged_fields.get(field_id)
+        if isinstance(existing_descriptor, dict):
+            merged_descriptor = _merge_runtime_option_descriptor(merged_descriptor, existing_descriptor)
+
+        source_key = merged_descriptor.get("dynamicOptionsKey")
+        if not isinstance(source_key, str) or not source_key:
+            source_key = merged_descriptor.get("runtimeKey") if isinstance(merged_descriptor.get("runtimeKey"), str) else None
+        source_descriptor = result.get(source_key) if isinstance(source_key, str) else None
+        if isinstance(source_descriptor, dict):
+            merged_descriptor = _merge_runtime_option_descriptor(merged_descriptor, source_descriptor)
+            merged_descriptor["settingKey"] = field_id
+
+        merged_fields[field_id] = merged_descriptor
+
+    if merged_fields:
+        result["fields"] = merged_fields
+
+    for runtime_key, field_id in schema_aliases.items():
+        descriptor = merged_fields.get(field_id)
+        if not isinstance(descriptor, dict):
+            continue
+        existing_descriptor = result.get(runtime_key)
+        if isinstance(existing_descriptor, dict):
+            merged_descriptor = _merge_runtime_option_descriptor(descriptor, existing_descriptor)
+            merged_descriptor["settingKey"] = field_id
+            result[runtime_key] = merged_descriptor
+        else:
+            result[runtime_key] = dict(descriptor)
+
+    quick_controls: List[str] = []
+    existing_quick_controls = result.get("quickControls")
+    if isinstance(existing_quick_controls, list):
+        for item in existing_quick_controls:
+            if isinstance(item, str) and item.strip() and item.strip() not in quick_controls:
+                quick_controls.append(item.strip())
+    for runtime_key in schema_quick_controls:
+        if runtime_key == "mode" and not bool(result.get("has_plan_modes")):
+            continue
+        if runtime_key not in quick_controls:
+            quick_controls.append(runtime_key)
+    if quick_controls:
+        result["quickControls"] = quick_controls
+
+    if schema_descriptors or result:
+        return result
+
     return {
         "agent": extension_id,
         "has_plan": bool(ext_info.get("has_plan")),
         "has_todo": bool(ext_info.get("has_todo")),
-        "approval": _runtime_option_from_schema_field(approval_field),
-        "sandbox": _runtime_option_from_schema_field(sandbox_field),
+        "has_plan_modes": bool(ext_info.get("has_plan_modes")),
     }
 
 

@@ -225,6 +225,26 @@ def init_codex_app_server_manager(
     print("[Codex] Extension initialized (app-server binary handler)")
 
 
+def init_codex_ext_testing_manager(
+    extensions_dir: Path,
+    server_root: Path,
+    fws_getter: Callable,
+    broadcast_fn: Callable,
+    transcript_fn: Callable,
+    meta_fns: Optional[Dict[str, Callable]] = None,
+    registered_extension_ids: Optional[List[str]] = None,
+) -> None:
+    init_codex_app_server_manager(
+        extensions_dir,
+        server_root,
+        fws_getter,
+        broadcast_fn,
+        transcript_fn,
+        meta_fns,
+        registered_extension_ids=registered_extension_ids,
+    )
+
+
 async def warm_up_all_extensions(timeout: float = 60.0) -> Dict[str, bool]:
     results = {ext_id: False for ext_id in sorted(_registered_extension_ids)}
     try:

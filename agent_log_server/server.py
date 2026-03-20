@@ -23,7 +23,7 @@ import tomlkit
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException, Depends
-from fastapi.responses import HTMLResponse, JSONResponse, Response, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -421,6 +421,23 @@ async def _sio_get_extension_settings_schema(sid, data):
         result = await api_extension_settings_schema(eid)
         if isinstance(result, JSONResponse):
             return _sio_error("Extension not found")
+        return result
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_extension_request_cards", namespace="/appserver")
+async def _sio_get_extension_request_cards(sid, data):
+    """Mirror of GET /api/extensions/{id}/request_cards"""
+    try:
+        eid = data.get("extension_id", "")
+        result = await api_extension_request_cards(eid)
+        if isinstance(result, JSONResponse):
+            try:
+                body = json.loads(result.body.decode("utf-8"))
+                return {"ok": False, **body}
+            except Exception:
+                return _sio_error("Extension request-card config unavailable")
         return result
     except Exception as e:
         return _sio_error(str(e))
@@ -1360,6 +1377,8 @@ def _build_pending_approval_descriptor(
     *,
     agent: Optional[str] = None,
     kind: Optional[str] = None,
+    request_method: Optional[str] = None,
+    request_params: Optional[Dict[str, Any]] = None,
     payload: Optional[Dict[str, Any]] = None,
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
@@ -1395,6 +1414,8 @@ def _build_pending_approval_descriptor(
     if not created_at_value:
         created_at_value = datetime.now(timezone.utc).isoformat()
     resolved_kind = str(kind or "unknown")
+    resolved_request_method = str(request_method or "").strip() or None
+    resolved_request_params = dict(request_params) if isinstance(request_params, dict) else {}
     resolved_payload = dict(payload) if isinstance(payload, dict) else {}
     normalized_render_event: Dict[str, Any]
     if isinstance(render_event, dict):
@@ -1414,6 +1435,12 @@ def _build_pending_approval_descriptor(
     normalized_render_event["id"] = normalized_render_event.get("id") or request_id_text
     normalized_render_event["request_id"] = normalized_render_event.get("request_id") or request_id_text
     normalized_render_event["kind"] = normalized_render_event.get("kind") or resolved_kind
+    normalized_render_event["request_method"] = normalized_render_event.get("request_method") or resolved_request_method
+    normalized_render_event["request_params"] = (
+        dict(normalized_render_event.get("request_params"))
+        if isinstance(normalized_render_event.get("request_params"), dict)
+        else resolved_request_params
+    )
     normalized_render_event["payload"] = (
         dict(normalized_render_event.get("payload"))
         if isinstance(normalized_render_event.get("payload"), dict)
@@ -1425,6 +1452,8 @@ def _build_pending_approval_descriptor(
         "request_id": request_id_text,
         "agent": agent_id,
         "kind": resolved_kind,
+        "request_method": resolved_request_method,
+        "request_params": resolved_request_params,
         "status": "pending",
         "payload": resolved_payload,
         "conversation_id": conversation_id,
@@ -1448,12 +1477,16 @@ def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -
     meta = _load_conversation_meta(conversation_id)
     pending = _ensure_pending_approvals(meta)
     existing = pending.get(request_id) if isinstance(pending.get(request_id), dict) else {}
+    request_params = descriptor.get("request_params") if isinstance(descriptor.get("request_params"), dict) else existing.get("request_params")
+    payload = descriptor.get("payload") if isinstance(descriptor.get("payload"), dict) else existing.get("payload")
     normalized = _build_pending_approval_descriptor(
         conversation_id,
         request_id,
         agent=descriptor.get("agent"),
         kind=descriptor.get("kind"),
-        payload=descriptor.get("payload") if isinstance(descriptor.get("payload"), dict) else {},
+        request_method=descriptor.get("request_method") or existing.get("request_method"),
+        request_params=request_params if isinstance(request_params, dict) else {},
+        payload=payload if isinstance(payload, dict) else {},
         thread_id=descriptor.get("thread_id"),
         turn_id=descriptor.get("turn_id"),
         runtime_signature=descriptor.get("runtime_signature"),
@@ -3566,6 +3599,9 @@ async def _route_appserver_event(
     if agent_type != "codex":
         extension_unavailable_detail = _extension_unavailable_detail(agent_type)
 
+    # Generic extension live-routing hook for plan/mode/todo/runtime state.
+    # New extensions must translate into the shared event/transcript shapes here
+    # instead of teaching server.py about backend-specific event names.
     if delegate_to_extension and ext_loader.has_extension(agent_type):
         routed = await ext_loader.route_event(
             agent_type,
@@ -5388,22 +5424,10 @@ async def codex_agent_ui() -> HTMLResponse:
             cls="composer",
         ),
         Footer(
-            Div(
-                Span("Approval"),
-                Div(
-                    Span("default", id="footer-approval-value", cls="pill"),
-                    Div(id="footer-approval-options", cls="dropdown-list"),
-                    cls="footer-dropdown",
-                ),
-                cls="status-pill footer-cell",
-            ),
+            Div(id="footer-runtime-controls", cls="footer-runtime-controls"),
             Div(
                 Span("context:"),
                 Span("—", id="context-remaining", cls="pill"),
-                cls="status-pill footer-cell",
-            ),
-            Div(
-                Span(">_", id="footer-terminal-toggle", cls="pill"),
                 cls="status-pill footer-cell",
             ),
             Div(
@@ -7021,7 +7045,11 @@ async def api_appserver_approval_record(payload: Dict[str, Any] = Body(...)):
     diff = payload.get("diff")
     path = payload.get("path")
     request_id = payload.get("request_id", payload.get("item_id"))
-    if status not in ("accepted", "declined"):
+    result_payload = payload.get("result") if isinstance(payload.get("result"), dict) else None
+    decision = payload.get("decision")
+    if decision is None and isinstance(result_payload, dict):
+        decision = result_payload.get("decision")
+    if status not in ("accepted", "declined", "cancelled"):
         raise HTTPException(status_code=400, detail="Invalid status")
     cfg = _load_appserver_config()
     convo_id = cfg.get("conversation_id")
@@ -7029,6 +7057,8 @@ async def api_appserver_approval_record(payload: Dict[str, Any] = Body(...)):
         await _append_transcript_entry(convo_id, {
             "role": "approval",
             "status": status,
+            "decision": decision,
+            "result": result_payload,
             "diff": diff,
             "path": path,
             "request_id": request_id,
@@ -7059,8 +7089,6 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
     for key in ("decision", "kind", "rules", "feedback", "message", "path"):
         if key in payload and key not in resolution:
             resolution[key] = payload.get(key)
-    decision = "accept" if str(resolution.get("decision") or "decline").strip().lower() == "accept" else "decline"
-    resolution["decision"] = decision
     conversation_id = payload.get("conversation_id")
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         async with _config_lock:
@@ -7081,6 +7109,8 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
     agent = str(descriptor.get("agent") or ((meta.get("settings") or {}).get("agent") or "codex")).strip() or "codex"
     resolved = False
     if agent == "codex":
+        decision = "accept" if str(resolution.get("decision") or "decline").strip().lower() == "accept" else "decline"
+        resolution["decision"] = decision
         resolved = await _resolve_codex_approval(request_id, resolution)
     elif ext_loader.has_extension(agent):
         resolved = bool(ext_loader.resolve_approval(agent, request_id, resolution))
@@ -7768,6 +7798,9 @@ async def api_appserver_runtime_options(
 
     settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
 
+    # Generic runtime-option hook for shared footer controls such as mode/plan.
+    # Extensions own the enum values, labels, and current state; server.py only
+    # resolves the active conversation/agent and forwards through ext_loader.
     if ext_loader.has_extension(resolved_agent):
         result = await ext_loader.get_runtime_options(
             resolved_agent,
@@ -8031,6 +8064,44 @@ async def api_extension_settings_schema(extension_id: str):
 
     # No schema found - return empty (extension has no custom settings)
     return {"version": "1", "fields": []}
+
+
+@app.get("/api/extensions/{extension_id}/request_cards")
+async def api_extension_request_cards(extension_id: str):
+    if not ext_loader.has_extension(extension_id):
+        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
+    try:
+        config = await ext_loader.get_request_cards(extension_id)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to build request-card config: {e}"}, status_code=500)
+    cards: List[Dict[str, Any]] = []
+    raw_cards = config.get("cards") if isinstance(config, dict) else None
+    if isinstance(raw_cards, list):
+        for raw_entry in raw_cards:
+            if not isinstance(raw_entry, dict):
+                continue
+            module_path = str(raw_entry.get("module") or "").strip().lstrip("/")
+            if not module_path:
+                continue
+            entry = dict(raw_entry)
+            entry["module"] = module_path
+            entry["module_url"] = f"/api/extensions/{extension_id}/assets/{module_path}"
+            entry["export"] = str(entry.get("export") or "renderRequestCard").strip() or "renderRequestCard"
+            cards.append(entry)
+    schemas = config.get("schemas") if isinstance(config, dict) and isinstance(config.get("schemas"), dict) else {}
+    return {
+        "extension_id": extension_id,
+        "cards": cards,
+        "schemas": schemas,
+    }
+
+
+@app.get("/api/extensions/{extension_id}/assets/{asset_path:path}")
+async def api_extension_asset(extension_id: str, asset_path: str):
+    asset_file = ext_loader.get_extension_asset_path(extension_id, asset_path)
+    if asset_file is None:
+        raise HTTPException(status_code=404, detail="Extension asset not found")
+    return FileResponse(asset_file)
 
 
 @app.get("/api/extensions/{extension_id}/models")

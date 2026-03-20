@@ -52,6 +52,7 @@ export function bindEventRouter(ctx) {
     renderMiniConversationList,
     insertMention,
     renderPromptFromText,
+    applyRuntimeMode,
   } = ctx;
 
   function normalizePreviewText(text, maxLen = 160) {
@@ -344,6 +345,11 @@ export function bindEventRouter(ctx) {
         updateTokens(evt.total);
         if (Number.isFinite(evt.context_window)) {
           updateContextRemaining(evt.total, evt.context_window);
+        }
+        return;
+      case 'mode':
+        if (typeof evt.kind === 'string') {
+          applyRuntimeMode(evt.kind);
         }
         return;
       case 'context_compacted':

@@ -5,7 +5,7 @@
 This document describes the current pluggable agent-extension architecture in `agent_log_server`, the hook surface exposed by the backend, and the two real reference implementations that exist today:
 
 - `copilot-sdk` — the more complete, production-style example
-- `codex-ext-testing` / `codex` — the Codex app-server example; `codex-ext-testing` is the experimental extension-owned path, while `codex` still keeps compatibility behavior in a few places
+- `codex-ext-testing` — the Codex app-server extension example; legacy `codex` is a separate built-in compatibility path in `server.py`, not a normal registered extension
 
 The goal is to explain how to build a new agent extension without hardcoding backend-specific logic into `server.py`, `static/codex_agent.js`, or `static/modals/settings_schema.js`.
 
@@ -103,7 +103,7 @@ Each extension is self-contained in its own folder.
 | `extensions/<folder>/client.py` | Main extension handler module |
 | `extensions/<folder>/router.py` | Optional event translation layer |
 | `extensions/<folder>/settings_schema.json` | Optional static settings schema |
-| `extensions/codex/runtime_protocol.py` | Codex-specific runtime schema/cache helper |
+| `extensions/codex_ext_testing/runtime_protocol.py` | Codex extension-specific runtime schema/cache helper |
 | `agent_log_server/server.py` | Generic backend entrypoint |
 | `agent_log_server/static/modals/settings_schema.js` | Generic schema-driven settings renderer |
 
@@ -127,17 +127,10 @@ The older flat `extensions/<type>_client.py` / `extensions/<type>_router.py` pat
       "enabled": true
     },
     {
-      "id": "codex",
-      "name": "Codex App Server",
-      "type": "codex_app_server",
-      "path": "codex",
-      "enabled": true
-    },
-    {
       "id": "codex-ext-testing",
       "name": "Codex Extension Testing",
-      "type": "codex_app_server",
-      "path": "codex",
+      "type": "codex_ext_testing",
+      "path": "codex_ext_testing",
       "enabled": true
     }
   ]
@@ -177,6 +170,7 @@ The extension system is intentionally small. Implement only the hooks your backe
 | `is_extension_ready(extension_id)` / `wait_extension_ready(...)` | readiness checks | Optional per-extension readiness |
 | `handle_message(conversation_id, text, agent_type, settings)` | send-message path in `server.py` | Send user input through the backend |
 | `get_settings_schema(extension_id)` | `GET /api/extensions/{id}/settings_schema` | Return a dynamic schema when runtime-generated |
+| `get_runtime_options(extension_id, conversation_id=None, settings=None)` | `GET /api/appserver/runtime_options` | Expose shared runtime quick controls/current values such as plan or collaboration mode |
 | `list_models()` | `GET /api/extensions/{id}/models` | Populate schema-driven model selectors |
 | `list_sessions(cwd=None)` | `GET /api/extensions/{id}/sessions` | Populate `session_picker` browse flows |
 | `resume_session_with_history(...)` | session bind/resume endpoint | Bind a backend session/thread to a local conversation and make live backend state ready |
@@ -350,28 +344,22 @@ It demonstrates almost the entire generic surface:
 
 ## Reference implementation 2: Codex app-server extension (experimental / MVP)
 
-`extensions/codex` is the runtime-schema-driven example.
+`extensions/codex_ext_testing` is the runtime-schema-driven example.
 
 ### Registered extension IDs
 
-Both of these entries use the same handler folder and runtime-protocol helpers:
+The registered extension ID is:
 
-- `codex`
 - `codex-ext-testing`
 
-They intentionally expose two different ownership paths around the same Codex app-server protocol family:
+Legacy `codex` is not loaded from the extension registry. It remains a built-in compatibility path in `server.py` with its own server-owned transport/orchestration.
 
-- **`codex`**
-  - keeps legacy compatibility behavior
-  - still uses the built-in settings modal path
-  - still uses the legacy server-owned app-server transport (`app-server:codex`)
-  - still falls back to legacy non-collab live routing in some cases
+`codex-ext-testing`:
 
-- **`codex-ext-testing`**
-  - exercises the generic extension architecture end to end
-  - uses runtime-generated settings schema, session picker, send/receive hooks, and bind/import hooks
-  - owns its own framework-shell-backed app-server transport (`app-server:codex-extension`)
-  - is the active proving ground for the schema-driven, extension-owned transport approach
+- exercises the generic extension architecture end to end
+- uses runtime-generated settings schema, session picker, send/receive hooks, and bind/import hooks
+- owns its own framework-shell-backed app-server transport (`app-server:codex-extension`)
+- is the active proving ground for the schema-driven, extension-owned transport approach
 
 ### Runtime protocol architecture
 
@@ -390,7 +378,7 @@ At runtime it:
    - `ServerNotification`
    - `EventMsg`
 
-That logic lives in `extensions/codex/runtime_protocol.py`.
+That logic lives in `extensions/codex_ext_testing/runtime_protocol.py`.
 
 ### What the runtime schema is used for
 
@@ -496,6 +484,8 @@ Those are the next major slices after basic two-way communication.
 
 Use the Copilot SDK and Codex app-server implementations as the two reference patterns.
 
+Legacy `codex` in `server.py` is the hard-coded compatibility template, but new extensions do **not** get their own special server/frontend branches. A real extension must plug into the same generic `server.py` / `ext_loader` hook surface as `copilot-sdk` and `codex-ext-testing`, so it also works when loaded from non-builtin extension roots.
+
 ### 1. Add a registry entry
 
 Create an entry in `extensions/extensions.json` with:
@@ -532,6 +522,8 @@ Use this to store callbacks and initialize any shared backend state.
 
 - choose **static `settings_schema.json`** when the backend config surface is stable
 - choose **`get_settings_schema()`** when the backend protocol is runtime-generated or version-dependent
+- if the extension participates in shared footer/runtime quick controls, expose that through schema metadata (`runtime_option`) instead of hardcoding frontend behavior
+- for plan/collaboration mode, expose a normal enumerated schema field (for example `mode`) and set the capability in the manifest; do not hard-code labels in shared UI code
 
 ### 5. Decide who owns backend transport/session lifecycle
 
@@ -545,6 +537,10 @@ At minimum, a usable extension usually needs:
 
 - `handle_message(...)`
 - `list_models()`
+
+If you support shared runtime quick controls (for example approval policy, sandbox policy, or plan/collaboration mode), also implement:
+
+- `get_runtime_options(...)`
 
 If you support bind/resume flows, also implement:
 
@@ -567,6 +563,8 @@ For bind/import flows, keep the responsibilities split:
 If your backend emits live updates, put protocol translation in `router.py` and surface it through `route_event(...)`.
 
 Do **not** teach `server.py` about your backend event names directly.
+
+If your extension exposes plan/collaboration mode, the router should translate live mode changes into the shared `mode` event/transcript shape, and any live plan updates into the shared `plan_state` shape. Replay must see the same fields the live UI sees.
 
 ### 8. Preserve transcript parity
 

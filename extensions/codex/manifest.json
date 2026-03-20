@@ -19,7 +19,8 @@
     "permissionHandling": true,
     "collabAgents": true,
     "hasPlan": false,
-    "hasTodo": true
+    "hasTodo": true,
+    "hasPlanModes": true
   },
 
   "dependencies": {

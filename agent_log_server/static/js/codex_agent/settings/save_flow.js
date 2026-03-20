@@ -69,7 +69,34 @@ export function bindSettingsSaveFlow(ctx) {
     if (agentType === 'codex') {
       const approvalKey = state.runtimeOptions?.approval?.settingKey || 'approvalPolicy';
       const sandboxKey = state.runtimeOptions?.sandbox?.settingKey || 'sandboxPolicy';
+      const preservedSettings = { ...(state.conversationSettings || {}) };
+      [
+        'cwd',
+        'approvalPolicy',
+        'sandboxPolicy',
+        'sandbox',
+        'model',
+        'effort',
+        'summary',
+        'developer_instructions',
+        'label',
+        'alias',
+        'commandOutputLines',
+        'markdown',
+        'useXterm',
+        'diffSyntax',
+        'semanticShellRibbon',
+        'te2_mcp_integration',
+        'trackEdits',
+        'agent',
+        approvalKey,
+        sandboxKey,
+      ].forEach((key) => {
+        if (!key) return;
+        delete preservedSettings[key];
+      });
       settings = {
+        ...preservedSettings,
         cwd,
         [approvalKey]: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
         [sandboxKey]: settingsSandboxEl?.value?.trim() || null,

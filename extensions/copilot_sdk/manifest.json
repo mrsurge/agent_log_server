@@ -19,7 +19,8 @@
     "permissionHandling": true,
     "hooks": true,
     "hasPlan": true,
-    "hasTodo": true
+    "hasTodo": true,
+    "hasPlanModes": true
   },
 
   "dependencies": {

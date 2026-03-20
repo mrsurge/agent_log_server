@@ -206,6 +206,26 @@ body.drawer-open {
   min-width: 140px;
 }
 
+.footer-runtime-controls {
+  display: contents;
+}
+
+.footer-runtime-toggle {
+  appearance: none;
+  background: #1a2030;
+  border: 1px solid #2a3448;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+}
+
+.footer-runtime-empty {
+  min-width: 140px;
+  min-height: 28px;
+  pointer-events: none;
+}
+
 .conversation-drawer .footer .footer-dropdown {
   min-width: 0;
   max-width: 100%;
@@ -1579,6 +1599,7 @@ body.terminal-mode #footer-terminal-toggle.pill {
   background: #1a2030;
   border: 1px solid #2a3448;
   font-size: 11px;
+  color: var(--text);
 }
 
 .pill.ok { color: #7ee787; border-color: #2ea043; }

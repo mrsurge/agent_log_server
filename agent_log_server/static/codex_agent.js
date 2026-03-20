@@ -19,6 +19,7 @@ import { bindPlanModal } from './js/codex_agent/plan_modal.js';
 import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.js';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
+import { bindRequestCardRuntime } from './js/codex_agent/request_cards/runtime.js';
 import { bindPtyRuntime } from './js/codex_agent/pty/runtime.js';
 import { bindShellSemantic } from './js/codex_agent/shell_semantic.js';
 import { formatJsonSetting, parseJsonSetting } from './js/codex_agent/settings/runtime_helpers.js';
@@ -42,6 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const promptEl = document.getElementById('agent-prompt');
   const footerEl = document.querySelector('.composer');
   const footerTerminalToggleEl = document.getElementById('footer-terminal-toggle');
+  const footerRuntimeControlsEl = document.getElementById('footer-runtime-controls');
   const composerTerminalEl = document.getElementById('composer-terminal');
   const sendBtn = document.getElementById('agent-send');
   const interruptBtn = document.getElementById('turn-interrupt');
@@ -85,9 +87,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsTe2McpIntegrationEl = document.getElementById('settings-te2-mcp-integration');
   const markdownToggleEl = document.getElementById('markdown-toggle');
   const trackEditsToggleEl = document.getElementById('track-edits-toggle');
-  const footerApprovalValue = document.getElementById('footer-approval-value');
-  const footerApprovalToggle = document.getElementById('footer-approval-toggle');
-  const footerApprovalOptions = document.getElementById('footer-approval-options');
   const settingsAgentEl = document.getElementById('settings-agent');
   const settingsAgentToggle = document.getElementById('settings-agent-toggle');
   const settingsAgentOptions = document.getElementById('settings-agent-options');
@@ -165,6 +164,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let _socket = null; // Socket.IO instance (set in connectWS)
   let modelList = []; // Cached model list with supportedReasoningEfforts
   let runtimeOptions = {};
+  let activeRuntimeOptionValues = {};
   let planDocState = { has_plan: false, plan_exists: false, plan_content: '', plan_path: null, plan_source: null };
   let todoState = { has_todo: false, plan_steps: [] };
   let planDocDirty = false;
@@ -1674,10 +1674,41 @@ document.addEventListener('DOMContentLoaded', () => {
       : [];
     return {
       settingKey,
+      label: typeof raw.label === 'string' ? raw.label.trim() : '',
+      footerLabel: typeof raw.footerLabel === 'string' ? raw.footerLabel.trim() : '',
       options,
       current: typeof raw.current === 'string' ? raw.current.trim() : '',
       default: typeof raw.default === 'string' ? raw.default.trim() : '',
+      accents: raw.accents && typeof raw.accents === 'object' ? { ...raw.accents } : {},
     };
+  }
+
+  function getQuickControlKinds() {
+    const configured = Array.isArray(runtimeOptions?.quickControls)
+      ? runtimeOptions.quickControls
+          .map((item) => (typeof item === 'string' ? item.trim() : ''))
+          .filter(Boolean)
+      : [];
+    if (configured.length) return configured;
+    return normalizeRuntimeOptionDescriptor('approval') ? ['approval'] : [];
+  }
+
+  function getFooterSlotKinds() {
+    const configured = new Set(getQuickControlKinds());
+    const kinds = [];
+    const approvalDescriptor = normalizeRuntimeOptionDescriptor('approval');
+    if (configured.has('approval') || approvalDescriptor?.options?.length) {
+      kinds.push('approval');
+    }
+    kinds.push('mode');
+    return kinds;
+  }
+
+  function getFooterRuntimeLabel(kind, descriptor) {
+    if (kind === 'mode') {
+      return descriptor?.label || descriptor?.footerLabel || 'Mode';
+    }
+    return descriptor?.footerLabel || descriptor?.label || kind;
   }
 
   function getRuntimeSettingKey(kind, fallbackKey) {
@@ -1698,48 +1729,149 @@ document.addEventListener('DOMContentLoaded', () => {
     return match?.label || value;
   }
 
-  function renderFooterApprovalOptions() {
-    if (!footerApprovalValue || !footerApprovalOptions) return;
-    footerApprovalOptions.innerHTML = '';
-    const descriptor = normalizeRuntimeOptionDescriptor('approval');
-    const options = descriptor?.options || [];
-    options.forEach((option) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'dropdown-item';
-      btn.dataset.value = option.value;
-      btn.textContent = option.label;
-      footerApprovalOptions.appendChild(btn);
-    });
-    const currentValue = getConversationSettingByRuntimeKey('approval', 'approvalPolicy')
+  function getRuntimeQuickValue(kind, fallbackKey) {
+    const activeValue = activeRuntimeOptionValues?.[kind];
+    if (typeof activeValue === 'string' && activeValue.trim()) {
+      return activeValue.trim();
+    }
+    const descriptor = normalizeRuntimeOptionDescriptor(kind);
+    return getConversationSettingByRuntimeKey(kind, fallbackKey)
       || descriptor?.current
       || descriptor?.default
       || '';
-    footerApprovalValue.textContent = getRuntimeOptionLabel('approval', currentValue) || currentValue || 'default';
   }
 
-  async function saveApprovalQuick(value) {
-    const approval = normalizeApprovalValue(value?.trim());
-    if (!approval) return;
-    const settingKey = getRuntimeSettingKey('approval', 'approvalPolicy');
+  function renderFooterRuntimeControls() {
+    if (!footerRuntimeControlsEl) return;
+    if (openDropdownEl && footerRuntimeControlsEl.contains(openDropdownEl)) {
+      closeDropdownMenu(openDropdownEl);
+    }
+    footerRuntimeControlsEl.innerHTML = '';
+    const hasRuntimeOptions = runtimeOptions && Object.keys(runtimeOptions).length > 0;
+    if (!hasRuntimeOptions) {
+      footerRuntimeControlsEl.style.display = 'none';
+      return;
+    }
+    const kinds = getFooterSlotKinds();
+    footerRuntimeControlsEl.style.display = kinds.length ? '' : 'none';
+    kinds.forEach((kind) => {
+      const descriptor = normalizeRuntimeOptionDescriptor(kind);
+      if (!descriptor || !descriptor.options.length) {
+        if (kind === 'mode') {
+          const placeholder = document.createElement('div');
+          placeholder.className = 'status-pill footer-cell footer-runtime-cell footer-runtime-empty';
+          placeholder.dataset.runtimeKind = kind;
+          placeholder.setAttribute('aria-hidden', 'true');
+          footerRuntimeControlsEl.appendChild(placeholder);
+        }
+        return;
+      }
+      const fallbackKey = descriptor.settingKey || kind;
+      const currentValue = getRuntimeQuickValue(kind, fallbackKey);
+      const cell = document.createElement('div');
+      cell.className = 'status-pill footer-cell footer-runtime-cell';
+      cell.dataset.runtimeKind = kind;
+
+      const labelEl = document.createElement('span');
+      labelEl.textContent = getFooterRuntimeLabel(kind, descriptor);
+      cell.appendChild(labelEl);
+
+      const dropdownEl = document.createElement('div');
+      dropdownEl.className = 'footer-dropdown';
+
+      const valueBtn = document.createElement('button');
+      valueBtn.type = 'button';
+      valueBtn.className = 'pill dropdown-toggle footer-runtime-toggle';
+      valueBtn.dataset.runtimeKind = kind;
+      const accentClass = typeof descriptor.accents?.[currentValue] === 'string'
+        ? descriptor.accents[currentValue]
+        : '';
+      valueBtn.classList.toggle('ok', accentClass === 'ok');
+      valueBtn.classList.toggle('warn', accentClass === 'warn');
+      valueBtn.classList.toggle('err', accentClass === 'err');
+      valueBtn.textContent = getRuntimeOptionLabel(kind, currentValue) || currentValue || 'default';
+      valueBtn.addEventListener('click', (evt) => {
+        evt.preventDefault();
+        toggleDropdownMenu(optionsEl);
+      });
+      dropdownEl.appendChild(valueBtn);
+
+      const optionsEl = document.createElement('div');
+      optionsEl.className = 'dropdown-list';
+      descriptor.options.forEach((option) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'dropdown-item';
+        btn.dataset.value = option.value;
+        btn.textContent = option.label;
+        btn.addEventListener('click', async () => {
+          closeDropdownMenu(optionsEl);
+          await saveRuntimeOptionQuick(kind, option.value, fallbackKey);
+        });
+        optionsEl.appendChild(btn);
+      });
+      dropdownEl.appendChild(optionsEl);
+      cell.appendChild(dropdownEl);
+      footerRuntimeControlsEl.appendChild(cell);
+    });
+  }
+
+  async function saveRuntimeOptionQuick(kind, value, fallbackKey) {
+    let nextValue = value?.trim();
+    if (kind === 'approval') {
+      nextValue = normalizeApprovalValue(nextValue);
+    }
+    if (!nextValue) return;
+    const settingKey = getRuntimeSettingKey(kind, fallbackKey || kind);
     await sioCall('conversation_update', {
       conversation_id: conversationMeta?.conversation_id,
-      settings: { [settingKey]: approval },
+      settings: { [settingKey]: nextValue },
     }, { fallbackUrl: '/api/appserver/conversation' });
     conversationSettings = {
       ...(conversationSettings || {}),
-      [settingKey]: approval,
+      [settingKey]: nextValue,
     };
-    if (runtimeOptions?.approval && typeof runtimeOptions.approval === 'object') {
+    if (runtimeOptions?.[kind] && typeof runtimeOptions[kind] === 'object') {
       runtimeOptions = {
         ...runtimeOptions,
-        approval: {
-          ...runtimeOptions.approval,
-          current: approval,
+        [kind]: {
+          ...runtimeOptions[kind],
+          current: nextValue,
         },
       };
     }
-    renderFooterApprovalOptions();
+    if (runtimeOptions?.fields && typeof runtimeOptions.fields === 'object' && runtimeOptions.fields[settingKey]) {
+      runtimeOptions = {
+        ...runtimeOptions,
+        fields: {
+          ...runtimeOptions.fields,
+          [settingKey]: {
+            ...runtimeOptions.fields[settingKey],
+            current: nextValue,
+          },
+        },
+      };
+    }
+    renderFooterRuntimeControls();
+  }
+
+  async function saveApprovalQuick(value) {
+    await saveRuntimeOptionQuick('approval', value, 'approvalPolicy');
+  }
+
+  function applyRuntimeMode(kind) {
+    const normalizedKind = typeof kind === 'string' ? kind.trim() : '';
+    if (normalizedKind) {
+      activeRuntimeOptionValues = {
+        ...(activeRuntimeOptionValues || {}),
+        mode: normalizedKind,
+      };
+    } else if (activeRuntimeOptionValues?.mode) {
+      const next = { ...(activeRuntimeOptionValues || {}) };
+      delete next.mode;
+      activeRuntimeOptionValues = next;
+    }
+    renderFooterRuntimeControls();
   }
 
   function openPicker(...args) {
@@ -2201,6 +2333,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function currentExtensionId() {
     return conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex';
   }
+
+  const requestCardRuntime = bindRequestCardRuntime({
+    sioCall,
+  });
 
   function syncPlanSurface({ renderModal = false } = {}) {
     const mergedState = currentPlanState();
@@ -2832,6 +2968,12 @@ document.addEventListener('DOMContentLoaded', () => {
           updateContextRemaining(entry.total, entry.context_window);
         }
         // Don't render token_usage as a visible row
+        return;
+      }
+      if (entry.role === 'mode') {
+        if (typeof entry.kind === 'string') {
+          applyRuntimeMode(entry.kind);
+        }
         return;
       }
       // Status entries - update ribbon dot on replay
@@ -4051,11 +4193,13 @@ document.addEventListener('DOMContentLoaded', () => {
     sioCall,
     getPending: () => pending,
     getConversationId: () => conversationMeta?.conversation_id || null,
+    getCurrentExtensionId: () => currentExtensionId(),
     createRow,
     getSubagentContainer,
     escapeHtml,
     formatDiff: (...args) => formatDiff(...args),
     toRelativePath,
+    requestCardRuntime,
   });
 
   function renderApproval(evt) {
@@ -4250,6 +4394,7 @@ document.addEventListener('DOMContentLoaded', () => {
 	        clientActiveView = conversationMeta.active_view;
 	      }
 	      activeView = clientActiveView || conversationMeta?.active_view || 'splash';
+        activeRuntimeOptionValues = {};
         if (activeView !== 'conversation') {
           miniConversationDrawerOpen = false;
         }
@@ -4257,12 +4402,13 @@ document.addEventListener('DOMContentLoaded', () => {
         conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex',
         conversationMeta?.conversation_id,
       );
+      await requestCardRuntime.preload(currentExtensionId());
       closePlanModal();
       applyAuthoritativePlanState(createEmptyPlanState(Boolean(runtimeOptions?.has_plan), Boolean(runtimeOptions?.has_todo)));
       setDrawerOpen(activeView === 'conversation');
 	      applyHostUi();
 	      updateActiveConversationLabel();
-	      renderFooterApprovalOptions();
+	      renderFooterRuntimeControls();
       // Sync markdown toggle from settings
       setMarkdownEnabled(conversationSettings?.markdown !== false);
       // Sync track-edits toggle from settings
@@ -4437,6 +4583,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderMiniConversationList,
     insertMention,
     renderPromptFromText,
+    applyRuntimeMode,
   });
 
   const { connectPtyWebSocket, handleUserPtyOutput } = bindPtyRuntime({
