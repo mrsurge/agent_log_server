@@ -159,7 +159,8 @@ export function bindInputFlow(ctx) {
     if (!scrollContainer) return;
     if (!state.transcriptLoading && state.transcriptStart > 0) {
       const topSpacerHeight = state.topSpacerEl ? state.topSpacerEl.getBoundingClientRect().height : 0;
-      if (scrollContainer.scrollTop <= topSpacerHeight + 120) {
+      const preloadPx = Math.max(120, (Number(state.estimatedRowHeight) || 0) * 25);
+      if (scrollContainer.scrollTop <= topSpacerHeight + preloadPx) {
         loadOlderTranscript();
       }
     }

@@ -167,6 +167,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let runtimeOptions = {};
   let planDocState = { has_plan: false, plan_exists: false, plan_content: '', plan_path: null, plan_source: null };
   let todoState = { has_todo: false, plan_steps: [] };
+  let planDocDirty = false;
   let planFetchSerial = 0;
   let settingsUi = null;
   let markdownEnabled = true; // Toggle for markdown rendering
@@ -2221,6 +2222,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function applyAuthoritativePlanState(nextState) {
     planDocState = normalizePlanDocumentState(nextState);
     todoState = normalizeTodoState(nextState);
+    planDocDirty = false;
     return syncPlanSurface({ renderModal: true });
   }
 
@@ -2264,6 +2266,11 @@ document.addEventListener('DOMContentLoaded', () => {
     handleLiveTodoUpdate(next);
     const operation = typeof next.plan_operation === 'string' ? next.plan_operation.trim().toLowerCase() : '';
     const modalOpen = planModal.isPlanModalOpen();
+    const hasPlanCapability = Boolean(next.has_plan ?? planDocState.has_plan ?? runtimeOptions?.has_plan);
+    if (operation === 'update' && !modalOpen && hasPlanCapability) {
+      planDocDirty = true;
+      return currentPlanState();
+    }
     if (operation === 'create' || operation === 'delete' || (operation === 'update' && modalOpen)) {
       const refreshPromise = refreshPlanSurface(true);
       if (refreshPromise && typeof refreshPromise.catch === 'function') {
@@ -2319,7 +2326,14 @@ document.addEventListener('DOMContentLoaded', () => {
     highlightCode,
   });
 
-  function openPlanModal() {
+  async function openPlanModal() {
+    if (planDocDirty) {
+      try {
+        await refreshPlanSurface(true);
+      } catch (err) {
+        console.warn('failed to refresh stale plan state before opening modal', err);
+      }
+    }
     return planModal.openPlanModal();
   }
 
@@ -2490,6 +2504,7 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptStart,
       transcriptTotal,
       transcriptEnd,
+      transcriptLimit,
       estimatedRowHeight,
     }),
     setTranscriptState: (patch) => {
@@ -3135,12 +3150,15 @@ document.addEventListener('DOMContentLoaded', () => {
       incrementMessages();
     });
     clearPlaceholder();
-    const insertBefore = opts.prepend ? topSpacerEl?.nextSibling : bottomSpacerEl;
+    const insertBefore = opts.prepend
+      ? ((planOverlayEl && planOverlayEl.parentElement === timelineEl) ? planOverlayEl.nextSibling : topSpacerEl?.nextSibling)
+      : bottomSpacerEl;
     if (insertBefore && insertBefore.parentElement === timelineEl) {
       timelineEl.insertBefore(fragment, insertBefore);
     } else {
       timelineEl.appendChild(fragment);
     }
+    syncPlanOverlayUi();
 
     // Initialize content after rows are in DOM (xterm needs DOM presence)
     if (pendingAgentPtyTerms.length) {
@@ -4577,6 +4595,7 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptLoading,
       transcriptStart,
       topSpacerEl,
+      estimatedRowHeight,
       scrollProgrammatic: _scrollProgrammatic,
       autoScroll,
       ptyWebSocket,

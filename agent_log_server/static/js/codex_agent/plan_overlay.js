@@ -15,9 +15,18 @@ export function bindPlanOverlay(ctx) {
     });
   }
 
+  function anchorPlanOverlay() {
+    const { planOverlayEl, topSpacerEl } = getState();
+    if (!planOverlayEl || !timelineEl || !topSpacerEl || topSpacerEl.parentElement !== timelineEl) return;
+    if (planOverlayEl.previousSibling !== topSpacerEl) {
+      timelineEl.insertBefore(planOverlayEl, topSpacerEl.nextSibling);
+    }
+  }
+
   function syncPlanOverlayUi() {
     const state = getState();
     if (!state.planOverlayEl || !state.planListEl) return;
+    anchorPlanOverlay();
     const toggleBtn = state.planOverlayEl.querySelector('.plan-toggle');
     const openBtn = state.planOverlayEl.querySelector('.plan-modal-open');
     const itemCount = state.planItems?.size || 0;
@@ -88,12 +97,8 @@ export function bindPlanOverlay(ctx) {
     planOverlayEl.append(header, planListEl);
     setState({ planOverlayEl, planListEl });
 
-    const nextState = getState();
-    if (nextState.topSpacerEl && nextState.topSpacerEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(planOverlayEl, nextState.topSpacerEl.nextSibling);
-    } else {
-      timelineEl.prepend(planOverlayEl);
-    }
+    anchorPlanOverlay();
+    if (!planOverlayEl.parentElement) timelineEl.prepend(planOverlayEl);
     syncPlanOverlayUi();
   }
 
