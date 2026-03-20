@@ -104,10 +104,6 @@ def _extract_thread_id_from_result(payload: Any) -> Optional[str]:
         thread = payload.get("thread")
         if isinstance(thread, dict) and thread.get("id"):
             return str(thread["id"])
-        for key in ("threadId", "thread_id", "id"):
-            value = payload.get(key)
-            if isinstance(value, str) and value:
-                return value
     return None
 
 

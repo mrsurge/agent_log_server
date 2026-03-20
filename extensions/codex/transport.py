@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from framework_shells.orchestrator import Orchestrator
 
 from .router import CodexEventRouter
-from .runtime_protocol import get_runtime_protocol
+from .runtime_protocol import decode_response_result, get_runtime_protocol
 
 _TRANSPORT_LABEL = "app-server:codex-extension"
 _CONFIG_ROOT = Path(os.path.expanduser("~/.cache/app_server"))
@@ -254,7 +254,10 @@ class CodexAppServerTransport:
             else:
                 message = str(error)
             raise RuntimeError(message)
-        return response.get("result", response)
+        protocol = await get_runtime_protocol()
+        decoded_result = decode_response_result(protocol, method, response.get("result", response))
+        self._remember_response_bindings(conversation_id=conversation_id, result=decoded_result)
+        return decoded_result
 
     async def notify(
         self,
@@ -441,13 +444,6 @@ class CodexAppServerTransport:
                 req_id = str(parsed.get("id"))
                 conversation_id = self._request_conversations.get(req_id)
                 self._raw_log_fn("in", conversation_id or self.get_raw_label(), text)
-                if conversation_id and isinstance(parsed.get("result"), dict):
-                    result = parsed.get("result")
-                    self._remember_bindings(
-                        conversation_id=conversation_id,
-                        thread_id=self._get_thread_id(result, fallback=None),
-                        turn_id=self._get_turn_id(result),
-                    )
                 waiter = self._rpc_waiters.get(req_id)
                 if waiter and not waiter.done():
                     waiter.set_result(parsed)
@@ -845,6 +841,33 @@ class CodexAppServerTransport:
             self._thread_conversations[thread_id] = conversation_id
         if isinstance(turn_id, str) and turn_id:
             self._turn_conversations[turn_id] = conversation_id
+
+    def _remember_response_bindings(
+        self,
+        *,
+        conversation_id: Optional[str],
+        result: Any,
+    ) -> None:
+        if not conversation_id or not isinstance(result, dict):
+            return
+        thread_id: Optional[str] = None
+        turn_id: Optional[str] = None
+        thread = result.get("thread")
+        if isinstance(thread, dict):
+            thread_value = thread.get("id")
+            if isinstance(thread_value, str) and thread_value:
+                thread_id = thread_value
+        turn = result.get("turn")
+        if isinstance(turn, dict):
+            turn_value = turn.get("id")
+            if isinstance(turn_value, str) and turn_value:
+                turn_id = turn_value
+        if thread_id or turn_id:
+            self._remember_bindings(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
 
     def _get_thread_id(self, payload: Any, fallback: Optional[str]) -> Optional[str]:
         if isinstance(payload, dict):

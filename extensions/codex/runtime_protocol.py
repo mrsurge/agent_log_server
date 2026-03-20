@@ -8,13 +8,16 @@ import shutil
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from te2_runtime import (
     build_codex_thread_config,
     build_effective_developer_instructions,
     te2_mcp_integration_enabled,
 )
+from .dependencies import is_android_termux as _is_android_termux
+from .dependencies import recommended_codex_install_command as _recommended_codex_install_command
+from .dependencies import recommended_codex_package as _recommended_codex_package
 
 _server_root: Optional[Path] = None
 _extensions_dir: Optional[Path] = None
@@ -43,6 +46,20 @@ _SEMANTIC_SUFFIXES = {
 }
 
 _THREAD_BINDING_FIELDS = ("new_thread_id", "receiver_thread_id")
+_BASIC_RESPONSE_METHODS = frozenset({
+    "initialize",
+    "model/list",
+    "thread/list",
+    "thread/resume",
+    "thread/start",
+    "turn/interrupt",
+    "turn/start",
+})
+_RESPONSE_SCHEMA_OVERRIDES: Dict[str, str] = {}
+
+
+class _SchemaDecodeError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -70,6 +87,7 @@ class RuntimeProtocol:
     schema_path: Path
     definitions: Dict[str, Any]
     request_params: Dict[str, Dict[str, Any]]
+    responses: Dict[str, Dict[str, Any]]
     server_requests: Dict[str, Dict[str, Any]]
     notifications: Dict[str, Dict[str, Any]]
     events: Dict[str, Dict[str, Any]]
@@ -80,6 +98,9 @@ class RuntimeProtocol:
 
     def request_schema(self, method: str) -> Optional[Dict[str, Any]]:
         return self.request_params.get(method.lower())
+
+    def response_schema(self, method: str) -> Optional[Dict[str, Any]]:
+        return self.responses.get(method.lower())
 
     def notification_schema(self, method: str) -> Optional[Dict[str, Any]]:
         return self.notifications.get(method.lower())
@@ -181,29 +202,6 @@ def _expand_path(raw: Any) -> Optional[str]:
 
 def _codex_binary_path() -> str:
     return shutil.which("codex") or "<not found>"
-
-
-def _is_android_termux() -> bool:
-    system_info = platform.platform()
-    uname = platform.uname()
-    prefix = os.environ.get("PREFIX", "")
-    markers = " ".join(
-        (
-            system_info,
-            getattr(uname, "system", ""),
-            getattr(uname, "release", ""),
-            prefix,
-        )
-    ).lower()
-    return "android" in markers or "termux" in markers or "com.termux" in markers
-
-
-def _recommended_codex_package() -> str:
-    return "@mmmbuto/codex-cli-termux" if _is_android_termux() else "@openai/codex"
-
-
-def _recommended_codex_install_command() -> str:
-    return f"npm install -g {_recommended_codex_package()}"
 
 
 def _generated_schema_files(root: Path, limit: int = 24) -> List[str]:
@@ -517,6 +515,53 @@ def _build_request_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[str, 
     return registry
 
 
+def _pascalize_identifier(value: str) -> str:
+    expanded = re.sub(r"(?<!^)(?=[A-Z])", " ", value)
+    tokens = re.split(r"[^A-Za-z0-9]+", expanded)
+    return "".join(token[:1].upper() + token[1:] for token in tokens if token)
+
+
+def _response_definition_name(method: str) -> Optional[str]:
+    normalized = method.lower().strip()
+    override = _RESPONSE_SCHEMA_OVERRIDES.get(normalized)
+    if isinstance(override, str) and override:
+        return override
+    parts = [_pascalize_identifier(part) for part in normalized.split("/") if part]
+    parts = [part for part in parts if part]
+    if not parts:
+        return None
+    return f'{"".join(parts)}Response'
+
+
+def _build_response_registry(
+    definitions: Dict[str, Any],
+    methods: Iterable[str],
+) -> Dict[str, Dict[str, Any]]:
+    registry: Dict[str, Dict[str, Any]] = {}
+    missing: List[str] = []
+    normalized_methods = sorted({
+        method.lower()
+        for method in methods
+        if isinstance(method, str) and method.lower() in _BASIC_RESPONSE_METHODS
+    })
+    for method in normalized_methods:
+        definition_name = _response_definition_name(method)
+        if not definition_name:
+            missing.append(f"{method} (unresolved)")
+            continue
+        schema = definitions.get(definition_name)
+        if not isinstance(schema, dict):
+            missing.append(f"{method} ({definition_name})")
+            continue
+        registry[method] = _resolve_schema(schema, definitions)
+    if missing:
+        raise RuntimeError(
+            "runtime schema missing response definitions for basic methods: "
+            + ", ".join(missing)
+        )
+    return registry
+
+
 def _build_server_request_registry(schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     registry: Dict[str, Dict[str, Any]] = {}
     definitions = schema.get("definitions") if isinstance(schema.get("definitions"), dict) else {}
@@ -575,6 +620,129 @@ def _build_event_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[str, An
         if isinstance(event_type, str):
             registry[event_type] = variant
     return registry
+
+
+def _decode_schema_value(
+    value: Any,
+    schema: Dict[str, Any],
+    definitions: Dict[str, Any],
+    path: str,
+) -> Any:
+    resolved = _resolve_schema(schema, definitions)
+    if not isinstance(resolved, dict):
+        return value
+
+    for key in ("anyOf", "oneOf"):
+        variants = resolved.get(key)
+        if isinstance(variants, list) and variants:
+            for variant in variants:
+                try:
+                    return _decode_schema_value(value, variant, definitions, path)
+                except _SchemaDecodeError:
+                    continue
+            raise _SchemaDecodeError(f"{path}: value did not match any allowed schema variant")
+
+    enum_values = resolved.get("enum")
+    if isinstance(enum_values, list):
+        if value in enum_values:
+            return value
+        raise _SchemaDecodeError(f"{path}: expected one of {enum_values!r}, got {value!r}")
+
+    type_decl = resolved.get("type")
+    if isinstance(type_decl, list):
+        if value is None and "null" in type_decl:
+            return None
+        for candidate_type in type_decl:
+            if candidate_type == "null":
+                continue
+            candidate_schema = dict(resolved)
+            candidate_schema["type"] = candidate_type
+            try:
+                return _decode_schema_value(value, candidate_schema, definitions, path)
+            except _SchemaDecodeError:
+                continue
+        raise _SchemaDecodeError(
+            f"{path}: expected one of {type_decl!r}, got {type(value).__name__}"
+        )
+
+    if value is None:
+        if type_decl == "null":
+            return None
+        raise _SchemaDecodeError(f"{path}: expected {type_decl or 'value'}, got null")
+
+    props = resolved.get("properties") if isinstance(resolved.get("properties"), dict) else None
+    additional = resolved.get("additionalProperties", True)
+    if type_decl == "object" or props is not None or additional is not True:
+        if not isinstance(value, dict):
+            raise _SchemaDecodeError(f"{path}: expected object, got {type(value).__name__}")
+        required = resolved.get("required") if isinstance(resolved.get("required"), list) else []
+        for key in required:
+            if key not in value:
+                raise _SchemaDecodeError(f"{path}.{key}: missing required property")
+        output: Dict[str, Any] = {}
+        for key, item in value.items():
+            next_path = f"{path}.{key}"
+            prop_schema = props.get(key) if props else None
+            if isinstance(prop_schema, dict):
+                output[key] = _decode_schema_value(item, prop_schema, definitions, next_path)
+            elif additional is False:
+                raise _SchemaDecodeError(f"{next_path}: unexpected property")
+            elif isinstance(additional, dict):
+                output[key] = _decode_schema_value(item, additional, definitions, next_path)
+            else:
+                output[key] = item
+        return output
+
+    items_schema = resolved.get("items")
+    if type_decl == "array" or isinstance(items_schema, dict):
+        if not isinstance(value, list):
+            raise _SchemaDecodeError(f"{path}: expected array, got {type(value).__name__}")
+        if isinstance(items_schema, dict):
+            return [
+                _decode_schema_value(item, items_schema, definitions, f"{path}[{index}]")
+                for index, item in enumerate(value)
+            ]
+        return list(value)
+
+    if type_decl == "string":
+        if not isinstance(value, str):
+            raise _SchemaDecodeError(f"{path}: expected string, got {type(value).__name__}")
+        return value
+    if type_decl == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise _SchemaDecodeError(f"{path}: expected integer, got {type(value).__name__}")
+        return value
+    if type_decl == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _SchemaDecodeError(f"{path}: expected number, got {type(value).__name__}")
+        return value
+    if type_decl == "boolean":
+        if not isinstance(value, bool):
+            raise _SchemaDecodeError(f"{path}: expected boolean, got {type(value).__name__}")
+        return value
+    if type_decl == "null":
+        raise _SchemaDecodeError(f"{path}: expected null, got {type(value).__name__}")
+
+    return value
+
+
+def decode_response_result(
+    protocol: RuntimeProtocol,
+    method: str,
+    result: Any,
+) -> Any:
+    schema = protocol.response_schema(method)
+    if not isinstance(schema, dict):
+        raise RuntimeError(f"runtime protocol missing response schema for {method}")
+    try:
+        return _decode_schema_value(
+            result,
+            schema,
+            protocol.definitions,
+            path=f"{method}.result",
+        )
+    except _SchemaDecodeError as exc:
+        raise RuntimeError(f"invalid {method} response: {exc}") from exc
 
 
 def _match_allowed_string(value: str, allowed: List[str]) -> Optional[str]:
@@ -864,17 +1032,27 @@ async def get_runtime_protocol() -> RuntimeProtocol:
         definitions = schema.get("definitions")
         if not isinstance(definitions, dict):
             raise RuntimeError(f"runtime schema missing definitions: {schema_path}")
-        request_params = _build_request_registry(definitions)
+        merged_definitions: Dict[str, Any] = {}
+        legacy_schema_path = _legacy_schema_bundle_path(schema_path.parent)
+        if legacy_schema_path.exists():
+            legacy_schema = json.loads(legacy_schema_path.read_text(encoding="utf-8"))
+            legacy_definitions = legacy_schema.get("definitions")
+            if isinstance(legacy_definitions, dict):
+                merged_definitions.update(legacy_definitions)
+        merged_definitions.update(definitions)
+        request_params = _build_request_registry(merged_definitions)
+        responses = _build_response_registry(merged_definitions, request_params.keys())
         server_requests = _build_server_request_registry(server_request_schema)
-        notifications = _build_notification_registry(definitions)
-        events = _build_event_registry(definitions)
+        notifications = _build_notification_registry(merged_definitions)
+        events = _build_event_registry(merged_definitions)
         _runtime_protocol = RuntimeProtocol(
             version=version,
             version_key=version_key,
             cache_dir=schema_path.parent,
             schema_path=schema_path,
-            definitions=definitions,
+            definitions=merged_definitions,
             request_params=request_params,
+            responses=responses,
             server_requests=server_requests,
             notifications=notifications,
             events=events,

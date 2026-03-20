@@ -7,6 +7,7 @@ export function bindConversationDrawer(ctx) {
   const list = createConversationDrawerList({
     conversationListEl: ctx.conversationListEl,
     conversationMiniListEl: ctx.conversationMiniListEl,
+    getState: ctx.getState,
     getHostUi: ctx.getHostUi,
     getSplashTab: ctx.getSplashTab,
     getConversationPreview: ctx.getConversationPreview,
@@ -42,6 +43,7 @@ export function bindConversationDrawer(ctx) {
     conversationMiniDrawerEl: ctx.conversationMiniDrawerEl,
     conversationMiniCloseBtn: ctx.conversationMiniCloseBtn,
     documentRef: ctx.documentRef,
+    windowRef: ctx.windowRef,
   });
 
   actionsRef = actions;

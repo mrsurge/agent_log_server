@@ -67,30 +67,47 @@ def load_extensions(
 
     discovered = _discover_extensions(extensions_dir)
 
+    _extension_handlers = {}
+    _extensions_registry = {}
+
     enabled_by_type: Dict[str, List[Dict[str, Any]]] = {}
     for ext_info in discovered:
-        if not ext_info.get("enabled", True):
-            continue
-        enabled_by_type.setdefault(ext_info["type"], []).append(ext_info)
-
-    for ext_info in discovered:
-        if not ext_info.get("enabled", True):
-            continue
-
         ext_id = ext_info["id"]
         ext_type = ext_info["type"]
         folder = ext_info["folder"]
+        manifest = ext_info.get("manifest") if isinstance(ext_info.get("manifest"), dict) else {}
+        dependencies = manifest.get("dependencies") if isinstance(manifest.get("dependencies"), dict) else {}
+        default_enabled = bool(ext_info.get("enabled", True))
 
         _extensions_registry[ext_id] = {
             "id": ext_id,
             "name": ext_info.get("name", ext_id),
             "type": ext_type,
             "path": folder,
-            "capabilities": ext_info.get("manifest", {}).get("capabilities", {}) if isinstance(ext_info.get("manifest"), dict) else {},
-            "ui": ext_info.get("manifest", {}).get("ui", {}) if isinstance(ext_info.get("manifest"), dict) else {},
-            "has_plan": _manifest_capability_flag(ext_info.get("manifest"), "hasPlan", "has_plan"),
-            "has_todo": _manifest_capability_flag(ext_info.get("manifest"), "hasTodo", "has_todo"),
+            "manifest": manifest,
+            "capabilities": manifest.get("capabilities", {}) if isinstance(manifest, dict) else {},
+            "ui": manifest.get("ui", {}) if isinstance(manifest, dict) else {},
+            "has_plan": _manifest_capability_flag(manifest, "hasPlan", "has_plan"),
+            "has_todo": _manifest_capability_flag(manifest, "hasTodo", "has_todo"),
+            "default_enabled": default_enabled,
+            "enabled": default_enabled,
+            "dependency_status": "unchecked",
+            "dependency_ok": True,
+            "dependency_message": "",
+            "dependency_details": {},
+            "has_dependency_check": bool(dependencies.get("has_check")),
+            "has_dependency_install": bool(dependencies.get("has_install")),
+            "active": default_enabled,
         }
+
+        if default_enabled:
+            enabled_by_type.setdefault(ext_type, []).append(ext_info)
+
+    for ext_info in discovered:
+        if not ext_info.get("enabled", True):
+            continue
+        ext_type = ext_info["type"]
+        folder = ext_info["folder"]
 
         if ext_type not in _extension_handlers:
             handler = _load_handler(
@@ -244,12 +261,13 @@ def get_handler(extension_id: str) -> Optional[Any]:
 
 def has_extension(extension_id: str) -> bool:
     """Check if an extension is registered."""
-    return extension_id in _extensions_registry
+    info = _extensions_registry.get(extension_id)
+    return bool(info and info.get("active"))
 
 
 def list_extensions() -> List[Dict[str, Any]]:
     """List all registered extensions."""
-    return list(_extensions_registry.values())
+    return [dict(info) for info in _extensions_registry.values()]
 
 
 def get_extension_info(extension_id: str) -> Optional[Dict[str, Any]]:
@@ -258,6 +276,151 @@ def get_extension_info(extension_id: str) -> Optional[Dict[str, Any]]:
     if not isinstance(info, dict):
         return None
     return dict(info)
+
+
+def _recompute_extension_active_state(extension_id: str) -> bool:
+    info = _extensions_registry.get(extension_id)
+    if not isinstance(info, dict):
+        return False
+    info["active"] = bool(info.get("enabled")) and bool(info.get("dependency_ok"))
+    return bool(info.get("active"))
+
+
+def _active_extensions_for_type(ext_type: str) -> List[Dict[str, Any]]:
+    return [
+        info
+        for info in _extensions_registry.values()
+        if isinstance(info, dict) and info.get("type") == ext_type and info.get("active")
+    ]
+
+
+def _ensure_handler_loaded_for_extension(extension_id: str) -> bool:
+    info = _extensions_registry.get(extension_id)
+    if not isinstance(info, dict):
+        return False
+    ext_type = info.get("type")
+    folder = info.get("path")
+    if not isinstance(ext_type, str) or not ext_type or not isinstance(folder, str) or not folder:
+        return False
+    if ext_type in _extension_handlers:
+        return True
+    extensions_dir = _init_args.get("extensions_dir")
+    server_root = _init_args.get("server_root")
+    fws_getter = _init_args.get("fws_getter")
+    broadcast_fn = _init_args.get("broadcast_fn")
+    transcript_fn = _init_args.get("transcript_fn")
+    meta_fns = _init_args.get("meta_fns")
+    if not isinstance(extensions_dir, Path) or not isinstance(server_root, Path):
+        return False
+    if not callable(fws_getter) or not callable(broadcast_fn) or not callable(transcript_fn):
+        return False
+    active_entries = _active_extensions_for_type(ext_type)
+    handler = _load_handler(
+        folder,
+        ext_type,
+        extensions_dir=extensions_dir,
+        server_root=server_root,
+        fws_getter=fws_getter,
+        broadcast_fn=broadcast_fn,
+        transcript_fn=transcript_fn,
+        meta_fns=meta_fns,
+        handler_extensions=active_entries,
+    )
+    if handler:
+        _extension_handlers[ext_type] = handler
+        return True
+    return False
+
+
+def set_extension_enabled(extension_id: str, enabled: bool) -> bool:
+    info = _extensions_registry.get(extension_id)
+    if not isinstance(info, dict):
+        return False
+    info["enabled"] = bool(enabled)
+    became_active = _recompute_extension_active_state(extension_id)
+    if became_active:
+        _ensure_handler_loaded_for_extension(extension_id)
+    return True
+
+
+def set_extension_dependency_result(extension_id: str, result: Optional[Dict[str, Any]]) -> bool:
+    info = _extensions_registry.get(extension_id)
+    if not isinstance(info, dict):
+        return False
+    payload = result if isinstance(result, dict) else {}
+    status = str(payload.get("status") or ("met" if payload.get("ok") else "error")).strip().lower()
+    if status not in {"met", "unmet", "error"}:
+        status = "met" if payload.get("ok") else "error"
+    message = payload.get("message")
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    info["dependency_status"] = status
+    info["dependency_ok"] = status == "met"
+    info["dependency_message"] = message if isinstance(message, str) else ""
+    info["dependency_details"] = details
+    became_active = _recompute_extension_active_state(extension_id)
+    if became_active:
+        _ensure_handler_loaded_for_extension(extension_id)
+    return True
+
+
+def supports_dependency_check(extension_id: str) -> bool:
+    info = _extensions_registry.get(extension_id)
+    return bool(isinstance(info, dict) and info.get("has_dependency_check"))
+
+
+def supports_dependency_install(extension_id: str) -> bool:
+    info = _extensions_registry.get(extension_id)
+    return bool(isinstance(info, dict) and info.get("has_dependency_install"))
+
+
+def _dependency_module_for_extension(extension_id: str) -> Optional[Any]:
+    info = _extensions_registry.get(extension_id)
+    folder = info.get("path") if isinstance(info, dict) else None
+    if not isinstance(folder, str) or not folder:
+        return None
+    module_path = f"extensions.{folder}.dependencies"
+    return importlib.import_module(module_path)
+
+
+async def _call_dependency_fn(func: Callable[..., Any], extension_id: str) -> Dict[str, Any]:
+    result = func(extension_id=extension_id, extension_info=get_extension_info(extension_id))
+    if inspect.isawaitable(result):
+        result = await result
+    if isinstance(result, dict):
+        return result
+    return {"ok": False, "status": "error", "message": "Invalid dependency result"}
+
+
+async def check_extension_dependencies(extension_id: str) -> Dict[str, Any]:
+    if not supports_dependency_check(extension_id):
+        return {"ok": True, "status": "met", "message": "No dependency check required"}
+    try:
+        module = _dependency_module_for_extension(extension_id)
+        func = getattr(module, "check_dependencies", None) if module else None
+        if not callable(func):
+            return {"ok": False, "status": "error", "message": "Dependency check contract missing"}
+        return await _call_dependency_fn(func, extension_id)
+    except Exception as e:
+        return {"ok": False, "status": "error", "message": str(e)}
+
+
+async def install_extension_dependencies(extension_id: str) -> Dict[str, Any]:
+    if not supports_dependency_install(extension_id):
+        return {"ok": False, "status": "failed", "message": "Dependency install not supported"}
+    try:
+        module = _dependency_module_for_extension(extension_id)
+        func = getattr(module, "install_dependencies", None) if module else None
+        if not callable(func):
+            return {"ok": False, "status": "failed", "message": "Dependency install contract missing"}
+        result = await _call_dependency_fn(func, extension_id)
+        status = str(result.get("status") or ("succeeded" if result.get("ok") else "failed")).strip().lower()
+        if status not in {"succeeded", "failed"}:
+            status = "succeeded" if result.get("ok") else "failed"
+        result["status"] = status
+        result["ok"] = status == "succeeded"
+        return result
+    except Exception as e:
+        return {"ok": False, "status": "failed", "message": str(e)}
 
 
 def _extension_root(extension_id: str) -> Optional[Path]:
@@ -293,13 +456,31 @@ async def warm_up_extensions(timeout: float = 60.0) -> Dict[str, bool]:
     Returns dict of extension_id -> success.
     """
     results: Dict[str, bool] = {}
+    active_by_type: Dict[str, List[str]] = {}
+    for ext_id, info in _extensions_registry.items():
+        if not isinstance(info, dict) or not info.get("active"):
+            continue
+        ext_type = info.get("type")
+        if isinstance(ext_type, str) and ext_type:
+            active_by_type.setdefault(ext_type, []).append(ext_id)
     for handler_type, handler in _extension_handlers.items():
+        active_ids = active_by_type.get(handler_type, [])
+        if not active_ids:
+            continue
         if hasattr(handler, "warm_up_all_extensions"):
             try:
                 type_results = await handler.warm_up_all_extensions(timeout=timeout)
-                results.update(type_results)
+                if isinstance(type_results, dict) and type_results:
+                    results.update(type_results)
+                    ready = all(bool(type_results.get(ext_id, False)) for ext_id in active_ids)
+                else:
+                    ready = True
+                for ext_id in active_ids:
+                    results.setdefault(ext_id, ready)
             except Exception as e:
                 print(f"[Extensions] Warm-up failed for {handler_type}: {e}")
+                for ext_id in active_ids:
+                    results[ext_id] = False
     return results
 
 
@@ -307,6 +488,8 @@ def is_extension_ready(extension_id: str) -> bool:
     """Check if an extension has completed warm-up."""
     ext_info = _extensions_registry.get(extension_id)
     if not ext_info:
+        return False
+    if not ext_info.get("active"):
         return False
     
     handler = _extension_handlers.get(ext_info["type"])
@@ -320,6 +503,8 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
     """Wait for an extension to be ready."""
     ext_info = _extensions_registry.get(extension_id)
     if not ext_info:
+        return False
+    if not ext_info.get("active"):
         return False
     
     handler = _extension_handlers.get(ext_info["type"])

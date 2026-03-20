@@ -22,6 +22,11 @@
     "hasTodo": true
   },
 
+  "dependencies": {
+    "has_check": true,
+    "has_install": true
+  },
+
   "model": {
     "name": "gpt-5.1-codex",
     "provider": "openai"

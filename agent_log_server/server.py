@@ -59,6 +59,10 @@ async def _lifespan(app: FastAPI):
             _sync_codex_te2_mcp_from_app_config()
         except Exception as e:
             print(f"[Startup] Codex TE2 MCP config sync error: {e}")
+        try:
+            await _refresh_extension_runtime_state()
+        except Exception as e:
+            print(f"[Startup] Extension dependency sync error: {e}")
         info = await _get_or_start_appserver_shell()
         await _ensure_appserver_reader(info["shell_id"])
         await _ensure_appserver_initialized()
@@ -693,7 +697,147 @@ def _default_appserver_config() -> Dict[str, Any]:
         "shell_manager_shell_id": None,
         "user_name": None,
         "te2_mcp_integration": False,
+        "extensions": {},
     }
+
+
+def _normalize_extension_config_entry(raw: Any, default_enabled: bool) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        enabled = raw.get("enabled")
+        return {"enabled": default_enabled if enabled is None else enabled is True}
+    if isinstance(raw, bool):
+        return {"enabled": raw}
+    return {"enabled": default_enabled}
+
+
+def _normalize_extensions_config(raw: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for ext_id, value in raw.items():
+        if not isinstance(ext_id, str) or not ext_id.strip():
+            continue
+        normalized[ext_id.strip()] = _normalize_extension_config_entry(value, True)
+    return normalized
+
+
+def _seed_extension_config(cfg: Dict[str, Any]) -> bool:
+    extensions_cfg = _normalize_extensions_config(cfg.get("extensions"))
+    changed = extensions_cfg != cfg.get("extensions")
+    cfg["extensions"] = extensions_cfg
+    for info in ext_loader.list_extensions():
+        ext_id = info.get("id")
+        if not isinstance(ext_id, str) or not ext_id:
+            continue
+        default_enabled = bool(info.get("default_enabled", True))
+        current = cfg["extensions"].get(ext_id)
+        normalized = _normalize_extension_config_entry(current, default_enabled)
+        if cfg["extensions"].get(ext_id) != normalized:
+            cfg["extensions"][ext_id] = normalized
+            changed = True
+    return changed
+
+
+def _get_configured_extension_enabled(cfg: Dict[str, Any], extension_id: str, default_enabled: bool = True) -> bool:
+    extensions_cfg = _normalize_extensions_config(cfg.get("extensions"))
+    cfg["extensions"] = extensions_cfg
+    entry = extensions_cfg.get(extension_id)
+    normalized = _normalize_extension_config_entry(entry, default_enabled)
+    if entry != normalized:
+        extensions_cfg[extension_id] = normalized
+    return normalized.get("enabled") is True
+
+
+def _conversation_agent(meta: Optional[Dict[str, Any]]) -> str:
+    settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
+    agent = settings.get("agent")
+    if isinstance(agent, str) and agent.strip():
+        return agent.strip()
+    return "codex"
+
+
+def _clear_active_conversation_if_extension_inactive(cfg: Dict[str, Any]) -> bool:
+    conversation_id = cfg.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        return False
+    safe_id = _sanitize_conversation_id(conversation_id)
+    if not safe_id or not _conversation_meta_path(safe_id).exists():
+        return False
+    meta = _load_conversation_meta(safe_id)
+    agent = _conversation_agent(meta)
+    info = ext_loader.get_extension_info(agent)
+    if not info:
+        return False
+    if ext_loader.has_extension(agent):
+        return False
+    cfg["conversation_id"] = None
+    cfg["thread_id"] = None
+    cfg["turn_id"] = None
+    cfg["active_view"] = "splash"
+    return True
+
+
+def _extension_unavailable_detail(extension_id: str) -> Optional[str]:
+    info = ext_loader.get_extension_info(extension_id)
+    if not isinstance(info, dict):
+        return None
+    if info.get("enabled") is not True:
+        return f"Extension disabled: {extension_id}"
+    status = str(info.get("dependency_status") or "").strip().lower()
+    message = info.get("dependency_message")
+    if status in {"unmet", "error"}:
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        return f"Extension dependencies unmet: {extension_id}"
+    if not ext_loader.has_extension(extension_id):
+        return f"Extension unavailable: {extension_id}"
+    return None
+
+
+async def _refresh_extension_runtime_state(extension_ids: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        changed = _seed_extension_config(cfg)
+        target_ids = [
+            info["id"]
+            for info in ext_loader.list_extensions()
+            if isinstance(info, dict) and isinstance(info.get("id"), str) and info.get("id")
+        ]
+        if extension_ids:
+            wanted = {str(ext_id).strip() for ext_id in extension_ids if isinstance(ext_id, str) and ext_id.strip()}
+            target_ids = [ext_id for ext_id in target_ids if ext_id in wanted]
+        enabled_map: Dict[str, bool] = {}
+        for ext_id in target_ids:
+            info = ext_loader.get_extension_info(ext_id) or {}
+            enabled_map[ext_id] = _get_configured_extension_enabled(
+                cfg,
+                ext_id,
+                bool(info.get("default_enabled", True)),
+            )
+        if changed:
+            _save_appserver_config(cfg)
+
+    results: Dict[str, Dict[str, Any]] = {}
+    for ext_id in target_ids:
+        ext_loader.set_extension_enabled(ext_id, enabled_map.get(ext_id, True))
+        if ext_loader.supports_dependency_check(ext_id):
+            result = await ext_loader.check_extension_dependencies(ext_id)
+        else:
+            result = {"ok": True, "status": "met", "message": "No dependency check required"}
+        ext_loader.set_extension_dependency_result(ext_id, result)
+        info = ext_loader.get_extension_info(ext_id)
+        if isinstance(info, dict):
+            results[ext_id] = info
+
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        changed = _seed_extension_config(cfg)
+        if _clear_active_conversation_if_extension_inactive(cfg):
+            changed = True
+        if changed:
+            _save_appserver_config(cfg)
+
+    return results
 
 
 def _load_appserver_config() -> Dict[str, Any]:
@@ -703,6 +847,7 @@ def _load_appserver_config() -> Dict[str, Any]:
             data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 cfg.update(data)
+                cfg["extensions"] = _normalize_extensions_config(cfg.get("extensions"))
         else:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -3417,6 +3562,9 @@ async def _route_appserver_event(
             agent_type = settings["agent"].strip()
 
     delegate_to_extension = ext_loader.has_extension(agent_type)
+    extension_unavailable_detail = None
+    if agent_type != "codex":
+        extension_unavailable_detail = _extension_unavailable_detail(agent_type)
 
     if delegate_to_extension and ext_loader.has_extension(agent_type):
         routed = await ext_loader.route_event(
@@ -3455,6 +3603,9 @@ async def _route_appserver_event(
                         pass
             routed_events = routed.get("events")
             return resolved_convo_id, routed_events if isinstance(routed_events, list) else events
+
+    if extension_unavailable_detail:
+        raise RuntimeError(extension_unavailable_detail)
 
     # -------------------------------------------------------------------------
     # SECTION: Approval Events (Frontend only - user interaction required)
@@ -5358,6 +5509,7 @@ async def codex_agent_ui() -> HTMLResponse:
                 Script(src=_asset("/static/modals/rollout_picker.js"), defer=True),
                 Script(src=_asset("/static/modals/warning_modal.js"), defer=True),
                 Script(src=_asset("/static/ui/splash_settings.js"), defer=True),
+                Script(src=_asset("/static/ui/extension_settings.js"), defer=True),
                 Script(src=_asset("/static/dist/codex_agent.js"), type="module"),
                 Script(NotStr(f"""import {{ initConsoleBridge }} from '{_asset("/static/js/console_bridge.js")}';
 try {{
@@ -5573,6 +5725,12 @@ try {{
                                     Span("TE2 MCP Integration"),
                                     Input(type="checkbox", id="splash-settings-te2-mcp-integration", checked=False),
                                     cls="settings-checkbox-row"
+                                ),
+                                Div(
+                                    H3("Extensions", cls="settings-subheading"),
+                                    Small("Enable, disable, or install extension dependencies."),
+                                    Div(id="splash-settings-extensions", cls="extension-settings-list"),
+                                    cls="extension-settings-section"
                                 ),
                                 cls="settings-body"
                             ),
@@ -5991,6 +6149,10 @@ async def api_appserver_conversation_select(payload: Dict[str, Any] = Body(...))
                     _save_appserver_config(cfg)
     
     meta = _load_conversation_meta(convo_id)
+    agent = _conversation_agent(meta)
+    unavailable_detail = _extension_unavailable_detail(agent)
+    if unavailable_detail:
+        raise HTTPException(status_code=409, detail=unavailable_detail)
 
     # NOTE: Copilot SDK sessions are NOT eagerly resumed on conversation select.
     # Like codex, resume happens lazily on first message (handle_message checks
@@ -6950,6 +7112,9 @@ async def api_appserver_interrupt(payload: Optional[Dict[str, Any]] = Body(None)
 
     # Route by agent type — non-codex agents use ext_loader
     agent_type = meta.get("settings", {}).get("agent", "codex")
+    unavailable_detail = _extension_unavailable_detail(agent_type) if agent_type != "codex" else None
+    if unavailable_detail:
+        raise HTTPException(status_code=409, detail=unavailable_detail)
     if agent_type != "codex" and ext_loader.has_extension(agent_type):
         result = await ext_loader.interrupt_session(agent_type, convo_id)
         if not result.get("ok"):
@@ -7775,6 +7940,58 @@ _init_extensions()
 async def api_extensions_list():
     """List all available extensions."""
     return {"extensions": ext_loader.list_extensions()}
+
+
+@app.post("/api/extensions/{extension_id}/enabled")
+async def api_extension_enabled(extension_id: str, payload: Dict[str, Any] = Body(...)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    info = ext_loader.get_extension_info(extension_id)
+    if not isinstance(info, dict):
+        raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
+    if "enabled" not in payload:
+        raise HTTPException(status_code=400, detail="Missing required field: enabled")
+    enabled = payload.get("enabled") is True
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        _seed_extension_config(cfg)
+        cfg["extensions"][extension_id] = _normalize_extension_config_entry(
+            cfg["extensions"].get(extension_id),
+            bool(info.get("default_enabled", True)),
+        )
+        cfg["extensions"][extension_id]["enabled"] = enabled
+        _save_appserver_config(cfg)
+    states = await _refresh_extension_runtime_state([extension_id])
+    if enabled:
+        with suppress(Exception):
+            await ext_loader.wait_extension_ready(extension_id, timeout=60.0)
+    return {"ok": True, "extension": states.get(extension_id) or ext_loader.get_extension_info(extension_id)}
+
+
+@app.post("/api/extensions/{extension_id}/install")
+async def api_extension_install(extension_id: str):
+    info = ext_loader.get_extension_info(extension_id)
+    if not isinstance(info, dict):
+        raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
+    if not ext_loader.supports_dependency_install(extension_id):
+        raise HTTPException(status_code=409, detail=f"Extension does not support dependency install: {extension_id}")
+    result = await ext_loader.install_extension_dependencies(extension_id)
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        _seed_extension_config(cfg)
+        cfg["extensions"][extension_id] = _normalize_extension_config_entry(
+            cfg["extensions"].get(extension_id),
+            bool(info.get("default_enabled", True)),
+        )
+        if result.get("ok"):
+            cfg["extensions"][extension_id]["enabled"] = True
+        _save_appserver_config(cfg)
+    states = await _refresh_extension_runtime_state([extension_id])
+    if result.get("ok"):
+        with suppress(Exception):
+            await ext_loader.wait_extension_ready(extension_id, timeout=60.0)
+    refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
+    return {"ok": bool(result.get("ok")), "result": result, "extension": refreshed}
 
 
 @app.get("/api/extensions/{extension_id}")

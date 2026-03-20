@@ -2204,3 +2204,51 @@ body.terminal-mode #footer-terminal-toggle.pill {
 .composer-terminal .xterm-viewport {
   overflow-y: auto !important;
 }
+
+.settings-subheading {
+  margin: 1rem 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.extension-settings-section small {
+  display: block;
+  margin-bottom: 0.75rem;
+  color: var(--muted);
+}
+
+.extension-settings-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.extension-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.extension-settings-meta {
+  min-width: 0;
+}
+
+.extension-settings-title {
+  font-weight: 600;
+}
+
+.extension-settings-status {
+  margin-top: 0.2rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.extension-settings-actions {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+}

@@ -2,6 +2,7 @@ export function createConversationDrawerList(ctx) {
   const {
     conversationListEl,
     conversationMiniListEl,
+    getState,
     getHostUi,
     getSplashTab,
     getConversationPreview,
@@ -12,6 +13,14 @@ export function createConversationDrawerList(ctx) {
     documentRef,
     windowRef,
   } = ctx;
+
+  function getExtensionStatus(agentId) {
+    const state = typeof getState === 'function' ? getState() : {};
+    const catalog = Array.isArray(state?.extensionCatalog) ? state.extensionCatalog : [];
+    const agent = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : 'codex';
+    if (agent === 'codex') return { active: true };
+    return catalog.find((item) => item?.id === agent) || null;
+  }
 
   function isConversationInProject(meta) {
     const hostUi = (typeof getHostUi === 'function' ? getHostUi() : null) || {};
@@ -123,16 +132,26 @@ export function createConversationDrawerList(ctx) {
         row.classList.add('active');
       }
       const info = buildConversationInfo(doc, getConversationDisplay(meta));
+      const agentId = typeof meta?.settings?.agent === 'string' && meta.settings.agent.trim() ? meta.settings.agent.trim() : 'codex';
+      const extensionStatus = getExtensionStatus(agentId);
+      const isUnavailable = extensionStatus && extensionStatus.active !== true;
+      const disabledTitle = typeof extensionStatus?.dependency_message === 'string' && extensionStatus.dependency_message.trim()
+        ? extensionStatus.dependency_message.trim()
+        : 'Extension disabled';
 
       const actions = document.createElement('div');
       actions.className = 'conversation-actions';
       const openBtn = document.createElement('button');
       openBtn.className = 'btn tiny primary';
       openBtn.textContent = 'Open';
+      openBtn.disabled = Boolean(isUnavailable);
+      if (isUnavailable) openBtn.title = disabledTitle;
       openBtn.addEventListener('click', () => selectConversation(meta.conversation_id));
       const settingsBtn = document.createElement('button');
       settingsBtn.className = 'btn tiny';
       settingsBtn.textContent = 'Settings';
+      settingsBtn.disabled = Boolean(isUnavailable);
+      if (isUnavailable) settingsBtn.title = disabledTitle;
       settingsBtn.addEventListener('click', async () => {
         await selectConversationWithView(meta.conversation_id, 'splash');
         openSettingsModal();
@@ -175,9 +194,13 @@ export function createConversationDrawerList(ctx) {
     }
     list.forEach((meta) => {
       if (!meta?.conversation_id) return;
+      const agentId = typeof meta?.settings?.agent === 'string' && meta.settings.agent.trim() ? meta.settings.agent.trim() : 'codex';
+      const extensionStatus = getExtensionStatus(agentId);
+      const isUnavailable = extensionStatus && extensionStatus.active !== true;
       const row = document.createElement('button');
       row.type = 'button';
       row.className = 'conversation-mini-row';
+      row.disabled = Boolean(isUnavailable);
       if (meta.conversation_id === activeId) {
         row.classList.add('active');
       }

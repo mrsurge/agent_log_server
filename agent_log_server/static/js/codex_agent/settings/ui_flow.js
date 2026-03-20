@@ -405,17 +405,23 @@ export function bindSettingsUiFlow(ctx) {
         fallbackMethod: 'GET',
       });
       const extensions = data?.extensions || [];
+      setState({ extensionCatalog: Array.isArray(extensions) ? extensions : [] });
       const agents = ['codex'];
       extensions.forEach((ext) => {
-        if (ext?.id && ext?.name) agents.push(ext.id);
+        if (!ext?.id || !ext?.name) return;
+        if (ext.active !== true) return;
+        if (ext.id === 'codex') return;
+        agents.push(ext.id);
       });
-      if (agents.length > 1) {
-        updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl, onAgentSelectionChange);
-      }
+      updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl, onAgentSelectionChange);
     } catch {
       // ignore
     }
   }
+
+  getWindow()?.addEventListener?.('codexagent:extensions-updated', () => {
+    void loadAgentOptions();
+  });
 
   async function onAgentSelectionChange(agentId) {
     const win = getWindow ? getWindow() : window;

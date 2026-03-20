@@ -23,6 +23,7 @@ export function createConversationDrawerActions(ctx) {
     conversationMiniDrawerEl,
     conversationMiniCloseBtn,
     documentRef,
+    windowRef,
   } = ctx;
 
   function getActiveConversationId() {
@@ -59,6 +60,16 @@ export function createConversationDrawerActions(ctx) {
 
   async function fetchConversations() {
     try {
+      let extensionCatalog = getState().extensionCatalog;
+      try {
+        const extData = await sioCall('get_extensions', {}, {
+          fallbackUrl: '/api/extensions',
+          fallbackMethod: 'GET',
+        });
+        extensionCatalog = Array.isArray(extData?.extensions) ? extData.extensions : [];
+      } catch {
+        // ignore
+      }
       const data = await sioCall('conversations_list', {}, {
         fallbackUrl: '/api/appserver/conversations',
         fallbackMethod: 'GET',
@@ -67,7 +78,7 @@ export function createConversationDrawerActions(ctx) {
       const conversationList = data?.items || [];
       const ssotActiveId = data?.active_conversation_id || null;
       const highlightId = state.clientConversationId || state.conversationMeta?.conversation_id || ssotActiveId;
-      const patch = { conversationList };
+      const patch = { conversationList, extensionCatalog };
       if (!state.clientActiveView && data?.active_view) patch.clientActiveView = data.active_view;
       setState(patch);
       renderConversationList(conversationList, highlightId);
@@ -234,6 +245,16 @@ export function createConversationDrawerActions(ctx) {
       if (conversationMiniDrawerEl?.contains(target)) return;
       if (conversationTitleEl?.contains(target)) return;
       setMiniDrawerOpen(false);
+    });
+
+    windowRef?.addEventListener?.('codexagent:extensions-updated', async () => {
+      await fetchConversations();
+      await fetchConversation();
+      const state = getState();
+      if (!state.conversationMeta?.conversation_id) {
+        setDrawerOpen(false);
+        await setActiveView('splash');
+      }
     });
 
     syncMiniDrawerUi();
