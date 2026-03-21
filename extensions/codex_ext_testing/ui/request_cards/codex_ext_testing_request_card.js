@@ -71,6 +71,36 @@ function setFeedback(node, message, isError = false) {
   node.style.color = isError ? '#c62828' : '';
 }
 
+function isReadOnlyEvent(event, helpers) {
+  return helpers?.readOnly === true
+    || event?.replay === true
+    || event?.event === 'approval_decision'
+    || typeof event?.status === 'string';
+}
+
+function readOnlyStatusLabel(event, fallback = 'Recorded response') {
+  const parts = [];
+  if (typeof event?.status === 'string' && event.status.trim()) parts.push(event.status.trim());
+  if (typeof event?.decision === 'string' && event.decision.trim()) parts.push(event.decision.trim());
+  if (typeof event?.result?.action === 'string' && event.result.action.trim()) parts.push(event.result.action.trim());
+  return parts.length ? `${fallback}: ${parts.join(' / ')}` : fallback;
+}
+
+function readOnlyQuestionAnswers(result, questionId) {
+  const answerEntry = result?.answers?.[questionId];
+  if (!answerEntry) return [];
+  if (Array.isArray(answerEntry?.answers)) {
+    return answerEntry.answers.map((item) => String(item || '')).filter(Boolean);
+  }
+  if (typeof answerEntry?.answer === 'string' && answerEntry.answer.trim()) {
+    return [answerEntry.answer.trim()];
+  }
+  if (typeof answerEntry === 'string' && answerEntry.trim()) {
+    return [answerEntry.trim()];
+  }
+  return [];
+}
+
 async function trySubmit(helpers, result, meta, feedbackNode, pendingMessage = '') {
   if (pendingMessage) {
     setFeedback(feedbackNode, pendingMessage, false);
@@ -111,6 +141,13 @@ function appendOptionValue(inputEl, value) {
   }
 }
 
+function createOptionDescription(text) {
+  const description = document.createElement('div');
+  description.className = 'approval-option-description';
+  description.textContent = String(text || '');
+  return description;
+}
+
 function splitAnswers(raw) {
   return String(raw || '')
     .split('\n')
@@ -131,6 +168,7 @@ function parseJsonLike(text, fallback = null) {
 function renderCommandCard(body, event, schema, helpers) {
   const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
   const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const readOnly = isReadOnlyEvent(event, helpers);
   body.innerHTML = '';
 
   const summary = document.createElement('div');
@@ -148,6 +186,16 @@ function renderCommandCard(body, event, schema, helpers) {
     proposedNetworkPolicyAmendments: payload.proposed_network_policy_amendments || requestParams.proposedNetworkPolicyAmendments || null,
     networkApprovalContext: payload.network_approval_context || requestParams.networkApprovalContext || null,
   });
+
+  if (readOnly) {
+    const feedback = createFeedbackNode(body);
+    feedback.classList.add('approval-feedback-static');
+    setFeedback(feedback, readOnlyStatusLabel(event), false);
+    if (event?.result && typeof event.result === 'object') {
+      addJsonDetails(body, 'Recorded result', event.result);
+    }
+    return;
+  }
 
   const feedback = createFeedbackNode(body);
   const actions = document.createElement('div');
@@ -167,6 +215,7 @@ function renderCommandCard(body, event, schema, helpers) {
 function renderFileChangeCard(body, event, schema, helpers) {
   const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
   const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const readOnly = isReadOnlyEvent(event, helpers);
   body.innerHTML = '';
 
   const summary = document.createElement('div');
@@ -184,6 +233,16 @@ function renderFileChangeCard(body, event, schema, helpers) {
     body.append(diffBlock);
   } else if (payload.changes) {
     addJsonDetails(body, 'File change details', payload.changes);
+  }
+
+  if (readOnly) {
+    const feedback = createFeedbackNode(body);
+    feedback.classList.add('approval-feedback-static');
+    setFeedback(feedback, readOnlyStatusLabel(event), false);
+    if (event?.result && typeof event.result === 'object') {
+      addJsonDetails(body, 'Recorded result', event.result);
+    }
+    return;
   }
 
   const feedback = createFeedbackNode(body);
@@ -205,6 +264,8 @@ function renderUserInputCard(body, event, _schema, helpers) {
   const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
   const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
   const questions = Array.isArray(requestParams.questions) ? requestParams.questions : (Array.isArray(payload.questions) ? payload.questions : []);
+  const readOnly = isReadOnlyEvent(event, helpers);
+  const result = event?.result && typeof event.result === 'object' ? event.result : {};
   body.innerHTML = '';
 
   const summary = document.createElement('div');
@@ -228,32 +289,50 @@ function renderUserInputCard(body, event, _schema, helpers) {
     }
 
     const field = question.isSecret ? document.createElement('input') : document.createElement('textarea');
+    const questionId = String(question.id || '');
+    const recordedAnswers = readOnlyQuestionAnswers(result, questionId);
     field.setAttribute('data-question-id', String(question.id || ''));
     if (field instanceof HTMLInputElement) {
       field.type = 'password';
-      field.className = 'input secret';
+      field.className = 'input secret approval-answer-field';
       field.placeholder = question.isOther ? 'Enter response' : 'Response';
     } else {
-      field.className = 'input';
+      field.className = 'input approval-answer-field';
       field.rows = 2;
       field.placeholder = question.isOther ? 'Enter one or more responses (one per line)' : 'Enter response';
+    }
+    if (recordedAnswers.length && 'value' in field) {
+      field.value = recordedAnswers.join('\n');
+    }
+    if (readOnly) {
+      field.readOnly = true;
     }
     wrapper.append(field);
 
     if (Array.isArray(question.options) && question.options.length) {
       const optionsWrap = document.createElement('div');
-      optionsWrap.className = 'actions';
+      optionsWrap.className = 'approval-option-list';
       question.options.forEach((option) => {
         if (!option || typeof option !== 'object') return;
+        const item = document.createElement('div');
+        item.className = 'approval-option-item';
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'btn tiny';
         button.textContent = String(option.label || '');
-        if (option.description) {
-          button.title = String(option.description);
+        if (recordedAnswers.includes(String(option.label || ''))) {
+          button.classList.add('approve');
         }
-        button.addEventListener('click', () => appendOptionValue(field, String(option.label || '')));
-        optionsWrap.append(button);
+        if (readOnly) {
+          button.disabled = true;
+        } else {
+          button.addEventListener('click', () => appendOptionValue(field, String(option.label || '')));
+        }
+        item.append(button);
+        if (option.description) {
+          item.append(createOptionDescription(option.description));
+        }
+        optionsWrap.append(item);
       });
       wrapper.append(optionsWrap);
     }
@@ -262,6 +341,11 @@ function renderUserInputCard(body, event, _schema, helpers) {
   });
 
   const feedback = createFeedbackNode(body);
+  if (readOnly) {
+    feedback.classList.add('approval-feedback-static');
+    setFeedback(feedback, readOnlyStatusLabel(event), false);
+    return;
+  }
   const actions = document.createElement('div');
   actions.className = 'actions';
   const sendButton = document.createElement('button');
@@ -291,6 +375,7 @@ function renderUserInputCard(body, event, _schema, helpers) {
 function renderToolCallCard(body, event, _schema, helpers) {
   const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
   const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const readOnly = isReadOnlyEvent(event, helpers);
   body.innerHTML = '';
 
   const summary = document.createElement('div');
@@ -304,9 +389,24 @@ function renderToolCallCard(body, event, _schema, helpers) {
   textarea.className = 'input';
   textarea.rows = 4;
   textarea.placeholder = 'Enter tool output text';
+  if (readOnly && Array.isArray(event?.result?.contentItems)) {
+    textarea.value = event.result.contentItems
+      .map((item) => (item && typeof item.text === 'string') ? item.text : '')
+      .filter(Boolean)
+      .join('\n');
+    textarea.readOnly = true;
+  }
   body.append(textarea);
 
   const feedback = createFeedbackNode(body);
+  if (readOnly) {
+    feedback.classList.add('approval-feedback-static');
+    setFeedback(feedback, readOnlyStatusLabel(event), false);
+    if (event?.result && typeof event.result === 'object') {
+      addJsonDetails(body, 'Recorded result', event.result);
+    }
+    return;
+  }
   const actions = document.createElement('div');
   actions.className = 'actions';
 
@@ -339,6 +439,7 @@ function renderToolCallCard(body, event, _schema, helpers) {
 function renderElicitationCard(body, event, _schema, helpers) {
   const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
   const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const readOnly = isReadOnlyEvent(event, helpers);
   body.innerHTML = '';
 
   const summary = document.createElement('div');
@@ -363,9 +464,21 @@ function renderElicitationCard(body, event, _schema, helpers) {
   textarea.className = 'input';
   textarea.rows = 5;
   textarea.placeholder = 'Enter JSON or plain text response';
+  if (readOnly && event?.result && typeof event.result === 'object') {
+    textarea.value = JSON.stringify(event.result.content ?? event.result, null, 2);
+    textarea.readOnly = true;
+  }
   body.append(textarea);
 
   const feedback = createFeedbackNode(body);
+  if (readOnly) {
+    feedback.classList.add('approval-feedback-static');
+    setFeedback(feedback, readOnlyStatusLabel(event), false);
+    if (event?.result && typeof event.result === 'object') {
+      addJsonDetails(body, 'Recorded result', event.result);
+    }
+    return;
+  }
   const actions = document.createElement('div');
   actions.className = 'actions';
 

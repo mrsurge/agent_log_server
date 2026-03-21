@@ -1508,6 +1508,86 @@ def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -
     return normalized
 
 
+def _approval_status_from_resolution(resolution: Any) -> str:
+    result = resolution if isinstance(resolution, dict) else {}
+    decision = str(result.get("decision") or "").strip().lower()
+    if decision == "decline":
+        return "declined"
+    if decision == "cancel":
+        return "cancelled"
+    action = str(result.get("action") or "").strip().lower()
+    if action == "decline":
+        return "declined"
+    if action == "cancel":
+        return "cancelled"
+    if result.get("success") is False:
+        return "declined"
+    return "accepted"
+
+
+def _build_approval_handoff_event(
+    conversation_id: str,
+    descriptor: Dict[str, Any],
+    resolution: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(descriptor, dict):
+        return None
+    request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
+    if not request_id_text:
+        return None
+    render_event = dict(descriptor.get("render_event") or {})
+    payload = dict(descriptor.get("payload") or {})
+    request_params = dict(descriptor.get("request_params") or {})
+    transcript_anchor = descriptor.get("transcript_anchor") if isinstance(descriptor.get("transcript_anchor"), dict) else {}
+    turn_id = descriptor.get("turn_id") or transcript_anchor.get("turn_id") or render_event.get("turn_id") or ""
+    return {
+        **render_event,
+        "type": "approval_handoff",
+        "conversation_id": conversation_id,
+        "id": render_event.get("id") or request_id_text,
+        "request_id": render_event.get("request_id") or request_id_text,
+        "kind": render_event.get("kind") or descriptor.get("kind") or "unknown",
+        "request_method": render_event.get("request_method") or descriptor.get("request_method"),
+        "request_params": (
+            dict(render_event.get("request_params"))
+            if isinstance(render_event.get("request_params"), dict)
+            else request_params
+        ),
+        "payload": (
+            dict(render_event.get("payload"))
+            if isinstance(render_event.get("payload"), dict)
+            else payload
+        ),
+        "turn_id": render_event.get("turn_id") or turn_id,
+        "created_at": str(render_event.get("created_at") or descriptor.get("created_at") or utc_ts()),
+        "status": _approval_status_from_resolution(resolution),
+        "decision": resolution.get("decision"),
+        "result": dict(resolution),
+        "resolved_at": utc_ts(),
+    }
+
+
+async def _append_approval_handoff_transcript_entry(
+    conversation_id: str,
+    handoff_event: Dict[str, Any],
+) -> None:
+    payload = handoff_event.get("payload") if isinstance(handoff_event.get("payload"), dict) else {}
+    await _append_transcript_entry(conversation_id, {
+        "role": "approval",
+        "status": handoff_event.get("status"),
+        "decision": handoff_event.get("decision"),
+        "result": handoff_event.get("result") if isinstance(handoff_event.get("result"), dict) else None,
+        "request_method": handoff_event.get("request_method"),
+        "payload": payload,
+        "diff": handoff_event.get("diff") or payload.get("diff"),
+        "path": handoff_event.get("path") or payload.get("path"),
+        "request_id": handoff_event.get("request_id", handoff_event.get("id")),
+        "item_id": handoff_event.get("request_id", handoff_event.get("id")),
+        "turn_id": handoff_event.get("turn_id"),
+        "event": "approval_decision",
+    })
+
+
 def _remove_pending_approval(conversation_id: str, request_id: Any) -> bool:
     request_id_text = str(request_id or "").strip()
     if not request_id_text or not _conversation_meta_path(conversation_id).exists():
@@ -7046,6 +7126,8 @@ async def api_appserver_approval_record(payload: Dict[str, Any] = Body(...)):
     path = payload.get("path")
     request_id = payload.get("request_id", payload.get("item_id"))
     result_payload = payload.get("result") if isinstance(payload.get("result"), dict) else None
+    request_method = payload.get("request_method")
+    request_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else None
     decision = payload.get("decision")
     if decision is None and isinstance(result_payload, dict):
         decision = result_payload.get("decision")
@@ -7053,16 +7135,24 @@ async def api_appserver_approval_record(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Invalid status")
     cfg = _load_appserver_config()
     convo_id = cfg.get("conversation_id")
+    if convo_id and _conversation_meta_path(convo_id).exists() and request_id is not None:
+        meta = _load_conversation_meta(convo_id)
+        pending = _ensure_pending_approvals(meta)
+        if str(request_id).strip() not in pending:
+            return {"ok": True, "skipped": True}
     if convo_id:
         await _append_transcript_entry(convo_id, {
             "role": "approval",
             "status": status,
             "decision": decision,
             "result": result_payload,
+            "request_method": request_method,
+            "payload": request_payload,
             "diff": diff,
             "path": path,
             "request_id": request_id,
             "item_id": request_id,
+            "turn_id": payload.get("turn_id"),
             "event": "approval_decision",
         })
     # If declined, broadcast a declined diff event to the UI
@@ -7122,13 +7212,31 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
         _remove_pending_approval(conversation_id, request_id)
         raise HTTPException(status_code=409, detail="Approval is stale or no longer actionable")
 
+    handoff_event = _build_approval_handoff_event(conversation_id, descriptor, resolution)
+    if handoff_event:
+        await _append_approval_handoff_transcript_entry(conversation_id, handoff_event)
     _remove_pending_approval(conversation_id, request_id)
+    if handoff_event:
+        await _broadcast_appserver_ui(handoff_event)
+        handoff_payload = handoff_event.get("payload") if isinstance(handoff_event.get("payload"), dict) else {}
+        diff = handoff_event.get("diff") or handoff_payload.get("diff")
+        path = handoff_event.get("path") or handoff_payload.get("path")
+        if handoff_event.get("status") == "declined" and diff:
+            await _broadcast_appserver_ui({
+                "type": "diff_declined",
+                "id": request_id,
+                "text": diff,
+                "path": path,
+                "conversation_id": conversation_id,
+            })
+    decision = resolution.get("decision")
     return {
         "ok": True,
         "conversation_id": conversation_id,
         "request_id": request_id,
         "decision": decision,
         "result": resolution,
+        "handoff_event": handoff_event,
     }
 
 

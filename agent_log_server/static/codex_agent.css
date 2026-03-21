@@ -1463,6 +1463,37 @@ textarea {
   flex-wrap: wrap;
 }
 
+.timeline-row .approval-answer-field {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.timeline-row .approval-option-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.timeline-row .approval-option-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.timeline-row .approval-option-description {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.timeline-row .approval-feedback-static {
+  color: var(--muted);
+}
+
 .composer {
   display: flex;
   gap: 10px;

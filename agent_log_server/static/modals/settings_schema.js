@@ -309,9 +309,11 @@ window.CodexAgentModules.push((ctx) => {
           input.type = 'text';
           input.id = `settings-ext-${field.id}`;
           input.placeholder = field.placeholder || '(new session)';
-          input.readOnly = true;
           input.value = value || '';
           input.dataset.sessionId = value || '';
+          input.addEventListener('input', () => {
+            input.dataset.sessionId = input.value || '';
+          });
           sessionDiv.appendChild(input);
           
           const resumeBtn = document.createElement('button');
@@ -510,7 +512,7 @@ window.CodexAgentModules.push((ctx) => {
     Object.entries(currentSchemaValues).forEach(([id, { input, type, field }]) => {
       if (!input) return;
       if (type === 'session_picker') {
-        values[id] = input.dataset.sessionId || input.value || '';
+        values[id] = input.value || input.dataset.sessionId || '';
         return;
       }
       if (type === 'checkbox') {

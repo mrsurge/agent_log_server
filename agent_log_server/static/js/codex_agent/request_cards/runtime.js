@@ -12,6 +12,26 @@ function normalizeMatchEntries(card) {
     }));
 }
 
+function requestCardProxyBase() {
+  if (typeof window === 'undefined') return '';
+  const path = typeof window.location?.pathname === 'string' ? window.location.pathname : '';
+  const match = path.match(/^(\/api\/app\/[^/]+\/proxy)(?:\/|$)/);
+  return match && match[1] ? match[1] : '';
+}
+
+function resolveRequestCardUrl(rawUrl) {
+  const url = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!url) return '';
+  if (/^(?:[a-z]+:)?\/\//i.test(url) || url.startsWith('data:') || url.startsWith('blob:')) {
+    return url;
+  }
+  const proxyBase = requestCardProxyBase();
+  if (proxyBase && url.startsWith('/')) {
+    return `${proxyBase}${url}`;
+  }
+  return url;
+}
+
 export function bindRequestCardRuntime(ctx) {
   const { sioCall } = ctx;
   const configCache = new Map();
@@ -28,7 +48,7 @@ export function bindRequestCardRuntime(ctx) {
         const data = await sioCall('get_extension_request_cards', {
           extension_id: normalizedId,
         }, {
-          fallbackUrl: `/api/extensions/${encodeURIComponent(normalizedId)}/request_cards`,
+          fallbackUrl: resolveRequestCardUrl(`/api/extensions/${encodeURIComponent(normalizedId)}/request_cards`),
           fallbackMethod: 'GET',
         });
         if (!data || data.ok === false) {
@@ -48,7 +68,7 @@ export function bindRequestCardRuntime(ctx) {
   }
 
   async function loadCardModule(config, card) {
-    const moduleUrl = typeof card?.module_url === 'string' ? card.module_url.trim() : '';
+    const moduleUrl = resolveRequestCardUrl(card?.module_url);
     if (!moduleUrl) return null;
     const exportName = typeof card?.export === 'string' && card.export.trim() ? card.export.trim() : 'renderRequestCard';
     const cacheKey = `${moduleUrl}#${exportName}`;
@@ -104,7 +124,12 @@ export function bindRequestCardRuntime(ctx) {
     let mod;
     try {
       mod = await loadCardModule(config, card);
-    } catch {
+    } catch (error) {
+      console.error('[request-cards] failed to load card module', {
+        extensionId,
+        moduleUrl: card?.module_url || null,
+        error,
+      });
       return false;
     }
     const exportName = typeof card.export === 'string' && card.export.trim() ? card.export.trim() : 'renderRequestCard';

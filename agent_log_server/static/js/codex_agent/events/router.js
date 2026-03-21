@@ -53,6 +53,7 @@ export function bindEventRouter(ctx) {
     insertMention,
     renderPromptFromText,
     applyRuntimeMode,
+    handoffApproval,
   } = ctx;
 
   function normalizePreviewText(text, maxLen = 160) {
@@ -273,6 +274,10 @@ export function bindEventRouter(ctx) {
       case 'approval':
         setLastEventType('approval');
         renderApproval(evt);
+        return;
+      case 'approval_handoff':
+        setLastEventType('approval');
+        handoffApproval?.(evt);
         return;
       case 'command_result':
         renderCommandResult(evt);

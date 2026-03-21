@@ -17,6 +17,7 @@ import { bindEventRouter } from './js/codex_agent/events/router.js';
 import { bindPlanOverlay } from './js/codex_agent/plan_overlay.js';
 import { bindPlanModal } from './js/codex_agent/plan_modal.js';
 import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.js';
+import { bindApprovalUi } from './js/codex_agent/approvals/ui.js';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
 import { bindRequestCardRuntime } from './js/codex_agent/request_cards/runtime.js';
@@ -3274,6 +3275,24 @@ document.addEventListener('DOMContentLoaded', () => {
         getTarget().appendChild(row);
         return;
       }
+      if (entry.role === 'approval') {
+        renderApproval({
+          ...entry,
+          id: entry.request_id || entry.item_id || entry.id,
+          request_id: entry.request_id || entry.item_id || entry.id,
+          request_method: entry.request_method || entry.requestMethod || '',
+          request_params: entry.payload && typeof entry.payload === 'object' ? entry.payload : {},
+          payload: entry.payload && typeof entry.payload === 'object' ? entry.payload : {},
+          replay: true,
+        }, {
+          parentEl: getTarget(),
+          readOnly: true,
+          source: 'replay',
+          useExisting: false,
+          extensionId: conversationSettings?.agent || 'codex',
+        });
+        return;
+      }
       const cleanText = entry.role === 'assistant' ? stripCitations(entry.text || '') : (entry.text || '');
       const useMessageCard = entry.role === 'assistant' || entry.role === 'user';
       const { row, body } = useMessageCard
@@ -4193,6 +4212,13 @@ document.addEventListener('DOMContentLoaded', () => {
     sioCall,
     getPending: () => pending,
     getConversationId: () => conversationMeta?.conversation_id || null,
+  });
+
+  const approvalUi = bindApprovalUi({
+    sioCall,
+    getConversationId: () => conversationMeta?.conversation_id || null,
+    getConversationMeta: () => conversationMeta,
+    setConversationMeta: (nextMeta) => { conversationMeta = nextMeta; },
     getCurrentExtensionId: () => currentExtensionId(),
     createRow,
     getSubagentContainer,
@@ -4200,44 +4226,23 @@ document.addEventListener('DOMContentLoaded', () => {
     formatDiff: (...args) => formatDiff(...args),
     toRelativePath,
     requestCardRuntime,
+    timelineEl,
+    onAfterRender: () => {
+      timelineStickyHeaders?.update?.();
+      maybeAutoScroll();
+    },
   });
 
-  function renderApproval(evt) {
-    return rpcFlow.renderApproval(evt);
+  function renderApproval(evt, options = {}) {
+    return approvalUi.renderApproval(evt, options);
+  }
+
+  function handoffApproval(evt) {
+    return approvalUi.handoffApproval(evt);
   }
 
   function restorePendingApprovals() {
-    if (!timelineEl) return;
-    timelineEl.querySelectorAll('.timeline-row[data-approval-id]').forEach((row) => row.remove());
-    const pending = conversationMeta?.pending_approvals;
-    if (!pending || typeof pending !== 'object') return;
-    const items = Object.values(pending)
-      .filter((entry) => entry && typeof entry === 'object' && (entry.request_id || entry.id))
-      .sort((a, b) => String(a?.created_at || a?.render_event?.created_at || '').localeCompare(String(b?.created_at || b?.render_event?.created_at || '')));
-    items.forEach((entry) => {
-      const requestId = entry.request_id || entry.id;
-      if (!requestId) return;
-      const liveEvent = entry.render_event && typeof entry.render_event === 'object'
-        ? { ...entry.render_event }
-        : {
-            type: 'approval',
-            id: requestId,
-            request_id: requestId,
-            kind: entry.kind || entry.payload?.kind || 'unknown',
-            payload: entry.payload || {},
-            turn_id: entry.turn_id || '',
-            conversation_id: conversationMeta?.conversation_id || null,
-          };
-      liveEvent.type = 'approval';
-      liveEvent.id = liveEvent.id ?? requestId;
-      liveEvent.request_id = liveEvent.request_id ?? requestId;
-      liveEvent.kind = liveEvent.kind || entry.kind || liveEvent.payload?.kind || 'unknown';
-      liveEvent.payload = (liveEvent.payload && typeof liveEvent.payload === 'object') ? liveEvent.payload : (entry.payload || {});
-      liveEvent.turn_id = liveEvent.turn_id || entry.turn_id || '';
-      liveEvent.conversation_id = liveEvent.conversation_id || conversationMeta?.conversation_id || null;
-      renderApproval(liveEvent);
-    });
-    timelineStickyHeaders?.update?.();
+    approvalUi.restorePendingApprovals();
   }
 
   async function postJson(url, payload) {
@@ -4311,7 +4316,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function respondApproval(requestId, decision) {
-    return rpcFlow.respondApproval(requestId, decision);
+    return approvalUi.respondApproval(requestId, decision);
   }
 
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
@@ -4554,6 +4559,7 @@ document.addEventListener('DOMContentLoaded', () => {
     addDiff,
     addDeclinedDiff,
     renderApproval,
+    handoffApproval,
     renderCommandResult,
     renderToolBegin,
     renderToolDelta,

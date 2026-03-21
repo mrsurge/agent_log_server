@@ -10,6 +10,7 @@ from framework_shells.orchestrator import Orchestrator
 
 from .router import CodexEventRouter
 from .runtime_protocol import (
+    build_initialize_params,
     decode_response_result,
     encode_server_request_result,
     get_runtime_protocol,
@@ -407,16 +408,11 @@ class CodexAppServerTransport:
     async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
+        protocol = await get_runtime_protocol()
         try:
             await self._rpc_request_unchecked(
                 "initialize",
-                params={
-                    "clientInfo": {
-                        "name": "agent_log_server",
-                        "title": "Agent Log Server",
-                        "version": "0.1.0",
-                    }
-                },
+                params=build_initialize_params(protocol),
                 timeout=15.0,
             )
         except RuntimeError as exc:

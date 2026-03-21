@@ -952,6 +952,21 @@ def _apply_setting_binding(
         return
 
 
+def _resolve_object_schema(spec: Any, definitions: Dict[str, Any]) -> Dict[str, Any]:
+    resolved = _resolve_schema(spec, definitions)
+    if isinstance(resolved.get("properties"), dict) or resolved.get("type") == "object":
+        return resolved
+    for key in ("anyOf", "oneOf", "allOf"):
+        variants = resolved.get(key)
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            candidate = _resolve_schema(variant, definitions)
+            if isinstance(candidate.get("properties"), dict) or candidate.get("type") == "object":
+                return candidate
+    return resolved
+
+
 def _build_collaboration_mode_setting(
     props: Dict[str, Any],
     definitions: Dict[str, Any],
@@ -1013,6 +1028,53 @@ def _build_collaboration_mode_setting(
         "mode": coerced_mode,
         "settings": nested_settings,
     }
+
+
+def build_initialize_params(protocol: RuntimeProtocol) -> Dict[str, Any]:
+    schema = protocol.request_schema("initialize")
+    if not isinstance(schema, dict):
+        raise RuntimeError("runtime protocol missing request schema for initialize")
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+
+    client_info_schema = _resolve_object_schema(props.get("clientInfo"), protocol.definitions)
+    client_info_props = (
+        client_info_schema.get("properties")
+        if isinstance(client_info_schema.get("properties"), dict)
+        else {}
+    )
+    if not client_info_props:
+        raise RuntimeError("runtime protocol missing initialize.clientInfo schema")
+
+    client_info: Dict[str, Any] = {}
+    for key, value in (
+        ("name", "agent_log_server"),
+        ("title", "Agent Log Server"),
+        ("version", "0.1.0"),
+    ):
+        field_schema = client_info_props.get(key)
+        if not isinstance(field_schema, dict):
+            continue
+        coerced = _coerce_schema_value(value, field_schema, protocol.definitions, {})
+        if coerced is not None:
+            client_info[key] = coerced
+    if not client_info.get("name") or not client_info.get("version"):
+        raise RuntimeError("runtime protocol requires initialize.clientInfo.name and version")
+
+    params: Dict[str, Any] = {"clientInfo": client_info}
+
+    capabilities_schema = _resolve_object_schema(props.get("capabilities"), protocol.definitions)
+    capability_props = (
+        capabilities_schema.get("properties")
+        if isinstance(capabilities_schema.get("properties"), dict)
+        else {}
+    )
+    experimental_schema = capability_props.get("experimentalApi")
+    if isinstance(experimental_schema, dict):
+        experimental_api = _coerce_schema_value(True, experimental_schema, protocol.definitions, {})
+        if isinstance(experimental_api, bool):
+            params["capabilities"] = {"experimentalApi": experimental_api}
+
+    return params
 
 
 def build_request_params(
@@ -1133,7 +1195,7 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Dict[
                 "id": "session",
                 "type": "session_picker",
                 "label": "Session",
-                "placeholder": "(new session)",
+                "placeholder": "(new session) or type/paste session ID",
                 "source": f"/api/extensions/{extension_id}/sessions",
                 "resume_endpoint": f"/api/extensions/{extension_id}/sessions/resume",
             },
