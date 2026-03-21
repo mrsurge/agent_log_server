@@ -15,7 +15,7 @@
       "id": "session",
       "type": "session_picker",
       "label": "Session",
-      "placeholder": "(new session)",
+      "placeholder": "(new session) or type/paste session ID",
       "source": "/api/extensions/copilot-sdk/sessions",
       "resume_endpoint": "/api/extensions/copilot-sdk/sessions/resume"
     },
