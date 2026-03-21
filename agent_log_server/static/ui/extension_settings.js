@@ -1,14 +1,20 @@
 window.CodexAgentModules = window.CodexAgentModules || [];
-window.CodexAgentModules.push(() => {
+window.CodexAgentModules.push((agent) => {
   const splashSettingsBtn = document.getElementById('splash-settings');
   const container = document.getElementById('splash-settings-extensions');
 
   if (!container) return;
 
+  function getSioCall() {
+    const sioCall = agent?.helpers?.sioCall || window.CodexAgent?.helpers?.sioCall;
+    if (typeof sioCall !== 'function') {
+      throw new Error('Socket.IO helper unavailable');
+    }
+    return sioCall;
+  }
+
   async function fetchExtensions() {
-    const response = await fetch('/api/extensions', { cache: 'no-store' });
-    if (!response.ok) throw new Error(`extension fetch failed: ${response.status}`);
-    const data = await response.json();
+    const data = await getSioCall()('get_extensions', {});
     return Array.isArray(data?.extensions) ? data.extensions : [];
   }
 
@@ -24,19 +30,6 @@ window.CodexAgentModules.push(() => {
     return 'Status unknown';
   }
 
-  async function postJson(url, payload) {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload ?? {}),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(data?.detail || data?.error || `request failed: ${response.status}`);
-    }
-    return data;
-  }
-
   function emitUpdated() {
     window.dispatchEvent(new CustomEvent('codexagent:extensions-updated'));
   }
@@ -50,13 +43,19 @@ window.CodexAgentModules.push(() => {
   }
 
   async function setEnabled(extensionId, enabled) {
-    await postJson(`/api/extensions/${encodeURIComponent(extensionId)}/enabled`, { enabled });
+    const result = await getSioCall()('extension_set_enabled', { extension_id: extensionId, enabled });
+    if (!result || result.ok === false) {
+      throw new Error(result?.error || 'Failed to update extension state');
+    }
     emitUpdated();
     await refresh();
   }
 
   async function install(extensionId) {
-    await postJson(`/api/extensions/${encodeURIComponent(extensionId)}/install`, {});
+    const result = await getSioCall()('extension_install', { extension_id: extensionId });
+    if (!result || result.ok === false) {
+      throw new Error(result?.error || 'Install failed');
+    }
     emitUpdated();
     await refresh();
   }

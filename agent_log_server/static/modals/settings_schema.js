@@ -23,6 +23,99 @@ window.CodexAgentModules.push((ctx) => {
   
   // Track which input field the session picker is serving
   let _sessionPickerTarget = null;  // { input, field }
+
+  function requireSioCall() {
+    const sioCall = ctx.helpers?.sioCall;
+    if (typeof sioCall !== 'function') {
+      throw new Error('Socket.IO helper unavailable');
+    }
+    return sioCall;
+  }
+
+  function dynamicSourceErrorMessage(err) {
+    if (typeof err === 'string' && err) return err;
+    if (err && typeof err === 'object') {
+      if (typeof err.message === 'string' && err.message) return err.message;
+      if (typeof err.error === 'string' && err.error) return err.error;
+      if (err.error && typeof err.error === 'object' && typeof err.error.message === 'string' && err.error.message) {
+        return err.error.message;
+      }
+    }
+    return 'Dynamic source request failed';
+  }
+
+  function unwrapDynamicSourceResult(result) {
+    if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+    if (result.ok === false) {
+      throw new Error(dynamicSourceErrorMessage(result));
+    }
+    if (result.ok === true && Object.prototype.hasOwnProperty.call(result, 'data')) {
+      return result.data;
+    }
+    return result;
+  }
+
+  async function waitForDynamicSourceSocket() {
+    const waitForWs = ctx.helpers?.waitForWs;
+    if (typeof waitForWs !== 'function') return;
+    const ready = await waitForWs(10000);
+    if (!ready) {
+      throw new Error('Socket.IO not connected');
+    }
+  }
+
+  function sourcePathname(sourceUrl) {
+    if (typeof sourceUrl !== 'string') return '';
+    const raw = sourceUrl.trim();
+    if (!raw) return '';
+    try {
+      return new URL(raw, window.location.origin).pathname || '';
+    } catch {
+      return raw.split(/[?#]/, 1)[0] || '';
+    }
+  }
+
+  function extensionIdFromApiPath(sourceUrl, suffix) {
+    const pathname = sourcePathname(sourceUrl).replace(/\/+$/, '');
+    const escapedSuffix = String(suffix || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = pathname
+      ? pathname.match(new RegExp(`(?:^|/)api/extensions/([^/]+)/${escapedSuffix}$`))
+      : null;
+    return match?.[1] ? decodeURIComponent(match[1]) : '';
+  }
+
+  async function fetchDynamicSource(sourceUrl, options = {}) {
+    const sioCall = requireSioCall();
+    const pathname = sourcePathname(sourceUrl);
+    const request = async () => {
+      const extensionIdForSessions = extensionIdFromApiPath(sourceUrl, 'sessions');
+      if (extensionIdForSessions) {
+        return unwrapDynamicSourceResult(await sioCall('get_sessions', { extension_id: extensionIdForSessions }));
+      }
+      const extensionIdForModels = extensionIdFromApiPath(sourceUrl, 'models');
+      if (extensionIdForModels) {
+        return unwrapDynamicSourceResult(await sioCall('get_extension_models', { extension_id: extensionIdForModels }));
+      }
+      if (pathname.includes('/api/appserver/runtime_options')) {
+        return unwrapDynamicSourceResult(await sioCall('get_runtime_options', {
+          conversation_id: options.conversationId || null,
+          agent: options.agent || null,
+        }));
+      }
+      throw new Error(`Unsupported Socket.IO schema source: ${sourceUrl || '(empty)'}`);
+    };
+
+    await waitForDynamicSourceSocket();
+    try {
+      return await request();
+    } catch (err) {
+      if (!/Socket\.IO not connected/i.test(dynamicSourceErrorMessage(err))) {
+        throw err;
+      }
+      await waitForDynamicSourceSocket();
+      return await request();
+    }
+  }
   
   function openSessionPicker(field, input) {
     if (!sessionPickerOverlay) return;
@@ -40,37 +133,25 @@ window.CodexAgentModules.push((ctx) => {
   async function fetchAndRenderSessions(sourceUrl) {
     if (!sessionPickerListEl) return;
     sessionPickerListEl.innerHTML = '<div class="picker-item">Loading…</div>';
-    console.log(`[schema] fetchSessions url=${sourceUrl} sioCall=${!!ctx.helpers?.sioCall}`);
     try {
-      let data;
-      // Route through SIO when available (proxy-safe)
-      const srcMatch = sourceUrl.match(/\/api\/extensions\/([^/]+)\/sessions/);
-      if (srcMatch && ctx.helpers?.sioCall) {
-        data = await ctx.helpers.sioCall('get_sessions', { extension_id: srcMatch[1] }, {
-          fallbackUrl: sourceUrl, fallbackMethod: 'GET',
-        });
-      } else {
-        const r = await fetch(sourceUrl, { cache: 'no-store' });
-        if (!r.ok) throw new Error('failed');
-        data = await r.json();
-      }
-      console.log(`[schema] sessions response`, data);
+      const data = await fetchDynamicSource(sourceUrl);
       const items = Array.isArray(data?.sessions) ? data.sessions
         : Array.isArray(data) ? data : [];
       renderSessionList(items);
     } catch (err) {
       console.warn('[schema] session list failed', err);
-      renderSessionList([]);
+      renderSessionList([], dynamicSourceErrorMessage(err));
     }
   }
   
-  function renderSessionList(items) {
+  function renderSessionList(items, errorMessage = '') {
     if (!sessionPickerListEl) return;
     sessionPickerListEl.innerHTML = '';
     if (!items.length) {
       const empty = document.createElement('div');
       empty.className = 'picker-item';
-      empty.textContent = 'No sessions found';
+      empty.textContent = errorMessage ? 'Session list unavailable' : 'No sessions found';
+      if (errorMessage) empty.title = errorMessage;
       sessionPickerListEl.appendChild(empty);
       return;
     }
@@ -120,9 +201,7 @@ window.CodexAgentModules.push((ctx) => {
     
     try {
       console.log(`[schema] loading schema for ${extensionId} sioCall=${!!ctx.helpers?.sioCall}`);
-      const schema = ctx.helpers.sioCall
-        ? await ctx.helpers.sioCall('get_extension_settings_schema', { extension_id: extensionId }, { fallbackUrl: `/api/extensions/${extensionId}/settings_schema`, fallbackMethod: 'GET' })
-        : await fetch(`/api/extensions/${extensionId}/settings_schema`, { cache: 'no-store' }).then(r => r.ok ? r.json() : null);
+      const schema = await requireSioCall()('get_extension_settings_schema', { extension_id: extensionId });
       console.log(`[schema] loaded schema for ${extensionId}`, schema ? Object.keys(schema) : null);
       schemaCache[extensionId] = schema;
       return schema;
@@ -208,6 +287,15 @@ window.CodexAgentModules.push((ctx) => {
         });
         control.listDiv.appendChild(optBtn);
       });
+    };
+
+    const setSelectMessage = (control, message) => {
+      if (!control?.listDiv) return;
+      control.listDiv.innerHTML = '';
+      const messageRow = document.createElement('div');
+      messageRow.className = 'picker-item';
+      messageRow.textContent = message;
+      control.listDiv.appendChild(messageRow);
     };
 
     const syncReasoningEffortOptions = () => {
@@ -368,10 +456,9 @@ window.CodexAgentModules.push((ctx) => {
           // Fetch dynamic options if configured
           if (field.dynamic_source) {
             const loadOpts = (data) => {
-              console.log(`[schema] loadOpts field=${field.id}`, data);
               if (!data) return;
               const { items, options: opts, current, defaultValue } = normalizeDynamicSelectOptions(field, data);
-              console.log(`[schema] built ${opts.length} options for ${field.id}`);
+              input.removeAttribute('title');
               if (field.id === 'model') {
                 modelItems = items.filter((item) => item && typeof item === 'object');
                 if (!input.value) {
@@ -390,34 +477,27 @@ window.CodexAgentModules.push((ctx) => {
             const runtimeOptionsSource = dynamicSource.includes('appserver')
               && dynamicSource.includes('runtime_options');
             const srcMatch = field.dynamic_source.match(/\/api\/extensions\/([^/]+)\/models/);
-            console.log(`[schema] dynamic_source=${field.dynamic_source} srcMatch=${srcMatch?.[1]||'null'} runtimeOptions=${runtimeOptionsSource} sioCall=${!!ctx.helpers?.sioCall}`);
-            if (runtimeOptionsSource && ctx.helpers?.sioCall) {
-              const payload = {
-                conversation_id: conversationId || null,
-                agent: selectedAgent || null,
-              };
-              const query = new URLSearchParams();
-              if (conversationId) query.set('conversation_id', conversationId);
-              if (selectedAgent) query.set('agent', selectedAgent);
-              const fallbackUrl = query.size
-                ? `${field.dynamic_source}?${query.toString()}`
-                : field.dynamic_source;
-              ctx.helpers.sioCall('get_runtime_options', payload, {
-                fallbackUrl,
-                fallbackMethod: 'GET',
-              }).then(loadOpts).catch(e => console.error(`[schema] sioCall runtime options failed`, e));
-            } else if (srcMatch && ctx.helpers?.sioCall) {
-              ctx.helpers.sioCall('get_extension_models', { extension_id: srcMatch[1] }, {
-                fallbackUrl: field.dynamic_source, fallbackMethod: 'GET',
-              }).then(loadOpts).catch(e => console.error(`[schema] sioCall models failed`, e));
+            if (runtimeOptionsSource || srcMatch) {
+              fetchDynamicSource(field.dynamic_source, {
+                conversationId,
+                agent: selectedAgent,
+              }).then(loadOpts).catch((e) => {
+                console.error('[schema] dynamic Socket.IO load failed', e);
+                const errorMessage = dynamicSourceErrorMessage(e);
+                input.title = errorMessage;
+                if (!input.value) {
+                  input.placeholder = 'Unable to load options';
+                }
+                setSelectMessage(selectControl, 'Unable to load options');
+              });
             } else {
-              const query = new URLSearchParams();
-              if (runtimeOptionsSource && conversationId) query.set('conversation_id', conversationId);
-              if (runtimeOptionsSource && selectedAgent) query.set('agent', selectedAgent);
-              const fetchUrl = query.size ? `${field.dynamic_source}?${query.toString()}` : field.dynamic_source;
-              fetch(fetchUrl, { cache: 'no-store' })
-                .then(r => { console.log(`[schema] fetch ${fetchUrl} status=${r.status}`); return r.ok ? r.json() : null; })
-                .then(loadOpts).catch(e => console.error(`[schema] fetch models failed`, e));
+              const errorMessage = `Unsupported dynamic source: ${field.dynamic_source}`;
+              input.title = errorMessage;
+              if (!input.value) {
+                input.placeholder = 'Unable to load options';
+              }
+              setSelectMessage(selectControl, 'Unable to load options');
+              console.error(`[schema] ${errorMessage}`);
             }
           }
           

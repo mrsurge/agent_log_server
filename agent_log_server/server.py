@@ -33,7 +33,7 @@ from framework_shells.api import fws_ui
 from framework_shells.orchestrator import Orchestrator
 
 import extensions as ext_loader
-from te2_runtime import (
+from agent_log_server.te2_runtime import (
     TE2_MCP_SERVER_NAME,
     build_codex_thread_config,
     build_effective_developer_instructions,
@@ -413,6 +413,32 @@ async def _sio_get_extensions(sid, data):
         return _sio_error(str(e))
 
 
+@socketio_server.on("extension_set_enabled", namespace="/appserver")
+async def _sio_extension_set_enabled(sid, data):
+    """Mirror of POST /api/extensions/{id}/enabled"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        extension_id = str(payload.get("extension_id") or "").strip()
+        return await api_extension_enabled(extension_id, {"enabled": payload.get("enabled")})
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("extension_install", namespace="/appserver")
+async def _sio_extension_install(sid, data):
+    """Mirror of POST /api/extensions/{id}/install"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        extension_id = str(payload.get("extension_id") or "").strip()
+        return await api_extension_install(extension_id)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 @socketio_server.on("get_extension_settings_schema", namespace="/appserver")
 async def _sio_get_extension_settings_schema(sid, data):
     """Mirror of GET /api/extensions/{id}/settings_schema"""
@@ -526,6 +552,17 @@ async def _sio_get_status(sid, data):
         return _sio_error(str(e))
 
 
+@socketio_server.on("get_host_ui", namespace="/appserver")
+async def _sio_get_host_ui(sid, data):
+    """Mirror of GET /api/host/ui"""
+    try:
+        return await api_host_ui_get()
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 @socketio_server.on("app_start", namespace="/appserver")
 async def _sio_app_start(sid, data):
     """Mirror of POST /api/appserver/start"""
@@ -546,6 +583,17 @@ async def _sio_app_stop(sid, data):
         return _sio_error(str(e))
 
 
+@socketio_server.on("app_initialize", namespace="/appserver")
+async def _sio_app_initialize(sid, data):
+    """Mirror of POST /api/appserver/initialize"""
+    try:
+        return await api_appserver_initialize()
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 @socketio_server.on("approval_record", namespace="/appserver")
 async def _sio_approval_record(sid, data):
     """Mirror of POST /api/appserver/approval_record"""
@@ -562,6 +610,100 @@ async def _sio_approval_response(sid, data):
     """Mirror of POST /api/appserver/approval_response."""
     try:
         return await api_appserver_approval_response(data)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("fs_list", namespace="/appserver")
+async def _sio_fs_list(sid, data):
+    """Mirror of GET /api/fs/list"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        return await api_fs_list(path=payload.get("path"))
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("fs_search", namespace="/appserver")
+async def _sio_fs_search(sid, data):
+    """Mirror of GET /api/fs/search"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        try:
+            limit = int(payload.get("limit", 200) or 200)
+        except Exception:
+            return _sio_error("limit must be an integer")
+        return await api_fs_search(
+            query=str(payload.get("query") or ""),
+            root=payload.get("root"),
+            limit=min(max(limit, 1), 200),
+        )
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("agent_pty_resize", namespace="/appserver")
+async def _sio_agent_pty_resize(sid, data):
+    """Mirror of POST /api/mcp/agent-pty/resize"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        return await api_mcp_agent_pty_resize(payload)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_pty_raw_tail", namespace="/appserver")
+async def _sio_get_pty_raw_tail(sid, data):
+    """Mirror of GET /api/pty/raw_tail"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        try:
+            max_bytes = int(payload.get("max_bytes", 65536) or 65536)
+        except Exception:
+            return _sio_error("max_bytes must be an integer")
+        return await api_pty_raw_tail(
+            conversation_id=payload.get("conversation_id"),
+            max_bytes=max_bytes,
+        )
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_pty_fws_tail", namespace="/appserver")
+async def _sio_get_pty_fws_tail(sid, data):
+    """Mirror of GET /api/pty/fws_tail"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        try:
+            tail_lines = int(payload.get("tail_lines", 200) or 200)
+        except Exception:
+            return _sio_error("tail_lines must be an integer")
+        return await api_pty_fws_tail(
+            conversation_id=payload.get("conversation_id"),
+            tail_lines=tail_lines,
+        )
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("pty_stdin", namespace="/appserver")
+async def _sio_pty_stdin(sid, data):
+    """Mirror of POST /api/pty/stdin"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        return await api_pty_stdin(payload)
+    except HTTPException as e:
+        return _sio_error(e.detail)
     except Exception as e:
         return _sio_error(str(e))
 
@@ -617,6 +759,44 @@ async def _sio_te2_agent_open(sid, data):
         return {"ok": True}
     except Exception as e:
         print(f"[Sidebar] te2_agent_open error: {e}")
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_log_messages", namespace="/appserver")
+async def _sio_get_log_messages(sid, data):
+    try:
+        payload = data if isinstance(data, dict) else {}
+        limit = payload.get("limit")
+        if limit is not None:
+            try:
+                limit = int(limit)
+            except Exception:
+                return _sio_error("limit must be an integer")
+        return read_records(limit=limit)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("post_log_message", namespace="/appserver")
+async def _sio_post_log_message(sid, data):
+    try:
+        payload = data if isinstance(data, dict) else {}
+        who = str(payload.get("who") or "").strip()
+        text = str(payload.get("message") or "").strip()
+        if not who or not text:
+            return _sio_error("Both 'who' and 'message' are required")
+        record = {"ts": utc_ts(), "who": who, "message": text}
+        await append_record(record)
+        return record
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("shutdown_request", namespace="/appserver")
+async def _sio_shutdown_request(sid, data):
+    try:
+        return await api_shutdown()
+    except Exception as e:
         return _sio_error(str(e))
 
 
@@ -5168,6 +5348,8 @@ async def append_record(record: Dict[str, Any]) -> None:
             f.write(line + "\n")
             f.flush()
     await manager.broadcast(record)
+    with suppress(Exception):
+        await socketio_server.emit("agent_log_message", record, namespace="/appserver")
 
 def read_records(limit: Optional[int] = None) -> List[Dict[str, Any]]:
     assert LOG_PATH is not None

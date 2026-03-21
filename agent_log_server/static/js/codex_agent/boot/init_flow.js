@@ -8,6 +8,7 @@ export function bindBootInitFlow(ctx) {
     updateScrollButton,
     resetWsReady,
     connectWS,
+    waitForWs,
     fetchHostUi,
     fetchAppConfig,
     bindPickerFilter,
@@ -67,11 +68,18 @@ export function bindBootInitFlow(ctx) {
     updateScrollButton();
     resetWsReady();
     connectWS(handleEvent);
-    fetchHostUi();
-    fetchAppConfig();
     bindPickerFilter();
     setDrawerOpen(false);
-    fetchConversation().then(async () => {
+    void (async () => {
+      const ready = await waitForWs(10000);
+      if (!ready) {
+        console.warn('Socket.IO not ready during initial boot hydration');
+        ensureActivityRow();
+        return;
+      }
+      await fetchHostUi();
+      await fetchAppConfig();
+      await fetchConversation();
       await fetchConversations();
       if (getState().activeView === 'conversation') {
         resetTimeline();
@@ -85,8 +93,8 @@ export function bindBootInitFlow(ctx) {
       } else {
         ensureActivityRow();
       }
-    });
-    fetchStatus();
+      await fetchStatus();
+    })();
   }
 
   function setupSettingsBoot() {
@@ -152,12 +160,12 @@ export function bindBootInitFlow(ctx) {
 
   function bindStartStopButtons() {
     startBtn?.addEventListener('click', async () => {
-      await sioCall('app_start', {}, { fallbackUrl: '/api/appserver/start' });
+      await sioCall('app_start', {});
       fetchStatus();
     });
 
     stopBtn?.addEventListener('click', async () => {
-      await sioCall('app_stop', {}, { fallbackUrl: '/api/appserver/stop' });
+      await sioCall('app_stop', {});
       fetchStatus();
     });
   }

@@ -47,9 +47,6 @@ export function bindRequestCardRuntime(ctx) {
       try {
         const data = await sioCall('get_extension_request_cards', {
           extension_id: normalizedId,
-        }, {
-          fallbackUrl: resolveRequestCardUrl(`/api/extensions/${encodeURIComponent(normalizedId)}/request_cards`),
-          fallbackMethod: 'GET',
         });
         if (!data || data.ok === false) {
           return { extension_id: normalizedId, cards: [], schemas: {} };

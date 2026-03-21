@@ -37,8 +37,8 @@ from ._vendor.copilot.generated.rpc import SessionModeSetParams, Mode as Session
 from ._vendor.copilot.types import SessionHooks, PermissionRequestResultKind
 
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
-from te2_runtime import (
-    build_copilot_mcp_servers,
+from .te2_runtime import build_copilot_mcp_servers
+from agent_log_server.te2_runtime import (
     build_effective_developer_instructions,
     build_te2_mcp_streamable_http_url,
     TE2_MCP_SERVER_NAME,
@@ -888,6 +888,41 @@ async def _apply_session_mode(
     if isinstance(getattr(applied, "value", None), str):
         return applied.value
     return _normalize_mode_value(applied)
+
+
+def _is_session_not_found_error(error: BaseException | str) -> bool:
+    message = str(error)
+    return "Session not found" in message or "session not found" in message
+
+
+async def _recover_evicted_session(
+    conversation_id: str,
+    *,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    print(f"[CopilotSDK] Session evicted, attempting re-resume for {conversation_id[:8]}")
+    _add_to_raw_buffer("out", conversation_id, "session_evicted, re-resuming...")
+
+    stale_session = _sessions.pop(conversation_id, None)
+    _routers.pop(conversation_id, None)
+    _runtime_signatures.pop(conversation_id, None)
+    if conversation_id in _unsubs:
+        try:
+            _unsubs.pop(conversation_id)()
+        except Exception:
+            pass
+    if stale_session and _client:
+        with _client._sessions_lock:  # type: ignore[attr-defined]
+            _client._sessions.pop(stale_session.session_id, None)  # type: ignore[attr-defined]
+
+    return await _resume_session_unlocked(
+        conversation_id,
+        cwd=cwd,
+        model=model,
+        settings=settings,
+    )
 
 
 def _session_event_paths(session_id: str) -> List[Path]:
@@ -1754,7 +1789,34 @@ async def handle_message(
                 model=settings.get("model"),
             )
         )
-        applied_mode = await _apply_session_mode(session, settings=settings)
+        try:
+            applied_mode = await _apply_session_mode(session, settings=settings)
+        except Exception as e:
+            if not _is_session_not_found_error(e):
+                print(f"[CopilotSDK] mode.set failed: {e}")
+                _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {e}")
+                return {"ok": False, "error": str(e)}
+
+            result = await _recover_evicted_session(
+                conversation_id,
+                cwd=cwd,
+                model=settings.get("model"),
+                settings=settings,
+            )
+            if not result.get("ok"):
+                print(f"[CopilotSDK] Re-resume after mode.set failed: {result}")
+                return result
+
+            session = _sessions.get(conversation_id)
+            router = _routers.get(conversation_id)
+            if not session or not router:
+                return {"ok": False, "error": "Session not found after mode re-resume"}
+            try:
+                applied_mode = await _apply_session_mode(session, settings=settings)
+            except Exception as retry_error:
+                print(f"[CopilotSDK] Retry mode.set failed: {retry_error}")
+                _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {retry_error}")
+                return {"ok": False, "error": str(retry_error)}
         if applied_mode:
             settings["mode"] = applied_mode
 
@@ -1774,22 +1836,8 @@ async def handle_message(
         except Exception as e:
             err_msg = str(e)
             # SDK binary evicts inactive sessions — catch and retry via resume
-            if "Session not found" in err_msg or "session not found" in err_msg:
-                print(f"[CopilotSDK] Session evicted, attempting re-resume for {conversation_id[:8]}")
-                _add_to_raw_buffer("out", conversation_id, "session_evicted, re-resuming...")
-                # Clear stale in-memory state so resume rebuilds it
-                stale_session = _sessions.pop(conversation_id, None)
-                _routers.pop(conversation_id, None)
-                _runtime_signatures.pop(conversation_id, None)
-                if conversation_id in _unsubs:
-                    try:
-                        _unsubs.pop(conversation_id)()
-                    except Exception:
-                        pass
-                if stale_session and _client:
-                    with _client._sessions_lock:  # type: ignore[attr-defined]
-                        _client._sessions.pop(stale_session.session_id, None)  # type: ignore[attr-defined]
-                result = await _resume_session_unlocked(
+            if _is_session_not_found_error(e):
+                result = await _recover_evicted_session(
                     conversation_id,
                     cwd=cwd,
                     model=settings.get("model"),
@@ -1802,6 +1850,14 @@ async def handle_message(
                 router = _routers.get(conversation_id)
                 if not session or not router:
                     return {"ok": False, "error": "Session not found after re-resume"}
+                try:
+                    applied_mode = await _apply_session_mode(session, settings=settings)
+                except Exception as retry_error:
+                    print(f"[CopilotSDK] Retry mode.set failed: {retry_error}")
+                    _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {retry_error}")
+                    return {"ok": False, "error": str(retry_error)}
+                if applied_mode:
+                    settings["mode"] = applied_mode
                 await router.on_turn_start(text)
                 try:
                     await session.send(MessageOptions(prompt=text, attachments=[]))

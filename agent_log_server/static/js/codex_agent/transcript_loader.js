@@ -16,13 +16,11 @@ export function bindTranscriptLoader(ctx) {
 
   async function fetchTranscriptRange(offset, limit) {
     const convoId = getConversationId?.() || null;
-    const cid = convoId ? `&conversation_id=${encodeURIComponent(convoId)}` : '';
-    const url = `/api/appserver/transcript/range?offset=${offset}&limit=${limit}${cid}`;
     const data = await sioCall('get_transcript_range', {
       conversation_id: convoId,
       offset,
       limit,
-    }, { fallbackUrl: url, fallbackMethod: 'GET' });
+    });
     if (!data || data.ok === false) {
       throw new Error(`get_transcript_range failed: ${data?.error || 'no data'}`);
     }

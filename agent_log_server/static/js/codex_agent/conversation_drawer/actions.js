@@ -62,18 +62,12 @@ export function createConversationDrawerActions(ctx) {
     try {
       let extensionCatalog = getState().extensionCatalog;
       try {
-        const extData = await sioCall('get_extensions', {}, {
-          fallbackUrl: '/api/extensions',
-          fallbackMethod: 'GET',
-        });
+        const extData = await sioCall('get_extensions', {});
         extensionCatalog = Array.isArray(extData?.extensions) ? extData.extensions : [];
       } catch {
         // ignore
       }
-      const data = await sioCall('conversations_list', {}, {
-        fallbackUrl: '/api/appserver/conversations',
-        fallbackMethod: 'GET',
-      });
+      const data = await sioCall('conversations_list', {});
       const state = getState();
       const conversationList = data?.items || [];
       const ssotActiveId = data?.active_conversation_id || null;
@@ -92,7 +86,7 @@ export function createConversationDrawerActions(ctx) {
 
   async function setActiveView(view) {
     try {
-      await sioCall('set_view', { view }, { fallbackUrl: '/api/appserver/view' });
+      await sioCall('set_view', { view });
     } catch {
       // ignore - SSOT is best-effort for boot defaults
     }
@@ -122,9 +116,7 @@ export function createConversationDrawerActions(ctx) {
     resetTimeline();
     setState({ clientConversationId: conversationId, clientActiveView: view });
     try {
-      await sioCall('conversation_select', { conversation_id: conversationId, view }, {
-        fallbackUrl: '/api/appserver/conversations/select',
-      });
+      await sioCall('conversation_select', { conversation_id: conversationId, view });
     } catch {
       // ignore - SSOT is best-effort for boot defaults
     }
@@ -145,14 +137,12 @@ export function createConversationDrawerActions(ctx) {
   async function createConversation() {
     const state = getState();
     // Cancel any pending draft save from previous conversation
-    if (state.draftSaveTimer) {
-      clearTimeout(state.draftSaveTimer);
-      setState({ draftSaveTimer: null });
-    }
-    setState({ lastDraftHash: null });
-    const meta = await sioCall('conversation_create', {}, {
-      fallbackUrl: '/api/appserver/conversations',
-    });
+      if (state.draftSaveTimer) {
+        clearTimeout(state.draftSaveTimer);
+        setState({ draftSaveTimer: null });
+      }
+      setState({ lastDraftHash: null });
+    const meta = await sioCall('conversation_create', {});
     if (meta?.conversation_id) {
       setState({
         clientConversationId: meta.conversation_id,
@@ -161,9 +151,7 @@ export function createConversationDrawerActions(ctx) {
         conversationSettings: meta?.settings || {},
       });
       try {
-        await sioCall('conversation_select', { conversation_id: meta.conversation_id, view: 'conversation' }, {
-          fallbackUrl: '/api/appserver/conversations/select',
-        });
+        await sioCall('conversation_select', { conversation_id: meta.conversation_id, view: 'conversation' });
       } catch {
         // ignore
       }
@@ -182,10 +170,7 @@ export function createConversationDrawerActions(ctx) {
 
   async function deleteConversation(conversationId) {
     if (!conversationId) return;
-    await sioCall('conversation_delete', { conversation_id: conversationId }, {
-      fallbackUrl: `/api/appserver/conversations/${conversationId}`,
-      fallbackMethod: 'DELETE',
-    });
+    await sioCall('conversation_delete', { conversation_id: conversationId });
     const state = getState();
     if (state.clientConversationId && state.clientConversationId === conversationId) {
       setState({

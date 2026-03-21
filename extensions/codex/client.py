@@ -23,7 +23,7 @@ from .runtime_protocol import (
     get_runtime_protocol,
 )
 from .transport import CodexAppServerTransport
-from te2_runtime import te2_mcp_integration_enabled
+from agent_log_server.te2_runtime import te2_mcp_integration_enabled
 
 # Stored references to server callbacks
 _broadcast_fn: Optional[Callable] = None

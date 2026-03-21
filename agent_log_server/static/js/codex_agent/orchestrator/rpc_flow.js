@@ -17,13 +17,13 @@ export function bindRpcFlow(ctx) {
     const payload = { method };
     if (params !== undefined) payload.params = params;
     if (options.notify) {
-      await sioCall('rpc', payload, { fallbackUrl: '/api/appserver/rpc' });
+      await sioCall('rpc', payload);
       return null;
     }
     const id = nextRpcId();
     payload.id = id;
     await waitForWs();
-    await sioCall('rpc', payload, { fallbackUrl: '/api/appserver/rpc' });
+    await sioCall('rpc', payload);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         getPending().delete(id);

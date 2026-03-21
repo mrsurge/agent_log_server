@@ -391,7 +391,7 @@ document.addEventListener('DOMContentLoaded', () => {
         await sioCall('conversation_draft', {
           conversation_id: convoId,
           draft: text
-        }, { fallbackUrl: '/api/appserver/conversation/draft' });
+        });
         if (conversationMeta && conversationMeta.conversation_id === convoId) {
           conversationMeta.draft = text;
         }
@@ -436,10 +436,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!promptEl) return;
     if (draftDirty) return;
     try {
-      const meta = await sioCall('conversation_get', { conversation_id: convoId }, {
-        fallbackUrl: '/api/appserver/conversation',
-        fallbackMethod: 'GET',
-      });
+      const meta = await sioCall('conversation_get', { conversation_id: convoId });
       if (!meta || meta.ok === false || meta.conversation_id !== convoId) return;
       const serverDraft = meta.draft;
       if (typeof serverDraft !== 'string') return;
@@ -632,10 +629,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function syncComposerTerminalSize(cols, rows) {
     const convoId = conversationMeta?.conversation_id;
     if (!convoId || !cols || !rows) return;
-    fetch('/api/mcp/agent-pty/resize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation_id: convoId, cols, rows }),
+    void sioCall('agent_pty_resize', {
+      conversation_id: convoId,
+      cols,
+      rows,
     }).catch(() => {});
   }
 
@@ -661,12 +658,12 @@ document.addEventListener('DOMContentLoaded', () => {
       // Conversation may have switched mid-retry; stop.
       if (conversationMeta?.conversation_id !== convoId) return;
       try {
-        const resp = await fetch('/api/mcp/agent-pty/resize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ conversation_id: convoId, cols: c, rows: r }),
+        const resp = await sioCall('agent_pty_resize', {
+          conversation_id: convoId,
+          cols: c,
+          rows: r,
         });
-        if (resp && resp.ok) return;
+        if (resp?.ok) return;
       } catch (_) {}
       if (attempts >= 12) return;
       const delay = Math.min(1500, 80 * attempts);
@@ -685,23 +682,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
     try {
       // Prefer framework_shells log tail for UI rehydration (matches what the user sees).
-      const r1 = await fetch(`/api/pty/fws_tail?conversation_id=${encodeURIComponent(convoId)}&tail_lines=200`, { cache: 'no-store' });
-      if (r1.ok) {
-        const data1 = await r1.json();
-        if (data1 && data1.ok && Array.isArray(data1.stdout_tail)) {
-          const text1 = data1.stdout_tail.join('');
-          if (text1) {
-            composerTerm.write(text1);
-            composerPrimedConvoId = convoId;
-            return true;
-          }
+      const data1 = await sioCall('get_pty_fws_tail', {
+        conversation_id: convoId,
+        tail_lines: 200,
+      });
+      if (data1 && data1.ok && Array.isArray(data1.stdout_tail)) {
+        const text1 = data1.stdout_tail.join('');
+        if (text1) {
+          composerTerm.write(text1);
+          composerPrimedConvoId = convoId;
+          return true;
         }
       }
 
-      // Fallback to conversation-local raw tail (lossless byte log).
-      const r2 = await fetch(`/api/pty/raw_tail?conversation_id=${encodeURIComponent(convoId)}&max_bytes=65536`, { cache: 'no-store' });
-      if (!r2.ok) return;
-      const data2 = await r2.json();
+      const data2 = await sioCall('get_pty_raw_tail', {
+        conversation_id: convoId,
+        max_bytes: 65536,
+      });
       if (!data2 || !data2.ok) return;
       const b64 = data2.data_b64 || '';
       if (!b64) {
@@ -1252,9 +1249,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!text || !text.trim()) { cb([]); return; }
         try {
           const cwd = conversationSettings?.cwd || '~';
-          const res = await fetch(`/api/fs/search?query=${encodeURIComponent(text)}&root=${encodeURIComponent(cwd)}&limit=30`);
-          if (!res.ok) { cb([]); return; }
-          const data = await res.json();
+          const data = await sioCall('fs_search', { query: text, root: cwd, limit: 30 });
+          if (!data || data.ok === false) { cb([]); return; }
           // Items already sorted: directories first, then files
           cb(data.items || []);
         } catch (e) {
@@ -1404,9 +1400,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
 	  async function fetchHostUi() {
 	    try {
-	      const r = await fetch('/api/host/ui', { cache: 'no-store' });
-	      if (!r.ok) return;
-	      const data = await r.json();
+	      const data = await sioCall('get_host_ui', {});
+	      if (!data || data.ok === false) return;
 	      const ui = data?.host_ui || {};
 	      hostUi = {
 	        showClose: Boolean(ui.show_close),
@@ -1506,19 +1501,6 @@ document.addEventListener('DOMContentLoaded', () => {
 	  async function ensureProjectRootLoaded() {
 	    if (hostUi?.projectRoot) return hostUi.projectRoot;
 	    if (!hostUi?.ideMode) return null;
-	    if (!hostUi?.parentOrigin) return null;
-	    try {
-	      const r = await fetch(`${hostUi.parentOrigin}/api/app/file_editor_cm6/agent/cwd`, { cache: 'no-store' });
-	      if (!r.ok) return null;
-	      const data = await r.json();
-	      const cwd = data?.data?.cwd || data?.data?.path || null;
-	      if (typeof cwd === 'string' && cwd) {
-	        hostUi.projectRoot = cwd;
-	        return cwd;
-	      }
-	    } catch {
-	      // ignore
-	    }
 	    return null;
 	  }
 
@@ -1600,10 +1582,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function fetchAppConfig() {
     try {
-      const data = await sioCall('get_config', {}, {
-        fallbackUrl: '/api/appserver/config',
-        fallbackMethod: 'GET',
-      });
+      const data = await sioCall('get_config', {});
       if (!data || data.ok === false) return null;
       applyAppConfig(data);
       return data;
@@ -1633,8 +1612,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await sioCall('update_config', {
         user_name: splashSettingsUserNameEl?.value?.trim() || null,
         te2_mcp_integration: splashSettingsTe2McpIntegrationEl?.checked === true,
-      }, {
-        fallbackUrl: '/api/appserver/config',
       });
       if (!data || data.ok === false) return;
       applyAppConfig(data);
@@ -1827,7 +1804,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await sioCall('conversation_update', {
       conversation_id: conversationMeta?.conversation_id,
       settings: { [settingKey]: nextValue },
-    }, { fallbackUrl: '/api/appserver/conversation' });
+    });
     conversationSettings = {
       ...(conversationSettings || {}),
       [settingKey]: nextValue,
@@ -2502,8 +2479,6 @@ document.addEventListener('DOMContentLoaded', () => {
         settings: {
           planOverlayCollapsed: planCollapsed,
         },
-      }, {
-        fallbackUrl: '/api/appserver/conversation',
       });
     } catch (err) {
       console.warn('failed to persist plan overlay collapse state', err);
@@ -2596,9 +2571,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function requestContextCompact() {
     try {
       const convoId = conversationMeta?.conversation_id || null;
-      const result = await sioCall('compact', convoId ? { conversation_id: convoId } : {}, {
-        fallbackUrl: '/api/appserver/compact',
-      });
+      const result = await sioCall('compact', convoId ? { conversation_id: convoId } : {});
       if (result && result.ok === false) {
         throw new Error(result.error || 'compact failed');
       }
@@ -4245,18 +4218,6 @@ document.addEventListener('DOMContentLoaded', () => {
     approvalUi.restorePendingApprovals();
   }
 
-  async function postJson(url, payload) {
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: payload ? JSON.stringify(payload) : '{}',
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const text = await r.text();
-    if (!text) return null;
-    try { return JSON.parse(text); } catch { return text; }
-  }
-
   const { saveSettings } = bindSettingsSaveFlow({
     getState: () => ({
       conversationSettings,
@@ -4336,15 +4297,17 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   /**
-   * Send a Socket.IO event with ack and HTTP fallback.
+   * Send a Socket.IO event with ack only.
    * @param {string} event - SIO event name (e.g. 'send_message')
    * @param {object} data - Payload to send
-   * @param {object} [options] - { fallbackUrl, fallbackMethod, timeoutMs }
-   * @returns {Promise<any>} Server response (ack value or HTTP JSON)
+   * @param {object} [options] - { timeoutMs }
+   * @returns {Promise<any>} Server response (ack value)
    */
   async function sioCall(event, data = {}, options = {}) {
+    if (options && (Object.prototype.hasOwnProperty.call(options, 'fallbackUrl') || Object.prototype.hasOwnProperty.call(options, 'fallbackMethod'))) {
+      throw new Error(`HTTP fallbacks are disabled for Socket.IO contract: ${event}`);
+    }
     const timeoutMs = options.timeoutMs || 10000;
-    // Try Socket.IO first if connected
     if (_socket && _socket.connected) {
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -4360,32 +4323,17 @@ document.addEventListener('DOMContentLoaded', () => {
         });
       });
     }
-    // Fallback to HTTP
-    if (options.fallbackUrl) {
-      const method = (options.fallbackMethod || 'POST').toUpperCase();
-      if (method === 'GET') {
-        const r = await fetch(options.fallbackUrl, { cache: 'no-store' });
-        return r.ok ? await r.json() : { ok: false, error: `HTTP ${r.status}` };
-      }
-      return postJson(options.fallbackUrl, data);
-    }
-    // No fallback — wait briefly for socket then retry
     const ready = await waitForWs(3000);
     if (ready && _socket && _socket.connected) {
-      return sioCall(event, data, { ...options, fallbackUrl: null });
+      return sioCall(event, data, options);
     }
-    return { ok: false, error: 'Socket.IO not connected and no fallback URL' };
+    return { ok: false, error: 'Socket.IO not connected' };
   }
 	  async function fetchConversation(conversationId = null) {
 	    try {
 	      const cid = conversationId || clientConversationId;
 	      const data = await sioCall('conversation_get', {
 	        conversation_id: cid || null,
-	      }, {
-	        fallbackUrl: cid
-	          ? `/api/appserver/conversations/${encodeURIComponent(cid)}/meta`
-	          : '/api/appserver/conversation',
-	        fallbackMethod: 'GET',
 	      });
 	      if (!data || data.ok === false) return;
 	      conversationMeta = data;
@@ -4447,10 +4395,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function fetchStatus() {
     try {
-      const data = await sioCall('get_status', {}, {
-        fallbackUrl: '/api/appserver/status',
-        fallbackMethod: 'GET',
-      });
+      const data = await sioCall('get_status', {});
       if (data.running) {
         setPill(statusEl, 'running', 'ok');
       } else {
@@ -4678,6 +4623,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateScrollButton,
     resetWsReady,
     connectWS,
+    waitForWs,
     fetchHostUi,
     fetchAppConfig,
     bindPickerFilter,
@@ -4714,11 +4660,12 @@ document.addEventListener('DOMContentLoaded', () => {
       fetchRollouts,
         setActivity,
         insertMention,
-        saveApprovalQuick,
-        sioCall,
-        fetchAppConfig,
-        formatJsonSetting,
-        parseJsonSetting,
+      saveApprovalQuick,
+      sioCall,
+      waitForWs,
+      fetchAppConfig,
+      formatJsonSetting,
+      parseJsonSetting,
         openDropdownMenu,
         closeDropdownMenu,
         toggleDropdownMenu,
@@ -4783,7 +4730,6 @@ document.addEventListener('DOMContentLoaded', () => {
     clearPrompt,
     clearDraft,
     setTerminalMode,
-    postJson,
     saveDraftDebounced,
     openPicker,
     sendHostCloseMessage,

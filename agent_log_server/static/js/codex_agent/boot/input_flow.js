@@ -9,7 +9,6 @@ export function bindInputFlow(ctx) {
     clearPrompt,
     clearDraft,
     setTerminalMode,
-    postJson,
     saveDraftDebounced,
     openPicker,
     sendHostCloseMessage,
@@ -66,7 +65,10 @@ export function bindInputFlow(ctx) {
       return;
     }
     try {
-      await postJson('/api/pty/stdin', { data });
+      const result = await sioCall('pty_stdin', { data });
+      if (result?.ok === false) {
+        throw new Error(result.error || 'PTY stdin failed');
+      }
     } catch (e) {
       console.error('Failed to send PTY stdin:', e);
     }
@@ -212,7 +214,7 @@ export function bindInputFlow(ctx) {
       await sioCall('conversation_update', {
         conversation_id: state.conversationMeta.conversation_id,
         settings: { ...state.conversationSettings, markdown: enabled },
-      }, { fallbackUrl: '/api/appserver/conversation' });
+      });
       await fetchConversation(state.conversationMeta.conversation_id);
     }
     resetTimeline();
@@ -232,7 +234,7 @@ export function bindInputFlow(ctx) {
       await sioCall('conversation_update', {
         conversation_id: state.conversationMeta.conversation_id,
         settings: { ...state.conversationSettings, trackEdits: enabled },
-      }, { fallbackUrl: '/api/appserver/conversation' });
+      });
     }
   }
 

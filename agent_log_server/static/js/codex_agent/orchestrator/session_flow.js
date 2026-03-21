@@ -35,7 +35,7 @@ export function bindSessionFlow(ctx) {
     const result = await sioCall('send_message', {
       conversation_id: convoId,
       text,
-    }, { fallbackUrl: '/api/appserver/message' });
+    });
     if (!result?.ok) {
       console.error('sendUserMessage failed:', result?.error);
       setActivity(result?.error || 'send failed', true);
@@ -55,12 +55,11 @@ export function bindSessionFlow(ctx) {
       return;
     }
     try {
-      const endpoint = state.terminalMode ? '/api/mcp/agent-pty/exec' : '/api/appserver/shell/exec';
       const resp = await sioCall('shell_exec', {
         conversation_id: state.conversationMeta?.conversation_id,
         command,
         terminal_mode: !!state.terminalMode,
-      }, { fallbackUrl: endpoint });
+      });
       if (resp.error && !shellRows.has(resp.callId)) {
         renderShellBatchResult({
           exitCode: resp.exitCode || 1,
@@ -84,9 +83,7 @@ export function bindSessionFlow(ctx) {
       setActivity('interrupt', true);
       const state = getState();
       const convoId = state.conversationMeta?.conversation_id || null;
-      await sioCall('interrupt', convoId ? { conversation_id: convoId } : {}, {
-        fallbackUrl: '/api/appserver/interrupt',
-      });
+      await sioCall('interrupt', convoId ? { conversation_id: convoId } : {});
       setActivity('interrupt sent', true);
     } catch (err) {
       console.warn('interrupt failed', err);

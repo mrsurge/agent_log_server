@@ -112,18 +112,9 @@ export function bindSettingsUiFlow(ctx) {
     const agent = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : '';
     const conversation_id = typeof conversationId === 'string' && conversationId.trim() ? conversationId.trim() : '';
     try {
-      const query = new URLSearchParams();
-      if (conversation_id) query.set('conversation_id', conversation_id);
-      if (agent) query.set('agent', agent);
-      const fallbackUrl = query.size
-        ? `/api/appserver/runtime_options?${query.toString()}`
-        : '/api/appserver/runtime_options';
       const data = await sioCall('get_runtime_options', {
         conversation_id: conversation_id || null,
         agent: agent || null,
-      }, {
-        fallbackUrl,
-        fallbackMethod: 'GET',
       });
       const next = (data && typeof data === 'object') ? data : {};
       setState({ runtimeOptions: next });
@@ -293,10 +284,7 @@ export function bindSettingsUiFlow(ctx) {
 
   async function fetchRollouts() {
     try {
-      const data = await sioCall('get_rollouts', {}, {
-        fallbackUrl: '/api/appserver/rollouts',
-        fallbackMethod: 'GET',
-      });
+      const data = await sioCall('get_rollouts', {});
       let items = Array.isArray(data?.items) ? data.items : [];
       const cwd = settingsCwdEl?.value?.trim();
       if (cwd) {
@@ -312,10 +300,7 @@ export function bindSettingsUiFlow(ctx) {
   async function loadRolloutPreview(rolloutId) {
     if (!rolloutId) return;
     try {
-      const data = await sioCall('get_rollout_preview', { rollout_id: rolloutId }, {
-        fallbackUrl: `/api/appserver/rollouts/${encodeURIComponent(rolloutId)}/preview`,
-        fallbackMethod: 'GET',
-      });
+      const data = await sioCall('get_rollout_preview', { rollout_id: rolloutId });
       const items = Array.isArray(data?.items) ? data.items : [];
       setState({
         pendingRollout: {
@@ -380,10 +365,7 @@ export function bindSettingsUiFlow(ctx) {
 
   async function loadModelOptions() {
     try {
-      const data = await sioCall('get_models', {}, {
-        fallbackUrl: '/api/appserver/models',
-        fallbackMethod: 'GET',
-      });
+      const data = await sioCall('get_models', {});
       const items = data?.result?.data || data?.result?.models || data?.data || data?.result || [];
       if (Array.isArray(items)) {
         setState({ modelList: items.filter((m) => m && typeof m === 'object' && m.id) });
@@ -400,10 +382,7 @@ export function bindSettingsUiFlow(ctx) {
 
   async function loadAgentOptions() {
     try {
-      const data = await sioCall('get_extensions', {}, {
-        fallbackUrl: '/api/extensions',
-        fallbackMethod: 'GET',
-      });
+      const data = await sioCall('get_extensions', {});
       const extensions = data?.extensions || [];
       setState({ extensionCatalog: Array.isArray(extensions) ? extensions : [] });
       const agents = ['codex'];
@@ -504,10 +483,8 @@ export function bindSettingsUiFlow(ctx) {
 
   async function fetchPicker(path) {
     try {
-      const url = `/api/fs/list?path=${encodeURIComponent(path || '~')}`;
-      const r = await fetch(url, { cache: 'no-store' });
-      if (!r.ok) return;
-      const data = await r.json();
+      const data = await sioCall('fs_list', { path: path || '~' });
+      if (!data || data.ok === false) return;
       setState({
         pickerPath: data?.path || path || '~',
         pickerItems: Array.isArray(data?.items) ? data.items : [],
@@ -523,10 +500,8 @@ export function bindSettingsUiFlow(ctx) {
     try {
       const state = getState();
       const root = state.conversationSettings?.cwd || settingsCwdEl?.value || state.pickerPath || '~';
-      const url = `/api/fs/search?query=${encodeURIComponent(query)}&root=${encodeURIComponent(root)}`;
-      const r = await fetch(url, { cache: 'no-store' });
-      if (!r.ok) return [];
-      const data = await r.json();
+      const data = await sioCall('fs_search', { query, root });
+      if (!data || data.ok === false) return [];
       return Array.isArray(data?.items) ? data.items : [];
     } catch {
       return [];

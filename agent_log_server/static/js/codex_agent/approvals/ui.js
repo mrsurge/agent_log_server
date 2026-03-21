@@ -210,10 +210,7 @@ export function bindApprovalUi(ctx) {
       payload.decision = resultPayload.decision;
     }
     try {
-      return await sioCall('approval_response', payload, {
-        fallbackUrl: '/api/appserver/approval_response',
-        fallbackMethod: 'POST',
-      });
+      return await sioCall('approval_response', payload);
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error || 'approval failed') };
     }

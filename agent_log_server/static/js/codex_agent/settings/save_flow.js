@@ -156,9 +156,7 @@ export function bindSettingsSaveFlow(ctx) {
     let nextState = getState();
     const isNewConversation = nextState.pendingNewConversation || !nextState.conversationMeta?.conversation_id;
     if (isNewConversation) {
-      const meta = await sioCall('conversation_create', {}, {
-        fallbackUrl: '/api/appserver/conversations',
-      });
+      const meta = await sioCall('conversation_create', {});
       if (meta?.conversation_id) {
         setState({
           clientConversationId: meta.conversation_id,
@@ -173,14 +171,14 @@ export function bindSettingsSaveFlow(ctx) {
     nextState = getState();
     await sioCall('conversation_update', {
       conversation_id: nextState.conversationMeta?.conversation_id, settings,
-    }, { fallbackUrl: '/api/appserver/conversation' });
+    });
 
     nextState = getState();
     if (nextState.pendingRollout?.id && Array.isArray(nextState.pendingRollout.items)) {
       setActivity('loading rollout', true);
       await sioCall('conversation_bind_rollout', {
         rollout_id: nextState.pendingRollout.id,
-      }, { fallbackUrl: '/api/appserver/conversations/bind-rollout' });
+      });
       setState({ pendingRollout: null });
       setActivity('rollout loaded', false);
     }

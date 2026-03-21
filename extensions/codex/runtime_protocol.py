@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from te2_runtime import (
+from agent_log_server.te2_runtime import (
     build_codex_thread_config,
     build_effective_developer_instructions,
     te2_mcp_integration_enabled,
