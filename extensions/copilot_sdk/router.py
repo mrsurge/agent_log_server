@@ -593,6 +593,7 @@ class CopilotEventRouter:
 
     # Tools that are UI-only (routed to ribbon/status, not rendered as shell cards)
     _UI_TOOLS = {"report_intent"}
+    _HIDDEN_UI_TOOLS = {"ask_user"}
 
     # Tools that are "read-only explorers" — sanitized card + ribbon
     _EXPLORE_TOOLS = {"view", "glob", "grep"}
@@ -698,6 +699,10 @@ class CopilotEventRouter:
                     "text": intent,
                     "turn_id": self.current_turn_id,
                 })
+            self._suppressed_tools.add(tool_call_id)
+            return
+
+        if tool_name in self._HIDDEN_UI_TOOLS and not self.debug_trace:
             self._suppressed_tools.add(tool_call_id)
             return
 

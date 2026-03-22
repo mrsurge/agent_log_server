@@ -126,26 +126,25 @@ function addJsonDetails(body, label, value) {
   body.append(details);
 }
 
-function appendOptionValue(inputEl, value) {
-  if (!(inputEl instanceof HTMLElement) || typeof value !== 'string' || !value.trim()) return;
-  const next = value.trim();
-  if ('value' in inputEl) {
-    const current = String(inputEl.value || '').trim();
-    if (!current) {
-      inputEl.value = next;
-      return;
-    }
-    const existing = current.split('\n').map((item) => item.trim()).filter(Boolean);
-    if (existing.includes(next)) return;
-    inputEl.value = `${current}\n${next}`;
-  }
-}
-
 function createOptionDescription(text) {
   const description = document.createElement('div');
   description.className = 'approval-option-description';
   description.textContent = String(text || '');
   return description;
+}
+
+function createSubmittedAnswerNode(values) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'approval-summary';
+  const title = document.createElement('div');
+  title.innerHTML = '<strong>Response:</strong>';
+  wrapper.append(title);
+  values.forEach((value) => {
+    const row = document.createElement('div');
+    row.textContent = String(value || '');
+    wrapper.append(row);
+  });
+  return wrapper;
 }
 
 function splitAnswers(raw) {
@@ -273,6 +272,37 @@ function renderUserInputCard(body, event, _schema, helpers) {
   appendKeyValue(summary, 'Request', payload.message || 'Tool is waiting for user input', helpers);
   body.append(summary);
 
+  const buildAnswers = (overrides = {}) => {
+    const answers = {};
+    body.querySelectorAll('[data-question-id]').forEach((inputEl) => {
+      const questionId = inputEl.getAttribute('data-question-id') || '';
+      if (!questionId) return;
+      const override = overrides[questionId];
+      const raw = override !== undefined ? override : ('value' in inputEl ? inputEl.value : '');
+      const values = Array.isArray(raw) ? raw : splitAnswers(raw);
+      if (values.length) {
+        answers[questionId] = { answers: values };
+      }
+    });
+    return answers;
+  };
+
+  const rerenderSubmitted = (answers, statusLabel = 'submitted') => {
+    renderUserInputCard(
+      body,
+      {
+        ...event,
+        status: statusLabel,
+        result: { answers },
+      },
+      _schema,
+      {
+        ...helpers,
+        readOnly: true,
+      },
+    );
+  };
+
   questions.forEach((question) => {
     if (!question || typeof question !== 'object') return;
     const wrapper = document.createElement('div');
@@ -288,26 +318,8 @@ function renderUserInputCard(body, event, _schema, helpers) {
       wrapper.append(prompt);
     }
 
-    const field = question.isSecret ? document.createElement('input') : document.createElement('textarea');
     const questionId = String(question.id || '');
     const recordedAnswers = readOnlyQuestionAnswers(result, questionId);
-    field.setAttribute('data-question-id', String(question.id || ''));
-    if (field instanceof HTMLInputElement) {
-      field.type = 'password';
-      field.className = 'input secret approval-answer-field';
-      field.placeholder = question.isOther ? 'Enter response' : 'Response';
-    } else {
-      field.className = 'input approval-answer-field';
-      field.rows = 2;
-      field.placeholder = question.isOther ? 'Enter one or more responses (one per line)' : 'Enter response';
-    }
-    if (recordedAnswers.length && 'value' in field) {
-      field.value = recordedAnswers.join('\n');
-    }
-    if (readOnly) {
-      field.readOnly = true;
-    }
-    wrapper.append(field);
 
     if (Array.isArray(question.options) && question.options.length) {
       const optionsWrap = document.createElement('div');
@@ -319,14 +331,21 @@ function renderUserInputCard(body, event, _schema, helpers) {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'btn tiny';
-        button.textContent = String(option.label || '');
-        if (recordedAnswers.includes(String(option.label || ''))) {
+        const optionLabel = String(option.label || '');
+        button.textContent = optionLabel;
+        if (recordedAnswers.includes(optionLabel)) {
           button.classList.add('approve');
         }
         if (readOnly) {
           button.disabled = true;
         } else {
-          button.addEventListener('click', () => appendOptionValue(field, String(option.label || '')));
+          button.addEventListener('click', async () => {
+            const answers = buildAnswers({ [questionId]: [optionLabel] });
+            const ok = await trySubmit(helpers, { answers }, {}, feedback, 'Sending answers…');
+            if (ok) {
+              rerenderSubmitted(answers);
+            }
+          });
         }
         item.append(button);
         if (option.description) {
@@ -336,6 +355,31 @@ function renderUserInputCard(body, event, _schema, helpers) {
       });
       wrapper.append(optionsWrap);
     }
+
+    if (readOnly) {
+      if (recordedAnswers.length) {
+        wrapper.append(createSubmittedAnswerNode(recordedAnswers));
+      }
+      body.append(wrapper);
+      return;
+    }
+
+    const freeformLabel = document.createElement('div');
+    freeformLabel.innerHTML = '<strong>Something else:</strong>';
+    wrapper.append(freeformLabel);
+
+    const field = question.isSecret ? document.createElement('input') : document.createElement('textarea');
+    field.setAttribute('data-question-id', questionId);
+    if (field instanceof HTMLInputElement) {
+      field.type = 'password';
+      field.className = 'input secret approval-answer-field';
+      field.placeholder = question.isOther ? 'Enter response' : 'Response';
+    } else {
+      field.className = 'input approval-answer-field';
+      field.rows = 2;
+      field.placeholder = question.isOther ? 'Enter one or more responses (one per line)' : 'Enter response';
+    }
+    wrapper.append(field);
 
     body.append(wrapper);
   });
@@ -352,21 +396,15 @@ function renderUserInputCard(body, event, _schema, helpers) {
   sendButton.className = 'btn tiny approve';
   sendButton.textContent = 'Send';
   sendButton.addEventListener('click', async () => {
-    const answers = {};
-    body.querySelectorAll('[data-question-id]').forEach((inputEl) => {
-      const questionId = inputEl.getAttribute('data-question-id') || '';
-      if (!questionId) return;
-      const raw = 'value' in inputEl ? inputEl.value : '';
-      const values = splitAnswers(raw);
-      if (values.length) {
-        answers[questionId] = { answers: values };
-      }
-    });
+    const answers = buildAnswers();
     if (!Object.keys(answers).length) {
       setFeedback(feedback, 'Enter at least one answer first.', true);
       return;
     }
-    await trySubmit(helpers, { answers }, {}, feedback, 'Sending answers…');
+    const ok = await trySubmit(helpers, { answers }, {}, feedback, 'Sending answers…');
+    if (ok) {
+      rerenderSubmitted(answers);
+    }
   });
   actions.append(sendButton);
   body.append(actions);

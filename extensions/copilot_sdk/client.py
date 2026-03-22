@@ -34,7 +34,12 @@ from ._vendor.copilot import (
     PermissionRequestResult,
 )
 from ._vendor.copilot.generated.rpc import SessionModeSetParams, Mode as SessionMode
-from ._vendor.copilot.types import SessionHooks, PermissionRequestResultKind
+from ._vendor.copilot.types import (
+    SessionHooks,
+    PermissionRequestResultKind,
+    UserInputRequest,
+    UserInputResponse,
+)
 
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from .te2_runtime import build_copilot_mcp_servers
@@ -115,6 +120,8 @@ _DEFAULT_APPROVAL_POLICY = "suggest"
 _DEFAULT_SANDBOX_POLICY = "cwd-only"
 _DEFAULT_WEB_POLICY = "deny"
 _DEFAULT_MODE = "interactive"
+_COPILOT_PERMISSION_REQUEST_METHOD = "copilot/permission/request"
+_COPILOT_USER_INPUT_REQUEST_METHOD = "copilot/user_input/request"
 _COPILOT_SESSION_STATE_ROOT = Path.home() / ".copilot" / "session-state"
 _COPILOT_TODO_FILENAMES = frozenset({"session.db", "session.db-wal", "session.db-shm"})
 _COPILOT_PLAN_FILENAME = "plan.md"
@@ -176,6 +183,7 @@ def _log_runtime_config(stage: str, conversation_id: str, config: Dict[str, Any]
 
 # Pending approval futures: request_id -> asyncio.Future
 _pending_approvals: Dict[str, asyncio.Future[Any]] = {}
+_pending_request_specs: Dict[str, Dict[str, Any]] = {}
 _PERMISSION_RESULT_KIND_VALUES = set(get_args(PermissionRequestResultKind))
 
 
@@ -729,6 +737,91 @@ def _normalize_permission_resolution(resolution: Any) -> PermissionRequestResult
     )
 
 
+def _build_permission_request_params(
+    kind: str,
+    request_fields: Dict[str, Any],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    params: Dict[str, Any] = {
+        "kind": kind,
+        "availableDecisions": ["accept", "decline"],
+    }
+    for field_name in (
+        "path",
+        "cwd",
+        "diff",
+        "warning",
+        "intention",
+        "possible_paths",
+        "possible_urls",
+        "can_offer_session_approval",
+    ):
+        value = payload.get(field_name)
+        if value is None:
+            value = request_fields.get(field_name)
+        if value is not None:
+            params[field_name] = value
+    if payload.get("tool_name"):
+        params["tool_name"] = payload["tool_name"]
+    if payload.get("command"):
+        params["command"] = payload["command"]
+    if payload.get("arguments") is not None:
+        params["arguments"] = payload["arguments"]
+    if payload.get("changes") is not None:
+        params["changes"] = payload["changes"]
+    if request_fields:
+        params["request"] = dict(request_fields)
+    return params
+
+
+def _build_user_input_request_params(request: UserInputRequest) -> Dict[str, Any]:
+    question = request.get("question")
+    choices = request.get("choices")
+    allow_freeform = request.get("allowFreeform")
+    return {
+        "question": str(question or "").strip(),
+        "choices": [str(item) for item in choices] if isinstance(choices, list) else [],
+        "allowFreeform": True if allow_freeform is None else bool(allow_freeform),
+    }
+
+
+def _normalize_user_input_resolution(
+    resolution: Any,
+    request_spec: Optional[Dict[str, Any]] = None,
+) -> UserInputResponse:
+    payload = resolution
+    if isinstance(resolution, dict) and isinstance(resolution.get("result"), dict):
+        payload = resolution.get("result")
+
+    if isinstance(payload, str):
+        answer = payload.strip()
+        return {
+            "answer": answer,
+            "wasFreeform": True,
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "answer": str(payload or ""),
+            "wasFreeform": True,
+        }
+
+    answer = str(payload.get("answer") or payload.get("choice") or "").strip()
+    if not answer:
+        answers = payload.get("answers")
+        if isinstance(answers, list) and answers:
+            answer = str(answers[0] or "").strip()
+    choices = request_spec.get("choices") if isinstance(request_spec, dict) else []
+    normalized_choices = [str(item) for item in choices] if isinstance(choices, list) else []
+    was_freeform = payload.get("wasFreeform")
+    if not isinstance(was_freeform, bool):
+        was_freeform = not bool(answer and answer in normalized_choices)
+    return {
+        "answer": answer,
+        "wasFreeform": bool(was_freeform),
+    }
+
+
 def _merge_runtime_settings(
     conversation_id: str,
     settings: Optional[Dict[str, Any]] = None,
@@ -820,6 +913,7 @@ def _build_session_runtime_config(
         "streaming": True,
         "config_dir": _copilot_config_dir(),
         "on_permission_request": _make_permission_handler(conversation_id),
+        "on_user_input_request": _make_user_input_handler(conversation_id),
         "hooks": SessionHooks(
             on_pre_tool_use=_make_pre_tool_use_hook(conversation_id),
         ),
@@ -1058,11 +1152,78 @@ async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
         return payload
 
 
+async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:
+    return {
+        _COPILOT_PERMISSION_REQUEST_METHOD: {
+            "request": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string"},
+                    "warning": {"type": "string"},
+                    "intention": {"type": "string"},
+                    "path": {"type": "string"},
+                    "cwd": {"type": "string"},
+                    "diff": {"type": "string"},
+                    "possible_paths": {"type": "array", "items": {"type": "string"}},
+                    "possible_urls": {"type": "array", "items": {"type": "string"}},
+                    "can_offer_session_approval": {"type": "boolean"},
+                    "availableDecisions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "request": {"type": "object"},
+                    "arguments": {},
+                    "changes": {},
+                },
+                "additionalProperties": True,
+            },
+            "response": {
+                "type": "object",
+                "properties": {
+                    "decision": {"type": "string", "enum": ["accept", "decline"]},
+                    "kind": {"type": "string"},
+                    "rules": {"type": "array"},
+                    "feedback": {"type": "string"},
+                    "message": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "additionalProperties": True,
+            },
+        },
+        _COPILOT_USER_INPUT_REQUEST_METHOD: {
+            "request": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "choices": {"type": "array", "items": {"type": "string"}},
+                    "allowFreeform": {"type": "boolean"},
+                },
+                "required": ["question"],
+                "additionalProperties": True,
+            },
+            "response": {
+                "type": "object",
+                "properties": {
+                    "answer": {"type": "string"},
+                    "wasFreeform": {"type": "boolean"},
+                },
+                "required": ["answer", "wasFreeform"],
+                "additionalProperties": True,
+            },
+        },
+    }
+
+
 def resolve_approval(request_id: str, resolution: Any) -> bool:
     """Called from WS handler when user responds to an approval request."""
     fut = _pending_approvals.pop(request_id, None)
+    request_spec = _pending_request_specs.pop(request_id, None)
     if fut and not fut.done():
-        fut.set_result(_normalize_permission_resolution(resolution))
+        request_type = request_spec.get("type") if isinstance(request_spec, dict) else "permission"
+        if request_type == "user_input":
+            fut.set_result(_normalize_user_input_resolution(resolution, request_spec=request_spec))
+        else:
+            fut.set_result(_normalize_permission_resolution(resolution))
         return True
     return False
 
@@ -1210,6 +1371,12 @@ def _make_permission_handler(conversation_id: str) -> Callable:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
         _pending_approvals[request_id] = fut
+        request_params = _build_permission_request_params(kind, request_fields, payload)
+        _pending_request_specs[request_id] = {
+            "type": "permission",
+            "request_method": _COPILOT_PERMISSION_REQUEST_METHOD,
+            "request_params": request_params,
+        }
 
         runtime_signature = _runtime_signatures.get(conversation_id) or _runtime_signature(conversation_id)
         session = _sessions.get(conversation_id)
@@ -1221,6 +1388,8 @@ def _make_permission_handler(conversation_id: str) -> Callable:
             "kind": kind,
             "tool_call_id": tool_call_id,
             "turn_id": router.current_turn_id if router else "",
+            "request_method": _COPILOT_PERMISSION_REQUEST_METHOD,
+            "request_params": request_params,
             "payload": payload,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -1232,6 +1401,8 @@ def _make_permission_handler(conversation_id: str) -> Callable:
             "agent": "copilot-sdk",
             "kind": kind,
             "payload": payload,
+            "request_method": _COPILOT_PERMISSION_REQUEST_METHOD,
+            "request_params": request_params,
             "thread_id": getattr(session, "session_id", None),
             "turn_id": router.current_turn_id if router else "",
             "runtime_signature": runtime_signature,
@@ -1257,11 +1428,75 @@ def _make_permission_handler(conversation_id: str) -> Callable:
                 permission_result = await asyncio.wait_for(fut, timeout=120.0)
             except asyncio.TimeoutError:
                 _pending_approvals.pop(request_id, None)
+                _pending_request_specs.pop(request_id, None)
                 _remove_pending_approval(conversation_id, request_id)
                 print(f"[CopilotSDK] Approval timeout for {request_id}, auto-approving")
                 permission_result = PermissionRequestResult(kind="approved", rules=[])
 
         return _normalize_permission_resolution(permission_result)
+
+    return handler
+
+
+def _make_user_input_handler(conversation_id: str) -> Callable:
+    async def handler(
+        request: UserInputRequest,
+        context: Dict[str, str],
+    ) -> UserInputResponse:
+        request_params = _build_user_input_request_params(request)
+        request_id = f"user_input_{conversation_id[:8]}_{id(request)}"
+        router = _routers.get(conversation_id)
+        runtime_signature = _runtime_signatures.get(conversation_id) or _runtime_signature(conversation_id)
+        session = _sessions.get(conversation_id)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Any] = loop.create_future()
+        _pending_approvals[request_id] = fut
+        _pending_request_specs[request_id] = {
+            "type": "user_input",
+            "request_method": _COPILOT_USER_INPUT_REQUEST_METHOD,
+            "request_params": request_params,
+            "choices": list(request_params.get("choices") or []),
+        }
+
+        payload: Dict[str, Any] = {
+            "kind": "user_input",
+            **request_params,
+        }
+        approval_event = {
+            "type": "approval",
+            "conversation_id": conversation_id,
+            "id": request_id,
+            "request_id": request_id,
+            "kind": "user_input",
+            "turn_id": router.current_turn_id if router else "",
+            "request_method": _COPILOT_USER_INPUT_REQUEST_METHOD,
+            "request_params": request_params,
+            "payload": payload,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        descriptor = {
+            "request_id": request_id,
+            "agent": "copilot-sdk",
+            "kind": "user_input",
+            "payload": payload,
+            "request_method": _COPILOT_USER_INPUT_REQUEST_METHOD,
+            "request_params": request_params,
+            "thread_id": getattr(session, "session_id", None),
+            "turn_id": router.current_turn_id if router else "",
+            "runtime_signature": runtime_signature,
+            "runtime_instance_id": getattr(session, "session_id", None),
+            "transcript_anchor": {"turn_id": router.current_turn_id if router else ""},
+            "source": "live",
+            "created_at": approval_event["created_at"],
+            "render_event": approval_event,
+        }
+        _upsert_pending_approval(conversation_id, descriptor)
+
+        if _broadcast_fn:
+            await _broadcast_fn(approval_event)
+
+        result = await fut
+        return _normalize_user_input_resolution(result, request_spec=request_params)
 
     return handler
 

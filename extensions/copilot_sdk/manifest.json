@@ -35,6 +35,28 @@
 
   "ui": {
     "icon": "copilot.svg",
-    "color": "#6e40c9"
+    "color": "#6e40c9",
+    "requestCards": [
+      {
+        "id": "copilot-permission-request",
+        "module": "ui/request_cards/copilot_request_card.js",
+        "export": "renderRequestCard",
+        "matches": [
+          {
+            "requestMethod": "copilot/permission/request"
+          }
+        ]
+      },
+      {
+        "id": "copilot-user-input-request",
+        "module": "ui/request_cards/copilot_request_card.js",
+        "export": "renderRequestCard",
+        "matches": [
+          {
+            "requestMethod": "copilot/user_input/request"
+          }
+        ]
+      }
+    ]
   }
 }

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -246,6 +247,43 @@ def _stringify_value(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
     except TypeError:
         return str(value)
+
+
+def _duration_ms(value: Any) -> Optional[int]:
+    if isinstance(value, dict):
+        secs = value.get("secs")
+        nanos = value.get("nanos")
+        if isinstance(secs, (int, float)) or isinstance(nanos, (int, float)):
+            return int(secs or 0) * 1000 + int(nanos or 0) // 1_000_000
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def _extract_tool_result(value: Any, *, status: str, error: Any = None) -> Tuple[Any, bool]:
+    is_error = bool(error) or status in {"failed", "error"}
+    if error is not None:
+        return {"error": error}, True
+    if isinstance(value, dict):
+        if isinstance(value.get("isError"), bool):
+            is_error = value["isError"] or is_error
+        structured = value.get("structuredContent")
+        if isinstance(structured, dict) and structured.get("result") is not None:
+            return structured.get("result"), is_error
+        content = value.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                try:
+                    return json.loads(text), is_error
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    return _normalize_output(text), is_error
+    return value, is_error
 
 
 def _command_text(value: Any) -> str:
@@ -694,7 +732,7 @@ class CodexEventRouter:
             "diff",
             "approval",
         }
-        transcript_roles = {"assistant", "user", "command", "diff", "reasoning"}
+        transcript_roles = {"assistant", "user", "command", "diff", "reasoning", "mcp_tool", "web_search"}
 
         for event in routed.get("events", []):
             if not isinstance(event, dict) or event.get("subagent_id"):
@@ -1633,11 +1671,14 @@ class CodexEventRouter:
                     arguments = {"path": item.get("path")}
                 status = str(item.get("status") or "").strip().lower()
                 error = item.get("error")
-                result_value = error if error is not None else item.get("result")
-                output = _stringify_value(result_value or {"status": status or "completed"})
-                is_error = bool(error) or status in {"failed", "error"}
-                command_label = f"{server_name}:{tool_name}" if server_name else str(tool_name)
-                return self._decorate_routed_result({
+                duration_ms = _duration_ms(item.get("durationMs"))
+                if duration_ms is None:
+                    duration_ms = _duration_ms(item.get("duration_ms"))
+                result_value, is_error = _extract_tool_result(item.get("result"), status=status, error=error)
+                live_result = result_value if result_value is not None else None
+                if live_result is None and item_type != "websearch":
+                    live_result = {"status": status or "completed"}
+                routed = {
                     "handled": True,
                     "events": [
                         {
@@ -1646,21 +1687,43 @@ class CodexEventRouter:
                             "tool": tool_name,
                             "server": server_name,
                             "arguments": arguments,
-                            "result": result_value if result_value is not None else {"status": status or "completed"},
+                            "result": live_result,
+                            "duration_ms": duration_ms,
                             "is_error": is_error,
                         },
                         {"type": "activity", "label": "processing", "active": True},
                     ],
-                    "transcript_entries": [{
-                        "role": "command",
-                        "command": command_label,
-                        "output": output,
-                        "status": status or ("error" if is_error else "completed"),
+                    "transcript_entries": [],
+                }
+                if item_type == "websearch":
+                    query = item.get("query")
+                    if not isinstance(query, str):
+                        query = arguments.get("query") if isinstance(arguments.get("query"), str) else ""
+                    routed["transcript_entries"].append({
+                        "role": "web_search",
+                        "query": query,
+                        "call_id": item_id,
+                        "timestamp": utc_ts(),
                         "item_id": item_id,
                         "turn_id": turn_id,
                         "event": label_lower,
-                    }],
-                }, thread_id=thread_id, item_state=item_state)
+                    })
+                else:
+                    routed["transcript_entries"].append({
+                        "role": "mcp_tool",
+                        "server": server_name,
+                        "tool": tool_name,
+                        "call_id": item_id,
+                        "arguments": arguments,
+                        "result": live_result,
+                        "duration_ms": duration_ms,
+                        "is_error": is_error,
+                        "timestamp": utc_ts(),
+                        "item_id": item_id,
+                        "turn_id": turn_id,
+                        "event": label_lower,
+                    })
+                return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
 
             return {"handled": True, "events": [], "transcript_entries": []}
 
