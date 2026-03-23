@@ -42,7 +42,9 @@ function addMessage(m, append = true) {
   const ts = escapeHtml(m.ts || '');
   const who = escapeHtml(m.who || '');
   const msg = escapeHtml(m.message || '');
-  div.innerHTML = `<div class="meta"><span class="ts">${ts}</span> <span class="who">${who}</span></div><div class="body">${msg}</div>`;
+  const msgNum = Number.isInteger(m.msg_num) ? `#${escapeHtml(m.msg_num)}` : '';
+  const msgNumHtml = msgNum ? `<span class="msg-num">${msgNum}</span> ` : '';
+  div.innerHTML = `<div class="meta">${msgNumHtml}<span class="ts">${ts}</span> <span class="who">${who}</span></div><div class="body">${msg}</div>`;
 
   if (append) {
     chatEl.appendChild(div);

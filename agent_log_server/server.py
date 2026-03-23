@@ -8527,11 +8527,6 @@ async def api_extension_debug_raw(extension_id: str, limit: int = Query(50, gt=0
 @app.post("/api/shutdown")
 async def api_shutdown():
     try:
-        await append_record({"ts": utc_ts(), "who": "server", "message": "shutdown requested"})
-    except Exception:
-        pass
-
-    try:
         await _stop_appserver_shell()
     except Exception:
         pass
@@ -9269,6 +9264,25 @@ async def api_pty_fws_tail(
 
 
 # --- Startup ---
+def _default_agent_log_dir() -> Path:
+    return Path.home() / ".cache" / "app_server" / "agent-log"
+
+
+def _resolve_agent_log_path(raw: str) -> Path:
+    text = str(raw or "").strip()
+    if not text:
+        return _default_agent_log_dir() / "agent_chat.log.jsonl"
+
+    expanded = Path(os.path.expanduser(text))
+    if expanded.is_absolute():
+        return expanded
+
+    if text.startswith("./") or text.startswith("../") or "/" in text:
+        return Path.cwd() / expanded
+
+    return _default_agent_log_dir() / expanded.name
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--log", default="agent_chat.log.jsonl")
@@ -9287,9 +9301,7 @@ def main():
     if args.broadcast_all:
         args.host = "0.0.0.0"
     
-    log_p = Path(args.log)
-    if not log_p.is_absolute():
-        log_p = Path.cwd() / log_p
+    log_p = _resolve_agent_log_path(args.log)
     ensure_log_file(log_p)
     LOG_PATH = log_p
     
@@ -9303,13 +9315,6 @@ def main():
         DEBUG_RAW_LOG_PATH = cache_dir / "debug_raw.jsonl"
         # Clear previous debug log on startup
         DEBUG_RAW_LOG_PATH.write_text("")
-
-    try:
-        with LOG_PATH.open("a", encoding="utf-8") as f:
-            r = {"ts": utc_ts(), "who": "server", "message": f"started on {args.host}:{args.port}"}
-            f.write(json.dumps(r) + "\n")
-    except Exception:
-        pass
 
     uvicorn.run(socketio_app, host=args.host, port=args.port)
 

@@ -1,6 +1,8 @@
 import hashlib
 import json
+import os
 import re
+import shlex
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -294,6 +296,112 @@ def _command_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _resolve_view_path(path: str, cwd: str) -> str:
+    if not path:
+        return ""
+    if os.path.isabs(path) or not cwd:
+        return path
+    return os.path.normpath(os.path.join(cwd, path))
+
+
+def _build_view_title(path: str, view_range: Optional[List[int]]) -> str:
+    short_path = os.path.basename(path) if path else "view"
+    if isinstance(view_range, list) and len(view_range) >= 2:
+        return f"{short_path}  Lines {view_range[0]}–{view_range[1]}"
+    if isinstance(view_range, list) and len(view_range) == 1:
+        return f"{short_path}  Line {view_range[0]}+"
+    return short_path
+
+
+def _unwrap_single_shell_command(command: str) -> str:
+    text = str(command or "").strip()
+    if not text:
+        return ""
+    try:
+        tokens = shlex.split(text, posix=True)
+    except ValueError:
+        return text
+    if len(tokens) >= 3 and tokens[0] in {"sh", "/bin/sh", "bash", "/bin/bash"} and tokens[1] in {"-c", "-lc"}:
+        return str(tokens[2] or "").strip()
+    return text
+
+
+def _last_non_flag_token(tokens: List[str], start: int = 1) -> Optional[str]:
+    candidate: Optional[str] = None
+    for token in tokens[start:]:
+        if token == "--":
+            continue
+        if token.startswith("-"):
+            continue
+        candidate = token
+    return candidate
+
+
+def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+    inner = _unwrap_single_shell_command(_command_text(command))
+    if not inner:
+        return None
+    if any(marker in inner for marker in ("\n", "&&", "||", ";", "|", ">", "<")):
+        return None
+    try:
+        tokens = shlex.split(inner, posix=True)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+
+    cmd = tokens[0]
+    path: Optional[str] = None
+    view_range: Optional[List[int]] = None
+
+    if cmd == "sed":
+        if len(tokens) < 4 or tokens[1] != "-n":
+            return None
+        range_token = tokens[2]
+        path = tokens[-1] if len(tokens) >= 4 else None
+        if not path or path.startswith("-"):
+            return None
+        m = re.fullmatch(r"(\d+),(\d+)p", range_token)
+        if m:
+            view_range = [int(m.group(1)), int(m.group(2))]
+        else:
+            m = re.fullmatch(r"(\d+)p", range_token)
+            if m:
+                view_range = [int(m.group(1))]
+    elif cmd in {"cat", "less", "more"}:
+        path = _last_non_flag_token(tokens)
+    elif cmd == "bat":
+        path = _last_non_flag_token(tokens)
+    elif cmd == "head":
+        path = _last_non_flag_token(tokens)
+        for idx, token in enumerate(tokens[1:], start=1):
+            if token == "-n" and idx + 1 < len(tokens):
+                try:
+                    view_range = [1, int(tokens[idx + 1])]
+                except (TypeError, ValueError):
+                    view_range = None
+                break
+            if token.startswith("-n") and len(token) > 2:
+                try:
+                    view_range = [1, int(token[2:])]
+                except (TypeError, ValueError):
+                    view_range = None
+                break
+    elif cmd == "tail":
+        path = _last_non_flag_token(tokens)
+    else:
+        return None
+
+    if not path or path.startswith("-"):
+        return None
+    resolved_path = _resolve_view_path(path, cwd)
+    return {
+        "path": resolved_path,
+        "view_range": view_range,
+        "title": _build_view_title(resolved_path, view_range),
+    }
 
 
 def _extract_path_from_diff(diff_text: str) -> Optional[str]:
@@ -732,7 +840,7 @@ class CodexEventRouter:
             "diff",
             "approval",
         }
-        transcript_roles = {"assistant", "user", "command", "diff", "reasoning", "mcp_tool", "web_search"}
+        transcript_roles = {"assistant", "user", "command", "diff", "reasoning", "mcp_tool", "tool", "web_search"}
 
         for event in routed.get("events", []):
             if not isinstance(event, dict) or event.get("subagent_id"):
@@ -1308,12 +1416,22 @@ class CodexEventRouter:
             if item_type == "commandexecution":
                 command = item.get("command") or item.get("parsedCmd") or item.get("cmd") or item.get("argv") or ""
                 cwd = item.get("cwd") or ""
+                view_spec = _shell_command_to_view_spec(command, cwd)
                 item_state.update({
                     "item_type": item_type,
                     "command": command,
                     "cwd": cwd,
                     "output_buffer": "",
+                    "view_spec": view_spec,
                 })
+                if view_spec:
+                    return self._decorate_routed_result({
+                        "handled": True,
+                        "events": [
+                            {"type": "activity", "label": "reading file", "active": True},
+                        ],
+                        "transcript_entries": [],
+                    }, thread_id=thread_id, item_state=item_state)
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": [
@@ -1459,6 +1577,8 @@ class CodexEventRouter:
             delta = _normalize_output(payload.get("delta"))
             if delta:
                 state["output_buffer"] = f"{state.get('output_buffer', '')}{delta}"
+                if state.get("view_spec"):
+                    return {"handled": True, "events": [], "transcript_entries": []}
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": [{
@@ -1491,6 +1611,9 @@ class CodexEventRouter:
 
         if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "terminalinteraction" and isinstance(payload, dict):
             item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
+            state = self._get_item_state(item_id, thread_id, turn_id)
+            if state.get("view_spec"):
+                return {"handled": True, "events": [], "transcript_entries": []}
             return self._decorate_routed_result({
                 "handled": True,
                 "events": [{
@@ -1569,6 +1692,37 @@ class CodexEventRouter:
                 duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
                 status = str(item.get("status") or "").strip().lower()
                 is_error = _result_error_status(status, exit_code, item.get("error"))
+                view_spec = item_state.get("view_spec") if isinstance(item_state.get("view_spec"), dict) else None
+                if view_spec and not is_error:
+                    routed = {
+                        "handled": True,
+                        "events": [
+                            {
+                                "type": "view",
+                                "id": item_id or _assistant_id(item, thread_id, turn_id),
+                                "title": view_spec.get("title") or _build_view_title(view_spec.get("path") or "", view_spec.get("view_range")),
+                                "path": view_spec.get("path") or "",
+                                "content": output,
+                                "view_range": view_spec.get("view_range"),
+                            },
+                            {"type": "activity", "label": "processing", "active": True},
+                        ],
+                        "transcript_entries": [{
+                            "role": "view",
+                            "title": view_spec.get("title") or _build_view_title(view_spec.get("path") or "", view_spec.get("view_range")),
+                            "path": view_spec.get("path") or "",
+                            "content": output,
+                            "view_range": view_spec.get("view_range"),
+                            "item_id": item_id,
+                            "turn_id": turn_id,
+                            "event": label_lower,
+                        }],
+                    }
+                    approval_request_id = item_state.get("approval_request_id")
+                    if approval_request_id:
+                        routed["clear_live_approval_ids"] = [approval_request_id]
+                        self._approval_request_map.pop(str(item_id), None)
+                    return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 routed: Dict[str, Any] = {
                     "handled": True,
                     "events": [
@@ -1620,9 +1774,18 @@ class CodexEventRouter:
                 paths = _paths_from_changes(changes) or item_state.get("paths") or []
                 output = _normalize_output(item_state.get("output_buffer"))
                 status = str(item.get("status") or "").strip().lower()
+                duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
                 first_path = _summarize_paths(paths) or item_state.get("path")
-                command_label = f"apply_patch {first_path}".strip() if first_path else "apply_patch"
+                primary_path = paths[0] if paths else item_state.get("path")
                 is_error = status in {"failed", "declined", "error"}
+                arguments = {
+                    "paths": paths,
+                    "change_count": len(paths),
+                } if paths else {}
+                result_payload = {
+                    "status": status or "completed",
+                    "changed_files": len(paths),
+                }
                 routed = {
                     "handled": True,
                     "events": [
@@ -1630,24 +1793,26 @@ class CodexEventRouter:
                             "type": "tool_end",
                             "id": item_id or _assistant_id(item, thread_id, turn_id),
                             "tool": "apply_patch",
-                            "arguments": {
-                                "paths": paths,
-                                "change_count": len(paths),
-                            } if paths else {},
-                            "result": {
-                                "status": status or "completed",
-                                "changed_files": len(paths),
-                            },
+                            "arguments": arguments,
+                            "result": result_payload,
+                            "output": output,
+                            "path": primary_path,
+                            "duration_ms": duration_ms,
                             "is_error": is_error,
                         },
                         {"type": "activity", "label": "processing", "active": True},
                     ],
                     "transcript_entries": [{
-                        "role": "command",
-                        "command": command_label,
+                        "role": "tool",
+                        "tool": "apply_patch",
+                        "arguments": arguments,
+                        "result": result_payload,
                         "output": output,
+                        "path": primary_path,
+                        "duration_ms": duration_ms,
                         "status": status or ("error" if is_error else "completed"),
-                        "path": paths[0] if paths else item_state.get("path"),
+                        "is_error": is_error,
+                        "timestamp": utc_ts(),
                         "item_id": item_id,
                         "turn_id": turn_id,
                         "event": label_lower,

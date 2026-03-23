@@ -23,6 +23,7 @@ export function bindEventRouter(ctx) {
     addDeclinedDiff,
     renderApproval,
     renderCommandResult,
+    renderViewCard,
     renderToolBegin,
     renderToolDelta,
     renderToolEnd,
@@ -119,6 +120,10 @@ export function bindEventRouter(ctx) {
       case 'tool_end': {
         const text = buildToolPreviewText(evt);
         return text ? { type: 'tool', text } : null;
+      }
+      case 'view': {
+        const title = normalizePreviewText(evt.title || evt.path || 'view', 140);
+        return title ? { type: 'tool', text: title } : null;
       }
       case 'shell_begin':
       case 'shell_end':
@@ -281,6 +286,9 @@ export function bindEventRouter(ctx) {
         return;
       case 'command_result':
         renderCommandResult(evt);
+        return;
+      case 'view':
+        renderViewCard(evt);
         return;
       case 'tool_begin':
         renderToolBegin(evt);

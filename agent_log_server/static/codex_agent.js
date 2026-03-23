@@ -751,6 +751,47 @@ document.addEventListener('DOMContentLoaded', () => {
     if (el) el.checked = enabled;
   }
 
+  const FILE_EXT_LANG_MAP = {
+    'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
+    'py': 'python', 'rb': 'ruby', 'rs': 'rust', 'go': 'go',
+    'java': 'java', 'kt': 'kotlin', 'scala': 'scala',
+    'c': 'c', 'h': 'c', 'cpp': 'cpp', 'cc': 'cpp', 'hpp': 'cpp',
+    'cs': 'csharp', 'fs': 'fsharp',
+    'php': 'php', 'swift': 'swift', 'r': 'r',
+    'json': 'json', 'yaml': 'yaml', 'yml': 'yaml', 'toml': 'toml',
+    'xml': 'xml', 'html': 'html', 'htm': 'html', 'css': 'css', 'scss': 'scss',
+    'md': 'markdown', 'markdown': 'markdown',
+    'sh': 'bash', 'bash': 'bash', 'zsh': 'bash', 'fish': 'bash',
+    'sql': 'sql', 'graphql': 'graphql', 'gql': 'graphql',
+    'dockerfile': 'dockerfile', 'makefile': 'makefile',
+    'tf': 'hcl', 'hcl': 'hcl',
+    'lua': 'lua', 'vim': 'vim', 'el': 'lisp', 'clj': 'clojure',
+    'ex': 'elixir', 'exs': 'elixir', 'erl': 'erlang',
+    'hs': 'haskell', 'ml': 'ocaml', 'nim': 'nim', 'zig': 'zig',
+  };
+
+  function detectLangFromPath(file) {
+    if (!file) return null;
+    const ext = file.split('.').pop()?.toLowerCase();
+    if (ext && FILE_EXT_LANG_MAP[ext]) return FILE_EXT_LANG_MAP[ext];
+    const basename = file.split('/').pop()?.toLowerCase();
+    if (basename === 'dockerfile') return 'dockerfile';
+    if (basename === 'makefile' || basename === 'gnumakefile') return 'makefile';
+    if (basename?.endsWith('rc') || basename?.startsWith('.')) return 'bash';
+    return null;
+  }
+
+  function buildViewCardTitle(path, viewRange, fallbackTitle = '') {
+    const shortPath = path ? String(path).split('/').pop() : '';
+    if (Array.isArray(viewRange) && viewRange.length >= 2 && Number.isFinite(Number(viewRange[0])) && Number.isFinite(Number(viewRange[1]))) {
+      return `${shortPath || fallbackTitle || 'view'}  Lines ${Number(viewRange[0])}–${Number(viewRange[1])}`;
+    }
+    if (Array.isArray(viewRange) && viewRange.length === 1 && Number.isFinite(Number(viewRange[0]))) {
+      return `${shortPath || fallbackTitle || 'view'}  Line ${Number(viewRange[0])}+`;
+    }
+    return shortPath || fallbackTitle || 'view';
+  }
+
   // Detect language from command for syntax highlighting
   function detectLangFromCommand(command) {
     if (!command) return null;
@@ -759,55 +800,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const shCMatch = command.match(/sh\s+-[lc]+\s+['"](.+)['"]\s*$/);
     const innerCmd = shCMatch ? shCMatch[1] : command;
     
-    const extMap = {
-      'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
-      'py': 'python', 'rb': 'ruby', 'rs': 'rust', 'go': 'go',
-      'java': 'java', 'kt': 'kotlin', 'scala': 'scala',
-      'c': 'c', 'h': 'c', 'cpp': 'cpp', 'cc': 'cpp', 'hpp': 'cpp',
-      'cs': 'csharp', 'fs': 'fsharp',
-      'php': 'php', 'swift': 'swift', 'r': 'r',
-      'json': 'json', 'yaml': 'yaml', 'yml': 'yaml', 'toml': 'toml',
-      'xml': 'xml', 'html': 'html', 'htm': 'html', 'css': 'css', 'scss': 'scss',
-      'md': 'markdown', 'markdown': 'markdown',
-      'sh': 'bash', 'bash': 'bash', 'zsh': 'bash', 'fish': 'bash',
-      'sql': 'sql', 'graphql': 'graphql', 'gql': 'graphql',
-      'dockerfile': 'dockerfile', 'makefile': 'makefile',
-      'tf': 'hcl', 'hcl': 'hcl',
-      'lua': 'lua', 'vim': 'vim', 'el': 'lisp', 'clj': 'clojure',
-      'ex': 'elixir', 'exs': 'elixir', 'erl': 'erlang',
-      'hs': 'haskell', 'ml': 'ocaml', 'nim': 'nim', 'zig': 'zig',
-    };
-    
-    // Helper to extract lang from file path
-    function langFromFile(file) {
-      if (!file) return null;
-      const ext = file.split('.').pop()?.toLowerCase();
-      if (ext && extMap[ext]) return extMap[ext];
-      const basename = file.split('/').pop()?.toLowerCase();
-      if (basename === 'dockerfile') return 'dockerfile';
-      if (basename === 'makefile' || basename === 'gnumakefile') return 'makefile';
-      if (basename?.endsWith('rc') || basename?.startsWith('.')) return 'bash';
-      return null;
-    }
-    
     // Pattern 1: cat/head/tail/less + file
     const catMatch = innerCmd.match(/\b(?:cat|head|tail|less|more|bat)\s+['"]*([^\s'"]+)/);
     if (catMatch) {
-      const lang = langFromFile(catMatch[1]);
+      const lang = detectLangFromPath(catMatch[1]);
       if (lang) return lang;
     }
     
     // Pattern 2: sed -n 'range' file (file is last argument)
     const sedMatch = innerCmd.match(/\bsed\s+(?:-[^\s]+\s+)*'[^']+'\s+([^\s'"]+)\s*$/);
     if (sedMatch) {
-      const lang = langFromFile(sedMatch[1]);
+      const lang = detectLangFromPath(sedMatch[1]);
       if (lang) return lang;
     }
     
     // Pattern 3: awk/grep with file argument
     const awkGrepMatch = innerCmd.match(/\b(?:awk|grep)\s+(?:-[^\s]+\s+)*(?:'[^']+'|"[^"]+")\s+([^\s'"]+)\s*$/);
     if (awkGrepMatch) {
-      const lang = langFromFile(awkGrepMatch[1]);
+      const lang = detectLangFromPath(awkGrepMatch[1]);
       if (lang) return lang;
     }
 
@@ -829,7 +839,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (unq.startsWith('-')) continue;
         const m = unq.match(/([^\s'"]+\.\w+)$/);
         if (m) {
-          const lang = langFromFile(m[1]);
+          const lang = detectLangFromPath(m[1]);
           if (lang) best = lang;
         }
       }
@@ -840,7 +850,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Pattern 4: Any file path with known extension at end of command
     const anyFileMatch = innerCmd.match(/([^\s'"]+\.\w+)\s*$/);
     if (anyFileMatch) {
-      const lang = langFromFile(anyFileMatch[1]);
+      const lang = detectLangFromPath(anyFileMatch[1]);
       if (lang) return lang;
     }
     
@@ -2779,6 +2789,16 @@ document.addEventListener('DOMContentLoaded', () => {
         getTarget().appendChild(row);
         return;
       }
+      if (entry.role === 'view') {
+        renderViewCard({
+          id: entry.id || entry.item_id || '',
+          title: entry.title || '',
+          path: entry.path || '',
+          content: entry.content ?? entry.output ?? '',
+          view_range: entry.view_range ?? entry.viewRange ?? null,
+        }, getTarget());
+        return;
+      }
       if (entry.role === 'command') {
         const row = document.createElement('div');
         row.className = 'timeline-row command-result';
@@ -3226,6 +3246,7 @@ document.addEventListener('DOMContentLoaded', () => {
           body.appendChild(footer);
         }
         row.appendChild(body);
+        makeCollapsible(row, `mcp:${entry.id || `${entry.server || ''}:${entry.tool || ''}`}`, false);
         getTarget().appendChild(row);
         return;
       }
@@ -3245,6 +3266,7 @@ document.addEventListener('DOMContentLoaded', () => {
           body.appendChild(queryPre);
         }
         row.appendChild(body);
+        makeCollapsible(row, `web:${entry.call_id || entry.id || entry.query || 'search'}`, false);
         getTarget().appendChild(row);
         return;
       }
@@ -4156,6 +4178,85 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function renderViewCard(evt, parentEl = null) {
+    const content = evt.content ?? evt.output ?? '';
+    const path = typeof evt.path === 'string' ? evt.path : '';
+    const viewRange = Array.isArray(evt.view_range) ? evt.view_range : (Array.isArray(evt.viewRange) ? evt.viewRange : null);
+    const title = evt.title || buildViewCardTitle(path, viewRange, 'view');
+    const truncateLines = conversationSettings?.commandOutputLines || 20;
+
+    let displayContent = typeof content === 'string' ? content : String(content ?? '');
+    let truncated = false;
+    if (displayContent) {
+      const lines = displayContent.split('\n');
+      if (lines.length > truncateLines) {
+        displayContent = lines.slice(0, truncateLines).join('\n');
+        truncated = true;
+      }
+    }
+
+    clearPlaceholder();
+    const row = document.createElement('div');
+    row.className = 'timeline-row command-result view-card';
+
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const ribbon = document.createElement('div');
+    ribbon.className = 'command-ribbon';
+    ribbon.textContent = title;
+    body.appendChild(ribbon);
+
+    if (path) {
+      const pathLine = document.createElement('div');
+      pathLine.className = 'view-card-path';
+      pathLine.textContent = toRelativePath(path);
+      pathLine.title = path;
+      pathLine.style.cursor = 'pointer';
+      pathLine.dataset.hasClickHandler = 'true';
+      pathLine.addEventListener('click', (e) => {
+        e.stopPropagation();
+        postTe2OpenRequest({ path, line: 1, column: 1 });
+      });
+      body.appendChild(pathLine);
+    }
+
+    const outputPre = document.createElement('pre');
+    outputPre.className = 'command-output';
+    const lang = detectLangFromPath(path);
+    if (lang && typeof hljs !== 'undefined') {
+      outputPre.innerHTML = highlightCodeAlways(displayContent, lang);
+      if (truncated) {
+        const truncNote = document.createElement('span');
+        truncNote.className = 'truncation-note';
+        truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${String(content).split('\n').length} lines)`;
+        outputPre.appendChild(truncNote);
+      }
+    } else {
+      outputPre.textContent = displayContent;
+      if (truncated) {
+        outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${String(content).split('\n').length} lines)`;
+      }
+    }
+    body.appendChild(outputPre);
+
+    row.appendChild(body);
+    makeCollapsible(row, `view:${evt.id || path || title}`, false);
+
+    const targetEl = parentEl || getLiveEventParent(evt);
+    if (targetEl) {
+      targetEl.appendChild(row);
+    } else if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
+      timelineEl.insertBefore(row, bottomSpacerEl);
+    } else {
+      timelineEl.appendChild(row);
+    }
+
+    lastEventType = 'view';
+    maybeAutoScroll();
+    setStatusDot('success');
+  }
+
   const diffRendering = bindDiffRendering({
     getDiffRow,
     createRow,
@@ -4506,6 +4607,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderApproval,
     handoffApproval,
     renderCommandResult,
+    renderViewCard,
     renderToolBegin,
     renderToolDelta,
     renderToolEnd,

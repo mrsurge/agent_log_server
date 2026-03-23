@@ -14,7 +14,9 @@ function isStickySourceRow(row) {
   if (!row?.classList) return false;
   return row.classList.contains('subagent-card')
     || row.classList.contains('diff')
-    || row.classList.contains('message-card');
+    || row.classList.contains('message-card')
+    || row.classList.contains('mcp-tool-card')
+    || row.classList.contains('web-search-card');
 }
 
 function getStickyType(row) {
@@ -33,6 +35,9 @@ function getHeaderForRow(row) {
   if (row.classList.contains('diff')) {
     return row.querySelector(':scope > .body > .diff-path-label, :scope > .body > .diff-path');
   }
+  if (row.classList.contains('mcp-tool-card') || row.classList.contains('web-search-card')) {
+    return row.querySelector(':scope > .body > .command-ribbon');
+  }
   return null;
 }
 
@@ -45,6 +50,9 @@ function getStickyHostClasses(row) {
   if (row.classList.contains('expanded')) classes.push('expanded');
   if (row.classList.contains('diff')) classes.push('diff');
   if (row.classList.contains('declined')) classes.push('declined');
+  if (row.classList.contains('command-result')) classes.push('command-result');
+  if (row.classList.contains('mcp-tool-card')) classes.push('mcp-tool-card');
+  if (row.classList.contains('web-search-card')) classes.push('web-search-card');
   return classes;
 }
 

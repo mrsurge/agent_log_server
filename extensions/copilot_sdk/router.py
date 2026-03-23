@@ -9,6 +9,7 @@ The router speaks Copilot SDK on one side (SessionEvent from the vendored copilo
 and our internal format on the other (to _broadcast_appserver_ui).
 """
 
+import json
 from typing import Any, Dict, Optional, Callable, Awaitable
 from datetime import datetime, timezone
 
@@ -44,6 +45,13 @@ _FILE_CHANGE_TOOLS = {
     "edit", "create", "write", "write_file", "apply_patch", "delete",
     "move", "rename", "insert", "replace", "patch",
 }
+
+_KNOWN_MCP_PREFIXES = (
+    "agent-pty-blocks",
+    "te2-mcp",
+    "github-mcp-server",
+    "simple-memory",
+)
 
 
 class CopilotEventRouter:
@@ -598,6 +606,132 @@ class CopilotEventRouter:
     # Tools that are "read-only explorers" — sanitized card + ribbon
     _EXPLORE_TOOLS = {"view", "glob", "grep"}
 
+    @staticmethod
+    def _coerce_tool_arguments(raw_args: Any) -> Dict[str, Any]:
+        if isinstance(raw_args, dict):
+            return raw_args
+        if isinstance(raw_args, str):
+            text = raw_args.strip()
+            if text.startswith("{") and text.endswith("}"):
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    return parsed
+        return {}
+
+    @staticmethod
+    def _split_known_flattened_mcp_name(tool_name: str) -> tuple[Optional[str], Optional[str]]:
+        for prefix in _KNOWN_MCP_PREFIXES:
+            needle = f"{prefix}-"
+            if tool_name.startswith(needle):
+                return prefix, tool_name[len(needle):]
+        return None, None
+
+    def _build_tool_render_state(self, data: Any, tool_name: str, raw_args: Any) -> Dict[str, Any]:
+        args = self._coerce_tool_arguments(raw_args)
+        file_path = ""
+        if isinstance(args, dict):
+            file_path = args.get("path") or args.get("file_path") or ""
+
+        mcp_server_name = getattr(data, "mcp_server_name", None) or None
+        mcp_tool_name = getattr(data, "mcp_tool_name", None) or None
+        if not mcp_server_name and not mcp_tool_name:
+            mcp_server_name, mcp_tool_name = self._split_known_flattened_mcp_name(tool_name)
+
+        if mcp_server_name or mcp_tool_name:
+            display_tool = mcp_tool_name or tool_name or "tool"
+            display_server = mcp_server_name or ""
+            display_args = dict(args) if isinstance(args, dict) else {}
+
+            if display_server == "agent-pty-blocks" and display_tool in {"agent_log_post", "agent_log_post_await"}:
+                message_value = display_args.get("message")
+                if isinstance(message_value, str) and "\n" not in message_value:
+                    message_value = f"{message_value}\n"
+                shaped_args: Dict[str, Any] = {}
+                if display_args.get("who") is not None:
+                    shaped_args["Who"] = display_args.get("who")
+                if message_value is not None:
+                    shaped_args["Message"] = message_value
+                return {
+                    "kind": "mcp",
+                    "tool_name": tool_name,
+                    "title": "Agent-log write",
+                    "activity": "writing agent log",
+                    "server": "",
+                    "tool": "Agent-log write",
+                    "arguments": shaped_args,
+                    "path": file_path,
+                }
+
+            return {
+                "kind": "mcp",
+                "tool_name": tool_name,
+                "title": display_tool,
+                "activity": f"calling {display_tool}",
+                "server": display_server,
+                "tool": display_tool,
+                "arguments": display_args,
+                "path": file_path,
+            }
+
+        if tool_name == "view":
+            card_label, ribbon_label, file_path = self._sanitize_tool_label(tool_name, raw_args)
+            return {
+                "kind": "view",
+                "tool_name": tool_name,
+                "title": card_label,
+                "activity": ribbon_label,
+                "path": file_path,
+                "view_range": args.get("view_range"),
+                "arguments": args,
+            }
+
+        if tool_name == "bash":
+            card_label, ribbon_label, file_path = self._sanitize_tool_label(tool_name, raw_args)
+            return {
+                "kind": "shell",
+                "tool_name": tool_name,
+                "title": card_label,
+                "activity": ribbon_label,
+                "path": file_path,
+                "arguments": args,
+            }
+
+        display_args: Dict[str, Any]
+        if tool_name in {"glob", "grep"}:
+            display_args = {}
+            if args.get("pattern"):
+                display_args["pattern"] = args.get("pattern")
+            if args.get("path"):
+                display_args["path"] = args.get("path")
+        elif tool_name in {"edit", "create", "write", "write_file"}:
+            display_args = {}
+            if args.get("path"):
+                display_args["path"] = args.get("path")
+        elif tool_name == "apply_patch":
+            display_args = {}
+            if file_path:
+                display_args["path"] = file_path
+        elif args:
+            display_args = args
+        elif isinstance(raw_args, str) and raw_args.strip():
+            display_args = {"input": raw_args}
+        else:
+            display_args = {}
+
+        return {
+            "kind": "tool",
+            "tool_name": tool_name,
+            "title": tool_name,
+            "activity": f"running {tool_name}",
+            "server": "",
+            "tool": tool_name,
+            "arguments": display_args,
+            "path": file_path,
+        }
+
     def _sanitize_tool_label(self, tool_name: str, raw_args: Any) -> tuple:
         """
         Sanitize SDK tool call into (card_label, ribbon_label, path).
@@ -707,35 +841,68 @@ class CopilotEventRouter:
             return
 
         raw_args = data.arguments
-        card_label, ribbon_label, file_path = self._sanitize_tool_label(tool_name, raw_args)
+        render_state = self._build_tool_render_state(data, tool_name, raw_args)
 
         self.tool_calls[tool_call_id] = {
             "id": tool_call_id,
-            "title": card_label,
-            "tool_name": tool_name,
+            "title": render_state.get("title", tool_name),
+            "tool_name": render_state.get("tool_name", tool_name),
             "arguments": raw_args,
             "turn_id": self.current_turn_id,
             "output": "",
             "subagent_id": subagent_id,
+            "render_kind": render_state.get("kind", "tool"),
+            "render_tool": render_state.get("tool", tool_name),
+            "render_server": render_state.get("server", ""),
+            "render_arguments": render_state.get("arguments", {}),
+            "path": render_state.get("path") or "",
+            "view_range": render_state.get("view_range"),
         }
 
         # Mark block type change so next message/reasoning delta gets a new ID
         self._last_block_type = "tool"
 
-        shell_begin_evt = {
-            "type": "shell_begin",
+        if render_state.get("kind") == "view":
+            await self._emit({
+                "type": "activity",
+                "conversation_id": self.conversation_id,
+                "label": render_state.get("activity", "reading"),
+                "active": True,
+                "turn_id": self.current_turn_id,
+                **({"subagent_id": subagent_id} if subagent_id else {}),
+            })
+            return
+
+        if render_state.get("kind") == "shell":
+            shell_begin_evt = {
+                "type": "shell_begin",
+                "conversation_id": self.conversation_id,
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "command": render_state.get("title", tool_name),
+                "activity": render_state.get("activity", "executing"),
+                "cwd": "",
+            }
+            if render_state.get("path"):
+                shell_begin_evt["path"] = render_state.get("path")
+            if subagent_id:
+                shell_begin_evt["subagent_id"] = subagent_id
+            await self._emit(shell_begin_evt)
+            return
+
+        tool_begin_evt = {
+            "type": "tool_begin",
             "conversation_id": self.conversation_id,
             "id": tool_call_id,
             "turn_id": self.current_turn_id,
-            "command": card_label,
-            "activity": ribbon_label,
-            "cwd": "",
+            "tool": render_state.get("tool", tool_name),
+            "arguments": render_state.get("arguments", {}),
         }
-        if file_path:
-            shell_begin_evt["path"] = file_path
+        if render_state.get("server"):
+            tool_begin_evt["server"] = render_state.get("server")
         if subagent_id:
-            shell_begin_evt["subagent_id"] = subagent_id
-        await self._emit(shell_begin_evt)
+            tool_begin_evt["subagent_id"] = subagent_id
+        await self._emit(tool_begin_evt)
 
     async def _handle_tool_complete(self, event: SessionEvent) -> None:
         data = event.data
@@ -756,11 +923,17 @@ class CopilotEventRouter:
             content = data.content or data.output or ""
         tool_call = self.tool_calls.get(tool_call_id, {})
         tool_name = (tool_call.get("tool_name") or "").lower()
+        render_kind = tool_call.get("render_kind") or "tool"
+        render_tool = tool_call.get("render_tool") or tool_name or "tool"
+        render_server = tool_call.get("render_server") or ""
+        render_arguments = tool_call.get("render_arguments") or {}
         file_path = data.path or ""
         if not file_path:
             args = tool_call.get("arguments") or {}
             if isinstance(args, dict):
                 file_path = args.get("path") or args.get("file_path") or ""
+        if not file_path:
+            file_path = tool_call.get("path") or ""
         # apply_patch: extract path from "Modified/Added N file(s): /path" content
         if not file_path and content:
             import re
@@ -774,51 +947,123 @@ class CopilotEventRouter:
         has_error = bool(getattr(data, "error", None) or getattr(data, "error_reason", None))
         exit_code = 1 if has_error else 0
 
-        # For edit/create/apply_patch tools: suppress verbose output, add status emoji
-        cmd_label = tool_call.get("title", "")
-        stdout = content
-        if tool_name in ("edit", "create", "apply_patch"):
-            status_emoji = "🔴" if has_error else "🟢"
-            # For apply_patch, extract just the file path from content
-            if tool_name == "apply_patch" and not has_error:
-                import re
-                m = re.search(r'(?:Modified|Added|Deleted) \d+ file\(s\): (.+)', content)
-                short = m.group(1).split('/')[-1] if m else content[:60]
-                cmd_label = f"apply_patch {short} {status_emoji}"
-            else:
-                cmd_label = f"{cmd_label} {status_emoji}"
-            # Only show error output, not the verbose echo
-            stdout = content if has_error else ""
+        if render_kind == "view":
+            view_content = content or tool_call.get("output") or ""
+            view_evt = {
+                "type": "view",
+                "conversation_id": self.conversation_id,
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "title": tool_call.get("title", "view"),
+                "path": file_path,
+                "content": view_content,
+            }
+            if tool_call.get("view_range") is not None:
+                view_evt["view_range"] = tool_call.get("view_range")
+            if subagent_id:
+                view_evt["subagent_id"] = subagent_id
+            await self._emit(view_evt)
 
-        shell_end_evt = {
-            "type": "shell_end",
-            "conversation_id": self.conversation_id,
-            "id": tool_call_id,
-            "turn_id": self.current_turn_id,
-            "exitCode": exit_code,
-            "stdout": stdout,
-            "stderr": "",
-            "command": cmd_label,
-        }
-        if file_path:
-            shell_end_evt["path"] = file_path
-        if subagent_id:
-            shell_end_evt["subagent_id"] = subagent_id
-        await self._emit(shell_end_evt)
+            record_entry = {
+                "role": "view",
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "title": tool_call.get("title", "view"),
+                "path": file_path,
+                "content": view_content,
+                "timestamp": utc_ts(),
+                "subagent_id": subagent_id,
+            }
+            if tool_call.get("view_range") is not None:
+                record_entry["view_range"] = tool_call.get("view_range")
+            await self._record(record_entry)
+        elif render_kind == "shell":
+            # For edit/create/apply_patch tools: suppress verbose output, add status emoji
+            cmd_label = tool_call.get("title", "")
+            stdout = content
+            if tool_name in ("edit", "create", "apply_patch"):
+                status_emoji = "🔴" if has_error else "🟢"
+                # For apply_patch, extract just the file path from content
+                if tool_name == "apply_patch" and not has_error:
+                    import re
+                    m = re.search(r'(?:Modified|Added|Deleted) \d+ file\(s\): (.+)', content)
+                    short = m.group(1).split('/')[-1] if m else content[:60]
+                    cmd_label = f"apply_patch {short} {status_emoji}"
+                else:
+                    cmd_label = f"{cmd_label} {status_emoji}"
+                # Only show error output, not the verbose echo
+                stdout = content if has_error else ""
 
-        record_entry = {
-            "role": "command",
-            "id": tool_call_id,
-            "turn_id": self.current_turn_id,
-            "command": cmd_label,
-            "output": stdout,
-            "status": "completed" if not has_error else "error",
-            "timestamp": utc_ts(),
-            "subagent_id": subagent_id,
-        }
-        if file_path:
-            record_entry["path"] = file_path
-        await self._record(record_entry)
+            shell_end_evt = {
+                "type": "shell_end",
+                "conversation_id": self.conversation_id,
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "exitCode": exit_code,
+                "stdout": stdout,
+                "stderr": "",
+                "command": cmd_label,
+            }
+            if file_path:
+                shell_end_evt["path"] = file_path
+            if subagent_id:
+                shell_end_evt["subagent_id"] = subagent_id
+            await self._emit(shell_end_evt)
+
+            record_entry = {
+                "role": "command",
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "command": cmd_label,
+                "output": stdout,
+                "status": "completed" if not has_error else "error",
+                "timestamp": utc_ts(),
+                "subagent_id": subagent_id,
+            }
+            if file_path:
+                record_entry["path"] = file_path
+            await self._record(record_entry)
+        else:
+            result_payload: Any = None
+            if content:
+                result_payload = content
+            elif getattr(data, "error_reason", None):
+                result_payload = getattr(data, "error_reason")
+            elif getattr(data, "error", None):
+                result_payload = getattr(data, "error")
+
+            tool_end_evt = {
+                "type": "tool_end",
+                "conversation_id": self.conversation_id,
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "tool": render_tool,
+                "arguments": render_arguments,
+                "result": result_payload,
+                "is_error": has_error,
+            }
+            if render_server:
+                tool_end_evt["server"] = render_server
+            if subagent_id:
+                tool_end_evt["subagent_id"] = subagent_id
+            await self._emit(tool_end_evt)
+
+            record_entry = {
+                "role": "mcp_tool",
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "tool": render_tool,
+                "arguments": render_arguments,
+                "result": result_payload,
+                "is_error": has_error,
+                "timestamp": utc_ts(),
+                "subagent_id": subagent_id,
+            }
+            if render_server:
+                record_entry["server"] = render_server
+            if file_path:
+                record_entry["path"] = file_path
+            await self._record(record_entry)
 
         # Emit diff for file-mutating tools only (not view/grep/read)
         diff_text = detailed
@@ -878,13 +1123,25 @@ class CopilotEventRouter:
             if tool_call:
                 tool_call["output"] += content
 
+            render_kind = tool_call.get("render_kind") if tool_call else "tool"
+            if render_kind == "view":
+                return
+
             delta_evt = {
-                "type": "shell_delta",
+                "type": "shell_delta" if render_kind == "shell" else "tool_delta",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
                 "turn_id": self.current_turn_id,
                 "delta": content,
             }
+            if render_kind != "shell":
+                delta_evt["tool"] = (
+                    (tool_call.get("render_tool") or tool_call.get("tool_name"))
+                    if tool_call
+                    else "tool"
+                ) or "tool"
+                if tool_call and tool_call.get("render_server"):
+                    delta_evt["server"] = tool_call.get("render_server")
             subagent_id = tool_call.get("subagent_id") if tool_call else None
             if subagent_id:
                 delta_evt["subagent_id"] = subagent_id

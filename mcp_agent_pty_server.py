@@ -2085,6 +2085,21 @@ def _resolve_section(nodes: list[SectionNode], section_id: str) -> SectionNode |
 
 mcp = FastMCP(name="agent-pty-blocks", instructions="Agent PTY + block store tools (per-conversation).")
 
+
+# Modern CLI harnesses expose native PTY/terminal controls, so keep the legacy
+# PTY/block implementation available in-code but unregistered by default.
+_REGISTER_LEGACY_TERMINAL_MCP_TOOLS = False
+
+
+def _legacy_terminal_mcp_tool(*, name: str, description: str):
+    def decorator(fn):
+        if _REGISTER_LEGACY_TERMINAL_MCP_TOOLS:
+            return mcp.tool(name=name, description=description)(fn)
+        return fn
+
+    return decorator
+
+
 # Diagnostic markers for stdio MCP process lifetime
 print(f"MCP SERVER STARTED pid={os.getpid()}", file=sys.stderr)
 
@@ -2107,7 +2122,7 @@ async def ping() -> Dict[str, Any]:
     return {"ok": True, "pid": os.getpid()}
 
 
-@mcp.tool(name="pty_exec", description="Execute a command (block mode) - waits for completion with BEGIN/END markers.")
+@_legacy_terminal_mcp_tool(name="pty_exec", description="Execute a command (block mode) - waits for completion with BEGIN/END markers.")
 async def pty_exec(conversation_id: str, cmd: str, cwd: Optional[str] = None) -> Dict[str, Any]:
     state = _state(conversation_id)
     if state.mode == "interactive":
@@ -2117,7 +2132,7 @@ async def pty_exec(conversation_id: str, cmd: str, cwd: Optional[str] = None) ->
     return await state.exec(cmd=cmd, cwd=cwd)
 
 
-@mcp.tool(
+@_legacy_terminal_mcp_tool(
     name="pty_exec_interactive",
     description="Start an interactive session - command runs without wrappers, use send+wait_for to interact."
 )
@@ -2136,13 +2151,13 @@ async def pty_exec_interactive(conversation_id: str, cmd: str, cwd: Optional[str
     return await state.exec_interactive(cmd=cmd, cwd=cwd)
 
 
-@mcp.tool(name="pty_end_session", description="End an interactive session.")
+@_legacy_terminal_mcp_tool(name="pty_end_session", description="End an interactive session.")
 async def pty_end_session(conversation_id: str, session_id: Optional[str] = None) -> Dict[str, Any]:
     state = _state(conversation_id)
     return await state.end_session(session_id)
 
 
-@mcp.tool(name="pty_send", description="Send raw bytes to PTY stdin (text, control chars, escape sequences).")
+@_legacy_terminal_mcp_tool(name="pty_send", description="Send raw bytes to PTY stdin (text, control chars, escape sequences).")
 async def pty_send(conversation_id: str, data: str) -> Dict[str, Any]:
     """
     Send raw data to the PTY.
@@ -2157,22 +2172,22 @@ async def pty_send(conversation_id: str, data: str) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty_ctrl_c", description="Send Ctrl+C (SIGINT) to PTY.")
+@_legacy_terminal_mcp_tool(name="pty_ctrl_c", description="Send Ctrl+C (SIGINT) to PTY.")
 async def pty_ctrl_c(conversation_id: str) -> Dict[str, Any]:
     return await pty_send(conversation_id, "\x03")
 
 
-@mcp.tool(name="pty_ctrl_d", description="Send Ctrl+D (EOF) to PTY.")
+@_legacy_terminal_mcp_tool(name="pty_ctrl_d", description="Send Ctrl+D (EOF) to PTY.")
 async def pty_ctrl_d(conversation_id: str) -> Dict[str, Any]:
     return await pty_send(conversation_id, "\x04")
 
 
-@mcp.tool(name="pty_enter", description="Send Enter/newline to PTY.")
+@_legacy_terminal_mcp_tool(name="pty_enter", description="Send Enter/newline to PTY.")
 async def pty_enter(conversation_id: str) -> Dict[str, Any]:
     return await pty_send(conversation_id, "\r")
 
 
-@mcp.tool(
+@_legacy_terminal_mcp_tool(
     name="pty_wait_for",
     description="Wait for a condition in PTY output. Returns when match found or timeout."
 )
@@ -2215,7 +2230,7 @@ async def pty_wait_for(
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty_wait_prompt", description="Wait for shell prompt sentinel and finalize interactive session.")
+@_legacy_terminal_mcp_tool(name="pty_wait_prompt", description="Wait for shell prompt sentinel and finalize interactive session.")
 async def pty_wait_prompt(
     conversation_id: str,
     from_cursor: int = 0,
@@ -2246,7 +2261,7 @@ async def pty_wait_prompt(
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty_expect_send", description="Atomic wait-for-match then send input (under lock).")
+@_legacy_terminal_mcp_tool(name="pty_expect_send", description="Atomic wait-for-match then send input (under lock).")
 async def pty_expect_send(
     conversation_id: str,
     expect: str,
@@ -2294,13 +2309,13 @@ async def pty_expect_send(
         return {"ok": False, "error": str(e), "sent": False}
 
 
-@mcp.tool(name="pty_status", description="Get PTY status: mode, active block/session, cursor position.")
+@_legacy_terminal_mcp_tool(name="pty_status", description="Get PTY status: mode, active block/session, cursor position.")
 async def pty_status(conversation_id: str) -> Dict[str, Any]:
     state = _state(conversation_id)
     return state.get_status()
 
 
-@mcp.tool(name="pty_read_spool", description="Read raw output from the conversation spool at a cursor position.")
+@_legacy_terminal_mcp_tool(name="pty_read_spool", description="Read raw output from the conversation spool at a cursor position.")
 async def pty_read_spool(
     conversation_id: str,
     from_cursor: int = 0,
@@ -2318,7 +2333,7 @@ async def pty_read_spool(
 
 # === Sprint 3: Screen model MCP tools ===
 
-@mcp.tool(name="pty_read_raw", description="Read lossless raw PTY output bytes at an offset (base64 encoded).")
+@_legacy_terminal_mcp_tool(name="pty_read_raw", description="Read lossless raw PTY output bytes at an offset (base64 encoded).")
 async def pty_read_raw(
     conversation_id: str,
     from_offset: int = 0,
@@ -2357,7 +2372,7 @@ async def pty_read_raw(
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty_read_screen", description="Get the current terminal screen state (what the user sees).")
+@_legacy_terminal_mcp_tool(name="pty_read_screen", description="Get the current terminal screen state (what the user sees).")
 async def pty_read_screen(conversation_id: str) -> Dict[str, Any]:
     """
     Get the current rendered screen state.
@@ -2383,7 +2398,7 @@ async def pty_read_screen(conversation_id: str) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty_read_scrollback", description="Read rendered scrollback lines from the terminal history buffer.")
+@_legacy_terminal_mcp_tool(name="pty_read_scrollback", description="Read rendered scrollback lines from the terminal history buffer.")
 async def pty_read_scrollback(conversation_id: str, cursor: int = 0, limit: int = 200) -> Dict[str, Any]:
     """
     Read scrollback (lines that have scrolled off the top of the screen).
@@ -2415,7 +2430,7 @@ async def pty_read_scrollback(conversation_id: str, cursor: int = 0, limit: int 
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty_resize", description="Resize the PTY and screen model for this conversation.")
+@_legacy_terminal_mcp_tool(name="pty_resize", description="Resize the PTY and screen model for this conversation.")
 async def pty_resize(conversation_id: str, cols: int, rows: int) -> Dict[str, Any]:
     """
     Resize the underlying PTY winsize and rebuild the pyte screen model.
@@ -2489,7 +2504,7 @@ async def pty_resize(conversation_id: str, cols: int, rows: int) -> Dict[str, An
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty_get_size", description="Get the current screen model size for this conversation.")
+@_legacy_terminal_mcp_tool(name="pty_get_size", description="Get the current screen model size for this conversation.")
 async def pty_get_size(conversation_id: str) -> Dict[str, Any]:
     state = _state(conversation_id)
     try:
@@ -2499,7 +2514,7 @@ async def pty_get_size(conversation_id: str) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty_close", description="Terminate the conversation-owned agent PTY shell (dtach).")
+@_legacy_terminal_mcp_tool(name="pty_close", description="Terminate the conversation-owned agent PTY shell (dtach).")
 async def pty_close(conversation_id: str, force: bool = True) -> Dict[str, Any]:
     """
     Terminate the conversation-owned agent PTY shell.
@@ -2512,7 +2527,7 @@ async def pty_close(conversation_id: str, force: bool = True) -> Dict[str, Any]:
     return await state.close_shell(force=force)
 
 
-@mcp.tool(name="pty_read_screen_deltas", description="Read screen delta events from a byte cursor position.")
+@_legacy_terminal_mcp_tool(name="pty_read_screen_deltas", description="Read screen delta events from a byte cursor position.")
 async def pty_read_screen_deltas(
     conversation_id: str,
     cursor: int = 0,
@@ -2581,7 +2596,7 @@ async def pty_read_screen_deltas(
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="pty_screen_status", description="Get screen model status (dimensions, cursor, title, alt-screen).")
+@_legacy_terminal_mcp_tool(name="pty_screen_status", description="Get screen model status (dimensions, cursor, title, alt-screen).")
 async def pty_screen_status(conversation_id: str) -> Dict[str, Any]:
     """
     Get screen model metadata without full row content.
@@ -2613,7 +2628,7 @@ async def pty_screen_status(conversation_id: str) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-@mcp.tool(name="blocks_since", description="List blocks since a byte cursor in blocks.jsonl (per conversation).")
+@_legacy_terminal_mcp_tool(name="blocks_since", description="List blocks since a byte cursor in blocks.jsonl (per conversation).")
 async def blocks_since(conversation_id: str, cursor: int = 0, limit: int = 50) -> Dict[str, Any]:
     path = _blocks_index_path(conversation_id)
     if not path.exists():
@@ -2637,7 +2652,7 @@ async def blocks_since(conversation_id: str, cursor: int = 0, limit: int = 50) -
     return {"ok": True, "cursor": cursor, "next_cursor": next_cursor, "items": items}
 
 
-@mcp.tool(name="blocks_read", description="Read raw output bytes from a block output file.")
+@_legacy_terminal_mcp_tool(name="blocks_read", description="Read raw output bytes from a block output file.")
 async def blocks_read(conversation_id: str, block_id: str, offset: int = 0, max_bytes: int = 65536) -> Dict[str, Any]:
     max_bytes = max(1, min(int(max_bytes), 512 * 1024))
     offset = max(0, int(offset))
@@ -2658,7 +2673,7 @@ async def blocks_read(conversation_id: str, block_id: str, offset: int = 0, max_
     return {"ok": True, "offset": offset, "next_offset": offset + len(chunk), "data": chunk.decode("utf-8", errors="replace")}
 
 
-@mcp.tool(name="blocks_get", description="Get metadata for a block id (from blocks.jsonl).")
+@_legacy_terminal_mcp_tool(name="blocks_get", description="Get metadata for a block id (from blocks.jsonl).")
 async def blocks_get(conversation_id: str, block_id: str) -> Dict[str, Any]:
     path = _blocks_index_path(conversation_id)
     if not path.exists():
@@ -2678,7 +2693,7 @@ async def blocks_get(conversation_id: str, block_id: str) -> Dict[str, Any]:
     return {"ok": False, "error": "block not found"}
 
 
-@mcp.tool(name="blocks_search", description="Search within a block's output for a substring; returns matching line snippets.")
+@_legacy_terminal_mcp_tool(name="blocks_search", description="Search within a block's output for a substring; returns matching line snippets.")
 async def blocks_search(conversation_id: str, block_id: str, query: str, limit: int = 50) -> Dict[str, Any]:
     meta = await blocks_get(conversation_id, block_id)
     if not meta.get("ok") or not meta.get("block"):
