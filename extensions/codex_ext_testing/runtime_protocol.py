@@ -174,7 +174,7 @@ def _get_runtime_lock() -> asyncio.Lock:
 
 
 def _cache_root() -> Path:
-    return Path.home() / ".cache" / "agent_log_server" / "codex_app_server_schema"
+    return Path.home() / ".cache" / "app_server" / "codex_app_server_schema"
 
 
 def _schema_bundle_path(cache_dir: Path) -> Path:

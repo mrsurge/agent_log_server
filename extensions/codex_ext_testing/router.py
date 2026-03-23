@@ -685,6 +685,10 @@ def _result_error_status(status: str, exit_code: Optional[int], error: Any = Non
 _THOUGHT_PATTERN = re.compile(r"\*\*([^*]+)\*\*")
 
 
+def _has_visible_reasoning_text(text: str) -> bool:
+    return isinstance(text, str) and bool(text.strip())
+
+
 def _extract_and_scrub_thoughts_stream(delta: str, state: Dict[str, Any]) -> Tuple[str, List[str]]:
     if not isinstance(delta, str) or not delta:
         return delta, []
@@ -722,6 +726,21 @@ def _extract_and_scrub_thoughts(text: str) -> Tuple[str, List[str]]:
     thoughts = _THOUGHT_PATTERN.findall(text)
     scrubbed = _THOUGHT_PATTERN.sub("", text)
     return scrubbed, thoughts
+
+
+def _consume_live_reasoning_delta(delta: str, state: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(delta, str) or not delta:
+        return None
+    if state.get("reasoning_live_visible"):
+        return delta
+    if _has_visible_reasoning_text(delta):
+        pending_prefix = state.get("reasoning_pending_prefix", "")
+        state["reasoning_pending_prefix"] = ""
+        state["reasoning_live_visible"] = True
+        return f"{pending_prefix}{delta}"
+    pending_prefix = state.get("reasoning_pending_prefix", "")
+    state["reasoning_pending_prefix"] = f"{pending_prefix}{delta}"
+    return None
 
 
 class CodexEventRouter:
@@ -872,6 +891,8 @@ class CodexEventRouter:
         turn_state["reasoning_buffer"] = ""
         turn_state["reasoning_id"] = None
         turn_state["thought_buffer"] = ""
+        turn_state["reasoning_pending_prefix"] = ""
+        turn_state["reasoning_live_visible"] = False
 
     def _plan_update_result(
         self,
@@ -1550,6 +1571,8 @@ class CodexEventRouter:
                     turn_state["reasoning_started"] = False
                     turn_state["reasoning_buffer"] = ""
                     turn_state["thought_buffer"] = ""
+                    turn_state["reasoning_pending_prefix"] = ""
+                    turn_state["reasoning_live_visible"] = False
                 item_state.update({
                     "item_type": item_type,
                 })
@@ -1693,11 +1716,12 @@ class CodexEventRouter:
                     turn_state["reasoning_buffer"] = f"{turn_state.get('reasoning_buffer', '')}{delta}"
                     scrubbed_delta, thoughts = _extract_and_scrub_thoughts_stream(delta, turn_state)
                     events: List[Dict[str, Any]] = [{"type": "thought", "text": thought} for thought in thoughts]
-                    if scrubbed_delta:
-                        events.append({"type": "reasoning_delta", "id": item_id, "delta": scrubbed_delta})
+                    live_delta = _consume_live_reasoning_delta(scrubbed_delta, turn_state)
+                    if live_delta:
+                        events.append({"type": "reasoning_delta", "id": item_id, "delta": live_delta})
                     if thoughts:
                         events.append({"type": "activity", "label": thoughts[-1], "active": True})
-                    elif scrubbed_delta:
+                    elif live_delta:
                         events.append({"type": "activity", "label": "reasoning", "active": True})
                     return self._decorate_routed_result({
                         "handled": True,
@@ -1717,9 +1741,10 @@ class CodexEventRouter:
                     return {"handled": True, "events": [], "transcript_entries": []}
                 turn_state, item_state, item_id = prepared
                 turn_state["reasoning_buffer"] = f"{turn_state.get('reasoning_buffer', '')}\n"
+                live_delta = _consume_live_reasoning_delta("\n", turn_state)
                 return self._decorate_routed_result({
                     "handled": True,
-                    "events": [{"type": "reasoning_delta", "id": item_id, "delta": "\n"}],
+                    "events": [{"type": "reasoning_delta", "id": item_id, "delta": live_delta}] if live_delta else [],
                     "transcript_entries": [],
                 }, thread_id=thread_id, item_state=item_state)
 
@@ -1809,15 +1834,15 @@ class CodexEventRouter:
                 effective_id = item_id or _reasoning_event_id(item, turn_state)
                 text = _extract_reasoning_text(item, fallback=turn_state.get("reasoning_buffer"))
                 scrubbed_text, thoughts = _extract_and_scrub_thoughts(text) if text else ("", [])
-                should_finalize_live = turn_state.get("reason_source") in {None, "item"} and (
-                    bool(scrubbed_text) or bool(turn_state.get("reasoning_started"))
-                )
+                has_visible_reasoning = _has_visible_reasoning_text(scrubbed_text)
+                should_finalize_live = turn_state.get("reason_source") in {None, "item"} and has_visible_reasoning
                 events: List[Dict[str, Any]] = []
-                if should_finalize_live:
+                if thoughts:
                     events.extend({"type": "thought", "text": thought} for thought in thoughts)
+                if should_finalize_live:
                     events.append({"type": "reasoning_finalize", "id": effective_id, "text": scrubbed_text})
                 transcript_entries: List[Dict[str, Any]] = []
-                if scrubbed_text and self._should_record_reasoning(turn_state, effective_id):
+                if has_visible_reasoning and self._should_record_reasoning(turn_state, effective_id):
                     transcript_entries.append({
                         "role": "reasoning",
                         "text": scrubbed_text,
@@ -2268,11 +2293,12 @@ class CodexEventRouter:
                     turn_state["reasoning_buffer"] = f"{turn_state.get('reasoning_buffer', '')}{delta}"
                     scrubbed_delta, thoughts = _extract_and_scrub_thoughts_stream(delta, turn_state)
                     events: List[Dict[str, Any]] = [{"type": "thought", "text": thought} for thought in thoughts]
-                    if scrubbed_delta:
-                        events.append({"type": "reasoning_delta", "id": item_id, "delta": scrubbed_delta})
+                    live_delta = _consume_live_reasoning_delta(scrubbed_delta, turn_state)
+                    if live_delta:
+                        events.append({"type": "reasoning_delta", "id": item_id, "delta": live_delta})
                     if thoughts:
                         events.append({"type": "activity", "label": thoughts[-1], "active": True})
-                    elif scrubbed_delta:
+                    elif live_delta:
                         events.append({"type": "activity", "label": "reasoning", "active": True})
                     return self._decorate_routed_result({
                         "handled": True,
@@ -2292,9 +2318,10 @@ class CodexEventRouter:
                     return {"handled": True, "events": [], "transcript_entries": []}
                 turn_state, item_state, item_id = prepared
                 turn_state["reasoning_buffer"] = f"{turn_state.get('reasoning_buffer', '')}\n\n"
+                live_delta = _consume_live_reasoning_delta("\n\n", turn_state)
                 return self._decorate_routed_result({
                     "handled": True,
-                    "events": [{"type": "reasoning_delta", "id": item_id, "delta": "\n\n"}],
+                    "events": [{"type": "reasoning_delta", "id": item_id, "delta": live_delta}] if live_delta else [],
                     "transcript_entries": [],
                 }, thread_id=thread_id, item_state=item_state)
 
@@ -2312,15 +2339,15 @@ class CodexEventRouter:
                 item_state["item_type"] = "reasoning"
                 text = _extract_reasoning_text(payload, fallback=turn_state.get("reasoning_buffer"))
                 scrubbed_text, thoughts = _extract_and_scrub_thoughts(text) if text else ("", [])
-                should_finalize_live = turn_state.get("reason_source") in {None, "codex"} and (
-                    bool(scrubbed_text) or bool(turn_state.get("reasoning_started"))
-                )
+                has_visible_reasoning = _has_visible_reasoning_text(scrubbed_text)
+                should_finalize_live = turn_state.get("reason_source") in {None, "codex"} and has_visible_reasoning
                 events: List[Dict[str, Any]] = []
-                if should_finalize_live:
+                if thoughts:
                     events.extend({"type": "thought", "text": thought} for thought in thoughts)
+                if should_finalize_live:
                     events.append({"type": "reasoning_finalize", "id": effective_id, "text": scrubbed_text})
                 transcript_entries: List[Dict[str, Any]] = []
-                if scrubbed_text and self._should_record_reasoning(turn_state, effective_id):
+                if has_visible_reasoning and self._should_record_reasoning(turn_state, effective_id):
                     transcript_entries.append({
                         "role": "reasoning",
                         "text": scrubbed_text,

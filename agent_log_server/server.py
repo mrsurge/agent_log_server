@@ -908,6 +908,8 @@ def _asset(url: str) -> str:
         return url
 # Persist app server config under ~/.cache/app_server.
 CONFIG_PATH = Path(os.path.expanduser("~/.cache/app_server/app_server_config.json"))
+APP_SERVER_DATA_PATH = Path(os.path.expanduser("~/.local/share/app_server"))
+USER_EXTENSIONS_DIR = APP_SERVER_DATA_PATH / "extensions"
 CODEX_CONFIG_PATH = Path(os.path.expanduser("~/.codex/config.toml"))
 LEGACY_TRANSCRIPT_DIR = CONFIG_PATH.parent / "transcripts"
 CONVERSATION_DIR = CONFIG_PATH.parent / "conversations"
@@ -937,6 +939,14 @@ def _default_appserver_config() -> Dict[str, Any]:
         "te2_mcp_integration": False,
         "extensions": {},
     }
+
+
+def _ensure_user_extensions_root() -> Path:
+    USER_EXTENSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    registry_path = USER_EXTENSIONS_DIR / "extensions.json"
+    if not registry_path.exists():
+        registry_path.write_text(json.dumps({"version": "1.0", "extensions": []}, indent=2) + "\n", encoding="utf-8")
+    return USER_EXTENSIONS_DIR
 
 
 def _normalize_extension_config_entry(raw: Any, default_enabled: bool) -> Dict[str, Any]:
@@ -8324,7 +8334,7 @@ async def api_appserver_debug_toggle(enabled: bool = Body(..., embed=True)):
     global DEBUG_MODE, DEBUG_RAW_LOG_PATH
     DEBUG_MODE = enabled
     if enabled and not DEBUG_RAW_LOG_PATH:
-        cache_dir = Path.home() / ".cache" / "agent_log_server"
+        cache_dir = CONFIG_PATH.parent
         cache_dir.mkdir(parents=True, exist_ok=True)
         DEBUG_RAW_LOG_PATH = cache_dir / "debug_raw.jsonl"
         DEBUG_RAW_LOG_PATH.write_text("")
@@ -8412,10 +8422,12 @@ async def await_message(req: AwaitIn):
 # Initialize extensions on startup
 def _init_extensions():
     server_root = PACKAGE_ROOT
-    extensions_dir = Path(ext_loader.__file__).resolve().parent
-    if extensions_dir.exists():
+    builtin_extensions_dir = Path(ext_loader.__file__).resolve().parent
+    user_extensions_dir = _ensure_user_extensions_root()
+    extension_roots = [root for root in (builtin_extensions_dir, user_extensions_dir) if root.exists()]
+    if extension_roots:
         ext_loader.load_extensions(
-            extensions_dir=extensions_dir,
+            extensions_dir=extension_roots,
             server_root=server_root,
             fws_getter=_get_fws_manager,
             broadcast_fn=_broadcast_appserver_ui,
@@ -9529,7 +9541,7 @@ def main():
 
     # Set up debug raw log in .cache directory
     if DEBUG_MODE:
-        cache_dir = Path.home() / ".cache" / "agent_log_server"
+        cache_dir = CONFIG_PATH.parent
         cache_dir.mkdir(parents=True, exist_ok=True)
         DEBUG_RAW_LOG_PATH = cache_dir / "debug_raw.jsonl"
         # Clear previous debug log on startup

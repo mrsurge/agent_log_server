@@ -13,9 +13,12 @@ extensions.json is checked first as an explicit override/ordering file.
 If absent, subfolders are scanned alphabetically.
 """
 
+import hashlib
 import importlib
 import inspect
 import json
+import sys
+import types
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional
 
@@ -23,10 +26,13 @@ from typing import Any, Callable, Dict, List, Optional
 _extension_handlers: Dict[str, Any] = {}
 # extension_id -> registry info (id, name, type, path, manifest)
 _extensions_registry: Dict[str, Dict[str, Any]] = {}
+_extension_source_roots: Dict[str, Path] = {}
+_extension_module_packages: Dict[str, str] = {}
 _initialized: bool = False
 
 # Callbacks stored for lazy init of discovered extensions
 _init_args: Dict[str, Any] = {}
+_DYNAMIC_EXTENSION_NAMESPACE = "_app_server_user_extensions"
 
 
 def _deep_merge_manifest(base: Any, override: Any) -> Any:
@@ -122,8 +128,78 @@ def _runtime_option_runtime_key(field: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _normalize_extension_roots(extension_roots: Any) -> List[Path]:
+    roots: List[Path] = []
+    raw_roots = extension_roots if isinstance(extension_roots, (list, tuple, set)) else [extension_roots]
+    for raw_root in raw_roots:
+        if isinstance(raw_root, Path):
+            root = raw_root.expanduser()
+        elif isinstance(raw_root, str) and raw_root.strip():
+            root = Path(raw_root.strip()).expanduser()
+        else:
+            continue
+        try:
+            resolved = root.resolve()
+        except Exception:
+            resolved = root
+        if not resolved.exists() or not resolved.is_dir():
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _sanitize_module_token(value: str) -> str:
+    token = "".join(char if char.isalnum() else "_" for char in str(value or ""))
+    token = token.strip("_")
+    if not token:
+        token = "extension"
+    if token[0].isdigit():
+        token = f"ext_{token}"
+    return token
+
+
+def _module_package_for_root(folder: str, source_root: Path, builtin_root: Optional[Path]) -> str:
+    folder_parts = [part for part in PurePosixPath(str(folder)).parts if part not in {"", "."}]
+    if builtin_root is not None and source_root == builtin_root:
+        tokens = [_sanitize_module_token(part) for part in folder_parts] or ["extension"]
+        return "extensions." + ".".join(tokens)
+    folder_token = _sanitize_module_token("_".join(folder_parts) if folder_parts else "extension")
+    digest = hashlib.sha1(f"{source_root}:{folder}".encode("utf-8")).hexdigest()[:12]
+    return f"{_DYNAMIC_EXTENSION_NAMESPACE}.{folder_token}_{digest}"
+
+
+def _ensure_dynamic_extension_package(module_package: str, extension_root: Path) -> None:
+    parent_package, _, _ = module_package.rpartition(".")
+    if parent_package and parent_package not in sys.modules:
+        parent = types.ModuleType(parent_package)
+        parent.__package__ = parent_package
+        parent.__path__ = []
+        sys.modules[parent_package] = parent
+    package = sys.modules.get(module_package)
+    package_path = str(extension_root.resolve())
+    if package is None:
+        package = types.ModuleType(module_package)
+        package.__package__ = module_package
+        package.__path__ = [package_path]
+        sys.modules[module_package] = package
+        return
+    existing_paths = list(getattr(package, "__path__", []))
+    if package_path not in existing_paths:
+        existing_paths.append(package_path)
+        package.__path__ = existing_paths
+
+
+def _import_extension_submodule(module_package: str, extension_root: Path, submodule: str) -> Any:
+    if not module_package.startswith(f"{_DYNAMIC_EXTENSION_NAMESPACE}."):
+        return importlib.import_module(f"{module_package}.{submodule}")
+    _ensure_dynamic_extension_package(module_package, extension_root)
+    importlib.invalidate_caches()
+    return importlib.import_module(f"{module_package}.{submodule}")
+
+
 def load_extensions(
-    extensions_dir: Path,
+    extensions_dir: Any,
     server_root: Path,
     fws_getter: Callable,
     broadcast_fn: Callable,
@@ -138,10 +214,15 @@ def load_extensions(
     3. For each enabled extension, import extensions.<folder>.client and
        call its init function with the standard callback set.
     """
-    global _extension_handlers, _extensions_registry, _initialized, _init_args
+    global _extension_handlers, _extensions_registry, _extension_source_roots
+    global _extension_module_packages, _initialized, _init_args
+
+    extension_roots = _normalize_extension_roots(extensions_dir)
+    primary_root = extension_roots[0] if extension_roots else None
 
     _init_args = {
-        "extensions_dir": extensions_dir,
+        "extensions_dir": primary_root,
+        "extension_roots": extension_roots,
         "server_root": server_root,
         "fws_getter": fws_getter,
         "broadcast_fn": broadcast_fn,
@@ -149,10 +230,12 @@ def load_extensions(
         "meta_fns": meta_fns,
     }
 
-    discovered = _discover_extensions(extensions_dir)
+    discovered = _discover_extensions(extension_roots)
 
     _extension_handlers = {}
     _extensions_registry = {}
+    _extension_source_roots = {}
+    _extension_module_packages = {}
 
     enabled_by_type: Dict[str, List[Dict[str, Any]]] = {}
     for ext_info in discovered:
@@ -162,6 +245,13 @@ def load_extensions(
         manifest = ext_info.get("manifest") if isinstance(ext_info.get("manifest"), dict) else {}
         dependencies = manifest.get("dependencies") if isinstance(manifest.get("dependencies"), dict) else {}
         default_enabled = bool(ext_info.get("enabled", True))
+        source_root = ext_info.get("source_root")
+        module_package = ext_info.get("module_package")
+
+        if isinstance(source_root, Path):
+            _extension_source_roots[ext_id] = source_root
+        if isinstance(module_package, str) and module_package:
+            _extension_module_packages[ext_id] = module_package
 
         _extensions_registry[ext_id] = {
             "id": ext_id,
@@ -196,10 +286,13 @@ def load_extensions(
 
         if ext_type not in _extension_handlers:
             handler = _load_handler(
-                folder,
-                ext_type,
+                ext_info,
                 handler_extensions=enabled_by_type.get(ext_type, []),
-                **_init_args,
+                server_root=server_root,
+                fws_getter=fws_getter,
+                broadcast_fn=broadcast_fn,
+                transcript_fn=transcript_fn,
+                meta_fns=meta_fns,
             )
             if handler:
                 _extension_handlers[ext_type] = handler
@@ -209,9 +302,11 @@ def load_extensions(
           f"{list(_extensions_registry.keys())}")
 
 
-def _discover_extensions(extensions_dir: Path) -> List[Dict[str, Any]]:
+def _discover_extensions_in_root(extensions_dir: Path, builtin_root: Optional[Path]) -> List[Dict[str, Any]]:
     """Return list of extension info dicts from manifests."""
     result: List[Dict[str, Any]] = []
+    if not extensions_dir.exists() or not extensions_dir.is_dir():
+        return result
 
     # Strategy 1: explicit extensions.json
     extensions_json = extensions_dir / "extensions.json"
@@ -236,6 +331,8 @@ def _discover_extensions(extensions_dir: Path) -> List[Dict[str, Any]]:
                     "enabled": entry.get("enabled", manifest.get("enabled", True)),
                     "folder": folder,
                     "manifest": manifest,
+                    "source_root": extensions_dir,
+                    "module_package": _module_package_for_root(folder, extensions_dir, builtin_root),
                 })
             return result
         except Exception as e:
@@ -257,6 +354,8 @@ def _discover_extensions(extensions_dir: Path) -> List[Dict[str, Any]]:
                 "enabled": manifest.get("enabled", True),
                 "folder": sub.name,
                 "manifest": manifest,
+                "source_root": extensions_dir,
+                "module_package": _module_package_for_root(sub.name, extensions_dir, builtin_root),
             })
         except Exception as e:
             print(f"[Extensions] Bad manifest in {sub.name}/: {e}")
@@ -264,10 +363,23 @@ def _discover_extensions(extensions_dir: Path) -> List[Dict[str, Any]]:
     return result
 
 
+def _discover_extensions(extension_roots: List[Path]) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    builtin_root = extension_roots[0] if extension_roots else None
+    for root in extension_roots:
+        for ext_info in _discover_extensions_in_root(root, builtin_root):
+            ext_id = ext_info.get("id")
+            if not isinstance(ext_id, str) or not ext_id:
+                continue
+            if ext_id in merged:
+                print(f"[Extensions] Duplicate extension id {ext_id} from {root}; overriding earlier root")
+                merged.pop(ext_id, None)
+            merged[ext_id] = ext_info
+    return list(merged.values())
+
+
 def _load_handler(
-    folder: str,
-    ext_type: str,
-    extensions_dir: Path,
+    ext_info: Dict[str, Any],
     server_root: Path,
     fws_getter: Callable,
     broadcast_fn: Callable,
@@ -275,10 +387,23 @@ def _load_handler(
     meta_fns: Optional[Dict[str, Callable]],
     handler_extensions: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Any]:
-    """Dynamically import extensions.<folder>.client and call its init function."""
-    module_path = f"extensions.{folder}.client"
+    """Dynamically import the extension client module and call its init function."""
+    folder = ext_info.get("folder")
+    ext_type = ext_info.get("type")
+    source_root = ext_info.get("source_root")
+    module_package = ext_info.get("module_package")
+    if not isinstance(folder, str) or not folder:
+        return None
+    if not isinstance(ext_type, str) or not ext_type:
+        return None
+    if not isinstance(source_root, Path):
+        return None
+    if not isinstance(module_package, str) or not module_package:
+        return None
+    extension_root = (source_root / folder).resolve()
+    module_path = f"{module_package}.client"
     try:
-        mod = importlib.import_module(module_path)
+        mod = _import_extension_submodule(module_package, extension_root, "client")
     except Exception as e:
         print(f"[Extensions] Failed to import {module_path}: {e}")
         import traceback
@@ -321,7 +446,7 @@ def _load_handler(
 
     try:
         init_fn(
-            extensions_dir,
+            source_root,
             server_root,
             fws_getter,
             broadcast_fn,
@@ -387,25 +512,33 @@ def _ensure_handler_loaded_for_extension(extension_id: str) -> bool:
         return False
     ext_type = info.get("type")
     folder = info.get("path")
+    source_root = _extension_source_roots.get(extension_id)
+    module_package = _extension_module_packages.get(extension_id)
     if not isinstance(ext_type, str) or not ext_type or not isinstance(folder, str) or not folder:
+        return False
+    if not isinstance(source_root, Path):
+        return False
+    if not isinstance(module_package, str) or not module_package:
         return False
     if ext_type in _extension_handlers:
         return True
-    extensions_dir = _init_args.get("extensions_dir")
     server_root = _init_args.get("server_root")
     fws_getter = _init_args.get("fws_getter")
     broadcast_fn = _init_args.get("broadcast_fn")
     transcript_fn = _init_args.get("transcript_fn")
     meta_fns = _init_args.get("meta_fns")
-    if not isinstance(extensions_dir, Path) or not isinstance(server_root, Path):
+    if not isinstance(server_root, Path):
         return False
     if not callable(fws_getter) or not callable(broadcast_fn) or not callable(transcript_fn):
         return False
     active_entries = _active_extensions_for_type(ext_type)
     handler = _load_handler(
-        folder,
-        ext_type,
-        extensions_dir=extensions_dir,
+        {
+            "folder": folder,
+            "type": ext_type,
+            "source_root": source_root,
+            "module_package": module_package,
+        },
         server_root=server_root,
         fws_getter=fws_getter,
         broadcast_fn=broadcast_fn,
@@ -462,11 +595,13 @@ def supports_dependency_install(extension_id: str) -> bool:
 
 def _dependency_module_for_extension(extension_id: str) -> Optional[Any]:
     info = _extensions_registry.get(extension_id)
-    folder = info.get("path") if isinstance(info, dict) else None
-    if not isinstance(folder, str) or not folder:
+    module_package = _extension_module_packages.get(extension_id)
+    extension_root = _extension_root(extension_id)
+    if not isinstance(module_package, str) or not module_package:
         return None
-    module_path = f"extensions.{folder}.dependencies"
-    return importlib.import_module(module_path)
+    if not isinstance(extension_root, Path):
+        return None
+    return _import_extension_submodule(module_package, extension_root, "dependencies")
 
 
 async def _call_dependency_fn(func: Callable[..., Any], extension_id: str) -> Dict[str, Any]:
@@ -513,12 +648,17 @@ async def install_extension_dependencies(extension_id: str) -> Dict[str, Any]:
 def _extension_root(extension_id: str) -> Optional[Path]:
     info = _extensions_registry.get(extension_id)
     ext_path = info.get("path") if isinstance(info, dict) else None
-    extensions_dir = _init_args.get("extensions_dir")
+    source_root = _extension_source_roots.get(extension_id)
     if not isinstance(ext_path, str) or not ext_path:
         return None
-    if not isinstance(extensions_dir, Path):
+    if not isinstance(source_root, Path):
         return None
-    return extensions_dir / ext_path
+    candidate = (source_root / ext_path).resolve()
+    try:
+        candidate.relative_to(source_root.resolve())
+    except ValueError:
+        return None
+    return candidate
 
 
 def get_static_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
