@@ -2799,6 +2799,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }, getTarget());
         return;
       }
+      if (entry.role === 'search') {
+        renderSearchCard({
+          id: entry.id || entry.item_id || '',
+          title: entry.title || '',
+          mode: entry.mode || entry.tool || 'search',
+          path: entry.path || '',
+          pattern: entry.pattern || '',
+          arguments: entry.arguments && typeof entry.arguments === 'object' ? entry.arguments : {},
+          content: entry.content ?? entry.result ?? '',
+        }, getTarget());
+        return;
+      }
       if (entry.role === 'command') {
         const row = document.createElement('div');
         row.className = 'timeline-row command-result';
@@ -3150,8 +3162,8 @@ document.addEventListener('DOMContentLoaded', () => {
         getTarget().appendChild(row);
         return;
       }
-      // MCP tool call entries
-      if (entry.role === 'mcp_tool') {
+      // Generic tool call entries
+      if (entry.role === 'mcp_tool' || entry.role === 'tool') {
         const row = document.createElement('div');
         row.className = 'timeline-row command-result mcp-tool-card';
         const body = document.createElement('div');
@@ -3159,9 +3171,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // Tool header
         const header = document.createElement('div');
         header.className = 'command-ribbon';
-        const toolName = entry.tool || 'mcp_tool';
+        const toolName = entry.tool || 'tool';
         const serverName = entry.server || '';
-        header.textContent = serverName ? `${serverName}:${toolName}` : toolName;
+        header.textContent = toolCardLabel(toolName, serverName);
         body.appendChild(header);
         // Arguments section
         if (entry.arguments && Object.keys(entry.arguments).length > 0) {
@@ -3202,6 +3214,16 @@ document.addEventListener('DOMContentLoaded', () => {
             argsPre.textContent = argLines.join('\n');
             body.appendChild(argsPre);
           }
+        }
+        // Output / streamed body
+        if (typeof entry.output === 'string' && entry.output) {
+          const outputPre = document.createElement('pre');
+          outputPre.className = 'mcp-tool-content';
+          outputPre.textContent = entry.output;
+          if (entry.is_error && (entry.result === undefined || entry.result === null)) {
+            outputPre.classList.add('error-text');
+          }
+          body.appendChild(outputPre);
         }
         // Result section
         if (entry.result !== undefined && entry.result !== null) {
@@ -3246,7 +3268,7 @@ document.addEventListener('DOMContentLoaded', () => {
           body.appendChild(footer);
         }
         row.appendChild(body);
-        makeCollapsible(row, `mcp:${entry.id || `${entry.server || ''}:${entry.tool || ''}`}`, false);
+        makeCollapsible(row, `tool:${entry.id || entry.item_id || `${entry.server || ''}:${entry.tool || ''}`}`, false);
         getTarget().appendChild(row);
         return;
       }
@@ -3463,12 +3485,16 @@ document.addEventListener('DOMContentLoaded', () => {
     return entry;
   }
 
+  function toolCardLabel(toolName, serverName = '') {
+    return serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
+  }
+
   function renderToolBegin(evt) {
     const toolName = evt.tool || 'tool';
     // Skip command tools - they're redundant with command cards
     if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
-    const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
+    const label = toolCardLabel(toolName, serverName);
     const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
     // Format arguments
     const args = evt.arguments || evt.payload || {};
@@ -3541,7 +3567,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Skip command tools - they're redundant with command cards
     if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
-    const label = serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
+    const label = toolCardLabel(toolName, serverName);
     const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
     // Handle both old payload format and new result format
     const result = evt.result ?? evt.payload ?? null;
@@ -4257,6 +4283,178 @@ document.addEventListener('DOMContentLoaded', () => {
     setStatusDot('success');
   }
 
+  function resolveSearchEntryPath(rawPath, rootPath) {
+    if (!rawPath) return '';
+    if (rawPath.startsWith('/')) return rawPath;
+    if (!rootPath) return rawPath;
+    return `${rootPath.replace(/\/+$/, '')}/${rawPath.replace(/^\.?\//, '')}`;
+  }
+
+  function shortenSearchTarget(path) {
+    const relativePath = toRelativePath(path || '');
+    if (!relativePath) return '';
+    const parts = relativePath.split('/').filter(Boolean);
+    if (parts.length <= 3) return relativePath;
+    return `.../${parts.slice(-3).join('/')}`;
+  }
+
+  function formatSearchArgumentValue(key, value) {
+    if (value === undefined || value === null) return '';
+    if (value === '') return '';
+    if (Array.isArray(value) && value.length === 0) return '';
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value);
+      } catch (_) {
+        return String(value);
+      }
+    }
+    if ((key === 'path' || key === 'root' || key === 'cwd') && typeof value === 'string') {
+      return toRelativePath(value);
+    }
+    return String(value);
+  }
+
+  function buildSearchDetailText(mode, rootPath, pattern, args) {
+    const merged = {};
+    if (args && typeof args === 'object') {
+      Object.entries(args).forEach(([key, value]) => {
+        if (value === undefined || value === null || value === '') return;
+        if (Array.isArray(value) && value.length === 0) return;
+        merged[key] = value;
+      });
+    }
+    if (!merged.path && rootPath) merged.path = rootPath;
+    if (!merged.pattern && pattern) merged.pattern = pattern;
+
+    const preferredKeys = ['pattern', 'path', 'glob', 'type', 'output_mode', 'n', 'i', 'A', 'B', 'C', 'head_limit', 'multiline'];
+    const detailLines = [`mode: ${mode}`];
+
+    preferredKeys.forEach((key) => {
+      if (!Object.prototype.hasOwnProperty.call(merged, key)) return;
+      const formatted = formatSearchArgumentValue(key, merged[key]);
+      if (formatted) detailLines.push(`${key}: ${formatted}`);
+      delete merged[key];
+    });
+
+    Object.entries(merged).forEach(([key, value]) => {
+      const formatted = formatSearchArgumentValue(key, value);
+      if (formatted) detailLines.push(`${key}: ${formatted}`);
+    });
+
+    return detailLines.join('\n');
+  }
+
+  function parseSearchCardEntries(mode, content, rootPath = '') {
+    const text = typeof content === 'string' ? content : String(content ?? '');
+    const lines = text.split('\n').map((line) => line.replace(/\r$/, ''));
+    if (mode === 'glob') {
+      return { entries: [], plainText: text };
+    }
+
+    const entries = [];
+    for (const rawLine of lines) {
+      const line = rawLine.trimEnd();
+      const match = line.match(/^(.+?):(\d+)(?::(\d+))?:(.*)$/);
+      if (!match) continue;
+      const resolvedPath = resolveSearchEntryPath(match[1], rootPath);
+      entries.push({
+        path: resolvedPath,
+        line: Number(match[2]),
+        column: match[3] ? Number(match[3]) : 1,
+        preview: match[4] || '',
+      });
+    }
+    return {
+      entries,
+      plainText: entries.length ? '' : text,
+    };
+  }
+
+  function renderSearchCard(evt, parentEl = null) {
+    const mode = evt.mode || evt.tool || 'search';
+    const pattern = typeof evt.pattern === 'string' ? evt.pattern : '';
+    const rootPath = typeof evt.path === 'string' ? evt.path : '';
+    const searchArgs = evt.arguments && typeof evt.arguments === 'object' ? evt.arguments : {};
+    const { entries, plainText } = parseSearchCardEntries(mode, evt.content ?? evt.result ?? '', rootPath);
+
+    clearPlaceholder();
+    const row = document.createElement('div');
+    row.className = 'timeline-row command-result search-card';
+
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const ribbon = document.createElement('div');
+    ribbon.className = 'command-ribbon';
+    const shortTarget = shortenSearchTarget(rootPath);
+    ribbon.textContent = shortTarget ? `search ${shortTarget}` : 'search';
+    if (rootPath) ribbon.title = rootPath;
+    body.appendChild(ribbon);
+
+    const detailLine = document.createElement('pre');
+    detailLine.className = 'search-card-detail';
+    detailLine.textContent = buildSearchDetailText(mode, rootPath, pattern, searchArgs);
+    body.appendChild(detailLine);
+
+    if (entries.length) {
+      const list = document.createElement('div');
+      list.className = 'search-card-list';
+      entries.forEach((entry) => {
+        const item = document.createElement('div');
+        item.className = 'search-card-entry';
+
+        const pathLine = document.createElement('div');
+        pathLine.className = 'search-card-path';
+        pathLine.textContent = entry.line ? `${toRelativePath(entry.path)}:${entry.line}` : toRelativePath(entry.path);
+        pathLine.title = entry.path;
+        pathLine.style.cursor = 'pointer';
+        pathLine.dataset.hasClickHandler = 'true';
+        pathLine.addEventListener('click', (e) => {
+          e.stopPropagation();
+          postTe2OpenRequest({ path: entry.path, line: entry.line || 1, column: entry.column || 1 });
+        });
+        item.appendChild(pathLine);
+
+        if (entry.preview) {
+          const preview = document.createElement('pre');
+          preview.className = 'search-card-preview';
+          const lang = detectLangFromPath(entry.path);
+          if (lang && typeof hljs !== 'undefined') {
+            preview.innerHTML = highlightCodeAlways(entry.preview, lang);
+          } else {
+            preview.textContent = entry.preview;
+          }
+          item.appendChild(preview);
+        }
+
+        list.appendChild(item);
+      });
+      body.appendChild(list);
+    } else {
+      const plain = document.createElement('pre');
+      plain.className = 'search-card-plain';
+      plain.textContent = plainText;
+      body.appendChild(plain);
+    }
+
+    row.appendChild(body);
+    makeCollapsible(row, `search:${evt.id || pattern || mode}`, false);
+
+    const targetEl = parentEl || getLiveEventParent(evt);
+    if (targetEl) {
+      targetEl.appendChild(row);
+    } else if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
+      timelineEl.insertBefore(row, bottomSpacerEl);
+    } else {
+      timelineEl.appendChild(row);
+    }
+
+    lastEventType = 'search';
+    maybeAutoScroll();
+    setStatusDot('success');
+  }
+
   const diffRendering = bindDiffRendering({
     getDiffRow,
     createRow,
@@ -4608,6 +4806,7 @@ document.addEventListener('DOMContentLoaded', () => {
     handoffApproval,
     renderCommandResult,
     renderViewCard,
+    renderSearchCard,
     renderToolBegin,
     renderToolDelta,
     renderToolEnd,

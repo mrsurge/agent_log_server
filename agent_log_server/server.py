@@ -2713,6 +2713,27 @@ def _extract_diff_with_path(payload: Any) -> Tuple[Optional[str], Optional[str]]
     return None, None
 
 
+def _paths_from_changes(changes: Any) -> List[str]:
+    paths: List[str] = []
+    if isinstance(changes, list):
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            path = change.get("path") or _extract_path_from_diff(str(change.get("diff") or ""))
+            if isinstance(path, str) and path and path not in paths:
+                paths.append(path)
+    elif isinstance(changes, dict):
+        for change_path, change in changes.items():
+            candidate = None
+            if isinstance(change, dict):
+                candidate = change.get("path") or change.get("file_path") or change_path
+            elif isinstance(change_path, str):
+                candidate = change_path
+            if isinstance(candidate, str) and candidate and candidate not in paths:
+                paths.append(candidate)
+    return paths
+
+
 def _extract_path_from_diff(diff_text: str) -> Optional[str]:
     """Extract file path from diff headers like '--- a/README.md' or 'diff --git a/README.md b/README.md'."""
     if not diff_text:
@@ -4356,12 +4377,26 @@ async def _route_appserver_event(
         if item_type == "filechange":
             # Cache diff info for approval - actual diff emitted via turn_diff
             diff, path = _extract_diff_with_path(item)
+            paths = _paths_from_changes(item.get("changes"))
+            tool_id = _tool_event_id(label_lower, item, thread_id, turn_id)
             if item.get("id"):
                 _approval_item_cache[str(item.get("id"))] = {
                     "diff": diff,
                     "changes": item.get("changes"),
                     "path": path,
+                    "paths": paths,
+                    "tool_id": tool_id,
                 }
+            events.append({
+                "type": "tool_begin",
+                "id": tool_id,
+                "tool": "apply_patch",
+                "arguments": {
+                    "paths": paths,
+                    "change_count": len(paths),
+                } if paths else {},
+            })
+            events.append({"type": "activity", "label": "preparing diff", "active": True})
             return convo_id, events
             
         if item_type == "commandexecution":
@@ -4444,13 +4479,64 @@ async def _route_appserver_event(
             
         if item_type == "filechange":
             # Cache for approval tracking - diff emitted via turn_diff
+            cached = _approval_item_cache.get(str(item.get("id"))) if item.get("id") else {}
             diff, path = _extract_diff_with_path(item)
-            if item.get("id") and diff:
+            changes = item.get("changes") if item.get("changes") is not None else cached.get("changes")
+            paths = _paths_from_changes(changes) or cached.get("paths") or []
+            primary_path = paths[0] if paths else (path or cached.get("path"))
+            tool_id = cached.get("tool_id") or _tool_event_id(label_lower, item, thread_id, turn_id)
+            status = str(item.get("status") or "").strip().lower()
+            duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
+            output = item.get("aggregatedOutput") or item.get("output") or item.get("stdout") or ""
+            if isinstance(output, str):
+                output = output.replace("\r\n", "\n").replace("\r", "\n")
+            is_error = status in {"failed", "declined", "error"}
+            result_payload = {
+                "status": status or "completed",
+                "changed_files": len(paths),
+            }
+            if item.get("id"):
                 _approval_item_cache[str(item.get("id"))] = {
-                    "diff": diff,
-                    "changes": item.get("changes"),
-                    "path": path,
+                    "diff": diff or cached.get("diff"),
+                    "changes": changes,
+                    "path": primary_path,
+                    "paths": paths,
+                    "tool_id": tool_id,
                 }
+            events.append({
+                "type": "tool_end",
+                "id": tool_id,
+                "tool": "apply_patch",
+                "arguments": {
+                    "paths": paths,
+                    "change_count": len(paths),
+                } if paths else {},
+                "result": result_payload,
+                "output": output,
+                "path": primary_path,
+                "duration_ms": duration_ms,
+                "is_error": is_error,
+            })
+            events.append({"type": "activity", "label": "processing", "active": True})
+            if convo_id:
+                await _append_transcript_entry(convo_id, {
+                    "role": "tool",
+                    "id": tool_id,
+                    "tool": "apply_patch",
+                    "arguments": {
+                        "paths": paths,
+                        "change_count": len(paths),
+                    } if paths else {},
+                    "result": result_payload,
+                    "output": output,
+                    "path": primary_path,
+                    "duration_ms": duration_ms,
+                    "status": status or ("error" if is_error else "completed"),
+                    "is_error": is_error,
+                    "item_id": item.get("id"),
+                    "timestamp": utc_ts(),
+                    "event": "item/completed",
+                })
             return convo_id, events
             
         if item_type == "commandexecution":
@@ -6593,6 +6679,8 @@ def _rg_list_files(root: Path) -> List[str]:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return [line for line in result.stdout.splitlines() if line]
 

@@ -24,6 +24,7 @@ export function bindEventRouter(ctx) {
     renderApproval,
     renderCommandResult,
     renderViewCard,
+    renderSearchCard,
     renderToolBegin,
     renderToolDelta,
     renderToolEnd,
@@ -123,6 +124,10 @@ export function bindEventRouter(ctx) {
       }
       case 'view': {
         const title = normalizePreviewText(evt.title || evt.path || 'view', 140);
+        return title ? { type: 'tool', text: title } : null;
+      }
+      case 'search': {
+        const title = normalizePreviewText(evt.path || evt.pattern || evt.title || 'search', 140);
         return title ? { type: 'tool', text: title } : null;
       }
       case 'shell_begin':
@@ -289,6 +294,9 @@ export function bindEventRouter(ctx) {
         return;
       case 'view':
         renderViewCard(evt);
+        return;
+      case 'search':
+        renderSearchCard(evt);
         return;
       case 'tool_begin':
         renderToolBegin(evt);

@@ -16,6 +16,7 @@ function isStickySourceRow(row) {
     || row.classList.contains('diff')
     || row.classList.contains('message-card')
     || row.classList.contains('mcp-tool-card')
+    || row.classList.contains('search-card')
     || row.classList.contains('web-search-card');
 }
 
@@ -35,7 +36,7 @@ function getHeaderForRow(row) {
   if (row.classList.contains('diff')) {
     return row.querySelector(':scope > .body > .diff-path-label, :scope > .body > .diff-path');
   }
-  if (row.classList.contains('mcp-tool-card') || row.classList.contains('web-search-card')) {
+  if (row.classList.contains('mcp-tool-card') || row.classList.contains('search-card') || row.classList.contains('web-search-card')) {
     return row.querySelector(':scope > .body > .command-ribbon');
   }
   return null;
@@ -52,6 +53,7 @@ function getStickyHostClasses(row) {
   if (row.classList.contains('declined')) classes.push('declined');
   if (row.classList.contains('command-result')) classes.push('command-result');
   if (row.classList.contains('mcp-tool-card')) classes.push('mcp-tool-card');
+  if (row.classList.contains('search-card')) classes.push('search-card');
   if (row.classList.contains('web-search-card')) classes.push('web-search-card');
   return classes;
 }

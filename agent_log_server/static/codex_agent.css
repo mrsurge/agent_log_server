@@ -1771,6 +1771,10 @@ body.terminal-mode #footer-terminal-toggle.pill {
 .collapsible:not(.expanded) > .body > .command-output,
 .collapsible:not(.expanded) > .body > .command-footer,
 .collapsible:not(.expanded) > .body > .view-card-path,
+.collapsible:not(.expanded) > .body > .search-card-root,
+.collapsible:not(.expanded) > .body > .search-card-detail,
+.collapsible:not(.expanded) > .body > .search-card-list,
+.collapsible:not(.expanded) > .body > .search-card-plain,
 .collapsible:not(.expanded) > .body > pre.diff-block,
 .collapsible:not(.expanded) > .body > .mcp-tool-args,
 .collapsible:not(.expanded) > .body > .mcp-tool-result,
@@ -1942,6 +1946,52 @@ body.terminal-mode #footer-terminal-toggle.pill {
   word-break: break-all;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.search-card-root,
+.search-card-path {
+  background: #11161a;
+  color: #9fb0ba;
+  padding: 8px 14px;
+  margin: 0;
+  font-family: monospace;
+  font-size: 0.82em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.search-card-detail {
+  background: #0b1014;
+  color: #8ea0aa;
+  padding: 8px 14px;
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.search-card-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.search-card-entry {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.search-card-preview,
+.search-card-plain {
+  background: #000;
+  color: #c9d1d9;
+  padding: 10px 14px;
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .command-footer {
