@@ -2122,6 +2122,13 @@ body.terminal-mode #footer-terminal-toggle.pill {
   margin: 0;
 }
 
+.warning-actions {
+  margin-top: 0.55rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
 /* Tribute.js mention dropdown */
 .tribute-container {
   background: var(--panel);
@@ -2372,5 +2379,55 @@ body.terminal-mode #footer-terminal-toggle.pill {
 .extension-settings-actions {
   display: inline-flex;
   gap: 0.4rem;
+  align-items: center;
+}
+
+.extension-settings-splash {
+  display: grid;
+  gap: 0.55rem;
+  padding-top: 0.2rem;
+}
+
+.extension-settings-field {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.extension-settings-field-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.extension-settings-field-text {
+  font-size: 0.92rem;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.extension-settings-field-detail {
+  font-size: 0.82rem;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.extension-settings-field-status[data-tone="success"] .extension-settings-field-text {
+  color: #7fe6b1;
+}
+
+.extension-settings-field-status[data-tone="warning"] .extension-settings-field-text {
+  color: #f0d47a;
+}
+
+.extension-settings-field-status[data-tone="error"] .extension-settings-field-text {
+  color: #f19797;
+}
+
+.extension-settings-inline-actions {
+  display: inline-flex;
+  gap: 0.45rem;
   align-items: center;
 }

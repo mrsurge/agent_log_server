@@ -200,8 +200,11 @@ export function bindEventRouter(ctx) {
         return;
       case 'warning':
         setLastEventType('warning');
-        renderWarningCard(evt.message || '');
+        renderWarningCard(evt.message || '', evt.action || null);
         setStatusDot('warning');
+        return;
+      case 'extensions_updated':
+        window.dispatchEvent(new CustomEvent('codexagent:extensions-updated'));
         return;
       case 'status':
         if (evt.status) {

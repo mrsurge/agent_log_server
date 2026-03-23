@@ -164,6 +164,10 @@ async def _sio_send_message(sid, data):
         settings = meta.get("settings", {})
         agent_type = settings.get("agent", "codex")
         if agent_type != "codex":
+            unavailable_detail = _extension_unavailable_detail(agent_type)
+            if unavailable_detail:
+                await _emit_extension_unavailable_warning(convo_id, agent_type, detail=unavailable_detail)
+                return _sio_error(unavailable_detail)
             handler = ext_loader.get_handler(agent_type)
             if handler and hasattr(handler, "handle_message"):
                 return await handler.handle_message(
@@ -448,6 +452,43 @@ async def _sio_get_extension_settings_schema(sid, data):
         if isinstance(result, JSONResponse):
             return _sio_error("Extension not found")
         return result
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("get_extension_splash_schema", namespace="/appserver")
+async def _sio_get_extension_splash_schema(sid, data):
+    """Mirror of GET /api/extensions/{id}/splash_schema"""
+    try:
+        eid = data.get("extension_id", "")
+        result = await api_extension_splash_schema(eid)
+        if isinstance(result, JSONResponse):
+            try:
+                body = json.loads(result.body.decode("utf-8"))
+                return {"ok": False, **body}
+            except Exception:
+                return _sio_error("Extension splash schema unavailable")
+        return result
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("run_extension_splash_action", namespace="/appserver")
+async def _sio_run_extension_splash_action(sid, data):
+    """Mirror of POST /api/extensions/{id}/splash_action"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        eid = payload.get("extension_id", "")
+        result = await api_extension_splash_action(eid, payload)
+        if isinstance(result, JSONResponse):
+            try:
+                body = json.loads(result.body.decode("utf-8"))
+                return {"ok": False, **body}
+            except Exception:
+                return _sio_error("Extension splash action failed")
+        return result
+    except HTTPException as e:
+        return _sio_error(e.detail)
     except Exception as e:
         return _sio_error(str(e))
 
@@ -989,6 +1030,46 @@ def _extension_unavailable_detail(extension_id: str) -> Optional[str]:
     if not ext_loader.has_extension(extension_id):
         return f"Extension unavailable: {extension_id}"
     return None
+
+
+def _extension_unavailable_action(extension_id: str) -> Optional[Dict[str, Any]]:
+    info = ext_loader.get_extension_info(extension_id)
+    if not isinstance(info, dict):
+        return None
+    details = info.get("dependency_details") if isinstance(info.get("dependency_details"), dict) else {}
+    if details.get("auth_required") and not details.get("authenticated"):
+        return {
+            "id": "open_splash_settings",
+            "label": "Open Splash Settings",
+            "extension_id": extension_id,
+        }
+    return None
+
+
+def _build_extension_unavailable_warning_event(extension_id: str, detail: Optional[str] = None) -> Dict[str, Any]:
+    message = detail.strip() if isinstance(detail, str) and detail.strip() else f"Extension unavailable: {extension_id}"
+    action = _extension_unavailable_action(extension_id)
+    if action and "splash settings" not in message.lower():
+        message = f"{message} Open splash settings to configure."
+    event = {
+        "type": "warning",
+        "message": message,
+    }
+    if action:
+        event["action"] = action
+    return event
+
+
+async def _emit_extension_unavailable_warning(
+    conversation_id: Optional[str],
+    extension_id: str,
+    *,
+    detail: Optional[str] = None,
+) -> None:
+    event = _build_extension_unavailable_warning_event(extension_id, detail=detail)
+    if conversation_id:
+        event["conversation_id"] = conversation_id
+    await _broadcast_appserver_ui(event)
 
 
 async def _refresh_extension_runtime_state(extension_ids: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
@@ -7207,6 +7288,10 @@ async def api_appserver_message(payload: AppserverMessageIn):
     
     # Route to extension if non-codex agent and handler exists
     if agent_type != "codex":
+        unavailable_detail = _extension_unavailable_detail(agent_type)
+        if unavailable_detail:
+            await _emit_extension_unavailable_warning(convo_id, agent_type, detail=unavailable_detail)
+            raise HTTPException(status_code=409, detail=unavailable_detail)
         handler = ext_loader.get_handler(agent_type)
         if handler and hasattr(handler, "handle_message"):
             return await handler.handle_message(
@@ -8442,6 +8527,52 @@ async def api_extension_settings_schema(extension_id: str):
 
     # No schema found - return empty (extension has no custom settings)
     return {"version": "1", "fields": []}
+
+
+@app.get("/api/extensions/{extension_id}/splash_schema")
+async def api_extension_splash_schema(extension_id: str):
+    """Get splash-settings schema for an extension, even when inactive."""
+    info = ext_loader.get_extension_info(extension_id)
+    if not isinstance(info, dict):
+        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
+    try:
+        schema = await ext_loader.get_splash_schema(extension_id)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to build splash schema: {e}"}, status_code=500)
+    if isinstance(schema, dict):
+        schema.setdefault("extension_id", extension_id)
+        return schema
+    return {"version": "1", "extension_id": extension_id, "fields": []}
+
+
+@app.post("/api/extensions/{extension_id}/splash_action")
+async def api_extension_splash_action(extension_id: str, payload: Dict[str, Any] = Body(...)):
+    """Run a splash-settings action for an extension, even when inactive."""
+    info = ext_loader.get_extension_info(extension_id)
+    if not isinstance(info, dict):
+        raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    action_id = str(payload.get("action_id") or "").strip()
+    if not action_id:
+        raise HTTPException(status_code=400, detail="Missing action_id")
+    try:
+        result = await ext_loader.run_splash_action(
+            extension_id,
+            action_id=action_id,
+            payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
+        )
+        states = await _refresh_extension_runtime_state([extension_id])
+        refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
+        schema = await ext_loader.get_splash_schema(extension_id)
+        return {
+            "ok": bool(isinstance(result, dict) and result.get("ok")),
+            "result": result if isinstance(result, dict) else {"ok": False, "error": "Invalid splash action result"},
+            "extension": refreshed,
+            "schema": schema if isinstance(schema, dict) else {"version": "1", "extension_id": extension_id, "fields": []},
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/extensions/{extension_id}/request_cards")

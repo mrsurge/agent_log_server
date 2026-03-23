@@ -3943,8 +3943,16 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
+  function handleWarningAction(action) {
+    if (!action || typeof action !== 'object') return;
+    const actionId = typeof action.id === 'string' ? action.id.trim() : '';
+    if (actionId === 'open_splash_settings') {
+      openSplashSettingsModal();
+    }
+  }
+
   // Render warning card
-  function renderWarningCard(message) {
+  function renderWarningCard(message, action = null) {
     if (!message) return;
     clearPlaceholder();
     
@@ -3953,6 +3961,20 @@ document.addEventListener('DOMContentLoaded', () => {
     pre.className = 'warning-text';
     pre.textContent = message;
     body.appendChild(pre);
+    if (action && typeof action === 'object') {
+      const label = typeof action.label === 'string' ? action.label.trim() : '';
+      if (label) {
+        const actions = document.createElement('div');
+        actions.className = 'warning-actions';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn tiny';
+        button.textContent = label;
+        button.addEventListener('click', () => handleWarningAction(action));
+        actions.appendChild(button);
+        body.appendChild(actions);
+      }
+    }
     
     if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
       timelineEl.insertBefore(row, bottomSpacerEl);
@@ -4356,14 +4378,15 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const rawLine of lines) {
       const line = rawLine.trimEnd();
       const match = line.match(/^(.+?):(\d+)(?::(\d+))?:(.*)$/);
-      if (!match) continue;
-      const resolvedPath = resolveSearchEntryPath(match[1], rootPath);
-      entries.push({
-        path: resolvedPath,
-        line: Number(match[2]),
-        column: match[3] ? Number(match[3]) : 1,
-        preview: match[4] || '',
-      });
+      if (match) {
+        const resolvedPath = resolveSearchEntryPath(match[1], rootPath);
+        entries.push({
+          path: resolvedPath,
+          line: Number(match[2]),
+          column: match[3] ? Number(match[3]) : 1,
+          preview: match[4] || '',
+        });
+      }
     }
     return {
       entries,
