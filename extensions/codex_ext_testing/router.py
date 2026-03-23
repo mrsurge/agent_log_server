@@ -404,6 +404,148 @@ def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[st
     }
 
 
+def _shell_command_to_search_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+    inner = _unwrap_single_shell_command(_command_text(command))
+    if not inner or "\n" in inner:
+        return None
+    try:
+        tokens = shlex.split(inner, posix=True)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    if any(token in {"&&", "||", ";", "|", ">", "<"} for token in tokens):
+        return None
+
+    cmd = tokens[0]
+    if cmd not in {"rg", "grep"}:
+        return None
+
+    bool_flags = {
+        "-n": "n",
+        "--line-number": "n",
+        "-i": "i",
+        "--ignore-case": "i",
+        "-l": "l",
+        "--files-with-matches": "l",
+        "-S": "S",
+        "--smart-case": "S",
+        "-u": "u",
+        "-uu": "uu",
+        "-uuu": "uuu",
+        "-r": "recursive",
+        "-R": "recursive",
+        "--recursive": "recursive",
+    }
+    value_flags = {
+        "-g": "glob",
+        "--glob": "glob",
+        "--type": "type",
+        "-A": "A",
+        "-B": "B",
+        "-C": "C",
+        "-m": "head_limit",
+        "--max-count": "head_limit",
+    }
+
+    args: Dict[str, Any] = {}
+    positional: List[str] = []
+    idx = 1
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token == "--":
+            positional.extend(tokens[idx + 1 :])
+            break
+        if token in value_flags:
+            if idx + 1 >= len(tokens):
+                return None
+            args[value_flags[token]] = tokens[idx + 1]
+            idx += 2
+            continue
+        if token.startswith("--glob="):
+            args["glob"] = token.split("=", 1)[1]
+            idx += 1
+            continue
+        if token.startswith("--type="):
+            args["type"] = token.split("=", 1)[1]
+            idx += 1
+            continue
+        if token.startswith("--max-count="):
+            args["head_limit"] = token.split("=", 1)[1]
+            idx += 1
+            continue
+        if token in bool_flags:
+            args[bool_flags[token]] = True
+            idx += 1
+            continue
+        if token.startswith("-") and token not in {"-"}:
+            if cmd == "rg" and token.startswith("-g") and len(token) > 2:
+                args["glob"] = token[2:]
+                idx += 1
+                continue
+            if token[:2] in {"-A", "-B", "-C", "-m"} and len(token) > 2:
+                args[value_flags[token[:2]]] = token[2:]
+                idx += 1
+                continue
+            if token.startswith("-") and len(token) > 2 and all(f"-{ch}" in bool_flags for ch in token[1:]):
+                for ch in token[1:]:
+                    args[bool_flags[f"-{ch}"]] = True
+                idx += 1
+                continue
+        positional.append(token)
+        idx += 1
+
+    if not positional:
+        return None
+
+    pattern = positional[0]
+    target_path = positional[1] if len(positional) >= 2 else ""
+    if len(positional) > 2:
+        return None
+
+    resolved_path = _resolve_view_path(target_path, cwd) if target_path else str(cwd or "")
+    if pattern:
+        args["pattern"] = pattern
+    if resolved_path:
+        args["path"] = resolved_path
+
+    return {
+        "mode": cmd,
+        "path": resolved_path,
+        "pattern": pattern,
+        "arguments": args,
+        "title": "search",
+    }
+
+
+def _normalize_search_output(output: str, search_spec: Optional[Dict[str, Any]]) -> str:
+    text = _normalize_output(output)
+    if not text or not isinstance(search_spec, dict):
+        return text
+    target_path = str(search_spec.get("path") or "")
+    if not target_path:
+        return text
+
+    had_trailing_newline = text.endswith("\n")
+    normalized_lines: List[str] = []
+    for raw_line in text.splitlines():
+        match = re.match(r"^(\d+)(?::(\d+))?:(.*)$", raw_line)
+        if match:
+            line_no = match.group(1)
+            col_no = match.group(2)
+            preview = match.group(3)
+            if col_no is not None:
+                normalized_lines.append(f"{target_path}:{line_no}:{col_no}:{preview}")
+            else:
+                normalized_lines.append(f"{target_path}:{line_no}:{preview}")
+        else:
+            normalized_lines.append(raw_line)
+    normalized = "\n".join(normalized_lines)
+    if had_trailing_newline:
+        normalized += "\n"
+    return normalized
+
+
 def _extract_path_from_diff(diff_text: str) -> Optional[str]:
     if not diff_text:
         return None
@@ -1417,18 +1559,28 @@ class CodexEventRouter:
                 command = item.get("command") or item.get("parsedCmd") or item.get("cmd") or item.get("argv") or ""
                 cwd = item.get("cwd") or ""
                 view_spec = _shell_command_to_view_spec(command, cwd)
+                search_spec = _shell_command_to_search_spec(command, cwd)
                 item_state.update({
                     "item_type": item_type,
                     "command": command,
                     "cwd": cwd,
                     "output_buffer": "",
                     "view_spec": view_spec,
+                    "search_spec": search_spec,
                 })
                 if view_spec:
                     return self._decorate_routed_result({
                         "handled": True,
                         "events": [
                             {"type": "activity", "label": "reading file", "active": True},
+                        ],
+                        "transcript_entries": [],
+                    }, thread_id=thread_id, item_state=item_state)
+                if search_spec:
+                    return self._decorate_routed_result({
+                        "handled": True,
+                        "events": [
+                            {"type": "activity", "label": "searching files", "active": True},
                         ],
                         "transcript_entries": [],
                     }, thread_id=thread_id, item_state=item_state)
@@ -1577,7 +1729,7 @@ class CodexEventRouter:
             delta = _normalize_output(payload.get("delta"))
             if delta:
                 state["output_buffer"] = f"{state.get('output_buffer', '')}{delta}"
-                if state.get("view_spec"):
+                if state.get("view_spec") or state.get("search_spec"):
                     return {"handled": True, "events": [], "transcript_entries": []}
                 return self._decorate_routed_result({
                     "handled": True,
@@ -1612,7 +1764,7 @@ class CodexEventRouter:
         if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "terminalinteraction" and isinstance(payload, dict):
             item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
             state = self._get_item_state(item_id, thread_id, turn_id)
-            if state.get("view_spec"):
+            if state.get("view_spec") or state.get("search_spec"):
                 return {"handled": True, "events": [], "transcript_entries": []}
             return self._decorate_routed_result({
                 "handled": True,
@@ -1693,6 +1845,7 @@ class CodexEventRouter:
                 status = str(item.get("status") or "").strip().lower()
                 is_error = _result_error_status(status, exit_code, item.get("error"))
                 view_spec = item_state.get("view_spec") if isinstance(item_state.get("view_spec"), dict) else None
+                search_spec = item_state.get("search_spec") if isinstance(item_state.get("search_spec"), dict) else None
                 if view_spec and not is_error:
                     routed = {
                         "handled": True,
@@ -1713,6 +1866,41 @@ class CodexEventRouter:
                             "path": view_spec.get("path") or "",
                             "content": output,
                             "view_range": view_spec.get("view_range"),
+                            "item_id": item_id,
+                            "turn_id": turn_id,
+                            "event": label_lower,
+                        }],
+                    }
+                    approval_request_id = item_state.get("approval_request_id")
+                    if approval_request_id:
+                        routed["clear_live_approval_ids"] = [approval_request_id]
+                        self._approval_request_map.pop(str(item_id), None)
+                    return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
+                if search_spec and not is_error:
+                    normalized_search_output = _normalize_search_output(output, search_spec)
+                    routed = {
+                        "handled": True,
+                        "events": [
+                            {
+                                "type": "search",
+                                "id": item_id or _assistant_id(item, thread_id, turn_id),
+                                "title": search_spec.get("title") or "search",
+                                "mode": search_spec.get("mode") or "search",
+                                "path": search_spec.get("path") or "",
+                                "pattern": search_spec.get("pattern") or "",
+                                "arguments": search_spec.get("arguments") or {},
+                                "content": normalized_search_output,
+                            },
+                            {"type": "activity", "label": "processing", "active": True},
+                        ],
+                        "transcript_entries": [{
+                            "role": "search",
+                            "title": search_spec.get("title") or "search",
+                            "mode": search_spec.get("mode") or "search",
+                            "path": search_spec.get("path") or "",
+                            "pattern": search_spec.get("pattern") or "",
+                            "arguments": search_spec.get("arguments") or {},
+                            "content": normalized_search_output,
                             "item_id": item_id,
                             "turn_id": turn_id,
                             "event": label_lower,
@@ -1775,7 +1963,6 @@ class CodexEventRouter:
                 output = _normalize_output(item_state.get("output_buffer"))
                 status = str(item.get("status") or "").strip().lower()
                 duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
-                first_path = _summarize_paths(paths) or item_state.get("path")
                 primary_path = paths[0] if paths else item_state.get("path")
                 is_error = status in {"failed", "declined", "error"}
                 arguments = {
@@ -1804,6 +1991,7 @@ class CodexEventRouter:
                     ],
                     "transcript_entries": [{
                         "role": "tool",
+                        "id": item_id or _assistant_id(item, thread_id, turn_id),
                         "tool": "apply_patch",
                         "arguments": arguments,
                         "result": result_payload,

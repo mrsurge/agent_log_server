@@ -6,9 +6,11 @@ from the installed binary plus the generic extension hook surface.
 """
 
 import asyncio
+import contextlib
 import importlib
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -32,6 +34,7 @@ _meta_fns: Optional[Dict[str, Callable]] = None
 _registered_extension_ids: set[str] = set()
 _ready_extensions: set[str] = set()
 _transport: Optional[CodexAppServerTransport] = None
+_auth_flow_state: Dict[str, Dict[str, Any]] = {}
 
 # Debug buffer (circular)
 _raw_buffer: List[Dict[str, Any]] = []
@@ -137,6 +140,439 @@ async def _ensure_transport_ready() -> CodexAppServerTransport:
     return transport
 
 
+def _auth_state_bucket(extension_id: str) -> Dict[str, Any]:
+    key = str(extension_id or "").strip() or "codex-ext-testing"
+    bucket = _auth_flow_state.get(key)
+    if not isinstance(bucket, dict):
+        bucket = {}
+        _auth_flow_state[key] = bucket
+    return bucket
+
+
+def _clear_auth_state(extension_id: str) -> None:
+    key = str(extension_id or "").strip() or "codex-ext-testing"
+    _auth_flow_state.pop(key, None)
+
+
+def _auth_extension_ids(*extension_ids: str) -> List[str]:
+    explicit = [
+        ext_id.strip()
+        for ext_id in extension_ids
+        if isinstance(ext_id, str) and ext_id.strip()
+    ]
+    if explicit:
+        return explicit
+    registered = sorted(
+        ext_id
+        for ext_id in _registered_extension_ids
+        if isinstance(ext_id, str) and ext_id.strip()
+    )
+    return registered or ["codex-ext-testing"]
+
+
+async def _refresh_extension_auth_state(*extension_ids: str) -> None:
+    await _server_module()._refresh_extension_runtime_state(_auth_extension_ids(*extension_ids))
+
+
+async def _handle_auth_transport_event(
+    *,
+    label: str,
+    payload: Any,
+    conversation_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    del thread_id, turn_id, request_id
+    label_lower = str(label or "").strip().lower()
+    if label_lower not in {"account/login/completed", "account/updated"}:
+        return []
+
+    extension_ids = _auth_extension_ids()
+    events: List[Dict[str, Any]] = []
+
+    if label_lower == "account/login/completed" and isinstance(payload, dict):
+        login_id = payload.get("loginId")
+        login_id = login_id.strip() if isinstance(login_id, str) and login_id.strip() else None
+        success = payload.get("success") is True
+        error_message = payload.get("error")
+        error_message = error_message.strip() if isinstance(error_message, str) and error_message.strip() else None
+        for extension_id in extension_ids:
+            pending = _auth_state_bucket(extension_id)
+            pending_login_id = pending.get("login_id")
+            pending_login_id = (
+                pending_login_id.strip()
+                if isinstance(pending_login_id, str) and pending_login_id.strip()
+                else None
+            )
+            if login_id and pending_login_id and login_id != pending_login_id:
+                continue
+            if not success:
+                pending.clear()
+        await _refresh_extension_auth_state(*extension_ids)
+        events.append({"type": "extensions_updated"})
+        if not success and error_message:
+            warning_event: Dict[str, Any] = {
+                "type": "warning",
+                "message": f"Codex login failed: {error_message}",
+            }
+            if conversation_id:
+                warning_event["conversation_id"] = conversation_id
+            events.append(warning_event)
+        return events
+
+    if label_lower == "account/updated" and isinstance(payload, dict):
+        for extension_id in extension_ids:
+            _clear_auth_state(extension_id)
+        await _refresh_extension_auth_state(*extension_ids)
+        events.append({"type": "extensions_updated"})
+    return events
+
+
+async def _open_url_with_xdg_open(url: str) -> tuple[bool, str]:
+    opener = shutil.which("xdg-open")
+    if not opener:
+        return False, "xdg-open not found"
+    target = str(url or "").strip()
+    if not target:
+        return False, "Empty URL"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            opener,
+            target,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        return False, str(exc)
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1.0)
+    except asyncio.TimeoutError:
+        return True, ""
+    if proc.returncode == 0:
+        return True, ""
+    message = stderr.decode("utf-8", errors="replace").strip() if isinstance(stderr, (bytes, bytearray)) else ""
+    return False, message or f"xdg-open exited with {proc.returncode}"
+
+
+def _plan_label(plan_type: Optional[str]) -> str:
+    if not isinstance(plan_type, str) or not plan_type.strip():
+        return ""
+    return plan_type.replace("_", " ").replace("-", " ").title()
+
+
+def _auth_status_detail(status: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    email = status.get("account_email")
+    if isinstance(email, str) and email.strip():
+        parts.append(email.strip())
+    account_type = status.get("account_type")
+    if account_type == "apiKey":
+        parts.append("API key")
+    plan_type = _plan_label(status.get("plan_type"))
+    if plan_type:
+        parts.append(f"{plan_type} plan")
+    return "  •  ".join(parts)
+
+
+def _build_auth_status_message(
+    *,
+    requires_openai_auth: bool,
+    authenticated: bool,
+    account_type: Optional[str],
+    account_email: Optional[str],
+    plan_type: Optional[str],
+    login_pending: bool,
+) -> str:
+    if authenticated:
+        if account_type == "chatgpt":
+            base = f"Signed in as {account_email or 'your ChatGPT account'}"
+            plan_label = _plan_label(plan_type)
+            if plan_label:
+                base += f" ({plan_label} plan)"
+            return base + "."
+        if account_type == "apiKey":
+            return "Authenticated via API key."
+        return "Authenticated."
+    if not requires_openai_auth:
+        return "OpenAI auth not required for the current provider."
+    if login_pending:
+        return "ChatGPT login pending. Finish sign-in in the opened browser."
+    return "OpenAI auth required. Sign in with ChatGPT from splash settings."
+
+
+def _normalize_auth_status(
+    raw: Any,
+    *,
+    extension_id: str,
+    pending: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    account = payload.get("account") if isinstance(payload.get("account"), dict) else None
+    requires_openai_auth = bool(payload.get("requiresOpenaiAuth"))
+    account_type = account.get("type") if isinstance(account, dict) and isinstance(account.get("type"), str) else None
+    account_email = account.get("email") if isinstance(account, dict) and isinstance(account.get("email"), str) else None
+    plan_type = account.get("planType") if isinstance(account, dict) and isinstance(account.get("planType"), str) else None
+    authenticated = isinstance(account, dict)
+    pending_state = pending if isinstance(pending, dict) else {}
+    login_id = pending_state.get("login_id") if isinstance(pending_state.get("login_id"), str) else None
+    auth_url = pending_state.get("auth_url") if isinstance(pending_state.get("auth_url"), str) else None
+    login_pending = bool(login_id and requires_openai_auth and not authenticated)
+    status = "ready"
+    if requires_openai_auth and not authenticated:
+        status = "login_pending" if login_pending else "auth_required"
+    message = _build_auth_status_message(
+        requires_openai_auth=requires_openai_auth,
+        authenticated=authenticated,
+        account_type=account_type,
+        account_email=account_email,
+        plan_type=plan_type,
+        login_pending=login_pending,
+    )
+    return {
+        "ok": True,
+        "extension_id": extension_id,
+        "status": status,
+        "message": message,
+        "requires_openai_auth": requires_openai_auth,
+        "authenticated": authenticated,
+        "account_type": account_type,
+        "account_email": account_email,
+        "plan_type": plan_type,
+        "login_pending": login_pending,
+        "login_id": login_id,
+        "auth_url": auth_url,
+        "detail": _auth_status_detail({
+            "account_email": account_email,
+            "account_type": account_type,
+            "plan_type": plan_type,
+        }),
+    }
+
+
+def _looks_like_auth_required_error(message: Any) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "auth required",
+            "authentication required",
+            "requires openai auth",
+            "openai auth",
+            "login required",
+            "not authenticated",
+        )
+    )
+
+
+async def _handle_auth_failure(conversation_id: str, extension_id: str, error_message: str) -> None:
+    server = _server_module()
+    with contextlib.suppress(Exception):
+        await server._refresh_extension_runtime_state([extension_id])
+    detail = None
+    with contextlib.suppress(Exception):
+        detail = server._extension_unavailable_detail(extension_id)
+    with contextlib.suppress(Exception):
+        await server._emit_extension_unavailable_warning(
+            conversation_id,
+            extension_id,
+            detail=detail or error_message,
+        )
+
+
+async def get_auth_status(extension_id: str, refresh: bool = False) -> Dict[str, Any]:
+    pending = dict(_auth_state_bucket(extension_id))
+    if pending.get("login_id") and not refresh:
+        return _normalize_auth_status(
+            {"account": None, "requiresOpenaiAuth": True},
+            extension_id=extension_id,
+            pending=pending,
+        )
+    try:
+        transport = await _ensure_transport_ready()
+        raw = await transport.rpc_request(
+            "account/read",
+            params={"refreshToken": bool(refresh)},
+            timeout=15.0,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "extension_id": extension_id,
+            "status": "error",
+            "message": f"Failed to read Codex auth status: {exc}",
+            "requires_openai_auth": False,
+            "authenticated": False,
+            "account_type": None,
+            "account_email": None,
+            "plan_type": None,
+            "login_pending": bool(pending.get("login_id")),
+            "login_id": pending.get("login_id"),
+            "auth_url": pending.get("auth_url"),
+            "detail": "",
+        }
+
+    normalized = _normalize_auth_status(raw, extension_id=extension_id, pending=pending)
+    if normalized.get("authenticated") or not normalized.get("requires_openai_auth"):
+        _clear_auth_state(extension_id)
+        normalized["login_pending"] = False
+        normalized["login_id"] = None
+        normalized["auth_url"] = None
+    return normalized
+
+
+async def get_splash_schema(extension_id: str) -> Dict[str, Any]:
+    auth_status = await get_auth_status(extension_id, refresh=False)
+    tone = "success"
+    if auth_status.get("status") in {"auth_required", "login_pending"}:
+        tone = "warning"
+    if auth_status.get("status") == "error" or auth_status.get("ok") is False:
+        tone = "error"
+
+    fields: List[Dict[str, Any]] = [
+        {
+            "id": "auth_status",
+            "type": "status",
+            "label": "Authentication",
+            "text": auth_status.get("message") or "Status unavailable",
+            "detail": auth_status.get("detail") or "",
+            "tone": tone,
+        }
+    ]
+
+    if auth_status.get("status") == "error" or auth_status.get("ok") is False:
+        fields.append({
+            "id": "refresh_auth_status",
+            "type": "action",
+            "label": "Authentication",
+            "button_label": "Refresh Status",
+            "action_id": "refresh_auth_status",
+            "description": "Retry the Codex auth status probe.",
+        })
+    elif auth_status.get("authenticated"):
+        fields.append({
+            "id": "logout_auth",
+            "type": "action",
+            "label": "Authentication",
+            "button_label": "Log Out",
+            "action_id": "logout_auth",
+            "description": "Clear the current Codex OpenAI login state.",
+        })
+    elif auth_status.get("requires_openai_auth"):
+        if auth_status.get("login_pending"):
+            fields.append({
+                "id": "cancel_auth_login",
+                "type": "action",
+                "label": "Authentication",
+                "button_label": "Cancel Login",
+                "action_id": "cancel_auth_login",
+                "description": "Cancel the pending ChatGPT login flow.",
+            })
+            fields.append({
+                "id": "refresh_auth_status",
+                "type": "action",
+                "label": "Authentication",
+                "button_label": "Refresh Status",
+                "action_id": "refresh_auth_status",
+                "description": "Refresh auth state after finishing sign-in in the browser.",
+            })
+        else:
+            fields.append({
+                "id": "login_chatgpt",
+                "type": "action",
+                "label": "Authentication",
+                "button_label": "Log In with ChatGPT",
+                "action_id": "login_chatgpt",
+                "description": "Open the Codex ChatGPT login flow in your browser.",
+                "open_strategy": "host",
+                "opens_window": True,
+            })
+
+    return {
+        "version": "1",
+        "extension_id": extension_id,
+        "description": "Splash settings schema for extension-scoped auth controls.",
+        "fields": fields,
+    }
+
+
+async def run_splash_action(
+    extension_id: str,
+    action_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    action = str(action_id or "").strip().lower()
+    params = payload if isinstance(payload, dict) else {}
+    auth_state = _auth_state_bucket(extension_id)
+    try:
+        transport = await _ensure_transport_ready()
+        if action == "login_chatgpt":
+            result = await transport.rpc_request(
+                "account/login/start",
+                params={"type": "chatgpt"},
+                timeout=15.0,
+            )
+            if not isinstance(result, dict):
+                return {"ok": False, "error": "Invalid login response"}
+            auth_url = result.get("authUrl")
+            login_id = result.get("loginId")
+            if not isinstance(auth_url, str) or not auth_url.strip() or not isinstance(login_id, str) or not login_id.strip():
+                return {"ok": False, "error": "ChatGPT login URL unavailable"}
+            auth_state.clear()
+            auth_state.update({
+                "login_id": login_id.strip(),
+                "auth_url": auth_url.strip(),
+            })
+            opened_externally, open_error = await _open_url_with_xdg_open(auth_url.strip())
+            message = "ChatGPT login started. Finish sign-in in the opened browser."
+            if not opened_externally and open_error:
+                message = f"ChatGPT login started, but xdg-open failed: {open_error}"
+            return {
+                "ok": True,
+                "message": message,
+                "opened_externally": opened_externally,
+                "open_url": auth_url.strip(),
+            }
+        if action == "cancel_auth_login":
+            login_id = params.get("login_id") if isinstance(params.get("login_id"), str) else auth_state.get("login_id")
+            if not isinstance(login_id, str) or not login_id.strip():
+                return {"ok": False, "error": "No pending login to cancel"}
+            result = await transport.rpc_request(
+                "account/login/cancel",
+                params={"loginId": login_id.strip()},
+                timeout=15.0,
+            )
+            auth_state.clear()
+            await _refresh_extension_auth_state(extension_id)
+            cancel_status = result.get("status") if isinstance(result, dict) else None
+            message = "Pending login canceled."
+            if cancel_status == "notFound":
+                message = "Pending login no longer exists."
+            return {"ok": True, "message": message}
+        if action == "logout_auth":
+            await transport.rpc_request(
+                "account/logout",
+                params=None,
+                timeout=15.0,
+            )
+            auth_state.clear()
+            await _refresh_extension_auth_state(extension_id)
+            return {"ok": True, "message": "Logged out of Codex OpenAI auth."}
+        if action == "refresh_auth_status":
+            status = await get_auth_status(extension_id, refresh=True)
+            await _refresh_extension_auth_state(extension_id)
+            return {
+                "ok": bool(status.get("ok", True)),
+                "message": status.get("message") or "Auth status refreshed.",
+            }
+        return {"ok": False, "error": f"Unknown splash action: {action_id}"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def _sort_session_entries(entries: List[Dict[str, Any]], cwd: Optional[str]) -> List[Dict[str, Any]]:
     if not cwd:
         return entries
@@ -221,6 +657,7 @@ def init_codex_app_server_manager(
         transcript_fn=transcript_fn,
         meta_fns=meta_fns,
         raw_log_fn=_add_to_raw_buffer,
+        auth_event_handler=_handle_auth_transport_event,
     )
     print("[Codex] Extension initialized (app-server binary handler)")
 
@@ -449,6 +886,8 @@ async def resume_session(
         _add_to_raw_buffer("out", conversation_id, f"thread_resumed {thread_id[:8]}")
         return {"ok": True, "session_id": thread_id}
     except Exception as exc:
+        if _looks_like_auth_required_error(exc):
+            await _handle_auth_failure(conversation_id, meta.get("settings", {}).get("agent") or "codex-ext-testing", str(exc))
         _add_to_raw_buffer("err", conversation_id, f"resume_failed {exc}")
         return {"ok": False, "error": f"Thread resume failed: {exc}"}
 
@@ -549,6 +988,8 @@ async def handle_message(
         _add_to_raw_buffer("out", conversation_id, f"turn_start thread={thread_id[:8]} text={text[:120]}")
         return {"ok": True, "thread_id": thread_id, "conversation_id": conversation_id}
     except Exception as exc:
+        if _looks_like_auth_required_error(exc):
+            await _handle_auth_failure(conversation_id, agent_type or "codex-ext-testing", str(exc))
         _add_to_raw_buffer("err", conversation_id, f"handle_message_failed {exc}")
         return {"ok": False, "error": str(exc)}
 

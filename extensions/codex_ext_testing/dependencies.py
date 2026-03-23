@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import os
 import platform
 import shutil
@@ -57,18 +58,60 @@ async def _run_install(package_name: str) -> Dict[str, Any]:
 
 async def check_dependencies(*, extension_id: str, extension_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     binary = _codex_binary_path()
-    if binary:
+    if not binary:
         return {
-            "ok": True,
-            "status": "met",
-            "message": f"codex available at {binary}",
+            "ok": False,
+            "status": "unmet",
+            "message": f"codex not found on PATH. Install with: {recommended_codex_install_command()}",
+            "details": {"install_command": recommended_codex_install_command()},
+        }
+
+    ext_loader = importlib.import_module("extensions")
+    handler = ext_loader.get_handler(extension_id)
+    auth_reader = getattr(handler, "get_auth_status", None) if handler else None
+    if not callable(auth_reader):
+        return {
+            "ok": False,
+            "status": "error",
+            "message": "Codex auth status helper unavailable",
             "details": {"binary": binary},
         }
+
+    auth_status = auth_reader(extension_id=extension_id, refresh=False)
+    if asyncio.iscoroutine(auth_status):
+        auth_status = await auth_status
+    auth_payload = auth_status if isinstance(auth_status, dict) else {}
+    details = {
+        "binary": binary,
+        "auth_required": bool(auth_payload.get("requires_openai_auth")),
+        "authenticated": bool(auth_payload.get("authenticated")),
+        "login_pending": bool(auth_payload.get("login_pending")),
+        "account_type": auth_payload.get("account_type"),
+        "account_email": auth_payload.get("account_email"),
+        "plan_type": auth_payload.get("plan_type"),
+    }
+
+    if auth_payload.get("ok") is False:
+        return {
+            "ok": False,
+            "status": "error",
+            "message": auth_payload.get("message") or "Failed to read Codex auth status",
+            "details": details,
+        }
+
+    if auth_payload.get("requires_openai_auth") and not auth_payload.get("authenticated"):
+        return {
+            "ok": False,
+            "status": "unmet",
+            "message": auth_payload.get("message") or "OpenAI auth required",
+            "details": details,
+        }
+
     return {
-        "ok": False,
-        "status": "unmet",
-        "message": f"codex not found on PATH. Install with: {recommended_codex_install_command()}",
-        "details": {"install_command": recommended_codex_install_command()},
+        "ok": True,
+        "status": "met",
+        "message": auth_payload.get("message") or f"codex available at {binary}",
+        "details": details,
     }
 
 

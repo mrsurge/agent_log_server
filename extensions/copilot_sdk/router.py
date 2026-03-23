@@ -604,7 +604,7 @@ class CopilotEventRouter:
     _HIDDEN_UI_TOOLS = {"ask_user"}
 
     # Tools that are "read-only explorers" — sanitized card + ribbon
-    _EXPLORE_TOOLS = {"view", "glob", "grep"}
+    _EXPLORE_TOOLS = {"view", "glob", "grep", "rg"}
 
     @staticmethod
     def _coerce_tool_arguments(raw_args: Any) -> Dict[str, Any]:
@@ -688,6 +688,17 @@ class CopilotEventRouter:
                 "arguments": args,
             }
 
+        if tool_name in {"glob", "grep", "rg"}:
+            return {
+                "kind": "search",
+                "tool_name": tool_name,
+                "title": "search",
+                "activity": "Exploring",
+                "tool": tool_name,
+                "arguments": args,
+                "path": file_path,
+            }
+
         if tool_name == "bash":
             card_label, ribbon_label, file_path = self._sanitize_tool_label(tool_name, raw_args)
             return {
@@ -700,13 +711,7 @@ class CopilotEventRouter:
             }
 
         display_args: Dict[str, Any]
-        if tool_name in {"glob", "grep"}:
-            display_args = {}
-            if args.get("pattern"):
-                display_args["pattern"] = args.get("pattern")
-            if args.get("path"):
-                display_args["path"] = args.get("path")
-        elif tool_name in {"edit", "create", "write", "write_file"}:
+        if tool_name in {"edit", "create", "write", "write_file"}:
             display_args = {}
             if args.get("path"):
                 display_args["path"] = args.get("path")
@@ -862,7 +867,7 @@ class CopilotEventRouter:
         # Mark block type change so next message/reasoning delta gets a new ID
         self._last_block_type = "tool"
 
-        if render_state.get("kind") == "view":
+        if render_state.get("kind") in {"view", "search"}:
             await self._emit({
                 "type": "activity",
                 "conversation_id": self.conversation_id,
@@ -977,6 +982,38 @@ class CopilotEventRouter:
             if tool_call.get("view_range") is not None:
                 record_entry["view_range"] = tool_call.get("view_range")
             await self._record(record_entry)
+        elif render_kind == "search":
+            search_content = content or tool_call.get("output") or ""
+            search_evt = {
+                "type": "search",
+                "conversation_id": self.conversation_id,
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "title": tool_call.get("title", render_tool or "search"),
+                "mode": render_tool or tool_name or "search",
+                "path": file_path,
+                "pattern": render_arguments.get("pattern") if isinstance(render_arguments, dict) else None,
+                "arguments": render_arguments if isinstance(render_arguments, dict) else {},
+                "content": search_content,
+            }
+            if subagent_id:
+                search_evt["subagent_id"] = subagent_id
+            await self._emit(search_evt)
+
+            record_entry = {
+                "role": "search",
+                "id": tool_call_id,
+                "turn_id": self.current_turn_id,
+                "title": tool_call.get("title", render_tool or "search"),
+                "mode": render_tool or tool_name or "search",
+                "path": file_path,
+                "pattern": render_arguments.get("pattern") if isinstance(render_arguments, dict) else None,
+                "arguments": render_arguments if isinstance(render_arguments, dict) else {},
+                "content": search_content,
+                "timestamp": utc_ts(),
+                "subagent_id": subagent_id,
+            }
+            await self._record(record_entry)
         elif render_kind == "shell":
             # For edit/create/apply_patch tools: suppress verbose output, add status emoji
             cmd_label = tool_call.get("title", "")
@@ -1044,12 +1081,15 @@ class CopilotEventRouter:
             }
             if render_server:
                 tool_end_evt["server"] = render_server
+            if file_path:
+                tool_end_evt["path"] = file_path
             if subagent_id:
                 tool_end_evt["subagent_id"] = subagent_id
             await self._emit(tool_end_evt)
 
+            transcript_role = "mcp_tool" if render_kind == "mcp" else "tool"
             record_entry = {
-                "role": "mcp_tool",
+                "role": transcript_role,
                 "id": tool_call_id,
                 "turn_id": self.current_turn_id,
                 "tool": render_tool,
@@ -1124,7 +1164,7 @@ class CopilotEventRouter:
                 tool_call["output"] += content
 
             render_kind = tool_call.get("render_kind") if tool_call else "tool"
-            if render_kind == "view":
+            if render_kind in {"view", "search"}:
                 return
 
             delta_evt = {

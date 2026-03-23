@@ -97,6 +97,7 @@ class CodexAppServerTransport:
         transcript_fn: Callable[[str, Dict[str, Any]], Awaitable[None]],
         meta_fns: Optional[Dict[str, Callable]],
         raw_log_fn: Callable[[str, str, Any], None],
+        auth_event_handler: Optional[Callable[..., Awaitable[List[Dict[str, Any]]]]] = None,
     ) -> None:
         self._server_root = server_root
         self._fws_getter = fws_getter
@@ -104,6 +105,7 @@ class CodexAppServerTransport:
         self._transcript_fn = transcript_fn
         self._meta_fns = meta_fns or {}
         self._raw_log_fn = raw_log_fn
+        self._auth_event_handler = auth_event_handler
 
         self._lock = asyncio.Lock()
         self._shell_id: Optional[str] = None
@@ -640,33 +642,49 @@ class CodexAppServerTransport:
             turn_id=turn_id,
             request_id=request_id,
         )
-        if not isinstance(routed, dict) or not routed.get("handled"):
+
+        extra_events: List[Dict[str, Any]] = []
+        if self._auth_event_handler is not None:
+            handled_events = await self._auth_event_handler(
+                label=label,
+                payload=payload,
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                request_id=request_id,
+            )
+            if isinstance(handled_events, list):
+                extra_events = [event for event in handled_events if isinstance(event, dict)]
+
+        if (not isinstance(routed, dict) or not routed.get("handled")) and not extra_events:
             return
 
-        resolved_conversation_id = routed.get("conversation_id") or conversation_id
-        transcript_entries = routed.get("transcript_entries")
+        routed_result = routed if isinstance(routed, dict) else {}
+        resolved_conversation_id = routed_result.get("conversation_id") or conversation_id
+        transcript_entries = routed_result.get("transcript_entries")
         if resolved_conversation_id and isinstance(transcript_entries, list):
             for entry in transcript_entries:
                 if isinstance(entry, dict):
                     await self._transcript_fn(resolved_conversation_id, entry)
 
-        next_turn_id = routed.get("set_turn_id")
+        next_turn_id = routed_result.get("set_turn_id")
         if resolved_conversation_id and next_turn_id is not None:
             self._persist_turn_id(resolved_conversation_id, next_turn_id)
-        elif resolved_conversation_id and routed.get("clear_turn_id"):
+        elif resolved_conversation_id and routed_result.get("clear_turn_id"):
             self._persist_turn_id(resolved_conversation_id, None)
 
-        events = routed.get("events")
-        if isinstance(events, list):
-            for event in events:
-                if not isinstance(event, dict):
-                    continue
-                outbound = dict(event)
-                if resolved_conversation_id:
-                    outbound["conversation_id"] = resolved_conversation_id
-                if request_id is not None and outbound.get("request_id") is None:
-                    outbound["request_id"] = request_id
-                await self._broadcast_fn(outbound)
+        events: List[Dict[str, Any]] = []
+        routed_events = routed_result.get("events")
+        if isinstance(routed_events, list):
+            events.extend(event for event in routed_events if isinstance(event, dict))
+        events.extend(extra_events)
+        for event in events:
+            outbound = dict(event)
+            if resolved_conversation_id and outbound.get("conversation_id") is None:
+                outbound["conversation_id"] = resolved_conversation_id
+            if request_id is not None and outbound.get("request_id") is None:
+                outbound["request_id"] = request_id
+            await self._broadcast_fn(outbound)
 
     def _persist_pending_approval(self, conversation_id: str, descriptor: Dict[str, Any]) -> None:
         request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()

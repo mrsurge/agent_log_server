@@ -47,6 +47,10 @@ _SEMANTIC_SUFFIXES = {
 
 _THREAD_BINDING_FIELDS = ("new_thread_id", "receiver_thread_id")
 _CLIENT_RESPONSE_METHODS = frozenset({
+    "account/login/cancel",
+    "account/login/start",
+    "account/logout",
+    "account/read",
     "initialize",
     "command/exec",
     "model/list",
@@ -56,7 +60,12 @@ _CLIENT_RESPONSE_METHODS = frozenset({
     "turn/interrupt",
     "turn/start",
 })
-_RESPONSE_SCHEMA_OVERRIDES: Dict[str, str] = {}
+_RESPONSE_SCHEMA_OVERRIDES: Dict[str, str] = {
+    "account/login/cancel": "CancelLoginAccountResponse",
+    "account/login/start": "LoginAccountResponse",
+    "account/logout": "LogoutAccountResponse",
+    "account/read": "GetAccountResponse",
+}
 _SERVER_REQUEST_RESPONSE_DEFINITIONS: Dict[str, str] = {
     "account/chatgptauthtokens/refresh": "ChatgptAuthTokensRefreshResponse",
     "item/commandexecution/requestapproval": "CommandExecutionRequestApprovalResponse",

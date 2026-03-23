@@ -640,6 +640,32 @@ async def get_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+async def get_splash_schema(extension_id: str) -> Optional[Dict[str, Any]]:
+    """Get a splash-settings schema for an extension when supported."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "get_splash_schema"):
+        return await handler.get_splash_schema(extension_id=extension_id)
+    return None
+
+
+async def run_splash_action(
+    extension_id: str,
+    action_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run a splash-settings action for an extension when supported."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "run_splash_action"):
+        result = await handler.run_splash_action(
+            extension_id=extension_id,
+            action_id=action_id,
+            payload=payload if isinstance(payload, dict) else None,
+        )
+        if isinstance(result, dict):
+            return result
+    return {"ok": False, "error": f"Extension {extension_id} does not support splash actions"}
+
+
 def _normalize_request_card_entries(manifest: Any) -> List[Dict[str, Any]]:
     if not isinstance(manifest, dict):
         return []
