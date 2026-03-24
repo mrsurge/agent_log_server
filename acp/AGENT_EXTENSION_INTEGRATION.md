@@ -94,15 +94,25 @@ Extensions own backend transport/session logic so the shared frontend can stay u
 
 ## Current filesystem layout
 
-Each extension is self-contained in its own folder.
+Each extension is self-contained in its own folder. There are now two extension roots:
+
+- builtin repo root: `extensions/`
+- user-installed root: `~/.local/share/app_server/extensions/`
+
+Each root has its own `extensions.json`.
 
 | Path | Purpose |
 |------|---------|
-| `extensions/extensions.json` | Explicit extension registry and ordering |
-| `extensions/<folder>/manifest.json` | Extension metadata and capabilities |
-| `extensions/<folder>/client.py` | Main extension handler module |
-| `extensions/<folder>/router.py` | Optional event translation layer |
-| `extensions/<folder>/settings_schema.json` | Optional static settings schema |
+| `extensions/extensions.json` | Builtin extension registry and ordering |
+| `extensions/<folder>/manifest.json` | Builtin extension metadata and capabilities |
+| `extensions/<folder>/client.py` | Builtin extension client module |
+| `extensions/<folder>/router.py` | Builtin optional event translation layer |
+| `extensions/<folder>/settings_schema.json` | Builtin optional static settings schema |
+| `~/.local/share/app_server/extensions/extensions.json` | User-installed extension registry and ordering |
+| `~/.local/share/app_server/extensions/<folder>/manifest.json` | User-installed extension metadata and capabilities |
+| `~/.local/share/app_server/extensions/<folder>/client.py` | User-installed extension client module |
+| `~/.local/share/app_server/extensions/<folder>/router.py` | User-installed optional event translation layer |
+| `~/.local/share/app_server/extensions/<folder>/settings_schema.json` | User-installed optional static settings schema |
 | `extensions/codex_ext_testing/runtime_protocol.py` | Codex extension-specific runtime schema/cache helper |
 | `agent_log_server/server.py` | Generic backend entrypoint |
 | `agent_log_server/static/modals/settings_schema.js` | Generic schema-driven settings renderer |
@@ -113,7 +123,12 @@ The older flat `extensions/<type>_client.py` / `extensions/<type>_router.py` pat
 
 ### Registry
 
-`extensions/extensions.json` is the explicit source of enabled extensions and their folder/type mapping.
+The loader merges registries from both roots:
+
+- builtin: `extensions/extensions.json`
+- user-installed: `~/.local/share/app_server/extensions/extensions.json`
+
+At startup, the server ensures the user root exists and seeds its `extensions.json` with an empty registry when missing.
 
 ```json
 {
@@ -141,15 +156,18 @@ The older flat `extensions/<type>_client.py` / `extensions/<type>_router.py` pat
 
 On startup, `ext_loader.load_extensions(...)`:
 
-1. reads `extensions/extensions.json` (or scans manifests if the file is absent)
-2. registers each extension by `id`
-3. imports `extensions.<folder>.client`
-4. calls the handler init function using this convention:
+1. ensures `~/.local/share/app_server/extensions/` exists
+2. ensures `~/.local/share/app_server/extensions/extensions.json` exists
+3. reads each root's `extensions.json` (or scans that root for manifests if the file is absent)
+4. merges discovered extensions by `id`
+5. imports builtin extensions as `extensions.<folder>.client`
+6. imports user-installed extensions from file-backed synthetic package namespaces so relative imports like `.router` and `.dependencies` still work
+7. calls the handler init function using this convention:
    - `init_<type>_manager(...)`
    - fallback: `init_<folder>_manager(...)`
    - fallback: any `init_*_manager(...)`
    - fallback: `init_manager(...)`
-5. injects shared server callbacks:
+8. injects shared server callbacks:
    - `broadcast_fn`
    - `transcript_fn`
    - `meta_fns`
@@ -157,7 +175,12 @@ On startup, `ext_loader.load_extensions(...)`:
    - `server_root`
    - `extensions_dir`
 
-This is what keeps `server.py` from importing extension modules directly.
+For each extension, `extensions_dir` is the root that owns that extension:
+
+- builtin extension → repo `extensions/`
+- user-installed extension → `~/.local/share/app_server/extensions/`
+
+This is what keeps `server.py` from importing extension modules directly while still allowing non-builtin roots.
 
 ## Generic hook surface
 
@@ -369,7 +392,7 @@ At runtime it:
 
 1. runs `codex --version`
 2. computes a versioned cache directory:
-   - `~/.cache/agent_log_server/codex_app_server_schema/<version>/`
+   - `~/.cache/app_server/codex_app_server_schema/<version>/`
 3. runs:
    - `codex app-server generate-json-schema --out <cache_dir>`
 4. loads the generated bundle
@@ -488,7 +511,15 @@ Legacy `codex` in `server.py` is the hard-coded compatibility template, but new 
 
 ### 1. Add a registry entry
 
-Create an entry in `extensions/extensions.json` with:
+For a site-package install, the normal user-modifiable extension root is:
+
+- `~/.local/share/app_server/extensions/`
+
+So for a new third-party extension, create or update:
+
+- `~/.local/share/app_server/extensions/extensions.json`
+
+with an entry containing:
 
 - `id`
 - `name`
@@ -498,15 +529,17 @@ Create an entry in `extensions/extensions.json` with:
 
 ### 2. Create an extension folder
 
-Minimum recommended structure:
+Minimum recommended structure for a user-installed extension:
 
 ```text
-extensions/<folder>/
+~/.local/share/app_server/extensions/<folder>/
   manifest.json
   client.py
   router.py              # optional but recommended for streaming backends
   settings_schema.json   # optional if schema is dynamic
 ```
+
+Builtin repo extensions under `extensions/<folder>/` still follow the same layout, but that is the builtin root, not the normal target for user-installed additions.
 
 ### 3. Implement the manager init hook
 
@@ -517,6 +550,11 @@ def init_<type>_manager(extensions_dir, server_root, fws_getter, broadcast_fn, t
 ```
 
 Use this to store callbacks and initialize any shared backend state.
+
+`extensions_dir` will be the root that owns the extension:
+
+- builtin repo extension → `extensions/`
+- user-installed extension → `~/.local/share/app_server/extensions/`
 
 ### 4. Decide whether schema is static or dynamic
 

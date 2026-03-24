@@ -8,6 +8,7 @@ import {
 } from './js/codex_agent/markdown.js';
 import { bindAssistantStream } from './js/codex_agent/assistant_stream.js';
 import { bindShellRender } from './js/codex_agent/shell_render.js';
+import { bindToolRender } from './js/codex_agent/tool_render.js';
 import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.js';
 import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.js';
 import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.js';
@@ -55,6 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const activeConversationEl = document.getElementById('active-conversation');
   const conversationTitleEl = document.getElementById('conversation-title');
   const splashViewEl = document.getElementById('splash-view');
+  const widescreenResizerEl = document.getElementById('widescreen-resizer');
   const drawerEl = document.getElementById('conversation-drawer');
   const conversationBodyEl = document.getElementById('conversation-body');
   const conversationListEl = document.getElementById('conversation-list');
@@ -181,6 +183,16 @@ document.addEventListener('DOMContentLoaded', () => {
   let ptyWebSocketConvoId = null; // conversation_id currently bound to ptyWebSocket
   let activeAgentPtyBlockId = null;
   const pending = new Map();
+  const WIDESCREEN_BREAKPOINT = 1280;
+  const WIDESCREEN_SPLIT_STORAGE_KEY = 'codex_widescreen_split';
+  const WIDESCREEN_SPLIT_DEFAULT = 420;
+  const WIDESCREEN_SPLIT_MIN = 320;
+  const WIDESCREEN_SPLIT_MAX = 720;
+  const widescreenMedia = typeof window.matchMedia === 'function'
+    ? window.matchMedia(`(min-width: ${WIDESCREEN_BREAKPOINT}px)`)
+    : null;
+  let widescreenLayout = Boolean(widescreenMedia?.matches);
+  let widescreenResizing = false;
 
   // Detect mobile for input behavior
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
@@ -1374,8 +1386,129 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function setDrawerOpen(open) {
     if (!drawerEl) return;
-    drawerEl.classList.toggle('open', Boolean(open));
-    document.body.classList.toggle('drawer-open', Boolean(open));
+    const shouldOpen = widescreenLayout || Boolean(open);
+    drawerEl.classList.toggle('open', shouldOpen);
+    document.body.classList.toggle('drawer-open', shouldOpen);
+  }
+
+  function clampWidescreenSplit(width) {
+    const numericWidth = Number(width);
+    const viewportWidth = Math.max(window.innerWidth || 0, 0);
+    const viewportCap = viewportWidth > 0
+      ? Math.floor(viewportWidth * 0.6)
+      : WIDESCREEN_SPLIT_MAX;
+    const maxWidth = Math.max(WIDESCREEN_SPLIT_MIN, Math.min(WIDESCREEN_SPLIT_MAX, viewportCap));
+    if (!Number.isFinite(numericWidth)) {
+      return Math.max(WIDESCREEN_SPLIT_MIN, Math.min(WIDESCREEN_SPLIT_DEFAULT, maxWidth));
+    }
+    return Math.max(WIDESCREEN_SPLIT_MIN, Math.min(Math.round(numericWidth), maxWidth));
+  }
+
+  function getStoredWidescreenSplit() {
+    try {
+      const raw = localStorage.getItem(WIDESCREEN_SPLIT_STORAGE_KEY);
+      if (!raw) return WIDESCREEN_SPLIT_DEFAULT;
+      return clampWidescreenSplit(Number(raw));
+    } catch {
+      return WIDESCREEN_SPLIT_DEFAULT;
+    }
+  }
+
+  function applyWidescreenSplit(width, { persist = true } = {}) {
+    const clampedWidth = clampWidescreenSplit(width);
+    document.documentElement.style.setProperty('--codex-widescreen-splash-width', `${clampedWidth}px`);
+    if (persist) {
+      try {
+        localStorage.setItem(WIDESCREEN_SPLIT_STORAGE_KEY, String(clampedWidth));
+      } catch {
+        // ignore storage failures
+      }
+    }
+    return clampedWidth;
+  }
+
+  function updateWidescreenLayout() {
+    widescreenLayout = Boolean(widescreenMedia?.matches);
+    document.body.classList.toggle('widescreen-layout', widescreenLayout);
+    if (widescreenLayout) {
+      applyWidescreenSplit(getStoredWidescreenSplit(), { persist: false });
+    } else {
+      finishWidescreenResize();
+    }
+    if (widescreenResizerEl) {
+      widescreenResizerEl.setAttribute('aria-hidden', widescreenLayout ? 'false' : 'true');
+    }
+    setDrawerOpen(activeView === 'conversation');
+  }
+
+  function applyWidescreenResizeFromClientX(clientX) {
+    if (!widescreenLayout || !splashViewEl) return;
+    const gridEl = splashViewEl.parentElement;
+    if (!gridEl) return;
+    const rect = gridEl.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const width = clientX - rect.left;
+    applyWidescreenSplit(width);
+  }
+
+  function finishWidescreenResize() {
+    if (!widescreenResizing) return;
+    widescreenResizing = false;
+    document.body.classList.remove('widescreen-resizing');
+    window.removeEventListener('pointermove', handleWidescreenResizeMove);
+    window.removeEventListener('pointerup', finishWidescreenResize);
+    window.removeEventListener('pointercancel', finishWidescreenResize);
+  }
+
+  function handleWidescreenResizeMove(event) {
+    if (!widescreenResizing) return;
+    applyWidescreenResizeFromClientX(event.clientX);
+  }
+
+  function handleWidescreenResizeStart(event) {
+    if (!widescreenLayout || !widescreenResizerEl) return;
+    event.preventDefault();
+    widescreenResizing = true;
+    document.body.classList.add('widescreen-resizing');
+    widescreenResizerEl.focus({ preventScroll: true });
+    if (typeof widescreenResizerEl.setPointerCapture === 'function' && event.pointerId != null) {
+      try {
+        widescreenResizerEl.setPointerCapture(event.pointerId);
+      } catch {
+        // ignore pointer-capture failures
+      }
+    }
+    window.addEventListener('pointermove', handleWidescreenResizeMove);
+    window.addEventListener('pointerup', finishWidescreenResize);
+    window.addEventListener('pointercancel', finishWidescreenResize);
+    applyWidescreenResizeFromClientX(event.clientX);
+  }
+
+  function handleWidescreenResizeKeydown(event) {
+    if (!widescreenLayout) return;
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const delta = event.shiftKey ? 64 : 24;
+    const direction = event.key === 'ArrowLeft' ? -1 : 1;
+    applyWidescreenSplit(getStoredWidescreenSplit() + (direction * delta));
+  }
+
+  function bindWidescreenResizer() {
+    if (!widescreenResizerEl) return;
+    widescreenResizerEl.addEventListener('pointerdown', handleWidescreenResizeStart);
+    widescreenResizerEl.addEventListener('keydown', handleWidescreenResizeKeydown);
+    widescreenResizerEl.addEventListener('dblclick', () => {
+      if (!widescreenLayout) return;
+      applyWidescreenSplit(WIDESCREEN_SPLIT_DEFAULT);
+    });
+    if (widescreenMedia) {
+      if (typeof widescreenMedia.addEventListener === 'function') {
+        widescreenMedia.addEventListener('change', updateWidescreenLayout);
+      } else if (typeof widescreenMedia.addListener === 'function') {
+        widescreenMedia.addListener(updateWidescreenLayout);
+      }
+    }
+    window.addEventListener('resize', updateWidescreenLayout);
   }
 
 	  function applyHostUi() {
@@ -3164,111 +3297,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       // Generic tool call entries
       if (entry.role === 'mcp_tool' || entry.role === 'tool') {
-        const row = document.createElement('div');
-        row.className = 'timeline-row command-result mcp-tool-card';
-        const body = document.createElement('div');
-        body.className = 'body';
-        // Tool header
-        const header = document.createElement('div');
-        header.className = 'command-ribbon';
-        const toolName = entry.tool || 'tool';
-        const serverName = entry.server || '';
-        header.textContent = toolCardLabel(toolName, serverName);
-        body.appendChild(header);
-        // Arguments section
-        if (entry.arguments && Object.keys(entry.arguments).length > 0) {
-          const argEntries = Object.entries(entry.arguments);
-          // Check if any argument looks like markdown
-          const hasMarkdownArg = argEntries.some(([k, v]) => 
-            typeof v === 'string' && (v.includes('\n') || v.startsWith('#') || v.includes('**') || v.includes('`'))
-          );
-          
-          if (hasMarkdownArg) {
-            argEntries.forEach(([k, v]) => {
-              const argLabel = document.createElement('div');
-              argLabel.className = 'mcp-tool-arg-label';
-              argLabel.textContent = `${k}:`;
-              body.appendChild(argLabel);
-              
-              if (typeof v === 'string' && (v.includes('\n') || v.startsWith('#') || v.includes('**') || v.includes('`'))) {
-                const argContainer = document.createElement('div');
-                argContainer.className = 'markdown-body mcp-tool-arg-value';
-                renderMarkdownInto(argContainer, v);
-                highlightCode(argContainer);
-                body.appendChild(argContainer);
-              } else {
-                const argValue = document.createElement('pre');
-                argValue.className = 'mcp-tool-arg-value-plain';
-                argValue.textContent = typeof v === 'string' ? v : JSON.stringify(v);
-                body.appendChild(argValue);
-              }
-            });
-          } else {
-            const argsPre = document.createElement('pre');
-            argsPre.className = 'mcp-tool-args';
-            const argLines = [];
-            argEntries.forEach(([k, v]) => {
-              const val = typeof v === 'string' ? v : JSON.stringify(v);
-              argLines.push(`  ${k}: ${val}`);
-            });
-            argsPre.textContent = argLines.join('\n');
-            body.appendChild(argsPre);
-          }
-        }
-        // Output / streamed body
-        if (typeof entry.output === 'string' && entry.output) {
-          const outputPre = document.createElement('pre');
-          outputPre.className = 'mcp-tool-content';
-          outputPre.textContent = entry.output;
-          if (entry.is_error && (entry.result === undefined || entry.result === null)) {
-            outputPre.classList.add('error-text');
-          }
-          body.appendChild(outputPre);
-        }
-        // Result section
-        if (entry.result !== undefined && entry.result !== null) {
-          const resultHeader = document.createElement('div');
-          resultHeader.className = 'mcp-tool-result-header';
-          resultHeader.textContent = '→';
-          body.appendChild(resultHeader);
-          
-          if (typeof entry.result === 'object') {
-            // Object result: use pre-formatted display
-            const resultPre = document.createElement('pre');
-            resultPre.className = 'mcp-tool-content';
-            const lines = [];
-            Object.entries(entry.result).forEach(([k, v]) => {
-              if (typeof v === 'object' && v !== null) {
-                lines.push(`  ${k}:`);
-                Object.entries(v).forEach(([k2, v2]) => {
-                  lines.push(`    ${k2}: ${JSON.stringify(v2)}`);
-                });
-              } else {
-                lines.push(`  ${k}: ${JSON.stringify(v)}`);
-              }
-            });
-            resultPre.textContent = lines.join('\n');
-            if (entry.is_error) resultPre.classList.add('error-text');
-            body.appendChild(resultPre);
-          } else {
-            // String result: render as markdown
-            const resultContainer = document.createElement('div');
-            resultContainer.className = 'markdown-body mcp-tool-result';
-            renderMarkdownInto(resultContainer, String(entry.result));
-            highlightCode(resultContainer);
-            if (entry.is_error) resultContainer.classList.add('error-text');
-            body.appendChild(resultContainer);
-          }
-        }
-        // Footer with duration
-        if (entry.duration_ms !== undefined && entry.duration_ms !== null) {
-          const footer = document.createElement('div');
-          footer.className = 'command-footer';
-          footer.textContent = `${entry.duration_ms}ms`;
-          body.appendChild(footer);
-        }
-        row.appendChild(body);
-        makeCollapsible(row, `tool:${entry.id || entry.item_id || `${entry.server || ''}:${entry.tool || ''}`}`, false);
+        const row = buildReplayToolRow(entry);
         getTarget().appendChild(row);
         return;
       }
@@ -3447,205 +3476,6 @@ document.addEventListener('DOMContentLoaded', () => {
       diffRows.set(key, entry);
     }
     return entry;
-  }
-
-  function getToolRow(id, label, parentEl = null) {
-    const key = id || `tool:${label || 'tool'}`;
-    let entry = toolRows.get(key);
-    if (!entry) {
-      // Match playback structure: mcp-tool-card with command-ribbon header
-      const row = document.createElement('div');
-      row.className = 'timeline-row command-result mcp-tool-card';
-      const body = document.createElement('div');
-      body.className = 'body';
-      const header = document.createElement('div');
-      header.className = 'command-ribbon';
-      header.textContent = label || 'tool';
-      body.appendChild(header);
-      // Args pre (for arguments)
-      const argsPre = document.createElement('pre');
-      argsPre.className = 'mcp-tool-args';
-      argsPre.textContent = '';
-      body.appendChild(argsPre);
-      row.appendChild(body);
-      if (parentEl) {
-        clearPlaceholder();
-        parentEl.appendChild(row);
-      } else {
-        insertRow(row);
-      }
-      makeCollapsible(row, `tool:${key}`, false);
-      entry = { row, body, argsPre, header, resultEl: null, streamEl: null, interactionEl: null };
-      toolRows.set(key, entry);
-    } else if (parentEl && entry.row.parentElement !== parentEl) {
-      clearPlaceholder();
-      parentEl.appendChild(entry.row);
-      maybeAutoScroll();
-    }
-    return entry;
-  }
-
-  function toolCardLabel(toolName, serverName = '') {
-    return serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
-  }
-
-  function renderToolBegin(evt) {
-    const toolName = evt.tool || 'tool';
-    // Skip command tools - they're redundant with command cards
-    if (toolName === 'command' || toolName === 'shell') return;
-    const serverName = evt.server || '';
-    const label = toolCardLabel(toolName, serverName);
-    const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
-    // Format arguments
-    const args = evt.arguments || evt.payload || {};
-    const argEntries = Object.entries(args);
-    
-    // Check if any argument looks like it should be markdown (multiline string)
-    const hasMarkdownArg = argEntries.some(([k, v]) => 
-      typeof v === 'string' && (v.includes('\n') || v.startsWith('#') || v.includes('**') || v.includes('`'))
-    );
-    
-    if (hasMarkdownArg) {
-      // Render with markdown for multiline/formatted content
-      entry.argsPre.style.display = 'none'; // Hide the pre element
-      argEntries.forEach(([k, v]) => {
-        const argLabel = document.createElement('div');
-        argLabel.className = 'mcp-tool-arg-label';
-        argLabel.textContent = `${k}:`;
-        entry.body.insertBefore(argLabel, entry.argsPre);
-        
-        if (typeof v === 'string' && (v.includes('\n') || v.startsWith('#') || v.includes('**') || v.includes('`'))) {
-          // Render as markdown
-          const argContainer = document.createElement('div');
-          argContainer.className = 'markdown-body mcp-tool-arg-value';
-          renderMarkdownInto(argContainer, v);
-          highlightCode(argContainer);
-          entry.body.insertBefore(argContainer, entry.argsPre);
-        } else {
-          // Render as plain value
-          const argValue = document.createElement('pre');
-          argValue.className = 'mcp-tool-arg-value-plain';
-          argValue.textContent = typeof v === 'string' ? v : JSON.stringify(v);
-          entry.body.insertBefore(argValue, entry.argsPre);
-        }
-      });
-    } else {
-      // Simple key: value format for basic args
-      const lines = [];
-      argEntries.forEach(([k, v]) => {
-        const val = typeof v === 'string' ? v : JSON.stringify(v);
-        lines.push(`  ${k}: ${val}`);
-      });
-      if (lines.length) {
-        entry.argsPre.textContent = lines.join('\n');
-      }
-    }
-    lastEventType = 'tool';
-  }
-
-  function renderToolDelta(evt) {
-    const toolName = evt.tool || 'tool';
-    // Skip command tools - they're redundant with command cards
-    if (toolName === 'command' || toolName === 'shell') return;
-    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`, getLiveEventParent(evt));
-    const delta = evt.delta || '';
-    if (delta) {
-      if (!entry.streamEl) {
-        const streamPre = document.createElement('pre');
-        streamPre.className = 'mcp-tool-content';
-        entry.body.appendChild(streamPre);
-        entry.streamEl = streamPre;
-      }
-      entry.streamEl.textContent += delta;
-    }
-    lastEventType = 'tool';
-    maybeAutoScroll();
-  }
-
-  function renderToolEnd(evt) {
-    const toolName = evt.tool || 'tool';
-    // Skip command tools - they're redundant with command cards
-    if (toolName === 'command' || toolName === 'shell') return;
-    const serverName = evt.server || '';
-    const label = toolCardLabel(toolName, serverName);
-    const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
-    // Handle both old payload format and new result format
-    const result = evt.result ?? evt.payload ?? null;
-    const durationMs = evt.duration_ms ?? (result && result.duration_ms) ?? (result && result.durationMs);
-    const isError = evt.is_error || (result && result.isError) || false;
-    
-    // Result header
-    const resultHeader = document.createElement('div');
-    resultHeader.className = 'mcp-tool-result-header';
-    resultHeader.textContent = '→';
-    entry.body.appendChild(resultHeader);
-    
-    // Format result
-    if (result && typeof result === 'object') {
-      // Object result: use pre-formatted display
-      const resultPre = document.createElement('pre');
-      resultPre.className = 'mcp-tool-content';
-      const lines = [];
-      Object.entries(result).forEach(([k, v]) => {
-        if (typeof v === 'object' && v !== null) {
-          lines.push(`  ${k}:`);
-          Object.entries(v).forEach(([k2, v2]) => {
-            lines.push(`    ${k2}: ${JSON.stringify(v2)}`);
-          });
-        } else {
-          lines.push(`  ${k}: ${JSON.stringify(v)}`);
-        }
-      });
-      resultPre.textContent = lines.join('\n');
-      if (isError) resultPre.classList.add('error-text');
-      entry.body.appendChild(resultPre);
-      entry.resultEl = resultPre;
-    } else if (result) {
-      // String result: render as markdown
-      const resultContainer = document.createElement('div');
-      resultContainer.className = 'markdown-body mcp-tool-result';
-      renderMarkdownInto(resultContainer, String(result));
-      highlightCode(resultContainer);
-      if (isError) resultContainer.classList.add('error-text');
-      entry.body.appendChild(resultContainer);
-      entry.resultEl = resultContainer;
-    }
-    
-    // Duration footer
-    if (durationMs !== undefined && durationMs !== null) {
-      const footer = document.createElement('div');
-      footer.className = 'command-footer';
-      footer.textContent = `${durationMs}ms`;
-      entry.body.appendChild(footer);
-    }
-    
-    lastEventType = 'tool';
-    // Update status dot based on error state
-    const exitCode = result && (result.exit_code ?? result.exitCode);
-    if (!isError && (exitCode === 0 || exitCode === undefined || exitCode === null)) {
-      setStatusDot('success');
-    } else {
-      setStatusDot('error');
-    }
-  }
-
-  function renderToolInteraction(evt) {
-    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`, getLiveEventParent(evt));
-    const payload = evt.payload || {};
-    const stdin = payload.stdin ? `stdin: ${payload.stdin}` : '';
-    const stdout = payload.stdout ? `stdout: ${payload.stdout}` : '';
-    const pid = payload.pid ? `pid=${payload.pid}` : '';
-    const parts = [pid, stdin, stdout].filter(Boolean);
-    if (parts.length) {
-      if (!entry.interactionEl) {
-        const interactionPre = document.createElement('pre');
-        interactionPre.className = 'mcp-tool-content';
-        entry.body.appendChild(interactionPre);
-        entry.interactionEl = interactionPre;
-      }
-      entry.interactionEl.textContent += `[io] ${parts.join(' ')}\n`;
-    }
-    lastEventType = 'tool';
   }
 
   function createXterm(container, rows) {
@@ -4502,6 +4332,29 @@ document.addEventListener('DOMContentLoaded', () => {
     return diffRendering.formatDiff(text, filePath);
   }
 
+  const {
+    buildReplayToolRow,
+    renderToolBegin,
+    renderToolDelta,
+    renderToolEnd,
+    renderToolInteraction,
+  } = bindToolRender({
+    toolRows,
+    clearPlaceholder,
+    insertRow,
+    makeCollapsible,
+    getLiveEventParent,
+    renderMarkdownInto,
+    highlightCode,
+    formatDiff: (...args) => formatDiff(...args),
+    toRelativePath,
+    escapeHtml,
+    renderShellCmdRibbon,
+    maybeAutoScroll,
+    setLastEventType: (value) => { lastEventType = value; },
+    setStatusDot,
+  });
+
   const rpcFlow = bindRpcFlow({
     waitForWs: (...args) => waitForWs(...args),
     sioCall,
@@ -5000,6 +4853,8 @@ document.addEventListener('DOMContentLoaded', () => {
     windowRef: window,
   });
 
+  bindWidescreenResizer();
+  updateWidescreenLayout();
   initializeBoot(handleEvent);
   setupSettingsBoot();
   installCodexAgentGlobal();

@@ -3643,6 +3643,21 @@ async def _get_sidebar_sio() -> Optional[socketio.AsyncClient]:
                     print(f"[Sidebar] CWD push from TE2: {cwd}")
                     await _set_host_ui_state(project_root=cwd, ide_mode=True)
 
+            @_sidebar_sio.on("sidebar:mention", namespace="/sidebar_ipc")
+            async def _on_sidebar_mention(data):
+                """Handle file mentions arriving from TE2 explorer via sidebar_ipc."""
+                if not isinstance(data, dict):
+                    return
+                path = data.get("path")
+                if not isinstance(path, str) or not path.strip():
+                    print("[Sidebar] mention ignored: missing path")
+                    return
+                print(f"[Sidebar] mention from TE2: path={path}")
+                try:
+                    await _process_mention({"path": path.strip()})
+                except Exception as e:
+                    print(f"[Sidebar] mention processing failed: {e}")
+
             await _sidebar_sio.connect(
                 f"{te2_base}?app_id=file_editor_cm6&source=appserver",
                 socketio_path=sio_path,
@@ -5977,7 +5992,7 @@ async def codex_agent_ui() -> HTMLResponse:
                 Script(NotStr(f"""import {{ initConsoleBridge }} from '{_asset("/static/js/console_bridge.js")}';
 try {{
   const isProxied = window.location.pathname.startsWith('/api/app/');
-  if (isProxied) initConsoleBridge({{ workerId: 'codex_agent' }});
+  if (isProxied) initConsoleBridge({{ workerLabel: 'codex_agent', uniquePerWindow: true }});
 }} catch (e) {{
   console.warn('[console_bridge] init failed', e);
 }}"""), type="module"),
@@ -6008,7 +6023,8 @@ try {{
 	                        # Threads panel intentionally removed for now.
 	                        # NOTE: No native browser modals/dialogs/dropdowns allowed.
 	                        # All future controls must be DOM-rendered.
-	                        Section(
+                        Section(
+                            Div(
 	                            H2("Conversations"),
 	                            Div(
 	                                Button("Project", id="splash-tab-project", cls="btn tiny toggle"),
@@ -6016,17 +6032,33 @@ try {{
 	                                cls="splash-tabs",
 	                                id="splash-tabs",
 	                            ),
+                                cls="splash-header",
+                            ),
 	                            Div(
+                                Div(
 	                                P("Pick or create a conversation", cls="muted"),
+                                    cls="conversation-list-panel-header",
+                                ),
+                                Div(
 	                                Div(id="conversation-list", cls="conversation-list"),
-	                                cls="splash-body"
-	                            ),
+                                    cls="conversation-list-scroller",
+                                ),
+                                cls="conversation-list-panel"
+                            ),
                             Footer(
                                 Button("New Conversation", id="conversation-create", cls="btn primary"),
                                 cls="splash-footer"
                             ),
                             cls="splash-view",
                             id="splash-view"
+                        ),
+                        Div(
+                            id="widescreen-resizer",
+                            cls="widescreen-resizer",
+                            role="separator",
+                            aria_orientation="vertical",
+                            aria_label="Resize splash and conversation panels",
+                            tabindex="0",
                         ),
                         conversation_drawer,
                         cls="grid"
@@ -7787,19 +7819,17 @@ async def api_appserver_compact(payload: Optional[Dict[str, Any]] = Body(None)):
     return {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
 
 
-@app.post("/api/appserver/mention")
-@app.put("/api/appserver/mention")
-async def api_appserver_mention(payload: Dict[str, Any] = Body(...)):
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+async def _process_mention(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Core mention logic shared by the HTTP endpoint and sidebar:mention handler."""
     path = payload.get("path")
     if not isinstance(path, str) or not path.strip():
-        raise HTTPException(status_code=400, detail="Missing or invalid 'path'")
+        raise ValueError("Missing or invalid 'path'")
+    path = path.strip()
     if "`" in path:
-        raise HTTPException(status_code=400, detail="Invalid 'path' (backticks not supported)")
+        raise ValueError("Invalid 'path' (backticks not supported)")
     conversation_id = payload.get("conversation_id")
     if conversation_id is not None and not isinstance(conversation_id, str):
-        raise HTTPException(status_code=400, detail="Invalid 'conversation_id'")
+        raise ValueError("Invalid 'conversation_id'")
 
     async with _config_lock:
         cfg = _load_appserver_config()
@@ -7810,20 +7840,17 @@ async def api_appserver_mention(payload: Dict[str, Any] = Body(...)):
         conversation_id = active_conversation_id
 
     if not conversation_id:
-        raise HTTPException(status_code=409, detail="No active conversation selected")
+        raise ValueError("No active conversation selected")
 
-    # Validate the conversation exists.
     if not _conversation_meta_path(conversation_id).exists():
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        raise FileNotFoundError("Conversation not found")
 
     queued = True
-    # Extract optional rich-mention fields (line, col, content).
     line_no = payload.get("lineNo")
     end_line_no = payload.get("endLineNo")
     col = payload.get("col")
     end_col = payload.get("endCol")
     content = payload.get("content")
-    # Truncate content to 20 lines max.
     if isinstance(content, str):
         lines = content.split("\n")
         if len(lines) > 20:
@@ -7845,13 +7872,10 @@ async def api_appserver_mention(payload: Dict[str, Any] = Body(...)):
         await _broadcast_appserver_ui(mention_evt)
         queued = False
     else:
-        # Drawer closed (or different conversation active): append into the draft buffer
-        # so it appears in the composer when the conversation is opened.
         meta = _load_conversation_meta(conversation_id)
         draft = meta.get("draft")
         if not isinstance(draft, str):
             draft = ""
-        # Build draft token: `path:line` or `path:line-endLine` or just `path`
         path_token = path
         if line_no is not None:
             path_token += f":{int(line_no)}"
@@ -7868,9 +7892,24 @@ async def api_appserver_mention(payload: Dict[str, Any] = Body(...)):
         _save_conversation_meta(conversation_id, meta)
         _draft_hash_cache[conversation_id] = hashlib.sha256(draft.encode("utf-8")).hexdigest()
 
+    return {"ok": True, "queued": queued, "conversation_id": conversation_id, "path": path}
+
+
+@app.post("/api/appserver/mention")
+@app.put("/api/appserver/mention")
+async def api_appserver_mention(payload: Dict[str, Any] = Body(...)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    try:
+        result = await _process_mention(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
     # CORS-friendly response for editor/iframe host apps.
     return JSONResponse(
-        {"ok": True, "queued": queued, "conversation_id": conversation_id, "path": path},
+        result,
         headers={
             "Access-Control-Allow-Origin": "*",
         },

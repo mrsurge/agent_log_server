@@ -174,6 +174,12 @@ When using TE2 console tools, do not start with a global console tail unless you
 
 TE2's global console transcript can include internal and dev-environment workers such as `main_page`, `editor_iframe`, `codex_agent`, and other framework activity. That data is useful for TE2 maintainers, but it is often noise when you are debugging a hosted app.
 
+TE2 console is multi-client:
+- the same app/frontend label may appear as multiple live workers at once
+- separate windows, tabs, iframes, or embedded + popped-out instances may each register their own worker
+- treat `workerId` as the exact evaluation/inspection target
+- treat `workerLabel` as a human grouping label, not as proof that only one worker exists
+
 If the target includes a browser or frontend surface, install the TE2 console bridge as part of the normal integration flow.
 
 Use the cached bridge file at:
@@ -188,9 +194,11 @@ When the repo already has an existing framework, follow that framework's normal 
 
 After wiring the bridge:
 1. use `te2_console_workers_live` or `te2_console_workers` to discover the relevant worker
-2. filter console inspection by that worker ID
+2. choose the exact `workerId` you want, not just a shared label
 3. use `te2_console_tail` or `te2_console_search` against that worker
 4. use `te2_console_eval` only after you have identified the correct worker
+
+When wiring a hosted/proxied frontend that may exist in multiple windows or tabs, prefer bridge init that supplies a stable `workerLabel` plus `uniquePerWindow: true`. Do not register all instances under one fixed shared `workerId`.
 
 Treat `main_page` and `editor_iframe` as internal TE2 workers unless you are specifically debugging TE2 itself.
 
@@ -279,7 +287,7 @@ Use TE2 MCP for structured runtime inspection, console access, and framework-she
 
 Treat TE2 console data as frontend/runtime observability, not shell stdin/stdout. Treat framework-shell data as process/runtime observability. Do not claim per-line timestamps for raw framework-shell logs unless they are explicitly provided by the runtime surface.
 
-If the target includes a browser or frontend surface, install the TE2 console bridge from `~/.cache/app_server/te2_console_bridge.js` at the app's real browser entry point. For app debugging, first identify the correct worker with `te2_console_workers_live` or `te2_console_workers`, then inspect or evaluate against that worker specifically.
+If the target includes a browser or frontend surface, install the TE2 console bridge from `~/.cache/app_server/te2_console_bridge.js` at the app's real browser entry point. TE2 console is multi-client, so do not assume one worker per app label. For app debugging, first identify the exact worker with `te2_console_workers_live` or `te2_console_workers`, then inspect or evaluate against that specific `workerId`. When the same frontend may exist in multiple windows/tabs, prefer bridge init with a stable `workerLabel` plus `uniquePerWindow: true`.
 
 Do not invent alternate transports or TE2-only product dependencies when existing TE2 control surfaces already solve the task.
 ```
