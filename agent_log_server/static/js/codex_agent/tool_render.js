@@ -5,8 +5,7 @@ export function bindToolRender(ctx) {
     insertRow,
     makeCollapsible,
     getLiveEventParent,
-    renderMarkdownInto,
-    highlightCode,
+    renderMarkdownSourceInto,
     formatDiff,
     toRelativePath,
     escapeHtml,
@@ -176,23 +175,25 @@ export function bindToolRender(ctx) {
     }
   }
 
+  function isMarkdownishText(value) {
+    return typeof value === 'string'
+      && (value.includes('\n') || value.startsWith('#') || value.includes('**') || value.includes('`'));
+  }
+
   function appendToolArguments(body, args) {
     if (!args || typeof args !== 'object' || Object.keys(args).length === 0) return;
     const argEntries = Object.entries(args);
-    const hasMarkdownArg = argEntries.some(([, value]) =>
-      typeof value === 'string' && (value.includes('\n') || value.startsWith('#') || value.includes('**') || value.includes('`'))
-    );
+    const hasMarkdownArg = argEntries.some(([, value]) => isMarkdownishText(value));
     if (hasMarkdownArg) {
       argEntries.forEach(([key, value]) => {
         const argLabel = document.createElement('div');
         argLabel.className = 'mcp-tool-arg-label';
         argLabel.textContent = `${key}:`;
         body.appendChild(argLabel);
-        if (typeof value === 'string' && (value.includes('\n') || value.startsWith('#') || value.includes('**') || value.includes('`'))) {
+        if (isMarkdownishText(value)) {
           const argContainer = document.createElement('div');
           argContainer.className = 'markdown-body mcp-tool-arg-value';
-          renderMarkdownInto(argContainer, value);
-          highlightCode(argContainer);
+          renderMarkdownSourceInto(argContainer, value);
           body.appendChild(argContainer);
         } else {
           const argValue = document.createElement('pre');
@@ -241,13 +242,21 @@ export function bindToolRender(ctx) {
       return resultPre;
     }
 
-    const resultContainer = document.createElement('div');
-    resultContainer.className = 'markdown-body mcp-tool-result';
-    renderMarkdownInto(resultContainer, String(result));
-    highlightCode(resultContainer);
-    if (isError) resultContainer.classList.add('error-text');
-    body.appendChild(resultContainer);
-    return resultContainer;
+    if (isMarkdownishText(result)) {
+      const resultContainer = document.createElement('div');
+      resultContainer.className = 'markdown-body mcp-tool-result';
+      renderMarkdownSourceInto(resultContainer, result);
+      if (isError) resultContainer.classList.add('error-text');
+      body.appendChild(resultContainer);
+      return resultContainer;
+    }
+
+    const resultPre = document.createElement('pre');
+    resultPre.className = 'mcp-tool-content';
+    resultPre.textContent = String(result);
+    if (isError) resultPre.classList.add('error-text');
+    body.appendChild(resultPre);
+    return resultPre;
   }
 
   function appendToolFooter(body, durationMs) {
@@ -309,9 +318,7 @@ export function bindToolRender(ctx) {
 
     const args = evt.arguments || evt.payload || {};
     const argEntries = Object.entries(args);
-    const hasMarkdownArg = argEntries.some(([, value]) =>
-      typeof value === 'string' && (value.includes('\n') || value.startsWith('#') || value.includes('**') || value.includes('`'))
-    );
+    const hasMarkdownArg = argEntries.some(([, value]) => isMarkdownishText(value));
 
     if (hasMarkdownArg) {
       entry.argsPre.style.display = 'none';
@@ -320,11 +327,10 @@ export function bindToolRender(ctx) {
         argLabel.className = 'mcp-tool-arg-label';
         argLabel.textContent = `${key}:`;
         entry.body.insertBefore(argLabel, entry.argsPre);
-        if (typeof value === 'string' && (value.includes('\n') || value.startsWith('#') || value.includes('**') || value.includes('`'))) {
+        if (isMarkdownishText(value)) {
           const argContainer = document.createElement('div');
           argContainer.className = 'markdown-body mcp-tool-arg-value';
-          renderMarkdownInto(argContainer, value);
-          highlightCode(argContainer);
+          renderMarkdownSourceInto(argContainer, value);
           entry.body.insertBefore(argContainer, entry.argsPre);
         } else {
           const argValue = document.createElement('pre');

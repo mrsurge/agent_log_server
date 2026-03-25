@@ -10,7 +10,8 @@ and our internal format on the other (to _broadcast_appserver_ui).
 """
 
 import json
-from typing import Any, Dict, Optional, Callable, Awaitable
+import re
+from typing import Any, Dict, Optional, Callable, Awaitable, List
 from datetime import datetime, timezone
 
 from ._vendor.copilot import SessionEvent
@@ -38,6 +39,30 @@ def _looks_like_diff(text: str) -> bool:
         if stripped.startswith("---") or stripped.startswith("+++") or stripped.startswith("@@"):
             return True
     return False
+
+
+_COPILOT_VIEW_LINE_RE = re.compile(r"^\s*(\d+)\.(.*)$")
+
+
+def _parse_copilot_view_lines(content: str) -> Optional[List[Dict[str, Any]]]:
+    if not isinstance(content, str):
+        return None
+    if not content:
+        return []
+
+    parsed: List[Dict[str, Any]] = []
+    for raw_line in content.splitlines():
+        match = _COPILOT_VIEW_LINE_RE.match(raw_line)
+        if not match:
+            return None
+        line_content = match.group(2)
+        if line_content[:1] in {" ", "\t"}:
+            line_content = line_content[1:]
+        parsed.append({
+            "line_no": int(match.group(1)),
+            "content": line_content,
+        })
+    return parsed
 
 
 # Tools that mutate files — only these get post-execution diff entries
@@ -710,6 +735,21 @@ class CopilotEventRouter:
                 "arguments": args,
             }
 
+        if tool_name == "edit":
+            display_args = {}
+            if file_path:
+                display_args["path"] = file_path
+            return {
+                "kind": "tool",
+                "tool_name": tool_name,
+                "title": "apply_patch",
+                "activity": "Patching",
+                "server": "",
+                "tool": "apply_patch",
+                "arguments": display_args,
+                "path": file_path,
+            }
+
         display_args: Dict[str, Any]
         if tool_name in {"edit", "create", "write", "write_file"}:
             display_args = {}
@@ -905,6 +945,8 @@ class CopilotEventRouter:
         }
         if render_state.get("server"):
             tool_begin_evt["server"] = render_state.get("server")
+        if render_state.get("path"):
+            tool_begin_evt["path"] = render_state.get("path")
         if subagent_id:
             tool_begin_evt["subagent_id"] = subagent_id
         await self._emit(tool_begin_evt)
@@ -954,6 +996,7 @@ class CopilotEventRouter:
 
         if render_kind == "view":
             view_content = content or tool_call.get("output") or ""
+            view_lines = _parse_copilot_view_lines(view_content)
             view_evt = {
                 "type": "view",
                 "conversation_id": self.conversation_id,
@@ -963,6 +1006,8 @@ class CopilotEventRouter:
                 "path": file_path,
                 "content": view_content,
             }
+            if view_lines is not None:
+                view_evt["lines"] = view_lines
             if tool_call.get("view_range") is not None:
                 view_evt["view_range"] = tool_call.get("view_range")
             if subagent_id:
@@ -979,6 +1024,8 @@ class CopilotEventRouter:
                 "timestamp": utc_ts(),
                 "subagent_id": subagent_id,
             }
+            if view_lines is not None:
+                record_entry["lines"] = view_lines
             if tool_call.get("view_range") is not None:
                 record_entry["view_range"] = tool_call.get("view_range")
             await self._record(record_entry)

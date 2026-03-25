@@ -3654,7 +3654,7 @@ async def _get_sidebar_sio() -> Optional[socketio.AsyncClient]:
                     return
                 print(f"[Sidebar] mention from TE2: path={path}")
                 try:
-                    await _process_mention({"path": path.strip()})
+                    await _process_mention(data)
                 except Exception as e:
                     print(f"[Sidebar] mention processing failed: {e}")
 
@@ -5603,7 +5603,6 @@ async def appserver_ui() -> HTMLResponse:
             Html(
             Head(
                 Link(rel="stylesheet", href=_asset("/static/appserver.css")),
-                Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
                 Script(src=_asset("/static/vendor/socket.io/socket.io.min.js"), defer=True),
                 Script(src=_asset("/static/appserver.js"), defer=True),
             ),
@@ -5960,26 +5959,15 @@ async def codex_agent_ui() -> HTMLResponse:
                 Link(rel="manifest", href=f"/manifest.json?v={version}"),
                 Meta(name="theme-color", content=CODEX_AGENT_THEME_COLOR),
                 Link(rel="icon", type="image/svg+xml", href=_asset(CODEX_AGENT_ICON_PATH)),
-                Link(rel="stylesheet", href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap"),
-                Link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"),
-                Link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"),
+                Link(rel="stylesheet", href=_asset("/static/vendor/fonts/jetbrains-mono.css")),
+                Link(rel="stylesheet", href=_asset("/static/vendor/highlight.js/github-dark.min.css")),
+                Link(rel="stylesheet", href=_asset("/static/vendor/xterm/xterm.css")),
                 Link(rel="stylesheet", href=_asset("/static/vendor/tribute.css")),
                 Link(rel="stylesheet", href=_asset("/static/codex_agent.css")),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/rust.min.js"),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"),
-                Script(src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/dockerfile.min.js"),
-                Script(src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"),
-                Script(src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"),
-                Script(src="https://unpkg.com/htmx.org@1.9.12", defer=True),
+                Script(src=_asset("/static/vendor/highlight.js/highlight.bundle.js")),
+                Script(src=_asset("/static/vendor/xterm/xterm.js")),
                 Script(src=_asset("/static/vendor/socket.io/socket.io.min.js")),
                 Script(src=_asset("/static/vendor/tribute.min.js")),
-                Script(src="https://cdn.jsdelivr.net/npm/streaming-markdown/smd.min.js", type="module"),
                 Script(NotStr("window.addEventListener('load', () => console.log('socket.io', typeof io));"), defer=True),
                 Script(src=_asset("/static/modals/settings_modal.js"), defer=True),
                 Script(src=_asset("/static/modals/settings_schema.js"), defer=True),
@@ -6166,6 +6154,11 @@ try {{
                                 Label(
                                     Span("Command Output Lines"),
                                     Input(type="number", id="settings-command-lines", placeholder="20", value="20", min="1", max="500"),
+                                ),
+                                Label(
+                                    Span("Wrap view cards"),
+                                    Input(type="checkbox", id="settings-view-wrap", checked=False),
+                                    cls="settings-checkbox-row"
                                 ),
                                 Label(
                                     Span("Render Markdown"),

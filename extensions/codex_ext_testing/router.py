@@ -315,6 +315,58 @@ def _build_view_title(path: str, view_range: Optional[List[int]]) -> str:
     return short_path
 
 
+_CODEX_VIEW_LINE_RE = re.compile(r"^\s*(\d+):(.*)$")
+
+
+def _parse_codex_view_lines(content: str) -> Optional[List[Dict[str, Any]]]:
+    if not isinstance(content, str):
+        return None
+    if not content:
+        return []
+
+    parsed: List[Dict[str, Any]] = []
+    for raw_line in content.splitlines():
+        match = _CODEX_VIEW_LINE_RE.match(raw_line)
+        if not match:
+            return None
+        line_content = match.group(2)
+        if line_content[:1] in {" ", "\t"}:
+            line_content = line_content[1:]
+        parsed.append({
+            "line_no": int(match.group(1)),
+            "content": line_content,
+        })
+    return parsed
+
+
+def _build_codex_view_lines(content: str, view_spec: Optional[Dict[str, Any]] = None) -> Optional[List[Dict[str, Any]]]:
+    parsed = _parse_codex_view_lines(content)
+    if parsed is not None:
+        return parsed
+    if not isinstance(content, str):
+        return None
+    if not content:
+        return []
+    if not isinstance(view_spec, dict):
+        return None
+
+    start_line = 1
+    raw_view_range = view_spec.get("view_range")
+    if isinstance(raw_view_range, list) and raw_view_range:
+        try:
+            start_line = int(raw_view_range[0])
+        except (TypeError, ValueError):
+            return None
+
+    return [
+        {
+            "line_no": start_line + idx,
+            "content": raw_line,
+        }
+        for idx, raw_line in enumerate(content.splitlines())
+    ]
+
+
 def _unwrap_single_shell_command(command: str) -> str:
     text = str(command or "").strip()
     if not text:
@@ -1645,6 +1697,8 @@ class CodexEventRouter:
                             "id": item_id or _assistant_id(item, thread_id, turn_id),
                             "tool": "apply_patch",
                             "arguments": arguments,
+                            "path": path,
+                            "diff": diff_text,
                         },
                         {"type": "activity", "label": "preparing diff", "active": True},
                     ],
@@ -1872,6 +1926,7 @@ class CodexEventRouter:
                 view_spec = item_state.get("view_spec") if isinstance(item_state.get("view_spec"), dict) else None
                 search_spec = item_state.get("search_spec") if isinstance(item_state.get("search_spec"), dict) else None
                 if view_spec and not is_error:
+                    view_lines = _build_codex_view_lines(output, view_spec)
                     routed = {
                         "handled": True,
                         "events": [
@@ -1882,6 +1937,7 @@ class CodexEventRouter:
                                 "path": view_spec.get("path") or "",
                                 "content": output,
                                 "view_range": view_spec.get("view_range"),
+                                **({"lines": view_lines} if view_lines is not None else {}),
                             },
                             {"type": "activity", "label": "processing", "active": True},
                         ],
@@ -1891,6 +1947,7 @@ class CodexEventRouter:
                             "path": view_spec.get("path") or "",
                             "content": output,
                             "view_range": view_spec.get("view_range"),
+                            **({"lines": view_lines} if view_lines is not None else {}),
                             "item_id": item_id,
                             "turn_id": turn_id,
                             "event": label_lower,
@@ -1989,6 +2046,7 @@ class CodexEventRouter:
                 status = str(item.get("status") or "").strip().lower()
                 duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
                 primary_path = paths[0] if paths else item_state.get("path")
+                diff_text = item_state.get("diff")
                 is_error = status in {"failed", "declined", "error"}
                 arguments = {
                     "paths": paths,
@@ -2009,6 +2067,7 @@ class CodexEventRouter:
                             "result": result_payload,
                             "output": output,
                             "path": primary_path,
+                            "diff": diff_text,
                             "duration_ms": duration_ms,
                             "is_error": is_error,
                         },
@@ -2022,6 +2081,7 @@ class CodexEventRouter:
                         "result": result_payload,
                         "output": output,
                         "path": primary_path,
+                        "diff": diff_text,
                         "duration_ms": duration_ms,
                         "status": status or ("error" if is_error else "completed"),
                         "is_error": is_error,

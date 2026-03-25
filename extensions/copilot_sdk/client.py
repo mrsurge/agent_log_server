@@ -41,6 +41,7 @@ from ._vendor.copilot.types import (
     UserInputResponse,
 )
 
+from .file_change_preview import build_file_change_preview
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from .te2_runtime import build_copilot_mcp_servers
 from agent_log_server.te2_runtime import (
@@ -1245,60 +1246,6 @@ def validate_pending_approval(conversation_id: str, request_id: str, descriptor:
     if descriptor_thread_id and not current_session_id:
         return False
     return request_id in _pending_approvals
-
-
-def _build_preview_diff(payload: Dict[str, Any], args: Dict[str, Any]) -> None:
-    """
-    Compute a unified-diff preview from tool arguments and attach to payload.
-    Supports edit-style tools (old_str/new_str) and create/write tools (file_text/content).
-    Sets payload["diff"] and payload["path"] for the frontend's formatDiff().
-    """
-    import difflib
-
-    file_path = args.get("path") or args.get("file_path") or args.get("file") or ""
-    old_str = args.get("old_str")
-    if old_str is None:
-        old_str = args.get("oldString") or args.get("old_text") or args.get("oldText")
-    new_str = args.get("new_str")
-    if new_str is None:
-        new_str = args.get("newString") or args.get("new_text") or args.get("newText")
-    file_text = args.get("file_text") or args.get("content") or args.get("new_content") or args.get("fileText")
-    command = args.get("command") or args.get("cmd")
-
-    if old_str is not None and new_str is not None:
-        # edit/replace style — compute unified diff
-        # Ensure trailing newlines so difflib produces separate lines
-        old_text = str(old_str)
-        new_text = str(new_str)
-        if not old_text.endswith("\n"):
-            old_text += "\n"
-        if not new_text.endswith("\n"):
-            new_text += "\n"
-        old_lines = old_text.splitlines(keepends=True)
-        new_lines = new_text.splitlines(keepends=True)
-        diff = difflib.unified_diff(
-            old_lines, new_lines,
-            fromfile=file_path or "a", tofile=file_path or "b",
-        )
-        payload["diff"] = "".join(diff)
-        if file_path:
-            payload["path"] = file_path
-    elif file_text is not None and file_path:
-        # create/write style — show as full addition
-        ft = str(file_text)
-        if not ft.endswith("\n"):
-            ft += "\n"
-        new_lines = ft.splitlines(keepends=True)
-        diff = difflib.unified_diff(
-            [], new_lines,
-            fromfile="/dev/null", tofile=file_path,
-        )
-        payload["diff"] = "".join(diff)
-        payload["path"] = file_path
-    elif command and file_path:
-        # shell command on a file — just show command + path
-        payload["path"] = file_path
-
 def _make_permission_handler(conversation_id: str) -> Callable:
     """
     Create a permission handler for a session.
@@ -1365,7 +1312,7 @@ def _make_permission_handler(conversation_id: str) -> Callable:
 
         # Compute a preview diff from tool arguments if possible
         if isinstance(normalized_args, dict):
-            _build_preview_diff(payload, normalized_args)
+            payload.update(build_file_change_preview(normalized_args))
 
         # Create a Future that the WS handler will resolve
         loop = asyncio.get_running_loop()

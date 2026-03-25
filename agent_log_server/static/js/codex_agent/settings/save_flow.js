@@ -6,6 +6,7 @@ export function bindSettingsSaveFlow(ctx) {
     normalizeApprovalValue,
     setActivity,
     setMarkdownEnabled,
+    setViewWrapEnabled,
     setXtermEnabled,
     setDiffSyntaxEnabled,
     setSemanticShellRibbonEnabled,
@@ -41,6 +42,7 @@ export function bindSettingsSaveFlow(ctx) {
       settingsDeveloperInstructionsEl,
       settingsLabelEl,
       settingsAliasEl,
+      settingsViewWrapEl,
     } = elements;
 
     const agentType = settingsAgentEl?.value?.trim() || 'codex';
@@ -60,6 +62,7 @@ export function bindSettingsSaveFlow(ctx) {
       return;
     }
     const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || '20', 10);
+    const viewWrapEnabled = settingsViewWrapEl?.checked === true;
     const mdEnabled = settingsMarkdownEl?.checked !== false;
     const xtermEnabled = settingsXtermEl?.checked !== false;
     const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
@@ -82,6 +85,7 @@ export function bindSettingsSaveFlow(ctx) {
         'label',
         'alias',
         'commandOutputLines',
+        'viewWrap',
         'markdown',
         'useXterm',
         'diffSyntax',
@@ -107,6 +111,7 @@ export function bindSettingsSaveFlow(ctx) {
         label: settingsLabelEl?.value?.trim() || null,
         alias: settingsAliasEl?.value?.trim() || null,
         commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
+        viewWrap: viewWrapEnabled,
         markdown: mdEnabled,
         useXterm: xtermEnabled,
         diffSyntax: diffSyntaxEnabled,
@@ -135,6 +140,7 @@ export function bindSettingsSaveFlow(ctx) {
         label: settingsLabelEl?.value?.trim() || null,
         alias: settingsAliasEl?.value?.trim() || null,
         commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
+        viewWrap: viewWrapEnabled,
         markdown: mdEnabled,
         useXterm: xtermEnabled,
         diffSyntax: diffSyntaxEnabled,
@@ -146,6 +152,7 @@ export function bindSettingsSaveFlow(ctx) {
     }
 
     setMarkdownEnabled(mdEnabled);
+    setViewWrapEnabled(viewWrapEnabled);
     setXtermEnabled(xtermEnabled);
     setDiffSyntaxEnabled(diffSyntaxEnabled);
     setSemanticShellRibbonEnabled(semanticRibbonEnabled);

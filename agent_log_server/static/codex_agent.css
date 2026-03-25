@@ -1944,6 +1944,7 @@ body.terminal-mode #footer-terminal-toggle.pill {
 .collapsible:not(.expanded) > .body > .command-output,
 .collapsible:not(.expanded) > .body > .command-footer,
 .collapsible:not(.expanded) > .body > .view-card-path,
+.collapsible:not(.expanded) > .body > .view-card-truncation,
 .collapsible:not(.expanded) > .body > .search-card-root,
 .collapsible:not(.expanded) > .body > .search-card-detail,
 .collapsible:not(.expanded) > .body > .search-card-list,
@@ -2078,6 +2079,16 @@ body.terminal-mode #footer-terminal-toggle.pill {
   background: transparent;
   padding: 0;
 }
+.transcript-line-no {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.transcript-line-content {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .truncation-note {
   color: #8b949e;
   font-style: italic;
@@ -2119,6 +2130,70 @@ body.terminal-mode #footer-terminal-toggle.pill {
   word-break: break-all;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.view-card-lines {
+  padding: 0;
+  max-height: 400px;
+  min-height: 1.5em;
+  overflow-x: auto;
+  overflow-y: auto;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.view-card-table {
+  display: flex;
+  flex-direction: column;
+  min-width: max-content;
+}
+
+.view-card-line {
+  display: grid;
+  grid-template-columns: calc(var(--view-card-gutter-ch, 1) * 1ch + 5px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.view-card-line-no {
+  display: block;
+  padding: 0 3px 0 1px;
+  text-align: right;
+  color: #8b949e;
+  background: #0a0f13;
+  border-right: 1px solid rgba(255, 255, 255, 0.04);
+  white-space: pre;
+}
+
+.view-card-line-content {
+  display: block;
+  padding: 0 14px 0 1px;
+  min-width: 0;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  color: inherit;
+}
+
+.view-card-lines.wrap-enabled {
+  overflow-x: hidden;
+}
+
+.view-card-lines.wrap-enabled .view-card-table {
+  min-width: 100%;
+}
+
+.view-card-lines.wrap-enabled .view-card-line-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.view-card-truncation {
+  background: #0b1014;
+  padding: 8px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  font-size: 0.82em;
 }
 
 .search-card-root,

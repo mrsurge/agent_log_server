@@ -3,6 +3,7 @@ import {
   highlightCode,
   renderMarkdownBlock,
   renderMarkdownInto,
+  renderMarkdownSourceInto,
   streamEnd,
   streamWrite,
 } from './js/codex_agent/markdown.js';
@@ -83,6 +84,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsLabelEl = document.getElementById('settings-label');
   const settingsAliasEl = document.getElementById('settings-alias');
   const settingsCommandLinesEl = document.getElementById('settings-command-lines');
+  const settingsViewWrapEl = document.getElementById('settings-view-wrap');
   const settingsMarkdownEl = document.getElementById('settings-markdown');
   const settingsXtermEl = document.getElementById('settings-xterm');
   const settingsDiffSyntaxEl = document.getElementById('settings-diff-syntax');
@@ -175,6 +177,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let settingsUi = null;
   let markdownEnabled = true; // Toggle for markdown rendering
   let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
+  let viewWrapEnabled = false; // Toggle for wrapped view/read cards
   let useXterm = true; // Toggle for xterm.js vs text box rendering
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
   let semanticShellRibbonEnabled = false; // Tree-sitter semantic highlighting for shell command ribbons
@@ -744,6 +747,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (trackEditsToggleEl) trackEditsToggleEl.checked = enabled;
   }
 
+  function setViewWrapEnabled(enabled) {
+    viewWrapEnabled = enabled === true;
+    if (settingsViewWrapEl) settingsViewWrapEl.checked = viewWrapEnabled;
+  }
+
   function isXtermEnabled() {
     return useXterm;
   }
@@ -913,6 +921,147 @@ document.addEventListener('DOMContentLoaded', () => {
       // fall through
     }
     return escapeHtml(text || '');
+  }
+
+  function normalizeStructuredViewLines(lines) {
+    if (!Array.isArray(lines) || !lines.length) return null;
+    const normalized = [];
+    for (const entry of lines) {
+      if (!entry || typeof entry !== 'object') return null;
+      const rawLineNo = entry.line_no ?? entry.lineNo;
+      const lineNo = Number(rawLineNo);
+      if (!Number.isFinite(lineNo)) return null;
+      normalized.push({
+        line_no: lineNo,
+        content: entry.content === null || entry.content === undefined ? '' : String(entry.content),
+      });
+    }
+    return normalized;
+  }
+
+  function synthesizeStructuredViewLines(content, viewRange) {
+    if (typeof content !== 'string') return null;
+    if (!Array.isArray(viewRange) || !viewRange.length) return null;
+    const startLine = Number(viewRange[0]);
+    if (!Number.isFinite(startLine)) return null;
+    if (!content) return [];
+    const normalizedContent = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const rawLines = normalizedContent.split('\n');
+    if (rawLines.length && rawLines[rawLines.length - 1] === '') {
+      rawLines.pop();
+    }
+    return rawLines.map((rawLine, idx) => ({
+      line_no: startLine + idx,
+      content: rawLine,
+    }));
+  }
+
+  function splitHighlightedHtmlIntoLines(highlightedHtml) {
+    const html = String(highlightedHtml || '');
+    const tokens = html.split(/(<[^>]+>)/g);
+    const openTags = [];
+    const lines = [];
+    let current = '';
+
+    const closeAllTags = () => openTags.slice().reverse().map((tag) => `</${tag.name}>`).join('');
+    const reopenAllTags = () => openTags.map((tag) => tag.open).join('');
+
+    for (const token of tokens) {
+      if (!token) continue;
+      if (token.startsWith('<')) {
+        current += token;
+        if (token.startsWith('<!--') || token.startsWith('<!')) {
+          continue;
+        }
+        const match = token.match(/^<\s*(\/?)\s*([a-zA-Z0-9:-]+)/);
+        if (!match) continue;
+        const isClosing = Boolean(match[1]);
+        const tagName = String(match[2] || '').toLowerCase();
+        const selfClosing = /\/\s*>$/.test(token) || ['br', 'hr', 'img', 'input', 'meta', 'link'].includes(tagName);
+        if (isClosing) {
+          for (let idx = openTags.length - 1; idx >= 0; idx -= 1) {
+            if (openTags[idx].name === tagName) {
+              openTags.splice(idx, 1);
+              break;
+            }
+          }
+        } else if (!selfClosing) {
+          openTags.push({ name: tagName, open: token });
+        }
+        continue;
+      }
+
+      const textParts = token.split('\n');
+      for (let idx = 0; idx < textParts.length; idx += 1) {
+        current += textParts[idx];
+        if (idx < textParts.length - 1) {
+          lines.push(current + closeAllTags());
+          current = reopenAllTags();
+        }
+      }
+    }
+
+    lines.push(current);
+    return lines;
+  }
+
+  function buildHighlightedViewLineHtml(lines, lang) {
+    if (!Array.isArray(lines) || !lines.length) return [];
+    const highlighted = highlightCodeAlways(lines.map((line) => line.content).join('\n'), lang);
+    const htmlLines = splitHighlightedHtmlIntoLines(highlighted);
+    return htmlLines.length === lines.length ? htmlLines : [];
+  }
+
+  function getStructuredViewGutterDigits(lines) {
+    if (!Array.isArray(lines) || !lines.length) return 1;
+    let maxDigits = 1;
+    lines.forEach((line) => {
+      const raw = Number(line?.line_no);
+      const digits = Number.isFinite(raw) ? String(Math.abs(Math.trunc(raw))).length : 1;
+      if (digits > maxDigits) maxDigits = digits;
+    });
+    return maxDigits;
+  }
+
+  function renderStructuredViewLineTable(lines, path) {
+    const output = document.createElement('div');
+    output.className = 'command-output view-card-lines';
+    output.classList.toggle('wrap-enabled', viewWrapEnabled === true);
+
+    const table = document.createElement('div');
+    table.className = 'view-card-table';
+    const gutterDigits = getStructuredViewGutterDigits(lines);
+    table.style.setProperty('--view-card-gutter-ch', String(gutterDigits));
+
+    const lang = detectLangFromPath(path);
+    const highlightedLines = typeof hljs !== 'undefined' ? buildHighlightedViewLineHtml(lines, lang) : [];
+
+    lines.forEach((line, idx) => {
+      const row = document.createElement('div');
+      row.className = 'view-card-line';
+      row.dataset.lineNo = String(line.line_no);
+
+      const gutter = document.createElement('div');
+      gutter.className = 'view-card-line-no transcript-line-no';
+      gutter.textContent = String(line.line_no).padStart(gutterDigits, ' ');
+
+      const content = document.createElement('div');
+      content.className = 'view-card-line-content transcript-line-content';
+      content.dataset.lineNo = String(line.line_no);
+      const lineHtml = highlightedLines[idx];
+      if (typeof lineHtml === 'string') {
+        content.innerHTML = lineHtml;
+      } else {
+        content.textContent = line.content;
+      }
+
+      row.appendChild(gutter);
+      row.appendChild(content);
+      table.appendChild(row);
+    });
+
+    output.appendChild(table);
+    return output;
   }
 
   // --- Tree-sitter semantic shell ribbon (optional) ---
@@ -2118,6 +2267,7 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsLabelEl,
       settingsAliasEl,
       settingsCommandLinesEl,
+      settingsViewWrapEl,
       settingsMarkdownEl,
       settingsXtermEl,
       settingsDiffSyntaxEl,
@@ -2928,6 +3078,7 @@ document.addEventListener('DOMContentLoaded', () => {
           title: entry.title || '',
           path: entry.path || '',
           content: entry.content ?? entry.output ?? '',
+          lines: Array.isArray(entry.lines) ? entry.lines : null,
           view_range: entry.view_range ?? entry.viewRange ?? null,
         }, getTarget());
         return;
@@ -4060,13 +4211,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const content = evt.content ?? evt.output ?? '';
     const path = typeof evt.path === 'string' ? evt.path : '';
     const viewRange = Array.isArray(evt.view_range) ? evt.view_range : (Array.isArray(evt.viewRange) ? evt.viewRange : null);
+    const structuredLines = normalizeStructuredViewLines(evt.lines) ?? synthesizeStructuredViewLines(content, viewRange);
     const title = evt.title || buildViewCardTitle(path, viewRange, 'view');
     const truncateLines = conversationSettings?.commandOutputLines || 20;
 
     let displayContent = typeof content === 'string' ? content : String(content ?? '');
+    let displayLines = structuredLines;
     let truncated = false;
-    if (displayContent) {
+    let totalLineCount = 0;
+    if (displayLines) {
+      totalLineCount = displayLines.length;
+      if (displayLines.length > truncateLines) {
+        displayLines = displayLines.slice(0, truncateLines);
+        truncated = true;
+      }
+    } else if (displayContent) {
       const lines = displayContent.split('\n');
+      totalLineCount = lines.length;
       if (lines.length > truncateLines) {
         displayContent = lines.slice(0, truncateLines).join('\n');
         truncated = true;
@@ -4094,29 +4255,33 @@ document.addEventListener('DOMContentLoaded', () => {
       pathLine.dataset.hasClickHandler = 'true';
       pathLine.addEventListener('click', (e) => {
         e.stopPropagation();
-        postTe2OpenRequest({ path, line: 1, column: 1 });
+        const preferredLine = displayLines?.[0]?.line_no
+          ?? (Array.isArray(viewRange) && Number.isFinite(Number(viewRange[0])) ? Number(viewRange[0]) : 1);
+        postTe2OpenRequest({ path, line: preferredLine, column: 1 });
       });
       body.appendChild(pathLine);
     }
 
-    const outputPre = document.createElement('pre');
-    outputPre.className = 'command-output';
-    const lang = detectLangFromPath(path);
-    if (lang && typeof hljs !== 'undefined') {
-      outputPre.innerHTML = highlightCodeAlways(displayContent, lang);
-      if (truncated) {
-        const truncNote = document.createElement('span');
-        truncNote.className = 'truncation-note';
-        truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${String(content).split('\n').length} lines)`;
-        outputPre.appendChild(truncNote);
-      }
+    if (displayLines) {
+      body.appendChild(renderStructuredViewLineTable(displayLines, path));
     } else {
-      outputPre.textContent = displayContent;
-      if (truncated) {
-        outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${String(content).split('\n').length} lines)`;
+      const outputPre = document.createElement('pre');
+      outputPre.className = 'command-output';
+      const lang = detectLangFromPath(path);
+      if (lang && typeof hljs !== 'undefined') {
+        outputPre.innerHTML = highlightCodeAlways(displayContent, lang);
+      } else {
+        outputPre.textContent = displayContent;
       }
+      body.appendChild(outputPre);
     }
-    body.appendChild(outputPre);
+
+    if (truncated) {
+      const truncNote = document.createElement('div');
+      truncNote.className = 'view-card-truncation truncation-note';
+      truncNote.textContent = `... (truncated, showing ${truncateLines} of ${totalLineCount} lines)`;
+      body.appendChild(truncNote);
+    }
 
     row.appendChild(body);
     makeCollapsible(row, `view:${evt.id || path || title}`, false);
@@ -4344,8 +4509,7 @@ document.addEventListener('DOMContentLoaded', () => {
     insertRow,
     makeCollapsible,
     getLiveEventParent,
-    renderMarkdownInto,
-    highlightCode,
+    renderMarkdownSourceInto,
     formatDiff: (...args) => formatDiff(...args),
     toRelativePath,
     escapeHtml,
@@ -4414,6 +4578,7 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsAgentEl,
       settingsCwdEl,
       settingsCommandLinesEl,
+      settingsViewWrapEl,
       settingsMarkdownEl,
       settingsXtermEl,
       settingsDiffSyntaxEl,
@@ -4431,6 +4596,7 @@ document.addEventListener('DOMContentLoaded', () => {
     normalizeApprovalValue,
     setActivity,
     setMarkdownEnabled,
+    setViewWrapEnabled,
     setXtermEnabled,
     setDiffSyntaxEnabled,
     setSemanticShellRibbonEnabled,
@@ -4536,11 +4702,13 @@ document.addEventListener('DOMContentLoaded', () => {
       setDrawerOpen(activeView === 'conversation');
 	      applyHostUi();
 	      updateActiveConversationLabel();
-	      renderFooterRuntimeControls();
+      renderFooterRuntimeControls();
       // Sync markdown toggle from settings
       setMarkdownEnabled(conversationSettings?.markdown !== false);
       // Sync track-edits toggle from settings
       setTrackEditsEnabled(conversationSettings?.trackEdits === true);
+      // Sync view-card wrap toggle from settings
+      setViewWrapEnabled(conversationSettings?.viewWrap === true);
       // Sync xterm toggle from settings
       setXtermEnabled(conversationSettings?.useXterm !== false);
       // Sync diff syntax toggle from settings

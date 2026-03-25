@@ -82,7 +82,7 @@ export function bindDiffRendering(ctx) {
         if (!showFileHeaders) return '';
         const relLabel = currentFilePath ? (toRelativePath(currentFilePath) || currentFilePath) : 'file';
         const safePath = currentFilePath ? escapeHtml(String(currentFilePath)) : '';
-        return `<span class="diff-line diff-file" data-path="${safePath}" data-old-line="" data-new-line=""><span class="diff-gutter">${escapeHtml(fileGutter)}</span><span class="diff-text"><strong>${escapeHtml(relLabel)}</strong></span></span>`;
+        return `<span class="diff-line diff-file" data-path="${safePath}" data-old-line="" data-new-line=""><span class="diff-gutter transcript-line-no">${escapeHtml(fileGutter)}</span><span class="diff-text"><strong>${escapeHtml(relLabel)}</strong></span></span>`;
       }
 
       if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('index ') || line.startsWith('new file mode') || line.startsWith('deleted file mode') || line.startsWith('similarity index') || line.startsWith('rename from') || line.startsWith('rename to')) {
@@ -110,7 +110,7 @@ export function bindDiffRendering(ctx) {
           newLine = newStart;
         }
         const hunkGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
-        return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${escapeHtml(String(oldLine || ''))}" data-new-line="${escapeHtml(String(newLine || ''))}"><span class="diff-gutter">${escapeHtml(hunkGutter)}</span><span class="diff-text">${escapeHtml(display)}</span></span>`;
+        return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${escapeHtml(String(oldLine || ''))}" data-new-line="${escapeHtml(String(newLine || ''))}"><span class="diff-gutter transcript-line-no">${escapeHtml(hunkGutter)}</span><span class="diff-text">${escapeHtml(display)}</span></span>`;
       } else if (line.startsWith('+') && !line.startsWith('+++')) {
         cls = 'diff-add';
         changeMarker = '+';
@@ -161,7 +161,7 @@ export function bindDiffRendering(ctx) {
 
       const dataOld = escapeHtml(String(oldNo || ''));
       const dataNew = escapeHtml(String(newNo || ''));
-      return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${dataOld}" data-new-line="${dataNew}"><span class="diff-gutter">${escapeHtml(gutterText)}</span><span class="diff-text">${codeHtml}</span></span>`;
+      return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${dataOld}" data-new-line="${dataNew}"><span class="diff-gutter transcript-line-no">${escapeHtml(gutterText)}</span><span class="diff-text">${codeHtml}</span></span>`;
     }).filter(line => line !== '').join('');
   }
 
@@ -192,4 +192,3 @@ export function bindDiffRendering(ctx) {
     bindDiffClickHandler,
   };
 }
-

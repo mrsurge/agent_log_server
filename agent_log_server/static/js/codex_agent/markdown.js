@@ -1,4 +1,4 @@
-import * as smd from 'https://cdn.jsdelivr.net/npm/streaming-markdown/smd.min.js';
+import * as smd from '/static/vendor/streaming-markdown/smd.min.js';
 
 export function highlightCode(container) {
   if (!container) return;
@@ -14,6 +14,18 @@ export function renderMarkdownInto(container, text) {
   const parser = smd.parser(renderer);
   smd.parser_write(parser, text || '');
   smd.parser_end(parser);
+}
+
+export function renderMarkdownSourceInto(container, text) {
+  if (!container) return;
+  container.textContent = '';
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.className = 'language-markdown';
+  code.textContent = text || '';
+  pre.appendChild(code);
+  container.appendChild(pre);
+  highlightCode(container);
 }
 
 export function renderMarkdownBlock(text, extraClass = '') {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -7,7 +8,7 @@ from typing import Any, Dict, Optional
 from agent_log_server.te2_runtime import TE2_MCP_SERVER_NAME, build_te2_mcp_url
 
 AGENT_PTY_BLOCKS_MCP_SERVER_NAME = "agent-pty-blocks"
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(os.path.abspath(__file__)).parents[2]
 _AGENT_PTY_MCP_SERVER_PATH = _REPO_ROOT / "mcp_agent_pty_server.py"
 
 
@@ -17,7 +18,6 @@ def build_agent_pty_blocks_local_mcp_server() -> Dict[str, Any]:
         "type": "local",
         "command": command,
         "args": [str(_AGENT_PTY_MCP_SERVER_PATH)],
-        "cwd": str(_REPO_ROOT),
         "tools": ["*"],
     }
 

@@ -22,6 +22,7 @@ export function bindSettingsUiFlow(ctx) {
     settingsLabelEl,
     settingsAliasEl,
     settingsCommandLinesEl,
+    settingsViewWrapEl,
     settingsMarkdownEl,
     settingsXtermEl,
     settingsDiffSyntaxEl,
@@ -147,6 +148,7 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsLabelEl) settingsLabelEl.value = '';
       if (settingsAliasEl) settingsAliasEl.value = '';
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = '20';
+      if (settingsViewWrapEl) settingsViewWrapEl.checked = false;
       if (settingsMarkdownEl) settingsMarkdownEl.checked = true;
       if (settingsRolloutEl) settingsRolloutEl.value = state.pendingRollout?.id || '';
       if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = false;
@@ -163,6 +165,7 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsLabelEl) settingsLabelEl.value = state.conversationSettings?.label || '';
       if (settingsAliasEl) settingsAliasEl.value = state.conversationSettings?.alias || '';
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = state.conversationSettings?.commandOutputLines || '20';
+      if (settingsViewWrapEl) settingsViewWrapEl.checked = state.conversationSettings?.viewWrap === true;
       if (settingsMarkdownEl) settingsMarkdownEl.checked = state.conversationSettings?.markdown !== false;
       if (settingsXtermEl) settingsXtermEl.checked = state.conversationSettings?.useXterm !== false;
       if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = state.conversationSettings?.diffSyntax === true;
@@ -385,13 +388,14 @@ export function bindSettingsUiFlow(ctx) {
       const data = await sioCall('get_extensions', {});
       const extensions = data?.extensions || [];
       setState({ extensionCatalog: Array.isArray(extensions) ? extensions : [] });
-      const agents = ['codex'];
+      const agents = [];
       extensions.forEach((ext) => {
         if (!ext?.id || !ext?.name) return;
         if (ext.active !== true) return;
         if (ext.id === 'codex') return;
-        agents.push(ext.id);
+        agents.push({ value: ext.id, label: ext.id });
       });
+      agents.push({ value: 'codex', label: 'codex-legacy' });
       updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl, onAgentSelectionChange);
     } catch {
       // ignore
