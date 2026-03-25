@@ -29,7 +29,7 @@ def _ensure_framework_shells_secret() -> None:
     os.environ.setdefault("FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE", "1")
     if os.environ.get("FRAMEWORK_SHELLS_SECRET"):
         return
-    repo_root = str(Path(__file__).resolve().parent)
+    repo_root = os.path.abspath(os.path.dirname(__file__))
     fingerprint = hashlib.sha256(repo_root.encode("utf-8")).hexdigest()[:16]
     base_dir = Path(os.path.expanduser("~/.cache/framework_shells"))
     secret_dir = base_dir / "runtimes" / fingerprint
@@ -58,7 +58,7 @@ from mcp.server.fastmcp import FastMCP
 
 def _find_project_root() -> Path:
     """Walk up from CWD to find the directory containing .agent-pty.toml (like git finds .git)."""
-    cur = Path.cwd().resolve()
+    cur = Path(os.path.abspath(os.getcwd()))
     while True:
         if (cur / ".agent-pty.toml").exists():
             return cur
@@ -66,7 +66,11 @@ def _find_project_root() -> Path:
         if parent == cur:
             break
         cur = parent
-    return Path.cwd()
+    return Path(os.path.abspath(os.getcwd()))
+
+
+def _logical_abspath(path: Path | str) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(str(path))))
 
 
 _KB_ROOT: Path = _find_project_root()
@@ -3142,7 +3146,7 @@ def _kb_resolve_file(file: Optional[str] = None) -> Path | Dict[str, Any]:
             f"File '{selected}' not in configured knowledge files",
             configured=files,
         )
-    return (_KB_ROOT / selected).resolve()
+    return _logical_abspath(_KB_ROOT / selected)
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -3300,7 +3304,7 @@ async def kb_list() -> str:
 async def kb_reload_config(cwd: Optional[str] = None) -> str:
     global _PROJECT_CONFIG, _KB_ROOT
     if cwd:
-        new_root = Path(cwd).expanduser().resolve()
+        new_root = _logical_abspath(cwd)
         if not new_root.is_dir():
             return _kb_error_text("InvalidParameter", f"Not a directory: {cwd}")
         # Walk up to find .agent-pty.toml from the given cwd
@@ -3325,21 +3329,21 @@ async def kb_reload_config(cwd: Optional[str] = None) -> str:
 async def kb_add_file(abs_path: str) -> str:
     if not isinstance(abs_path, str) or not abs_path.strip():
         return _kb_error_text("InvalidParameter", "abs_path is required")
-    p = Path(abs_path).expanduser()
+    p = _logical_abspath(abs_path)
     if not p.is_absolute():
         return _kb_error_text("InvalidParameter", "abs_path must be an absolute path")
     if not p.exists() or not p.is_file():
         return _kb_error_text("FileNotAllowed", f"File not found: {p}")
 
-    root = _KB_ROOT.resolve()
+    root = _logical_abspath(_KB_ROOT)
     try:
-        rel = p.resolve().relative_to(root)
+        rel = p.relative_to(root)
     except Exception:
         return _kb_error_text(
             "FileNotAllowed",
             "File must be inside current project root",
             project_root=str(root),
-            abs_path=str(p.resolve()),
+            abs_path=str(p),
         )
 
     rel_str = rel.as_posix()
@@ -3364,7 +3368,7 @@ async def kb_add_file(abs_path: str) -> str:
     global _PROJECT_CONFIG
     _PROJECT_CONFIG = _load_project_config()
     all_files = _kb_configured_files()
-    config_path = (_KB_ROOT / ".agent-pty.toml").resolve()
+    config_path = _logical_abspath(_KB_ROOT / ".agent-pty.toml")
     return f"[kb_add_file: OK  added: {rel_str}]\n  config: {config_path}\n  files: {', '.join(all_files)}"
 
 
