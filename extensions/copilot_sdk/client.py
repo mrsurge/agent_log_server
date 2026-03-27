@@ -88,6 +88,8 @@ _todo_signatures: Dict[str, str] = {}
 _plan_doc_signatures: Dict[str, str] = {}
 # Latest known plan-document state keyed by conversation_id.
 _plan_doc_state: Dict[str, Dict[str, Any]] = {}
+_model_context_window_cache: Dict[str, Optional[int]] = {}
+_model_context_window_lock: Optional[asyncio.Lock] = None
 
 # Ready state
 _ready_event: Optional[asyncio.Event] = None
@@ -118,6 +120,61 @@ _MODE_OPTIONS: List[Dict[str, str]] = [
     {"value": "autopilot", "label": "Autopilot"},
 ]
 _DEFAULT_APPROVAL_POLICY = "suggest"
+
+
+def _get_model_context_window_lock() -> asyncio.Lock:
+    global _model_context_window_lock
+    if _model_context_window_lock is None:
+        _model_context_window_lock = asyncio.Lock()
+    return _model_context_window_lock
+
+
+def _extract_model_context_window(model: Any) -> Optional[int]:
+    if model is None:
+        return None
+    capabilities = model.get("capabilities") if isinstance(model, dict) else getattr(model, "capabilities", None)
+    limits = capabilities.get("limits") if isinstance(capabilities, dict) else getattr(capabilities, "limits", None)
+    candidates = (
+        limits.get("max_context_window_tokens") if isinstance(limits, dict) else getattr(limits, "max_context_window_tokens", None),
+        limits.get("maxContextWindowTokens") if isinstance(limits, dict) else getattr(limits, "maxContextWindowTokens", None),
+        model.get("max_context_window_tokens") if isinstance(model, dict) else getattr(model, "max_context_window_tokens", None),
+        model.get("maxContextWindowTokens") if isinstance(model, dict) else getattr(model, "maxContextWindowTokens", None),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, (int, float)) and candidate > 0:
+            return int(candidate)
+    return None
+
+
+async def _refresh_model_context_window_cache() -> None:
+    async with _get_model_context_window_lock():
+        models = await list_models()
+        if not models:
+            return
+        next_cache: Dict[str, Optional[int]] = {}
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                continue
+            next_cache[model_id.strip()] = _extract_model_context_window(item)
+        _model_context_window_cache.clear()
+        _model_context_window_cache.update(next_cache)
+
+
+async def _context_window_for_model(model_id: Optional[str]) -> Optional[int]:
+    if not isinstance(model_id, str) or not model_id.strip():
+        return None
+    normalized = model_id.strip()
+    if normalized not in _model_context_window_cache:
+        await _refresh_model_context_window_cache()
+        if normalized not in _model_context_window_cache:
+            _model_context_window_cache[normalized] = None
+    value = _model_context_window_cache.get(normalized)
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
 _DEFAULT_SANDBOX_POLICY = "cwd-only"
 _DEFAULT_WEB_POLICY = "deny"
 _DEFAULT_MODE = "interactive"
@@ -1679,6 +1736,8 @@ async def _init_session_unlocked(
                 cwd=cwd,
             ),
             plan_state_provider=_build_live_plan_state,
+            initial_model=_merge_runtime_settings(conversation_id, settings=settings, cwd=cwd).get("model"),
+            model_context_window_resolver=_context_window_for_model,
         )
         _routers[conversation_id] = router
 
@@ -1796,6 +1855,8 @@ async def _resume_session_unlocked(
                 model=model,
             ),
             plan_state_provider=_build_live_plan_state,
+            initial_model=_merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model).get("model"),
+            model_context_window_resolver=_context_window_for_model,
         )
         _routers[conversation_id] = router
 
@@ -1852,6 +1913,8 @@ def _register_attached_session(
         transcript_fn=_transcript_fn,
         debug_trace=debug_trace,
         plan_state_provider=_build_live_plan_state,
+        initial_model=(config.get("model") if isinstance(config.get("model"), str) else None),
+        model_context_window_resolver=_context_window_for_model,
     )
     _routers[conversation_id] = router
 

@@ -5,15 +5,156 @@ export function bindToolRender(ctx) {
     insertRow,
     makeCollapsible,
     getLiveEventParent,
-    renderMarkdownSourceInto,
+    renderEventMarkdownInto,
     formatDiff,
     toRelativePath,
-    escapeHtml,
     renderShellCmdRibbon,
     maybeAutoScroll,
     setLastEventType,
     setStatusDot,
+    getToolRenderPolicy,
+    highlightCodeAlways,
   } = ctx;
+
+  function getActiveToolRenderPolicy() {
+    if (typeof getToolRenderPolicy === 'function') {
+      const policy = getToolRenderPolicy();
+      if (policy && typeof policy === 'object') return policy;
+    }
+    return {
+      default: {
+        request: { kind: 'plain' },
+        response: { kind: 'plain' },
+      },
+      rules: [],
+    };
+  }
+
+  function normalizeRenderSpec(spec) {
+    if (!spec || typeof spec !== 'object') return { kind: 'plain' };
+    const kind = typeof spec.kind === 'string' ? spec.kind.trim().toLowerCase() : 'plain';
+    if (kind === 'markdown') return { kind: 'markdown' };
+    if (kind === 'hljs') {
+      const language = typeof spec.language === 'string' && spec.language.trim() ? spec.language.trim() : '';
+      return language ? { kind: 'hljs', language } : { kind: 'hljs' };
+    }
+    return { kind: 'plain' };
+  }
+
+  function ruleMatches(rule, serverName, toolName) {
+    if (!rule || typeof rule !== 'object') return false;
+    const server = typeof serverName === 'string' ? serverName : '';
+    const tool = typeof toolName === 'string' ? toolName : '';
+    const exactServer = typeof rule.server === 'string' && rule.server ? rule.server : '';
+    const exactTool = typeof rule.tool === 'string' && rule.tool ? rule.tool : '';
+    const serverPrefix = typeof rule.serverPrefix === 'string' && rule.serverPrefix ? rule.serverPrefix : '';
+    const toolPrefix = typeof rule.toolPrefix === 'string' && rule.toolPrefix ? rule.toolPrefix : '';
+    const servers = Array.isArray(rule.servers) ? rule.servers.filter((value) => typeof value === 'string' && value) : [];
+    const tools = Array.isArray(rule.tools) ? rule.tools.filter((value) => typeof value === 'string' && value) : [];
+    if (exactServer && server !== exactServer) return false;
+    if (exactTool && tool !== exactTool) return false;
+    if (serverPrefix && !server.startsWith(serverPrefix)) return false;
+    if (toolPrefix && !tool.startsWith(toolPrefix)) return false;
+    if (servers.length && !servers.includes(server)) return false;
+    if (tools.length && !tools.includes(tool)) return false;
+    return Boolean(exactServer || exactTool || serverPrefix || toolPrefix || servers.length || tools.length);
+  }
+
+  function resolveRenderSpec(serverName, toolName, target, fieldName = '') {
+    const policy = getActiveToolRenderPolicy();
+    const defaults = policy.default && typeof policy.default === 'object' ? policy.default : {};
+    const rules = Array.isArray(policy.rules) ? policy.rules : [];
+    const matchedRule = rules.find((rule) => ruleMatches(rule, serverName, toolName)) || null;
+    const targetConfig = target === 'request'
+      ? {
+        primary: 'request',
+        legacy: ['args', 'arguments'],
+        fieldPrimary: 'requestFields',
+        fieldLegacy: ['argsFields', 'argumentsFields'],
+      }
+      : {
+        primary: 'response',
+        legacy: ['result'],
+        fieldPrimary: 'responseFields',
+        fieldLegacy: ['resultFields'],
+      };
+    if (fieldName) {
+      const ruleFieldSources = [targetConfig.fieldPrimary, ...targetConfig.fieldLegacy];
+      for (const fieldKey of ruleFieldSources) {
+        const matchedField = matchedRule && matchedRule[fieldKey] && typeof matchedRule[fieldKey] === 'object'
+          ? matchedRule[fieldKey][fieldName]
+          : null;
+        if (matchedField) return normalizeRenderSpec(matchedField);
+      }
+      for (const fieldKey of ruleFieldSources) {
+        const defaultField = defaults[fieldKey] && typeof defaults[fieldKey] === 'object'
+          ? defaults[fieldKey][fieldName]
+          : null;
+        if (defaultField) return normalizeRenderSpec(defaultField);
+      }
+    }
+    const sourceKeys = [targetConfig.primary, ...targetConfig.legacy];
+    for (const key of sourceKeys) {
+      if (matchedRule?.[key]) return normalizeRenderSpec(matchedRule[key]);
+    }
+    for (const key of sourceKeys) {
+      if (defaults?.[key]) return normalizeRenderSpec(defaults[key]);
+    }
+    return normalizeRenderSpec(null);
+  }
+
+  function buildRenderedTextElement(text, spec, className) {
+    const normalizedText = text == null ? '' : String(text);
+    const normalizedSpec = normalizeRenderSpec(spec);
+    if (normalizedSpec.kind === 'markdown' && typeof renderEventMarkdownInto === 'function') {
+      const container = document.createElement('div');
+      container.className = `markdown-body ${className}`.trim();
+      renderEventMarkdownInto(container, normalizedText);
+      return container;
+    }
+    const pre = document.createElement('pre');
+    pre.className = className;
+    if (normalizedSpec.kind === 'hljs') {
+      const code = document.createElement('code');
+      const language = normalizedSpec.language || '';
+      code.className = language ? `hljs language-${language}` : 'hljs';
+      if (typeof highlightCodeAlways === 'function') {
+        code.innerHTML = highlightCodeAlways(normalizedText, language);
+      } else {
+        code.textContent = normalizedText;
+      }
+      pre.appendChild(code);
+      return pre;
+    }
+    pre.textContent = normalizedText;
+    return pre;
+  }
+
+  function buildObjectText(result) {
+    const lines = [];
+    Object.entries(result).forEach(([key, value]) => {
+      if (typeof value === 'object' && value !== null) {
+        lines.push(`  ${key}:`);
+        Object.entries(value).forEach(([innerKey, innerValue]) => {
+          lines.push(`    ${innerKey}: ${JSON.stringify(innerValue)}`);
+        });
+      } else {
+        lines.push(`  ${key}: ${JSON.stringify(value)}`);
+      }
+    });
+    return lines.join('\n');
+  }
+
+  function removeNode(node) {
+    if (node && node.parentElement) {
+      node.parentElement.removeChild(node);
+    }
+  }
+
+  function removeNodes(nodes) {
+    if (!Array.isArray(nodes)) return;
+    nodes.forEach((node) => removeNode(node));
+  }
 
   function getToolRow(id, label, parentEl = null) {
     const key = id || `tool:${label || 'tool'}`;
@@ -27,10 +168,6 @@ export function bindToolRender(ctx) {
       header.className = 'command-ribbon';
       header.textContent = label || 'tool';
       body.appendChild(header);
-      const argsPre = document.createElement('pre');
-      argsPre.className = 'mcp-tool-args';
-      argsPre.textContent = '';
-      body.appendChild(argsPre);
       row.appendChild(body);
       if (parentEl) {
         clearPlaceholder();
@@ -42,9 +179,11 @@ export function bindToolRender(ctx) {
       entry = {
         row,
         body,
-        argsPre,
         header,
-        resultEl: null,
+        argsEls: [],
+        resultHeaderEl: null,
+        resultEls: [],
+        footerEl: null,
         streamEl: null,
         interactionEl: null,
         diffLabelEl: null,
@@ -163,108 +302,118 @@ export function bindToolRender(ctx) {
     if (!preview) return;
     if (!entry.diffLabelEl) {
       entry.diffLabelEl = preview.label;
-      entry.body.insertBefore(entry.diffLabelEl, entry.argsPre);
+      entry.body.insertBefore(entry.diffLabelEl, entry.body.firstChild.nextSibling || null);
     } else {
       entry.diffLabelEl.textContent = preview.label.textContent;
     }
     if (!entry.diffPre) {
       entry.diffPre = preview.pre;
-      entry.body.insertBefore(entry.diffPre, entry.argsPre);
+      const anchor = entry.diffLabelEl.nextSibling;
+      entry.body.insertBefore(entry.diffPre, anchor || null);
     } else {
       entry.diffPre.innerHTML = preview.pre.innerHTML;
     }
   }
 
-  function isMarkdownishText(value) {
-    return typeof value === 'string'
-      && (value.includes('\n') || value.startsWith('#') || value.includes('**') || value.includes('`'));
+  function appendStructuredToolFields(body, values, serverName, toolName, target, isError = false) {
+    if (!values || typeof values !== 'object') return null;
+    const entries = Object.entries(values);
+    if (!entries.length) return null;
+    const hasDeclaredFieldPolicy = entries.some(([key]) => resolveRenderSpec(serverName, toolName, target, key).kind !== 'plain');
+    if (!hasDeclaredFieldPolicy) return null;
+    const inserted = [];
+    const valueClass = target === 'args' ? 'mcp-tool-arg-value-plain' : 'mcp-tool-content';
+    entries.forEach(([key, value]) => {
+      const label = document.createElement('div');
+      label.className = 'mcp-tool-arg-label';
+      label.textContent = `${key}:`;
+      body.appendChild(label);
+      inserted.push(label);
+      const renderSpec = resolveRenderSpec(serverName, toolName, target, key);
+      const serializedValue = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+      let rendered;
+      if (typeof value === 'string' || renderSpec.kind === 'hljs') {
+        rendered = buildRenderedTextElement(serializedValue, renderSpec, valueClass);
+      } else {
+        rendered = document.createElement('pre');
+        rendered.className = valueClass;
+        rendered.textContent = serializedValue;
+      }
+      if (isError) rendered.classList.add('error-text');
+      body.appendChild(rendered);
+      inserted.push(rendered);
+    });
+    return inserted;
   }
 
-  function appendToolArguments(body, args) {
-    if (!args || typeof args !== 'object' || Object.keys(args).length === 0) return;
-    const argEntries = Object.entries(args);
-    const hasMarkdownArg = argEntries.some(([, value]) => isMarkdownishText(value));
-    if (hasMarkdownArg) {
-      argEntries.forEach(([key, value]) => {
-        const argLabel = document.createElement('div');
-        argLabel.className = 'mcp-tool-arg-label';
-        argLabel.textContent = `${key}:`;
-        body.appendChild(argLabel);
-        if (isMarkdownishText(value)) {
-          const argContainer = document.createElement('div');
-          argContainer.className = 'markdown-body mcp-tool-arg-value';
-          renderMarkdownSourceInto(argContainer, value);
-          body.appendChild(argContainer);
-        } else {
-          const argValue = document.createElement('pre');
-          argValue.className = 'mcp-tool-arg-value-plain';
-          argValue.textContent = typeof value === 'string' ? value : JSON.stringify(value);
-          body.appendChild(argValue);
-        }
-      });
-      return;
-    }
+  function appendToolArguments(body, args, serverName = '', toolName = '') {
+    if (!args || typeof args !== 'object' || Object.keys(args).length === 0) return [];
+    const structured = appendStructuredToolFields(body, args, serverName, toolName, 'request');
+    if (structured) return structured;
     const argsPre = document.createElement('pre');
     argsPre.className = 'mcp-tool-args';
     const lines = [];
-    argEntries.forEach(([key, value]) => {
+    Object.entries(args).forEach(([key, value]) => {
       const renderedValue = typeof value === 'string' ? value : JSON.stringify(value);
       lines.push(`  ${key}: ${renderedValue}`);
     });
     argsPre.textContent = lines.join('\n');
     body.appendChild(argsPre);
+    return [argsPre];
   }
 
-  function appendToolResult(body, result, isError) {
-    if (result === undefined || result === null) return;
+  function appendToolResult(body, result, isError, serverName = '', toolName = '') {
+    if (result === undefined || result === null) {
+      return { headerEl: null, nodes: [] };
+    }
     const resultHeader = document.createElement('div');
     resultHeader.className = 'mcp-tool-result-header';
     resultHeader.textContent = '→';
     body.appendChild(resultHeader);
 
     if (typeof result === 'object') {
+      const structured = appendStructuredToolFields(body, result, serverName, toolName, 'response', isError);
+      if (structured) {
+        return { headerEl: resultHeader, nodes: structured };
+      }
       const resultPre = document.createElement('pre');
       resultPre.className = 'mcp-tool-content';
-      const lines = [];
-      Object.entries(result).forEach(([key, value]) => {
-        if (typeof value === 'object' && value !== null) {
-          lines.push(`  ${key}:`);
-          Object.entries(value).forEach(([innerKey, innerValue]) => {
-            lines.push(`    ${innerKey}: ${JSON.stringify(innerValue)}`);
-          });
-        } else {
-          lines.push(`  ${key}: ${JSON.stringify(value)}`);
-        }
-      });
-      resultPre.textContent = lines.join('\n');
+      resultPre.textContent = buildObjectText(result);
       if (isError) resultPre.classList.add('error-text');
       body.appendChild(resultPre);
-      return resultPre;
+      return { headerEl: resultHeader, nodes: [resultPre] };
     }
 
-    if (isMarkdownishText(result)) {
-      const resultContainer = document.createElement('div');
-      resultContainer.className = 'markdown-body mcp-tool-result';
-      renderMarkdownSourceInto(resultContainer, result);
-      if (isError) resultContainer.classList.add('error-text');
-      body.appendChild(resultContainer);
-      return resultContainer;
-    }
-
-    const resultPre = document.createElement('pre');
-    resultPre.className = 'mcp-tool-content';
-    resultPre.textContent = String(result);
-    if (isError) resultPre.classList.add('error-text');
-    body.appendChild(resultPre);
-    return resultPre;
+    const rendered = buildRenderedTextElement(String(result), resolveRenderSpec(serverName, toolName, 'response'), 'mcp-tool-content');
+    if (isError) rendered.classList.add('error-text');
+    body.appendChild(rendered);
+    return { headerEl: resultHeader, nodes: [rendered] };
   }
 
-  function appendToolFooter(body, durationMs) {
+  function setToolArguments(entry, args, serverName, toolName) {
+    removeNodes(entry.argsEls);
+    entry.argsEls = appendToolArguments(entry.body, args, serverName, toolName);
+  }
+
+  function setToolResult(entry, result, isError, serverName, toolName) {
+    removeNode(entry.resultHeaderEl);
+    removeNodes(entry.resultEls);
+    entry.resultHeaderEl = null;
+    entry.resultEls = [];
+    const rendered = appendToolResult(entry.body, result, isError, serverName, toolName);
+    entry.resultHeaderEl = rendered.headerEl;
+    entry.resultEls = rendered.nodes;
+  }
+
+  function setToolFooter(entry, durationMs) {
+    removeNode(entry.footerEl);
+    entry.footerEl = null;
     if (durationMs === undefined || durationMs === null) return;
     const footer = document.createElement('div');
     footer.className = 'command-footer';
     footer.textContent = `${durationMs}ms`;
-    body.appendChild(footer);
+    entry.body.appendChild(footer);
+    entry.footerEl = footer;
   }
 
   function buildReplayToolRow(entry) {
@@ -281,7 +430,7 @@ export function bindToolRender(ctx) {
     renderToolCardHeader(header, toolName, serverName, filePath, entry);
     body.appendChild(header);
 
-    appendToolArguments(body, entry.arguments);
+    appendToolArguments(body, entry.request ?? entry.arguments, serverName, toolName);
 
     const diffText = resolveToolCardDiff(toolName, entry);
     if (diffText) {
@@ -293,14 +442,14 @@ export function bindToolRender(ctx) {
       const outputPre = document.createElement('pre');
       outputPre.className = 'mcp-tool-content';
       outputPre.textContent = entry.output;
-      if (entry.is_error && (entry.result === undefined || entry.result === null)) {
+      if (entry.is_error && ((entry.response ?? entry.result) === undefined || (entry.response ?? entry.result) === null)) {
         outputPre.classList.add('error-text');
       }
       body.appendChild(outputPre);
     }
 
-    appendToolResult(body, entry.result, entry.is_error === true);
-    appendToolFooter(body, entry.duration_ms);
+    appendToolResult(body, entry.response ?? entry.result, entry.is_error === true, serverName, toolName);
+    setToolFooter({ body, footerEl: null }, entry.duration_ms);
 
     row.appendChild(body);
     makeCollapsible(row, `tool:${entry.id || entry.item_id || `${entry.server || ''}:${entry.tool || ''}`}`, false);
@@ -315,39 +464,7 @@ export function bindToolRender(ctx) {
     const label = toolCardLabel(toolName, serverName, filePath);
     const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
     renderToolCardHeader(entry.header, toolName, serverName, filePath, evt);
-
-    const args = evt.arguments || evt.payload || {};
-    const argEntries = Object.entries(args);
-    const hasMarkdownArg = argEntries.some(([, value]) => isMarkdownishText(value));
-
-    if (hasMarkdownArg) {
-      entry.argsPre.style.display = 'none';
-      argEntries.forEach(([key, value]) => {
-        const argLabel = document.createElement('div');
-        argLabel.className = 'mcp-tool-arg-label';
-        argLabel.textContent = `${key}:`;
-        entry.body.insertBefore(argLabel, entry.argsPre);
-        if (isMarkdownishText(value)) {
-          const argContainer = document.createElement('div');
-          argContainer.className = 'markdown-body mcp-tool-arg-value';
-          renderMarkdownSourceInto(argContainer, value);
-          entry.body.insertBefore(argContainer, entry.argsPre);
-        } else {
-          const argValue = document.createElement('pre');
-          argValue.className = 'mcp-tool-arg-value-plain';
-          argValue.textContent = typeof value === 'string' ? value : JSON.stringify(value);
-          entry.body.insertBefore(argValue, entry.argsPre);
-        }
-      });
-    } else {
-      const lines = [];
-      argEntries.forEach(([key, value]) => {
-        const renderedValue = typeof value === 'string' ? value : JSON.stringify(value);
-        lines.push(`  ${key}: ${renderedValue}`);
-      });
-      if (lines.length) entry.argsPre.textContent = lines.join('\n');
-    }
-
+    setToolArguments(entry, evt.request ?? evt.arguments ?? evt.payload ?? {}, serverName, toolName);
     ensureToolDiffPreview(entry, resolveToolCardDiff(toolName, evt), filePath);
     setLastEventType('tool');
   }
@@ -383,12 +500,16 @@ export function bindToolRender(ctx) {
     const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
     renderToolCardHeader(entry.header, toolName, serverName, filePath, evt);
 
-    const result = evt.result ?? evt.payload ?? null;
+    const request = evt.request ?? evt.arguments ?? evt.payload ?? {};
+    if (!entry.argsEls.length && request && typeof request === 'object') {
+      setToolArguments(entry, request, serverName, toolName);
+    }
+    const result = evt.response ?? evt.result ?? evt.payload ?? null;
     const durationMs = evt.duration_ms ?? (result && result.duration_ms) ?? (result && result.durationMs);
     const isError = evt.is_error || (result && result.isError) || false;
     ensureToolDiffPreview(entry, resolveToolCardDiff(toolName, evt), filePath);
-    entry.resultEl = appendToolResult(entry.body, result, isError);
-    appendToolFooter(entry.body, durationMs);
+    setToolResult(entry, result, isError, serverName, toolName);
+    setToolFooter(entry, durationMs);
 
     setLastEventType('tool');
     const exitCode = result && (result.exit_code ?? result.exitCode);
@@ -400,7 +521,11 @@ export function bindToolRender(ctx) {
   }
 
   function renderToolInteraction(evt) {
-    const entry = getToolRow(evt.id, `tool:${evt.tool || 'tool'}`, getLiveEventParent(evt));
+    const toolName = evt.tool || 'tool';
+    const serverName = evt.server || '';
+    const filePath = resolveToolCardPath(toolName, evt);
+    const entry = getToolRow(evt.id, toolCardLabel(toolName, serverName, filePath), getLiveEventParent(evt));
+    renderToolCardHeader(entry.header, toolName, serverName, filePath, evt);
     const payload = evt.payload || {};
     const stdin = payload.stdin ? `stdin: ${payload.stdin}` : '';
     const stdout = payload.stdout ? `stdout: ${payload.stdout}` : '';

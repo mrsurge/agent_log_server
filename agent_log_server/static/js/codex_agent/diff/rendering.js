@@ -5,6 +5,7 @@ export function bindDiffRendering(ctx) {
     escapeHtml,
     toRelativePath,
     isDiffSyntaxEnabled,
+    resolveHljsLanguage,
     setLastEventType,
     maybeAutoScroll,
     timelineEl,
@@ -147,8 +148,8 @@ export function bindDiffRendering(ctx) {
             jsx: 'javascript', rb: 'ruby', rs: 'rust', go: 'go', sh: 'bash',
             yml: 'yaml', md: 'markdown', htm: 'html',
           };
-          const lang = extToLang[ext] || ext;
-          if (lang && hljs.getLanguage(lang)) {
+          const lang = resolveHljsLanguage?.(extToLang[ext] || ext) || null;
+          if (lang) {
             codeHtml = hljs.highlight(display, { language: lang, ignoreIllegals: true }).value;
           } else if (display.length > 10) {
             const auto = hljs.highlightAuto(display);

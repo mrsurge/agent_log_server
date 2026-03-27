@@ -510,6 +510,26 @@ async def _sio_get_extension_request_cards(sid, data):
         return _sio_error(str(e))
 
 
+@socketio_server.on("get_extension_ui_features", namespace="/appserver")
+async def _sio_get_extension_ui_features(sid, data):
+    """Return generic manifest-driven frontend behavior flags for one extension."""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        extension_id = str(payload.get("extension_id") or "").strip()
+        if not extension_id:
+            return _sio_error("Missing required field: extension_id")
+        info = ext_loader.get_extension_info(extension_id)
+        if not isinstance(info, dict):
+            return _sio_error(f"Extension not found: {extension_id}")
+        return {
+            "ok": True,
+            "extension_id": extension_id,
+            "ui_features": ext_loader.get_extension_ui_features(extension_id),
+        }
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 @socketio_server.on("get_extension_plan", namespace="/appserver")
 async def _sio_get_extension_plan(sid, data):
     """Mirror of GET /api/extensions/{id}/plan"""
@@ -4342,21 +4362,65 @@ async def _route_appserver_event(
     # SECTION: Error/Warning Events (Frontend + Transcript for Replay)
     # -------------------------------------------------------------------------
     
-    if label_lower in {"codex/event/error", "error"} and isinstance(payload, dict):
-        error_obj = payload.get("error") or payload
-        message = error_obj.get("message") or str(error_obj)
+    if label_lower in {"codex/event/error", "codex/event/stream_error", "thread/realtime/error", "error"} and isinstance(payload, dict):
+        raw_error_obj = payload.get("error")
+        if isinstance(raw_error_obj, dict):
+            error_obj = raw_error_obj
+            message = error_obj.get("message") or payload.get("message") or str(error_obj)
+        else:
+            error_obj = payload
+            message = payload.get("message") or (str(raw_error_obj) if raw_error_obj not in (None, "") else str(payload))
+        error_type = error_obj.get("error_type") or error_obj.get("errorType")
+        status_code = error_obj.get("status_code")
+        if status_code is None:
+            status_code = error_obj.get("statusCode")
+        if status_code is None:
+            status_code = error_obj.get("httpStatusCode")
+        provider_call_id = error_obj.get("provider_call_id") or error_obj.get("providerCallId")
+        stack = error_obj.get("stack")
+        details = error_obj.get("details") or error_obj.get("additional_details")
+        code = error_obj.get("code")
         # [Transcript] Store for replay
         if convo_id:
-            await _append_transcript_entry(convo_id, {
+            transcript_entry = {
                 "role": "error",
+                "message": message,
                 "text": message,
+                "source": label_lower,
                 "event": label_lower,
-            })
+            }
+            if isinstance(error_type, str) and error_type:
+                transcript_entry["error_type"] = error_type
+            if isinstance(status_code, (int, float)):
+                transcript_entry["status_code"] = int(status_code)
+            if isinstance(provider_call_id, str) and provider_call_id:
+                transcript_entry["provider_call_id"] = provider_call_id
+            if isinstance(stack, str) and stack:
+                transcript_entry["stack"] = stack
+            if isinstance(details, str) and details:
+                transcript_entry["details"] = details
+            if code is not None:
+                transcript_entry["code"] = code
+            await _append_transcript_entry(convo_id, transcript_entry)
         # [Frontend] Error display
-        events.append({
+        error_event = {
             "type": "error",
             "message": message,
-        })
+            "source": label_lower,
+        }
+        if isinstance(error_type, str) and error_type:
+            error_event["error_type"] = error_type
+        if isinstance(status_code, (int, float)):
+            error_event["status_code"] = int(status_code)
+        if isinstance(provider_call_id, str) and provider_call_id:
+            error_event["provider_call_id"] = provider_call_id
+        if isinstance(stack, str) and stack:
+            error_event["stack"] = stack
+        if isinstance(details, str) and details:
+            error_event["details"] = details
+        if code is not None:
+            error_event["code"] = code
+        events.append(error_event)
         events.append({"type": "activity", "label": "error", "active": False})
         return convo_id, events
 
@@ -5965,6 +6029,7 @@ async def codex_agent_ui() -> HTMLResponse:
                 Link(rel="stylesheet", href=_asset("/static/vendor/tribute.css")),
                 Link(rel="stylesheet", href=_asset("/static/codex_agent.css")),
                 Script(src=_asset("/static/vendor/highlight.js/highlight.bundle.js")),
+                Script(src=_asset("/static/vendor/markdown-it/markdown-it.min.js")),
                 Script(src=_asset("/static/vendor/xterm/xterm.js")),
                 Script(src=_asset("/static/vendor/socket.io/socket.io.min.js")),
                 Script(src=_asset("/static/vendor/tribute.min.js")),

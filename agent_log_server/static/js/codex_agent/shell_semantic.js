@@ -2,6 +2,8 @@ export function bindShellSemantic(ctx) {
   const {
     getEnabled,
     setEnabled,
+    getQuoteParsingEnabled,
+    setQuoteParsingEnabled,
     getCheckboxEl,
     escapeHtml,
   } = ctx;
@@ -23,6 +25,14 @@ export function bindShellSemantic(ctx) {
     setEnabled(next);
     const el = getCheckboxEl?.();
     if (el) el.checked = next;
+  }
+
+  function isSemanticShellQuoteParsingEnabled() {
+    return getQuoteParsingEnabled() === true;
+  }
+
+  function setSemanticShellQuoteParsingEnabled(enabled) {
+    setQuoteParsingEnabled(enabled === true);
   }
 
   function normalizeCaptureName(name) {
@@ -232,6 +242,55 @@ export function bindShellSemantic(ctx) {
     return out;
   }
 
+  function parsePythonHeredocCommand(command) {
+    const normalized = String(command || '').replace(/\r\n?/g, '\n');
+    if (!normalized.includes('\n')) return null;
+    const lines = normalized.split('\n');
+    if (lines.length < 3) return null;
+    const firstLine = lines[0];
+    const match = firstLine.match(/^\s*python\s+-\s+<<(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s*$/);
+    if (!match) return null;
+    const terminator = match[1] || match[2] || match[3] || '';
+    if (!terminator) return null;
+    let endIndex = -1;
+    for (let idx = 1; idx < lines.length; idx += 1) {
+      if (lines[idx] === terminator) {
+        endIndex = idx;
+        break;
+      }
+    }
+    if (endIndex <= 0) return null;
+    const trailingLines = lines.slice(endIndex + 1);
+    if (trailingLines.some((line) => line.trim() !== '')) return null;
+    return {
+      prefix: firstLine,
+      body: lines.slice(1, endIndex).join('\n'),
+      terminator,
+    };
+  }
+
+  function highlightPythonHeredocBodyHtml(body) {
+    const text = String(body || '');
+    if (!text) return '';
+    if (typeof hljs === 'undefined' || !hljs.getLanguage?.('python')) {
+      return escapeHtml(text);
+    }
+    try {
+      return hljs.highlight(text, { language: 'python', ignoreIllegals: true }).value;
+    } catch (_) {
+      return escapeHtml(text);
+    }
+  }
+
+  function renderPythonHeredocHtml(command) {
+    const parsed = parsePythonHeredocCommand(command);
+    if (!parsed) return null;
+    const prefixHtml = treeSitterHighlightHtml(parsed.prefix);
+    const bodyHtml = highlightPythonHeredocBodyHtml(parsed.body);
+    const terminatorHtml = treeSitterHighlightHtml(parsed.terminator);
+    return `${prefixHtml}\n${bodyHtml}\n${terminatorHtml}`;
+  }
+
   function renderShellCmdRibbon(el, cmd) {
     if (!el) return;
     const command = String(cmd || '');
@@ -245,17 +304,25 @@ export function bindShellSemantic(ctx) {
       }
       if (tsRibbonReady) {
         try {
-          const segs = splitQuotedSegments(command);
-          let html = '';
-          for (const seg of segs) {
-            if (seg.type === 'text') {
-              html += treeSitterHighlightHtml(seg.text);
-            } else if (seg.type === 'quote') {
-              const q = escapeHtml(seg.quote);
-              html += `<span class="ts-quote">${q}</span>`;
-              html += `<span class="ts-quoted-inner">${treeSitterHighlightHtml(seg.text)}</span>`;
-              html += `<span class="ts-quote">${q}</span>`;
+          const heredocHtml = renderPythonHeredocHtml(command);
+          let html = heredocHtml;
+          if (typeof html !== 'string') {
+            html = '';
+          }
+          if (!html && isSemanticShellQuoteParsingEnabled()) {
+            const segs = splitQuotedSegments(command);
+            for (const seg of segs) {
+              if (seg.type === 'text') {
+                html += treeSitterHighlightHtml(seg.text);
+              } else if (seg.type === 'quote') {
+                const q = escapeHtml(seg.quote);
+                html += `<span class="ts-quote">${q}</span>`;
+                html += `<span class="ts-quoted-inner">${treeSitterHighlightHtml(seg.text)}</span>`;
+                html += `<span class="ts-quote">${q}</span>`;
+              }
             }
+          } else if (!html) {
+            html = treeSitterHighlightHtml(command);
           }
           el.innerHTML = `<span class="shell-prompt">$ </span><code class="tsribbon">${html}</code>`;
           if (savedTwisty) el.appendChild(savedTwisty);
@@ -295,6 +362,8 @@ export function bindShellSemantic(ctx) {
   return {
     isSemanticShellRibbonEnabled,
     setSemanticShellRibbonEnabled,
+    isSemanticShellQuoteParsingEnabled,
+    setSemanticShellQuoteParsingEnabled,
     ensureTreeSitterRibbonReady,
     renderShellCmdRibbon,
   };

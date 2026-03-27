@@ -58,6 +58,29 @@ function appendKeyValue(container, label, value, helpers) {
   container.append(row);
 }
 
+function renderMarkdownNode(container, text, helpers, extraClass = '') {
+  if (!(container instanceof HTMLElement)) return;
+  if (typeof helpers?.renderMarkdown === 'function') {
+    helpers.renderMarkdown(container, text, extraClass);
+    return;
+  }
+  if (typeof extraClass === 'string' && extraClass.trim()) {
+    container.className = extraClass.trim();
+  }
+  container.textContent = String(text || '');
+}
+
+function appendMarkdownValue(container, label, value, helpers) {
+  if (value === null || value === undefined || value === '') return;
+  const row = document.createElement('div');
+  const title = document.createElement('div');
+  title.innerHTML = `<strong>${helpers.escapeHtml(label)}:</strong>`;
+  const content = document.createElement('div');
+  renderMarkdownNode(content, String(value), helpers);
+  row.append(title, content);
+  container.append(row);
+}
+
 function createFeedbackNode(body) {
   const feedback = document.createElement('div');
   feedback.className = 'approval-feedback';
@@ -126,10 +149,9 @@ function addJsonDetails(body, label, value) {
   body.append(details);
 }
 
-function createOptionDescription(text) {
+function createOptionDescription(text, helpers) {
   const description = document.createElement('div');
-  description.className = 'approval-option-description';
-  description.textContent = String(text || '');
+  renderMarkdownNode(description, String(text || ''), helpers, 'approval-option-description');
   return description;
 }
 
@@ -174,7 +196,7 @@ function renderCommandCard(body, event, schema, helpers) {
   summary.className = 'approval-summary';
   appendKeyValue(summary, 'Command', Array.isArray(payload.command) ? payload.command.join(' ') : payload.command || requestParams.command || '', helpers);
   appendKeyValue(summary, 'CWD', payload.cwd || requestParams.cwd || '', helpers);
-  appendKeyValue(summary, 'Reason', payload.reason || requestParams.reason || '', helpers);
+  appendMarkdownValue(summary, 'Reason', payload.reason || requestParams.reason || '', helpers);
   body.append(summary);
 
   addJsonDetails(body, 'Command request details', {
@@ -219,7 +241,7 @@ function renderFileChangeCard(body, event, schema, helpers) {
 
   const summary = document.createElement('div');
   summary.className = 'approval-summary';
-  appendKeyValue(summary, 'Reason', payload.reason || requestParams.reason || '', helpers);
+  appendMarkdownValue(summary, 'Reason', payload.reason || requestParams.reason || '', helpers);
   appendKeyValue(summary, 'Grant root', payload.grant_root || requestParams.grantRoot || '', helpers);
   body.append(summary);
 
@@ -269,7 +291,7 @@ function renderUserInputCard(body, event, _schema, helpers) {
 
   const summary = document.createElement('div');
   summary.className = 'approval-summary';
-  appendKeyValue(summary, 'Request', payload.message || 'Tool is waiting for user input', helpers);
+  appendMarkdownValue(summary, 'Request', payload.message || 'Tool is waiting for user input', helpers);
   body.append(summary);
 
   const buildAnswers = (overrides = {}) => {
@@ -314,7 +336,7 @@ function renderUserInputCard(body, event, _schema, helpers) {
 
     if (question.question) {
       const prompt = document.createElement('div');
-      prompt.textContent = String(question.question);
+      renderMarkdownNode(prompt, String(question.question), helpers);
       wrapper.append(prompt);
     }
 
@@ -349,7 +371,7 @@ function renderUserInputCard(body, event, _schema, helpers) {
         }
         item.append(button);
         if (option.description) {
-          item.append(createOptionDescription(option.description));
+          item.append(createOptionDescription(option.description, helpers));
         }
         optionsWrap.append(item);
       });
@@ -484,7 +506,7 @@ function renderElicitationCard(body, event, _schema, helpers) {
   summary.className = 'approval-summary';
   appendKeyValue(summary, 'Server', payload.server_name || requestParams.serverName || '', helpers);
   appendKeyValue(summary, 'Mode', payload.mode || requestParams.mode || '', helpers);
-  appendKeyValue(summary, 'Message', payload.message || requestParams.message || '', helpers);
+  appendMarkdownValue(summary, 'Message', payload.message || requestParams.message || '', helpers);
   body.append(summary);
 
   if (payload.url || requestParams.url) {

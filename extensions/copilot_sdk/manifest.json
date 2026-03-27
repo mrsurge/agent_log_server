@@ -36,6 +36,75 @@
   "ui": {
     "icon": "copilot.svg",
     "color": "#6e40c9",
+    "semanticShellRibbon": {
+      "quoteParsing": false
+    },
+    "toolRenderPolicy": {
+      "default": {
+        "args": "plain",
+        "result": "plain"
+      },
+      "rules": [
+        {
+          "tool": "Agent-log write",
+          "requestFields": {
+            "Message": "markdown"
+          }
+        },
+        {
+          "tool": "sql",
+          "requestFields": {
+            "description": "plain",
+            "query": "plain"
+          },
+          "response": "markdown"
+        },
+        {
+          "server": "agent-pty-blocks",
+          "toolPrefix": "agent_log_",
+          "response": "markdown"
+        },
+        {
+          "server": "agent-pty-blocks",
+          "tool": "kb_write",
+          "requestFields": {
+            "content": "markdown"
+          }
+        },
+        {
+          "server": "agent-pty-blocks",
+          "tool": "kb_update",
+          "requestFields": {
+            "content": "markdown"
+          }
+        },
+        {
+          "server": "agent-pty-blocks",
+          "toolPrefix": "kb_",
+          "response": "markdown"
+        },
+        {
+          "server": "te2-mcp",
+          "tool": "te2_console_eval",
+          "requestFields": {
+            "target_worker_id": "plain",
+            "code": {
+              "kind": "hljs",
+              "language": "javascript"
+            }
+          },
+          "responseFields": {
+            "workerId": "plain",
+            "reqId": "plain",
+            "ok": "plain",
+            "value": {
+              "kind": "hljs",
+              "language": "json"
+            }
+          }
+        }
+      ]
+    },
     "requestCards": [
       {
         "id": "copilot-permission-request",

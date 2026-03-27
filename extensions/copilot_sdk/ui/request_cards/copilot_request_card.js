@@ -11,6 +11,29 @@ function appendKeyValue(container, label, value, helpers) {
   container.append(row);
 }
 
+function renderMarkdownNode(container, text, helpers, extraClass = '') {
+  if (!(container instanceof HTMLElement)) return;
+  if (typeof helpers?.renderMarkdown === 'function') {
+    helpers.renderMarkdown(container, text, extraClass);
+    return;
+  }
+  if (typeof extraClass === 'string' && extraClass.trim()) {
+    container.className = extraClass.trim();
+  }
+  container.textContent = String(text || '');
+}
+
+function appendMarkdownValue(container, label, value, helpers) {
+  if (value === null || value === undefined || value === '') return;
+  const row = document.createElement('div');
+  const title = document.createElement('div');
+  title.innerHTML = `<strong>${helpers.escapeHtml(label)}:</strong>`;
+  const content = document.createElement('div');
+  renderMarkdownNode(content, String(value), helpers);
+  row.append(title, content);
+  container.append(row);
+}
+
 function createFeedbackNode(body) {
   const feedback = document.createElement('div');
   feedback.className = 'approval-feedback';
@@ -128,7 +151,7 @@ function renderPermissionCard(body, event, schema, helpers) {
   appendKeyValue(summary, 'Kind', requestParams.kind || payload.kind || '', helpers);
   appendKeyValue(summary, 'Tool', payload.tool_name || requestParams.tool_name || '', helpers);
   appendKeyValue(summary, 'Command', Array.isArray(payload.command) ? payload.command.join(' ') : (payload.command || requestParams.command || ''), helpers);
-  appendKeyValue(summary, 'Intention', requestParams.intention || payload.intention || '', helpers);
+  appendMarkdownValue(summary, 'Intention', requestParams.intention || payload.intention || '', helpers);
   appendKeyValue(summary, 'Path', payload.path || requestParams.path || '', helpers);
   appendKeyValue(summary, 'CWD', payload.cwd || requestParams.cwd || '', helpers);
   body.append(summary);
@@ -136,8 +159,7 @@ function renderPermissionCard(body, event, schema, helpers) {
   const warning = requestParams.warning || payload.warning;
   if (typeof warning === 'string' && warning.trim()) {
     const warningNode = document.createElement('div');
-    warningNode.className = 'approval-feedback';
-    warningNode.textContent = warning;
+    renderMarkdownNode(warningNode, warning, helpers, 'approval-feedback');
     body.append(warningNode);
   }
 
@@ -194,7 +216,7 @@ function renderUserInputCard(body, event, _schema, helpers) {
 
   const summary = document.createElement('div');
   summary.className = 'approval-summary';
-  appendKeyValue(summary, 'Question', question, helpers);
+  appendMarkdownValue(summary, 'Question', question, helpers);
   body.append(summary);
 
   const recordedAnswer = typeof result.answer === 'string' ? result.answer : '';

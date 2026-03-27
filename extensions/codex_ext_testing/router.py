@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .plan_utils import normalize_plan_steps, plan_signature, render_plan_markdown
 from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
+from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
 
 
 def utc_ts() -> str:
@@ -1054,8 +1055,10 @@ class CodexEventRouter:
             "reasoning_finalize",
             "diff",
             "approval",
+            "view",
+            "search",
         }
-        transcript_roles = {"assistant", "user", "command", "diff", "reasoning", "mcp_tool", "tool", "web_search"}
+        transcript_roles = {"assistant", "user", "command", "diff", "reasoning", "mcp_tool", "tool", "view", "search", "web_search"}
 
         for event in routed.get("events", []):
             if not isinstance(event, dict) or event.get("subagent_id"):
@@ -1248,6 +1251,83 @@ class CodexEventRouter:
             "events": events,
             "transcript_entries": transcript_entries,
             "bind_thread_ids": bind_thread_ids,
+        }
+
+    def _error_result(
+        self,
+        *,
+        label_lower: str,
+        payload: Dict[str, Any],
+        turn_id: Optional[str],
+    ) -> Dict[str, Any]:
+        error_obj = payload.get("error") if isinstance(payload.get("error"), dict) else payload
+        if not isinstance(error_obj, dict):
+            error_obj = payload
+
+        message = ""
+        if isinstance(error_obj, dict):
+            raw_message = error_obj.get("message") or payload.get("message")
+            if isinstance(raw_message, str):
+                message = raw_message.strip()
+            elif raw_message is not None:
+                message = str(raw_message).strip()
+        if not message:
+            return {"handled": True, "events": [], "transcript_entries": []}
+
+        error_event: Dict[str, Any] = {
+            "type": "error",
+            "message": message,
+            "source": label_lower,
+        }
+        error_entry: Dict[str, Any] = {
+            "role": "error",
+            "message": message,
+            "turn_id": turn_id,
+            "source": label_lower,
+            "event": label_lower,
+        }
+
+        details = error_obj.get("details") or error_obj.get("additional_details") or payload.get("additional_details")
+        if isinstance(details, str) and details.strip():
+            error_event["details"] = details
+            error_entry["details"] = details
+
+        stack = error_obj.get("stack")
+        if isinstance(stack, str) and stack.strip():
+            error_event["stack"] = stack
+            error_entry["stack"] = stack
+
+        error_type = error_obj.get("error_type") or error_obj.get("errorType")
+        if isinstance(error_type, str) and error_type.strip():
+            error_event["error_type"] = error_type
+            error_entry["error_type"] = error_type
+
+        provider_call_id = error_obj.get("provider_call_id") or error_obj.get("providerCallId")
+        if isinstance(provider_call_id, str) and provider_call_id.strip():
+            error_event["provider_call_id"] = provider_call_id
+            error_entry["provider_call_id"] = provider_call_id
+
+        code = error_obj.get("code")
+        if code is not None:
+            error_event["code"] = code
+            error_entry["code"] = code
+
+        status_code = error_obj.get("status_code")
+        if status_code is None:
+            status_code = error_obj.get("statusCode")
+        if status_code is None:
+            status_code = error_obj.get("httpStatusCode")
+        if isinstance(status_code, (int, float)):
+            error_event["status_code"] = int(status_code)
+            error_entry["status_code"] = int(status_code)
+
+        return {
+            "handled": True,
+            "events": [
+                error_event,
+                {"type": "activity", "label": "error", "active": False},
+            ],
+            "transcript_entries": [error_entry],
         }
 
     def _token_usage_result(
@@ -1588,6 +1668,12 @@ class CodexEventRouter:
         ) and isinstance(payload, dict):
             return self._token_usage_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
 
+        if (
+            (notification_spec and notification_spec.category == "thread" and notification_spec.subject == "realtime" and notification_spec.phase == "error")
+            or label_lower in {"thread/realtime/error", "codex/event/error", "codex/event/stream_error"}
+        ) and isinstance(payload, dict):
+            return self._error_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
+
         if label_lower == "codex/event/task_started" and isinstance(payload, dict):
             return self._collaboration_mode_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
 
@@ -1715,12 +1801,27 @@ class CodexEventRouter:
                 elif item_type == "imageview":
                     tool_name = "view_image"
                     arguments = {"path": item.get("path")}
+                request_payload = build_tool_card_request(server_name or "", tool_name or item_type, arguments)
                 item_state.update({
                     "item_type": item_type,
                     "tool": tool_name or item_type,
                     "server": server_name or "",
                     "arguments": arguments,
+                    "request": request_payload,
                 })
+                if item_type == "websearch":
+                    query = item.get("query")
+                    if not isinstance(query, str):
+                        query = arguments.get("query") if isinstance(arguments.get("query"), str) else ""
+                    item_state["query"] = query
+                    activity_label = f"web_search: {query}" if query else "web_search"
+                    return self._decorate_routed_result({
+                        "handled": True,
+                        "events": [
+                            {"type": "activity", "label": activity_label, "active": True},
+                        ],
+                        "transcript_entries": [],
+                    }, thread_id=thread_id, item_state=item_state)
                 activity_label = f"calling {tool_name}" if isinstance(tool_name, str) and tool_name else "calling tool"
                 return self._decorate_routed_result({
                     "handled": True,
@@ -1731,6 +1832,7 @@ class CodexEventRouter:
                             "tool": tool_name or item_type,
                             "server": server_name or "",
                             "arguments": arguments,
+                            "request": request_payload,
                         },
                         {"type": "activity", "label": activity_label, "active": True},
                     ],
@@ -2116,6 +2218,62 @@ class CodexEventRouter:
                 live_result = result_value if result_value is not None else None
                 if live_result is None and item_type != "websearch":
                     live_result = {"status": status or "completed"}
+                request_payload = item_state.get("request")
+                if request_payload is None:
+                    request_payload = build_tool_card_request(server_name, tool_name, arguments)
+                response_payload = build_tool_card_response(server_name, tool_name, live_result)
+                if item_type == "websearch":
+                    query = item.get("query")
+                    if not isinstance(query, str):
+                        query = item_state.get("query") if isinstance(item_state.get("query"), str) else ""
+                    results_payload: Any = result_value
+                    if isinstance(result_value, dict) and "results" in result_value:
+                        results_payload = result_value.get("results")
+                    search_content = ""
+                    if results_payload is not None:
+                        search_content = _stringify_value(results_payload)
+                    elif live_result is not None:
+                        search_content = _stringify_value(live_result)
+                    elif isinstance(error, str) and error.strip():
+                        search_content = error
+                    routed = {
+                        "handled": True,
+                        "events": [
+                            {
+                                "type": "search",
+                                "id": item_id or _assistant_id(item, thread_id, turn_id),
+                                "title": "web search",
+                                "mode": "web_search",
+                                "path": "",
+                                "pattern": query or "",
+                                "arguments": {"query": query or ""},
+                                "content": search_content,
+                                "result": live_result,
+                                "results": results_payload,
+                                "duration_ms": duration_ms,
+                                "is_error": is_error,
+                            },
+                            {"type": "activity", "label": "processing", "active": True},
+                        ],
+                        "transcript_entries": [{
+                            "role": "search",
+                            "title": "web search",
+                            "mode": "web_search",
+                            "path": "",
+                            "pattern": query or "",
+                            "arguments": {"query": query or ""},
+                            "content": search_content,
+                            "result": live_result,
+                            "results": results_payload,
+                            "duration_ms": duration_ms,
+                            "is_error": is_error,
+                            "timestamp": utc_ts(),
+                            "item_id": item_id,
+                            "turn_id": turn_id,
+                            "event": label_lower,
+                        }],
+                    }
+                    return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 routed = {
                     "handled": True,
                     "events": [
@@ -2125,7 +2283,9 @@ class CodexEventRouter:
                             "tool": tool_name,
                             "server": server_name,
                             "arguments": arguments,
+                            "request": request_payload,
                             "result": live_result,
+                            "response": response_payload,
                             "duration_ms": duration_ms,
                             "is_error": is_error,
                         },
@@ -2133,34 +2293,22 @@ class CodexEventRouter:
                     ],
                     "transcript_entries": [],
                 }
-                if item_type == "websearch":
-                    query = item.get("query")
-                    if not isinstance(query, str):
-                        query = arguments.get("query") if isinstance(arguments.get("query"), str) else ""
-                    routed["transcript_entries"].append({
-                        "role": "web_search",
-                        "query": query,
-                        "call_id": item_id,
-                        "timestamp": utc_ts(),
-                        "item_id": item_id,
-                        "turn_id": turn_id,
-                        "event": label_lower,
-                    })
-                else:
-                    routed["transcript_entries"].append({
-                        "role": "mcp_tool",
-                        "server": server_name,
-                        "tool": tool_name,
-                        "call_id": item_id,
-                        "arguments": arguments,
-                        "result": live_result,
-                        "duration_ms": duration_ms,
-                        "is_error": is_error,
-                        "timestamp": utc_ts(),
-                        "item_id": item_id,
-                        "turn_id": turn_id,
-                        "event": label_lower,
-                    })
+                routed["transcript_entries"].append({
+                    "role": "mcp_tool",
+                    "server": server_name,
+                    "tool": tool_name,
+                    "call_id": item_id,
+                    "arguments": arguments,
+                    "request": request_payload,
+                    "result": live_result,
+                    "response": response_payload,
+                    "duration_ms": duration_ms,
+                    "is_error": is_error,
+                    "timestamp": utc_ts(),
+                    "item_id": item_id,
+                    "turn_id": turn_id,
+                    "event": label_lower,
+                })
                 return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
 
             return {"handled": True, "events": [], "transcript_entries": []}

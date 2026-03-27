@@ -53,6 +53,159 @@ def _manifest_capability_flag(manifest: Any, *names: str) -> bool:
     return any(bool(capabilities.get(name)) for name in names)
 
 
+def _manifest_ui_quote_parsing_enabled(manifest: Any) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    ui = manifest.get("ui")
+    if not isinstance(ui, dict):
+        return False
+    semantic_shell = None
+    for key in ("semanticShellRibbon", "semantic_shell_ribbon"):
+        value = ui.get(key)
+        if isinstance(value, dict):
+            semantic_shell = value
+            break
+    if not isinstance(semantic_shell, dict):
+        return False
+    return bool(semantic_shell.get("quoteParsing") or semantic_shell.get("quote_parsing"))
+
+
+def _normalize_tool_render_spec(spec_raw: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(spec_raw, str):
+        text = spec_raw.strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        if lowered in {"plain", "markdown"}:
+            return {"kind": lowered}
+        if lowered == "hljs":
+            return {"kind": "hljs"}
+        return {"kind": "hljs", "language": text}
+    if not isinstance(spec_raw, dict):
+        return None
+    kind_raw = spec_raw.get("kind")
+    kind = kind_raw.strip().lower() if isinstance(kind_raw, str) and kind_raw.strip() else ""
+    language_raw = spec_raw.get("language")
+    language = language_raw.strip() if isinstance(language_raw, str) and language_raw.strip() else ""
+    if kind not in {"plain", "markdown", "hljs"}:
+        if language:
+            return {"kind": "hljs", "language": language}
+        return None
+    spec: Dict[str, Any] = {"kind": kind}
+    if kind == "hljs" and language:
+        spec["language"] = language
+    return spec
+
+
+def _normalize_tool_render_field_map(fields_raw: Any) -> Dict[str, Dict[str, Any]]:
+    normalized: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(fields_raw, dict):
+        return normalized
+    for key, value in fields_raw.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        spec = _normalize_tool_render_spec(value)
+        if spec is None:
+            continue
+        normalized[key.strip()] = spec
+    return normalized
+
+
+def _normalize_tool_render_rule(rule_raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(rule_raw, dict):
+        return None
+    rule: Dict[str, Any] = {}
+    for field in ("server", "tool", "serverPrefix", "toolPrefix"):
+        value = rule_raw.get(field)
+        if isinstance(value, str) and value.strip():
+            rule[field] = value.strip()
+    for field in ("servers", "tools"):
+        value = rule_raw.get(field)
+        if isinstance(value, list):
+            items = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+            if items:
+                rule[field] = items
+    for source_key, target_key in (
+        ("request", "request"),
+        ("args", "request"),
+        ("arguments", "request"),
+        ("response", "response"),
+        ("result", "response"),
+    ):
+        if target_key in rule:
+            continue
+        spec = _normalize_tool_render_spec(rule_raw.get(source_key))
+        if spec is not None:
+            rule[target_key] = spec
+    for source_key, target_key in (
+        ("requestFields", "requestFields"),
+        ("argsFields", "requestFields"),
+        ("argumentsFields", "requestFields"),
+        ("responseFields", "responseFields"),
+        ("resultFields", "responseFields"),
+    ):
+        if target_key in rule:
+            continue
+        fields = _normalize_tool_render_field_map(rule_raw.get(source_key))
+        if fields:
+            rule[target_key] = fields
+    if not rule:
+        return None
+    return rule
+
+
+def _manifest_tool_render_policy(manifest: Any) -> Dict[str, Any]:
+    default_policy: Dict[str, Any] = {
+        "default": {
+            "request": {"kind": "plain"},
+            "response": {"kind": "plain"},
+        },
+        "rules": [],
+    }
+    if not isinstance(manifest, dict):
+        return default_policy
+    ui = manifest.get("ui")
+    if not isinstance(ui, dict):
+        return default_policy
+    policy_raw = ui.get("toolRenderPolicy")
+    if not isinstance(policy_raw, dict):
+        return default_policy
+    default_raw = policy_raw.get("default")
+    if isinstance(default_raw, dict):
+        normalized_default: Dict[str, Any] = {}
+        request_spec = _normalize_tool_render_spec(
+            default_raw.get("request") or default_raw.get("args") or default_raw.get("arguments")
+        )
+        if request_spec is not None:
+            normalized_default["request"] = request_spec
+        response_spec = _normalize_tool_render_spec(default_raw.get("response") or default_raw.get("result"))
+        if response_spec is not None:
+            normalized_default["response"] = response_spec
+        request_fields = _normalize_tool_render_field_map(
+            default_raw.get("requestFields") or default_raw.get("argsFields") or default_raw.get("argumentsFields")
+        )
+        if request_fields:
+            normalized_default["requestFields"] = request_fields
+        response_fields = _normalize_tool_render_field_map(
+            default_raw.get("responseFields") or default_raw.get("resultFields")
+        )
+        if response_fields:
+            normalized_default["responseFields"] = response_fields
+        if normalized_default:
+            default_policy["default"] = {
+                **default_policy["default"],
+                **normalized_default,
+            }
+    rules_raw = policy_raw.get("rules")
+    if isinstance(rules_raw, list):
+        default_policy["rules"] = [
+            rule
+            for rule in (_normalize_tool_render_rule(rule_raw) for rule_raw in rules_raw)
+            if rule is not None
+        ]
+    return default_policy
+
+
 def _normalize_runtime_options_list(options_raw: Any) -> List[Dict[str, Any]]:
     options: List[Dict[str, Any]] = []
     if not isinstance(options_raw, list):
@@ -488,6 +641,18 @@ def get_extension_info(extension_id: str) -> Optional[Dict[str, Any]]:
     if not isinstance(info, dict):
         return None
     return dict(info)
+
+
+def get_extension_ui_features(extension_id: str) -> Dict[str, Any]:
+    """Return manifest-driven frontend behavior flags for one extension."""
+    info = _extensions_registry.get(extension_id)
+    manifest = info.get("manifest") if isinstance(info, dict) and isinstance(info.get("manifest"), dict) else {}
+    return {
+        "semanticShellRibbon": {
+            "quoteParsing": _manifest_ui_quote_parsing_enabled(manifest),
+        },
+        "toolRenderPolicy": _manifest_tool_render_policy(manifest),
+    }
 
 
 def _recompute_extension_active_state(extension_id: str) -> bool:

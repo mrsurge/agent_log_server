@@ -195,7 +195,7 @@ export function bindEventRouter(ctx) {
         return;
       case 'error':
         setLastEventType('error');
-        renderErrorCard(evt.message || 'Unknown error');
+        renderErrorCard(evt);
         setStatusDot('error');
         return;
       case 'warning':

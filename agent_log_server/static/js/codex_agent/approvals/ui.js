@@ -64,6 +64,7 @@ export function bindApprovalUi(ctx) {
     getSubagentContainer,
     escapeHtml,
     formatDiff,
+    renderEventMarkdownInto,
     toRelativePath,
     requestCardRuntime,
     timelineEl,
@@ -194,6 +195,33 @@ export function bindApprovalUi(ctx) {
     });
   }
 
+  function renderApprovalMarkdown(container, text, extraClass = '') {
+    if (!(container instanceof HTMLElement)) return;
+    if (typeof extraClass === 'string' && extraClass.trim()) {
+      extraClass.trim().split(/\s+/).forEach((cls) => {
+        if (cls) container.classList.add(cls);
+      });
+    }
+    if (typeof renderEventMarkdownInto === 'function') {
+      container.classList.add('markdown-body', 'approval-markdown');
+      renderEventMarkdownInto(container, text);
+      return;
+    }
+    container.textContent = String(text || '');
+  }
+
+  function appendMarkdownValue(container, label, value) {
+    if (!(container instanceof HTMLElement)) return;
+    if (value === null || value === undefined || value === '') return;
+    const row = document.createElement('div');
+    const title = document.createElement('div');
+    title.innerHTML = `<strong>${escapeHtml(label)}:</strong>`;
+    const content = document.createElement('div');
+    renderApprovalMarkdown(content, String(value));
+    row.append(title, content);
+    container.append(row);
+  }
+
   async function respondApproval(requestId, result) {
     if (requestId === null || requestId === undefined) return;
     const resultPayload = typeof result === 'string'
@@ -230,29 +258,64 @@ export function bindApprovalUi(ctx) {
 
   function renderGenericApprovalBody(body, evt, helpers) {
     const payload = evt.payload || {};
-    const lines = [];
     let diffText = null;
     let filePath = null;
+    let renderedAny = false;
+    body.textContent = '';
+    const appendPlainValue = (label, value) => {
+      if (value === null || value === undefined || value === '') return;
+      const row = document.createElement('div');
+      row.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${escapeHtml(String(value))}`;
+      body.append(row);
+      renderedAny = true;
+    };
+    const appendNarrativeValue = (label, value) => {
+      if (value === null || value === undefined || value === '') return;
+      appendMarkdownValue(body, label, value);
+      renderedAny = true;
+    };
     if (payload.command) {
-      lines.push(`<div><strong>Command:</strong> ${escapeHtml(Array.isArray(payload.command) ? payload.command.join(' ') : String(payload.command))}</div>`);
+      appendPlainValue('Command', Array.isArray(payload.command) ? payload.command.join(' ') : String(payload.command));
     }
     if (payload.cwd) {
-      lines.push(`<div><strong>CWD:</strong> ${escapeHtml(String(payload.cwd))}</div>`);
+      appendPlainValue('CWD', String(payload.cwd));
     }
     if (payload.reason) {
-      lines.push(`<div><strong>Reason:</strong> ${escapeHtml(String(payload.reason))}</div>`);
+      appendNarrativeValue('Reason', String(payload.reason));
+    }
+    if (payload.question) {
+      appendNarrativeValue('Question', String(payload.question));
+    }
+    if (payload.message) {
+      appendNarrativeValue('Message', String(payload.message));
+    }
+    if (payload.warning) {
+      const warningNode = document.createElement('div');
+      renderApprovalMarkdown(warningNode, String(payload.warning), 'approval-feedback');
+      body.append(warningNode);
+      renderedAny = true;
     }
     if (payload.diff) {
       diffText = payload.diff;
       filePath = payload.path || filePath;
-      lines.push(`<pre class="diff-block">${formatDiff(payload.diff, payload.path)}</pre>`);
+      const diffBlock = document.createElement('pre');
+      diffBlock.className = 'diff-block';
+      diffBlock.innerHTML = formatDiff(payload.diff, payload.path);
+      body.append(diffBlock);
+      renderedAny = true;
     }
     if (payload.changes && Array.isArray(payload.changes)) {
       payload.changes.forEach((change) => {
         if (change && change.diff) {
           diffText = diffText || change.diff;
           filePath = filePath || change.path;
-          lines.push(`<div><strong>${escapeHtml(toRelativePath(change.path) || 'file')}</strong></div><pre class="diff-block">${formatDiff(change.diff, change.path)}</pre>`);
+          const label = document.createElement('div');
+          label.innerHTML = `<strong>${escapeHtml(toRelativePath(change.path) || 'file')}</strong>`;
+          const diffBlock = document.createElement('pre');
+          diffBlock.className = 'diff-block';
+          diffBlock.innerHTML = formatDiff(change.diff, change.path);
+          body.append(label, diffBlock);
+          renderedAny = true;
         }
       });
     }
@@ -264,10 +327,20 @@ export function bindApprovalUi(ctx) {
         const resolvedPath = change.path || change.file_path || changePath;
         diffText = diffText || changeDiff;
         filePath = filePath || resolvedPath;
-        lines.push(`<div><strong>${escapeHtml(toRelativePath(resolvedPath) || 'file')}</strong></div><pre class="diff-block">${formatDiff(changeDiff, resolvedPath)}</pre>`);
+        const label = document.createElement('div');
+        label.innerHTML = `<strong>${escapeHtml(toRelativePath(resolvedPath) || 'file')}</strong>`;
+        const diffBlock = document.createElement('pre');
+        diffBlock.className = 'diff-block';
+        diffBlock.innerHTML = formatDiff(changeDiff, resolvedPath);
+        body.append(label, diffBlock);
+        renderedAny = true;
       });
     }
-    body.innerHTML = lines.join('') || `<pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>`;
+    if (!renderedAny) {
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(payload, null, 2);
+      body.append(pre);
+    }
 
     if (helpers.readOnly) {
       const feedback = document.createElement('div');
@@ -318,6 +391,7 @@ export function bindApprovalUi(ctx) {
       formatDiff,
       toRelativePath,
       normalizeDecisionLabel,
+      renderMarkdown: (container, text, extraClass = '') => renderApprovalMarkdown(container, text, extraClass),
       readOnly: options.readOnly === true,
       submitResult: async (result, meta = {}) => submitApproval(requestId, result, {
         requestMethod: evt?.request_method || evt?.requestMethod || null,

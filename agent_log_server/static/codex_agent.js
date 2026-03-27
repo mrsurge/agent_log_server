@@ -1,5 +1,6 @@
 import {
   createStreamingParser,
+  renderEventMarkdownInto,
   highlightCode,
   renderMarkdownBlock,
   renderMarkdownInto,
@@ -181,6 +182,14 @@ document.addEventListener('DOMContentLoaded', () => {
   let useXterm = true; // Toggle for xterm.js vs text box rendering
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
   let semanticShellRibbonEnabled = false; // Tree-sitter semantic highlighting for shell command ribbons
+  let semanticShellQuoteParsingEnabled = false; // Extension-gated quote segmentation for semantic shell ribbons
+  let activeToolRenderPolicy = {
+    default: {
+      request: { kind: 'plain' },
+      response: { kind: 'plain' },
+    },
+    rules: [],
+  };
   let commandRunning = false; // Whether a PTY command is currently running
   let ptyWebSocket = null; // Raw PTY WebSocket connection
   let ptyWebSocketConvoId = null; // conversation_id currently bound to ptyWebSocket
@@ -772,7 +781,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   const FILE_EXT_LANG_MAP = {
-    'js': 'javascript', 'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
+    'js': 'javascript', 'mjs': 'javascript', 'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
     'py': 'python', 'rb': 'ruby', 'rs': 'rust', 'go': 'go',
     'java': 'java', 'kt': 'kotlin', 'scala': 'scala',
     'c': 'c', 'h': 'c', 'cpp': 'cpp', 'cc': 'cpp', 'hpp': 'cpp',
@@ -798,6 +807,36 @@ document.addEventListener('DOMContentLoaded', () => {
     if (basename === 'dockerfile') return 'dockerfile';
     if (basename === 'makefile' || basename === 'gnumakefile') return 'makefile';
     if (basename?.endsWith('rc') || basename?.startsWith('.')) return 'bash';
+    return null;
+  }
+
+  function resolveHljsLanguage(lang) {
+    if (typeof hljs === 'undefined' || !lang) return null;
+    const requested = String(lang).trim().toLowerCase();
+    if (!requested) return null;
+    const fallbackMap = {
+      javascript: ['javascript', 'typescript'],
+      jsx: ['javascript', 'typescript'],
+      typescript: ['typescript', 'javascript'],
+      tsx: ['typescript', 'javascript'],
+      html: ['html', 'xml'],
+      htm: ['html', 'xml'],
+      xml: ['xml', 'html'],
+      markdown: ['markdown'],
+      md: ['markdown'],
+      json: ['json'],
+      css: ['css', 'scss'],
+      scss: ['scss', 'css'],
+      yaml: ['yaml'],
+      yml: ['yaml'],
+      toml: ['ini'],
+      bash: ['bash'],
+      sh: ['bash'],
+    };
+    const candidates = fallbackMap[requested] || [requested];
+    for (const candidate of candidates) {
+      if (candidate && hljs.getLanguage(candidate)) return candidate;
+    }
     return null;
   }
 
@@ -910,8 +949,9 @@ document.addEventListener('DOMContentLoaded', () => {
       return escapeHtml(text || '');
     }
     try {
-      if (lang && hljs.getLanguage(lang)) {
-        return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+      const resolvedLang = resolveHljsLanguage(lang);
+      if (resolvedLang) {
+        return hljs.highlight(text, { language: resolvedLang, ignoreIllegals: true }).value;
       }
       const result = hljs.highlightAuto(text);
       if (result.relevance > 5) {
@@ -1068,6 +1108,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const shellSemantic = bindShellSemantic({
     getEnabled: () => semanticShellRibbonEnabled,
     setEnabled: (enabled) => { semanticShellRibbonEnabled = enabled === true; },
+    getQuoteParsingEnabled: () => semanticShellQuoteParsingEnabled,
+    setQuoteParsingEnabled: (enabled) => { semanticShellQuoteParsingEnabled = enabled === true; },
     getCheckboxEl: () => document.getElementById('settings-semantic-shell-ribbon'),
     escapeHtml,
   });
@@ -1078,6 +1120,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function setSemanticShellRibbonEnabled(enabled) {
     shellSemantic.setSemanticShellRibbonEnabled(enabled);
+  }
+
+  function setSemanticShellQuoteParsingEnabled(enabled) {
+    semanticShellQuoteParsingEnabled = enabled === true;
+    shellSemantic.setSemanticShellQuoteParsingEnabled(enabled);
+  }
+
+  function setActiveToolRenderPolicy(policy) {
+    if (policy && typeof policy === 'object') {
+      activeToolRenderPolicy = policy;
+      return;
+    }
+    activeToolRenderPolicy = {
+      default: {
+        request: { kind: 'plain' },
+        response: { kind: 'plain' },
+      },
+      rules: [],
+    };
   }
 
   async function ensureTreeSitterRibbonReady() {
@@ -2605,6 +2666,24 @@ document.addEventListener('DOMContentLoaded', () => {
     return conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex';
   }
 
+  async function loadExtensionUiFeatures(extensionId) {
+    const resolvedExtensionId = typeof extensionId === 'string' && extensionId.trim() ? extensionId.trim() : 'codex';
+    try {
+      const data = await sioCall('get_extension_ui_features', {
+        extension_id: resolvedExtensionId,
+      });
+      const uiFeatures = data?.ui_features && typeof data.ui_features === 'object' ? data.ui_features : {};
+      const semanticShellRibbon = uiFeatures.semanticShellRibbon;
+      setSemanticShellQuoteParsingEnabled(semanticShellRibbon?.quoteParsing === true);
+      setActiveToolRenderPolicy(uiFeatures.toolRenderPolicy);
+      return uiFeatures;
+    } catch (_) {
+      setSemanticShellQuoteParsingEnabled(false);
+      setActiveToolRenderPolicy(null);
+      return {};
+    }
+  }
+
   const requestCardRuntime = bindRequestCardRuntime({
     sioCall,
   });
@@ -3439,10 +3518,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // Error entries
       if (entry.role === 'error') {
         const { row, body } = buildRow('error', 'error');
-        const pre = document.createElement('pre');
-        pre.className = 'error-text';
-        pre.textContent = entry.text || '';
-        body.appendChild(pre);
+        appendErrorContent(body, entry);
         getTarget().appendChild(row);
         return;
       }
@@ -3903,16 +3979,97 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
+  function normalizeErrorPayload(raw) {
+    if (typeof raw === 'string') {
+      return {
+        message: raw,
+        errorType: '',
+        statusCode: null,
+        providerCallId: '',
+        stack: '',
+        details: '',
+        source: '',
+        code: null,
+      };
+    }
+    const payload = raw && typeof raw === 'object' ? raw : {};
+    const message = typeof payload.message === 'string' && payload.message
+      ? payload.message
+      : (typeof payload.text === 'string' ? payload.text : '');
+    const errorType = typeof payload.error_type === 'string' && payload.error_type
+      ? payload.error_type
+      : (typeof payload.errorType === 'string' ? payload.errorType : '');
+    const statusRaw = payload.status_code ?? payload.statusCode;
+    const statusCode = Number.isFinite(Number(statusRaw)) ? Number(statusRaw) : null;
+    const providerCallId = typeof payload.provider_call_id === 'string' && payload.provider_call_id
+      ? payload.provider_call_id
+      : (typeof payload.providerCallId === 'string' ? payload.providerCallId : '');
+    const stack = typeof payload.stack === 'string' ? payload.stack : '';
+    const details = typeof payload.details === 'string' && payload.details
+      ? payload.details
+      : (typeof payload.additional_details === 'string' ? payload.additional_details : '');
+    const source = typeof payload.source === 'string' && payload.source
+      ? payload.source
+      : (typeof payload.event === 'string' ? payload.event : '');
+    const code = payload.code ?? null;
+    return {
+      message,
+      errorType,
+      statusCode,
+      providerCallId,
+      stack,
+      details,
+      source,
+      code,
+    };
+  }
+
+  function appendErrorContent(body, raw) {
+    if (!body) return;
+    const payload = normalizeErrorPayload(raw);
+    if (payload.message) {
+      const pre = document.createElement('pre');
+      pre.className = 'error-text';
+      pre.textContent = payload.message;
+      body.appendChild(pre);
+    }
+
+    const metaParts = [];
+    if (payload.errorType) metaParts.push(`type: ${payload.errorType}`);
+    if (payload.statusCode !== null) metaParts.push(`status: ${payload.statusCode}`);
+    if (payload.code !== null && payload.code !== '') metaParts.push(`code: ${payload.code}`);
+    if (payload.providerCallId) metaParts.push(`provider_call_id: ${payload.providerCallId}`);
+    if (payload.source) metaParts.push(`source: ${payload.source}`);
+    if (metaParts.length) {
+      const meta = document.createElement('div');
+      meta.className = 'command-footer';
+      meta.textContent = metaParts.join(' | ');
+      body.appendChild(meta);
+    }
+
+    if (payload.details && payload.details !== payload.message) {
+      const detailPre = document.createElement('pre');
+      detailPre.className = 'error-text';
+      detailPre.textContent = payload.details;
+      body.appendChild(detailPre);
+    }
+
+    if (payload.stack && payload.stack !== payload.message && payload.stack !== payload.details) {
+      const stackPre = document.createElement('pre');
+      stackPre.className = 'error-text';
+      stackPre.textContent = payload.stack;
+      body.appendChild(stackPre);
+    }
+  }
+
   // Render error card
-  function renderErrorCard(message) {
-    if (!message) return;
+  function renderErrorCard(raw) {
+    const payload = normalizeErrorPayload(raw);
+    if (!payload.message && !payload.details && !payload.stack) return;
     clearPlaceholder();
     
     const { row, body } = createRow('error', 'error');
-    const pre = document.createElement('pre');
-    pre.className = 'error-text';
-    pre.textContent = message;
-    body.appendChild(pre);
+    appendErrorContent(body, payload);
     
     if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
       timelineEl.insertBefore(row, bottomSpacerEl);
@@ -4406,7 +4563,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const ribbon = document.createElement('div');
     ribbon.className = 'command-ribbon';
     const shortTarget = shortenSearchTarget(rootPath);
-    ribbon.textContent = shortTarget ? `search ${shortTarget}` : 'search';
+    const ribbonBase = mode === 'web_search' ? 'web_search' : 'search';
+    ribbon.textContent = shortTarget ? `${ribbonBase} ${shortTarget}` : ribbonBase;
     if (rootPath) ribbon.title = rootPath;
     body.appendChild(ribbon);
 
@@ -4479,6 +4637,7 @@ document.addEventListener('DOMContentLoaded', () => {
     escapeHtml,
     toRelativePath,
     isDiffSyntaxEnabled: () => diffSyntaxHighlight === true,
+    resolveHljsLanguage,
     setLastEventType: (value) => { lastEventType = value; },
     maybeAutoScroll,
     timelineEl,
@@ -4509,7 +4668,7 @@ document.addEventListener('DOMContentLoaded', () => {
     insertRow,
     makeCollapsible,
     getLiveEventParent,
-    renderMarkdownSourceInto,
+    renderEventMarkdownInto,
     formatDiff: (...args) => formatDiff(...args),
     toRelativePath,
     escapeHtml,
@@ -4517,6 +4676,8 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     setLastEventType: (value) => { lastEventType = value; },
     setStatusDot,
+    getToolRenderPolicy: () => activeToolRenderPolicy,
+    highlightCodeAlways,
   });
 
   const rpcFlow = bindRpcFlow({
@@ -4536,6 +4697,7 @@ document.addEventListener('DOMContentLoaded', () => {
     getSubagentContainer,
     escapeHtml,
     formatDiff: (...args) => formatDiff(...args),
+    renderEventMarkdownInto,
     toRelativePath,
     requestCardRuntime,
     timelineEl,
@@ -4696,6 +4858,7 @@ document.addEventListener('DOMContentLoaded', () => {
         conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex',
         conversationMeta?.conversation_id,
       );
+      await loadExtensionUiFeatures(currentExtensionId());
       await requestCardRuntime.preload(currentExtensionId());
       closePlanModal();
       applyAuthoritativePlanState(createEmptyPlanState(Boolean(runtimeOptions?.has_plan), Boolean(runtimeOptions?.has_todo)));
@@ -4991,6 +5154,7 @@ document.addEventListener('DOMContentLoaded', () => {
       openSettingsModal,
       closeSettingsModal,
       saveSettings,
+      onAgentChange: async (agentId) => { await loadExtensionUiFeatures(agentId); },
       openSplashSettingsModal,
       closeSplashSettingsModal,
       saveSplashSettings,

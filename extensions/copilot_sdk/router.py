@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from ._vendor.copilot import SessionEvent
 from ._vendor.copilot.generated.session_events import SessionEventType
+from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
 
 
 def utc_ts() -> str:
@@ -101,12 +102,17 @@ class CopilotEventRouter:
         transcript_fn: Callable[[str, Dict[str, Any]], Awaitable[None]],
         debug_trace: bool = False,
         plan_state_provider: Optional[Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
+        initial_model: Optional[str] = None,
+        model_context_window_resolver: Optional[Callable[[str], Awaitable[Optional[int]]]] = None,
     ):
         self.conversation_id = conversation_id
         self.broadcast = broadcast_fn
         self.append_transcript = transcript_fn
         self.debug_trace = self._coerce_bool(debug_trace)
         self.plan_state_provider = plan_state_provider
+        self._active_model: Optional[str] = self._normalize_id(initial_model)
+        self._resolved_context_window: Optional[int] = None
+        self._model_context_window_resolver = model_context_window_resolver
 
         # State tracking
         self.current_turn_id: Optional[str] = None
@@ -147,6 +153,165 @@ class CopilotEventRouter:
             return None
         text = str(candidate).strip()
         return text or None
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            return int(float(text))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _first_int(cls, *values: Any) -> Optional[int]:
+        for value in values:
+            coerced = cls._coerce_int(value)
+            if coerced is not None:
+                return coerced
+        return None
+
+    def _remember_active_model(self, data: Any) -> None:
+        candidate = None
+        for value in (
+            getattr(data, "current_model", None),
+            getattr(data, "selected_model", None),
+            getattr(data, "new_model", None),
+            getattr(data, "model", None),
+        ):
+            normalized = self._normalize_id(value)
+            if normalized:
+                candidate = normalized
+                break
+        if candidate and candidate != self._active_model:
+            self._active_model = candidate
+            self._resolved_context_window = None
+
+    async def _resolve_context_window(self, raw_value: Any = None) -> Optional[int]:
+        explicit = self._coerce_int(raw_value)
+        if explicit is not None and explicit > 0:
+            self._resolved_context_window = explicit
+            return explicit
+        if self._resolved_context_window is not None and self._resolved_context_window > 0:
+            return self._resolved_context_window
+        if not self._active_model or not callable(self._model_context_window_resolver):
+            return None
+        try:
+            resolved = await self._model_context_window_resolver(self._active_model)
+        except Exception:
+            return None
+        resolved_int = self._coerce_int(resolved)
+        if resolved_int is not None and resolved_int > 0:
+            self._resolved_context_window = resolved_int
+            return resolved_int
+        return None
+
+    async def _emit_token_count(
+        self,
+        *,
+        total: Any,
+        input_tokens: Any = None,
+        output_tokens: Any = None,
+        cached_input_tokens: Any = None,
+        context_window: Any = None,
+        source: Optional[str] = None,
+    ) -> None:
+        total_int = self._coerce_int(total)
+        if total_int is None:
+            return
+
+        input_int = self._coerce_int(input_tokens)
+        output_int = self._coerce_int(output_tokens)
+        cached_int = self._coerce_int(cached_input_tokens)
+        context_window_int = await self._resolve_context_window(context_window)
+
+        event: Dict[str, Any] = {
+            "type": "token_count",
+            "conversation_id": self.conversation_id,
+            "total": total_int,
+            "turn_id": self.current_turn_id,
+        }
+        entry: Dict[str, Any] = {
+            "role": "token_usage",
+            "total": total_int,
+            "timestamp": utc_ts(),
+            "turn_id": self.current_turn_id,
+        }
+
+        if input_int is not None:
+            event["input_tokens"] = input_int
+            entry["input_tokens"] = input_int
+        if output_int is not None:
+            event["output_tokens"] = output_int
+            entry["output_tokens"] = output_int
+        if cached_int is not None:
+            event["cached_input_tokens"] = cached_int
+            entry["cached_input_tokens"] = cached_int
+        if input_int is not None and cached_int is not None:
+            active_context = max(0, input_int - cached_int)
+            event["active_context"] = active_context
+            entry["active_context"] = active_context
+        if context_window_int is not None and context_window_int > 0:
+            event["context_window"] = context_window_int
+            entry["context_window"] = context_window_int
+        if source:
+            event["source"] = source
+            entry["source"] = source
+
+        await self._emit(event)
+        await self._record(entry)
+
+    async def _handle_context_compacted(self, data: Any, *, source: str) -> None:
+        context_window = self._coerce_int(getattr(data, "token_limit", None))
+        total = self._first_int(
+            getattr(data, "post_compaction_tokens", None),
+            getattr(data, "post_truncation_tokens_in_messages", None),
+            getattr(data, "current_tokens", None),
+            getattr(data, "pre_compaction_tokens", None),
+            getattr(data, "pre_truncation_tokens_in_messages", None),
+        )
+
+        if total is not None:
+            await self._emit_token_count(
+                total=total,
+                context_window=context_window,
+                source=source,
+            )
+
+        messages_removed = self._first_int(
+            getattr(data, "messages_removed", None),
+            getattr(data, "messages_removed_during_truncation", None),
+        )
+        tokens_removed = self._first_int(
+            getattr(data, "tokens_removed", None),
+            getattr(data, "tokens_removed_during_truncation", None),
+        )
+        compacted_event: Dict[str, Any] = {
+            "type": "context_compacted",
+            "conversation_id": self.conversation_id,
+            "turn_id": self.current_turn_id,
+            "source": source,
+        }
+        compacted_entry: Dict[str, Any] = {
+            "role": "context_compacted",
+            "timestamp": utc_ts(),
+            "turn_id": self.current_turn_id,
+            "source": source,
+        }
+        if messages_removed is not None:
+            compacted_event["messages_removed"] = messages_removed
+            compacted_entry["messages_removed"] = messages_removed
+        if tokens_removed is not None:
+            compacted_event["tokens_removed"] = tokens_removed
+            compacted_entry["tokens_removed"] = tokens_removed
+
+        await self._emit(compacted_event)
+        await self._record(compacted_entry)
 
     async def _emit_mode(
         self,
@@ -281,6 +446,7 @@ class CopilotEventRouter:
         """Route a Copilot SDK SessionEvent to the appropriate handler."""
         etype = event.type
         data = event.data
+        self._remember_active_model(data)
         if _is_debug():
             print(f"[ROUTER-EVENT] type={etype} id={event.id} parent_id={event.parent_id} data_type={type(data).__name__}")
 
@@ -307,13 +473,23 @@ class CopilotEventRouter:
         elif etype == SessionEventType.ASSISTANT_INTENT:
             await self._handle_intent(data)
         elif etype == SessionEventType.ASSISTANT_USAGE:
-            await self._handle_usage(data)
+            await self._handle_usage(data, source="assistant.usage")
+        elif etype == SessionEventType.SESSION_USAGE_INFO:
+            await self._handle_usage(data, source="session.usage_info")
+        elif etype == SessionEventType.SESSION_CONTEXT_CHANGED:
+            await self._handle_usage(data, source="session.context_changed")
         elif etype == SessionEventType.SESSION_ERROR:
             await self._handle_error(data)
         elif etype == SessionEventType.SESSION_START:
             pass  # Handled by client
         elif etype == SessionEventType.SESSION_RESUME:
             pass  # Handled by client
+        elif etype == SessionEventType.SESSION_COMPACTION_START:
+            pass
+        elif etype == SessionEventType.SESSION_COMPACTION_COMPLETE:
+            await self._handle_context_compacted(data, source="session.compaction_complete")
+        elif etype == SessionEventType.SESSION_TRUNCATION:
+            await self._handle_context_compacted(data, source="session.truncation")
         elif etype == SessionEventType.SESSION_IDLE:
             await self._emit({
                 "type": "activity",
@@ -687,6 +863,7 @@ class CopilotEventRouter:
                     "server": "",
                     "tool": "Agent-log write",
                     "arguments": shaped_args,
+                    "request": build_tool_card_request("", "Agent-log write", shaped_args),
                     "path": file_path,
                 }
 
@@ -698,6 +875,7 @@ class CopilotEventRouter:
                 "server": display_server,
                 "tool": display_tool,
                 "arguments": display_args,
+                "request": build_tool_card_request(display_server, display_tool, display_args),
                 "path": file_path,
             }
 
@@ -774,6 +952,7 @@ class CopilotEventRouter:
             "server": "",
             "tool": tool_name,
             "arguments": display_args,
+            "request": build_tool_card_request("", tool_name, display_args),
             "path": file_path,
         }
 
@@ -900,6 +1079,7 @@ class CopilotEventRouter:
             "render_tool": render_state.get("tool", tool_name),
             "render_server": render_state.get("server", ""),
             "render_arguments": render_state.get("arguments", {}),
+            "render_request": render_state.get("request", render_state.get("arguments", {})),
             "path": render_state.get("path") or "",
             "view_range": render_state.get("view_range"),
         }
@@ -942,6 +1122,7 @@ class CopilotEventRouter:
             "turn_id": self.current_turn_id,
             "tool": render_state.get("tool", tool_name),
             "arguments": render_state.get("arguments", {}),
+            "request": render_state.get("request", render_state.get("arguments", {})),
         }
         if render_state.get("server"):
             tool_begin_evt["server"] = render_state.get("server")
@@ -1115,6 +1296,8 @@ class CopilotEventRouter:
                 result_payload = getattr(data, "error_reason")
             elif getattr(data, "error", None):
                 result_payload = getattr(data, "error")
+            request_payload = tool_call.get("render_request") or render_arguments
+            response_payload = build_tool_card_response(render_server, render_tool, result_payload)
 
             tool_end_evt = {
                 "type": "tool_end",
@@ -1123,7 +1306,9 @@ class CopilotEventRouter:
                 "turn_id": self.current_turn_id,
                 "tool": render_tool,
                 "arguments": render_arguments,
+                "request": request_payload,
                 "result": result_payload,
+                "response": response_payload,
                 "is_error": has_error,
             }
             if render_server:
@@ -1141,7 +1326,9 @@ class CopilotEventRouter:
                 "turn_id": self.current_turn_id,
                 "tool": render_tool,
                 "arguments": render_arguments,
+                "request": request_payload,
                 "result": result_payload,
+                "response": response_payload,
                 "is_error": has_error,
                 "timestamp": utc_ts(),
                 "subagent_id": subagent_id,
@@ -1246,49 +1433,73 @@ class CopilotEventRouter:
                 "turn_id": self.current_turn_id,
             })
 
-    async def _handle_usage(self, data: Any) -> None:
-        input_tokens = getattr(data, "input_tokens", None) or 0
-        output_tokens = getattr(data, "output_tokens", None) or 0
-        cache_read = getattr(data, "cache_read_tokens", None) or 0
-        total = input_tokens + output_tokens
+    async def _handle_usage(self, data: Any, *, source: str = "assistant.usage") -> None:
+        input_tokens = self._coerce_int(getattr(data, "input_tokens", None))
+        output_tokens = self._coerce_int(getattr(data, "output_tokens", None))
+        cache_read = self._coerce_int(getattr(data, "cache_read_tokens", None))
+        context_window = self._coerce_int(getattr(data, "token_limit", None))
+        current_tokens = self._coerce_int(getattr(data, "current_tokens", None))
 
-        await self._emit({
-            "type": "token_usage",
-            "conversation_id": self.conversation_id,
-            "total": total,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cached_input_tokens": cache_read,
-            "turn_id": self.current_turn_id,
-        })
+        if current_tokens is not None:
+            total = current_tokens
+        elif input_tokens is not None or output_tokens is not None:
+            total = (input_tokens or 0) + (output_tokens or 0)
+        else:
+            return
 
-        await self._record({
-            "role": "token_usage",
-            "total": total,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cached_input_tokens": cache_read,
-            "timestamp": utc_ts(),
-            "turn_id": self.current_turn_id,
-        })
+        await self._emit_token_count(
+            total=total,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cache_read,
+            context_window=context_window,
+            source=source,
+        )
 
     async def _handle_error(self, data: Any) -> None:
         msg = getattr(data, "message", None) or "Unknown error"
         error_type = getattr(data, "error_type", None) or ""
+        status_code = self._coerce_int(getattr(data, "status_code", None))
+        provider_call_id = getattr(data, "provider_call_id", None) or ""
+        stack = getattr(data, "stack", None) or ""
+        source = "session.error"
 
-        await self._emit({
-            "type": "rpc_error",
+        error_event: Dict[str, Any] = {
+            "type": "error",
             "conversation_id": self.conversation_id,
             "message": msg,
-            "error_type": error_type,
             "turn_id": self.current_turn_id,
-        })
+            "source": source,
+        }
+        error_entry: Dict[str, Any] = {
+            "role": "error",
+            "message": msg,
+            "turn_id": self.current_turn_id,
+            "timestamp": utc_ts(),
+            "source": source,
+            "event": source,
+        }
+        if error_type:
+            error_event["error_type"] = error_type
+            error_entry["error_type"] = error_type
+        if status_code is not None:
+            error_event["status_code"] = status_code
+            error_entry["status_code"] = status_code
+        if provider_call_id:
+            error_event["provider_call_id"] = provider_call_id
+            error_entry["provider_call_id"] = provider_call_id
+        if stack:
+            error_event["stack"] = stack
+            error_entry["stack"] = stack
+
+        await self._emit(error_event)
+        await self._record(error_entry)
 
         await self._emit({
             "type": "activity",
             "conversation_id": self.conversation_id,
-            "label": msg,
-            "active": True,
+            "label": "error",
+            "active": False,
             "turn_id": self.current_turn_id,
         })
 
