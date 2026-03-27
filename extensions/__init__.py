@@ -1317,6 +1317,24 @@ async def hydrate_transcript(
     return []
 
 
+async def handle_message(
+    extension_id: str,
+    conversation_id: str,
+    text: str,
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Send a message through an extension handler when supported."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "handle_message"):
+        return await handler.handle_message(
+            conversation_id,
+            text,
+            extension_id,
+            settings or {},
+        )
+    return {"ok": False, "error": f"Extension {extension_id} does not support message sending"}
+
+
 def resolve_approval(extension_id: str, request_id: str, resolution: Any) -> bool:
     """Resolve an approval request. Handler must implement resolve_approval()."""
     handler = get_handler(extension_id)

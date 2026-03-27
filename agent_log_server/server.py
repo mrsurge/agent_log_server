@@ -154,30 +154,15 @@ def _sio_error(msg: str) -> Dict[str, str]:
 async def _sio_send_message(sid, data):
     """Mirror of POST /api/appserver/message"""
     try:
-        convo_id = data.get("conversation_id")
-        text = data.get("text")
-        if not convo_id or not text:
-            return _sio_error("conversation_id and text required")
-        meta = _load_conversation_meta(convo_id)
-        if not meta:
-            return _sio_error(f"Conversation not found: {convo_id}")
-        settings = meta.get("settings", {})
-        agent_type = settings.get("agent", "codex")
-        if agent_type != "codex":
-            unavailable_detail = _extension_unavailable_detail(agent_type)
-            if unavailable_detail:
-                await _emit_extension_unavailable_warning(convo_id, agent_type, detail=unavailable_detail)
-                return _sio_error(unavailable_detail)
-            handler = ext_loader.get_handler(agent_type)
-            if handler and hasattr(handler, "handle_message"):
-                return await handler.handle_message(
-                    convo_id,
-                    text,
-                    agent_type,
-                    _materialize_extension_runtime_settings(settings),
-                )
-        # Delegate to the HTTP handler for codex (complex RPC logic)
-        return await api_appserver_message(AppserverMessageIn(conversation_id=convo_id, text=text))
+        payload = data if isinstance(data, dict) else {}
+        return await api_appserver_message(
+            AppserverMessageIn(
+                conversation_id=payload.get("conversation_id") or "",
+                text=payload.get("text") or "",
+            )
+        )
+    except HTTPException as e:
+        return _sio_error(e.detail)
     except Exception as e:
         return _sio_error(str(e))
 
@@ -5998,6 +5983,11 @@ async def codex_agent_ui() -> HTMLResponse:
                     Span("📝"),
                     cls="toggle-label",
                 ),
+                Label(
+                    Input(type="checkbox", id="line-numbers-toggle"),
+                    Span("#"),
+                    cls="toggle-label",
+                ),
                 Span("👎", id="agent-ws", cls="pill warn"),
                 Button("Settings", id="conversation-settings", cls="btn"),
                 Button("Back", id="conversation-back", cls="btn ghost"),
@@ -6572,6 +6562,149 @@ async def api_appserver_conversation_update(payload: Dict[str, Any] = Body(...))
 
 # Cache for draft hash to avoid unnecessary writes
 _draft_hash_cache: Dict[str, str] = {}
+_user_message_buffer: Dict[str, Dict[str, Any]] = {}
+
+
+def _buffer_user_message(conversation_id: str, text: str, agent_type: str) -> None:
+    if not conversation_id:
+        return
+    _user_message_buffer[conversation_id] = {
+        "text": text if isinstance(text, str) else "",
+        "agent_type": agent_type if isinstance(agent_type, str) else "",
+    }
+
+
+def _clear_user_message_buffer(conversation_id: str) -> None:
+    if conversation_id:
+        _user_message_buffer.pop(conversation_id, None)
+
+
+def _peek_user_message_buffer(conversation_id: str) -> Optional[str]:
+    entry = _user_message_buffer.get(conversation_id)
+    if not isinstance(entry, dict):
+        return None
+    text = entry.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    return text
+
+
+async def _restore_buffered_user_message_draft(conversation_id: str) -> Optional[str]:
+    buffered_text = _peek_user_message_buffer(conversation_id)
+    if not isinstance(buffered_text, str) or not buffered_text:
+        return None
+    await api_appserver_conversation_draft({
+        "conversation_id": conversation_id,
+        "draft": buffered_text,
+    })
+    return buffered_text
+
+
+async def _emit_conversation_error_event(
+    conversation_id: str,
+    *,
+    message: Any,
+    source: Optional[str] = None,
+    error_type: Optional[str] = None,
+    status_code: Any = None,
+    provider_call_id: Optional[str] = None,
+    details: Optional[str] = None,
+    stack: Optional[str] = None,
+    code: Any = None,
+    turn_id: Optional[str] = None,
+) -> None:
+    if not conversation_id:
+        return
+    message_text = str(message or "").strip() or "Message send failed"
+    transcript_entry: Dict[str, Any] = {
+        "role": "error",
+        "message": message_text,
+        "text": message_text,
+        "timestamp": utc_ts(),
+    }
+    if isinstance(source, str) and source.strip():
+        transcript_entry["source"] = source.strip()
+    if isinstance(error_type, str) and error_type.strip():
+        transcript_entry["error_type"] = error_type.strip()
+    if isinstance(status_code, (int, float)):
+        transcript_entry["status_code"] = int(status_code)
+    if isinstance(provider_call_id, str) and provider_call_id.strip():
+        transcript_entry["provider_call_id"] = provider_call_id.strip()
+    if isinstance(details, str) and details.strip():
+        transcript_entry["details"] = details
+    if isinstance(stack, str) and stack.strip():
+        transcript_entry["stack"] = stack
+    if code is not None:
+        transcript_entry["code"] = code
+    if isinstance(turn_id, str) and turn_id.strip():
+        transcript_entry["turn_id"] = turn_id.strip()
+    await _append_transcript_entry(conversation_id, transcript_entry)
+
+    event: Dict[str, Any] = {
+        "type": "error",
+        "conversation_id": conversation_id,
+        "message": message_text,
+    }
+    if isinstance(source, str) and source.strip():
+        event["source"] = source.strip()
+    if isinstance(error_type, str) and error_type.strip():
+        event["error_type"] = error_type.strip()
+    if isinstance(status_code, (int, float)):
+        event["status_code"] = int(status_code)
+    if isinstance(provider_call_id, str) and provider_call_id.strip():
+        event["provider_call_id"] = provider_call_id.strip()
+    if isinstance(details, str) and details.strip():
+        event["details"] = details
+    if isinstance(stack, str) and stack.strip():
+        event["stack"] = stack
+    if code is not None:
+        event["code"] = code
+    if isinstance(turn_id, str) and turn_id.strip():
+        event["turn_id"] = turn_id.strip()
+    await _broadcast_appserver_ui(event)
+    await _broadcast_appserver_ui({
+        "type": "activity",
+        "conversation_id": conversation_id,
+        "label": "error",
+        "active": False,
+    })
+
+
+async def _apply_send_message_contract(
+    conversation_id: str,
+    agent_type: str,
+    result: Any,
+) -> Dict[str, Any]:
+    normalized = dict(result) if isinstance(result, dict) else {
+        "ok": False,
+        "error": "Invalid send result from agent handler",
+    }
+    if normalized.get("ok") is True:
+        _clear_user_message_buffer(conversation_id)
+        return normalized
+
+    restore_draft = normalized.get("restore_draft") is True
+    if restore_draft:
+        restored_text = await _restore_buffered_user_message_draft(conversation_id)
+        normalized["draft_restored"] = bool(restored_text)
+
+    surface_error = normalized.get("surface_error")
+    if surface_error is True or (restore_draft and surface_error is not False):
+        await _emit_conversation_error_event(
+            conversation_id,
+            message=normalized.get("error") or "Message send failed",
+            source=normalized.get("error_source") or agent_type,
+            error_type=normalized.get("error_type") or normalized.get("failure_kind"),
+            status_code=normalized.get("status_code"),
+            provider_call_id=normalized.get("provider_call_id"),
+            details=normalized.get("details"),
+            stack=normalized.get("stack"),
+            code=normalized.get("code"),
+            turn_id=normalized.get("turn_id"),
+        )
+
+    _clear_user_message_buffer(conversation_id)
+    return normalized
 
 
 @app.post("/api/appserver/conversation/draft")
@@ -7385,6 +7518,7 @@ async def api_appserver_message(payload: AppserverMessageIn):
     
     settings = meta.get("settings", {})
     agent_type = settings.get("agent", "codex")
+    runtime_settings = _materialize_extension_runtime_settings(settings)
     
     # Route to extension if non-codex agent and handler exists
     if agent_type != "codex":
@@ -7392,17 +7526,21 @@ async def api_appserver_message(payload: AppserverMessageIn):
         if unavailable_detail:
             await _emit_extension_unavailable_warning(convo_id, agent_type, detail=unavailable_detail)
             raise HTTPException(status_code=409, detail=unavailable_detail)
-        handler = ext_loader.get_handler(agent_type)
-        if handler and hasattr(handler, "handle_message"):
-            return await handler.handle_message(
+        _buffer_user_message(convo_id, text, agent_type)
+        try:
+            result = await ext_loader.handle_message(
+                agent_type,
                 convo_id,
                 text,
-                agent_type,
-                _materialize_extension_runtime_settings(settings),
+                runtime_settings,
             )
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)}
+        return await _apply_send_message_contract(convo_id, agent_type, result)
     
     # Default: route to codex-app-server
     thread_id = meta.get("thread_id")
+    _buffer_user_message(convo_id, text, agent_type)
 
     # Generate request IDs for async turn/start writes.
     base_id = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -7411,6 +7549,7 @@ async def api_appserver_message(payload: AppserverMessageIn):
     def inject_settings(params: Dict[str, Any], method: str) -> Dict[str, Any]:
         return _inject_codex_runtime_settings(params, method, settings)
     
+    result: Dict[str, Any]
     try:
         # Ensure the codex-app-server framework shell is running and reader is attached.
         info = await _get_or_start_appserver_shell()
@@ -7437,6 +7576,7 @@ async def api_appserver_message(payload: AppserverMessageIn):
             }
             _pending_turn_starts[str(base_id + 1)] = turn_payload.copy()
             await _write_appserver(turn_payload)
+            result = {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
         else:
             # No thread yet - negotiate a new one synchronously on the backend.
             start_params = inject_settings({}, "thread/start")
@@ -7453,36 +7593,35 @@ async def api_appserver_message(payload: AppserverMessageIn):
                     thread_id = cfg.get("thread_id")
 
             if not thread_id:
-                return {"ok": False, "error": "Failed to start thread - no thread_id received"}
+                result = {"ok": False, "error": "Failed to start thread - no thread_id received"}
+            else:
+                meta["thread_id"] = thread_id
+                meta["status"] = "active"
 
-            meta["thread_id"] = thread_id
-            meta["status"] = "active"
+                meta["thread_runtime_signature"] = _codex_thread_runtime_signature(settings)
+                _save_conversation_meta(convo_id, meta)
 
-            meta["thread_runtime_signature"] = _codex_thread_runtime_signature(settings)
-            _save_conversation_meta(convo_id, meta)
-
-            async with _config_lock:
-                cfg = _load_appserver_config()
-                cfg["thread_id"] = thread_id
-                _save_appserver_config(cfg)
-            
-            # Send turn/start with new thread
-            turn_params = inject_settings({
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": text}]
-            }, "turn/start")
-            turn_payload = {
-                "id": base_id + 1,
-                "method": "turn/start",
-                "params": turn_params
-            }
-            _pending_turn_starts[str(base_id + 1)] = turn_payload.copy()
-            await _write_appserver(turn_payload)
-        
-        return {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
-    
+                async with _config_lock:
+                    cfg = _load_appserver_config()
+                    cfg["thread_id"] = thread_id
+                    _save_appserver_config(cfg)
+                
+                # Send turn/start with new thread
+                turn_params = inject_settings({
+                    "threadId": thread_id,
+                    "input": [{"type": "text", "text": text}]
+                }, "turn/start")
+                turn_payload = {
+                    "id": base_id + 1,
+                    "method": "turn/start",
+                    "params": turn_params
+                }
+                _pending_turn_starts[str(base_id + 1)] = turn_payload.copy()
+                await _write_appserver(turn_payload)
+                result = {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        result = {"ok": False, "error": str(e)}
+    return await _apply_send_message_contract(convo_id, agent_type, result)
 
 
 @app.post("/api/appserver/rpc")

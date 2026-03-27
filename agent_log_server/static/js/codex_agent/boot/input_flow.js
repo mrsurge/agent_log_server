@@ -47,6 +47,7 @@ export function bindInputFlow(ctx) {
     timelineEl,
     markdownToggleEl,
     trackEditsToggleEl,
+    lineNumbersToggleEl,
     settingsCwdEl,
   } = elements;
 
@@ -238,6 +239,25 @@ export function bindInputFlow(ctx) {
     }
   }
 
+  async function handleLineNumbersToggle() {
+    const state = getState();
+    const enabled = lineNumbersToggleEl?.checked === true;
+    if (state.conversationSettings && typeof state.conversationSettings === 'object') {
+      state.conversationSettings.lineNumbers = enabled;
+    }
+    if (state.conversationMeta?.conversation_id) {
+      await sioCall('conversation_update', {
+        conversation_id: state.conversationMeta.conversation_id,
+        settings: { ...state.conversationSettings, lineNumbers: enabled },
+      });
+      await fetchConversation(state.conversationMeta.conversation_id);
+    }
+    resetTimeline();
+    await replayTranscript();
+    await refreshPlanSurface?.();
+    restorePendingApprovals();
+  }
+
   function syncMarkdownFromSettings() {
     const enabled = getState().conversationSettings?.markdown !== false;
     setMarkdownEnabled(enabled);
@@ -299,6 +319,7 @@ export function bindInputFlow(ctx) {
     timelineEl?.addEventListener('click', handleDiffClick);
     markdownToggleEl?.addEventListener('change', handleMarkdownToggle);
     trackEditsToggleEl?.addEventListener('change', handleTrackEditsToggle);
+    lineNumbersToggleEl?.addEventListener('change', handleLineNumbersToggle);
   }
 
   return {

@@ -117,6 +117,7 @@ class CodexAppServerTransport:
         self._thread_conversations: Dict[str, str] = {}
         self._turn_conversations: Dict[str, str] = {}
         self._pending_approval_requests: Dict[str, Dict[str, Any]] = {}
+        self._resume_startup_barriers: Dict[str, Dict[str, Any]] = {}
         self._request_counter = int(time.time() * 1000)
         self._stdin: Optional[Any] = None
         self._router = CodexEventRouter()
@@ -150,6 +151,7 @@ class CodexAppServerTransport:
             self._thread_conversations.clear()
             self._turn_conversations.clear()
             self._pending_approval_requests.clear()
+            self._clear_resume_startup_barriers("transport stopped")
             self._router.reset()
             self._stdin = None
             self._fail_waiters("transport stopped")
@@ -269,6 +271,10 @@ class CodexAppServerTransport:
         conversation_id: Optional[str] = None,
         timeout: float = 6.0,
     ) -> Dict[str, Any]:
+        method_name = str(method or "").strip().lower()
+        resume_thread_id = self._extract_resume_thread_id(params) if method_name == "thread/resume" else None
+        if conversation_id and resume_thread_id:
+            self._begin_resume_startup_barrier(conversation_id, resume_thread_id)
         req_id = self._next_request_id()
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._rpc_waiters[req_id] = future
@@ -278,19 +284,46 @@ class CodexAppServerTransport:
             payload["params"] = params
         await self._write_payload(payload, conversation_id=conversation_id)
         try:
-            response = await asyncio.wait_for(future, timeout=timeout)
+            if conversation_id and resume_thread_id:
+                response = await self._await_resume_virtual_ack_or_response(
+                    req_id=req_id,
+                    response_future=future,
+                    conversation_id=conversation_id,
+                    thread_id=resume_thread_id,
+                    timeout=timeout,
+                )
+            else:
+                try:
+                    response = await asyncio.wait_for(future, timeout=timeout)
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(f"{method} request timed out") from exc
         finally:
             self._rpc_waiters.pop(req_id, None)
             self._request_conversations.pop(req_id, None)
         if not isinstance(response, dict):
+            if conversation_id and resume_thread_id:
+                self._discard_resume_startup_barrier(conversation_id, reason="invalid rpc response")
             raise RuntimeError("invalid rpc response")
         if response.get("error"):
+            if conversation_id and resume_thread_id:
+                self._discard_resume_startup_barrier(conversation_id, reason="rpc error")
             error = response.get("error")
             if isinstance(error, dict):
                 message = error.get("message") or "rpc error"
             else:
                 message = str(error)
             raise RuntimeError(message)
+        if response.get("_virtual_ack") is True and conversation_id and resume_thread_id:
+            self._remember_bindings(
+                conversation_id=conversation_id,
+                thread_id=resume_thread_id,
+                turn_id=None,
+            )
+            return {
+                "thread": {"id": resume_thread_id},
+                "_virtual_ack": True,
+                "_virtual_ack_source": response.get("_virtual_ack_source"),
+            }
         protocol = await get_runtime_protocol()
         decoded_result = decode_response_result(protocol, method, response.get("result", response))
         self._remember_response_bindings(conversation_id=conversation_id, result=decoded_result)
@@ -371,6 +404,7 @@ class CodexAppServerTransport:
         self._resumed_threads.clear()
         self._thread_conversations.clear()
         self._turn_conversations.clear()
+        self._clear_resume_startup_barriers("transport restarted")
         try:
             await mgr.terminate_shell(shell_id, force=True)
         except Exception:
@@ -537,6 +571,12 @@ class CodexAppServerTransport:
             if conversation_id and thread_id:
                 self._persist_thread_id(conversation_id, thread_id)
             turn_id = self._get_turn_id(payload)
+            self._note_resume_startup_event(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                label=label,
+                payload=payload,
+            )
 
             await self._route_transport_event(
                 label,
@@ -575,6 +615,7 @@ class CodexAppServerTransport:
             self._thread_conversations.clear()
             self._turn_conversations.clear()
             self._pending_approval_requests.clear()
+            self._clear_resume_startup_barriers("transport reader stopped")
             self._router.reset()
             self._stdin = None
             self._fail_waiters("transport reader stopped")
@@ -764,6 +805,238 @@ class CodexAppServerTransport:
         if turn_id:
             return self._find_conversation_by_turn_id(turn_id)
         return None
+
+    def _extract_resume_thread_id(self, params: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(params, dict):
+            return None
+        for key in ("threadId", "thread_id"):
+            value = params.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def _begin_resume_startup_barrier(self, conversation_id: str, thread_id: str) -> Dict[str, Any]:
+        existing = self._resume_startup_barriers.get(conversation_id)
+        if (
+            isinstance(existing, dict)
+            and existing.get("thread_id") == thread_id
+            and isinstance(existing.get("future"), asyncio.Future)
+            and not existing["future"].done()
+        ):
+            return existing
+        future = asyncio.get_running_loop().create_future()
+        barrier = {
+            "thread_id": thread_id,
+            "saw_startup": False,
+            "future": future,
+        }
+        self._resume_startup_barriers[conversation_id] = barrier
+        self._remember_bindings(conversation_id=conversation_id, thread_id=thread_id, turn_id=None)
+        self._raw_log_fn("out", conversation_id, f"resume_virtual_ack_begin thread={thread_id[:8]}")
+        return barrier
+
+    def _clear_resume_startup_barriers(self, reason: str) -> None:
+        for barrier in self._resume_startup_barriers.values():
+            future = barrier.get("future") if isinstance(barrier, dict) else None
+            if isinstance(future, asyncio.Future) and not future.done():
+                future.cancel()
+        self._resume_startup_barriers.clear()
+
+    def _discard_resume_startup_barrier(self, conversation_id: str, *, reason: Optional[str] = None) -> None:
+        barrier = self._resume_startup_barriers.pop(conversation_id, None)
+        if not isinstance(barrier, dict):
+            return
+        future = barrier.get("future")
+        if not isinstance(future, asyncio.Future) or future.done():
+            return
+        if reason:
+            future.cancel()
+        else:
+            future.set_result(None)
+
+    def _transport_event_type(self, label: str, payload: Any) -> Optional[str]:
+        special_types = {
+            "thread/status/changed",
+            "mcp_startup_update",
+            "mcp_startup_complete",
+        }
+        candidates: List[str] = []
+        if isinstance(payload, dict) and isinstance(payload.get("type"), str) and payload.get("type"):
+            candidates.append(payload["type"])
+        if isinstance(payload, dict) and isinstance(payload.get("msg"), dict):
+            msg_type = payload["msg"].get("type")
+            if isinstance(msg_type, str) and msg_type:
+                candidates.append(msg_type)
+        if isinstance(label, str) and label:
+            if label.startswith("codex/event/"):
+                candidates.append(label.split("/", 2)[-1])
+            else:
+                candidates.append(label)
+        protocol = peek_runtime_protocol()
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            if text in special_types:
+                return text
+            if protocol is None or protocol.has_event_type(text):
+                return text
+        return None
+
+    def _note_resume_startup_event(
+        self,
+        *,
+        conversation_id: Optional[str],
+        thread_id: Optional[str],
+        label: str,
+        payload: Any,
+    ) -> None:
+        if not conversation_id:
+            return
+        barrier = self._resume_startup_barriers.get(conversation_id)
+        if not isinstance(barrier, dict):
+            return
+        barrier_thread_id = barrier.get("thread_id")
+        if isinstance(barrier_thread_id, str) and barrier_thread_id and thread_id and barrier_thread_id != thread_id:
+            return
+        event_type = self._transport_event_type(label, payload)
+        if event_type == "mcp_startup_update":
+            barrier["saw_startup"] = True
+            msg_payload = payload.get("msg") if isinstance(payload, dict) and isinstance(payload.get("msg"), dict) else payload
+            msg_dict = msg_payload if isinstance(msg_payload, dict) else {}
+            status = msg_dict.get("status") if isinstance(msg_dict.get("status"), dict) else {}
+            state = str(status.get("state") or "").strip().lower()
+            if state == "failed":
+                future = barrier.get("future")
+                if isinstance(future, asyncio.Future) and not future.done():
+                    server_name = str(msg_dict.get("server") or "").strip()
+                    error_text = str(status.get("error") or "").strip()
+                    message = error_text or "MCP startup failed during thread resume"
+                    future.set_exception(RuntimeError(message))
+                    server_suffix = f" server={server_name}" if server_name else ""
+                    self._raw_log_fn(
+                        "in",
+                        conversation_id,
+                        f"resume_virtual_ack_event thread={str(barrier_thread_id or thread_id or '')[:8]} "
+                        f"source=mcp_startup_update state=failed{server_suffix}",
+                    )
+            return
+        future = barrier.get("future")
+        if not isinstance(future, asyncio.Future) or future.done():
+            return
+        if event_type == "thread/status/changed":
+            status = payload.get("status") if isinstance(payload, dict) and isinstance(payload.get("status"), dict) else {}
+            status_type = str(status.get("type") or "").strip().lower()
+            if status_type == "idle":
+                future.set_result({
+                    "source": "thread/status/changed",
+                    "status": status_type,
+                })
+                self._raw_log_fn(
+                    "in",
+                    conversation_id,
+                    f"resume_virtual_ack_event thread={str(barrier_thread_id or thread_id or '')[:8]} "
+                    "source=thread/status/changed status=idle",
+                )
+            return
+        if event_type == "mcp_startup_complete":
+            barrier["saw_startup"] = True
+            future.set_result({
+                "source": "mcp_startup_complete",
+            })
+            self._raw_log_fn(
+                "in",
+                conversation_id,
+                f"resume_virtual_ack_event thread={str(barrier_thread_id or thread_id or '')[:8]} "
+                "source=mcp_startup_complete",
+            )
+
+    async def _await_resume_virtual_ack_or_response(
+        self,
+        *,
+        req_id: str,
+        response_future: asyncio.Future,
+        conversation_id: str,
+        thread_id: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        barrier = self._resume_startup_barriers.get(conversation_id)
+        if not isinstance(barrier, dict):
+            try:
+                return await asyncio.wait_for(response_future, timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("thread/resume request timed out") from exc
+        if barrier.get("thread_id") != thread_id:
+            try:
+                return await asyncio.wait_for(response_future, timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("thread/resume request timed out") from exc
+        barrier_future = barrier.get("future")
+        if not isinstance(barrier_future, asyncio.Future):
+            self._discard_resume_startup_barrier(conversation_id)
+            try:
+                return await asyncio.wait_for(response_future, timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("thread/resume request timed out") from exc
+        self._raw_log_fn(
+            "out",
+            conversation_id,
+            f"resume_virtual_ack_wait thread={thread_id[:8]} timeout={timeout:.2f} req={req_id}",
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {response_future, barrier_future},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError as exc:
+            self._discard_resume_startup_barrier(conversation_id, reason="thread/resume virtual ack cancelled")
+            raise RuntimeError("thread/resume virtual ack cancelled") from exc
+        if response_future in done:
+            self._discard_resume_startup_barrier(conversation_id)
+            try:
+                response = response_future.result()
+            except asyncio.CancelledError as exc:
+                raise RuntimeError("thread/resume response cancelled") from exc
+            self._raw_log_fn(
+                "in",
+                conversation_id,
+                f"resume_virtual_ack_fallback thread={thread_id[:8]} source=response req={req_id}",
+            )
+            return response
+        if barrier_future in done:
+            try:
+                ack_payload = barrier_future.result()
+            except asyncio.CancelledError as exc:
+                self._discard_resume_startup_barrier(conversation_id)
+                raise RuntimeError("thread/resume virtual ack cancelled") from exc
+            except Exception as exc:
+                if not response_future.done():
+                    response_future.cancel()
+                self._discard_resume_startup_barrier(conversation_id)
+                self._raw_log_fn(
+                    "err",
+                    conversation_id,
+                    f"resume_virtual_ack_fail thread={thread_id[:8]} req={req_id} error={exc}",
+                )
+                raise RuntimeError(str(exc) or "thread/resume virtual ack failed") from exc
+            source = ack_payload.get("source") if isinstance(ack_payload, dict) else "unknown"
+            if not response_future.done():
+                response_future.cancel()
+            self._discard_resume_startup_barrier(conversation_id)
+            self._raw_log_fn(
+                "in",
+                conversation_id,
+                f"resume_virtual_ack_release thread={thread_id[:8]} source={source} req={req_id}",
+            )
+            return {
+                "_virtual_ack": True,
+                "_virtual_ack_source": source,
+            }
+        if not response_future.done():
+            response_future.cancel()
+        self._discard_resume_startup_barrier(conversation_id, reason="thread/resume virtual ack timed out")
+        raise RuntimeError("thread/resume virtual ack timed out")
 
     def _conversation_exists(self, conversation_id: str) -> bool:
         if not conversation_id:

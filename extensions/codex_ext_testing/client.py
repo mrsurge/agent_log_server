@@ -368,6 +368,35 @@ def _looks_like_auth_required_error(message: Any) -> bool:
     )
 
 
+def _looks_like_mcp_startup_error(message: Any) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    return (
+        "mcp client for" in text
+        or "mcp startup failed" in text
+        or ("mcp startup" in text and "failed" in text)
+    )
+
+
+def _build_send_failure_result(error_message: Any) -> Dict[str, Any]:
+    message = str(error_message or "").strip() or "Message send failed"
+    failure_kind = "send_failed"
+    if _looks_like_mcp_startup_error(message):
+        failure_kind = "mcp_startup"
+    elif _looks_like_auth_required_error(message):
+        failure_kind = "auth_required"
+    return {
+        "ok": False,
+        "error": message,
+        "restore_draft": True,
+        "surface_error": True,
+        "failure_kind": failure_kind,
+        "error_type": failure_kind,
+        "error_source": "codex-ext-testing",
+    }
+
+
 async def _handle_auth_failure(conversation_id: str, extension_id: str, error_message: str) -> None:
     server = _server_module()
     with contextlib.suppress(Exception):
@@ -991,7 +1020,7 @@ async def handle_message(
         if _looks_like_auth_required_error(exc):
             await _handle_auth_failure(conversation_id, agent_type or "codex-ext-testing", str(exc))
         _add_to_raw_buffer("err", conversation_id, f"handle_message_failed {exc}")
-        return {"ok": False, "error": str(exc)}
+        return _build_send_failure_result(exc)
 
 
 async def resume_session_with_history(

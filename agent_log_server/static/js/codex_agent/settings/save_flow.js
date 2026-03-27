@@ -92,6 +92,7 @@ export function bindSettingsSaveFlow(ctx) {
         'semanticShellRibbon',
         'te2_mcp_integration',
         'trackEdits',
+        'lineNumbers',
         'agent',
         approvalKey,
         sandboxKey,
@@ -118,6 +119,7 @@ export function bindSettingsSaveFlow(ctx) {
         semanticShellRibbon: semanticRibbonEnabled,
         te2_mcp_integration: settingsTe2McpIntegrationEl?.checked === true,
         trackEdits: state.trackEditsEnabled,
+        lineNumbers: state.lineNumbersEnabled === true,
         agent: agentType,
       };
     } else {
@@ -147,6 +149,7 @@ export function bindSettingsSaveFlow(ctx) {
         semanticShellRibbon: semanticRibbonEnabled,
         te2_mcp_integration: settingsTe2McpIntegrationEl?.checked === true,
         trackEdits: state.trackEditsEnabled,
+        lineNumbers: state.lineNumbersEnabled === true,
         agent: agentType,
       };
     }

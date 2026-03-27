@@ -3,6 +3,7 @@ import {
   renderEventMarkdownInto,
   highlightCode,
   renderMarkdownBlock,
+  renderMarkdownItBlock,
   renderMarkdownInto,
   renderMarkdownSourceInto,
   streamEnd,
@@ -93,6 +94,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsTe2McpIntegrationEl = document.getElementById('settings-te2-mcp-integration');
   const markdownToggleEl = document.getElementById('markdown-toggle');
   const trackEditsToggleEl = document.getElementById('track-edits-toggle');
+  const lineNumbersToggleEl = document.getElementById('line-numbers-toggle');
   const settingsAgentEl = document.getElementById('settings-agent');
   const settingsAgentToggle = document.getElementById('settings-agent-toggle');
   const settingsAgentOptions = document.getElementById('settings-agent-options');
@@ -178,6 +180,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let settingsUi = null;
   let markdownEnabled = true; // Toggle for markdown rendering
   let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
+  let lineNumbersEnabled = false; // Toggle for transcript gutter line numbers
   let viewWrapEnabled = false; // Toggle for wrapped view/read cards
   let useXterm = true; // Toggle for xterm.js vs text box rendering
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
@@ -754,6 +757,12 @@ document.addEventListener('DOMContentLoaded', () => {
   function setTrackEditsEnabled(enabled) {
     trackEditsEnabled = enabled;
     if (trackEditsToggleEl) trackEditsToggleEl.checked = enabled;
+  }
+
+  function setLineNumbersEnabled(enabled) {
+    lineNumbersEnabled = enabled === true;
+    if (lineNumbersToggleEl) lineNumbersToggleEl.checked = lineNumbersEnabled;
+    document.body.classList.toggle('line-numbers-enabled', lineNumbersEnabled);
   }
 
   function setViewWrapEnabled(enabled) {
@@ -2966,7 +2975,9 @@ document.addEventListener('DOMContentLoaded', () => {
       insertRow(row);
     }
     if ((role === 'assistant' || role === 'user') && isMarkdownEnabled()) {
-      const rendered = renderMarkdownBlock(cleanText);
+      const rendered = role === 'user'
+        ? renderMarkdownItBlock(cleanText)
+        : renderMarkdownBlock(cleanText);
       body.append(rendered);
     } else {
       const pre = document.createElement('pre');
@@ -3573,7 +3584,9 @@ document.addEventListener('DOMContentLoaded', () => {
         : buildRow('message', entry.role === 'assistant' ? 'assistant' : entry.role);
       if (!useMessageCard && entry.role === 'user') row.classList.add('user');
       if ((entry.role === 'assistant' || entry.role === 'user') && isMarkdownEnabled()) {
-        const container = renderMarkdownBlock(cleanText);
+        const container = entry.role === 'user'
+          ? renderMarkdownItBlock(cleanText)
+          : renderMarkdownBlock(cleanText);
         body.append(container);
       } else {
         const pre = document.createElement('pre');
@@ -4726,6 +4739,7 @@ document.addEventListener('DOMContentLoaded', () => {
       pendingNewConversation,
       pendingRollout,
       trackEditsEnabled,
+      lineNumbersEnabled,
       runtimeOptions,
     }),
     setState: (patch) => {
@@ -4870,6 +4884,8 @@ document.addEventListener('DOMContentLoaded', () => {
       setMarkdownEnabled(conversationSettings?.markdown !== false);
       // Sync track-edits toggle from settings
       setTrackEditsEnabled(conversationSettings?.trackEdits === true);
+      // Sync line-number toggle from settings
+      setLineNumbersEnabled(conversationSettings?.lineNumbers === true);
       // Sync view-card wrap toggle from settings
       setViewWrapEnabled(conversationSettings?.viewWrap === true);
       // Sync xterm toggle from settings
@@ -5233,6 +5249,7 @@ document.addEventListener('DOMContentLoaded', () => {
       timelineEl,
       markdownToggleEl,
       trackEditsToggleEl,
+      lineNumbersToggleEl,
       settingsCwdEl,
     },
     sendShellCommand,

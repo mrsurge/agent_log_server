@@ -36,7 +36,13 @@ function escapeHtmlText(text) {
 
 function renderHighlightedFenceHtml(source, lang) {
   const rawLang = typeof lang === 'string' ? lang.trim() : '';
-  const requestedLang = rawLang ? rawLang.split(/\s+/, 1)[0].toLowerCase() : '';
+  const requestedLangRaw = rawLang ? rawLang.split(/\s+/, 1)[0].toLowerCase() : '';
+  const languageAliasMap = {
+    sh: 'bash',
+    shell: 'bash',
+    zsh: 'bash',
+  };
+  const requestedLang = languageAliasMap[requestedLangRaw] || requestedLangRaw;
   if (typeof hljs === 'undefined') {
     const languageClass = requestedLang ? ` language-${requestedLang}` : '';
     return `<pre><code class="hljs${languageClass}">${escapeHtmlText(source)}</code></pre>`;
@@ -173,6 +179,14 @@ export function renderMarkdownBlock(text, extraClass = '') {
   const container = document.createElement('div');
   container.className = extraClass ? `markdown-body ${extraClass}` : 'markdown-body';
   renderMarkdownInto(container, text);
+  highlightCode(container);
+  return container;
+}
+
+export function renderMarkdownItBlock(text, extraClass = '') {
+  const container = document.createElement('div');
+  container.className = extraClass ? `markdown-body ${extraClass}` : 'markdown-body';
+  renderEventMarkdownInto(container, text);
   highlightCode(container);
   return container;
 }
