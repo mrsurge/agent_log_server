@@ -23,9 +23,10 @@ files = ["KNOWLEDGE.md", "ARCHITECTURE.md"]
 - Paths are relative to the project root (the directory containing `.agent-pty.toml`).
 - Absolute paths and `..` traversal are rejected.
 - Files can be added at runtime with `kb_add_file` (auto-updates the config and hot-reloads).
+- Files can be removed at runtime with `kb_remove_file` (auto-updates the config and hot-reloads).
 - The config is reloadable with `kb_reload_config`.
-- **Auto-discovery:** at startup, the server walks up from its CWD to find `.agent-pty.toml` (like git finds `.git`). No manual root config needed if the file exists anywhere in the parent chain.
-- **Cross-repo override:** call `kb_reload_config(cwd="/path/to/repo")` to switch to a different project root (also walks up to find the config).
+- **Auto-discovery:** the server walks up from the harness launch `cwd` to find `.agent-pty.toml` (like git finds `.git`). No manual root config is needed when the MCP server is launched from inside the repo.
+- **Harness-owned root:** KB follows the MCP server's launch `cwd` / repo. Cross-repo KB root switching is not supported through KB tools.
 
 ## Tools
 
@@ -102,11 +103,14 @@ Returns a status line + unified diff.
 
 ### Management
 
-**`kb_reload_config(cwd?)`**
-Reload `.agent-pty.toml` and return the effective file list. Optionally set `cwd` to point the KB root at a different directory (for cross-repo use).
+**`kb_reload_config()`**
+Reload `.agent-pty.toml` for the current project root and return the effective file list.
 
 **`kb_add_file(abs_path)`**
 Add a markdown file to the knowledge config by absolute path. The file must be inside the current project root. Auto-updates `.agent-pty.toml` and hot-reloads.
+
+**`kb_remove_file(abs_path)`**
+Remove a markdown file from the knowledge config by absolute path. The file must be inside the current project root and already registered in `knowledge.files`. Auto-updates `.agent-pty.toml` and hot-reloads.
 
 ## Section IDs
 
@@ -157,4 +161,4 @@ Use `dry_run=true` to preview any mutation as a unified diff before committing.
 - Use `kb_search_content` like grep — find the snippet, then `kb_read` the full section.
 - The `file` parameter is optional when only one knowledge file is configured.
 - Headings inside fenced code blocks are ignored — safe for docs with code examples.
-- For cross-repo use: call `kb_reload_config(cwd="/path/to/repo")` to switch the project root.
+- To target a different repo, launch the MCP server from that repo's harness `cwd` instead of switching roots through KB tools.
