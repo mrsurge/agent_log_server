@@ -5,14 +5,15 @@ import os
 import platform
 import re
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from agent_log_server.te2_runtime import (
+from agent_log_server.prompt_context import build_effective_prompt_context
+from agent_log_server.te2_mcp_config import (
     build_codex_thread_config,
-    build_effective_developer_instructions,
     te2_mcp_integration_enabled,
 )
 from .dependencies import is_android_termux as _is_android_termux
@@ -23,6 +24,7 @@ _server_root: Optional[Path] = None
 _extensions_dir: Optional[Path] = None
 _runtime_lock: Optional[asyncio.Lock] = None
 _runtime_protocol: Optional["RuntimeProtocol"] = None
+_AGENT_PTY_BLOCKS_MCP_SERVER_NAME = "agent-pty-blocks"
 
 
 _SEMANTIC_SUFFIXES = {
@@ -1086,6 +1088,79 @@ def build_initialize_params(protocol: RuntimeProtocol) -> Dict[str, Any]:
     return params
 
 
+def _agent_pty_mcp_server_script_path() -> Path:
+    if isinstance(_server_root, Path):
+        package_candidate = _server_root / "mcp_agent_pty_server.py"
+        if package_candidate.exists():
+            return package_candidate
+        repo_candidate = _server_root.parent / "mcp_agent_pty_server.py"
+        if repo_candidate.exists():
+            return repo_candidate
+    return Path(os.path.abspath(__file__)).parents[2] / "mcp_agent_pty_server.py"
+
+
+def _build_agent_pty_blocks_mcp_server(
+    *,
+    cwd: Any,
+    existing_server: Any = None,
+) -> Optional[Dict[str, Any]]:
+    launch_cwd = _expand_path(cwd)
+    if not launch_cwd:
+        return None
+
+    command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
+    merged: Dict[str, Any] = dict(existing_server) if isinstance(existing_server, dict) else {}
+    env = dict(merged.get("env")) if isinstance(merged.get("env"), dict) else {}
+    env["PWD"] = launch_cwd
+
+    return {
+        **merged,
+        "command": command,
+        "args": [str(_agent_pty_mcp_server_script_path())],
+        "cwd": launch_cwd,
+        "env": env,
+    }
+
+
+def _build_codex_ext_thread_config(
+    existing_config: Any,
+    *,
+    te2_enabled: bool,
+    base_url: Optional[str],
+    cwd: Any,
+    force_te2_mcp_entry: bool = False,
+) -> Optional[Dict[str, Any]]:
+    merged = build_codex_thread_config(
+        existing_config,
+        te2_enabled=te2_enabled,
+        base_url=base_url,
+        force_te2_mcp_entry=force_te2_mcp_entry,
+    )
+    config: Dict[str, Any] = dict(merged) if isinstance(merged, dict) else {}
+
+    existing_mcp = config.get("mcp_servers")
+    if existing_mcp in (None, ""):
+        mcp_servers: Dict[str, Any] = {}
+    elif isinstance(existing_mcp, dict):
+        mcp_servers = dict(existing_mcp)
+    else:
+        raise ValueError("Codex config.mcp_servers must be a JSON object")
+
+    agent_pty_server = _build_agent_pty_blocks_mcp_server(
+        cwd=cwd,
+        existing_server=mcp_servers.get(_AGENT_PTY_BLOCKS_MCP_SERVER_NAME),
+    )
+    if agent_pty_server is not None:
+        mcp_servers[_AGENT_PTY_BLOCKS_MCP_SERVER_NAME] = agent_pty_server
+
+    if mcp_servers or force_te2_mcp_entry:
+        config["mcp_servers"] = mcp_servers
+    else:
+        config.pop("mcp_servers", None)
+
+    return config or None
+
+
 def build_request_params(
     protocol: RuntimeProtocol,
     method: str,
@@ -1126,27 +1201,30 @@ def build_request_params(
     _apply_setting_binding(params, props, protocol.definitions, normalized_settings, ["sandboxPolicy", "sandbox"], ["sandboxPolicy", "sandbox"])
     _apply_setting_binding(params, props, protocol.definitions, normalized_settings, ["reasoning_effort", "effort"], ["reasoningEffort", "effort"])
     _apply_setting_binding(params, props, protocol.definitions, normalized_settings, ["summary"], ["summary"])
-    _apply_setting_binding(params, props, protocol.definitions, normalized_settings, ["developer_instructions"], ["developerInstructions", "baseInstructions"])
     collaboration_mode = _build_collaboration_mode_setting(props, protocol.definitions, normalized_settings)
     if collaboration_mode is not None:
         params["collaborationMode"] = collaboration_mode
 
     if "config" in props:
-        config = build_codex_thread_config(
+        config = _build_codex_ext_thread_config(
             normalized_settings.get("config"),
             te2_enabled=te2_mcp_integration_enabled(normalized_settings),
             base_url=normalized_settings.get("te2_base_url"),
+            cwd=normalized_settings.get("cwd"),
             force_te2_mcp_entry=force_te2_config,
         )
         if config:
             params["config"] = config
-    if "developerInstructions" in props and "developerInstructions" not in params:
-        developer_instructions = build_effective_developer_instructions(
-            normalized_settings.get("developer_instructions"),
-            te2_enabled=te2_mcp_integration_enabled(normalized_settings),
-        )
-        if developer_instructions:
-            params["developerInstructions"] = developer_instructions
+    prompt_context = build_effective_prompt_context(
+        normalized_settings.get("developer_instructions"),
+        te2_enabled=te2_mcp_integration_enabled(normalized_settings),
+        cwd=normalized_settings.get("cwd"),
+    )
+    if prompt_context:
+        if "developerInstructions" in props:
+            params["developerInstructions"] = prompt_context
+        elif "baseInstructions" in props:
+            params["baseInstructions"] = prompt_context
 
     return params
 

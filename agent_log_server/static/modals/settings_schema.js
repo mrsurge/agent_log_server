@@ -75,6 +75,11 @@ window.CodexAgentModules.push((ctx) => {
     }
   }
 
+  function isRuntimeOptionsSource(sourceUrl) {
+    const pathname = sourcePathname(sourceUrl);
+    return pathname.endsWith('/runtime_options') && pathname.includes('/appserver/');
+  }
+
   function extensionIdFromApiPath(sourceUrl, suffix) {
     const pathname = sourcePathname(sourceUrl).replace(/\/+$/, '');
     const escapedSuffix = String(suffix || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -96,7 +101,7 @@ window.CodexAgentModules.push((ctx) => {
       if (extensionIdForModels) {
         return unwrapDynamicSourceResult(await sioCall('get_extension_models', { extension_id: extensionIdForModels }));
       }
-      if (pathname.includes('/api/appserver/runtime_options')) {
+      if (isRuntimeOptionsSource(sourceUrl)) {
         return unwrapDynamicSourceResult(await sioCall('get_runtime_options', {
           conversation_id: options.conversationId || null,
           agent: options.agent || null,
@@ -474,8 +479,7 @@ window.CodexAgentModules.push((ctx) => {
             const selectedAgent = settingsAgentEl?.value?.trim() || '';
             const conversationId = window.CodexAgent?.state?.conversationMeta?.conversation_id || '';
             const dynamicSource = typeof field.dynamic_source === 'string' ? field.dynamic_source : '';
-            const runtimeOptionsSource = dynamicSource.includes('appserver')
-              && dynamicSource.includes('runtime_options');
+            const runtimeOptionsSource = isRuntimeOptionsSource(dynamicSource);
             const srcMatch = field.dynamic_source.match(/\/api\/extensions\/([^/]+)\/models/);
             if (runtimeOptionsSource || srcMatch) {
               fetchDynamicSource(field.dynamic_source, {

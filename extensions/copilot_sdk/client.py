@@ -44,8 +44,8 @@ from ._vendor.copilot.types import (
 from .file_change_preview import build_file_change_preview
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from .te2_runtime import build_copilot_mcp_servers
-from agent_log_server.te2_runtime import (
-    build_effective_developer_instructions,
+from agent_log_server.prompt_context import build_effective_prompt_context
+from agent_log_server.te2_mcp_config import (
     build_te2_mcp_streamable_http_url,
     TE2_MCP_SERVER_NAME,
     te2_mcp_integration_enabled,
@@ -938,14 +938,16 @@ def _runtime_signature_payload(
 
     te2_enabled = te2_mcp_integration_enabled(merged)
     payload["reasoning_effort"] = merged.get("reasoning_effort") or merged.get("effort")
-    payload["developer_instructions"] = build_effective_developer_instructions(
+    payload["developer_instructions"] = build_effective_prompt_context(
         merged.get("developer_instructions"),
         te2_enabled=te2_enabled,
+        cwd=merged.get("cwd"),
     )
     payload["mcp_servers"] = build_copilot_mcp_servers(
         merged.get("mcp_servers"),
         te2_enabled=te2_enabled,
         base_url=merged.get("te2_base_url"),
+        cwd=merged.get("cwd"),
     )
     return payload
 
@@ -990,9 +992,10 @@ def _build_session_runtime_config(
     if isinstance(reasoning_effort, str) and reasoning_effort.strip():
         config["reasoning_effort"] = reasoning_effort.strip()
 
-    developer_instructions = build_effective_developer_instructions(
+    developer_instructions = build_effective_prompt_context(
         merged.get("developer_instructions"),
         te2_enabled=te2_mcp_integration_enabled(merged),
+        cwd=merged.get("cwd"),
     )
     if developer_instructions:
         config["system_message"] = {
@@ -1004,6 +1007,7 @@ def _build_session_runtime_config(
         merged.get("mcp_servers"),
         te2_enabled=te2_mcp_integration_enabled(merged),
         base_url=merged.get("te2_base_url"),
+        cwd=merged.get("cwd"),
     )
     if mcp_servers is not None:
         te2_cfg = mcp_servers.get(TE2_MCP_SERVER_NAME) if isinstance(mcp_servers, dict) else None

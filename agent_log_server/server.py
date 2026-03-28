@@ -33,10 +33,13 @@ from framework_shells.api import fws_ui
 from framework_shells.orchestrator import Orchestrator
 
 import extensions as ext_loader
-from agent_log_server.te2_runtime import (
+from agent_log_server.prompt_context import (
+    build_effective_prompt_context,
+    load_repo_memory_snapshot,
+)
+from agent_log_server.te2_mcp_config import (
     TE2_MCP_SERVER_NAME,
     build_codex_thread_config,
-    build_effective_developer_instructions,
     build_te2_mcp_streamable_http_url,
     te2_mcp_integration_enabled,
 )
@@ -5291,9 +5294,10 @@ def _inject_codex_runtime_settings(
             effort = settings.get("effort") or settings.get("reasoning_effort")
             if effort and "reasoningEffort" not in params:
                 params["reasoningEffort"] = effort
-        effective_developer_instructions = build_effective_developer_instructions(
+        effective_developer_instructions = build_effective_prompt_context(
             settings.get("developer_instructions"),
             te2_enabled=te2_mcp_integration_enabled(settings),
+            cwd=settings.get("cwd") if isinstance(settings, dict) else None,
         )
         if effective_developer_instructions and "developerInstructions" not in params:
             params["developerInstructions"] = effective_developer_instructions
@@ -5343,9 +5347,10 @@ def _codex_thread_runtime_signature(settings: Optional[Dict[str, Any]]) -> str:
         "sandbox": _normalize_codex_thread_sandbox(
             effective_settings.get("sandbox") or effective_settings.get("sandboxPolicy")
         ),
-        "developerInstructions": build_effective_developer_instructions(
+        "developerInstructions": build_effective_prompt_context(
             effective_settings.get("developer_instructions"),
             te2_enabled=te2_mcp_integration_enabled(effective_settings),
+            cwd=effective_settings.get("cwd"),
         ),
         "config": effective_config,
     }
@@ -5369,9 +5374,10 @@ def _build_codex_thread_reconfigure_params(thread_id: str, settings: Optional[Di
     )
     if sandbox_value:
         params["sandbox"] = sandbox_value
-    params["developerInstructions"] = build_effective_developer_instructions(
+    params["developerInstructions"] = build_effective_prompt_context(
         effective_settings.get("developer_instructions"),
         te2_enabled=te2_mcp_integration_enabled(effective_settings),
+        cwd=effective_settings.get("cwd"),
     )
     params["config"] = build_codex_thread_config(
         effective_settings.get("config"),
@@ -6752,6 +6758,33 @@ async def api_appserver_conversation_draft(payload: Dict[str, Any] = Body(...)):
     })
 
     return {"status": "saved", "conversation_id": convo_id, "draft_hash": draft_hash}
+
+
+@app.get("/api/appserver/repo_memory")
+async def api_appserver_repo_memory(conversation_id: Optional[str] = Query(None)):
+    async with _config_lock:
+        cfg = _load_appserver_config()
+
+    resolved_conversation_id = conversation_id
+    if not isinstance(resolved_conversation_id, str) or not resolved_conversation_id.strip():
+        resolved_conversation_id = cfg.get("conversation_id") if isinstance(cfg.get("conversation_id"), str) else None
+
+    cwd = cfg.get("cwd") if isinstance(cfg.get("cwd"), str) and cfg.get("cwd").strip() else None
+    if isinstance(resolved_conversation_id, str) and resolved_conversation_id:
+        meta = _load_conversation_meta(resolved_conversation_id)
+        settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
+        convo_cwd = settings.get("cwd") if isinstance(settings.get("cwd"), str) and settings.get("cwd").strip() else None
+        if convo_cwd:
+            cwd = convo_cwd
+
+    if not isinstance(cwd, str) or not cwd.strip():
+        host_project_root = _HOST_UI_STATE.get("project_root")
+        if isinstance(host_project_root, str) and host_project_root.strip():
+            cwd = host_project_root
+
+    snapshot = load_repo_memory_snapshot(cwd)
+    snapshot["conversation_id"] = resolved_conversation_id if isinstance(resolved_conversation_id, str) and resolved_conversation_id else None
+    return {"ok": True, **snapshot}
 
 
 @app.get("/api/appserver/conversations")

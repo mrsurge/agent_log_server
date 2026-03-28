@@ -56,9 +56,33 @@ from framework_shells import get_manager as get_framework_shell_manager
 from mcp.server.fastmcp import FastMCP
 
 
-def _find_project_root() -> Path:
-    """Walk up from CWD to find the directory containing .agent-pty.toml (like git finds .git)."""
-    cur = Path(os.path.abspath(os.getcwd()))
+def _logical_abspath(path: Path | str) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _launch_cwd() -> Path:
+    raw = os.environ.get("PWD")
+    if isinstance(raw, str) and raw.strip():
+        logical = _logical_abspath(raw.strip())
+        if logical.is_dir():
+            return logical
+    return _logical_abspath(os.getcwd())
+
+
+def _project_root_search_starts() -> list[Path]:
+    starts: list[Path] = []
+    logical = _launch_cwd()
+    starts.append(logical)
+    actual = _logical_abspath(os.getcwd())
+    if actual not in starts:
+        starts.append(actual)
+    return starts
+
+
+def _find_project_root(start: Optional[Path | str] = None) -> Path:
+    """Walk up from the harness cwd to find the directory containing .agent-pty.toml."""
+    start_path = _logical_abspath(start or _launch_cwd())
+    cur = start_path
     while True:
         if (cur / ".agent-pty.toml").exists():
             return cur
@@ -66,19 +90,25 @@ def _find_project_root() -> Path:
         if parent == cur:
             break
         cur = parent
-    return Path(os.path.abspath(os.getcwd()))
+    return start_path
 
 
-def _logical_abspath(path: Path | str) -> Path:
-    return Path(os.path.abspath(os.path.expanduser(str(path))))
+def _current_project_root() -> Path:
+    return _find_project_root(_project_root_search_starts()[0])
 
 
-_KB_ROOT: Path = _find_project_root()
+def _current_project_roots() -> list[Path]:
+    roots: list[Path] = []
+    for start in _project_root_search_starts():
+        root = _find_project_root(start)
+        if root not in roots:
+            roots.append(root)
+    return roots
 
 
 def _load_project_config(root: Optional[Path] = None) -> dict:
-    """Load .agent-pty.toml from a directory (defaults to _KB_ROOT)."""
-    base = root or _KB_ROOT
+    """Load .agent-pty.toml from a directory (defaults to the current project root)."""
+    base = _logical_abspath(root) if root is not None else _current_project_root()
     config_path = base / ".agent-pty.toml"
     if not config_path.exists():
         return {}
@@ -89,12 +119,9 @@ def _load_project_config(root: Optional[Path] = None) -> dict:
         return {}
 
 
-_PROJECT_CONFIG = _load_project_config()
-
-
-def _kb_configured_files() -> list[str]:
+def _kb_configured_files(root: Optional[Path] = None) -> list[str]:
     """Return the list of knowledge files from config, validated."""
-    raw = _PROJECT_CONFIG.get("knowledge", {}).get("files", [])
+    raw = _load_project_config(root).get("knowledge", {}).get("files", [])
     if isinstance(raw, str):
         raw = [raw]
     result: list[str] = []
@@ -3123,7 +3150,8 @@ def _kb_dict_to_error_text(d: Dict[str, Any]) -> str:
 
 def _kb_resolve_file(file: Optional[str] = None) -> Path | Dict[str, Any]:
     """Resolve a knowledge file path. Returns absolute Path or error dict."""
-    files = _kb_configured_files()
+    root = _current_project_root()
+    files = _kb_configured_files(root)
     if not files:
         return _kb_error("NotConfigured", "No knowledge files in .agent-pty.toml")
 
@@ -3146,7 +3174,7 @@ def _kb_resolve_file(file: Optional[str] = None) -> Path | Dict[str, Any]:
             f"File '{selected}' not in configured knowledge files",
             configured=files,
         )
-    return _logical_abspath(_KB_ROOT / selected)
+    return _logical_abspath(root / selected)
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -3247,9 +3275,9 @@ def _toml_quote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _save_kb_files_config(files: list[str]) -> None:
+def _save_kb_files_config(files: list[str], *, root: Path) -> None:
     """Write knowledge.files config to .agent-pty.toml (minimal managed format)."""
-    config_path = _KB_ROOT / ".agent-pty.toml"
+    config_path = _logical_abspath(root / ".agent-pty.toml")
     lines = [
         "# Agent PTY project configuration",
         "# Auto-managed by kb tools.",
@@ -3259,6 +3287,17 @@ def _save_kb_files_config(files: list[str]) -> None:
         "",
     ]
     _atomic_write(config_path, "\n".join(lines))
+
+
+def _load_kb_files_config(*, root: Path) -> list[str]:
+    cfg = _load_project_config(root)
+    kb = cfg.get("knowledge", {})
+    raw_files = kb.get("files", [])
+    if isinstance(raw_files, str):
+        return [raw_files]
+    if isinstance(raw_files, list):
+        return [str(x) for x in raw_files if isinstance(x, str)]
+    return []
 
 
 def _snippet_with_offsets(line: str, match_start: int, match_end: int, context_chars: int) -> tuple[str, int, int]:
@@ -3291,36 +3330,21 @@ def _snippet_with_offsets(line: str, match_start: int, match_end: int, context_c
 
 @mcp.tool(name="kb_list", description="List configured markdown knowledge files.")
 async def kb_list() -> str:
-    files = _kb_configured_files()
+    root = _current_project_root()
+    files = _kb_configured_files(root)
     if not files:
         return _kb_error_text("NotConfigured", "No knowledge files in .agent-pty.toml")
-    out = [f"[kb_list: {len(files)} files  root: {_KB_ROOT}]"]
+    out = [f"[kb_list: {len(files)} files  root: {root}]"]
     for f in files:
         out.append(f"  {f}")
     return "\n".join(out)
 
 
-@mcp.tool(name="kb_reload_config", description="Reload .agent-pty.toml config and return effective knowledge files. Optionally set project root via cwd.")
-async def kb_reload_config(cwd: Optional[str] = None) -> str:
-    global _PROJECT_CONFIG, _KB_ROOT
-    if cwd:
-        new_root = _logical_abspath(cwd)
-        if not new_root.is_dir():
-            return _kb_error_text("InvalidParameter", f"Not a directory: {cwd}")
-        # Walk up to find .agent-pty.toml from the given cwd
-        cur = new_root
-        while True:
-            if (cur / ".agent-pty.toml").exists():
-                new_root = cur
-                break
-            parent = cur.parent
-            if parent == cur:
-                break
-            cur = parent
-        _KB_ROOT = new_root
-    _PROJECT_CONFIG = _load_project_config()
-    files = _kb_configured_files()
-    out = [f"[kb_reload_config: OK  root: {_KB_ROOT}]"]
+@mcp.tool(name="kb_reload_config", description="Reload .agent-pty.toml config for the current project root.")
+async def kb_reload_config() -> str:
+    root = _current_project_root()
+    files = _kb_configured_files(root)
+    out = [f"[kb_reload_config: OK  root: {root}]"]
     out.append(f"  files: {', '.join(files) if files else '(none)'}")
     return "\n".join(out)
 
@@ -3335,10 +3359,16 @@ async def kb_add_file(abs_path: str) -> str:
     if not p.exists() or not p.is_file():
         return _kb_error_text("FileNotAllowed", f"File not found: {p}")
 
-    root = _logical_abspath(_KB_ROOT)
-    try:
-        rel = p.relative_to(root)
-    except Exception:
+    roots = _current_project_roots()
+    root = roots[0]
+    rel: Optional[Path] = None
+    for candidate_root in roots:
+        try:
+            rel = p.relative_to(candidate_root)
+            break
+        except Exception:
+            continue
+    if rel is None:
         return _kb_error_text(
             "FileNotAllowed",
             "File must be inside current project root",
@@ -3350,26 +3380,62 @@ async def kb_add_file(abs_path: str) -> str:
     if ".." in rel.parts:
         return _kb_error_text("FileNotAllowed", "Path traversal not allowed", path=rel_str)
 
-    cfg = _load_project_config()
-    kb = cfg.get("knowledge", {})
-    raw_files = kb.get("files", [])
-    if isinstance(raw_files, str):
-        files = [raw_files]
-    elif isinstance(raw_files, list):
-        files = [str(x) for x in raw_files if isinstance(x, str)]
-    else:
-        files = []
+    files = _load_kb_files_config(root=root)
 
     if rel_str not in files:
         files.append(rel_str)
 
-    _save_kb_files_config(files)
+    _save_kb_files_config(files, root=root)
 
-    global _PROJECT_CONFIG
-    _PROJECT_CONFIG = _load_project_config()
-    all_files = _kb_configured_files()
-    config_path = _logical_abspath(_KB_ROOT / ".agent-pty.toml")
+    all_files = _kb_configured_files(root)
+    config_path = _logical_abspath(root / ".agent-pty.toml")
     return f"[kb_add_file: OK  added: {rel_str}]\n  config: {config_path}\n  files: {', '.join(all_files)}"
+
+
+@mcp.tool(name="kb_remove_file", description="Remove a file (absolute path) from knowledge.files and hot-reload config.")
+async def kb_remove_file(abs_path: str) -> str:
+    if not isinstance(abs_path, str) or not abs_path.strip():
+        return _kb_error_text("InvalidParameter", "abs_path is required")
+    p = _logical_abspath(abs_path)
+    if not p.is_absolute():
+        return _kb_error_text("InvalidParameter", "abs_path must be an absolute path")
+
+    roots = _current_project_roots()
+    root = roots[0]
+    rel: Optional[Path] = None
+    for candidate_root in roots:
+        try:
+            rel = p.relative_to(candidate_root)
+            break
+        except Exception:
+            continue
+    if rel is None:
+        return _kb_error_text(
+            "FileNotAllowed",
+            "File must be inside current project root",
+            project_root=str(root),
+            abs_path=str(p),
+        )
+
+    rel_str = rel.as_posix()
+    if ".." in rel.parts:
+        return _kb_error_text("FileNotAllowed", "Path traversal not allowed", path=rel_str)
+
+    files = _load_kb_files_config(root=root)
+    if rel_str not in files:
+        return _kb_error_text(
+            "FileNotConfigured",
+            "File is not registered in knowledge.files",
+            file=rel_str,
+        )
+
+    files = [f for f in files if f != rel_str]
+    _save_kb_files_config(files, root=root)
+
+    all_files = _kb_configured_files(root)
+    config_path = _logical_abspath(root / ".agent-pty.toml")
+    rendered_files = ", ".join(all_files) if all_files else "(none)"
+    return f"[kb_remove_file: OK  removed: {rel_str}]\n  config: {config_path}\n  files: {rendered_files}"
 
 
 @mcp.tool(name="kb_schema", description="Show heading schema for a markdown knowledge file with optional drill-down.")
