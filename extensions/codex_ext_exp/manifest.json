@@ -1,0 +1,133 @@
+{
+  "id": "codex-ext-exp",
+  "name": "Codex Extension (Experimental)",
+  "version": "1.0.0",
+  "type": "codex_ext_exp",
+  "description": "Codex CLI extension via the app-server binary (JSON-RPC over stdio)",
+  "enabled": true,
+
+  "agent": {
+    "command": "/data/data/com.termux/files/home/downloads/codex/codex-rs/target/debug/codex-app-server",
+    "args": [],
+    "shellspec": "shellspec/app_server_exp.yaml#app_server_exp"
+  },
+
+  "capabilities": {
+    "sessionResume": true,
+    "streaming": true,
+    "modelListing": true,
+    "permissionHandling": true,
+    "collabAgents": true,
+    "hasPlan": false,
+    "hasTodo": true,
+    "hasPlanModes": true
+  },
+
+  "dependencies": {
+    "has_check": true,
+    "has_install": true
+  },
+
+  "model": {
+    "name": "gpt-5.1-codex",
+    "provider": "openai"
+  },
+
+  "ui": {
+    "icon": "codex.svg",
+    "color": "#10a37f",
+    "semanticShellRibbon": {
+      "quoteParsing": true
+    },
+    "toolRenderPolicy": {
+      "default": {
+        "args": "plain",
+        "result": "plain"
+      },
+      "rules": [
+        {
+          "server": "agent-pty-blocks",
+          "tool": "agent_log_post",
+          "requestFields": {
+            "message": "markdown"
+          }
+        },
+        {
+          "server": "agent-pty-blocks",
+          "tool": "agent_log_post_await",
+          "requestFields": {
+            "message": "markdown"
+          }
+        },
+        {
+          "server": "agent-pty-blocks",
+          "toolPrefix": "agent_log_",
+          "response": "markdown"
+        },
+        {
+          "server": "agent-pty-blocks",
+          "tool": "kb_write",
+          "requestFields": {
+            "content": "markdown"
+          }
+        },
+        {
+          "server": "agent-pty-blocks",
+          "tool": "kb_update",
+          "requestFields": {
+            "content": "markdown"
+          }
+        },
+        {
+          "server": "agent-pty-blocks",
+          "toolPrefix": "kb_",
+          "response": "markdown"
+        },
+        {
+          "server": "te2-mcp",
+          "tool": "te2_console_eval",
+          "requestFields": {
+            "target_worker_id": "plain",
+            "code": {
+              "kind": "hljs",
+              "language": "javascript"
+            }
+          },
+          "responseFields": {
+            "workerId": "plain",
+            "reqId": "plain",
+            "ok": "plain",
+            "value": {
+              "kind": "hljs",
+              "language": "json"
+            }
+          }
+        }
+      ]
+    },
+    "requestCards": [
+      {
+        "id": "codex-ext-exp-rich-approval",
+        "module": "ui/request_cards/codex_ext_exp_request_card.js",
+        "export": "renderRequestCard",
+        "matches": [
+          {
+            "requestMethod": "item/commandExecution/requestApproval"
+          },
+          {
+            "requestMethod": "item/fileChange/requestApproval"
+          },
+          {
+            "requestMethod": "item/tool/requestUserInput"
+          },
+          {
+            "requestMethod": "item/tool/call"
+          },
+          {
+            "requestMethod": "mcpServer/elicitation/request"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -7,10 +7,12 @@ from the installed binary plus the generic extension hook surface.
 
 import asyncio
 import contextlib
+import hashlib
 import importlib
 import json
 import os
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -25,6 +27,8 @@ from .runtime_protocol import (
     get_runtime_protocol,
 )
 from .transport import CodexAppServerTransport
+from agent_log_server.prompt_context import build_effective_prompt_context
+from agent_log_server.pending_context import pop_pending
 from agent_log_server.te2_mcp_config import te2_mcp_integration_enabled
 
 # Stored references to server callbacks
@@ -55,6 +59,24 @@ def _add_to_raw_buffer(direction: str, conversation_id: str, data: Any) -> None:
     _raw_buffer.append(entry)
     if len(_raw_buffer) > _RAW_BUFFER_MAX:
         _raw_buffer.pop(0)
+
+
+def _debug_text_hash(text: Any) -> str:
+    if not isinstance(text, str) or not text:
+        return "-"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _debug_log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _build_prompt_context_from_settings(settings: Dict[str, Any]) -> Optional[str]:
+    return build_effective_prompt_context(
+        settings.get("developer_instructions"),
+        te2_enabled=te2_mcp_integration_enabled(settings),
+        cwd=settings.get("cwd"),
+    )
 
 
 def get_raw_buffer(limit: int = 50) -> List[Dict[str, Any]]:
@@ -141,7 +163,7 @@ async def _ensure_transport_ready() -> CodexAppServerTransport:
 
 
 def _auth_state_bucket(extension_id: str) -> Dict[str, Any]:
-    key = str(extension_id or "").strip() or "codex-ext-testing"
+    key = str(extension_id or "").strip() or "codex-ext-exp"
     bucket = _auth_flow_state.get(key)
     if not isinstance(bucket, dict):
         bucket = {}
@@ -150,7 +172,7 @@ def _auth_state_bucket(extension_id: str) -> Dict[str, Any]:
 
 
 def _clear_auth_state(extension_id: str) -> None:
-    key = str(extension_id or "").strip() or "codex-ext-testing"
+    key = str(extension_id or "").strip() or "codex-ext-exp"
     _auth_flow_state.pop(key, None)
 
 
@@ -167,7 +189,7 @@ def _auth_extension_ids(*extension_ids: str) -> List[str]:
         for ext_id in _registered_extension_ids
         if isinstance(ext_id, str) and ext_id.strip()
     )
-    return registered or ["codex-ext-testing"]
+    return registered or ["codex-ext-exp"]
 
 
 async def _refresh_extension_auth_state(*extension_ids: str) -> None:
@@ -393,7 +415,7 @@ def _build_send_failure_result(error_message: Any) -> Dict[str, Any]:
         "surface_error": True,
         "failure_kind": failure_kind,
         "error_type": failure_kind,
-        "error_source": "codex-ext-testing",
+        "error_source": "codex-ext-exp",
     }
 
 
@@ -691,7 +713,7 @@ def init_codex_app_server_manager(
     print("[Codex] Extension initialized (app-server binary handler)")
 
 
-def init_codex_ext_testing_manager(
+def init_codex_ext_exp_manager(
     extensions_dir: Path,
     server_root: Path,
     fws_getter: Callable,
@@ -916,7 +938,7 @@ async def resume_session(
         return {"ok": True, "session_id": thread_id}
     except Exception as exc:
         if _looks_like_auth_required_error(exc):
-            await _handle_auth_failure(conversation_id, meta.get("settings", {}).get("agent") or "codex-ext-testing", str(exc))
+            await _handle_auth_failure(conversation_id, meta.get("settings", {}).get("agent") or "codex-ext-exp", str(exc))
         _add_to_raw_buffer("err", conversation_id, f"resume_failed {exc}")
         return {"ok": False, "error": f"Thread resume failed: {exc}"}
 
@@ -970,6 +992,50 @@ async def handle_message(
                 thread_id=thread_id,
                 text=text,
             )
+            # Dynamic developer instructions: only send on this turn if
+            # .repo_memory.md changed since the last turn (pending_context
+            # detected an inotify event).  Otherwise omit the field so the
+            # session-level value persists unchanged.
+            pending_update = pop_pending(conversation_id, update_type="repo_memory")
+            _debug_log(
+                f"[codex-ext-exp] turn/start pending convo={conversation_id[:8]} "
+                f"thread={thread_id[:8]} pending={bool(pending_update)} "
+                f"pending_hash={(pending_update or {}).get('content_hash', '-')}"
+            )
+            if not pending_update:
+                turn_params.pop("developerInstructions", None)
+                turn_params.pop("baseInstructions", None)
+            else:
+                # codex-ext-exp uses a patched app-server binary that accepts
+                # developerInstructions on turn/start, but its runtime schema is
+                # still sourced from a stock schema that does not advertise that
+                # field.  When a pending repo-memory update exists, inject the
+                # rebuilt prompt context manually so the patched binary receives
+                # it on the next turn.
+                if "developerInstructions" not in turn_params and "baseInstructions" not in turn_params:
+                    manual_prompt_context = _build_prompt_context_from_settings(merged_settings)
+                    if manual_prompt_context:
+                        turn_params["developerInstructions"] = manual_prompt_context
+                        _debug_log(
+                            f"[codex-ext-exp] turn/start manual-devins convo={conversation_id[:8]} "
+                            f"thread={thread_id[:8]} len={len(manual_prompt_context)} "
+                            f"hash={_debug_text_hash(manual_prompt_context)}"
+                        )
+                    else:
+                        _debug_log(
+                            f"[codex-ext-exp] turn/start manual-devins empty "
+                            f"convo={conversation_id[:8]} thread={thread_id[:8]}"
+                        )
+            instr_value = turn_params.get("developerInstructions")
+            if not isinstance(instr_value, str):
+                instr_value = turn_params.get("baseInstructions")
+            _debug_log(
+                f"[codex-ext-exp] turn/start payload convo={conversation_id[:8]} "
+                f"thread={thread_id[:8]} has_devins={isinstance(instr_value, str) and bool(instr_value)} "
+                f"devins_len={len(instr_value) if isinstance(instr_value, str) else 0} "
+                f"devins_hash={_debug_text_hash(instr_value)}"
+            )
+
             await transport.rpc_request(
                 "turn/start",
                 params=turn_params,
@@ -1007,6 +1073,24 @@ async def handle_message(
                 thread_id=thread_id,
                 text=text,
             )
+            # New thread — baseline instructions already sent via thread/start.
+            # Clear any pending so it doesn't re-fire on the next turn.
+            pending_update = pop_pending(conversation_id, update_type="repo_memory")
+            _debug_log(
+                f"[codex-ext-exp] new-thread pending-clear convo={conversation_id[:8]} "
+                f"thread={thread_id[:8]} had_pending={bool(pending_update)} "
+                f"pending_hash={(pending_update or {}).get('content_hash', '-')}"
+            )
+            instr_value = turn_params.get("developerInstructions")
+            if not isinstance(instr_value, str):
+                instr_value = turn_params.get("baseInstructions")
+            _debug_log(
+                f"[codex-ext-exp] new-thread turn/start payload convo={conversation_id[:8]} "
+                f"thread={thread_id[:8]} has_devins={isinstance(instr_value, str) and bool(instr_value)} "
+                f"devins_len={len(instr_value) if isinstance(instr_value, str) else 0} "
+                f"devins_hash={_debug_text_hash(instr_value)}"
+            )
+
             await transport.rpc_request(
                 "turn/start",
                 params=turn_params,
@@ -1018,7 +1102,7 @@ async def handle_message(
         return {"ok": True, "thread_id": thread_id, "conversation_id": conversation_id}
     except Exception as exc:
         if _looks_like_auth_required_error(exc):
-            await _handle_auth_failure(conversation_id, agent_type or "codex-ext-testing", str(exc))
+            await _handle_auth_failure(conversation_id, agent_type or "codex-ext-exp", str(exc))
         _add_to_raw_buffer("err", conversation_id, f"handle_message_failed {exc}")
         return _build_send_failure_result(exc)
 
@@ -1149,6 +1233,57 @@ async def abort_session(conversation_id: str) -> bool:
     except Exception as exc:
         _add_to_raw_buffer("err", conversation_id, f"interrupt_failed {exc}")
         return False
+
+
+async def compact_session(conversation_id: str) -> Dict[str, Any]:
+    """Send thread/compact/start to the extension-owned app-server transport.
+
+    Follows the same resume-if-needed flow as handle_message: if the thread
+    is not loaded in memory, resume it first (virtual ack), then compact.
+    """
+    if not _meta_fns or "load" not in _meta_fns:
+        return {"ok": False, "error": "meta_fns not available"}
+    meta = _meta_fns["load"](conversation_id)
+    if not isinstance(meta, dict):
+        return {"ok": False, "error": "conversation not found"}
+    thread_id = meta.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id:
+        return {"ok": False, "error": "no active thread"}
+
+    try:
+        transport = await _ensure_transport_ready()
+        protocol = await get_runtime_protocol()
+
+        # Resume thread if not loaded — same pattern as handle_message
+        if transport.needs_thread_resume(thread_id):
+            merged_settings = _merge_runtime_settings(
+                conversation_id,
+                settings=meta.get("settings") or {},
+                cwd=(meta.get("settings") or {}).get("cwd"),
+                model=(meta.get("settings") or {}).get("model"),
+            )
+            resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
+            await transport.rpc_request(
+                "thread/resume",
+                params=resume_params,
+                conversation_id=conversation_id,
+                timeout=10.0,
+            )
+            transport.mark_thread_ready(thread_id)
+            _add_to_raw_buffer("out", conversation_id, f"compact_resume thread={thread_id[:8]}")
+
+        params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)
+        await transport.rpc_request(
+            "thread/compact/start",
+            params=params,
+            conversation_id=conversation_id,
+            timeout=30.0,
+        )
+        _add_to_raw_buffer("out", conversation_id, f"compact_start thread={thread_id[:8]}")
+        return {"ok": True, "thread_id": thread_id, "conversation_id": conversation_id}
+    except Exception as exc:
+        _add_to_raw_buffer("err", conversation_id, f"compact_failed {exc}")
+        return {"ok": False, "error": str(exc), "thread_id": thread_id, "conversation_id": conversation_id}
 
 
 async def shutdown_client() -> None:

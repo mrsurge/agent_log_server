@@ -1372,6 +1372,14 @@ async def interrupt_session(extension_id: str, conversation_id: str) -> Dict[str
     return {"ok": False, "error": f"Extension {extension_id} does not support interrupt"}
 
 
+async def compact_session(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+    """Compact/condense the context window for an extension session."""
+    handler = get_handler(extension_id)
+    if handler and hasattr(handler, "compact_session"):
+        return await handler.compact_session(conversation_id)
+    return {"ok": False, "error": f"Extension {extension_id} does not support compact"}
+
+
 def get_raw_buffer(extension_id: str, limit: int = 50) -> Any:
     """Get raw debug buffer. Handler must implement get_raw_buffer()."""
     handler = get_handler(extension_id)

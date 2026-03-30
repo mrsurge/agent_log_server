@@ -13,6 +13,7 @@ Key advantages over ACP:
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -21,7 +22,8 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Callable, Awaitable, get_args
+from typing import Any, Dict, List, Optional, Callable, Awaitable, Deque, Tuple, get_args
+from collections import deque
 
 from ._vendor.copilot import (
     CopilotClient,
@@ -77,6 +79,11 @@ _sessions: Dict[str, CopilotSession] = {}
 _routers: Dict[str, CopilotEventRouter] = {}
 # Event unsubscribe fns: conversation_id -> unsubscribe callable
 _unsubs: Dict[str, Callable] = {}
+# Per-conversation event queue / worker to preserve SDK arrival order.
+_event_queues: Dict[str, asyncio.Queue[Optional[SessionEvent]]] = {}
+_event_tasks: Dict[str, asyncio.Task[None]] = {}
+_recent_event_keys: Dict[str, Deque[Tuple[str, str, str]]] = {}
+_recent_event_key_sets: Dict[str, set[Tuple[str, str, str]]] = {}
 # Runtime signature tracking: conversation_id -> signature of effective session config inputs
 _runtime_signatures: Dict[str, str] = {}
 # Per-conversation session locks: serialize init/resume/send/destroy per conversation.
@@ -98,6 +105,8 @@ _initialized: bool = False
 # Debug buffer (circular)
 _raw_buffer: List[Dict[str, Any]] = []
 _RAW_BUFFER_MAX = 2000
+_debug_raw_entry_counters: Dict[str, int] = {}
+_RECENT_EVENT_KEY_LIMIT = 512
 
 _APPROVAL_POLICY_OPTIONS: List[Dict[str, str]] = [
     {"value": "auto-approve", "label": "Auto-Approve"},
@@ -186,16 +195,158 @@ _COPILOT_PLAN_FILENAME = "plan.md"
 _COPILOT_SESSION_STATE_READ_SETTLE_SECONDS = 0.10
 
 
-def _add_to_raw_buffer(direction: str, conversation_id: str, data: Any) -> None:
+def _next_debug_raw_entry_index(conversation_id: str) -> int:
+    next_value = _debug_raw_entry_counters.get(conversation_id, 0) + 1
+    _debug_raw_entry_counters[conversation_id] = next_value
+    return next_value
+
+
+def _serialize_session_event(event: SessionEvent) -> Dict[str, Any]:
+    data = getattr(event, "data", None)
+    return {
+        "event_type": getattr(getattr(event, "type", None), "value", str(getattr(event, "type", ""))),
+        "sdk_event_id": (str(getattr(event, "id", "")).strip() or None),
+        "parent_id": (str(getattr(event, "parent_id", "")).strip() or None),
+        "data_type": type(data).__name__ if data is not None else None,
+        "data": _json_safe_sdk_value(data),
+    }
+
+
+def _event_identity_key(event: SessionEvent) -> Optional[Tuple[str, str, str]]:
+    event_type = getattr(getattr(event, "type", None), "value", str(getattr(event, "type", "")))
+    event_id = str(getattr(event, "id", "") or "").strip()
+    if not event_id:
+        return None
+    parent_id = str(getattr(event, "parent_id", "") or "").strip()
+    return (event_type, event_id, parent_id)
+
+
+def _mark_recent_event(conversation_id: str, key: Tuple[str, str, str]) -> bool:
+    seen = _recent_event_key_sets.setdefault(conversation_id, set())
+    if key in seen:
+        return False
+    order = _recent_event_keys.setdefault(conversation_id, deque())
+    order.append(key)
+    seen.add(key)
+    while len(order) > _RECENT_EVENT_KEY_LIMIT:
+        stale = order.popleft()
+        seen.discard(stale)
+    return True
+
+
+async def _drain_event_queue(conversation_id: str) -> None:
+    queue = _event_queues.get(conversation_id)
+    if queue is None:
+        return
+    try:
+        while True:
+            event = await queue.get()
+            try:
+                if event is None:
+                    return
+                key = _event_identity_key(event)
+                if key is not None and not _mark_recent_event(conversation_id, key):
+                    continue
+                router = _routers.get(conversation_id)
+                if router is None:
+                    continue
+                await router.route_event(event)
+            finally:
+                queue.task_done()
+    except asyncio.CancelledError:
+        raise
+
+
+def _ensure_event_worker(conversation_id: str) -> asyncio.Queue[Optional[SessionEvent]]:
+    queue = _event_queues.get(conversation_id)
+    if queue is None:
+        queue = asyncio.Queue()
+        _event_queues[conversation_id] = queue
+    task = _event_tasks.get(conversation_id)
+    if task is None or task.done():
+        _event_tasks[conversation_id] = asyncio.create_task(
+            _drain_event_queue(conversation_id),
+            name=f"copilot-event-drain-{conversation_id[:8]}",
+        )
+    return queue
+
+
+async def _stop_event_worker(conversation_id: str) -> None:
+    queue = _event_queues.pop(conversation_id, None)
+    task = _event_tasks.pop(conversation_id, None)
+    _recent_event_keys.pop(conversation_id, None)
+    _recent_event_key_sets.pop(conversation_id, None)
+    if queue is not None:
+        with contextlib.suppress(asyncio.QueueFull):
+            queue.put_nowait(None)
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def _replace_session_subscription(conversation_id: str, session: CopilotSession) -> None:
+    previous = _unsubs.pop(conversation_id, None)
+    if previous:
+        try:
+            previous()
+        except Exception:
+            pass
+    _unsubs[conversation_id] = session.on(_make_event_handler(conversation_id))
+
+
+def _add_to_raw_buffer(
+    direction: str,
+    conversation_id: str,
+    data: Any,
+    *,
+    payload: Any = None,
+    category: Optional[str] = None,
+) -> None:
+    summary = data if isinstance(data, str) else str(data)[:500]
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "dir": direction,
         "convo": conversation_id[:8] if conversation_id else "?",
-        "data": data if isinstance(data, str) else str(data)[:500],
+        "data": summary,
     }
     _raw_buffer.append(entry)
     if len(_raw_buffer) > _RAW_BUFFER_MAX:
         _raw_buffer.pop(0)
+
+    router = _routers.get(conversation_id)
+    if not conversation_id or not router or not router.debug_trace or not _transcript_fn:
+        return
+
+    transcript_entry: Dict[str, Any] = {
+        "role": "debug_raw",
+        "type": "debug_raw",
+        "internal": True,
+        "visibility": "internal",
+        "source": "copilot-sdk.raw",
+        "direction": direction,
+        "conversation_id": conversation_id,
+        "debug_index": _next_debug_raw_entry_index(conversation_id),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "summary": summary,
+    }
+    if category:
+        transcript_entry["category"] = category
+    if router.current_turn_id:
+        transcript_entry["turn_id"] = router.current_turn_id
+
+    if payload is not None:
+        transcript_entry["payload"] = _json_safe_sdk_value(payload)
+    elif isinstance(data, (dict, list, tuple, set)):
+        transcript_entry["payload"] = _json_safe_sdk_value(data)
+    else:
+        transcript_entry["payload"] = summary
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_transcript_fn(conversation_id, transcript_entry))
+    except RuntimeError:
+        print(f"[CopilotSDK] No running loop for debug transcript append: {conversation_id[:8]}")
 
 
 def get_raw_buffer(limit: int = 50) -> List[Dict[str, Any]]:
@@ -1069,6 +1220,7 @@ async def _recover_evicted_session(
             _unsubs.pop(conversation_id)()
         except Exception:
             pass
+    await _stop_event_worker(conversation_id)
     if stale_session and _client:
         with _client._sessions_lock:  # type: ignore[attr-defined]
             _client._sessions.pop(stale_session.session_id, None)  # type: ignore[attr-defined]
@@ -1581,13 +1733,18 @@ def _make_pre_tool_use_hook(conversation_id: str) -> Callable:
 def _make_event_handler(conversation_id: str) -> Callable[[SessionEvent], None]:
     """Create an event handler that routes SessionEvents to the conversation's router."""
     def handler(event: SessionEvent) -> None:
-        _add_to_raw_buffer("in", conversation_id, f"{event.type.value}: {str(event.data)[:200]}")
+        _add_to_raw_buffer(
+            "in",
+            conversation_id,
+            f"{event.type.value}: {str(event.data)[:200]}",
+            payload=_serialize_session_event(event),
+            category="session_event",
+        )
         router = _routers.get(conversation_id)
         if router:
             # Schedule the coroutine on the running event loop
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(router.route_event(event))
+                _ensure_event_worker(conversation_id).put_nowait(event)
             except RuntimeError:
                 print(f"[CopilotSDK] No running loop for event routing: {event.type.value}")
         else:
@@ -1631,6 +1788,7 @@ async def _ensure_client() -> CopilotClient:
                 "auto_start": True,
                 "auto_restart": True,
                 "log_level": "info",
+                "cwd": os.path.expanduser("~"),
             }
             cli_path = _resolve_external_copilot_cli_path()
             if cli_path:
@@ -1759,8 +1917,7 @@ async def _init_session_unlocked(
         _runtime_signatures[conversation_id] = runtime_signature
 
         # Subscribe to events
-        unsub = session.on(_make_event_handler(conversation_id))
-        _unsubs[conversation_id] = unsub
+        _replace_session_subscription(conversation_id, session)
 
         # Store SDK session_id as thread_id in conversation meta (like codex)
         # INVARIANT: thread_id is immutable once set — never overwrite
@@ -1881,8 +2038,7 @@ async def _resume_session_unlocked(
         _sessions[conversation_id] = session
         _runtime_signatures[conversation_id] = runtime_signature
 
-        unsub = session.on(_make_event_handler(conversation_id))
-        _unsubs[conversation_id] = unsub
+        _replace_session_subscription(conversation_id, session)
 
         await _ensure_todo_watch(conversation_id, str(sdk_session_id))
 
@@ -1936,8 +2092,7 @@ def _register_attached_session(
 
     _sessions[conversation_id] = session
     _runtime_signatures[conversation_id] = runtime_signature
-    unsub = session.on(_make_event_handler(conversation_id))
-    _unsubs[conversation_id] = unsub
+    _replace_session_subscription(conversation_id, session)
     _add_to_raw_buffer("out", conversation_id, f"session_attached sdk={sdk_session_id[:8]}")
     return session
 
@@ -2427,12 +2582,14 @@ async def _destroy_session_unlocked(conversation_id: str) -> bool:
     if unsub:
         unsub()
 
+    await _stop_event_worker(conversation_id)
     await _stop_todo_watch(conversation_id)
 
     session = _sessions.pop(conversation_id, None)
     _routers.pop(conversation_id, None)
     _runtime_signatures.pop(conversation_id, None)
     _plan_doc_state.pop(conversation_id, None)
+    _debug_raw_entry_counters.pop(conversation_id, None)
 
     if session and _client:
         with _client._sessions_lock:  # type: ignore[attr-defined]
@@ -2488,6 +2645,23 @@ async def abort_session(conversation_id: str) -> bool:
     except Exception as e:
         print(f"[CopilotSDK] abort error: {e}")
         return False
+
+
+# ── Compact ─────────────────────────────────────────────────────────
+
+async def compact_session(conversation_id: str) -> Dict[str, Any]:
+    """Compact/condense the context window for a copilot-sdk session."""
+    session = _sessions.get(conversation_id)
+    if not session:
+        return {"ok": False, "error": "no active session for conversation"}
+    try:
+        result = await session.rpc.compaction.compact(timeout=30.0)
+        success = getattr(result, "success", None)
+        print(f"[CopilotSDK] Compacted: {conversation_id[:8]} success={success}")
+        return {"ok": bool(success), "conversation_id": conversation_id}
+    except Exception as e:
+        print(f"[CopilotSDK] compact error: {e}")
+        return {"ok": False, "error": str(e), "conversation_id": conversation_id}
 
 
 # ── Shutdown alias (for server.py lifespan) ─────────────────────────

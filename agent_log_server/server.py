@@ -43,6 +43,7 @@ from agent_log_server.te2_mcp_config import (
     build_te2_mcp_streamable_http_url,
     te2_mcp_integration_enabled,
 )
+from agent_log_server import pending_context as _pending_ctx
 
 from fastcore.xml import (
     Html, Head, Body, Div, Section, Header, Footer, Main, H1, H2, H3, P, Button,
@@ -66,9 +67,12 @@ async def _lifespan(app: FastAPI):
             await _refresh_extension_runtime_state()
         except Exception as e:
             print(f"[Startup] Extension dependency sync error: {e}")
-        info = await _get_or_start_appserver_shell()
-        await _ensure_appserver_reader(info["shell_id"])
-        await _ensure_appserver_initialized()
+        # DEPRECATED: Legacy builtin codex app-server auto-start is disabled.
+        # All codex conversations should use codex-ext or codex-ext-exp extensions,
+        # which manage their own app-server processes via the extension transport.
+        # info = await _get_or_start_appserver_shell()
+        # await _ensure_appserver_reader(info["shell_id"])
+        # await _ensure_appserver_initialized()
         # Ensure the shell manager is available for agent PTY attach/terminate operations.
         # This keeps the backend stable even when the MCP stdio worker is session-scoped.
         await _get_or_start_shell_manager()
@@ -94,6 +98,15 @@ async def _lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[Startup] Sidebar IPC connect error: {e}")
         asyncio.create_task(_sidebar_connect_background(), name="sidebar-ipc-connect")
+        # Start pending-context watcher registry (tracks repo-local .repo_memory.md
+        # files for eligible conversations and watches each file independently).
+        try:
+            await _pending_ctx.start_watcher(
+                _load_conversation_meta,
+                _conversation_ids_from_disk,
+            )
+        except Exception as e:
+            print(f"[Startup] Pending-context watcher error: {e}")
     except Exception:
         pass
     yield
@@ -116,6 +129,8 @@ async def _lifespan(app: FastAPI):
         await _stop_mcp_shell()
     with suppress(Exception):
         await _stop_shell_manager()
+    with suppress(Exception):
+        _pending_ctx.stop_watcher()
 
 app = FastAPI(lifespan=_lifespan)
 socketio_server = socketio.AsyncServer(
@@ -1620,6 +1635,8 @@ def _save_conversation_meta(conversation_id: str, meta: Dict[str, Any]) -> None:
     path = _conversation_meta_path(conversation_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    with suppress(Exception):
+        _pending_ctx.refresh_conversation(conversation_id)
 
 
 def _ensure_pending_approvals(meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -8007,6 +8024,42 @@ async def api_appserver_compact(payload: Optional[Dict[str, Any]] = Body(None)):
     thread_id = meta.get("thread_id")
     if not thread_id:
         raise HTTPException(status_code=409, detail="No active thread to compact")
+
+    # Route to extension if non-legacy agent
+    agent_type = (meta.get("settings") or {}).get("agent", "codex")
+    if agent_type != "codex" and ext_loader.has_extension(agent_type):
+        await _emit_command_result_mirror(
+            convo_id,
+            command="context compact",
+            output=f"request: sending thread/compact/start for thread {thread_id}",
+            event="thread/compact/start/request",
+            source="system",
+            shared_fields={"thread_id": thread_id, "phase": "request"},
+        )
+        result = await ext_loader.compact_session(agent_type, convo_id)
+        if not result.get("ok"):
+            error_detail = result.get("error", "compact failed")
+            await _emit_command_result_mirror(
+                convo_id,
+                command="context compact",
+                output=f"error: thread/compact/start failed for thread {thread_id}: {error_detail}",
+                event="thread/compact/start/error",
+                exit_code=1,
+                source="system",
+                shared_fields={"thread_id": thread_id, "phase": "error", "error": True},
+            )
+            raise HTTPException(status_code=500, detail=f"thread/compact/start failed: {error_detail}")
+        await _emit_command_result_mirror(
+            convo_id,
+            command="context compact",
+            output=f"response: app-server accepted thread/compact/start for thread {thread_id}; waiting for thread/compacted",
+            event="thread/compact/start/response",
+            source="system",
+            shared_fields={"thread_id": thread_id, "phase": "response"},
+        )
+        return {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
+
+    # Legacy codex path (DEPRECATED — will be removed)
     info = await _get_or_start_appserver_shell()
     await _ensure_appserver_reader(info["shell_id"])
     await _ensure_appserver_initialized()

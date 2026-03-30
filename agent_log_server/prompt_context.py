@@ -8,7 +8,6 @@ from typing import Any, Dict, Optional
 
 REPO_MEMORY_FILENAME = ".repo_memory.md"
 _DEFAULT_TEMPLATE_PATH = Path(os.path.abspath(__file__)).parent.parent / "DEVELOPER_MESSAGE_TEMPLATE.md"
-_REPO_MEMORY_MAX_CHARS = 12000
 
 
 def _template_path(template_path: Optional[str] = None) -> Path:
@@ -70,7 +69,7 @@ def _detect_repo_memory_root(start: Path) -> Path:
 def load_repo_memory_snapshot(
     cwd: Any,
     *,
-    max_chars: int = _REPO_MEMORY_MAX_CHARS,
+    max_chars: int = 0,
 ) -> Dict[str, Any]:
     logical_cwd = _logical_cwd_path(cwd)
     snapshot: Dict[str, Any] = {

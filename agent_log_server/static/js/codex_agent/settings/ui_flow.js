@@ -395,7 +395,6 @@ export function bindSettingsUiFlow(ctx) {
         if (ext.id === 'codex') return;
         agents.push({ value: ext.id, label: ext.id });
       });
-      agents.push({ value: 'codex', label: 'codex-legacy' });
       updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl, onAgentSelectionChange);
     } catch {
       // ignore

@@ -37,7 +37,8 @@ agent_log_server = [
 ]
 extensions = ["*.json", "*/*.json"]
 "extensions.acp" = ["*.json"]
-"extensions.codex_ext_testing" = ["*.json"]
+"extensions.codex_ext" = ["*.json"]
+"extensions.codex_ext_exp" = ["*.json"]
 "extensions.copilot_sdk" = ["*.json"]
 "extensions.copilot_sdk._vendor.copilot" = ["py.typed"]
 

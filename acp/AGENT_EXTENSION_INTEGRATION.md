@@ -2,10 +2,12 @@
 
 > Historical note: this file lives under `acp/` for now because that folder predates the current extension system. The content here is no longer ACP-specific.
 
-This document describes the current pluggable agent-extension architecture in `agent_log_server`, the hook surface exposed by the backend, and the two real reference implementations that exist today:
+This document describes the current pluggable agent-extension architecture in `agent_log_server`, the hook surface exposed by the backend, and the real reference implementations that exist today:
 
 - `copilot-sdk` — the more complete, production-style example
-- `codex-ext-testing` — the Codex app-server extension example; legacy `codex` is a separate built-in compatibility path in `server.py`, not a normal registered extension
+- `codex-ext` — the stable Codex app-server extension example
+- `codex-ext-exp` — the experimental Codex fork for dynamic developer-instruction / pending-context work
+- `codex-ext-testing` — a compatibility registry alias that resolves to `codex-ext`; legacy `codex` is still a separate built-in compatibility path in `server.py`, not a normal registered extension
 
 The goal is to explain how to build a new agent extension without hardcoding backend-specific logic into `server.py`, `static/codex_agent.js`, or `static/modals/settings_schema.js`.
 
@@ -41,6 +43,10 @@ These rules matter more than any individual implementation detail:
    - use `internal: true` on both the live event and the transcript entry
    - normal frontend live-play, replay, and conversation-preview paths must ignore internal-tagged records
    - `/api/appserver/transcript/range` hides internal-tagged rows by default; opt in with `include_internal=true` when you need to inspect them directly
+
+7. **Runtime UI/backend contracts are Socket.IO-only**
+   - generic HTTP endpoints still exist for data loading, session browsing, debug, and admin flows
+   - do not add HTTP fallback paths for runtime UI/backend behavior unless the user explicitly approves that fallback
 
 ## Terms used in this repo
 
@@ -113,7 +119,8 @@ Each root has its own `extensions.json`.
 | `~/.local/share/app_server/extensions/<folder>/client.py` | User-installed extension client module |
 | `~/.local/share/app_server/extensions/<folder>/router.py` | User-installed optional event translation layer |
 | `~/.local/share/app_server/extensions/<folder>/settings_schema.json` | User-installed optional static settings schema |
-| `extensions/codex_ext_testing/runtime_protocol.py` | Codex extension-specific runtime schema/cache helper |
+| `extensions/codex_ext/runtime_protocol.py` | Stable Codex runtime schema/cache helper |
+| `extensions/codex_ext_exp/runtime_protocol.py` | Experimental Codex runtime schema/cache helper |
 | `agent_log_server/server.py` | Generic backend entrypoint |
 | `agent_log_server/static/modals/settings_schema.js` | Generic schema-driven settings renderer |
 
@@ -142,10 +149,24 @@ At startup, the server ensures the user root exists and seeds its `extensions.js
       "enabled": true
     },
     {
+      "id": "codex-ext",
+      "name": "Codex Extension",
+      "type": "codex_ext",
+      "path": "codex_ext",
+      "enabled": true
+    },
+    {
       "id": "codex-ext-testing",
-      "name": "Codex Extension Testing",
-      "type": "codex_ext_testing",
-      "path": "codex_ext_testing",
+      "name": "Codex Extension Testing (compat shim → codex-ext)",
+      "type": "codex_ext",
+      "path": "codex_ext",
+      "enabled": true
+    },
+    {
+      "id": "codex-ext-exp",
+      "name": "Codex Extension (Experimental)",
+      "type": "codex_ext_exp",
+      "path": "codex_ext_exp",
       "enabled": true
     }
   ]
@@ -256,7 +277,7 @@ await ext_loader.route_event(
 )
 ```
 
-For the built-in `codex` agent, legacy server-side handling still remains as a fallback for non-collab events. `codex-ext-testing` uses the extension-owned route directly.
+For the built-in `codex` agent, legacy server-side handling still remains as a fallback for non-collab events. `codex-ext` and `codex-ext-exp` use the extension-owned route directly, and `codex-ext-testing` simply resolves to the `codex-ext` handler.
 
 ### Approval and interrupt plumbing
 
@@ -365,28 +386,36 @@ It demonstrates almost the entire generic surface:
 - tool policy hooks
 - rich event routing
 
-## Reference implementation 2: Codex app-server extension (experimental / MVP)
+## Reference implementation 2: Codex app-server extensions
 
-`extensions/codex_ext_testing` is the runtime-schema-driven example.
+`extensions/codex_ext` is the stable runtime-schema-driven example. `extensions/codex_ext_exp` is the experimental fork that layers dynamic developer-instruction / pending-context work on top of the same architecture. `codex-ext-testing` in the registry is only a compatibility alias that resolves to `codex-ext`.
 
 ### Registered extension IDs
 
-The registered extension ID is:
+The currently registered Codex extension IDs are:
 
-- `codex-ext-testing`
+- `codex-ext` — stable extension-owned Codex path
+- `codex-ext-testing` — compatibility shim → `codex-ext`
+- `codex-ext-exp` — experimental fork with its own shellspec and transport label
 
 Legacy `codex` is not loaded from the extension registry. It remains a built-in compatibility path in `server.py` with its own server-owned transport/orchestration.
 
-`codex-ext-testing`:
+`codex-ext`:
 
 - exercises the generic extension architecture end to end
 - uses runtime-generated settings schema, session picker, send/receive hooks, and bind/import hooks
 - owns its own framework-shell-backed app-server transport (`app-server:codex-extension`)
 - is the active proving ground for the schema-driven, extension-owned transport approach
 
+`codex-ext-exp`:
+
+- reuses the same generic extension architecture and runtime-schema approach
+- keeps a separate shellspec/transport label so it can point at a patched `codex-app-server` binary
+- is where dynamic developer-instruction / pending-context behavior is being explored without destabilizing the stable path
+
 ### Runtime protocol architecture
 
-This extension does **not** depend on a committed schema artifact anymore.
+These extensions do **not** depend on a committed schema artifact anymore.
 
 At runtime it:
 
@@ -401,7 +430,7 @@ At runtime it:
    - `ServerNotification`
    - `EventMsg`
 
-That logic lives in `extensions/codex_ext_testing/runtime_protocol.py`.
+The stable runtime protocol/cache logic lives in `extensions/codex_ext/runtime_protocol.py`. The experimental fork mirrors the same pattern in `extensions/codex_ext_exp/runtime_protocol.py`.
 
 ### What the runtime schema is used for
 
@@ -431,6 +460,7 @@ That logic lives in `extensions/codex_ext_testing/runtime_protocol.py`.
 
 - **event routing**
   - the router checks runtime-known notification and event types before translating them
+  - the experimental fork reuses the same runtime-shaped request/event model while layering in its dynamic developer-instruction flow
 
 ### Hook usage
 
@@ -469,16 +499,22 @@ That logic lives in `extensions/codex_ext_testing/runtime_protocol.py`.
     - collab subagent lifecycle events
   - routed results may also include a generic `meta_patch` object; `server.py` applies it to `meta.json` so extensions can persist conversation-local live state without adding extension-specific backend code
 
+- **`compact_session(...)`**
+  - powers the generic frontend `compact` flow via `ext_loader.compact_session(...)`
+  - resumes the thread first when transport state requires it, then sends `thread/compact/start`
+
 ### framework_shells interaction
 
 Unlike the Copilot SDK extension, Codex app-server does use `framework_shells`.
 
-- `codex-ext-testing` starts/adopts a dedicated shell labeled `app-server:codex-extension`
-- that shell uses the observed shellspec entry `app_server_observed`
+- `codex-ext` starts/adopts a dedicated shell labeled `app-server:codex-extension` and uses `shellspec/app_server.yaml#app_server`
+- `codex-ext-exp` starts/adopts a dedicated shell labeled `app-server:codex-experimental` and uses `extensions/codex_ext_exp/shellspec/app_server_exp.yaml#app_server_exp`
+- both paths use observed shellspec entries (`app_server_observed` / `app_server_exp_observed`) for framework-shell observability
 - `agent_log_server.rpc_stdio_mirror` preserves the real stdout pipe for the transport parser while mirroring RPC stdin/stdout traffic to stderr for framework-shell observability
-- the handler also hardens startup by restarting locally when an adopted shell lacks a live stdin pipe
+- both handlers harden startup by restarting locally when an adopted shell lacks a live stdin pipe
+- `codex-ext-exp` keeps a distinct transport label/shellspec so it can point at the patched `codex-app-server` binary without process adoption conflicts
 
-### Current state of the Codex extension
+### Current state of the Codex extensions
 
 What works now:
 
@@ -491,23 +527,25 @@ What works now:
 - extension-owned app-server transport
 - real two-way message flow
 - interrupt support
+- compaction support through the generic `compact` flow
 - stderr RPC observability via the wrapper shell
 - extension-owned MVP live routing
+- `codex-ext-exp` adds dynamic developer-instruction / pending-context experimentation on a patched app-server binary
 
-What is intentionally still incomplete:
+What is intentionally still evolving:
 
-- full tool call render coverage
-- full approval plumbing through the extension-owned path
+- richer tool-card/render parity
+- continued approval-path parity across the stable and experimental forks
 
 Existing conversation hydration is already handled through the local transcript replay path and is not an extension-specific transport concern.
 
-Those are the next major slices after basic two-way communication.
+`codex-ext-testing` should be treated as a compatibility alias for the stable path, not as a third independent implementation.
 
 ## How to build a new agent extension
 
 Use the Copilot SDK and Codex app-server implementations as the two reference patterns.
 
-Legacy `codex` in `server.py` is the hard-coded compatibility template, but new extensions do **not** get their own special server/frontend branches. A real extension must plug into the same generic `server.py` / `ext_loader` hook surface as `copilot-sdk` and `codex-ext-testing`, so it also works when loaded from non-builtin extension roots.
+Legacy `codex` in `server.py` is the hard-coded compatibility template, but new extensions do **not** get their own special server/frontend branches. A real extension must plug into the same generic `server.py` / `ext_loader` hook surface as `copilot-sdk` and `codex-ext`, so it also works when loaded from non-builtin extension roots.
 
 ### 1. Add a registry entry
 
@@ -608,6 +646,8 @@ If your extension exposes plan/collaboration mode, the router should translate l
 
 If the live UI sees a field, replay should also see it later. That means router output must always have a transcript equivalent whenever replay depends on it.
 
+See `TRANSCRIPT_CARD_CONTRACTS.md` for the shared generic card shapes and replay-parity rules.
+
 ### 9. Validate the extension end to end
 
 Recommended checklist:
@@ -643,10 +683,10 @@ Use the **Codex app-server pattern** when:
 The extension architecture is now the intended long-term path.
 
 - `copilot-sdk` is the mature example
-- `codex-ext-testing` proves the runtime-schema-driven, extension-owned transport model
-- the next major Codex extension slices are:
-  - tool call rendering
-  - approval flow integration
+- `codex-ext` is the live runtime-schema-driven, extension-owned Codex path
+- `codex-ext-exp` is the experimental fork for dynamic context injection and patched app-server work
+- `codex-ext-testing` remains a compatibility alias to `codex-ext`
+- the next major Codex slices continue to be tool/render parity and approval-path parity
 
 ## Rename note
 

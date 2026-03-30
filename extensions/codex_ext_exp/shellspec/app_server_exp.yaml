@@ -1,0 +1,25 @@
+version: "1"
+shells:
+  app_server_exp:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["codex_agent", "app_server", "codex_exp"]
+    command:
+      - /data/data/com.termux/files/home/downloads/codex/codex-rs/target/debug/codex-app-server
+    labels:
+      app: "codex-app-server-exp"
+  app_server_exp_observed:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["codex_agent", "app_server", "codex_exp", "observed"]
+    command:
+      - python
+      - -u
+      - -m
+      - agent_log_server.rpc_stdio_mirror
+      - --label
+      - codex-app-server-exp
+      - --
+      - /data/data/com.termux/files/home/downloads/codex/codex-rs/target/debug/codex-app-server
+    labels:
+      app: "codex-app-server-exp-observed"

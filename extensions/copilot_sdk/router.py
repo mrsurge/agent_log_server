@@ -132,6 +132,7 @@ class CopilotEventRouter:
         self._active_subagents: Dict[str, Dict[str, Any]] = {}  # tool_call_id -> subagent info
         self._known_subagent_ids: set = set()  # all seen subagent ids for validation
         self._subagent_tool_ids: set = set()  # tool_call_ids that belong to a subagent
+        self._recorded_reasoning_ids: set = set()  # reasoning ids already persisted this turn
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -393,6 +394,79 @@ class CopilotEventRouter:
             return next(iter(self._active_subagents))
         return None
 
+    def _resolve_reasoning_id(self, data: Any = None) -> Optional[str]:
+        for candidate in (
+            getattr(data, "reasoning_id", None) if data is not None else None,
+            getattr(data, "reasoningId", None) if data is not None else None,
+            self.current_reasoning_id,
+        ):
+            normalized = self._normalize_id(candidate)
+            if normalized:
+                return normalized
+        return None
+
+    @staticmethod
+    def _extract_reasoning_text(data: Any) -> str:
+        if data is None:
+            return ""
+        return (
+            getattr(data, "reasoning_text", None)
+            or getattr(data, "reasoningText", None)
+            or ""
+        )
+
+    async def _record_reasoning(self, text: str, *, data: Any = None) -> bool:
+        if not text:
+            return False
+
+        reasoning_id = self._resolve_reasoning_id(data)
+        if reasoning_id and reasoning_id in self._recorded_reasoning_ids:
+            self.current_thought_text = ""
+            return False
+
+        if not reasoning_id:
+            self._block_counter += 1
+            reasoning_id = f"reasoning_{self._turn_counter}_{self._block_counter}"
+            self.current_reasoning_id = reasoning_id
+
+        await self._record({
+            "role": "reasoning",
+            "id": reasoning_id,
+            "text": text,
+            "timestamp": utc_ts(),
+            "turn_id": self.current_turn_id,
+        })
+
+        self._recorded_reasoning_ids.add(reasoning_id)
+        self.current_thought_text = ""
+        return True
+
+    async def _finalize_message(self, text: str, *, subagent_id: Optional[str]) -> None:
+        finalize_evt = {
+            "type": "assistant_finalize",
+            "conversation_id": self.conversation_id,
+            "id": self.current_message_id,
+            "text": text,
+            "turn_id": self.current_turn_id,
+        }
+        if subagent_id:
+            finalize_evt["subagent_id"] = subagent_id
+        await self._emit(finalize_evt)
+
+        record = {
+            "role": "assistant",
+            "id": self.current_message_id,
+            "text": text,
+            "timestamp": utc_ts(),
+            "turn_id": self.current_turn_id,
+        }
+        if subagent_id:
+            record["subagent_id"] = subagent_id
+        await self._record(record)
+
+        self.current_message_text = ""
+        self.current_message_subagent_id = None
+
     async def _trace_subagent_provenance(
         self,
         event: SessionEvent,
@@ -647,6 +721,29 @@ class CopilotEventRouter:
         if not content:
             return
 
+        resolved_subagent_id = self._resolve_message_subagent_id(event)
+        if resolved_subagent_id:
+            self.current_message_subagent_id = resolved_subagent_id
+            subagent_id = resolved_subagent_id
+        else:
+            subagent_id = self.current_message_subagent_id
+
+        # For streamed top-level replies, replay should mirror live ordering:
+        # if reasoning deltas already appeared, persist that reasoning first,
+        # then finalize the assistant message before any later tool card.
+        if self.current_thought_text and not subagent_id:
+            reasoning_text = self._extract_reasoning_text(data) or self.current_thought_text
+            await self._record_reasoning(reasoning_text, data=data)
+
+        # A top-level streamed assistant reply with real content should finalize
+        # here, not at turn_end. Tool-request envelopes can also arrive as
+        # assistant.message with empty content; those are ignored above.
+        if self.current_message_text and not subagent_id:
+            self.current_message_text = content
+            self._last_block_type = "message"
+            await self._finalize_message(content, subagent_id=subagent_id)
+            return
+
         trace_needed = False
         # Always bump block counter for each complete message.
         # SDK sends ASSISTANT_MESSAGE (complete) without preceding deltas for
@@ -658,12 +755,6 @@ class CopilotEventRouter:
             self.current_message_subagent_id = None
             trace_needed = True
 
-        resolved_subagent_id = self._resolve_message_subagent_id(event)
-        if resolved_subagent_id:
-            self.current_message_subagent_id = resolved_subagent_id
-            subagent_id = resolved_subagent_id
-        else:
-            subagent_id = self.current_message_subagent_id
         if trace_needed:
             await self._trace_subagent_provenance(
                 event,
@@ -672,45 +763,11 @@ class CopilotEventRouter:
                 resolved_subagent_id=subagent_id,
             )
 
-        finalize_evt = {
-            "type": "assistant_finalize",
-            "conversation_id": self.conversation_id,
-            "id": self.current_message_id,
-            "text": content,
-            "turn_id": self.current_turn_id,
-        }
-        if subagent_id:
-            finalize_evt["subagent_id"] = subagent_id
-        await self._emit(finalize_evt)
-
-        record = {
-            "role": "assistant",
-            "id": self.current_message_id,
-            "text": content,
-            "timestamp": utc_ts(),
-            "turn_id": self.current_turn_id,
-        }
-        if subagent_id:
-            record["subagent_id"] = subagent_id
-        await self._record(record)
-
-        self.current_message_text = ""
-        self.current_message_subagent_id = None
+        await self._finalize_message(content, subagent_id=subagent_id)
 
     async def _handle_reasoning_complete(self, data: Any) -> None:
-        text = getattr(data, "reasoning_text", None) or self.current_thought_text
-        if not text:
-            return
-
-        await self._record({
-            "role": "reasoning",
-            "id": self.current_reasoning_id,
-            "text": text,
-            "timestamp": utc_ts(),
-            "turn_id": self.current_turn_id,
-        })
-
-        self.current_thought_text = ""
+        text = self._extract_reasoning_text(data) or self.current_thought_text
+        await self._record_reasoning(text, data=data)
 
     # ── Turn lifecycle ──────────────────────────────────────────────
 
@@ -721,6 +778,7 @@ class CopilotEventRouter:
         self.current_message_text = ""
         self.current_message_subagent_id = None
         self.current_thought_text = ""
+        self._recorded_reasoning_ids.clear()
 
         await self._emit_mode(
             getattr(data, "agent_mode", None),
@@ -739,40 +797,12 @@ class CopilotEventRouter:
         """Assistant turn completed."""
         # Flush any pending reasoning
         if self.current_thought_text:
-            await self._record({
-                "role": "reasoning",
-                "id": self.current_reasoning_id,
-                "text": self.current_thought_text,
-                "timestamp": utc_ts(),
-                "turn_id": self.current_turn_id,
-            })
-            self.current_thought_text = ""
+            await self._record_reasoning(self.current_thought_text)
 
         # Flush any pending message
         if self.current_message_text:
             subagent_id = self.current_message_subagent_id
-            flush_finalize = {
-                "type": "assistant_finalize",
-                "conversation_id": self.conversation_id,
-                "id": self.current_message_id,
-                "text": self.current_message_text,
-                "turn_id": self.current_turn_id,
-            }
-            if subagent_id:
-                flush_finalize["subagent_id"] = subagent_id
-            await self._emit(flush_finalize)
-            flush_record = {
-                "role": "assistant",
-                "id": self.current_message_id,
-                "text": self.current_message_text,
-                "timestamp": utc_ts(),
-                "turn_id": self.current_turn_id,
-            }
-            if subagent_id:
-                flush_record["subagent_id"] = subagent_id
-            await self._record(flush_record)
-            self.current_message_text = ""
-            self.current_message_subagent_id = None
+            await self._finalize_message(self.current_message_text, subagent_id=subagent_id)
 
         await self._emit({
             "type": "turn_completed",
@@ -1554,6 +1584,7 @@ class CopilotEventRouter:
         self.tool_calls = {}
         self._block_counter = 0
         self._last_block_type = None
+        self._recorded_reasoning_ids.clear()
 
         user_msg_id = f"user_{self._turn_counter}"
 
