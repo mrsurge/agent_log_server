@@ -1000,32 +1000,39 @@ async def handle_message(
             _debug_log(
                 f"[codex-ext-exp] turn/start pending convo={conversation_id[:8]} "
                 f"thread={thread_id[:8]} pending={bool(pending_update)} "
+                f"pending_mode={(pending_update or {}).get('mode', '-')} "
                 f"pending_hash={(pending_update or {}).get('content_hash', '-')}"
             )
             if not pending_update:
                 turn_params.pop("developerInstructions", None)
                 turn_params.pop("baseInstructions", None)
             else:
-                # codex-ext-exp uses a patched app-server binary that accepts
-                # developerInstructions on turn/start, but its runtime schema is
-                # still sourced from a stock schema that does not advertise that
-                # field.  When a pending repo-memory update exists, inject the
-                # rebuilt prompt context manually so the patched binary receives
-                # it on the next turn.
-                if "developerInstructions" not in turn_params and "baseInstructions" not in turn_params:
-                    manual_prompt_context = _build_prompt_context_from_settings(merged_settings)
-                    if manual_prompt_context:
-                        turn_params["developerInstructions"] = manual_prompt_context
-                        _debug_log(
-                            f"[codex-ext-exp] turn/start manual-devins convo={conversation_id[:8]} "
-                            f"thread={thread_id[:8]} len={len(manual_prompt_context)} "
-                            f"hash={_debug_text_hash(manual_prompt_context)}"
-                        )
+                pending_mode = str(pending_update.get("mode") or "").strip().lower()
+                manual_prompt_context = None
+                if pending_mode == "delta":
+                    candidate = pending_update.get("content")
+                    if isinstance(candidate, str) and candidate.strip():
+                        manual_prompt_context = candidate.strip()
                     else:
-                        _debug_log(
-                            f"[codex-ext-exp] turn/start manual-devins empty "
-                            f"convo={conversation_id[:8]} thread={thread_id[:8]}"
-                        )
+                        pending_mode = "full"
+                if pending_mode != "delta":
+                    manual_prompt_context = _build_prompt_context_from_settings(merged_settings)
+                    pending_mode = "full"
+
+                turn_params.pop("developerInstructions", None)
+                turn_params.pop("baseInstructions", None)
+                if manual_prompt_context:
+                    turn_params["developerInstructions"] = manual_prompt_context
+                    _debug_log(
+                        f"[codex-ext-exp] turn/start manual-devins convo={conversation_id[:8]} "
+                        f"thread={thread_id[:8]} mode={pending_mode} len={len(manual_prompt_context)} "
+                        f"hash={_debug_text_hash(manual_prompt_context)}"
+                    )
+                else:
+                    _debug_log(
+                        f"[codex-ext-exp] turn/start manual-devins empty "
+                        f"convo={conversation_id[:8]} thread={thread_id[:8]} mode={pending_mode}"
+                    )
             instr_value = turn_params.get("developerInstructions")
             if not isinstance(instr_value, str):
                 instr_value = turn_params.get("baseInstructions")

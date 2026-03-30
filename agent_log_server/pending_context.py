@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from .prompt_context import REPO_MEMORY_FILENAME, load_repo_memory_snapshot
+from .repo_memory_delta import build_repo_memory_delta
 from .te2_mcp_config import te2_mcp_integration_enabled
 
 # -- Configuration -----------------------------------------------------
@@ -43,17 +44,21 @@ _EVENT_HEADER_FMT = "iIII"
 
 # PendingContextUpdate shape:
 # {
-#     "type": "repo_memory",       # open-ended for future types
-#     "content": str,              # the new snapshot content
-#     "ts": float,                 # when the change was detected
-#     "source_path": str,          # abs path to the changed file
-#     "content_hash": str,         # sha256 of content for dedup
+#     "type": "repo_memory",          # open-ended for future types
+#     "mode": "delta" | "full",      # delivery mode for the next turn
+#     "content": str,                 # delta markdown or full snapshot
+#     "snapshot_content": str,        # latest file snapshot
+#     "ts": float,                    # when the change was detected
+#     "source_path": str,             # abs path to the changed file
+#     "content_hash": str,            # sha256 of latest file snapshot for dedup
 # }
 
 # -- Module state ------------------------------------------------------
 
 _pending: Dict[str, List[Dict[str, Any]]] = {}
-_last_content_hash: Dict[str, str] = {}  # source_path -> hash of last queued content
+_last_content_hash: Dict[str, str] = {}  # source_path -> hash of last seen snapshot
+_last_content_text: Dict[str, str] = {}  # source_path -> last seen snapshot text
+_conversation_snapshot_text: Dict[str, str] = {}  # conversation_id -> last delivered snapshot text
 _meta_loader: Optional[Callable[[str], Dict[str, Any]]] = None
 _conversation_lister: Optional[Callable[[], List[str]]] = None
 _conversation_targets: Dict[str, Dict[str, str]] = {}
@@ -94,6 +99,9 @@ def pop_pending(
         entries.clear()
         if not entries:
             _pending.pop(conversation_id, None)
+        snapshot_content = entry.get("snapshot_content")
+        if entry.get("type") == "repo_memory" and isinstance(snapshot_content, str):
+            _conversation_snapshot_text[conversation_id] = snapshot_content
         return entry
 
     # Find most recent of the requested type
@@ -104,6 +112,9 @@ def pop_pending(
             entries[:] = [e for e in entries if e.get("type") != update_type]
             if not entries:
                 _pending.pop(conversation_id, None)
+            snapshot_content = entry.get("snapshot_content")
+            if entry.get("type") == "repo_memory" and isinstance(snapshot_content, str):
+                _conversation_snapshot_text[conversation_id] = snapshot_content
             return entry
 
     return None
@@ -127,6 +138,19 @@ def queue_update(conversation_id: str, update: Dict[str, Any]) -> None:
 def clear_all() -> None:
     """Clear all pending updates. Mainly for testing."""
     _pending.clear()
+    _last_content_hash.clear()
+    _last_content_text.clear()
+    _conversation_snapshot_text.clear()
+
+
+def _prime_watch_state(memory_path: str) -> None:
+    try:
+        content = Path(memory_path).read_text(encoding="utf-8").strip()
+    except Exception as exc:
+        _log(f"[pending_context] failed to prime {memory_path}: {exc}")
+        return
+    _last_content_text[memory_path] = content
+    _last_content_hash[memory_path] = _content_hash(content)
 
 
 # -- inotify helpers ---------------------------------------------------
@@ -233,6 +257,8 @@ def _stop_watch(memory_path: str) -> None:
         task.cancel()
 
     _watcher_conversations.pop(memory_path, None)
+    _last_content_hash.pop(memory_path, None)
+    _last_content_text.pop(memory_path, None)
 
 
 def _ensure_watch(memory_path: str) -> None:
@@ -251,6 +277,7 @@ def _ensure_watch(memory_path: str) -> None:
         _log(f"[pending_context] no running loop; cannot watch {memory_path}")
         return
 
+    _prime_watch_state(memory_path)
     stop_event = asyncio.Event()
     _watcher_stop_events[memory_path] = stop_event
     _watcher_tasks[memory_path] = loop.create_task(
@@ -262,6 +289,7 @@ def _ensure_watch(memory_path: str) -> None:
 
 def _unregister_conversation(conversation_id: str) -> None:
     target = _conversation_targets.pop(conversation_id, None)
+    _conversation_snapshot_text.pop(conversation_id, None)
     if not target:
         return
 
@@ -289,14 +317,18 @@ def refresh_conversation(conversation_id: str) -> Optional[Dict[str, str]]:
         return None
 
     memory_path = target["memory_path"]
+    snapshot = load_repo_memory_snapshot(target["repo_root"])
+    snapshot_content = snapshot.get("content", "") if isinstance(snapshot, dict) else ""
     if current == target:
         _watcher_conversations.setdefault(memory_path, set()).add(conversation_id)
+        _conversation_snapshot_text.setdefault(conversation_id, snapshot_content if isinstance(snapshot_content, str) else "")
         _ensure_watch(memory_path)
         return target
 
     _unregister_conversation(conversation_id)
     _conversation_targets[conversation_id] = target
     _watcher_conversations.setdefault(memory_path, set()).add(conversation_id)
+    _conversation_snapshot_text[conversation_id] = snapshot_content if isinstance(snapshot_content, str) else ""
     _ensure_watch(memory_path)
     _log(f"[pending_context] tracking {conversation_id[:8]} -> {memory_path}")
     return target
@@ -348,7 +380,10 @@ def _handle_file_change(source_path: str) -> int:
         _log(f"[pending_context] unchanged path={source_path} hash={new_hash}")
         return 0
 
+    update_ts = time.time()
+
     _last_content_hash[source_path] = new_hash
+    _last_content_text[source_path] = content
     conversations = sorted(_watcher_conversations.get(source_path, set()))
     _log(
         f"[pending_context] file_change path={source_path} "
@@ -358,19 +393,29 @@ def _handle_file_change(source_path: str) -> int:
         _log(f"[pending_context] change detected in {source_path} but no matching conversations")
         return 0
 
-    update = {
-        "type": "repo_memory",
-        "content": content,
-        "ts": time.time(),
-        "source_path": source_path,
-        "content_hash": new_hash,
-    }
-
     for cid in conversations:
+        base_snapshot = _conversation_snapshot_text.get(cid, "")
+        delta_markdown = None
+        if old_hash is not None:
+            delta_markdown = build_repo_memory_delta(
+                base_snapshot,
+                content,
+                source_path=source_path,
+                ts=update_ts,
+            )
+        update = {
+            "type": "repo_memory",
+            "mode": "delta" if isinstance(delta_markdown, str) and delta_markdown.strip() else "full",
+            "content": delta_markdown if isinstance(delta_markdown, str) and delta_markdown.strip() else content,
+            "snapshot_content": content,
+            "ts": update_ts,
+            "source_path": source_path,
+            "content_hash": new_hash,
+        }
         queue_update(cid, update)
 
     _log(
-        f"[pending_context] queued repo_memory update for "
+        f"[pending_context] queued repo_memory {update['mode']} update for "
         f"{len(conversations)} conversation(s): {[c[:8] for c in conversations]}"
     )
     return len(conversations)
@@ -495,6 +540,9 @@ def stop_watcher() -> None:
     _watcher_stop_events.clear()
     _watcher_conversations.clear()
     _conversation_targets.clear()
+    _conversation_snapshot_text.clear()
+    _last_content_hash.clear()
+    _last_content_text.clear()
     _meta_loader = None
     _conversation_lister = None
 
@@ -509,7 +557,6 @@ __all__ = [
     "clear_all",
     "has_pending",
     "is_watching",
-    "pending_count",
     "pop_pending",
     "queue_update",
     "refresh_all_conversations",
