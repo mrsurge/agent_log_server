@@ -1077,24 +1077,26 @@ document.addEventListener('DOMContentLoaded', () => {
     output.className = 'command-output view-card-lines';
     output.classList.toggle('wrap-enabled', viewWrapEnabled === true);
 
-    const table = document.createElement('div');
+    const table = document.createElement('table');
     table.className = 'view-card-table';
     const gutterDigits = getStructuredViewGutterDigits(lines);
     table.style.setProperty('--view-card-gutter-ch', String(gutterDigits));
+    const tableBody = document.createElement('tbody');
 
     const lang = detectLangFromPath(path);
     const highlightedLines = typeof hljs !== 'undefined' ? buildHighlightedViewLineHtml(lines, lang) : [];
 
     lines.forEach((line, idx) => {
-      const row = document.createElement('div');
+      const row = document.createElement('tr');
       row.className = 'view-card-line';
       row.dataset.lineNo = String(line.line_no);
 
-      const gutter = document.createElement('div');
+      const gutter = document.createElement('td');
       gutter.className = 'view-card-line-no transcript-line-no';
+      gutter.dataset.lineNo = String(line.line_no);
       gutter.textContent = String(line.line_no).padStart(gutterDigits, ' ');
 
-      const content = document.createElement('div');
+      const content = document.createElement('td');
       content.className = 'view-card-line-content transcript-line-content';
       content.dataset.lineNo = String(line.line_no);
       const lineHtml = highlightedLines[idx];
@@ -1106,9 +1108,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
       row.appendChild(gutter);
       row.appendChild(content);
-      table.appendChild(row);
+      tableBody.appendChild(row);
     });
 
+    table.appendChild(tableBody);
     output.appendChild(table);
     return output;
   }
