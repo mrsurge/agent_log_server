@@ -21,8 +21,12 @@ from typing import Any, Dict, Optional
 
 import pyte
 import pyte.modes
+import socketio
 
-from agent_log_server.markdown_sections import SectionNode, parse_markdown
+from agent_log_server.markdown_sections import SectionNode, normalize_heading as _normalize_heading, parse_markdown
+from agent_log_server.ipc_auth import load_or_create_ipc_secret
+from agent_log_server.prompt_context import REPO_MEMORY_FILENAME
+from agent_log_server.repo_memory_delta import build_repo_memory_delta
 
 
 def _ensure_framework_shells_secret() -> None:
@@ -134,6 +138,83 @@ def _kb_configured_files(root: Optional[Path] = None) -> list[str]:
             continue
         result.append(str(p))
     return result
+
+
+_APPSERVER_ORIGIN = os.environ.get("AGENT_LOG_SERVER_ORIGIN", "http://127.0.0.1:12359")
+_APPSERVER_IPC_NAMESPACE = "/ipc"
+_appserver_ipc_sio: Optional[socketio.AsyncClient] = None
+_appserver_ipc_lock = asyncio.Lock()
+
+
+async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
+    global _appserver_ipc_sio
+    async with _appserver_ipc_lock:
+        if _appserver_ipc_sio and _appserver_ipc_sio.connected:
+            return _appserver_ipc_sio
+        if _appserver_ipc_sio:
+            with contextlib.suppress(Exception):
+                await _appserver_ipc_sio.disconnect()
+            _appserver_ipc_sio = None
+
+        client = socketio.AsyncClient(reconnection=True, reconnection_attempts=3)
+        try:
+            await client.connect(
+                _APPSERVER_ORIGIN,
+                auth={"secret": load_or_create_ipc_secret()},
+                namespaces=[_APPSERVER_IPC_NAMESPACE],
+                transports=["websocket"],
+                wait_timeout=5,
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            raise
+        _appserver_ipc_sio = client
+        return client
+
+
+async def _notify_repo_memory_ipc(path: Path, old_text: str, new_text: str) -> Optional[str]:
+    if path.name != REPO_MEMORY_FILENAME:
+        return None
+
+    previous_content = old_text.strip()
+    current_content = new_text.strip()
+    update_ts = time.time()
+    delta_content = build_repo_memory_delta(
+        previous_content,
+        current_content,
+        source_path=str(path),
+        ts=update_ts,
+    )
+    payload = {
+        "source_path": str(path),
+        "previous_content": previous_content,
+        "current_content": current_content,
+        "delta_content": delta_content or "",
+        "ts": update_ts,
+    }
+    client = await _get_appserver_ipc_sio()
+    ack = await client.call(
+        "repo_memory_delta",
+        payload,
+        namespace=_APPSERVER_IPC_NAMESPACE,
+        timeout=10,
+    )
+    if not isinstance(ack, dict) or not ack.get("ok"):
+        detail = ack.get("error") if isinstance(ack, dict) else ack
+        raise RuntimeError(f"repo_memory_delta IPC failed: {detail}")
+    return (
+        f"[kb_ipc: OK  queued: {int(ack.get('queued') or 0)}"
+        f"  mode: {ack.get('mode') or '-'}  hash: {ack.get('content_hash') or '-'}]"
+    )
+
+
+def _render_kb_result(header: str, diff: str, ipc_note: Optional[str] = None) -> str:
+    parts = [header]
+    if isinstance(ipc_note, str) and ipc_note.strip():
+        parts.append(ipc_note.strip())
+    parts.append(diff)
+    return "\n".join(parts)
 
 
 _DEFAULT_CONVERSATION_DIR = Path(os.path.expanduser("~/.cache/app_server/conversations"))
@@ -3553,9 +3634,14 @@ async def kb_write(
 
     diff = _unified_diff(old_text, new_text, str(path))
     action = "DRY RUN" if dry_run else "WRITTEN"
+    ipc_note = None
     if not dry_run:
         _atomic_write(path, new_text)
-    return f"[kb_write: {action}  hash: {_content_hash(new_text)}]\n{diff}"
+        try:
+            ipc_note = await _notify_repo_memory_ipc(path, old_text, new_text)
+        except Exception as exc:
+            ipc_note = f"[kb_ipc: ERROR  {exc}]"
+    return _render_kb_result(f"[kb_write: {action}  hash: {_content_hash(new_text)}]", diff, ipc_note)
 
 
 @mcp.tool(name="kb_update", description="Update body or subtree of a markdown section.")
@@ -3605,9 +3691,14 @@ async def kb_update(
     diff = _unified_diff(old_text, new_text, str(path))
 
     action = "DRY RUN" if dry_run else "WRITTEN"
+    ipc_note = None
     if not dry_run:
         _atomic_write(path, new_text)
-    return f"[kb_update: {action}  hash: {_content_hash(content)}]\n{diff}"
+        try:
+            ipc_note = await _notify_repo_memory_ipc(path, old_text, new_text)
+        except Exception as exc:
+            ipc_note = f"[kb_ipc: ERROR  {exc}]"
+    return _render_kb_result(f"[kb_update: {action}  hash: {_content_hash(content)}]", diff, ipc_note)
 
 
 @mcp.tool(name="kb_remove", description="Remove body or subtree of a markdown section.")
@@ -3656,9 +3747,14 @@ async def kb_remove(
     diff = _unified_diff(old_text, new_text, str(path))
 
     action = "DRY RUN" if dry_run else "REMOVED"
+    ipc_note = None
     if not dry_run:
         _atomic_write(path, new_text)
-    return f"[kb_remove: {action}]\n{diff}"
+        try:
+            ipc_note = await _notify_repo_memory_ipc(path, old_text, new_text)
+        except Exception as exc:
+            ipc_note = f"[kb_ipc: ERROR  {exc}]"
+    return _render_kb_result(f"[kb_remove: {action}]", diff, ipc_note)
 
 
 # =============================================================================
