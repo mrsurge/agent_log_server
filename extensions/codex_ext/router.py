@@ -317,6 +317,7 @@ def _build_view_title(path: str, view_range: Optional[List[int]]) -> str:
 
 
 _CODEX_VIEW_LINE_RE = re.compile(r"^\s*(\d+):(.*)$")
+_CODEX_NL_VIEW_LINE_RE = re.compile(r"^\s*(\d+)\t(.*)$")
 
 
 def _parse_codex_view_lines(content: str) -> Optional[List[Dict[str, Any]]]:
@@ -328,15 +329,23 @@ def _parse_codex_view_lines(content: str) -> Optional[List[Dict[str, Any]]]:
     parsed: List[Dict[str, Any]] = []
     for raw_line in content.splitlines():
         match = _CODEX_VIEW_LINE_RE.match(raw_line)
-        if not match:
-            return None
-        line_content = match.group(2)
-        if line_content[:1] in {" ", "\t"}:
-            line_content = line_content[1:]
-        parsed.append({
-            "line_no": int(match.group(1)),
-            "content": line_content,
-        })
+        if match:
+            line_content = match.group(2)
+            if line_content[:1] in {" ", "\t"}:
+                line_content = line_content[1:]
+            parsed.append({
+                "line_no": int(match.group(1)),
+                "content": line_content,
+            })
+            continue
+        nl_match = _CODEX_NL_VIEW_LINE_RE.match(raw_line)
+        if nl_match:
+            parsed.append({
+                "line_no": int(nl_match.group(1)),
+                "content": nl_match.group(2),
+            })
+            continue
+        return None
     return parsed
 
 
@@ -392,11 +401,58 @@ def _last_non_flag_token(tokens: List[str], start: int = 1) -> Optional[str]:
     return candidate
 
 
+def _parse_sed_view_range(range_token: Any) -> Optional[List[int]]:
+    text = str(range_token or "").strip()
+    if not text:
+        return None
+    m = re.fullmatch(r"(\d+),(\d+)p", text)
+    if m:
+        return [int(m.group(1)), int(m.group(2))]
+    m = re.fullmatch(r"(\d+)p", text)
+    if m:
+        return [int(m.group(1))]
+    return None
+
+
+def _shell_pipeline_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[Dict[str, Any]]:
+    if tokens.count("|") != 1:
+        return None
+    pipe_index = tokens.index("|")
+    if pipe_index <= 0 or pipe_index >= len(tokens) - 1:
+        return None
+
+    left = tokens[:pipe_index]
+    right = tokens[pipe_index + 1 :]
+    if not left or not right:
+        return None
+    if left[0] != "nl" or "-ba" not in left[1:]:
+        return None
+    if right[0] != "sed" or len(right) < 3 or right[1] != "-n":
+        return None
+
+    path = _last_non_flag_token(left)
+    if not path or path.startswith("-"):
+        return None
+    if len(right) > 3 and any(token != "--" for token in right[3:]):
+        return None
+
+    view_range = _parse_sed_view_range(right[2])
+    if view_range is None:
+        return None
+
+    resolved_path = _resolve_view_path(path, cwd)
+    return {
+        "path": resolved_path,
+        "view_range": view_range,
+        "title": _build_view_title(resolved_path, view_range),
+    }
+
+
 def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner:
         return None
-    if any(marker in inner for marker in ("\n", "&&", "||", ";", "|", ">", "<")):
+    if any(marker in inner for marker in ("\n", "&&", "||", ";", ">", "<")):
         return None
     try:
         tokens = shlex.split(inner, posix=True)
@@ -404,6 +460,8 @@ def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[st
         return None
     if not tokens:
         return None
+    if "|" in tokens:
+        return _shell_pipeline_to_view_spec(tokens, cwd)
 
     cmd = tokens[0]
     path: Optional[str] = None
@@ -416,13 +474,7 @@ def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[st
         path = tokens[-1] if len(tokens) >= 4 else None
         if not path or path.startswith("-"):
             return None
-        m = re.fullmatch(r"(\d+),(\d+)p", range_token)
-        if m:
-            view_range = [int(m.group(1)), int(m.group(2))]
-        else:
-            m = re.fullmatch(r"(\d+)p", range_token)
-            if m:
-                view_range = [int(m.group(1))]
+        view_range = _parse_sed_view_range(range_token)
     elif cmd in {"cat", "less", "more"}:
         path = _last_non_flag_token(tokens)
     elif cmd == "bat":
