@@ -14,7 +14,7 @@ export function bindDiffRendering(ctx) {
 
   function addDiff(id, text, path, parentEl) {
     const entry = getDiffRow(id, path, parentEl);
-    entry.pre.innerHTML = formatDiff(text || '', path);
+    entry.block.innerHTML = formatDiff(text || '', path);
     setLastEventType('diff');
     maybeAutoScroll();
   }
@@ -28,10 +28,10 @@ export function bindDiffRendering(ctx) {
       pathLabel.innerHTML = `<strong>DECLINED:</strong> ${escapeHtml(toRelativePath(path))}`;
       body.appendChild(pathLabel);
     }
-    const pre = document.createElement('pre');
-    pre.className = 'diff-block';
-    pre.innerHTML = formatDiff(text || '', path);
-    body.appendChild(pre);
+    const block = document.createElement('div');
+    block.className = 'diff-block';
+    block.innerHTML = formatDiff(text || '', path);
+    body.appendChild(block);
     setLastEventType('diff');
     maybeAutoScroll();
   }
@@ -64,7 +64,7 @@ export function bindDiffRendering(ctx) {
     let currentFilePath = filePath || null;
     const fileGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
 
-    return text.split('\n').map((line) => {
+    const rows = text.split('\n').map((line) => {
       let cls = 'diff-context';
       let display = line;
       let changeMarker = ' ';
@@ -83,7 +83,7 @@ export function bindDiffRendering(ctx) {
         if (!showFileHeaders) return '';
         const relLabel = currentFilePath ? (toRelativePath(currentFilePath) || currentFilePath) : 'file';
         const safePath = currentFilePath ? escapeHtml(String(currentFilePath)) : '';
-        return `<span class="diff-line diff-file" data-path="${safePath}" data-old-line="" data-new-line=""><span class="diff-gutter transcript-line-no">${escapeHtml(fileGutter)}</span><span class="diff-text"><strong>${escapeHtml(relLabel)}</strong></span></span>`;
+        return `<tr class="diff-line diff-file" data-path="${safePath}" data-old-line="" data-new-line=""><td class="diff-gutter transcript-line-no">${escapeHtml(fileGutter)}</td><td class="diff-text"><strong>${escapeHtml(relLabel)}</strong></td></tr>`;
       }
 
       if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('index ') || line.startsWith('new file mode') || line.startsWith('deleted file mode') || line.startsWith('similarity index') || line.startsWith('rename from') || line.startsWith('rename to')) {
@@ -111,7 +111,7 @@ export function bindDiffRendering(ctx) {
           newLine = newStart;
         }
         const hunkGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
-        return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${escapeHtml(String(oldLine || ''))}" data-new-line="${escapeHtml(String(newLine || ''))}"><span class="diff-gutter transcript-line-no">${escapeHtml(hunkGutter)}</span><span class="diff-text">${escapeHtml(display)}</span></span>`;
+        return `<tr class="diff-line ${cls}" data-path="${safePath}" data-old-line="${escapeHtml(String(oldLine || ''))}" data-new-line="${escapeHtml(String(newLine || ''))}"><td class="diff-gutter transcript-line-no">${escapeHtml(hunkGutter)}</td><td class="diff-text">${escapeHtml(display)}</td></tr>`;
       } else if (line.startsWith('+') && !line.startsWith('+++')) {
         cls = 'diff-add';
         changeMarker = '+';
@@ -162,8 +162,10 @@ export function bindDiffRendering(ctx) {
 
       const dataOld = escapeHtml(String(oldNo || ''));
       const dataNew = escapeHtml(String(newNo || ''));
-      return `<span class="diff-line ${cls}" data-path="${safePath}" data-old-line="${dataOld}" data-new-line="${dataNew}"><span class="diff-gutter transcript-line-no">${escapeHtml(gutterText)}</span><span class="diff-text">${codeHtml}</span></span>`;
-    }).filter(line => line !== '').join('');
+      return `<tr class="diff-line ${cls}" data-path="${safePath}" data-old-line="${dataOld}" data-new-line="${dataNew}"><td class="diff-gutter transcript-line-no">${escapeHtml(gutterText)}</td><td class="diff-text">${codeHtml}</td></tr>`;
+    }).filter(line => line !== '');
+    if (!rows.length) return '';
+    return `<table class="diff-table" role="presentation"><tbody>${rows.join('')}</tbody></table>`;
   }
 
   function bindDiffClickHandler() {

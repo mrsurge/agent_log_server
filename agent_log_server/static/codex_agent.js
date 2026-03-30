@@ -3157,10 +3157,10 @@ document.addEventListener('DOMContentLoaded', () => {
           pathDiv.innerHTML = '<strong>diff</strong>';
         }
         body.append(pathDiv);
-        const pre = document.createElement('pre');
-        pre.className = 'diff-block';
-        pre.innerHTML = formatDiff(entry.text || '', diffPath);
-        body.append(pre);
+        const block = document.createElement('div');
+        block.className = 'diff-block';
+        block.innerHTML = formatDiff(entry.text || '', diffPath);
+        body.append(block);
         makeCollapsible(row, `diff:${entry.id || diffPath || 'diff'}`, false);
         getTarget().appendChild(row);
         return;
@@ -3706,16 +3706,16 @@ document.addEventListener('DOMContentLoaded', () => {
         pathLabel.innerHTML = '<strong>diff</strong>';
       }
       body.append(pathLabel);
-      const pre = document.createElement('pre');
-      pre.className = 'diff-block';
-      body.append(pre);
+      const block = document.createElement('div');
+      block.className = 'diff-block';
+      body.append(block);
       if (parentEl) {
         parentEl.appendChild(row);
       } else {
         insertRow(row);
       }
       makeCollapsible(row, `diff:${key}`, false);
-      entry = { pre, row };
+      entry = { block, row };
       diffRows.set(key, entry);
     }
     return entry;

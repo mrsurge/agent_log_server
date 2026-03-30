@@ -135,6 +135,112 @@ def queue_update(conversation_id: str, update: Dict[str, Any]) -> None:
     entries.append(update)
 
 
+def _build_repo_memory_update(
+    conversation_id: str,
+    *,
+    source_path: str,
+    previous_content: str,
+    current_content: str,
+    content_hash: str,
+    ts: float,
+    delta_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    base_snapshot = _conversation_snapshot_text.get(conversation_id, "")
+    existing_pending = next(
+        (entry for entry in _pending.get(conversation_id, []) if entry.get("type") == "repo_memory"),
+        None,
+    )
+    delta_markdown = None
+    if (
+        isinstance(delta_override, str)
+        and delta_override.strip()
+        and base_snapshot == previous_content
+        and (
+            existing_pending is None
+            or existing_pending.get("snapshot_content") == current_content
+        )
+    ):
+        delta_markdown = delta_override.strip()
+    else:
+        delta_markdown = build_repo_memory_delta(
+            base_snapshot,
+            current_content,
+            source_path=source_path,
+            ts=ts,
+        )
+    return {
+        "type": "repo_memory",
+        "mode": "delta" if isinstance(delta_markdown, str) and delta_markdown.strip() else "full",
+        "content": delta_markdown if isinstance(delta_markdown, str) and delta_markdown.strip() else current_content,
+        "snapshot_content": current_content,
+        "ts": ts,
+        "source_path": source_path,
+        "content_hash": content_hash,
+    }
+
+
+def queue_external_repo_memory_update(
+    source_path: str,
+    *,
+    previous_content: str,
+    current_content: str,
+    delta_content: Optional[str] = None,
+    ts: Optional[float] = None,
+) -> Dict[str, Any]:
+    raw_path = str(source_path or "").strip()
+    if not raw_path:
+        raise ValueError("source_path is required")
+    normalized_path = os.path.abspath(os.path.expanduser(raw_path))
+
+    previous_text = previous_content.strip() if isinstance(previous_content, str) else ""
+    current_text = current_content.strip() if isinstance(current_content, str) else ""
+    update_ts = float(ts) if isinstance(ts, (int, float)) else time.time()
+    new_hash = _content_hash(current_text)
+    old_hash = _last_content_hash.get(normalized_path)
+    _last_content_hash[normalized_path] = new_hash
+    _last_content_text[normalized_path] = current_text
+
+    conversations = sorted(_watcher_conversations.get(normalized_path, set()))
+    _log(
+        f"[pending_context] external_update path={normalized_path} "
+        f"hash={old_hash or '-'}->{new_hash} conversations={[c[:8] for c in conversations]}"
+    )
+    if not conversations:
+        _log(f"[pending_context] external update for {normalized_path} but no matching conversations")
+        return {
+            "queued": 0,
+            "mode": "delta" if isinstance(delta_content, str) and delta_content.strip() else "full",
+            "content_hash": new_hash,
+            "source_path": normalized_path,
+        }
+
+    modes: set[str] = set()
+    for conversation_id in conversations:
+        update = _build_repo_memory_update(
+            conversation_id,
+            source_path=normalized_path,
+            previous_content=previous_text,
+            current_content=current_text,
+            content_hash=new_hash,
+            ts=update_ts,
+            delta_override=delta_content,
+        )
+        modes.add(str(update.get("mode") or "full"))
+        queue_update(conversation_id, update)
+
+    mode = modes.pop() if len(modes) == 1 else "mixed"
+    _log(
+        f"[pending_context] queued external repo_memory {mode} update for "
+        f"{len(conversations)} conversation(s): {[c[:8] for c in conversations]}"
+    )
+    return {
+        "queued": len(conversations),
+        "mode": mode,
+        "content_hash": new_hash,
+        "source_path": normalized_path,
+    }
+
+
 def clear_all() -> None:
     """Clear all pending updates. Mainly for testing."""
     _pending.clear()
@@ -380,45 +486,14 @@ def _handle_file_change(source_path: str) -> int:
         _log(f"[pending_context] unchanged path={source_path} hash={new_hash}")
         return 0
 
-    update_ts = time.time()
-
-    _last_content_hash[source_path] = new_hash
-    _last_content_text[source_path] = content
-    conversations = sorted(_watcher_conversations.get(source_path, set()))
-    _log(
-        f"[pending_context] file_change path={source_path} "
-        f"hash={old_hash or '-'}->{new_hash} conversations={[c[:8] for c in conversations]}"
+    previous_content = _last_content_text.get(source_path, "")
+    result = queue_external_repo_memory_update(
+        source_path,
+        previous_content=previous_content,
+        current_content=content,
+        ts=time.time(),
     )
-    if not conversations:
-        _log(f"[pending_context] change detected in {source_path} but no matching conversations")
-        return 0
-
-    for cid in conversations:
-        base_snapshot = _conversation_snapshot_text.get(cid, "")
-        delta_markdown = None
-        if old_hash is not None:
-            delta_markdown = build_repo_memory_delta(
-                base_snapshot,
-                content,
-                source_path=source_path,
-                ts=update_ts,
-            )
-        update = {
-            "type": "repo_memory",
-            "mode": "delta" if isinstance(delta_markdown, str) and delta_markdown.strip() else "full",
-            "content": delta_markdown if isinstance(delta_markdown, str) and delta_markdown.strip() else content,
-            "snapshot_content": content,
-            "ts": update_ts,
-            "source_path": source_path,
-            "content_hash": new_hash,
-        }
-        queue_update(cid, update)
-
-    _log(
-        f"[pending_context] queued repo_memory {update['mode']} update for "
-        f"{len(conversations)} conversation(s): {[c[:8] for c in conversations]}"
-    )
-    return len(conversations)
+    return int(result.get("queued") or 0)
 
 
 # -- Watcher loop ------------------------------------------------------
@@ -558,6 +633,7 @@ __all__ = [
     "has_pending",
     "is_watching",
     "pop_pending",
+    "queue_external_repo_memory_update",
     "queue_update",
     "refresh_all_conversations",
     "refresh_conversation",

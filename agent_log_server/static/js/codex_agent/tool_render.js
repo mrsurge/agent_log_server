@@ -187,7 +187,7 @@ export function bindToolRender(ctx) {
         streamEl: null,
         interactionEl: null,
         diffLabelEl: null,
-        diffPre: null,
+        diffBlock: null,
       };
       toolRows.set(key, entry);
     } else if (parentEl && entry.row.parentElement !== parentEl) {
@@ -290,10 +290,10 @@ export function bindToolRender(ctx) {
     label.className = 'mcp-tool-arg-label mcp-tool-diff-label';
     const resolvedPath = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : '';
     label.textContent = resolvedPath ? `Changes: ${toRelativePath(resolvedPath) || resolvedPath}` : 'Changes';
-    const pre = document.createElement('pre');
-    pre.className = 'diff-block mcp-tool-diff';
-    pre.innerHTML = formatDiff(diffText, resolvedPath || null);
-    return { label, pre };
+    const block = document.createElement('div');
+    block.className = 'diff-block mcp-tool-diff';
+    block.innerHTML = formatDiff(diffText, resolvedPath || null);
+    return { label, block };
   }
 
   function ensureToolDiffPreview(entry, diffText, filePath = '') {
@@ -306,12 +306,12 @@ export function bindToolRender(ctx) {
     } else {
       entry.diffLabelEl.textContent = preview.label.textContent;
     }
-    if (!entry.diffPre) {
-      entry.diffPre = preview.pre;
+    if (!entry.diffBlock) {
+      entry.diffBlock = preview.block;
       const anchor = entry.diffLabelEl.nextSibling;
-      entry.body.insertBefore(entry.diffPre, anchor || null);
+      entry.body.insertBefore(entry.diffBlock, anchor || null);
     } else {
-      entry.diffPre.innerHTML = preview.pre.innerHTML;
+      entry.diffBlock.innerHTML = preview.block.innerHTML;
     }
   }
 
@@ -435,7 +435,7 @@ export function bindToolRender(ctx) {
     const diffText = resolveToolCardDiff(toolName, entry);
     if (diffText) {
       const preview = buildToolDiffPreview(diffText, filePath);
-      if (preview) body.append(preview.label, preview.pre);
+      if (preview) body.append(preview.label, preview.block);
     }
 
     if (typeof entry.output === 'string' && entry.output) {

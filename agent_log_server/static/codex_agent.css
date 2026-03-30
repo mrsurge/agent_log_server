@@ -1165,36 +1165,38 @@ textarea {
   padding: 0;
 }
 
-.timeline-row.diff pre {
+.diff-block {
   background: #000;
   color: #fff;
   border: none;
   border-radius: 0;
   margin: 0;
   padding: 12px;
-}
-
-.diff-block {
   font-size: 12px;
   line-height: 1.1;
-  white-space: pre-wrap;
-  word-break: break-all;
-  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+
+.diff-table {
+  border-collapse: collapse;
+  border-spacing: 0;
+  width: 100%;
+  table-layout: auto;
 }
 
 .diff-line {
-  display: flex;
-  align-items: stretch;
-  gap: 0;
-  margin: 0;
-  padding: 2px 0;
   line-height: 1.4;
   color: #c9d1d9;
   background: #0d1117;
-  border-bottom: 1px solid #21262d;
   cursor: pointer;
 }
-.diff-line:last-child {
+
+.diff-line > td {
+  border-bottom: 1px solid #21262d;
+  vertical-align: top;
+}
+
+.diff-line:last-child > td {
   border-bottom: none;
 }
 
@@ -1224,20 +1226,20 @@ textarea {
   background: rgba(124, 92, 255, 0.22) !important;
 }
 .diff-gutter {
+  width: 1%;
   white-space: pre;
   color: #8b949e;
   margin: 0;
-  padding: 0 4px 0 8px;
+  padding: 2px 4px 2px 8px;
   background: rgba(0, 0, 0, 0.2);
   font-variant-numeric: tabular-nums;
-  user-select: none;
 }
 .diff-text {
   white-space: pre-wrap;
   word-break: break-all;
   overflow-wrap: anywhere;
-  padding: 0 8px 0 0;
-  flex: 1;
+  padding: 2px 8px 2px 0;
+  min-width: 0;
 }
 .diff-line.diff-context {
   color: #c9d1d9;

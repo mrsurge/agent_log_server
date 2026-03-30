@@ -37,6 +37,7 @@ from agent_log_server.prompt_context import (
     build_effective_prompt_context,
     load_repo_memory_snapshot,
 )
+from agent_log_server.ipc_auth import load_or_create_ipc_secret
 from agent_log_server.te2_mcp_config import (
     TE2_MCP_SERVER_NAME,
     build_codex_thread_config,
@@ -148,6 +149,8 @@ _HOST_UI_STATE: Dict[str, Any] = {
     "ide_mode": False,
     "project_root": None,
 }
+_IPC_NAMESPACE = "/ipc"
+_IPC_SIDS: set[str] = set()
 
 
 @socketio_server.on("connect", namespace="/appserver")
@@ -158,6 +161,63 @@ async def _appserver_connect(sid, environ):
 @socketio_server.on("disconnect", namespace="/appserver")
 async def _appserver_disconnect(sid):
     return None
+
+
+def _ipc_error(msg: str) -> Dict[str, Any]:
+    return {"ok": False, "error": str(msg)}
+
+
+@socketio_server.on("connect", namespace=_IPC_NAMESPACE)
+async def _ipc_connect(sid, environ, auth=None):
+    provided = auth.get("secret") if isinstance(auth, dict) else None
+    expected = load_or_create_ipc_secret()
+    if not isinstance(provided, str) or not provided.strip():
+        raise socketio.exceptions.ConnectionRefusedError("missing secret")
+    if not secrets.compare_digest(provided.strip(), expected):
+        raise socketio.exceptions.ConnectionRefusedError("unauthorized")
+    _IPC_SIDS.add(sid)
+    return {"ok": True}
+
+
+@socketio_server.on("disconnect", namespace=_IPC_NAMESPACE)
+async def _ipc_disconnect(sid):
+    _IPC_SIDS.discard(sid)
+    return None
+
+
+@socketio_server.on("repo_memory_delta", namespace=_IPC_NAMESPACE)
+async def _ipc_repo_memory_delta(sid, data):
+    if sid not in _IPC_SIDS:
+        return _ipc_error("unauthorized")
+    if not isinstance(data, dict):
+        return _ipc_error("payload must be an object")
+
+    source_path = data.get("source_path")
+    previous_content = data.get("previous_content")
+    current_content = data.get("current_content")
+    delta_content = data.get("delta_content")
+    ts = data.get("ts")
+
+    if not isinstance(source_path, str) or not source_path.strip():
+        return _ipc_error("source_path is required")
+    if not isinstance(previous_content, str):
+        return _ipc_error("previous_content must be a string")
+    if not isinstance(current_content, str):
+        return _ipc_error("current_content must be a string")
+    if delta_content is not None and not isinstance(delta_content, str):
+        return _ipc_error("delta_content must be a string when provided")
+
+    try:
+        result = _pending_ctx.queue_external_repo_memory_update(
+            source_path,
+            previous_content=previous_content,
+            current_content=current_content,
+            delta_content=delta_content if isinstance(delta_content, str) else None,
+            ts=float(ts) if isinstance(ts, (int, float)) else None,
+        )
+    except Exception as exc:
+        return _ipc_error(exc)
+    return {"ok": True, **result}
 
 
 # ── Socket.IO inbound handlers (mirrors HTTP endpoints) ──────────────
