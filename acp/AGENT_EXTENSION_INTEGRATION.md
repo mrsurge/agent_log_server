@@ -203,6 +203,14 @@ For each extension, `extensions_dir` is the root that owns that extension:
 
 This is what keeps `server.py` from importing extension modules directly while still allowing non-builtin roots.
 
+Important import note for cross-root extensions:
+
+- relative imports are still fine for modules inside the same extension package, for example `.router` or `.dependencies`
+- shared repo helper modules are different: user-installed extensions are loaded under synthetic package names, not under the builtin `extensions.<folder>` package tree
+- when you need a shared helper that lives in the builtin top-level `extensions` package, use an absolute import such as:
+  - `from extensions.tool_card_contracts import build_tool_card_request, build_tool_card_response`
+- do not rely on parent-relative imports like `from ..tool_card_contracts import ...` for cross-root extensions
+
 ## Generic hook surface
 
 The extension system is intentionally small. Implement only the hooks your backend actually supports.
@@ -485,7 +493,7 @@ The stable runtime protocol/cache logic lives in `extensions/codex_ext/runtime_p
   - resumes the selected Codex thread through the extension-owned transport
 
 - **`hydrate_transcript(...)`**
-  - supports the **new session from port-in** flow
+  - supports the **session from port-in** flow
   - reuses the in-house rollout import helper to return flat transcript entries
   - leaves local transcript writing/replay orchestration to the generic server/frontend path
 
@@ -538,8 +546,6 @@ What is intentionally still evolving:
 - continued approval-path parity across the stable and experimental forks
 
 Existing conversation hydration is already handled through the local transcript replay path and is not an extension-specific transport concern.
-
-`codex-ext-testing` should be treated as a compatibility alias for the stable path, not as a third independent implementation.
 
 ## How to build a new agent extension
 
@@ -598,8 +604,8 @@ Use this to store callbacks and initialize any shared backend state.
 
 - choose **static `settings_schema.json`** when the backend config surface is stable
 - choose **`get_settings_schema()`** when the backend protocol is runtime-generated or version-dependent
-- if the extension participates in shared footer/runtime quick controls, expose that through schema metadata (`runtime_option`) instead of hardcoding frontend behavior
-- for plan/collaboration mode, expose a normal enumerated schema field (for example `mode`) and set the capability in the manifest; do not hard-code labels in shared UI code
+- if the extension participates in shared footer/runtime quick controls, expose that through schema metadata (`runtime_option`) 
+- for plan/collaboration mode, expose a normal enumerated schema field (for example `mode`) and set the capability in the manifest
 
 ### 5. Decide who owns backend transport/session lifecycle
 
@@ -668,7 +674,6 @@ Recommended checklist:
 Use the **Copilot SDK pattern** when:
 
 - a Python library already abstracts backend transport
-- session history can be queried directly
 - backend events are rich and callback-driven
 
 Use the **Codex app-server pattern** when:

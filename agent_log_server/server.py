@@ -33,9 +33,13 @@ from framework_shells.api import fws_ui
 from framework_shells.orchestrator import Orchestrator
 
 import extensions as ext_loader
+from agent_log_server import ask_user_interactions
 from agent_log_server.prompt_context import (
     build_effective_prompt_context,
     load_repo_memory_snapshot,
+)
+from agent_log_server.ask_user_interactions import (
+    AGENT_PTY_ASK_USER_REQUEST_METHOD as _AGENT_PTY_ASK_USER_REQUEST_METHOD,
 )
 from agent_log_server.ipc_auth import load_or_create_ipc_secret
 from agent_log_server.te2_mcp_config import (
@@ -167,6 +171,95 @@ def _ipc_error(msg: str) -> Dict[str, Any]:
     return {"ok": False, "error": str(msg)}
 
 
+async def _ipc_emit(event_name: str, payload: Dict[str, Any], sid: Optional[str] = None) -> None:
+    if sid:
+        await socketio_server.emit(event_name, payload, namespace=_IPC_NAMESPACE, to=sid)
+        return
+    await socketio_server.emit(event_name, payload, namespace=_IPC_NAMESPACE)
+
+
+def _pending_approval_turn_id(descriptor: Dict[str, Any]) -> str:
+    render_event = descriptor.get("render_event") if isinstance(descriptor.get("render_event"), dict) else {}
+    return str(descriptor.get("turn_id") or render_event.get("turn_id") or "").strip()
+
+
+def _iter_pending_approvals(
+    *,
+    request_method: Any = None,
+    conversation_id: Any = None,
+    turn_id: Any = None,
+    request_id: Any = None,
+) -> List[Tuple[str, str, Dict[str, Any]]]:
+    request_method_text = str(request_method or "").strip().lower()
+    request_id_text = str(request_id or "").strip()
+    turn_id_text = str(turn_id or "").strip()
+    conversation_id_text = str(conversation_id or "").strip()
+    if conversation_id_text:
+        conversation_id_text = _sanitize_conversation_id(conversation_id_text)
+    conversation_ids = [conversation_id_text] if conversation_id_text else _conversation_ids_from_disk()
+
+    matches: List[Tuple[str, str, Dict[str, Any]]] = []
+    seen_conversations: set[str] = set()
+    for candidate_conversation_id in conversation_ids:
+        conversation_id_value = _sanitize_conversation_id(str(candidate_conversation_id or "").strip())
+        if (
+            not conversation_id_value
+            or conversation_id_value in seen_conversations
+            or not _conversation_meta_path(conversation_id_value).exists()
+        ):
+            continue
+        seen_conversations.add(conversation_id_value)
+        meta = _load_conversation_meta(conversation_id_value)
+        pending = _ensure_pending_approvals(meta)
+        for raw_request_id, descriptor in list(pending.items()):
+            descriptor_request_id = str(raw_request_id or "").strip()
+            if not descriptor_request_id or not isinstance(descriptor, dict):
+                continue
+            if request_id_text and descriptor_request_id != request_id_text:
+                continue
+            descriptor_method = str(descriptor.get("request_method") or "").strip().lower()
+            if request_method_text and descriptor_method != request_method_text:
+                continue
+            if turn_id_text and _pending_approval_turn_id(descriptor) != turn_id_text:
+                continue
+            matches.append((conversation_id_value, descriptor_request_id, descriptor))
+    return matches
+
+
+def _find_pending_approval(request_id: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+    request_id_text = str(request_id or "").strip()
+    if not request_id_text:
+        return None
+    matches = _iter_pending_approvals(request_id=request_id_text)
+    if not matches:
+        return None
+    conversation_id, _, descriptor = matches[0]
+    return conversation_id, descriptor
+
+
+def _record_pending_approval_submission(
+    conversation_id: str,
+    request_id: Any,
+    resolution: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    conversation_id_text = _sanitize_conversation_id(str(conversation_id or "").strip())
+    request_id_text = str(request_id or "").strip()
+    if not conversation_id_text or not request_id_text or not _conversation_meta_path(conversation_id_text).exists():
+        return None
+    meta = _load_conversation_meta(conversation_id_text)
+    pending = _ensure_pending_approvals(meta)
+    descriptor = pending.get(request_id_text)
+    if not isinstance(descriptor, dict):
+        return None
+    updated = dict(descriptor)
+    updated["submitted_resolution"] = dict(resolution) if isinstance(resolution, dict) else {}
+    updated["submitted_at"] = utc_ts()
+    pending[request_id_text] = updated
+    meta["pending_approvals"] = pending
+    _save_conversation_meta(conversation_id_text, meta)
+    return updated
+
+
 @socketio_server.on("connect", namespace=_IPC_NAMESPACE)
 async def _ipc_connect(sid, environ, auth=None):
     provided = auth.get("secret") if isinstance(auth, dict) else None
@@ -218,6 +311,30 @@ async def _ipc_repo_memory_delta(sid, data):
     except Exception as exc:
         return _ipc_error(exc)
     return {"ok": True, **result}
+
+
+@socketio_server.on("ask_user_ack", namespace=_IPC_NAMESPACE)
+async def _ipc_ask_user_ack(sid, data):
+    if sid not in _IPC_SIDS:
+        return _ipc_error("unauthorized")
+    if not isinstance(data, dict):
+        return _ipc_error("payload must be an object")
+    request_id = str(
+        data.get("request_id")
+        or data.get("requestId")
+        or data.get("interaction_id")
+        or data.get("id")
+        or ""
+    ).strip()
+    if not request_id:
+        return _ipc_error("request_id is required")
+    print(f"[ask_user server] ack request_id={request_id} sid={sid}", flush=True)
+    ok = await ask_user_interactions.acknowledge_interaction(request_id)
+    if not ok:
+        print(f"[ask_user server] ack failed request_id={request_id} sid={sid}", flush=True)
+        return _ipc_error("approval is no longer pending")
+    print(f"[ask_user server] ack cleared request_id={request_id} sid={sid}", flush=True)
+    return {"ok": True, "request_id": request_id}
 
 
 # ── Socket.IO inbound handlers (mirrors HTTP endpoints) ──────────────
@@ -3595,6 +3712,19 @@ async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
     except Exception:
         pass
 
+    if evt_type == "status":
+        turn_status = str(evt.get("turn_status") or "").strip().lower()
+        if turn_status in {"interrupted", "failed"}:
+            await ask_user_interactions.cancel_interactions(
+                conversation_id=evt.get("conversation_id"),
+                turn_id=evt.get("turn_id"),
+                resolution=(
+                    {"status": "interrupted"}
+                    if turn_status == "interrupted"
+                    else {"status": "error", "error": "turn failed"}
+                ),
+            )
+
     # On diff events, notify TE2 for edit tracking via sidebar websocket
     # Only when ide_mode is on AND the conversation has trackEdits enabled
     if evt.get("type") == "diff" and _HOST_UI_STATE.get("ide_mode"):
@@ -3615,6 +3745,18 @@ async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
                     "source": "appserver_diff",
                     "conversation_id": evt.get("conversation_id", ""),
                 })
+
+
+ask_user_interactions.configure(
+    emit_ipc_fn=_ipc_emit,
+    find_pending_approval_fn=_find_pending_approval,
+    list_pending_approvals_fn=_iter_pending_approvals,
+    record_submitted_resolution_fn=_record_pending_approval_submission,
+    remove_pending_approval_fn=_remove_pending_approval,
+    build_handoff_event_fn=_build_approval_handoff_event,
+    append_handoff_fn=_append_approval_handoff_transcript_entry,
+    broadcast_ui_fn=_broadcast_appserver_ui,
+)
 
 
 async def _emit_command_result_mirror(
@@ -7875,7 +8017,10 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
     """Resolve a pending approval and clear durable meta state on success."""
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
-    request_id_raw = payload.get("request_id", payload.get("id"))
+    request_id_raw = payload.get(
+        "request_id",
+        payload.get("requestId", payload.get("interaction_id", payload.get("id"))),
+    )
     request_id = str(request_id_raw or "").strip()
     if not request_id:
         raise HTTPException(status_code=400, detail="Missing request_id")
@@ -7884,23 +8029,71 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
         if key in payload and key not in resolution:
             resolution[key] = payload.get(key)
     conversation_id = payload.get("conversation_id")
-    if not isinstance(conversation_id, str) or not conversation_id.strip():
-        async with _config_lock:
-            cfg = _load_appserver_config()
-        conversation_id = cfg.get("conversation_id")
-    if not isinstance(conversation_id, str) or not conversation_id.strip():
-        raise HTTPException(status_code=404, detail="No conversation available for approval resolution")
-    conversation_id = _sanitize_conversation_id(conversation_id.strip())
-    if not conversation_id or not _conversation_meta_path(conversation_id).exists():
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    descriptor: Optional[Dict[str, Any]] = None
+    meta: Optional[Dict[str, Any]] = None
+    print(
+        f"[ask_user server] approval_response request_id={request_id} conversation_id={conversation_id or '-'} "
+        f"payload_keys={sorted(payload.keys()) if isinstance(payload, dict) else '-'}",
+        flush=True,
+    )
 
-    meta = await _validate_conversation_pending_approvals(conversation_id, _load_conversation_meta(conversation_id))
-    pending = _ensure_pending_approvals(meta)
-    descriptor = pending.get(request_id)
+    if isinstance(conversation_id, str) and conversation_id.strip():
+        requested_conversation_id = _sanitize_conversation_id(conversation_id.strip())
+        if requested_conversation_id and _conversation_meta_path(requested_conversation_id).exists():
+            meta = await _validate_conversation_pending_approvals(
+                requested_conversation_id,
+                _load_conversation_meta(requested_conversation_id),
+            )
+            pending = _ensure_pending_approvals(meta)
+            descriptor = pending.get(request_id) if isinstance(pending.get(request_id), dict) else None
+            if isinstance(descriptor, dict):
+                conversation_id = requested_conversation_id
+
     if not isinstance(descriptor, dict):
-        raise HTTPException(status_code=409, detail="Approval is no longer pending")
+        found = _find_pending_approval(request_id)
+        if not isinstance(found, tuple) or len(found) != 2:
+            raise HTTPException(status_code=409, detail="Approval is no longer pending")
+        conversation_id, _ = found
+        meta = await _validate_conversation_pending_approvals(
+            conversation_id,
+            _load_conversation_meta(conversation_id),
+        )
+        pending = _ensure_pending_approvals(meta)
+        descriptor = pending.get(request_id) if isinstance(pending.get(request_id), dict) else None
+        if not isinstance(descriptor, dict):
+            raise HTTPException(status_code=409, detail="Approval is no longer pending")
 
     agent = str(descriptor.get("agent") or ((meta.get("settings") or {}).get("agent") or "codex")).strip() or "codex"
+    request_method = str(descriptor.get("request_method") or "").strip().lower()
+    print(
+        f"[ask_user server] approval_response matched request_id={request_id} conversation_id={conversation_id} "
+        f"agent={agent} request_method={request_method}",
+        flush=True,
+    )
+    if request_method == _AGENT_PTY_ASK_USER_REQUEST_METHOD:
+        print(
+            f"[ask_user server] approval_response submit request_id={request_id} result={resolution!r}",
+            flush=True,
+        )
+        submitted = await ask_user_interactions.submit_user_response(request_id, resolution)
+        if not submitted.get("ok"):
+            print(
+                f"[ask_user server] approval_response submit_failed request_id={request_id} error={submitted.get('error')!r}",
+                flush=True,
+            )
+            raise HTTPException(status_code=409, detail=submitted.get("error") or "Approval is stale or no longer actionable")
+        print(
+            f"[ask_user server] approval_response submitted request_id={request_id} awaiting_harness_ack={submitted.get('awaiting_harness_ack')}",
+            flush=True,
+        )
+        return {
+            "ok": True,
+            "conversation_id": conversation_id,
+            "request_id": request_id,
+            "result": resolution,
+            "awaiting_harness_ack": True,
+        }
+
     resolved = False
     if agent == "codex":
         decision = "accept" if str(resolution.get("decision") or "decline").strip().lower() == "accept" else "decline"
@@ -7961,6 +8154,11 @@ async def api_appserver_interrupt(payload: Optional[Dict[str, Any]] = Body(None)
         result = await ext_loader.interrupt_session(agent_type, convo_id)
         if not result.get("ok"):
             raise HTTPException(status_code=409, detail=result.get("error", "Interrupt failed"))
+        await ask_user_interactions.cancel_interactions(
+            conversation_id=convo_id,
+            turn_id=meta.get("turn_id"),
+            resolution={"status": "interrupted"},
+        )
         return result
 
     # Codex path: JSON-RPC turn/interrupt
@@ -7972,6 +8170,11 @@ async def api_appserver_interrupt(payload: Optional[Dict[str, Any]] = Body(None)
     if not thread_id or not turn_id:
         raise HTTPException(status_code=409, detail="No active turn to interrupt")
     await _rpc_request("turn/interrupt", params={"threadId": thread_id, "turnId": turn_id})
+    await ask_user_interactions.cancel_interactions(
+        conversation_id=convo_id,
+        turn_id=turn_id,
+        resolution={"status": "interrupted"},
+    )
     return {"ok": True, "thread_id": thread_id, "turn_id": turn_id, "conversation_id": convo_id}
 
 

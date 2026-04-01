@@ -11,6 +11,7 @@ and our internal format on the other (to _broadcast_appserver_ui).
 
 import json
 import re
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional, Callable, Awaitable, List
 from datetime import datetime, timezone
 
@@ -64,6 +65,24 @@ def _parse_copilot_view_lines(content: str) -> Optional[List[Dict[str, Any]]]:
             "content": line_content,
         })
     return parsed
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(inner) for key, inner in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(item) for item in value]
+    if is_dataclass(value):
+        return _json_safe_value(asdict(value))
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return _json_safe_value(to_dict())
+        except Exception:
+            pass
+    return str(value)
 
 
 # Tools that mutate files — only these get post-execution diff entries
@@ -1326,6 +1345,7 @@ class CopilotEventRouter:
                 result_payload = getattr(data, "error_reason")
             elif getattr(data, "error", None):
                 result_payload = getattr(data, "error")
+            result_payload = _json_safe_value(result_payload)
             request_payload = tool_call.get("render_request") or render_arguments
             response_payload = build_tool_card_response(render_server, render_tool, result_payload)
 

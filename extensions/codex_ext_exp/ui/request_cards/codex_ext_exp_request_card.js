@@ -186,6 +186,84 @@ function parseJsonLike(text, fallback = null) {
   }
 }
 
+function normalizeStringList(value) {
+  const items = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
+  const normalized = [];
+  const seen = new Set();
+  items.forEach((item) => {
+    const text = String(item || '').trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    normalized.push(text);
+  });
+  return normalized;
+}
+
+function normalizePromptText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function shouldRenderUserInputRequestSummary(requestText, questions) {
+  const normalizedRequest = normalizePromptText(requestText);
+  if (!normalizedRequest) return false;
+  if (!Array.isArray(questions) || questions.length !== 1) return true;
+  const [question] = questions;
+  if (!question || typeof question !== 'object') return true;
+  const normalizedQuestion = normalizePromptText(question.question || '');
+  return !normalizedQuestion || normalizedQuestion !== normalizedRequest;
+}
+
+function buildAskUserElicitationSpec(requestParams, payload) {
+  const requestedSchema = payload.requested_schema && typeof payload.requested_schema === 'object'
+    ? payload.requested_schema
+    : (requestParams.requestedSchema && typeof requestParams.requestedSchema === 'object' ? requestParams.requestedSchema : null);
+  if (!requestedSchema || requestedSchema['x-agent-pty-card'] !== 'ask_user') {
+    return null;
+  }
+  const rawMessage = String(payload.message || requestParams.message || '').trim();
+  const question = String(requestedSchema['x-agent-pty-question'] || rawMessage).trim();
+  const message = rawMessage && rawMessage !== question ? rawMessage : 'Tool is waiting for user input';
+  return {
+    question,
+    message,
+    header: String(requestedSchema.title || 'Question').trim() || 'Question',
+    choices: normalizeStringList(requestedSchema['x-agent-pty-choices']),
+    allowFreeform: requestedSchema['x-agent-pty-allowFreeform'] !== false,
+  };
+}
+
+function buildAskUserAnswerState(result) {
+  const content = result?.content && typeof result.content === 'object' ? result.content : {};
+  const answers = normalizeStringList(content.answer);
+  return answers.length ? { answer: { answers } } : {};
+}
+
+function buildAgentPtyAskUserSpec(requestParams, payload) {
+  const question = String(requestParams.question || payload.question || payload.message || '').trim();
+  if (!question) {
+    return null;
+  }
+  const allowFreeform = requestParams.allowFreeform !== undefined
+    ? requestParams.allowFreeform !== false
+    : payload.allowFreeform !== false;
+  return {
+    question,
+    message: String(payload.message || question).trim() || question,
+    header: 'Question',
+    choices: normalizeStringList(requestParams.choices ?? payload.choices),
+    allowFreeform,
+  };
+}
+
+function buildAgentPtyAskUserAnswerState(result) {
+  const answers = normalizeStringList(result?.answers);
+  if (answers.length) {
+    return { answer: { answers } };
+  }
+  const answer = String(result?.answer || '').trim();
+  return answer ? { answer: { answers: [answer] } } : {};
+}
+
 function renderCommandCard(body, event, schema, helpers) {
   const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
   const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
@@ -289,10 +367,17 @@ function renderUserInputCard(body, event, _schema, helpers) {
   const result = event?.result && typeof event.result === 'object' ? event.result : {};
   body.innerHTML = '';
 
+  const requestText = String(payload.message || '').trim();
   const summary = document.createElement('div');
   summary.className = 'approval-summary';
-  appendMarkdownValue(summary, 'Request', payload.message || 'Tool is waiting for user input', helpers);
-  body.append(summary);
+  if (shouldRenderUserInputRequestSummary(requestText, questions)) {
+    appendMarkdownValue(summary, 'Request', requestText, helpers);
+  } else if (!requestText) {
+    appendMarkdownValue(summary, 'Request', 'Tool is waiting for user input', helpers);
+  }
+  if (summary.childElementCount) {
+    body.append(summary);
+  }
 
   const buildAnswers = (overrides = {}) => {
     const answers = {};
@@ -386,22 +471,26 @@ function renderUserInputCard(body, event, _schema, helpers) {
       return;
     }
 
-    const freeformLabel = document.createElement('div');
-    freeformLabel.innerHTML = '<strong>Something else:</strong>';
-    wrapper.append(freeformLabel);
+    const allowFreeform = question.allowFreeform !== false;
+    if (allowFreeform) {
+      const freeformLabel = document.createElement('div');
+      const labelText = Array.isArray(question.options) && question.options.length ? 'Something else:' : 'Response:';
+      freeformLabel.innerHTML = `<strong>${helpers.escapeHtml(labelText)}</strong>`;
+      wrapper.append(freeformLabel);
 
-    const field = question.isSecret ? document.createElement('input') : document.createElement('textarea');
-    field.setAttribute('data-question-id', questionId);
-    if (field instanceof HTMLInputElement) {
-      field.type = 'password';
-      field.className = 'input secret approval-answer-field';
-      field.placeholder = question.isOther ? 'Enter response' : 'Response';
-    } else {
-      field.className = 'input approval-answer-field';
-      field.rows = 2;
-      field.placeholder = question.isOther ? 'Enter one or more responses (one per line)' : 'Enter response';
+      const field = question.isSecret ? document.createElement('input') : document.createElement('textarea');
+      field.setAttribute('data-question-id', questionId);
+      if (field instanceof HTMLInputElement) {
+        field.type = 'password';
+        field.className = 'input secret approval-answer-field';
+        field.placeholder = question.isOther ? 'Enter response' : 'Response';
+      } else {
+        field.className = 'input approval-answer-field';
+        field.rows = 2;
+        field.placeholder = question.isOther ? 'Enter one or more responses (one per line)' : 'Enter response';
+      }
+      wrapper.append(field);
     }
-    wrapper.append(field);
 
     body.append(wrapper);
   });
@@ -410,6 +499,14 @@ function renderUserInputCard(body, event, _schema, helpers) {
   if (readOnly) {
     feedback.classList.add('approval-feedback-static');
     setFeedback(feedback, readOnlyStatusLabel(event), false);
+    return;
+  }
+  const needsManualSubmit = questions.some((question) => {
+    if (!question || typeof question !== 'object') return false;
+    if (question.allowFreeform !== false) return true;
+    return !Array.isArray(question.options) || !question.options.length;
+  });
+  if (!needsManualSubmit) {
     return;
   }
   const actions = document.createElement('div');
@@ -496,9 +593,160 @@ function renderToolCallCard(body, event, _schema, helpers) {
   body.append(actions);
 }
 
+function renderAskUserElicitationCard(body, event, _schema, helpers, spec) {
+  const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const readOnly = isReadOnlyEvent(event, helpers);
+  const question = {
+    id: 'answer',
+    header: spec.header,
+    question: spec.question,
+    options: spec.choices.map((label) => ({ label, description: '' })),
+    allowFreeform: spec.allowFreeform,
+    isOther: spec.allowFreeform,
+  };
+  const syntheticEvent = {
+    ...event,
+    status: event?.status || (typeof event?.result?.action === 'string' ? event.result.action : undefined),
+    payload: {
+      ...payload,
+      message: spec.message,
+      questions: [question],
+    },
+    request_params: {
+      ...requestParams,
+      questions: [question],
+    },
+    result: {
+      answers: buildAskUserAnswerState(event?.result),
+    },
+  };
+  const syntheticHelpers = {
+    ...helpers,
+    submitResult: async (result, meta) => {
+      const answers = normalizeStringList(result?.answers?.answer?.answers);
+      return helpers.submitResult({
+        action: 'accept',
+        content: { answer: answers },
+      }, meta);
+    },
+  };
+  renderUserInputCard(body, syntheticEvent, _schema, syntheticHelpers);
+  if (readOnly) {
+    return;
+  }
+  const feedback = body.querySelector('.approval-feedback');
+  const feedbackNode = feedback instanceof HTMLElement ? feedback : createFeedbackNode(body);
+  let actions = body.querySelector('.actions');
+  if (!(actions instanceof HTMLElement)) {
+    actions = document.createElement('div');
+    actions.className = 'actions';
+    body.append(actions);
+  }
+  const declineButton = document.createElement('button');
+  declineButton.className = 'btn tiny decline';
+  declineButton.textContent = 'Decline';
+  declineButton.addEventListener('click', async () => {
+    await trySubmit(helpers, { action: 'decline', content: null }, {}, feedbackNode, 'Sending response…');
+  });
+  actions.append(declineButton);
+
+  const cancelButton = document.createElement('button');
+  cancelButton.className = 'btn tiny decline';
+  cancelButton.textContent = 'Cancel';
+  cancelButton.addEventListener('click', async () => {
+    await trySubmit(helpers, { action: 'cancel', content: null }, {}, feedbackNode, 'Sending response…');
+  });
+  actions.append(cancelButton);
+}
+
+function renderAgentPtyAskUserCard(body, event, _schema, helpers) {
+  const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const spec = buildAgentPtyAskUserSpec(requestParams, payload);
+  const readOnly = isReadOnlyEvent(event, helpers);
+  if (!spec) {
+    body.textContent = 'Question unavailable.';
+    return;
+  }
+  const question = {
+    id: 'answer',
+    header: spec.header,
+    question: spec.question,
+    options: spec.choices.map((label) => ({ label, description: '' })),
+    allowFreeform: spec.allowFreeform,
+    isOther: spec.allowFreeform,
+  };
+  const syntheticEvent = {
+    ...event,
+    status: event?.status || (typeof event?.result?.action === 'string' ? event.result.action : undefined),
+    payload: {
+      ...payload,
+      message: spec.message,
+      questions: [question],
+    },
+    request_params: {
+      ...requestParams,
+      questions: [question],
+    },
+    result: {
+      answers: buildAgentPtyAskUserAnswerState(event?.result),
+    },
+  };
+  const syntheticHelpers = {
+    ...helpers,
+    submitResult: async (result, meta) => {
+      const answers = normalizeStringList(result?.answers?.answer?.answers);
+      const answer = answers[0] || null;
+      const selectedChoice = answer && spec.choices.includes(answer) ? answer : null;
+      const freeformAnswer = answer && !selectedChoice ? answer : null;
+      return helpers.submitResult({
+        action: 'accept',
+        answer,
+        answers,
+        selected_choice: selectedChoice,
+        freeform_answer: freeformAnswer,
+        wasFreeform: Boolean(freeformAnswer),
+      }, meta);
+    },
+  };
+  renderUserInputCard(body, syntheticEvent, _schema, syntheticHelpers);
+  if (readOnly) {
+    return;
+  }
+  const feedback = body.querySelector('.approval-feedback');
+  const feedbackNode = feedback instanceof HTMLElement ? feedback : createFeedbackNode(body);
+  let actions = body.querySelector('.actions');
+  if (!(actions instanceof HTMLElement)) {
+    actions = document.createElement('div');
+    actions.className = 'actions';
+    body.append(actions);
+  }
+  const declineButton = document.createElement('button');
+  declineButton.className = 'btn tiny decline';
+  declineButton.textContent = 'Decline';
+  declineButton.addEventListener('click', async () => {
+    await trySubmit(helpers, { action: 'decline' }, {}, feedbackNode, 'Sending response…');
+  });
+  actions.append(declineButton);
+
+  const cancelButton = document.createElement('button');
+  cancelButton.className = 'btn tiny decline';
+  cancelButton.textContent = 'Cancel';
+  cancelButton.addEventListener('click', async () => {
+    await trySubmit(helpers, { action: 'cancel' }, {}, feedbackNode, 'Sending response…');
+  });
+  actions.append(cancelButton);
+}
+
 function renderElicitationCard(body, event, _schema, helpers) {
   const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
   const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const askUserSpec = buildAskUserElicitationSpec(requestParams, payload);
+  if (askUserSpec) {
+    renderAskUserElicitationCard(body, event, _schema, helpers, askUserSpec);
+    return;
+  }
   const readOnly = isReadOnlyEvent(event, helpers);
   body.innerHTML = '';
 
@@ -602,6 +850,10 @@ export async function renderRequestCard(ctx = {}) {
   }
   if (requestMethod === 'item/tool/call') {
     renderToolCallCard(body, event, schema, helpers);
+    return true;
+  }
+  if (requestMethod === 'agent-pty/ask-user') {
+    renderAgentPtyAskUserCard(body, event, schema, helpers);
     return true;
   }
   if (requestMethod === 'mcpserver/elicitation/request') {

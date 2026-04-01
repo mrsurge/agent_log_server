@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -6,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from agent_log_server import ask_user_interactions
 from framework_shells.orchestrator import Orchestrator
 
 from .router import CodexEventRouter
@@ -198,13 +200,16 @@ class CodexAppServerTransport:
                 if key not in {"feedback", "kind", "message", "path", "rules"}
             }
 
+        request_method = self._approval_request_method(pending)
+        requires_decision = request_method in {
+            "item/commandexecution/requestapproval",
+            "item/filechange/requestapproval",
+        }
         decision = result_value.get("decision")
         if decision is None:
             decision = resolution.get("decision") if isinstance(resolution, dict) else resolution
-        if "decision" not in result_value:
+        if requires_decision and "decision" not in result_value:
             result_value["decision"] = "accept" if str(decision).strip().lower() == "accept" else "decline"
-
-        request_method = self._approval_request_method(pending)
         if request_method:
             protocol = peek_runtime_protocol()
             if protocol is None:
@@ -610,6 +615,17 @@ class CodexAppServerTransport:
                 except Exception as exc:
                     self._raw_log_fn("err", self.get_raw_label(), f"reader_process_failed {exc}")
         finally:
+            pending_ask_user_request_ids = [
+                request_id_text
+                for request_id_text, pending in list(self._pending_approval_requests.items())
+                if self._approval_request_method(pending) == ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD
+            ]
+            for request_id_text in pending_ask_user_request_ids:
+                with contextlib.suppress(Exception):
+                    await ask_user_interactions.finalize_interaction(
+                        request_id_text,
+                        {"status": "error", "error": "transport reader stopped"},
+                    )
             self._initialized = False
             self._resumed_threads.clear()
             self._thread_conversations.clear()
@@ -643,6 +659,7 @@ class CodexAppServerTransport:
             payload=routed_payload,
             thread_id=thread_id,
             turn_id=turn_id,
+            conversation_id=conversation_id,
             extract_item_text=_extract_item_text,
         )
         if conversation_id and isinstance(routed, dict):
@@ -702,6 +719,26 @@ class CodexAppServerTransport:
 
         routed_result = routed if isinstance(routed, dict) else {}
         resolved_conversation_id = routed_result.get("conversation_id") or conversation_id
+        descriptors_by_request: Dict[str, Dict[str, Any]] = {}
+        routed_descriptors = routed_result.get("approval_descriptors")
+        if isinstance(routed_descriptors, list):
+            for descriptor in routed_descriptors:
+                if not isinstance(descriptor, dict):
+                    continue
+                request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
+                if request_id_text:
+                    descriptors_by_request[request_id_text] = descriptor
+
+        ask_user_finalizations = routed_result.get("ask_user_finalizations")
+        if isinstance(ask_user_finalizations, list):
+            for finalization in ask_user_finalizations:
+                if not isinstance(finalization, dict):
+                    continue
+                await ask_user_interactions.finalize_interaction(
+                    finalization.get("request_id"),
+                    finalization.get("resolution"),
+                )
+
         transcript_entries = routed_result.get("transcript_entries")
         if resolved_conversation_id and isinstance(transcript_entries, list):
             for entry in transcript_entries:

@@ -122,6 +122,9 @@
         "export": "renderRequestCard",
         "matches": [
           {
+            "requestMethod": "agent-pty/ask-user"
+          },
+          {
             "requestMethod": "copilot/user_input/request"
           }
         ]

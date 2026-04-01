@@ -145,25 +145,5 @@ The intended iteration loop is:
 
 This workflow applies both to extension development and extension-framework development.
 
-## KB vs Agent Log
 
-Use the KB tools for durable repo-scoped workflow/contract knowledge.
 
-Use the agent log for:
-
-- coordination
-- progress updates
-- handoffs
-- transient decisions
-
-The KB is the better place for stable workflow contracts because it is repo-scoped and cross-platform.
-
-## Current Product Direction
-
-Legacy builtin `codex` is now a compatibility path, not the preferred primary agent path.
-
-Directionally:
-
-- extension-backed agents should be favored over legacy builtin `codex`
-- the settings modal should not present legacy `codex` as the primary/default-looking option
-- compatibility can remain, but preference should move toward the extension-backed implementations

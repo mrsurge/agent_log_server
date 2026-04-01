@@ -12,7 +12,7 @@ _REPO_ROOT = Path(os.path.abspath(__file__)).parents[2]
 _AGENT_PTY_MCP_SERVER_PATH = _REPO_ROOT / "mcp_agent_pty_server.py"
 
 
-def build_agent_pty_blocks_local_mcp_server(cwd: Optional[str] = None) -> Dict[str, Any]:
+def build_agent_pty_blocks_local_mcp_server(cwd: Optional[str] = None, conversation_id: Optional[str] = None) -> Dict[str, Any]:
     command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
     server: Dict[str, Any] = {
         "type": "local",
@@ -21,8 +21,11 @@ def build_agent_pty_blocks_local_mcp_server(cwd: Optional[str] = None) -> Dict[s
         "tools": ["*"],
     }
     if isinstance(cwd, str) and cwd.strip():
+        env: Dict[str, str] = {"PWD": cwd}
+        if isinstance(conversation_id, str) and conversation_id.strip():
+            env["CONVERSATION_ID"] = conversation_id.strip()
         server["cwd"] = cwd
-        server["env"] = {"PWD": cwd}
+        server["env"] = env
     return server
 
 
@@ -32,6 +35,7 @@ def build_copilot_mcp_servers(
     te2_enabled: bool,
     base_url: Optional[str],
     cwd: Optional[str] = None,
+    conversation_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     if existing_servers in (None, ""):
         merged: Dict[str, Any] = {}
@@ -46,6 +50,6 @@ def build_copilot_mcp_servers(
             "url": build_te2_mcp_url(base_url or ""),
             "tools": ["*"],
         }
-        merged[AGENT_PTY_BLOCKS_MCP_SERVER_NAME] = build_agent_pty_blocks_local_mcp_server(cwd)
+        merged[AGENT_PTY_BLOCKS_MCP_SERVER_NAME] = build_agent_pty_blocks_local_mcp_server(cwd, conversation_id=conversation_id)
 
     return merged or None

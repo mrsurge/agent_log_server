@@ -1159,6 +1159,7 @@ def _build_session_runtime_config(
         te2_enabled=te2_mcp_integration_enabled(merged),
         base_url=merged.get("te2_base_url"),
         cwd=merged.get("cwd"),
+        conversation_id=conversation_id,
     )
     if mcp_servers is not None:
         te2_cfg = mcp_servers.get(TE2_MCP_SERVER_NAME) if isinstance(mcp_servers, dict) else None

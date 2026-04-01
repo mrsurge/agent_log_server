@@ -4,6 +4,19 @@ function normalizeRequestMethod(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
+function normalizeStringList(value) {
+  const items = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
+  const normalized = [];
+  const seen = new Set();
+  items.forEach((item) => {
+    const text = String(item || '').trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    normalized.push(text);
+  });
+  return normalized;
+}
+
 function appendKeyValue(container, label, value, helpers) {
   if (value === null || value === undefined || value === '') return;
   const row = document.createElement('div');
@@ -322,6 +335,81 @@ function renderUserInputCard(body, event, _schema, helpers) {
   body.append(actions);
 }
 
+function renderAgentPtyAskUserCard(body, event, _schema, helpers) {
+  const requestParams = event.request_params && typeof event.request_params === 'object' ? event.request_params : {};
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const question = String(requestParams.question || payload.question || payload.message || '').trim();
+  const choices = normalizeStringList(requestParams.choices ?? payload.choices);
+  const allowFreeform = requestParams.allowFreeform !== undefined
+    ? requestParams.allowFreeform !== false
+    : payload.allowFreeform !== false;
+  const syntheticEvent = {
+    ...event,
+    status: event?.status || (typeof event?.result?.action === 'string' ? event.result.action : undefined),
+    request_params: {
+      ...requestParams,
+      question,
+      choices,
+      allowFreeform,
+    },
+    payload: {
+      ...payload,
+      question,
+      choices,
+      allowFreeform,
+    },
+    result: {
+      answer: typeof event?.result?.answer === 'string' ? event.result.answer : '',
+      wasFreeform: event?.result?.wasFreeform === true
+        || (typeof event?.result?.freeform_answer === 'string' && event.result.freeform_answer.trim().length > 0),
+    },
+  };
+  const syntheticHelpers = {
+    ...helpers,
+    submitResult: async (result, meta) => {
+      const answer = typeof result?.answer === 'string' ? result.answer.trim() : '';
+      const answers = answer ? [answer] : [];
+      const selectedChoice = answer && choices.includes(answer) ? answer : null;
+      const freeformAnswer = answer && !selectedChoice ? answer : null;
+      return helpers.submitResult({
+        action: 'accept',
+        answer: answer || null,
+        answers,
+        selected_choice: selectedChoice,
+        freeform_answer: freeformAnswer,
+        wasFreeform: Boolean(result?.wasFreeform) || Boolean(freeformAnswer),
+      }, meta);
+    },
+  };
+  renderUserInputCard(body, syntheticEvent, _schema, syntheticHelpers);
+  if (isReadOnlyEvent(event, helpers)) {
+    return;
+  }
+  const feedback = body.querySelector('.approval-feedback');
+  const feedbackNode = feedback instanceof HTMLElement ? feedback : createFeedbackNode(body);
+  let actions = body.querySelector('.actions');
+  if (!(actions instanceof HTMLElement)) {
+    actions = document.createElement('div');
+    actions.className = 'actions';
+    body.append(actions);
+  }
+  const declineButton = document.createElement('button');
+  declineButton.className = 'btn tiny decline';
+  declineButton.textContent = 'Decline';
+  declineButton.addEventListener('click', async () => {
+    await trySubmit(helpers, { action: 'decline' }, {}, feedbackNode, 'Sending response…');
+  });
+  actions.append(declineButton);
+
+  const cancelButton = document.createElement('button');
+  cancelButton.className = 'btn tiny decline';
+  cancelButton.textContent = 'Cancel';
+  cancelButton.addEventListener('click', async () => {
+    await trySubmit(helpers, { action: 'cancel' }, {}, feedbackNode, 'Sending response…');
+  });
+  actions.append(cancelButton);
+}
+
 export function initializeRequestCardModule(config = {}) {
   bootConfig = {
     schemas: config.schemas && typeof config.schemas === 'object' ? config.schemas : {},
@@ -338,6 +426,10 @@ export async function renderRequestCard(ctx = {}) {
 
   if (requestMethod === 'copilot/permission/request') {
     renderPermissionCard(body, event, schema, helpers);
+    return true;
+  }
+  if (requestMethod === 'agent-pty/ask-user') {
+    renderAgentPtyAskUserCard(body, event, schema, helpers);
     return true;
   }
   if (requestMethod === 'copilot/user_input/request') {

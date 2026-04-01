@@ -85,6 +85,7 @@ def _merge_runtime_settings(
         merged["cwd"] = cwd
     if isinstance(model, str) and model.strip():
         merged["model"] = model
+    merged["conversation_id"] = conversation_id
     return _materialize_runtime_settings(merged)
 
 

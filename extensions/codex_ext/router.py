@@ -6,6 +6,12 @@ import shlex
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from agent_log_server.ask_user_interactions import (
+    AGENT_PTY_ASK_USER_REQUEST_METHOD,
+    is_agent_pty_ask_user_request,
+    is_agent_pty_ask_user_tool,
+)
+
 from .plan_utils import normalize_plan_steps, plan_signature, render_plan_markdown
 from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
 from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
@@ -1570,6 +1576,51 @@ class CodexEventRouter:
             }],
         }
 
+    def _ask_user_request_result(
+        self,
+        *,
+        tool_id: str,
+        request_id: str,
+        arguments: Any,
+        item_state: Dict[str, Any],
+        thread_id: Optional[str],
+        turn_id: Optional[str],
+    ) -> Dict[str, Any]:
+        normalized_arguments = arguments if isinstance(arguments, dict) else {}
+        question = str(normalized_arguments.get("question") or "").strip()
+        choices = normalized_arguments.get("choices") if isinstance(normalized_arguments.get("choices"), list) else []
+        allow_freeform = normalized_arguments.get(
+            "allow_freeform",
+            normalized_arguments.get("allowFreeform", True),
+        )
+        item_state["approval_request_id"] = request_id
+        item_state["ask_user_descriptor_emitted"] = True
+        self._approval_request_map[str(tool_id)] = request_id
+        request_params = {
+            "requestId": request_id,
+            "question": question,
+            "choices": list(choices),
+            "allowFreeform": bool(allow_freeform),
+        }
+        payload_data = {
+            "requestId": request_id,
+            "question": question,
+            "choices": list(choices),
+            "allowFreeform": bool(allow_freeform),
+            "message": question,
+            "tool_call_id": str(tool_id or ""),
+        }
+        return self._decorate_routed_result(self._tool_request_result(
+            request_id=request_id,
+            kind="user_input",
+            payload={key: value for key, value in payload_data.items() if value not in (None, "", [], {})},
+            thread_id=thread_id,
+            turn_id=turn_id,
+            request_method=AGENT_PTY_ASK_USER_REQUEST_METHOD,
+            request_params=request_params,
+            activity_label="request",
+        ), thread_id=thread_id, item_state=item_state)
+
     def route_event(
         self,
         protocol: RuntimeProtocol,
@@ -1578,6 +1629,7 @@ class CodexEventRouter:
         payload: Any,
         thread_id: Optional[str],
         turn_id: Optional[str],
+        conversation_id: Optional[str] = None,
         extract_item_text: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, str]]]] = None,
     ) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -1861,6 +1913,30 @@ class CodexEventRouter:
                     "arguments": arguments,
                     "request": request_payload,
                 })
+                if is_agent_pty_ask_user_tool(server_name, tool_name):
+                    request_id = str(conversation_id or "").strip()
+                    if request_id and isinstance(arguments, dict):
+                        arguments = dict(arguments)
+                        arguments["requestId"] = request_id
+                        item_state["arguments"] = arguments
+                    if request_id:
+                        item_state["approval_request_id"] = request_id
+                    if request_id:
+                        if item_state.get("ask_user_descriptor_emitted"):
+                            return self._decorate_routed_result({
+                                "handled": True,
+                                "events": [],
+                                "transcript_entries": [],
+                            }, thread_id=thread_id, item_state=item_state)
+                        tool_call_id = item_id or _assistant_id(item, thread_id, turn_id)
+                        return self._ask_user_request_result(
+                            tool_id=str(tool_call_id or ""),
+                            request_id=request_id,
+                            arguments=arguments,
+                            item_state=item_state,
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                        )
                 if item_type == "websearch":
                     query = item.get("query")
                     if not isinstance(query, str):
@@ -2270,6 +2346,32 @@ class CodexEventRouter:
                 live_result = result_value if result_value is not None else None
                 if live_result is None and item_type != "websearch":
                     live_result = {"status": status or "completed"}
+                if is_agent_pty_ask_user_tool(server_name, tool_name):
+                    approval_request_id = str(
+                        item_state.get("approval_request_id")
+                        or self._approval_request_map.get(str(item_id or ""))
+                        or ""
+                    ).strip()
+                    if approval_request_id:
+                        terminal_resolution = dict(live_result) if isinstance(live_result, dict) else {}
+                        if is_error:
+                            if not terminal_resolution:
+                                terminal_resolution = {"status": "error"}
+                            terminal_resolution.setdefault("status", "error")
+                            if error not in (None, "", {}):
+                                terminal_resolution["error"] = _stringify_value(error)
+                        routed = {
+                            "handled": True,
+                            "events": [],
+                            "transcript_entries": [],
+                        }
+                        routed["clear_live_approval_ids"] = [approval_request_id]
+                        routed["ask_user_finalizations"] = [{
+                            "request_id": approval_request_id,
+                            "resolution": terminal_resolution or {"action": "cancel"},
+                        }]
+                        self._approval_request_map.pop(str(item_id), None)
+                        return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 request_payload = item_state.get("request")
                 if request_payload is None:
                     request_payload = build_tool_card_request(server_name, tool_name, arguments)
@@ -2375,12 +2477,48 @@ class CodexEventRouter:
                 tool_id = _assistant_id(payload, thread_id, turn_id)
             tool_name = payload.get("tool") or "tool"
             arguments = payload.get("arguments")
+            server_name = (
+                payload.get("server")
+                or payload.get("serverName")
+                or payload.get("server_name")
+                or payload.get("mcpServer")
+                or ""
+            )
             item_state = self._get_item_state(tool_id, thread_id, turn_id)
             item_state.update({
                 "item_type": "tool",
                 "tool": tool_name,
+                "server": server_name,
                 "arguments": arguments,
             })
+            if is_agent_pty_ask_user_request(tool_name, arguments):
+                request_id_text = str(conversation_id or "").strip()
+                if request_id_text:
+                    if isinstance(arguments, dict):
+                        arguments = dict(arguments)
+                        arguments["requestId"] = request_id_text
+                        item_state["arguments"] = arguments
+                    item_state["approval_request_id"] = request_id_text
+                if item_state.get("ask_user_descriptor_emitted"):
+                    return self._decorate_routed_result({
+                        "handled": True,
+                        "events": [],
+                        "transcript_entries": [],
+                    }, thread_id=thread_id, item_state=item_state)
+                if request_id_text:
+                    return self._ask_user_request_result(
+                        tool_id=str(tool_id or ""),
+                        request_id=request_id_text,
+                        arguments=arguments,
+                        item_state=item_state,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                    )
+                return self._decorate_routed_result({
+                    "handled": True,
+                    "events": [],
+                    "transcript_entries": [],
+                }, thread_id=thread_id, item_state=item_state)
             payload_data = {
                 "tool": tool_name,
                 "call_id": payload.get("callId") or payload.get("call_id"),
@@ -2669,6 +2807,7 @@ def route_event(
     payload: Any,
     thread_id: Optional[str],
     turn_id: Optional[str],
+    conversation_id: Optional[str] = None,
     extract_item_text: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, str]]]] = None,
 ) -> Dict[str, Any]:
     return CodexEventRouter().route_event(
@@ -2677,5 +2816,6 @@ def route_event(
         payload=payload,
         thread_id=thread_id,
         turn_id=turn_id,
+        conversation_id=conversation_id,
         extract_item_text=extract_item_text,
     )

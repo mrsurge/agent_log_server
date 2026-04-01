@@ -1104,6 +1104,7 @@ def _build_agent_pty_blocks_mcp_server(
     *,
     cwd: Any,
     existing_server: Any = None,
+    conversation_id: Any = None,
 ) -> Optional[Dict[str, Any]]:
     launch_cwd = _expand_path(cwd)
     if not launch_cwd:
@@ -1113,6 +1114,8 @@ def _build_agent_pty_blocks_mcp_server(
     merged: Dict[str, Any] = dict(existing_server) if isinstance(existing_server, dict) else {}
     env = dict(merged.get("env")) if isinstance(merged.get("env"), dict) else {}
     env["PWD"] = launch_cwd
+    if isinstance(conversation_id, str) and conversation_id.strip():
+        env["CONVERSATION_ID"] = conversation_id.strip()
 
     return {
         **merged,
@@ -1130,6 +1133,7 @@ def _build_codex_ext_thread_config(
     base_url: Optional[str],
     cwd: Any,
     force_te2_mcp_entry: bool = False,
+    conversation_id: Any = None,
 ) -> Optional[Dict[str, Any]]:
     merged = build_codex_thread_config(
         existing_config,
@@ -1150,6 +1154,7 @@ def _build_codex_ext_thread_config(
     agent_pty_server = _build_agent_pty_blocks_mcp_server(
         cwd=cwd,
         existing_server=mcp_servers.get(_AGENT_PTY_BLOCKS_MCP_SERVER_NAME),
+        conversation_id=conversation_id,
     )
     if agent_pty_server is not None:
         mcp_servers[_AGENT_PTY_BLOCKS_MCP_SERVER_NAME] = agent_pty_server
@@ -1213,6 +1218,7 @@ def build_request_params(
             base_url=normalized_settings.get("te2_base_url"),
             cwd=normalized_settings.get("cwd"),
             force_te2_mcp_entry=force_te2_config,
+            conversation_id=normalized_settings.get("conversation_id"),
         )
         if config:
             params["config"] = config

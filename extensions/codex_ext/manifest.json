@@ -124,6 +124,9 @@
             "requestMethod": "item/tool/call"
           },
           {
+            "requestMethod": "agent-pty/ask-user"
+          },
+          {
             "requestMethod": "mcpServer/elicitation/request"
           }
         ]

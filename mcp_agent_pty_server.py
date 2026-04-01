@@ -59,7 +59,7 @@ def _ensure_framework_shells_secret() -> None:
 _ensure_framework_shells_secret()
 
 from framework_shells import get_manager as get_framework_shell_manager
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 
 def _logical_abspath(path: Path | str) -> Path:
@@ -144,6 +144,7 @@ _APPSERVER_ORIGIN = os.environ.get("AGENT_LOG_SERVER_ORIGIN", "http://127.0.0.1:
 _APPSERVER_IPC_NAMESPACE = "/ipc"
 _appserver_ipc_sio: Optional[socketio.AsyncClient] = None
 _appserver_ipc_lock = asyncio.Lock()
+_ask_user_pending_requests: dict[str, asyncio.Future] = {}
 
 
 async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
@@ -157,6 +158,61 @@ async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
             _appserver_ipc_sio = None
 
         client = socketio.AsyncClient(reconnection=True, reconnection_attempts=3)
+
+        @client.on("ask_user_response", namespace=_APPSERVER_IPC_NAMESPACE)
+        async def _on_ask_user_response(data):
+            if not isinstance(data, dict):
+                return
+            request_id = str(
+                data.get("request_id")
+                or data.get("requestId")
+                or data.get("id")
+                or ""
+            ).strip()
+            if not request_id:
+                return
+            waiter = _ask_user_pending_requests.get(request_id)
+            print(
+                f"[ask_user mcp] recv_response request_id={request_id} waiter={'yes' if waiter and not waiter.done() else 'no'}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if waiter and not waiter.done():
+                waiter.set_result(dict(data))
+
+        @client.on("ask_user_terminal", namespace=_APPSERVER_IPC_NAMESPACE)
+        async def _on_ask_user_terminal(data):
+            if not isinstance(data, dict):
+                return
+            request_id = str(
+                data.get("request_id")
+                or data.get("requestId")
+                or data.get("interaction_id")
+                or data.get("id")
+                or ""
+            ).strip()
+            if not request_id:
+                return
+            waiter = _ask_user_pending_requests.get(request_id)
+            print(
+                f"[ask_user mcp] recv_terminal request_id={request_id} waiter={'yes' if waiter and not waiter.done() else 'no'} status={data.get('status')!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if waiter and not waiter.done():
+                waiter.set_result(dict(data))
+
+        @client.on("disconnect", namespace=_APPSERVER_IPC_NAMESPACE)
+        async def _on_ipc_disconnect():
+            for request_id, pending in list(_ask_user_pending_requests.items()):
+                if pending and not pending.done():
+                    pending.set_result({
+                        "request_id": request_id,
+                        "status": "error",
+                        "error": "ask_user IPC disconnected",
+                    })
+            _ask_user_pending_requests.clear()
+
         try:
             await client.connect(
                 _APPSERVER_ORIGIN,
@@ -2073,6 +2129,9 @@ def _resolve_section(nodes: list[SectionNode], section_id: str) -> SectionNode |
 
 mcp = FastMCP(name="agent-pty-blocks", instructions="Agent PTY + block store tools (per-conversation).")
 
+_ASK_USER_CARD_KIND = "ask_user"
+_ASK_USER_ANSWER_FIELD = "answer"
+
 
 # Modern CLI harnesses expose native PTY/terminal controls, so keep the legacy
 # PTY/block implementation available in-code but unregistered by default.
@@ -2108,6 +2167,284 @@ atexit.register(_atexit_cleanup)
 @mcp.tool(name="ping", description="Return MCP server pid (diagnostic).")
 async def ping() -> Dict[str, Any]:
     return {"ok": True, "pid": os.getpid()}
+
+
+def _normalize_choice_list(raw_choices: Optional[list[str]]) -> list[str]:
+    if not isinstance(raw_choices, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_choices:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _build_ask_user_requested_schema(
+    *,
+    question: str,
+    choices: list[str],
+    allow_freeform: bool,
+) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "title": "User Input",
+        "additionalProperties": False,
+        "required": [_ASK_USER_ANSWER_FIELD],
+        "properties": {
+            _ASK_USER_ANSWER_FIELD: {
+                "type": "array",
+                "items": {"type": "string"},
+                "title": "Answer",
+            },
+        },
+        "x-agent-pty-card": _ASK_USER_CARD_KIND,
+        "x-agent-pty-question": question,
+        "x-agent-pty-choices": list(choices),
+        "x-agent-pty-allowFreeform": bool(allow_freeform),
+    }
+
+
+def _extract_ask_user_answers(content: Any) -> list[str]:
+    payload = content if isinstance(content, dict) else {}
+    raw_answers = payload.get(_ASK_USER_ANSWER_FIELD)
+    if isinstance(raw_answers, str):
+        value = raw_answers.strip()
+        return [value] if value else []
+    if not isinstance(raw_answers, list):
+        return []
+    answers: list[str] = []
+    for item in raw_answers:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if value:
+            answers.append(value)
+    return answers
+
+
+async def _wait_for_ask_user_event(request_id: str) -> Dict[str, Any]:
+    request_id_text = str(request_id or "").strip()
+    if not request_id_text:
+        raise RuntimeError("request_id is required")
+    future = _ask_user_pending_requests.get(request_id_text)
+    if not isinstance(future, asyncio.Future):
+        future = asyncio.get_running_loop().create_future()
+        _ask_user_pending_requests[request_id_text] = future
+    try:
+        return await future
+    finally:
+        current = _ask_user_pending_requests.get(request_id_text)
+        if current is future:
+            _ask_user_pending_requests.pop(request_id_text, None)
+
+
+def _extract_ask_user_answers_from_resolution(resolution: Any) -> list[str]:
+    payload = resolution if isinstance(resolution, dict) else {}
+    answers = payload.get("answers")
+    if isinstance(answers, str):
+        value = answers.strip()
+        return [value] if value else []
+    if isinstance(answers, list):
+        normalized: list[str] = []
+        for item in answers:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if value:
+                normalized.append(value)
+        if normalized:
+            return normalized
+    answer = payload.get("answer")
+    if isinstance(answer, str):
+        value = answer.strip()
+        return [value] if value else []
+    content = payload.get("content")
+    if isinstance(content, dict):
+        answers_from_content = _extract_ask_user_answers(content)
+        if answers_from_content:
+            return answers_from_content
+    return []
+
+
+def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(value, dict):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        with contextlib.suppress(Exception):
+            dumped = model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+    to_dict = getattr(value, "dict", None)
+    if callable(to_dict):
+        with contextlib.suppress(Exception):
+            dumped = to_dict()
+            if isinstance(dumped, dict):
+                return dumped
+    return None
+
+
+def _normalize_ask_user_resolution(
+    resolution: Any,
+    *,
+    choices: list[str],
+) -> Dict[str, Any]:
+    payload = resolution if isinstance(resolution, dict) else {}
+    action = str(payload.get("action") or payload.get("status") or "accept").strip().lower() or "accept"
+    if action not in {"accept", "decline", "cancel"}:
+        action = "accept"
+    if action != "accept":
+        return {
+            "ok": True,
+            "status": action,
+            "accepted": False,
+            "answer": None,
+            "answers": [],
+            "selected_choice": None,
+            "freeform_answer": None,
+        }
+
+    answers = _extract_ask_user_answers_from_resolution(payload)
+    answer = answers[0] if answers else None
+    choice_set = set(choices)
+    selected_choice = answer if isinstance(answer, str) and answer in choice_set else None
+    freeform_answer = answer if isinstance(answer, str) and answer not in choice_set else None
+    return {
+        "ok": True,
+        "status": "accept",
+        "accepted": True,
+        "answer": answer,
+        "answers": answers,
+        "selected_choice": selected_choice,
+        "freeform_answer": freeform_answer,
+    }
+
+
+def _normalize_ask_user_terminal(
+    event: Any,
+    *,
+    choices: list[str],
+) -> Dict[str, Any]:
+    payload = event if isinstance(event, dict) else {}
+    if isinstance(payload.get("response"), dict):
+        return _normalize_ask_user_resolution(payload["response"], choices=choices)
+    if isinstance(payload.get("result"), dict):
+        return _normalize_ask_user_resolution(payload["result"], choices=choices)
+    status = str(payload.get("status") or "").strip().lower()
+    error = str(payload.get("error") or "").strip()
+    if status == "error" or error:
+        return {"ok": False, "error": error or "ask_user terminated with error"}
+    if status not in {"cancel", "interrupted"}:
+        status = "cancel"
+    return {
+        "ok": True,
+        "status": status,
+        "accepted": False,
+        "answer": None,
+        "answers": [],
+        "selected_choice": None,
+        "freeform_answer": None,
+    }
+
+
+@mcp.tool(
+    name="ask_user",
+    description="Ask the user a question and wait for a response. Supports choices and optional freeform input.",
+)
+async def ask_user(
+    question: str,
+    choices: Optional[list[str]] = None,
+    allow_freeform: bool = True,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    question_text = str(question or "").strip()
+    if not question_text:
+        return {"ok": False, "error": "question is required"}
+    if ctx is None:
+        return {"ok": False, "error": "request context unavailable"}
+
+    normalized_choices = _normalize_choice_list(choices)
+    allow_freeform_value = bool(allow_freeform)
+    if not normalized_choices and not allow_freeform_value:
+        return {
+            "ok": False,
+            "error": "At least one choice is required when allow_freeform is false",
+        }
+    raw_request_id = str(getattr(ctx, "request_id", "") or "").strip()
+    request_id = os.environ.get("CONVERSATION_ID", "").strip()
+    if not request_id:
+        return {"ok": False, "error": "CONVERSATION_ID not available — MCP server not conversation-scoped"}
+    print(
+        f"[ask_user mcp] start request_id={request_id} question={question_text!r} choices={normalized_choices!r} allow_freeform={allow_freeform_value}",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        client = await _get_appserver_ipc_sio()
+        loop = asyncio.get_running_loop()
+        existing_future = _ask_user_pending_requests.get(request_id)
+        if isinstance(existing_future, asyncio.Future) and not existing_future.done():
+            return {"ok": False, "error": f"ask_user request already pending for {request_id}"}
+        result_future = loop.create_future()
+        _ask_user_pending_requests[request_id] = result_future
+        print(f"[ask_user mcp] waiting request_id={request_id}", file=sys.stderr, flush=True)
+        result_event = await _wait_for_ask_user_event(request_id)
+    except Exception as exc:
+        if "request_id" in locals() and request_id:
+            _ask_user_pending_requests.pop(request_id, None)
+        print(f"[ask_user mcp] error request_id={request_id or '-'} error={exc!r}", file=sys.stderr, flush=True)
+        return {"ok": False, "error": str(exc)}
+    if isinstance(result_event.get("response"), dict):
+        print(
+            f"[ask_user mcp] got_response request_id={request_id} response={result_event.get('response')!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        with contextlib.suppress(Exception):
+            await client.emit(
+                "ask_user_ack",
+                {"request_id": request_id},
+                namespace=_APPSERVER_IPC_NAMESPACE,
+            )
+            print(f"[ask_user mcp] ack_sent request_id={request_id}", file=sys.stderr, flush=True)
+        return _normalize_ask_user_resolution(
+            result_event.get("response"),
+            choices=normalized_choices,
+        )
+    if isinstance(result_event.get("result"), dict):
+        print(
+            f"[ask_user mcp] got_legacy_result request_id={request_id} result={result_event.get('result')!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        with contextlib.suppress(Exception):
+            await client.emit(
+                "ask_user_ack",
+                {"request_id": request_id},
+                namespace=_APPSERVER_IPC_NAMESPACE,
+            )
+            print(f"[ask_user mcp] ack_sent request_id={request_id}", file=sys.stderr, flush=True)
+        return _normalize_ask_user_resolution(
+            result_event.get("result"),
+            choices=normalized_choices,
+        )
+    print(f"[ask_user mcp] terminal request_id={request_id} event={result_event!r}", file=sys.stderr, flush=True)
+    return _normalize_ask_user_terminal(
+        result_event,
+        choices=normalized_choices,
+    )
+
+
+@mcp.tool(name="conv_id", description="Return the conversation ID for this MCP session.")
+async def conv_id() -> Dict[str, Any]:
+    cid = os.environ.get("CONVERSATION_ID", "")
+    return {"ok": bool(cid), "conversation_id": cid}
 
 
 @_legacy_terminal_mcp_tool(name="pty_exec", description="Execute a command (block mode) - waits for completion with BEGIN/END markers.")
