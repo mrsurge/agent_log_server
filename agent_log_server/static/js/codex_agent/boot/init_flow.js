@@ -93,18 +93,12 @@ export function bindBootInitFlow(ctx) {
       } else {
         ensureActivityRow();
       }
-      await fetchStatus();
     })();
   }
 
   function setupSettingsBoot() {
     setupDropdown(settingsApprovalEl, settingsApprovalToggle, settingsApprovalOptions, []);
     setupDropdown(settingsSandboxEl, settingsSandboxToggle, settingsSandboxOptions, []);
-    setupDropdown(settingsModelEl, settingsModelToggle, settingsModelOptions, [
-      'gpt-5.1-codex',
-      'gpt-5-codex',
-      'gpt-4.1-codex',
-    ]);
     setupDropdown(settingsEffortEl, settingsEffortToggle, settingsEffortOptions, [
       'low',
       'medium',
@@ -115,11 +109,12 @@ export function bindBootInitFlow(ctx) {
       'detailed',
       'auto',
     ]);
-    setupDropdown(settingsAgentEl, settingsAgentToggle, settingsAgentOptions, ['codex']);
+    setupDropdown(settingsModelEl, settingsModelToggle, settingsModelOptions, []);
+    setupDropdown(settingsAgentEl, settingsAgentToggle, settingsAgentOptions, []);
     loadAgentOptions();
     loadModelOptions();
     loadRuntimeOptions(
-      getState().conversationSettings?.agent || getState().conversationMeta?.settings?.agent || 'codex',
+      getState().conversationSettings?.agent || getState().conversationMeta?.settings?.agent || null,
       getState().conversationMeta?.conversation_id,
     );
     if (settingsModelEl) {
@@ -159,15 +154,7 @@ export function bindBootInitFlow(ctx) {
   }
 
   function bindStartStopButtons() {
-    startBtn?.addEventListener('click', async () => {
-      await sioCall('app_start', {});
-      fetchStatus();
-    });
-
-    stopBtn?.addEventListener('click', async () => {
-      await sioCall('app_stop', {});
-      fetchStatus();
-    });
+    // Legacy builtin app-server controls removed from the codex-agent UI.
   }
 
   function initExternalModules() {

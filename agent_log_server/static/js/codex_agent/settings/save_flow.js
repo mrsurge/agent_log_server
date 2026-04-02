@@ -45,17 +45,12 @@ export function bindSettingsSaveFlow(ctx) {
       settingsViewWrapEl,
     } = elements;
 
-    const agentType = settingsAgentEl?.value?.trim() || 'codex';
-    let cwd;
-    if (agentType === 'codex') {
-      cwd = settingsCwdEl?.value?.trim();
-    } else {
-      const schemaVals =
-        window.CodexAgent?.helpers?.getSchemaRawValues?.()
-        || window.CodexAgent?.helpers?.getSchemaValues?.()
-        || {};
-      cwd = schemaVals.cwd?.trim();
+    const agentType = settingsAgentEl?.value?.trim() || state.runtimeOptions?.agent || '';
+    if (!agentType) {
+      setActivity('Agent required', true);
+      return;
     }
+    let cwd = settingsCwdEl?.value?.trim();
     if (!cwd) cwd = state.conversationSettings?.cwd?.trim();
     if (!cwd) {
       setActivity('CWD required', true);
@@ -68,91 +63,73 @@ export function bindSettingsSaveFlow(ctx) {
     const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
     const semanticRibbonEnabled = settingsSemanticShellRibbonEl?.checked === true;
 
-    let settings;
-    if (agentType === 'codex') {
-      const approvalKey = state.runtimeOptions?.approval?.settingKey || 'approvalPolicy';
-      const sandboxKey = state.runtimeOptions?.sandbox?.settingKey || 'sandboxPolicy';
-      const preservedSettings = { ...(state.conversationSettings || {}) };
-      [
-        'cwd',
-        'approvalPolicy',
-        'sandboxPolicy',
-        'sandbox',
-        'model',
-        'effort',
-        'summary',
-        'developer_instructions',
-        'label',
-        'alias',
-        'commandOutputLines',
-        'viewWrap',
-        'markdown',
-        'useXterm',
-        'diffSyntax',
-        'semanticShellRibbon',
-        'te2_mcp_integration',
-        'trackEdits',
-        'lineNumbers',
-        'agent',
-        approvalKey,
-        sandboxKey,
-      ].forEach((key) => {
-        if (!key) return;
-        delete preservedSettings[key];
-      });
-      settings = {
-        ...preservedSettings,
-        cwd,
-        [approvalKey]: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
-        [sandboxKey]: settingsSandboxEl?.value?.trim() || null,
-        model: settingsModelEl?.value?.trim() || null,
-        effort: settingsEffortEl?.value?.trim() || null,
-        summary: settingsSummaryEl?.value?.trim() || null,
-        developer_instructions: settingsDeveloperInstructionsEl?.value?.trim() || null,
-        label: settingsLabelEl?.value?.trim() || null,
-        alias: settingsAliasEl?.value?.trim() || null,
-        commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
-        viewWrap: viewWrapEnabled,
-        markdown: mdEnabled,
-        useXterm: xtermEnabled,
-        diffSyntax: diffSyntaxEnabled,
-        semanticShellRibbon: semanticRibbonEnabled,
-        te2_mcp_integration: settingsTe2McpIntegrationEl?.checked === true,
-        trackEdits: state.trackEditsEnabled,
-        lineNumbers: state.lineNumbersEnabled === true,
-        agent: agentType,
-      };
-    } else {
-      let schemaRaw;
-      try {
-        schemaRaw =
-          window.CodexAgent?.helpers?.getSchemaParsedValues?.()
-          || window.CodexAgent?.helpers?.getSchemaValues?.()
-          || {};
-      } catch (err) {
-        setActivity(err instanceof Error ? err.message : String(err), true);
-        return;
-      }
-      const schemaVals = Object.fromEntries(
-        Object.entries(schemaRaw).filter(([_, v]) => v !== '' && v != null)
-      );
-      settings = {
-        ...schemaVals,
-        cwd: schemaVals.cwd?.trim() || cwd,
-        label: settingsLabelEl?.value?.trim() || null,
-        alias: settingsAliasEl?.value?.trim() || null,
-        commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
-        viewWrap: viewWrapEnabled,
-        markdown: mdEnabled,
-        useXterm: xtermEnabled,
-        diffSyntax: diffSyntaxEnabled,
-        semanticShellRibbon: semanticRibbonEnabled,
-        te2_mcp_integration: settingsTe2McpIntegrationEl?.checked === true,
-        trackEdits: state.trackEditsEnabled,
-        lineNumbers: state.lineNumbersEnabled === true,
-        agent: agentType,
-      };
+    let schemaRaw = {};
+    try {
+      schemaRaw =
+        window.CodexAgent?.helpers?.getSchemaParsedValues?.()
+        || window.CodexAgent?.helpers?.getSchemaValues?.()
+        || {};
+    } catch (err) {
+      setActivity(err instanceof Error ? err.message : String(err), true);
+      return;
     }
+    const schemaVals = Object.fromEntries(
+      Object.entries(schemaRaw).filter(([_, v]) => v !== '' && v != null)
+    );
+    const approvalKey = state.runtimeOptions?.approval?.settingKey || 'approvalPolicy';
+    const sandboxKey = state.runtimeOptions?.sandbox?.settingKey || 'sandboxPolicy';
+    const preservedSettings = { ...(state.conversationSettings || {}) };
+    [
+      'cwd',
+      'approvalPolicy',
+      'sandboxPolicy',
+      'sandbox',
+      'model',
+      'effort',
+      'summary',
+      'developer_instructions',
+      'label',
+      'alias',
+      'commandOutputLines',
+      'viewWrap',
+      'markdown',
+      'useXterm',
+      'diffSyntax',
+      'semanticShellRibbon',
+      'te2_mcp_integration',
+      'trackEdits',
+      'lineNumbers',
+      'agent',
+      approvalKey,
+      sandboxKey,
+      ...Object.keys(schemaRaw),
+    ].forEach((key) => {
+      if (!key) return;
+      delete preservedSettings[key];
+    });
+    const settings = {
+      ...preservedSettings,
+      ...schemaVals,
+      cwd,
+      [approvalKey]: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
+      [sandboxKey]: settingsSandboxEl?.value?.trim() || null,
+      model: settingsModelEl?.value?.trim() || null,
+      effort: settingsEffortEl?.value?.trim() || null,
+      summary: settingsSummaryEl?.value?.trim() || null,
+      developer_instructions: settingsDeveloperInstructionsEl?.value?.trim() || null,
+      label: settingsLabelEl?.value?.trim() || null,
+      alias: settingsAliasEl?.value?.trim() || null,
+      commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
+      viewWrap: viewWrapEnabled,
+      markdown: mdEnabled,
+      useXterm: xtermEnabled,
+      diffSyntax: diffSyntaxEnabled,
+      semanticShellRibbon: semanticRibbonEnabled,
+      te2_mcp_integration: settingsTe2McpIntegrationEl?.checked === true,
+      trackEdits: state.trackEditsEnabled,
+      lineNumbers: state.lineNumbersEnabled === true,
+      agent: agentType,
+    };
 
     setMarkdownEnabled(mdEnabled);
     setViewWrapEnabled(viewWrapEnabled);

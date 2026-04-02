@@ -18,6 +18,7 @@ import socketio
 import binascii
 import urllib.request
 import urllib.error
+import urllib.parse
 import shutil
 import tomlkit
 
@@ -322,7 +323,6 @@ async def _ipc_ask_user_ack(sid, data):
     request_id = str(
         data.get("request_id")
         or data.get("requestId")
-        or data.get("interaction_id")
         or data.get("id")
         or ""
     ).strip()
@@ -1003,6 +1003,50 @@ async def _sio_te2_agent_open(sid, data):
         return _sio_error(str(e))
 
 
+async def _open_external_http_url(url: str) -> tuple[bool, str]:
+    opener = shutil.which("xdg-open")
+    if not opener:
+        return False, "xdg-open not found"
+    target = str(url or "").strip()
+    if not target:
+        return False, "Empty URL"
+    parsed = urllib.parse.urlparse(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False, "Only http/https URLs are supported"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            opener,
+            target,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        return False, str(exc)
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1.0)
+    except asyncio.TimeoutError:
+        return True, ""
+    if proc.returncode == 0:
+        return True, ""
+    message = stderr.decode("utf-8", errors="replace").strip() if isinstance(stderr, (bytes, bytearray)) else ""
+    return False, message or f"xdg-open exited with {proc.returncode}"
+
+
+@socketio_server.on("open_external_url", namespace="/appserver")
+async def _sio_open_external_url(sid, data):
+    """User-initiated external URL open via backend xdg-open."""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        url = payload.get("url")
+        ok, error = await _open_external_http_url(str(url or ""))
+        if not ok:
+            return _sio_error(error or "Failed to open URL")
+        return {"ok": True, "url": str(url or "").strip()}
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 @socketio_server.on("get_log_messages", namespace="/appserver")
 async def _sio_get_log_messages(sid, data):
     try:
@@ -1196,12 +1240,23 @@ def _get_configured_extension_enabled(cfg: Dict[str, Any], extension_id: str, de
     return normalized.get("enabled") is True
 
 
+def _default_active_extension_id() -> Optional[str]:
+    for info in ext_loader.list_extensions():
+        ext_id = info.get("id") if isinstance(info, dict) else None
+        if not isinstance(ext_id, str) or not ext_id.strip():
+            continue
+        ext_id = ext_id.strip()
+        if info.get("active") is True and ext_loader.has_extension(ext_id):
+            return ext_id
+    return None
+
+
 def _conversation_agent(meta: Optional[Dict[str, Any]]) -> str:
     settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
     agent = settings.get("agent")
     if isinstance(agent, str) and agent.strip():
         return agent.strip()
-    return "codex"
+    return _default_active_extension_id() or ""
 
 
 def _clear_active_conversation_if_extension_inactive(cfg: Dict[str, Any]) -> bool:
@@ -1226,9 +1281,14 @@ def _clear_active_conversation_if_extension_inactive(cfg: Dict[str, Any]) -> boo
 
 
 def _extension_unavailable_detail(extension_id: str) -> Optional[str]:
+    extension_id = str(extension_id or "").strip()
+    if not extension_id:
+        return "No active extension available"
+    if extension_id == "codex":
+        return "Legacy builtin Codex is disabled"
     info = ext_loader.get_extension_info(extension_id)
     if not isinstance(info, dict):
-        return None
+        return f"Extension unavailable: {extension_id}"
     if info.get("enabled") is not True:
         return f"Extension disabled: {extension_id}"
     status = str(info.get("dependency_status") or "").strip().lower()
@@ -1592,6 +1652,7 @@ def _default_conversation_meta(conversation_id: str) -> Dict[str, Any]:
         "created_at": utc_ts(),
         "thread_id": None,
         "pending_approvals": {},
+        "ask_user_msg_counter": 0,
         "active_plan": None,
         "settings": {},
         "status": "draft",
@@ -1998,6 +2059,14 @@ def _approval_status_from_resolution(resolution: Any) -> str:
     return "accepted"
 
 
+def _next_ask_user_msg_id(conversation_id: str) -> int:
+    meta = _load_conversation_meta(conversation_id)
+    counter = int(meta.get("ask_user_msg_counter") or 0)
+    meta["ask_user_msg_counter"] = counter + 1
+    _save_conversation_meta(conversation_id, meta)
+    return counter
+
+
 def _build_approval_handoff_event(
     conversation_id: str,
     descriptor: Dict[str, Any],
@@ -2013,6 +2082,15 @@ def _build_approval_handoff_event(
     request_params = dict(descriptor.get("request_params") or {})
     transcript_anchor = descriptor.get("transcript_anchor") if isinstance(descriptor.get("transcript_anchor"), dict) else {}
     turn_id = descriptor.get("turn_id") or transcript_anchor.get("turn_id") or render_event.get("turn_id") or ""
+    card_id = (
+        str(render_event.get("card_id") or descriptor.get("card_id") or "").strip()
+        or None
+    )
+    is_ask_user = (
+        str(descriptor.get("request_method") or render_event.get("request_method") or "").strip()
+        == "agent-pty-blocks.ask_user"
+    )
+    ask_user_msg_id = _next_ask_user_msg_id(conversation_id) if is_ask_user else None
     return {
         **render_event,
         "type": "approval_handoff",
@@ -2033,6 +2111,8 @@ def _build_approval_handoff_event(
         ),
         "turn_id": render_event.get("turn_id") or turn_id,
         "created_at": str(render_event.get("created_at") or descriptor.get("created_at") or utc_ts()),
+        "card_id": card_id,
+        "ask_user_msg_id": ask_user_msg_id,
         "status": _approval_status_from_resolution(resolution),
         "decision": resolution.get("decision"),
         "result": dict(resolution),
@@ -2045,6 +2125,9 @@ async def _append_approval_handoff_transcript_entry(
     handoff_event: Dict[str, Any],
 ) -> None:
     payload = handoff_event.get("payload") if isinstance(handoff_event.get("payload"), dict) else {}
+    card_id = str(handoff_event.get("card_id") or "").strip() or None
+    request_id = handoff_event.get("request_id", handoff_event.get("id"))
+    item_id = card_id or request_id
     await _append_transcript_entry(conversation_id, {
         "role": "approval",
         "status": handoff_event.get("status"),
@@ -2054,8 +2137,10 @@ async def _append_approval_handoff_transcript_entry(
         "payload": payload,
         "diff": handoff_event.get("diff") or payload.get("diff"),
         "path": handoff_event.get("path") or payload.get("path"),
-        "request_id": handoff_event.get("request_id", handoff_event.get("id")),
-        "item_id": handoff_event.get("request_id", handoff_event.get("id")),
+        "request_id": request_id,
+        "item_id": item_id,
+        "card_id": card_id,
+        "ask_user_msg_id": handoff_event.get("ask_user_msg_id"),
         "turn_id": handoff_event.get("turn_id"),
         "event": "approval_decision",
     })
@@ -6275,16 +6360,10 @@ try {{
 	                        ),
 	                        Div(
 	                            Div(
-	                                Span("Status"),
-	                                Span("idle", id="agent-status", cls="pill warn"),
-	                                cls="status-pill"
-	                            ),
-	                            Button("Start", id="agent-start", cls="btn"),
-	                            Button("Stop", id="agent-stop", cls="btn ghost"),
                                 Button("⚙", id="splash-settings", cls="btn ghost", title="Splash settings"),
-	                            Button("×", id="host-close-top", cls="btn ghost host-close-btn"),
-	                            cls="toolbar"
-	                        ),
+                                Button("×", id="host-close-top", cls="btn ghost host-close-btn"),
+                                cls="toolbar"
+                            ),
 	                        cls="topbar"
 	                    ),
 	                    Main(
@@ -6342,7 +6421,7 @@ try {{
                                 Label(
                                     Span("Agent"),
                                     Div(
-                                        Input(type="text", id="settings-agent", placeholder="codex", readonly=True, value="codex"),
+                                        Input(type="text", id="settings-agent", placeholder="(select agent)", readonly=True),
                                         Button("▾", id="settings-agent-toggle", cls="btn ghost dropdown-toggle"),
                                         Div(id="settings-agent-options", cls="dropdown-list"),
                                         cls="dropdown-field"
@@ -6387,7 +6466,7 @@ try {{
                                     Label(
                                         Span("Model"),
                                         Div(
-                                            Input(type="text", id="settings-model", placeholder="gpt-5.1-codex"),
+                                            Input(type="text", id="settings-model", placeholder="model id"),
                                             Button("▾", id="settings-model-toggle", cls="btn ghost dropdown-toggle"),
                                             Div(id="settings-model-options", cls="dropdown-list"),
                                             cls="dropdown-field"
@@ -6416,18 +6495,9 @@ try {{
                                         Textarea(
                                             id="settings-developer-instructions",
                                             cls="settings-textarea",
-                                            placeholder="Additional runtime instructions applied when Codex starts or resumes a thread",
+                                            placeholder="Additional runtime instructions applied when the agent starts or resumes a thread",
                                         ),
                                     ),
-                                    Label(
-                                        Span("Rollout"),
-                                        Div(
-                                            Input(type="text", id="settings-rollout", placeholder="(unselected)", readonly=True),
-                                            Button("Pick", id="settings-rollout-browse", cls="btn ghost"),
-                                            cls="settings-row"
-                                    ),
-                                    id="settings-rollout-row",
-                                ),
                                     id="settings-codex-fields",
                                 ),
                                 Div(id="settings-extension-fields"),
@@ -6616,6 +6686,7 @@ try {{
                     ),
                     cls="appshell"
                 )
+            )
             )
             )
         )
@@ -7769,15 +7840,13 @@ async def api_appserver_message(payload: AppserverMessageIn):
         raise HTTPException(status_code=404, detail=f"Conversation not found: {convo_id}")
     
     settings = meta.get("settings", {})
-    agent_type = settings.get("agent", "codex")
+    agent_type = _conversation_agent(meta)
     runtime_settings = _materialize_extension_runtime_settings(settings)
-    
-    # Route to extension if non-codex agent and handler exists
-    if agent_type != "codex":
-        unavailable_detail = _extension_unavailable_detail(agent_type)
-        if unavailable_detail:
-            await _emit_extension_unavailable_warning(convo_id, agent_type, detail=unavailable_detail)
-            raise HTTPException(status_code=409, detail=unavailable_detail)
+    unavailable_detail = _extension_unavailable_detail(agent_type)
+    if unavailable_detail:
+        await _emit_extension_unavailable_warning(convo_id, agent_type or "unknown", detail=unavailable_detail)
+        raise HTTPException(status_code=409, detail=unavailable_detail)
+    if ext_loader.has_extension(agent_type):
         _buffer_user_message(convo_id, text, agent_type)
         try:
             result = await ext_loader.handle_message(
@@ -8019,7 +8088,7 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
     request_id_raw = payload.get(
         "request_id",
-        payload.get("requestId", payload.get("interaction_id", payload.get("id"))),
+        payload.get("requestId", payload.get("id")),
     )
     request_id = str(request_id_raw or "").strip()
     if not request_id:
@@ -8146,11 +8215,11 @@ async def api_appserver_interrupt(payload: Optional[Dict[str, Any]] = Body(None)
     meta = _load_conversation_meta(convo_id)
 
     # Route by agent type — non-codex agents use ext_loader
-    agent_type = meta.get("settings", {}).get("agent", "codex")
-    unavailable_detail = _extension_unavailable_detail(agent_type) if agent_type != "codex" else None
+    agent_type = _conversation_agent(meta)
+    unavailable_detail = _extension_unavailable_detail(agent_type)
     if unavailable_detail:
         raise HTTPException(status_code=409, detail=unavailable_detail)
-    if agent_type != "codex" and ext_loader.has_extension(agent_type):
+    if ext_loader.has_extension(agent_type):
         result = await ext_loader.interrupt_session(agent_type, convo_id)
         if not result.get("ok"):
             raise HTTPException(status_code=409, detail=result.get("error", "Interrupt failed"))
@@ -8289,8 +8358,11 @@ async def api_appserver_compact(payload: Optional[Dict[str, Any]] = Body(None)):
         raise HTTPException(status_code=409, detail="No active thread to compact")
 
     # Route to extension if non-legacy agent
-    agent_type = (meta.get("settings") or {}).get("agent", "codex")
-    if agent_type != "codex" and ext_loader.has_extension(agent_type):
+    agent_type = _conversation_agent(meta)
+    unavailable_detail = _extension_unavailable_detail(agent_type)
+    if unavailable_detail:
+        raise HTTPException(status_code=409, detail=unavailable_detail)
+    if ext_loader.has_extension(agent_type):
         await _emit_command_result_mirror(
             convo_id,
             command="context compact",
@@ -8852,9 +8924,12 @@ async def api_appserver_runtime_options(
                     resolved_agent = saved_agent.strip()
 
     if not resolved_agent:
-        resolved_agent = "codex"
+        resolved_agent = _default_active_extension_id() or ""
 
     settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
+    unavailable_detail = _extension_unavailable_detail(resolved_agent)
+    if unavailable_detail:
+        raise HTTPException(status_code=409, detail=unavailable_detail)
 
     # Generic runtime-option hook for shared footer controls such as mode/plan.
     # Extensions own the enum values, labels, and current state; server.py only
@@ -9101,10 +9176,6 @@ async def api_extension_get(extension_id: str):
 @app.get("/api/extensions/{extension_id}/settings_schema")
 async def api_extension_settings_schema(extension_id: str):
     """Get settings schema for an extension."""
-    # Special case: legacy codex keeps the built-in modal path.
-    if extension_id == "codex":
-        return {"version": "1", "fields": [], "useBuiltin": True}
-    
     if not ext_loader.has_extension(extension_id):
         return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
 

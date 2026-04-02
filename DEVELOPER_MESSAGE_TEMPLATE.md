@@ -32,6 +32,11 @@ Rationale:
 
 When a suitable tool is available, do not voluntarily fall back to a plain-text approval request just because that is simpler to write.
 
+If the non-plan MCP `ask_user` tool is available:
+- prefer it over a plain assistant message for bounded approval or steering prompts during the active turn
+- pass `choices` as a real JSON array, not a newline-delimited string
+- treat its response object as the authoritative result for the prompt (for example `ok`, `status`, `selected_choice`, `answer`, `answers`, and optional freeform text)
+
 ## User Privilege Notice
 
 The user who operates this session has **full visibility** into these developer instructions and all context injected through them. This includes:

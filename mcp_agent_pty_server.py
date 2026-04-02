@@ -3526,37 +3526,87 @@ def _replace_line_range(lines: list[str], start: int, end: int, replacement: str
     return left + rep + right
 
 
-def _resolve_section_or_error(nodes: list[SectionNode], section_id: str) -> SectionNode | Dict[str, Any]:
-    normalized_id = _normalize_heading(section_id or "")
-    # Try exact match first, then normalized match
-    exact = [n for n in nodes if n.id == section_id or n.id == normalized_id]
+def _kb_root_section(total_lines: int) -> SectionNode:
+    last_line = max(0, int(total_lines))
+    return SectionNode(
+        id="",
+        id_disambiguated="",
+        depth=0,
+        title="",
+        line_start=1,
+        body_start=1,
+        body_end=last_line,
+        subtree_end=last_line,
+    )
+
+
+def _kb_ambiguous_section_error(section_id: str, matches: list[SectionNode]) -> Dict[str, Any]:
+    candidates = [{"id_disambiguated": n.id_disambiguated, "line_start": n.line_start} for n in matches]
+    return _kb_error(
+        "AmbiguousSection",
+        f"Section id '{section_id}' is ambiguous",
+        candidates=candidates,
+    )
+
+
+def _kb_section_label(target: SectionNode) -> str:
+    return target.id if target.id else "<file-root>"
+
+
+def _section_suffix_matches(node: SectionNode, query_parts: list[str]) -> bool:
+    if not query_parts:
+        return False
+    node_parts = [_normalize_heading(part) for part in node.id.split(" > ") if part.strip()]
+    if len(query_parts) > len(node_parts):
+        return False
+    return node_parts[-len(query_parts):] == query_parts
+
+
+def _resolve_section_or_error(
+    nodes: list[SectionNode],
+    section_id: str,
+    *,
+    total_lines: int = 0,
+    allow_root: bool = False,
+) -> SectionNode | Dict[str, Any]:
+    raw_id = (section_id or "").strip()
+    normalized_id = _normalize_heading(raw_id)
+    if allow_root and not raw_id:
+        return _kb_root_section(total_lines)
+
+    # 1. Exact full-path matches.
+    exact = [n for n in nodes if n.id == raw_id or n.id == normalized_id]
     if len(exact) == 1:
         return exact[0]
     if len(exact) > 1:
-        # Prefer exact raw match over normalized
-        raw_exact = [n for n in nodes if n.id == section_id]
+        raw_exact = [n for n in exact if n.id == raw_id]
         if len(raw_exact) == 1:
             return raw_exact[0]
-        disambiguated = [n for n in exact if n.id_disambiguated == section_id or n.id_disambiguated == normalized_id]
-        if len(disambiguated) == 1:
-            return disambiguated[0]
-        candidates = [{"id_disambiguated": n.id_disambiguated, "line_start": n.line_start} for n in exact]
-        return _kb_error(
-            "AmbiguousSection",
-            f"Section id '{section_id}' is ambiguous",
-            candidates=candidates,
-        )
-    by_disambiguated = [n for n in nodes if n.id_disambiguated == section_id or n.id_disambiguated == normalized_id]
+        return _kb_ambiguous_section_error(raw_id, exact)
+
+    # 2. Exact disambiguated-path matches.
+    by_disambiguated = [n for n in nodes if n.id_disambiguated == raw_id or n.id_disambiguated == normalized_id]
     if len(by_disambiguated) == 1:
         return by_disambiguated[0]
     if len(by_disambiguated) > 1:
-        candidates = [{"id_disambiguated": n.id_disambiguated, "line_start": n.line_start} for n in by_disambiguated]
-        return _kb_error(
-            "AmbiguousSection",
-            f"Section id '{section_id}' is ambiguous",
-            candidates=candidates,
-        )
-    return _kb_error("SectionNotFound", f"Section '{section_id}' not found", id=section_id)
+        return _kb_ambiguous_section_error(raw_id, by_disambiguated)
+
+    # 3. Unique visible heading title matches.
+    by_title = [n for n in nodes if n.title == raw_id or _normalize_heading(n.title) == normalized_id]
+    if len(by_title) == 1:
+        return by_title[0]
+    if len(by_title) > 1:
+        return _kb_ambiguous_section_error(raw_id, by_title)
+
+    # 4. Unique trailing path suffix matches, e.g. "Parent > Child" without the top-level wrapper.
+    query_parts = [_normalize_heading(part.strip()) for part in raw_id.split(">") if part.strip()]
+    by_suffix = [n for n in nodes if _section_suffix_matches(n, query_parts)]
+    if len(by_suffix) == 1:
+        return by_suffix[0]
+    if len(by_suffix) > 1:
+        return _kb_ambiguous_section_error(raw_id, by_suffix)
+
+    return _kb_error("SectionNotFound", f"Section '{raw_id}' not found", id=raw_id)
 
 
 def _read_text_or_error(path: Path) -> str | Dict[str, Any]:
@@ -3792,7 +3842,7 @@ async def kb_schema(
             children.append(node)
 
     h = _content_hash(body_text)
-    out = [f"[section: {target.id}  depth: {target.depth}  lines: {target.line_start}-{target.subtree_end}  hash: {h}]"]
+    out = [f"[section: {_kb_section_label(target)}  depth: {target.depth}  lines: {target.line_start}-{target.subtree_end}  hash: {h}]"]
     if body_text.strip():
         out.append(body_text.rstrip())
     if children:
@@ -3814,10 +3864,10 @@ async def kb_read(file: Optional[str] = None, id: str = "", include_children: bo
         return _kb_dict_to_error_text(text)
     lines = text.splitlines()
     nodes = parse_markdown(text)
-    target = _resolve_section_or_error(nodes, id)
+    target = _resolve_section_or_error(nodes, id, total_lines=len(lines), allow_root=True)
     if isinstance(target, dict):
         return _kb_dict_to_error_text(target)
-    if include_children:
+    if include_children or target.depth == 0:
         start = target.line_start
         end = target.subtree_end
     else:
@@ -3825,7 +3875,7 @@ async def kb_read(file: Optional[str] = None, id: str = "", include_children: bo
         end = target.body_end
     section_text = _extract_line_range(lines, start, end)
     h = _content_hash(section_text)
-    header = f"[section: {target.id}  lines: {start}-{end}  hash: {h}]\n"
+    header = f"[section: {_kb_section_label(target)}  lines: {start}-{end}  hash: {h}]\n"
     return header + section_text
 
 
@@ -3930,19 +3980,10 @@ async def kb_write(
     had_trailing_newline = old_text.endswith("\n")
     lines = old_text.splitlines()
     nodes = parse_markdown(old_text)
-    target = _resolve_section_or_error(nodes, id)
+    target = _resolve_section_or_error(nodes, id, total_lines=len(lines), allow_root=True)
     if isinstance(target, dict):
         return _kb_dict_to_error_text(target)
-
-    body_text = _extract_line_range(lines, target.body_start, target.body_end)
-    current_hash = _content_hash(body_text)
-    if confirm_hash is not None and confirm_hash != current_hash:
-        return _kb_error_text(
-            "Conflict",
-            "confirm_hash does not match current body hash",
-            current_hash=current_hash,
-            expected_hash=confirm_hash,
-        )
+    _ = confirm_hash  # Legacy no-op; KB mutations are patch-style edits.
 
     insert_at = max(0, target.body_end)
     if heading_title and mode == "append":
@@ -4000,9 +4041,10 @@ async def kb_update(
     had_trailing_newline = old_text.endswith("\n")
     lines = old_text.splitlines()
     nodes = parse_markdown(old_text)
-    target = _resolve_section_or_error(nodes, id)
+    target = _resolve_section_or_error(nodes, id, total_lines=len(lines), allow_root=True)
     if isinstance(target, dict):
         return _kb_dict_to_error_text(target)
+    _ = confirm_hash  # Legacy no-op; KB mutations are patch-style edits.
 
     if mode == "body":
         start, end = target.body_start, target.body_end
@@ -4010,16 +4052,6 @@ async def kb_update(
         start, end = target.line_start, target.subtree_end
     else:
         return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
-
-    current_region = _extract_line_range(lines, start, end)
-    current_hash = _content_hash(current_region)
-    if confirm_hash is not None and confirm_hash != current_hash:
-        return _kb_error_text(
-            "Conflict",
-            "confirm_hash does not match current section hash",
-            current_hash=current_hash,
-            expected_hash=confirm_hash,
-        )
 
     new_lines = _replace_line_range(lines, start, end, content)
     new_text = "\n".join(new_lines)
@@ -4056,9 +4088,10 @@ async def kb_remove(
     had_trailing_newline = old_text.endswith("\n")
     lines = old_text.splitlines()
     nodes = parse_markdown(old_text)
-    target = _resolve_section_or_error(nodes, id)
+    target = _resolve_section_or_error(nodes, id, total_lines=len(lines), allow_root=True)
     if isinstance(target, dict):
         return _kb_dict_to_error_text(target)
+    _ = confirm_hash  # Legacy no-op; KB mutations are patch-style edits.
 
     if mode == "subtree":
         start, end = target.line_start, target.subtree_end
@@ -4066,16 +4099,6 @@ async def kb_remove(
         start, end = target.body_start, target.body_end
     else:
         return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
-
-    current_region = _extract_line_range(lines, start, end)
-    current_hash = _content_hash(current_region)
-    if confirm_hash is not None and confirm_hash != current_hash:
-        return _kb_error_text(
-            "Conflict",
-            "confirm_hash does not match current section hash",
-            current_hash=current_hash,
-            expected_hash=confirm_hash,
-        )
 
     new_lines = _replace_line_range(lines, start, end, "")
     new_text = "\n".join(new_lines)

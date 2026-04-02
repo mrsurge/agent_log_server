@@ -6,6 +6,7 @@ import {
   renderMarkdownItBlock,
   renderMarkdownInto,
   renderMarkdownSourceInto,
+  setMarkdownLinkHandlers,
   streamEnd,
   streamWrite,
 } from './js/codex_agent/markdown.js';
@@ -147,15 +148,33 @@ document.addEventListener('DOMContentLoaded', () => {
 	  let conversationMeta = {};
 		  let conversationSettings = {};
 		  let conversationList = [];
-		  let conversationPreviewCache = {};
-		  let appConfig = {};
-		  let activeView = 'splash';
+  let conversationPreviewCache = {};
+  let appConfig = {};
+  let activeView = 'splash';
 		  // Client-local selection (do not treat SSOT active conversation as an authority after boot).
 		  let clientConversationId = null;
 		  let clientActiveView = null;
       let miniConversationDrawerOpen = false;
 		  let hostUi = { showClose: false, parentOrigin: null };
-		  let splashTab = 'all'; // 'all' | 'project'
+  const SPLASH_TAB_STORAGE_KEY = 'codex_splash_tab';
+  function normalizeSplashTab(value) {
+    return value === 'project' ? 'project' : 'all';
+  }
+  function readSplashTabPreference() {
+    try {
+      return normalizeSplashTab(localStorage.getItem(SPLASH_TAB_STORAGE_KEY));
+    } catch {
+      return 'all';
+    }
+  }
+  function writeSplashTabPreference(value) {
+    try {
+      localStorage.setItem(SPLASH_TAB_STORAGE_KEY, normalizeSplashTab(value));
+    } catch {
+      // Ignore storage failures; splash tab state still works in-memory.
+    }
+  }
+		  let splashTab = readSplashTabPreference(); // 'all' | 'project'
   let pendingNewConversation = false;
   let pendingRollout = null;
   let lastEventType = null;
@@ -1835,7 +1854,10 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
       if (patch.draftSaveTimer !== undefined) draftSaveTimer = patch.draftSaveTimer;
       if (patch.lastDraftHash !== undefined) lastDraftHash = patch.lastDraftHash;
-      if (patch.splashTab !== undefined) splashTab = patch.splashTab;
+      if (patch.splashTab !== undefined) {
+        splashTab = normalizeSplashTab(patch.splashTab);
+        writeSplashTabPreference(splashTab);
+      }
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
       if (patch.miniConversationDrawerOpen !== undefined) miniConversationDrawerOpen = patch.miniConversationDrawerOpen;
     },
@@ -1898,6 +1920,37 @@ document.addEventListener('DOMContentLoaded', () => {
 		      console.warn('[TE2_OPEN] error:', e);
 		    }
 		  }
+
+  async function postExternalUrlOpenRequest(url) {
+    const target = typeof url === 'string' ? url.trim() : '';
+    if (!target) return;
+    try {
+      const result = await sioCall('open_external_url', {
+        url: target,
+        source: 'codex-agent',
+        conversation_id: conversationMeta?.conversation_id || null,
+      });
+      if (result?.ok === false) {
+        console.warn('[OPEN_EXTERNAL_URL] failed:', JSON.stringify(result));
+      }
+    } catch (e) {
+      console.warn('[OPEN_EXTERNAL_URL] error:', e);
+    }
+  }
+
+  setMarkdownLinkHandlers({
+    openFilePath: (target) => {
+      const next = target && typeof target === 'object' ? target : { path: target };
+      postTe2OpenRequest({
+        path: next.path,
+        line: Number.isFinite(next.line) ? next.line : 1,
+        column: Number.isFinite(next.column) ? next.column : 1,
+      });
+    },
+    openExternalUrl: (url) => {
+      postExternalUrlOpenRequest(url);
+    },
+  });
 
   function updateActiveConversationLabel() {
     if (!activeConversationEl) return;
@@ -2675,11 +2728,20 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function currentExtensionId() {
-    return conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex';
+    const candidate = conversationSettings?.agent || conversationMeta?.settings?.agent || runtimeOptions?.agent || '';
+    const resolved = typeof candidate === 'string' ? candidate.trim() : '';
+    return resolved === 'codex' ? '' : resolved;
   }
 
   async function loadExtensionUiFeatures(extensionId) {
-    const resolvedExtensionId = typeof extensionId === 'string' && extensionId.trim() ? extensionId.trim() : 'codex';
+    const resolvedExtensionId = typeof extensionId === 'string' && extensionId.trim()
+      ? extensionId.trim()
+      : currentExtensionId();
+    if (!resolvedExtensionId) {
+      setSemanticShellQuoteParsingEnabled(false);
+      setActiveToolRenderPolicy(null);
+      return {};
+    }
     try {
       const data = await sioCall('get_extension_ui_features', {
         extension_id: resolvedExtensionId,
@@ -3563,10 +3625,18 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       if (entry.role === 'approval') {
+        const requestId = entry.request_id || entry.id || entry.item_id;
+        const askUserMsgId = entry.ask_user_msg_id ?? entry.askUserMsgId;
+        const resolvedCardId = askUserMsgId != null
+          ? `ask_user_resolved_${askUserMsgId}`
+          : (entry.card_id || entry.item_id || entry.id || requestId);
+        const cardId = resolvedCardId;
         renderApproval({
           ...entry,
-          id: entry.request_id || entry.item_id || entry.id,
-          request_id: entry.request_id || entry.item_id || entry.id,
+          id: resolvedCardId,
+          request_id: requestId,
+          card_id: cardId,
+          ask_user_msg_id: askUserMsgId,
           request_method: entry.request_method || entry.requestMethod || '',
           request_params: entry.payload && typeof entry.payload === 'object' ? entry.payload : {},
           payload: entry.payload && typeof entry.payload === 'object' ? entry.payload : {},
@@ -3576,7 +3646,7 @@ document.addEventListener('DOMContentLoaded', () => {
           readOnly: true,
           source: 'replay',
           useExisting: false,
-          extensionId: conversationSettings?.agent || 'codex',
+          extensionId: currentExtensionId(),
         });
         return;
       }
@@ -4882,11 +4952,11 @@ document.addEventListener('DOMContentLoaded', () => {
 	      }
 	      activeView = clientActiveView || conversationMeta?.active_view || 'splash';
         activeRuntimeOptionValues = {};
-        if (activeView !== 'conversation') {
-          miniConversationDrawerOpen = false;
-        }
+      if (activeView !== 'conversation') {
+        miniConversationDrawerOpen = false;
+      }
       await loadRuntimeOptions(
-        conversationSettings?.agent || conversationMeta?.settings?.agent || 'codex',
+        currentExtensionId() || null,
         conversationMeta?.conversation_id,
       );
       await loadExtensionUiFeatures(currentExtensionId());

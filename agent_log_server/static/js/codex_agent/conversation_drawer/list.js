@@ -17,8 +17,12 @@ export function createConversationDrawerList(ctx) {
   function getExtensionStatus(agentId) {
     const state = typeof getState === 'function' ? getState() : {};
     const catalog = Array.isArray(state?.extensionCatalog) ? state.extensionCatalog : [];
-    const agent = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : 'codex';
-    if (agent === 'codex') return { active: true };
+    const defaultAgent = catalog.find((item) => item?.active === true && item?.id)?.id || '';
+    const agent = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : defaultAgent;
+    if (agent === 'codex') {
+      return { active: false, dependency_message: 'Legacy builtin Codex is disabled' };
+    }
+    if (!agent) return null;
     return catalog.find((item) => item?.id === agent) || null;
   }
 
@@ -132,7 +136,7 @@ export function createConversationDrawerList(ctx) {
         row.classList.add('active');
       }
       const info = buildConversationInfo(doc, getConversationDisplay(meta));
-      const agentId = typeof meta?.settings?.agent === 'string' && meta.settings.agent.trim() ? meta.settings.agent.trim() : 'codex';
+      const agentId = typeof meta?.settings?.agent === 'string' && meta.settings.agent.trim() ? meta.settings.agent.trim() : '';
       const extensionStatus = getExtensionStatus(agentId);
       const isUnavailable = extensionStatus && extensionStatus.active !== true;
       const disabledTitle = typeof extensionStatus?.dependency_message === 'string' && extensionStatus.dependency_message.trim()
@@ -194,7 +198,7 @@ export function createConversationDrawerList(ctx) {
     }
     list.forEach((meta) => {
       if (!meta?.conversation_id) return;
-      const agentId = typeof meta?.settings?.agent === 'string' && meta.settings.agent.trim() ? meta.settings.agent.trim() : 'codex';
+      const agentId = typeof meta?.settings?.agent === 'string' && meta.settings.agent.trim() ? meta.settings.agent.trim() : '';
       const extensionStatus = getExtensionStatus(agentId);
       const isUnavailable = extensionStatus && extensionStatus.active !== true;
       const row = document.createElement('button');

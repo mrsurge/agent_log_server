@@ -33,6 +33,8 @@ When requesting prompt approval or final plan approval for work on this repo, I 
 2. MCP user-input or approval tool, when no built-in tool is available
 3. plain assistant message only when no approval tool is available
 
+If a higher-priority approval tool is available, I will actually use it. I will not skip to a lower-priority method just because it is simpler or more convenient to write.
+
 I should prefer in-turn approval tools because they preserve reasoning, investigation context, and plan state that would otherwise be lost across turns.
 
 ## Step 3: Execute Approved Plan
@@ -57,6 +59,11 @@ I should prefer in-turn approval tools because they preserve reasoning, investig
 3. **Execute Approved Plan**
 4. **Subsequent Interactions**
 5. Sometimes inquiries
+
+For Step 1 prompt approval and Step 2 final plan approval, I will use the approval-tool hierarchy in this order:
+1. built-in harness user-input or approval tool
+2. MCP user-input or approval tool
+3. plain assistant end-of-turn message only if no approval tool is available
 
 # Workflow Scope
 
@@ -167,6 +174,40 @@ The frontend renders cards identically for live and replay. If the transcript is
 
 UNDER NO CIRCUMSTANCES WILL I EVER USE `resolve()` or ANY SYMLINK RESOLOVING METHOD. EVER. (unless I AM EXPLICITLY AUTHORIZED TO)
 
+# Search Discipline
+
+## Do not blindly content-search high-noise roots
+
+- Do **not** run blind recursive content searches (`rg`, `grep`, `ripgrep`, `grep -R`, etc.) from broad high-noise roots such as the repo root or the package root when the query could walk bundled/generated/vendor content.
+- Name-only discovery in those places is fine (`find`, `glob`, `rg --files`, directory listings). The restriction is on blind **file-content** searching.
+- Narrow to specific source directories first, then search content only inside the targeted source tree.
+
+## Generated, bundled, minified, and vendor-heavy paths
+
+- Treat the following as **no blind content-search** zones unless the user explicitly asks for one of them:
+  - `node_modules/`
+  - `build/`
+  - `scripts/schema-extract/node_modules/`
+  - `worktrees/**/build/`
+  - `agent_log_server/static/dist/`
+- Also avoid blind content searches in obvious bundled/minified artifacts anywhere in the repo, especially:
+  - `*.min.js`
+  - `*.min.css`
+  - `*.bundle.js`
+  - `*.map`
+- Static source files are fine to inspect and search **when they are not minified/bundled**. If unsure, check the filename and file size first before searching contents.
+
+## Conversations and framework-shell logs
+
+- Do **not** blindly `rg`/`grep` conversation transcripts or framework-shell logs for content.
+- The main log/cache roots to treat this way are:
+  - `~/.cache/app_server/conversations/`
+  - `~/.cache/framework_shells/runtimes/**/logs/`
+- For those roots:
+  - file-name listing and path discovery are fine
+  - targeted content inspection must use a Python heredoc heuristic/parser tailored to the file format and the question being asked
+  - prefer JSON-aware or line-scoped Python extraction over raw text grep so you do not drown in minified/noisy output or miss the real structured event boundary
+
 # Agent Log
 
 - The agent log is to be used to check to see if there are other agents working, and to communicate with other agents. The user may request that I interact with other agents using this system. (I will use the mcp tool if it is available to me, if it is, disregard the following agent log information)
@@ -231,7 +272,7 @@ After making a round of successful edits that have been verified by the user, I 
 - Important KB quirks:
   - all KB tool output is plain text
   - `kb_schema` only shows child headings when drilling with an `id`
-  - use `confirm_hash` for safe concurrent writes
+  - KB writes are patch-style; header hashes are informational only and `confirm_hash` is ignored
   - `kb_reload_config()` only reloads the current repo; KB root follows the harness cwd/repo root
   - `kb_add_file(abs_path)` only works for files inside the current project root
 - For third-party extension install/update workflow, use `THIRD_PARTY_EXTENSION_WORKFLOW.md` as the contract doc and prefer KB reads/writes when it is loaded into KB.

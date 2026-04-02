@@ -1,5 +1,146 @@
 import * as smd from '/static/vendor/streaming-markdown/smd.min.js';
 
+let markdownLinkHandlers = {
+  openFilePath: null,
+  openExternalUrl: null,
+};
+
+function parseLineColumnHash(hash) {
+  const text = typeof hash === 'string' ? hash.trim() : '';
+  const match = text.match(/^#L(\d+)(?:C(\d+))?$/i);
+  if (!match) return null;
+  const line = Number.parseInt(match[1], 10);
+  const column = match[2] ? Number.parseInt(match[2], 10) : null;
+  if (!Number.isFinite(line) || line < 1) return null;
+  return {
+    line,
+    column: Number.isFinite(column) && column >= 1 ? column : null,
+  };
+}
+
+function parseLineColumnSuffix(pathText) {
+  const text = typeof pathText === 'string' ? pathText.trim() : '';
+  const match = text.match(/^(.*?):(\d+)(?::(\d+))?$/);
+  if (!match) return null;
+  const line = Number.parseInt(match[2], 10);
+  const column = match[3] ? Number.parseInt(match[3], 10) : null;
+  if (!Number.isFinite(line) || line < 1) return null;
+  return {
+    path: match[1] || '',
+    line,
+    column: Number.isFinite(column) && column >= 1 ? column : null,
+  };
+}
+
+function normalizeMarkdownHref(rawHref) {
+  return typeof rawHref === 'string' ? rawHref.trim() : '';
+}
+
+function isExternalHttpUrl(rawHref) {
+  return /^https?:\/\//i.test(rawHref);
+}
+
+function isFileUrl(rawHref) {
+  return /^file:\/\//i.test(rawHref);
+}
+
+function decodeFileUrlPath(rawHref) {
+  try {
+    const url = new URL(rawHref);
+    return decodeURIComponent(url.pathname || '');
+  } catch {
+    return '';
+  }
+}
+
+function decodePathLikeHref(rawHref) {
+  try {
+    return decodeURIComponent(rawHref);
+  } catch {
+    return rawHref;
+  }
+}
+
+function normalizeParsedFileTarget(path, line = null, column = null) {
+  const normalizedPath = typeof path === 'string' ? path.trim() : '';
+  if (!normalizedPath) return null;
+  return {
+    path: normalizedPath,
+    line: Number.isFinite(line) && line >= 1 ? line : null,
+    column: Number.isFinite(column) && column >= 1 ? column : null,
+  };
+}
+
+function parseFileTargetFromAnchor(anchor, rawHref) {
+  if (!(anchor instanceof HTMLAnchorElement)) return null;
+  const decodedHref = decodePathLikeHref(rawHref);
+  if (isFileUrl(decodedHref)) {
+    const hashParts = parseLineColumnHash(anchor.hash);
+    return normalizeParsedFileTarget(
+      decodeFileUrlPath(decodedHref),
+      hashParts?.line ?? null,
+      hashParts?.column ?? null,
+    );
+  }
+
+  const hashParts = parseLineColumnHash(anchor.hash);
+  const basePath = decodePathLikeHref(anchor.pathname || decodedHref.split('#', 1)[0] || '');
+  if (hashParts) {
+    return normalizeParsedFileTarget(basePath, hashParts.line, hashParts.column);
+  }
+
+  const suffixParts = parseLineColumnSuffix(decodedHref);
+  if (suffixParts) {
+    return normalizeParsedFileTarget(suffixParts.path, suffixParts.line, suffixParts.column);
+  }
+
+  return normalizeParsedFileTarget(basePath || decodedHref);
+}
+
+function isLikelyFilePath(rawHref) {
+  if (!rawHref) return false;
+  if (rawHref.startsWith('#')) return false;
+  if (isExternalHttpUrl(rawHref)) return false;
+  if (isFileUrl(rawHref)) return true;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(rawHref)) return false;
+  return true;
+}
+
+function bindMarkdownLinkRouting(container) {
+  if (!container || container.dataset.markdownLinkRoutingBound === 'true') return;
+  container.dataset.markdownLinkRoutingBound = 'true';
+  container.addEventListener('click', (evt) => {
+    const target = evt.target;
+    if (!(target instanceof Element)) return;
+    const anchor = target.closest('a[href]');
+    if (!(anchor instanceof HTMLAnchorElement) || !container.contains(anchor)) return;
+    const rawHref = normalizeMarkdownHref(anchor.getAttribute('href'));
+    if (!rawHref) return;
+
+    if (isExternalHttpUrl(rawHref) && typeof markdownLinkHandlers.openExternalUrl === 'function') {
+      evt.preventDefault();
+      evt.stopPropagation();
+      markdownLinkHandlers.openExternalUrl(rawHref, anchor);
+      return;
+    }
+
+    if (isLikelyFilePath(rawHref) && typeof markdownLinkHandlers.openFilePath === 'function') {
+      const fileTarget = parseFileTargetFromAnchor(anchor, rawHref);
+      if (!fileTarget?.path) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      markdownLinkHandlers.openFilePath(fileTarget, anchor);
+    }
+  });
+}
+
+export function setMarkdownLinkHandlers(handlers = {}) {
+  markdownLinkHandlers = {
+    openFilePath: typeof handlers.openFilePath === 'function' ? handlers.openFilePath : null,
+    openExternalUrl: typeof handlers.openExternalUrl === 'function' ? handlers.openExternalUrl : null,
+  };
+}
+
 export function highlightCode(container) {
   if (!container) return;
   container.querySelectorAll('pre code').forEach((block) => {
@@ -12,6 +153,7 @@ export function highlightCode(container) {
 export function renderMarkdownInto(container, text) {
   const renderer = smd.default_renderer(container);
   const parser = smd.parser(renderer);
+  bindMarkdownLinkRouting(container);
   smd.parser_write(parser, text || '');
   smd.parser_end(parser);
 }
@@ -173,6 +315,7 @@ export function renderEventMarkdownInto(container, text) {
     return;
   }
   container.innerHTML = renderer.render(text || '');
+  bindMarkdownLinkRouting(container);
 }
 
 export function renderMarkdownBlock(text, extraClass = '') {
@@ -193,6 +336,7 @@ export function renderMarkdownItBlock(text, extraClass = '') {
 
 export function createStreamingParser(container) {
   const renderer = smd.default_renderer(container);
+  bindMarkdownLinkRouting(container);
   return smd.parser(renderer);
 }
 

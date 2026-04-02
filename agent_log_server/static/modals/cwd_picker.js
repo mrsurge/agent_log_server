@@ -21,15 +21,7 @@ window.CodexAgentModules.push((ctx) => {
       ctx.helpers.closePicker();
       return;
     }
-    // Update CWD field based on agent type
-    const agentType = settingsAgentEl?.value?.trim() || 'codex';
-    if (agentType === 'codex') {
-      if (settingsCwdEl && pickerPath) settingsCwdEl.value = pickerPath;
-    } else {
-      // Update schema field for non-codex agents
-      const schemaField = document.getElementById('settings-ext-cwd');
-      if (schemaField && pickerPath) schemaField.value = pickerPath;
-    }
+    if (settingsCwdEl && pickerPath) settingsCwdEl.value = pickerPath;
     ctx.helpers.closePicker();
   });
 });

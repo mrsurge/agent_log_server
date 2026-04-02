@@ -1593,6 +1593,7 @@ class CodexEventRouter:
             "allow_freeform",
             normalized_arguments.get("allowFreeform", True),
         )
+        card_id = str(tool_id or request_id or "").strip() or request_id
         item_state["approval_request_id"] = request_id
         item_state["ask_user_descriptor_emitted"] = True
         self._approval_request_map[str(tool_id)] = request_id
@@ -1610,7 +1611,7 @@ class CodexEventRouter:
             "message": question,
             "tool_call_id": str(tool_id or ""),
         }
-        return self._decorate_routed_result(self._tool_request_result(
+        routed = self._tool_request_result(
             request_id=request_id,
             kind="user_input",
             payload={key: value for key, value in payload_data.items() if value not in (None, "", [], {})},
@@ -1619,7 +1620,22 @@ class CodexEventRouter:
             request_method=AGENT_PTY_ASK_USER_REQUEST_METHOD,
             request_params=request_params,
             activity_label="request",
-        ), thread_id=thread_id, item_state=item_state)
+        )
+        events = routed.get("events")
+        if isinstance(events, list):
+            for event in events:
+                if isinstance(event, dict) and event.get("type") == "approval":
+                    event["card_id"] = card_id
+        descriptors = routed.get("approval_descriptors")
+        if isinstance(descriptors, list):
+            for descriptor in descriptors:
+                if not isinstance(descriptor, dict):
+                    continue
+                descriptor["card_id"] = card_id
+                render_event = descriptor.get("render_event") if isinstance(descriptor.get("render_event"), dict) else None
+                if isinstance(render_event, dict):
+                    render_event["card_id"] = card_id
+        return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
 
     def route_event(
         self,
@@ -1921,16 +1937,14 @@ class CodexEventRouter:
                         item_state["arguments"] = arguments
                     if request_id:
                         item_state["approval_request_id"] = request_id
-                    if request_id:
                         if item_state.get("ask_user_descriptor_emitted"):
                             return self._decorate_routed_result({
                                 "handled": True,
                                 "events": [],
                                 "transcript_entries": [],
                             }, thread_id=thread_id, item_state=item_state)
-                        tool_call_id = item_id or _assistant_id(item, thread_id, turn_id)
                         return self._ask_user_request_result(
-                            tool_id=str(tool_call_id or ""),
+                            tool_id=str(item_id or _assistant_id(item, thread_id, turn_id)),
                             request_id=request_id,
                             arguments=arguments,
                             item_state=item_state,
@@ -2492,23 +2506,23 @@ class CodexEventRouter:
                 "arguments": arguments,
             })
             if is_agent_pty_ask_user_request(tool_name, arguments):
-                request_id_text = str(conversation_id or "").strip()
-                if request_id_text:
+                request_id = str(conversation_id or "").strip()
+                if request_id:
                     if isinstance(arguments, dict):
                         arguments = dict(arguments)
-                        arguments["requestId"] = request_id_text
+                        arguments["requestId"] = request_id
                         item_state["arguments"] = arguments
-                    item_state["approval_request_id"] = request_id_text
+                    item_state["approval_request_id"] = request_id
                 if item_state.get("ask_user_descriptor_emitted"):
                     return self._decorate_routed_result({
                         "handled": True,
                         "events": [],
                         "transcript_entries": [],
                     }, thread_id=thread_id, item_state=item_state)
-                if request_id_text:
+                if request_id:
                     return self._ask_user_request_result(
                         tool_id=str(tool_id or ""),
-                        request_id=request_id_text,
+                        request_id=request_id,
                         arguments=arguments,
                         item_state=item_state,
                         thread_id=thread_id,

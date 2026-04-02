@@ -79,6 +79,30 @@ export function bindSettingsUiFlow(ctx) {
     return typeof value === 'string' ? value : '';
   }
 
+  function getActiveAgentOptions(state = getState()) {
+    const extensions = Array.isArray(state?.extensionCatalog) ? state.extensionCatalog : [];
+    return extensions
+      .filter((ext) => ext?.active === true && ext?.id && ext.id !== 'codex')
+      .map((ext) => ({
+        value: ext.id,
+        label: ext.name || ext.id,
+      }));
+  }
+
+  function getDefaultAgentId(state = getState()) {
+    const runtimeAgent = typeof state?.runtimeOptions?.agent === 'string' ? state.runtimeOptions.agent.trim() : '';
+    if (runtimeAgent && runtimeAgent !== 'codex') return runtimeAgent;
+    return getActiveAgentOptions(state)[0]?.value || '';
+  }
+
+  function resolveAgentId(candidate, state = getState()) {
+    const agent = typeof candidate === 'string' ? candidate.trim() : '';
+    if (agent && agent !== 'codex') return agent;
+    const savedAgent = typeof state?.conversationSettings?.agent === 'string' ? state.conversationSettings.agent.trim() : '';
+    if (savedAgent && savedAgent !== 'codex') return savedAgent;
+    return getDefaultAgentId(state);
+  }
+
   function applyRuntimeOptions(runtimeOptions) {
     const state = getState();
     const approval = normalizeRuntimeOption(runtimeOptions?.approval);
@@ -153,6 +177,7 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsRolloutEl) settingsRolloutEl.value = state.pendingRollout?.id || '';
       if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = false;
       if (settingsTe2McpIntegrationEl) settingsTe2McpIntegrationEl.checked = false;
+      if (settingsAgentEl) settingsAgentEl.value = resolveAgentId('', state);
     } else {
       if (settingsCwdEl) settingsCwdEl.value = state.conversationSettings?.cwd || '';
       if (settingsApprovalEl) settingsApprovalEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.approval?.settingKey) || state.conversationSettings?.approvalPolicy || '';
@@ -172,7 +197,7 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = state.conversationSettings?.semanticShellRibbon === true;
       if (settingsTe2McpIntegrationEl) settingsTe2McpIntegrationEl.checked = state.conversationSettings?.te2_mcp_integration === true;
       if (settingsRolloutEl) settingsRolloutEl.value = state.pendingRollout?.id || state.conversationSettings?.rolloutId || '';
-      if (settingsAgentEl) settingsAgentEl.value = state.conversationSettings?.agent || 'codex';
+      if (settingsAgentEl) settingsAgentEl.value = resolveAgentId(state.conversationSettings?.agent, state);
     }
     if (settingsAgentRowEl) {
       const hasSavedSettings = !state.pendingNewConversation && state.conversationMeta?.settings && Object.values(state.conversationMeta.settings).some((v) => v);
@@ -183,25 +208,23 @@ export function bindSettingsUiFlow(ctx) {
       settingsRolloutRowEl.style.display = hasSavedSettings ? 'none' : 'block';
     }
     settingsModalEl.classList.remove('hidden');
-    const currentAgent = settingsAgentEl?.value || 'codex';
-    await onAgentSelectionChange(currentAgent);
+    const currentAgent = resolveAgentId(settingsAgentEl?.value, state);
+    if (settingsAgentEl) settingsAgentEl.value = currentAgent;
+    if (currentAgent) {
+      await onAgentSelectionChange(currentAgent);
+    }
   }
 
   function closeSettingsModal() {
     if (!settingsModalEl) return;
     const state = getState();
-    const agentType = settingsAgentEl?.value?.trim() || 'codex';
-    let cwdOk;
-    if (agentType === 'codex') {
-      cwdOk = Boolean(settingsCwdEl?.value?.trim());
-    } else {
-      const schemaVals =
-        getWindow()?.CodexAgent?.helpers?.getSchemaRawValues?.()
-        || getWindow()?.CodexAgent?.helpers?.getSchemaValues?.()
-        || {};
-      cwdOk = Boolean(schemaVals.cwd?.trim());
+    const agentType = resolveAgentId(settingsAgentEl?.value, state);
+    if (!agentType) {
+      setActivity('Agent required', true);
+      return;
     }
-    if (!cwdOk) cwdOk = Boolean(state.conversationSettings?.cwd?.trim());
+    const cwdOk = Boolean(settingsCwdEl?.value?.trim())
+      || Boolean(state.conversationSettings?.cwd?.trim());
     if (!cwdOk) {
       setActivity('CWD required', true);
       return;
@@ -366,10 +389,19 @@ export function bindSettingsUiFlow(ctx) {
     buildDropdown(listEl, values, inputEl, onChange);
   }
 
-  async function loadModelOptions() {
+  async function loadModelOptions(agentId = '') {
     try {
-      const data = await sioCall('get_models', {});
-      const items = data?.result?.data || data?.result?.models || data?.data || data?.result || [];
+      const resolvedAgent = resolveAgentId(agentId, getState());
+      if (!resolvedAgent) {
+        setState({ modelList: [] });
+        updateDropdownOptions(settingsModelOptions, [], settingsModelEl, updateEffortOptionsForModel);
+        updateEffortOptionsForModel(settingsModelEl?.value);
+        return;
+      }
+      const data = await sioCall('get_extension_models', { extension_id: resolvedAgent });
+      const items = Array.isArray(data)
+        ? data
+        : data?.models || data?.data || data?.result?.models || data?.result?.data || [];
       if (Array.isArray(items)) {
         setState({ modelList: items.filter((m) => m && typeof m === 'object' && m.id) });
         const names = items.filter((m) => m && typeof m === 'object' && m.id).map((m) => m.id);
@@ -387,15 +419,12 @@ export function bindSettingsUiFlow(ctx) {
     try {
       const data = await sioCall('get_extensions', {});
       const extensions = data?.extensions || [];
-      setState({ extensionCatalog: Array.isArray(extensions) ? extensions : [] });
-      const agents = [];
-      extensions.forEach((ext) => {
-        if (!ext?.id || !ext?.name) return;
-        if (ext.active !== true) return;
-        if (ext.id === 'codex') return;
-        agents.push({ value: ext.id, label: ext.id });
-      });
+      const nextState = { ...getState(), extensionCatalog: Array.isArray(extensions) ? extensions : [] };
+      setState({ extensionCatalog: nextState.extensionCatalog });
+      const agents = getActiveAgentOptions(nextState);
       updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl, onAgentSelectionChange);
+      const resolvedAgent = resolveAgentId(settingsAgentEl?.value, nextState);
+      if (settingsAgentEl) settingsAgentEl.value = resolvedAgent;
     } catch {
       // ignore
     }
@@ -406,11 +435,14 @@ export function bindSettingsUiFlow(ctx) {
   });
 
   async function onAgentSelectionChange(agentId) {
+    const resolvedAgent = resolveAgentId(agentId, getState());
+    if (settingsAgentEl) settingsAgentEl.value = resolvedAgent;
     const win = getWindow ? getWindow() : window;
     if (win.CodexAgent?.helpers?.onAgentChange) {
-      await win.CodexAgent.helpers.onAgentChange(agentId);
+      await win.CodexAgent.helpers.onAgentChange(resolvedAgent);
     }
-    await loadRuntimeOptions(agentId, getState().conversationMeta?.conversation_id);
+    await loadModelOptions(resolvedAgent);
+    await loadRuntimeOptions(resolvedAgent, getState().conversationMeta?.conversation_id);
   }
 
   function normalizeModelEfforts(model) {
