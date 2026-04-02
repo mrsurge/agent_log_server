@@ -64,6 +64,7 @@ export function bindApprovalUi(ctx) {
     getSubagentContainer,
     escapeHtml,
     formatDiff,
+    renderDiffBlock,
     renderEventMarkdownInto,
     toRelativePath,
     requestCardRuntime,
@@ -298,9 +299,13 @@ export function bindApprovalUi(ctx) {
     if (payload.diff) {
       diffText = payload.diff;
       filePath = payload.path || filePath;
-      const diffBlock = document.createElement('pre');
+      const diffBlock = document.createElement('div');
       diffBlock.className = 'diff-block';
-      diffBlock.innerHTML = formatDiff(payload.diff, payload.path);
+      if (typeof renderDiffBlock === 'function') {
+        renderDiffBlock(diffBlock, payload.diff, payload.path);
+      } else {
+        diffBlock.innerHTML = formatDiff(payload.diff, payload.path);
+      }
       body.append(diffBlock);
       renderedAny = true;
     }
@@ -311,9 +316,13 @@ export function bindApprovalUi(ctx) {
           filePath = filePath || change.path;
           const label = document.createElement('div');
           label.innerHTML = `<strong>${escapeHtml(toRelativePath(change.path) || 'file')}</strong>`;
-          const diffBlock = document.createElement('pre');
+          const diffBlock = document.createElement('div');
           diffBlock.className = 'diff-block';
-          diffBlock.innerHTML = formatDiff(change.diff, change.path);
+          if (typeof renderDiffBlock === 'function') {
+            renderDiffBlock(diffBlock, change.diff, change.path);
+          } else {
+            diffBlock.innerHTML = formatDiff(change.diff, change.path);
+          }
           body.append(label, diffBlock);
           renderedAny = true;
         }
@@ -329,9 +338,13 @@ export function bindApprovalUi(ctx) {
         filePath = filePath || resolvedPath;
         const label = document.createElement('div');
         label.innerHTML = `<strong>${escapeHtml(toRelativePath(resolvedPath) || 'file')}</strong>`;
-        const diffBlock = document.createElement('pre');
+        const diffBlock = document.createElement('div');
         diffBlock.className = 'diff-block';
-        diffBlock.innerHTML = formatDiff(changeDiff, resolvedPath);
+        if (typeof renderDiffBlock === 'function') {
+          renderDiffBlock(diffBlock, changeDiff, resolvedPath);
+        } else {
+          diffBlock.innerHTML = formatDiff(changeDiff, resolvedPath);
+        }
         body.append(label, diffBlock);
         renderedAny = true;
       });

@@ -7,6 +7,7 @@ export function bindToolRender(ctx) {
     getLiveEventParent,
     renderEventMarkdownInto,
     formatDiff,
+    renderDiffBlock,
     toRelativePath,
     renderShellCmdRibbon,
     maybeAutoScroll,
@@ -292,7 +293,11 @@ export function bindToolRender(ctx) {
     label.textContent = resolvedPath ? `Changes: ${toRelativePath(resolvedPath) || resolvedPath}` : 'Changes';
     const block = document.createElement('div');
     block.className = 'diff-block mcp-tool-diff';
-    block.innerHTML = formatDiff(diffText, resolvedPath || null);
+    if (typeof renderDiffBlock === 'function') {
+      renderDiffBlock(block, diffText, resolvedPath || null);
+    } else {
+      block.innerHTML = formatDiff(diffText, resolvedPath || null);
+    }
     return { label, block };
   }
 

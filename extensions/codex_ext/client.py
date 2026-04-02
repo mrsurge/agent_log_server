@@ -380,6 +380,22 @@ def _looks_like_mcp_startup_error(message: Any) -> bool:
     )
 
 
+def _looks_like_thread_not_loaded_error(message: Any) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "thread not found",
+            "conversation not found",
+            "no rollout found",
+            "thread not loaded",
+            "not loaded in memory",
+        )
+    )
+
+
 def _build_send_failure_result(error_message: Any) -> Dict[str, Any]:
     message = str(error_message or "").strip() or "Message send failed"
     failure_kind = "send_failed"
@@ -411,6 +427,34 @@ async def _handle_auth_failure(conversation_id: str, extension_id: str, error_me
             extension_id,
             detail=detail or error_message,
         )
+
+
+# Thread resume can legitimately take longer than a normal RPC round-trip while the
+# app-server finishes startup work and emits the idle virtual ack.
+_THREAD_RESUME_TIMEOUT_SECONDS = 30.0
+
+
+async def _resume_thread_for_rpc_server(
+    *,
+    conversation_id: str,
+    thread_id: str,
+    transport: CodexAppServerTransport,
+    protocol: RuntimeProtocol,
+    merged_settings: Dict[str, Any],
+    meta: Dict[str, Any],
+) -> None:
+    resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
+    await transport.rpc_request(
+        "thread/resume",
+        params=resume_params,
+        conversation_id=conversation_id,
+        timeout=_THREAD_RESUME_TIMEOUT_SECONDS,
+    )
+    transport.mark_thread_ready(thread_id)
+    meta["status"] = "active"
+    meta["thread_runtime_signature"] = _thread_runtime_signature(protocol, merged_settings)
+    meta["settings"] = merged_settings
+    _meta_fns["save"](conversation_id, meta)
 
 
 async def get_auth_status(extension_id: str, refresh: bool = False) -> Dict[str, Any]:
@@ -901,18 +945,14 @@ async def resume_session(
         model=model,
     )
     try:
-        resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
-        await transport.rpc_request(
-            "thread/resume",
-            params=resume_params,
+        await _resume_thread_for_rpc_server(
             conversation_id=conversation_id,
-            timeout=10.0,
+            thread_id=thread_id,
+            transport=transport,
+            protocol=protocol,
+            merged_settings=merged_settings,
+            meta=meta,
         )
-        transport.mark_thread_ready(thread_id)
-        meta["status"] = "active"
-        meta["thread_runtime_signature"] = _thread_runtime_signature(protocol, merged_settings)
-        meta["settings"] = merged_settings
-        _meta_fns["save"](conversation_id, meta)
         _add_to_raw_buffer("out", conversation_id, f"thread_resumed {thread_id[:8]}")
         return {"ok": True, "session_id": thread_id}
     except Exception as exc:
@@ -946,24 +986,10 @@ async def handle_message(
         model=settings.get("model") if isinstance(settings, dict) else None,
     )
     thread_id = meta.get("thread_id")
-    base_id = int(datetime.now(timezone.utc).timestamp() * 1000)
     current_signature = _thread_runtime_signature(protocol, merged_settings)
 
     try:
         if thread_id:
-            if meta.get("thread_runtime_signature") != current_signature or transport.needs_thread_resume(thread_id):
-                resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
-                await transport.rpc_request(
-                    "thread/resume",
-                    params=resume_params,
-                    conversation_id=conversation_id,
-                    timeout=10.0,
-                )
-                transport.mark_thread_ready(thread_id)
-                meta["thread_runtime_signature"] = current_signature
-                meta["settings"] = merged_settings
-                _meta_fns["save"](conversation_id, meta)
-
             turn_params = build_request_params(
                 protocol,
                 "turn/start",
@@ -971,12 +997,50 @@ async def handle_message(
                 thread_id=thread_id,
                 text=text,
             )
-            await transport.rpc_request(
-                "turn/start",
-                params=turn_params,
-                conversation_id=conversation_id,
-                timeout=15.0,
-            )
+            turn_params.pop("developerInstructions", None)
+            turn_params.pop("baseInstructions", None)
+            try:
+                await transport.rpc_request(
+                    "turn/start",
+                    params=turn_params,
+                    conversation_id=conversation_id,
+                    timeout=15.0,
+                )
+                transport.mark_thread_ready(thread_id)
+                meta["status"] = "active"
+                meta["settings"] = merged_settings
+                _meta_fns["save"](conversation_id, meta)
+            except Exception as exc:
+                if not _looks_like_thread_not_loaded_error(exc):
+                    raise
+                _add_to_raw_buffer(
+                    "out",
+                    conversation_id,
+                    f"turn_start_resume thread={thread_id[:8]} error={str(exc)[:200]}",
+                )
+                await _resume_thread_for_rpc_server(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    transport=transport,
+                    protocol=protocol,
+                    merged_settings=merged_settings,
+                    meta=meta,
+                )
+                retry_turn_params = build_request_params(
+                    protocol,
+                    "turn/start",
+                    merged_settings,
+                    thread_id=thread_id,
+                    text=text,
+                )
+                retry_turn_params.pop("developerInstructions", None)
+                retry_turn_params.pop("baseInstructions", None)
+                await transport.rpc_request(
+                    "turn/start",
+                    params=retry_turn_params,
+                    conversation_id=conversation_id,
+                    timeout=15.0,
+                )
         else:
             start_params = build_request_params(protocol, "thread/start", merged_settings)
             start_result = await transport.rpc_request(
@@ -1008,6 +1072,8 @@ async def handle_message(
                 thread_id=thread_id,
                 text=text,
             )
+            turn_params.pop("developerInstructions", None)
+            turn_params.pop("baseInstructions", None)
             await transport.rpc_request(
                 "turn/start",
                 params=turn_params,
@@ -1155,8 +1221,8 @@ async def abort_session(conversation_id: str) -> bool:
 async def compact_session(conversation_id: str) -> Dict[str, Any]:
     """Send thread/compact/start to the extension-owned app-server transport.
 
-    Follows the same resume-if-needed flow as handle_message: if the thread
-    is not loaded in memory, resume it first (virtual ack), then compact.
+    Try compact directly first, then resume and retry only for the canonical
+    thread-not-loaded startup errors.
     """
     if not _meta_fns or "load" not in _meta_fns:
         return {"ok": False, "error": "meta_fns not available"}
@@ -1170,32 +1236,43 @@ async def compact_session(conversation_id: str) -> Dict[str, Any]:
     try:
         transport = await _ensure_transport_ready()
         protocol = await get_runtime_protocol()
-
-        # Resume thread if not loaded — same pattern as handle_message
-        if transport.needs_thread_resume(thread_id):
-            merged_settings = _merge_runtime_settings(
-                conversation_id,
-                settings=meta.get("settings") or {},
-                cwd=(meta.get("settings") or {}).get("cwd"),
-                model=(meta.get("settings") or {}).get("model"),
-            )
-            resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
+        merged_settings = _merge_runtime_settings(
+            conversation_id,
+            settings=meta.get("settings") or {},
+            cwd=(meta.get("settings") or {}).get("cwd"),
+            model=(meta.get("settings") or {}).get("model"),
+        )
+        params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)
+        try:
             await transport.rpc_request(
-                "thread/resume",
-                params=resume_params,
+                "thread/compact/start",
+                params=params,
                 conversation_id=conversation_id,
-                timeout=10.0,
+                timeout=30.0,
             )
             transport.mark_thread_ready(thread_id)
+            meta["status"] = "active"
+            meta["settings"] = merged_settings
+            _meta_fns["save"](conversation_id, meta)
+        except Exception as exc:
+            if not _looks_like_thread_not_loaded_error(exc):
+                raise
+            await _resume_thread_for_rpc_server(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                transport=transport,
+                protocol=protocol,
+                merged_settings=merged_settings,
+                meta=meta,
+            )
             _add_to_raw_buffer("out", conversation_id, f"compact_resume thread={thread_id[:8]}")
-
-        params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)
-        await transport.rpc_request(
-            "thread/compact/start",
-            params=params,
-            conversation_id=conversation_id,
-            timeout=30.0,
-        )
+            params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)
+            await transport.rpc_request(
+                "thread/compact/start",
+                params=params,
+                conversation_id=conversation_id,
+                timeout=30.0,
+            )
         _add_to_raw_buffer("out", conversation_id, f"compact_start thread={thread_id[:8]}")
         return {"ok": True, "thread_id": thread_id, "conversation_id": conversation_id}
     except Exception as exc:

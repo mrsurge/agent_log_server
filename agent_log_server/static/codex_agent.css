@@ -1261,6 +1261,17 @@ textarea {
   background: #5c1e1e;
   color: #f85149;
 }
+.diff-intraline-change {
+  color: inherit;
+  font-weight: 600;
+  padding: 0 1px;
+}
+.diff-line.diff-add .diff-intraline-add {
+  background: rgba(63, 185, 80, 0.28);
+}
+.diff-line.diff-del .diff-intraline-del {
+  background: rgba(248, 81, 73, 0.26);
+}
 .diff-line.diff-hunk {
   background: #161b22;
   color: #8b949e;
@@ -1951,6 +1962,7 @@ body.terminal-mode #footer-terminal-toggle.pill {
 .collapsible:not(.expanded) > .body > .search-card-detail,
 .collapsible:not(.expanded) > .body > .search-card-list,
 .collapsible:not(.expanded) > .body > .search-card-plain,
+.collapsible:not(.expanded) > .body > .diff-block,
 .collapsible:not(.expanded) > .body > pre.diff-block,
 .collapsible:not(.expanded) > .body > .mcp-tool-args,
 .collapsible:not(.expanded) > .body > .mcp-tool-result,

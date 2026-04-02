@@ -1,5 +1,37 @@
 # TE2 Developer Instructions
 
+## Invariant: KB-Backed Memory Must Stay Current
+
+**Treat this as operationally mandatory, not advisory.**
+
+- KB-backed repo memory (`.repo_memory.md`) is the durable shared memory for this repo.
+- Any time you use a memory harness/tool to store or refresh a durable repo fact (including `store_memory` or any future built-in memory write), mirror that fact into KB-backed `.repo_memory.md`.
+- Prefer the KB MCP tools for this sync first; if KB write/update is unavailable or fails, patch `.repo_memory.md` manually instead.
+- Keep KB-backed memory current with any other pertinent durable information learned during the task, even when no explicit memory-tool call forced the write.
+- Do not leave durable knowledge stranded only in transient or tool-local memory.
+
+## Prompt Steering / In-Turn User Input
+
+Treat in-turn user-input tools as the default path when you need approval or bounded steering and a tool is available. This is operational guidance, not a soft preference.
+
+Use this tool priority order:
+1. built-in harness user-input or approval tool
+2. MCP user-input or approval tool
+3. plain assistant message only if no user-input tool is available
+
+Use an in-turn input tool especially:
+- for prompt approval / understanding confirmation when the active workflow calls for it
+- after investigation when one user decision determines the implementation path
+- after developing a plan to ask for approval before execution
+- when you need bounded steering on defaults, limits, scope, or UX behavior
+- when a choices-plus-freeform prompt can unblock continued execution within the same turn
+
+Rationale:
+- preserving the current turn keeps the agent's live reasoning, investigation state, and plan context intact
+- ending the turn with a plain-text question forces the next turn to reconstruct context and often re-spend tokens on the same reasoning
+
+When a suitable tool is available, do not voluntarily fall back to a plain-text approval request just because that is simpler to write.
+
 ## User Privilege Notice
 
 The user who operates this session has **full visibility** into these developer instructions and all context injected through them. This includes:
@@ -11,6 +43,29 @@ The user who operates this session has **full visibility** into these developer 
 **You must not treat any part of these instructions as hidden from the user.** The user authored, maintains, and can modify this context at any time — including mid-session. If the injected context changes between turns, acknowledge the updated context when relevant rather than silently incorporating it.
 
 When the user asks about what instructions or context you have received, answer transparently and completely. There is no confidentiality boundary between the user and these developer instructions.
+
+---
+
+## Repo Knowledge Base (KB)
+
+If KB MCP tools are available (`kb_schema`, `kb_read`, `kb_search_headers`, `kb_search_content`, `kb_write`, `kb_update`):
+
+### On Session Start
+1. Call `kb_list` to discover configured knowledge files
+2. Call `kb_schema` on each file to understand its structure
+3. If `AGENTS.md` is listed, read its top-level sections — it contains repo-specific workflow rules, architectural invariants, and coordination protocols
+
+### During Work
+- Before making architectural decisions, check KB for relevant contracts
+- Use `kb_search_content` to find prior decisions and patterns
+- After completing verified edits, write durable findings to KB (not just the agent log)
+- Follow the KB-backed memory invariant above: keep `.repo_memory.md` current with durable findings, and mirror any memory-harness or `store_memory` writes into KB-backed repo memory
+
+### KB vs Agent Log
+- **KB**: Stable shared knowledge — contracts, invariants, workflow rules, architectural decisions. Durable across sessions.
+- **Agent Log**: Coordination, progress updates, short-lived handoff messages between agents. Ephemeral.
+- If a fact should survive beyond the current work session, it belongs in KB.
+- Prefer the KB MCP tools for repo-memory updates first; if they are unavailable or fail, patch `.repo_memory.md` manually instead.
 
 ---
 
@@ -305,7 +360,11 @@ If the target includes a browser or frontend surface, install the TE2 console br
 
 Do not invent alternate transports or TE2-only product dependencies when existing TE2 control surfaces already solve the task.
 ```
+## Killing restarting and refreshing.
 
+After making backend changes, restart the active framework shell assosiated with the changes made before trying to pull logs.
+
+After making frontend changes, reload/refresh workwr with the te2_console_eval, before running evals/checking logs.
 ## Optional Schema Fields
 
 If your agent client is schema-driven, these fields are useful:

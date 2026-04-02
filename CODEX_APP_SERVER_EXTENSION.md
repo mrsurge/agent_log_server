@@ -12,11 +12,11 @@ The Codex Agent Server is a FastAPI + `fastcore.xml` Python server that acts as 
 │  ┌─────────────────────────────────────────────────────────────────┐│
 │  │                    codex_agent.js                               ││
 │  │  - Dumb renderer (displays what backend tells it)               ││
-│  │  - Socket.IO client for live updates and actions                ││
-│  │  - HTTP fallback for the same app-level actions                 ││
+│  │  - Socket.IO client for live updates and runtime actions        ││
+│  │  - HTTP endpoints for conversation data, debug, and admin flows ││
 │  └─────────────────────────────────────────────────────────────────┘│
 └──────────────────────────────┬──────────────────────────────────────┘
-                               │ Socket.IO + HTTP fallback
+                               │ Socket.IO live runtime + HTTP data/debug endpoints
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Python Server (server.py)                        │
@@ -447,11 +447,12 @@ Controls how much "thinking" the model does:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/appserver/debug/raw` | GET | Get raw event buffer (last N items) |
-| `/api/appserver/debug/state` | GET | Get server debug state |
-| `/api/appserver/debug/toggle` | POST | Toggle debug mode (`{"enabled": true}`) |
+| `/api/appserver/debug/raw` | GET | Get legacy appserver raw event buffer (last N items) |
+| `/api/appserver/debug/state` | GET | Get legacy appserver debug state |
+| `/api/appserver/debug/toggle` | POST | Toggle legacy appserver debug mode (`{"enabled": true}`) |
+| `/api/extensions/{extension_id}/debug/raw` | GET | Get extension-owned debug buffer |
 
-When debug mode is enabled (`--debug` flag or via toggle endpoint), raw events are written to `~/.cache/agent_log_server/debug_raw.jsonl`.
+Legacy appserver debug mode can mirror raw appserver events to `~/.cache/agent_log_server/debug_raw.jsonl`. Extension-owned transports expose their own debug buffers through `GET /api/extensions/{extension_id}/debug/raw`, and extensions may also persist internal `debug_raw` transcript rows when a debug workflow needs durable per-conversation forensic evidence.
 
 ## WebSocket Events
 
@@ -468,7 +469,7 @@ When debug mode is enabled (`--debug` flag or via toggle endpoint), raw events a
 
 ### Client → Server
 
-The client prefers Socket.IO application events with HTTP fallback for the same actions.
+Live/runtime UI actions use Socket.IO. HTTP endpoints remain for conversation data loading, admin, and debug surfaces; they are not the runtime fallback contract for shared UI/backend behavior.
 
 ## Diff Rendering
 
@@ -714,7 +715,7 @@ Different RPC methods accept different parameters (per codex-app-server schema):
 - Changing `model` mid-conversation: Takes effect on next `thread/resume` or `turn/start`
 - Changing `effort` (reasoning level) mid-conversation: Takes effect on next `turn/start` only (not on resume)
 - Changing `summary` (reasoning summary mode) mid-conversation: Takes effect on next `turn/start` only (not on resume)
-- In `codex-ext-testing`, `summary` is now surfaced in the runtime-generated settings schema and persisted in SSOT/meta with enum values `auto`, `concise`, `detailed`, and `none`
+- In `codex-ext`, `summary` is surfaced in the runtime-generated settings schema and persisted in SSOT/meta with enum values `auto`, `concise`, `detailed`, and `none`
 - Settings are read fresh from SSOT on each RPC, enabling mid-conversation changes
 - Multi-device/tab support: Backend always uses current SSOT, frontend validates conversation ID before sending
 
@@ -945,7 +946,9 @@ Added CSS for proper word wrapping in agent messages, user messages, and reasoni
 
 ## Pluggable Extension System
 
-The server supports pluggable agent extensions alongside the built-in Codex flow. Extensions plug in via `extensions/__init__.py` (the "ext_loader") without modifying `server.py` or `codex_agent.js`.
+The server supports pluggable agent extensions alongside the built-in Codex flow. Extensions plug in via `extensions/__init__.py` (the "ext_loader") without modifying `server.py`, `codex_agent.js`, or `settings_schema.js` with extension-specific logic.
+
+Shared live/runtime UI contracts are Socket.IO-based. Generic HTTP routes still exist for conversation loading, debug, and admin flows, but they are not the fallback path for runtime extension behavior.
 
 ### INVARIANT: Platform-Agnostic Core Files
 
@@ -1001,7 +1004,7 @@ Copilot SDK port-in:
   2. ext_loader.hydrate_transcript(ext_id, session_id, ...) → List[{role, text, ts}]  (SDK history)
   3. _write_transcript_entries(items)                       → writes transcript.jsonl
 
-codex-ext-testing port-in:
+codex-ext port-in (also used by the `codex-ext-testing` compat shim):
   1. ext_loader.resume_session_with_history(ext_id, ...)    → bind + resume
   2. ext_loader.hydrate_transcript(ext_id, session_id, ...) → List[{role, text, ts}]  (internal rollout import helper)
   3. _write_transcript_entries(items)                       → writes transcript.jsonl
@@ -1016,28 +1019,31 @@ codex-ext-testing port-in:
 | Method | Signature | Purpose |
 |--------|-----------|---------|
 | `list_models(ext_id)` | `async → List` | Get available models |
+| `get_settings_schema(ext_id)` | `async → Dict` | Get dynamic or static settings schema |
 | `list_sessions(ext_id, cwd)` | `async → List` | Get resumable sessions |
 | `resume_session_with_history(ext_id, session_id, convo_id, ...)` | `async → Dict` | Bind session to conversation |
 | `hydrate_transcript(ext_id, session_id, convo_id, ...)` | `async → List[Dict]` | Build flat transcript entries for a new session from port-in |
 | `get_runtime_options(ext_id, conversation_id, settings)` | `async → Dict` | Return generic approval/sandbox descriptors |
 | `resolve_approval(ext_id, request_id, decision)` | `sync → None` | Resolve pending approval |
+| `compact_session(ext_id, convo_id)` | `async → Dict` | Trigger extension-owned compaction |
 | `shutdown_extension(ext_id)` | `async → None` | Graceful shutdown |
 | `get_raw_buffer(ext_id, limit)` | `sync → List` | Debug buffer |
 
 All follow the same pattern: `get_handler(ext_id) → hasattr(handler, method) → handler.method(...)`.
 
-### codex-ext-testing today
+### codex-ext / codex-ext-exp today
 
-`codex-ext-testing` is the extension-owned Codex path:
+`codex-ext` is the stable extension-owned Codex path. `codex-ext-testing` remains a compatibility registry alias that resolves to the same `extensions/codex_ext` implementation, and `codex-ext-exp` is the experimental fork in `extensions/codex_ext_exp`.
 
 - settings modal fields are generated dynamically from the installed Codex app-server JSON schema
 - session browse uses the generic `session_picker` flow
 - bind/import uses the same generic `resume_session_with_history(...)` + `hydrate_transcript(...)` contract as Copilot, but the Codex implementation reuses internal rollout import helpers
-- live send/resume/interrupt uses an extension-owned framework-shell transport
-- that transport starts from `app_server_observed` and runs `python -m agent_log_server.rpc_stdio_mirror -- codex app-server`
-- the wrapper preserves the real stdout pipe for JSON-RPC parsing while mirroring RPC stdin/stdout to stderr for framework-shell observability
+- stable live send/resume/interrupt/compact uses an extension-owned framework-shell transport rooted at `shellspec/app_server.yaml#app_server` with transport label `app-server:codex-extension`
+- the stable wrapper starts from `app_server_observed` and runs `python -m agent_log_server.rpc_stdio_mirror -- codex app-server`
+- `codex-ext-exp` keeps a separate shellspec/transport label (`shellspec/app_server_exp.yaml#app_server_exp`, `app-server:codex-experimental`) so it can point at the patched `codex-app-server` binary without adoption conflicts
+- both wrappers preserve the real stdout pipe for JSON-RPC parsing while mirroring RPC stdin/stdout to stderr for framework-shell observability
 
-The remaining major extension-owned slices are tool-call rendering and approval plumbing.
+Ongoing extension-owned work includes richer tool-card parity, approval-path parity, and continuing the experimental dynamic-context path in `codex-ext-exp`.
 
 ### Adding a New Extension
 

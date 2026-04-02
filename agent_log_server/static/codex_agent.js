@@ -3159,7 +3159,7 @@ document.addEventListener('DOMContentLoaded', () => {
         body.append(pathDiv);
         const block = document.createElement('div');
         block.className = 'diff-block';
-        block.innerHTML = formatDiff(entry.text || '', diffPath);
+        renderDiffBlock(block, entry.text || '', diffPath);
         body.append(block);
         makeCollapsible(row, `diff:${entry.id || diffPath || 'diff'}`, false);
         getTarget().appendChild(row);
@@ -4672,6 +4672,18 @@ document.addEventListener('DOMContentLoaded', () => {
     return diffRendering.formatDiff(text, filePath);
   }
 
+  function renderDiffBlock(block, text, filePath) {
+    return diffRendering.renderDiffBlock(block, text, filePath);
+  }
+
+  function getDiffRenderState() {
+    return diffRendering.getDiffRenderState();
+  }
+
+  function setDiffRenderMode(mode) {
+    return diffRendering.setDiffRenderMode(mode);
+  }
+
   const {
     buildReplayToolRow,
     renderToolBegin,
@@ -4686,6 +4698,7 @@ document.addEventListener('DOMContentLoaded', () => {
     getLiveEventParent,
     renderEventMarkdownInto,
     formatDiff: (...args) => formatDiff(...args),
+    renderDiffBlock: (...args) => renderDiffBlock(...args),
     toRelativePath,
     escapeHtml,
     renderShellCmdRibbon,
@@ -4713,6 +4726,7 @@ document.addEventListener('DOMContentLoaded', () => {
     getSubagentContainer,
     escapeHtml,
     formatDiff: (...args) => formatDiff(...args),
+    renderDiffBlock: (...args) => renderDiffBlock(...args),
     renderEventMarkdownInto,
     toRelativePath,
     requestCardRuntime,
@@ -5189,6 +5203,8 @@ document.addEventListener('DOMContentLoaded', () => {
         setActivity,
         insertMention,
       saveApprovalQuick,
+      getDiffRenderState,
+      setDiffRenderMode,
       sioCall,
       waitForWs,
       fetchAppConfig,

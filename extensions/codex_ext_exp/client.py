@@ -402,6 +402,22 @@ def _looks_like_mcp_startup_error(message: Any) -> bool:
     )
 
 
+def _looks_like_thread_not_loaded_error(message: Any) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "thread not found",
+            "conversation not found",
+            "no rollout found",
+            "thread not loaded",
+            "not loaded in memory",
+        )
+    )
+
+
 def _build_send_failure_result(error_message: Any) -> Dict[str, Any]:
     message = str(error_message or "").strip() or "Message send failed"
     failure_kind = "send_failed"
@@ -420,6 +436,149 @@ def _build_send_failure_result(error_message: Any) -> Dict[str, Any]:
     }
 
 
+_PENDING_REPO_MEMORY_QUEUE_KEY = "pending_repo_memory_queue"
+
+
+def _normalize_repo_memory_update(update: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(update, dict):
+        return None
+    update_type = str(update.get("type") or "").strip().lower()
+    if update_type != "repo_memory":
+        return None
+    mode = str(update.get("mode") or "full").strip().lower()
+    if mode not in {"delta", "full"}:
+        mode = "full"
+    content = update.get("content") if isinstance(update.get("content"), str) else ""
+    snapshot_content = update.get("snapshot_content") if isinstance(update.get("snapshot_content"), str) else content
+    snapshot_text = snapshot_content.strip()
+    content_text = content.strip() or snapshot_text
+    if not content_text and not snapshot_text:
+        return None
+    content_hash = str(update.get("content_hash") or "").strip()
+    if not content_hash and snapshot_text:
+        content_hash = hashlib.sha256(snapshot_text.encode("utf-8")).hexdigest()
+    ts = update.get("ts")
+    if not isinstance(ts, (int, float)):
+        ts = datetime.now(timezone.utc).timestamp()
+    source_path = str(update.get("source_path") or "").strip()
+    return {
+        "type": "repo_memory",
+        "mode": mode,
+        "content": content_text,
+        "snapshot_content": snapshot_text,
+        "ts": float(ts),
+        "source_path": source_path,
+        "content_hash": content_hash,
+    }
+
+
+def _queued_repo_memory_update(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    raw = meta.get(_PENDING_REPO_MEMORY_QUEUE_KEY)
+    if isinstance(raw, dict):
+        candidates = [raw]
+    elif isinstance(raw, list):
+        candidates = raw
+    else:
+        return None
+    for candidate in reversed(candidates):
+        normalized = _normalize_repo_memory_update(candidate)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def _stage_repo_memory_update_for_turn(
+    conversation_id: str,
+    meta: Dict[str, Any],
+) -> tuple[Optional[Dict[str, Any]], bool]:
+    live_update = pop_pending(conversation_id, update_type="repo_memory")
+    if live_update is None:
+        return _queued_repo_memory_update(meta), False
+    normalized = _normalize_repo_memory_update(live_update)
+    if normalized is None:
+        return _queued_repo_memory_update(meta), False
+    meta[_PENDING_REPO_MEMORY_QUEUE_KEY] = [normalized]
+    return normalized, True
+
+
+def _clear_queued_repo_memory_updates(meta: Dict[str, Any]) -> bool:
+    return meta.pop(_PENDING_REPO_MEMORY_QUEUE_KEY, None) is not None
+
+
+def _clear_repo_memory_resume_state(conversation_id: str, meta: Dict[str, Any]) -> None:
+    cleared_live = pop_pending(conversation_id, update_type="repo_memory")
+    cleared_meta = _clear_queued_repo_memory_updates(meta)
+    if cleared_live or cleared_meta:
+        _debug_log(
+            f"[codex-ext-exp] cleared repo-memory queue convo={conversation_id[:8]} "
+            f"live={bool(cleared_live)} queued={bool(cleared_meta)}"
+        )
+
+
+def _apply_repo_memory_turn_update(
+    *,
+    conversation_id: str,
+    thread_id: str,
+    turn_params: Dict[str, Any],
+    merged_settings: Dict[str, Any],
+    pending_update: Optional[Dict[str, Any]],
+) -> bool:
+    _debug_log(
+        f"[codex-ext-exp] turn/start pending convo={conversation_id[:8]} "
+        f"thread={thread_id[:8]} pending={bool(pending_update)} "
+        f"pending_mode={(pending_update or {}).get('mode', '-')} "
+        f"pending_hash={(pending_update or {}).get('content_hash', '-')}"
+    )
+    turn_params.pop("developerInstructions", None)
+    turn_params.pop("baseInstructions", None)
+    if not pending_update:
+        return False
+
+    pending_mode = str(pending_update.get("mode") or "").strip().lower()
+    manual_prompt_context = None
+    if pending_mode == "delta":
+        candidate = pending_update.get("content")
+        if isinstance(candidate, str) and candidate.strip():
+            manual_prompt_context = candidate.strip()
+        else:
+            pending_mode = "full"
+    if pending_mode != "delta":
+        manual_prompt_context = _build_prompt_context_from_settings(merged_settings)
+        pending_mode = "full"
+
+    if manual_prompt_context:
+        turn_params["developerInstructions"] = manual_prompt_context
+        _debug_log(
+            f"[codex-ext-exp] turn/start manual-devins convo={conversation_id[:8]} "
+            f"thread={thread_id[:8]} mode={pending_mode} len={len(manual_prompt_context)} "
+            f"hash={_debug_text_hash(manual_prompt_context)}"
+        )
+    else:
+        _debug_log(
+            f"[codex-ext-exp] turn/start manual-devins empty "
+            f"convo={conversation_id[:8]} thread={thread_id[:8]} mode={pending_mode}"
+        )
+    return True
+
+
+def _log_turn_start_payload(
+    *,
+    conversation_id: str,
+    thread_id: str,
+    turn_params: Dict[str, Any],
+    prefix: str = "[codex-ext-exp] turn/start payload",
+) -> None:
+    instr_value = turn_params.get("developerInstructions")
+    if not isinstance(instr_value, str):
+        instr_value = turn_params.get("baseInstructions")
+    _debug_log(
+        f"{prefix} convo={conversation_id[:8]} "
+        f"thread={thread_id[:8]} has_devins={isinstance(instr_value, str) and bool(instr_value)} "
+        f"devins_len={len(instr_value) if isinstance(instr_value, str) else 0} "
+        f"devins_hash={_debug_text_hash(instr_value)}"
+    )
+
+
 async def _handle_auth_failure(conversation_id: str, extension_id: str, error_message: str) -> None:
     server = _server_module()
     with contextlib.suppress(Exception):
@@ -433,6 +592,35 @@ async def _handle_auth_failure(conversation_id: str, extension_id: str, error_me
             extension_id,
             detail=detail or error_message,
         )
+
+
+# Thread resume can legitimately take longer than a normal RPC round-trip while the
+# app-server finishes startup work and emits the idle virtual ack.
+_THREAD_RESUME_TIMEOUT_SECONDS = 30.0
+
+
+async def _resume_thread_for_rpc_server(
+    *,
+    conversation_id: str,
+    thread_id: str,
+    transport: CodexAppServerTransport,
+    protocol: RuntimeProtocol,
+    merged_settings: Dict[str, Any],
+    meta: Dict[str, Any],
+) -> None:
+    resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
+    await transport.rpc_request(
+        "thread/resume",
+        params=resume_params,
+        conversation_id=conversation_id,
+        timeout=_THREAD_RESUME_TIMEOUT_SECONDS,
+    )
+    transport.mark_thread_ready(thread_id)
+    meta["status"] = "active"
+    meta["thread_runtime_signature"] = _thread_runtime_signature(protocol, merged_settings)
+    meta["settings"] = merged_settings
+    _clear_repo_memory_resume_state(conversation_id, meta)
+    _meta_fns["save"](conversation_id, meta)
 
 
 async def get_auth_status(extension_id: str, refresh: bool = False) -> Dict[str, Any]:
@@ -923,18 +1111,14 @@ async def resume_session(
         model=model,
     )
     try:
-        resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
-        await transport.rpc_request(
-            "thread/resume",
-            params=resume_params,
+        await _resume_thread_for_rpc_server(
             conversation_id=conversation_id,
-            timeout=10.0,
+            thread_id=thread_id,
+            transport=transport,
+            protocol=protocol,
+            merged_settings=merged_settings,
+            meta=meta,
         )
-        transport.mark_thread_ready(thread_id)
-        meta["status"] = "active"
-        meta["thread_runtime_signature"] = _thread_runtime_signature(protocol, merged_settings)
-        meta["settings"] = merged_settings
-        _meta_fns["save"](conversation_id, meta)
         _add_to_raw_buffer("out", conversation_id, f"thread_resumed {thread_id[:8]}")
         return {"ok": True, "session_id": thread_id}
     except Exception as exc:
@@ -968,24 +1152,13 @@ async def handle_message(
         model=settings.get("model") if isinstance(settings, dict) else None,
     )
     thread_id = meta.get("thread_id")
-    base_id = int(datetime.now(timezone.utc).timestamp() * 1000)
     current_signature = _thread_runtime_signature(protocol, merged_settings)
 
     try:
         if thread_id:
-            if meta.get("thread_runtime_signature") != current_signature or transport.needs_thread_resume(thread_id):
-                resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
-                await transport.rpc_request(
-                    "thread/resume",
-                    params=resume_params,
-                    conversation_id=conversation_id,
-                    timeout=10.0,
-                )
-                transport.mark_thread_ready(thread_id)
-                meta["thread_runtime_signature"] = current_signature
-                meta["settings"] = merged_settings
+            pending_update, queued_changed = _stage_repo_memory_update_for_turn(conversation_id, meta)
+            if queued_changed:
                 _meta_fns["save"](conversation_id, meta)
-
             turn_params = build_request_params(
                 protocol,
                 "turn/start",
@@ -993,63 +1166,67 @@ async def handle_message(
                 thread_id=thread_id,
                 text=text,
             )
-            # Dynamic developer instructions: only send on this turn if
-            # .repo_memory.md changed since the last turn (pending_context
-            # detected an inotify event).  Otherwise omit the field so the
-            # session-level value persists unchanged.
-            pending_update = pop_pending(conversation_id, update_type="repo_memory")
-            _debug_log(
-                f"[codex-ext-exp] turn/start pending convo={conversation_id[:8]} "
-                f"thread={thread_id[:8]} pending={bool(pending_update)} "
-                f"pending_mode={(pending_update or {}).get('mode', '-')} "
-                f"pending_hash={(pending_update or {}).get('content_hash', '-')}"
-            )
-            if not pending_update:
-                turn_params.pop("developerInstructions", None)
-                turn_params.pop("baseInstructions", None)
-            else:
-                pending_mode = str(pending_update.get("mode") or "").strip().lower()
-                manual_prompt_context = None
-                if pending_mode == "delta":
-                    candidate = pending_update.get("content")
-                    if isinstance(candidate, str) and candidate.strip():
-                        manual_prompt_context = candidate.strip()
-                    else:
-                        pending_mode = "full"
-                if pending_mode != "delta":
-                    manual_prompt_context = _build_prompt_context_from_settings(merged_settings)
-                    pending_mode = "full"
-
-                turn_params.pop("developerInstructions", None)
-                turn_params.pop("baseInstructions", None)
-                if manual_prompt_context:
-                    turn_params["developerInstructions"] = manual_prompt_context
-                    _debug_log(
-                        f"[codex-ext-exp] turn/start manual-devins convo={conversation_id[:8]} "
-                        f"thread={thread_id[:8]} mode={pending_mode} len={len(manual_prompt_context)} "
-                        f"hash={_debug_text_hash(manual_prompt_context)}"
-                    )
-                else:
-                    _debug_log(
-                        f"[codex-ext-exp] turn/start manual-devins empty "
-                        f"convo={conversation_id[:8]} thread={thread_id[:8]} mode={pending_mode}"
-                    )
-            instr_value = turn_params.get("developerInstructions")
-            if not isinstance(instr_value, str):
-                instr_value = turn_params.get("baseInstructions")
-            _debug_log(
-                f"[codex-ext-exp] turn/start payload convo={conversation_id[:8]} "
-                f"thread={thread_id[:8]} has_devins={isinstance(instr_value, str) and bool(instr_value)} "
-                f"devins_len={len(instr_value) if isinstance(instr_value, str) else 0} "
-                f"devins_hash={_debug_text_hash(instr_value)}"
-            )
-
-            await transport.rpc_request(
-                "turn/start",
-                params=turn_params,
+            used_pending_update = _apply_repo_memory_turn_update(
                 conversation_id=conversation_id,
-                timeout=15.0,
+                thread_id=thread_id,
+                turn_params=turn_params,
+                merged_settings=merged_settings,
+                pending_update=pending_update,
             )
+            _log_turn_start_payload(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                turn_params=turn_params,
+            )
+            try:
+                await transport.rpc_request(
+                    "turn/start",
+                    params=turn_params,
+                    conversation_id=conversation_id,
+                    timeout=15.0,
+                )
+                transport.mark_thread_ready(thread_id)
+                meta["status"] = "active"
+                meta["settings"] = merged_settings
+                if used_pending_update:
+                    _clear_queued_repo_memory_updates(meta)
+                _meta_fns["save"](conversation_id, meta)
+            except Exception as exc:
+                if not _looks_like_thread_not_loaded_error(exc):
+                    raise
+                _debug_log(
+                    f"[codex-ext-exp] turn/start requires-resume convo={conversation_id[:8]} "
+                    f"thread={thread_id[:8]} error={exc}"
+                )
+                await _resume_thread_for_rpc_server(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    transport=transport,
+                    protocol=protocol,
+                    merged_settings=merged_settings,
+                    meta=meta,
+                )
+                retry_turn_params = build_request_params(
+                    protocol,
+                    "turn/start",
+                    merged_settings,
+                    thread_id=thread_id,
+                    text=text,
+                )
+                retry_turn_params.pop("developerInstructions", None)
+                retry_turn_params.pop("baseInstructions", None)
+                _log_turn_start_payload(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    turn_params=retry_turn_params,
+                    prefix="[codex-ext-exp] turn/start retry payload",
+                )
+                await transport.rpc_request(
+                    "turn/start",
+                    params=retry_turn_params,
+                    conversation_id=conversation_id,
+                    timeout=15.0,
+                )
         else:
             start_params = build_request_params(protocol, "thread/start", merged_settings)
             start_result = await transport.rpc_request(
@@ -1072,6 +1249,7 @@ async def handle_message(
             meta["status"] = "active"
             meta["settings"] = merged_settings
             meta["thread_runtime_signature"] = current_signature
+            cleared_meta_queue = _clear_queued_repo_memory_updates(meta)
             _meta_fns["save"](conversation_id, meta)
 
             turn_params = build_request_params(
@@ -1084,19 +1262,19 @@ async def handle_message(
             # New thread — baseline instructions already sent via thread/start.
             # Clear any pending so it doesn't re-fire on the next turn.
             pending_update = pop_pending(conversation_id, update_type="repo_memory")
+            turn_params.pop("developerInstructions", None)
+            turn_params.pop("baseInstructions", None)
             _debug_log(
                 f"[codex-ext-exp] new-thread pending-clear convo={conversation_id[:8]} "
                 f"thread={thread_id[:8]} had_pending={bool(pending_update)} "
-                f"pending_hash={(pending_update or {}).get('content_hash', '-')}"
+                f"pending_hash={(pending_update or {}).get('content_hash', '-')} "
+                f"queued_cleared={cleared_meta_queue}"
             )
-            instr_value = turn_params.get("developerInstructions")
-            if not isinstance(instr_value, str):
-                instr_value = turn_params.get("baseInstructions")
-            _debug_log(
-                f"[codex-ext-exp] new-thread turn/start payload convo={conversation_id[:8]} "
-                f"thread={thread_id[:8]} has_devins={isinstance(instr_value, str) and bool(instr_value)} "
-                f"devins_len={len(instr_value) if isinstance(instr_value, str) else 0} "
-                f"devins_hash={_debug_text_hash(instr_value)}"
+            _log_turn_start_payload(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                turn_params=turn_params,
+                prefix="[codex-ext-exp] new-thread turn/start payload",
             )
 
             await transport.rpc_request(
@@ -1246,8 +1424,8 @@ async def abort_session(conversation_id: str) -> bool:
 async def compact_session(conversation_id: str) -> Dict[str, Any]:
     """Send thread/compact/start to the extension-owned app-server transport.
 
-    Follows the same resume-if-needed flow as handle_message: if the thread
-    is not loaded in memory, resume it first (virtual ack), then compact.
+    Try compact directly first, then resume and retry only for the canonical
+    thread-not-loaded startup errors.
     """
     if not _meta_fns or "load" not in _meta_fns:
         return {"ok": False, "error": "meta_fns not available"}
@@ -1261,32 +1439,43 @@ async def compact_session(conversation_id: str) -> Dict[str, Any]:
     try:
         transport = await _ensure_transport_ready()
         protocol = await get_runtime_protocol()
-
-        # Resume thread if not loaded — same pattern as handle_message
-        if transport.needs_thread_resume(thread_id):
-            merged_settings = _merge_runtime_settings(
-                conversation_id,
-                settings=meta.get("settings") or {},
-                cwd=(meta.get("settings") or {}).get("cwd"),
-                model=(meta.get("settings") or {}).get("model"),
-            )
-            resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
+        merged_settings = _merge_runtime_settings(
+            conversation_id,
+            settings=meta.get("settings") or {},
+            cwd=(meta.get("settings") or {}).get("cwd"),
+            model=(meta.get("settings") or {}).get("model"),
+        )
+        params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)
+        try:
             await transport.rpc_request(
-                "thread/resume",
-                params=resume_params,
+                "thread/compact/start",
+                params=params,
                 conversation_id=conversation_id,
-                timeout=10.0,
+                timeout=30.0,
             )
             transport.mark_thread_ready(thread_id)
+            meta["status"] = "active"
+            meta["settings"] = merged_settings
+            _meta_fns["save"](conversation_id, meta)
+        except Exception as exc:
+            if not _looks_like_thread_not_loaded_error(exc):
+                raise
+            await _resume_thread_for_rpc_server(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                transport=transport,
+                protocol=protocol,
+                merged_settings=merged_settings,
+                meta=meta,
+            )
             _add_to_raw_buffer("out", conversation_id, f"compact_resume thread={thread_id[:8]}")
-
-        params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)
-        await transport.rpc_request(
-            "thread/compact/start",
-            params=params,
-            conversation_id=conversation_id,
-            timeout=30.0,
-        )
+            params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)
+            await transport.rpc_request(
+                "thread/compact/start",
+                params=params,
+                conversation_id=conversation_id,
+                timeout=30.0,
+            )
         _add_to_raw_buffer("out", conversation_id, f"compact_start thread={thread_id[:8]}")
         return {"ok": True, "thread_id": thread_id, "conversation_id": conversation_id}
     except Exception as exc:

@@ -25,6 +25,16 @@ I will follow a structured, multi-step, approval-based workflow for every new ta
 3. This is the **"Final Approval"** stage. I will present this plan to the user for their review.
 4. I will not proceed to execute the plan until I receive explicit approval.
 
+## Approval Tool Hierarchy
+
+When requesting prompt approval or final plan approval for work on this repo, I will use this order:
+
+1. built-in harness user-input or approval tool, when available
+2. MCP user-input or approval tool, when no built-in tool is available
+3. plain assistant message only when no approval tool is available
+
+I should prefer in-turn approval tools because they preserve reasoning, investigation context, and plan state that would otherwise be lost across turns.
+
 ## Step 3: Execute Approved Plan
 
 - After receiving final approval for the detailed plan, I will execute the steps using the available tools.
@@ -47,6 +57,12 @@ I will follow a structured, multi-step, approval-based workflow for every new ta
 3. **Execute Approved Plan**
 4. **Subsequent Interactions**
 5. Sometimes inquiries
+
+# Workflow Scope
+
+- This workflow governs work on this repo.
+- This repo is harness infrastructure used to work on many other repos.
+- I will not assume downstream target repos inherit this repo's workflow or approval rules unless those repos explicitly define them.
 
 # Invariant: Platform-Agnostic Core Files — Zero Extension-Specific Code
 
@@ -153,7 +169,7 @@ UNDER NO CIRCUMSTANCES WILL I EVER USE `resolve()` or ANY SYMLINK RESOLOVING MET
 
 # Agent Log
 
-- The agent log is to be used to check to see if there are other agents working, and to communicate with other agents. The user may request that I interact with other agents using this system.
+- The agent log is to be used to check to see if there are other agents working, and to communicate with other agents. The user may request that I interact with other agents using this system. (I will use the mcp tool if it is available to me, if it is, disregard the following agent log information)
 
 ## Agent Log CLI Usage
 
@@ -221,4 +237,4 @@ After making a round of successful edits that have been verified by the user, I 
 - For third-party extension install/update workflow, use `THIRD_PARTY_EXTENSION_WORKFLOW.md` as the contract doc and prefer KB reads/writes when it is loaded into KB.
 
 ## Agents working in this repo
-- Disregard the developer instructions to restart framework shells and refresh front ends.  Ask user, then continue.
+- Disregard the developer instructions to restart framework shells and refresh front ends.  Ask user, then continue. (if I am working on this repo, then the harness I am running on is a child process of an agent extension)
