@@ -1372,6 +1372,16 @@ document.addEventListener('DOMContentLoaded', () => {
       span.textContent = displayText;
     }
 
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'mention-token-remove';
+    removeBtn.textContent = '(x)';
+    removeBtn.setAttribute('aria-label', 'Remove mention');
+    removeBtn.title = 'Remove mention';
+    removeBtn.setAttribute('contenteditable', 'false');
+    removeBtn.tabIndex = -1;
+    span.appendChild(removeBtn);
+
     return span;
   }
 
@@ -1488,13 +1498,8 @@ document.addEventListener('DOMContentLoaded', () => {
       noMatchTemplate: '<li class="tribute-no-match">No files found</li>',
       selectTemplate: function(item) {
         if (!item) return '';
-        const cwd = conversationSettings?.cwd || '';
         const absPath = item.original.path || '';
-        const relPath = getRelativePath(absPath, cwd);
-        const bestPath = relPath || absPath;
-        return '<span class="mention-token" contenteditable="false" data-abs="' +
-               absPath + '" data-path="' + bestPath + '" title="' + absPath + '">' +
-               item.original.name + '</span>';
+        return createMentionToken(absPath).outerHTML;
       },
       menuItemTemplate: function(item) {
         const icon = item.original.type === 'directory' ? '📁' : '📄';
@@ -1571,31 +1576,13 @@ document.addEventListener('DOMContentLoaded', () => {
   function insertMention(path, opts) {
     if (!promptEl || !path) return;
     opts = opts || {};
-    const { absPath, bestPath, cwd } = toMentionAbsAndBestPath(String(path || ''));
-    const relPath = getRelativePath(absPath, cwd);
-    const displayPath = relPath || bestPath || absPath;
-    const filename = String(displayPath || '').split('/').filter(Boolean).pop() || displayPath;
-    // Build display: file.js:42-48 or file.js:42 or file.js
-    let display = filename;
-    if (opts.lineNo != null) {
-      display += ':' + opts.lineNo;
-      if (opts.endLineNo != null && opts.endLineNo !== opts.lineNo) {
-        display += '-' + opts.endLineNo;
-      }
-    }
-    
-    const token = document.createElement('span');
-    token.className = 'mention-token';
-    token.contentEditable = 'false';
-    token.dataset.abs = absPath || '';
-    token.dataset.path = displayPath || '';
-    token.title = absPath || '';
-    if (opts.lineNo != null) token.dataset.line = String(opts.lineNo);
-    if (opts.endLineNo != null) token.dataset.endLine = String(opts.endLineNo);
-    if (opts.col != null) token.dataset.col = String(opts.col);
-    if (opts.endCol != null) token.dataset.endCol = String(opts.endCol);
-    if (opts.content) token.dataset.content = String(opts.content);
-    token.textContent = display;
+    const token = createMentionToken(path, {
+      line: opts.lineNo,
+      endLine: opts.endLineNo,
+      col: opts.col,
+      endCol: opts.endCol,
+      content: opts.content,
+    });
     
     const selection = window.getSelection();
     if (selection && selection.rangeCount > 0 && promptEl.contains(selection.getRangeAt(0).commonAncestorContainer)) {

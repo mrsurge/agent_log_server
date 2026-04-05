@@ -134,6 +134,25 @@ function bindMarkdownLinkRouting(container) {
   });
 }
 
+function bindInlineCodeCopy(container) {
+  if (!container || container.dataset.inlineCodeCopyBound === 'true') return;
+  container.dataset.inlineCodeCopyBound = 'true';
+  container.addEventListener('click', (evt) => {
+    const target = evt.target;
+    if (!(target instanceof HTMLElement)) return;
+    const code = target.closest('code');
+    if (!(code instanceof HTMLElement) || !container.contains(code)) return;
+    if (code.closest('pre')) return;
+    if (code.closest('a[href]')) return;
+    const selection = window.getSelection?.();
+    if (selection && String(selection).trim()) return;
+    const text = code.textContent || '';
+    if (!text.trim()) return;
+    evt.preventDefault();
+    void copyTextToClipboard(text);
+  });
+}
+
 export function setMarkdownLinkHandlers(handlers = {}) {
   markdownLinkHandlers = {
     openFilePath: typeof handlers.openFilePath === 'function' ? handlers.openFilePath : null,
@@ -148,12 +167,14 @@ export function highlightCode(container) {
       hljs.highlightElement(block);
     }
   });
+  attachCodeCopyButtons(container);
 }
 
 export function renderMarkdownInto(container, text) {
   const renderer = smd.default_renderer(container);
   const parser = smd.parser(renderer);
   bindMarkdownLinkRouting(container);
+  bindInlineCodeCopy(container);
   smd.parser_write(parser, text || '');
   smd.parser_end(parser);
 }
@@ -204,6 +225,87 @@ function renderHighlightedFenceHtml(source, lang) {
     const languageClass = requestedLang ? ` language-${requestedLang}` : '';
     return `<pre><code class="hljs${languageClass}">${escapeHtmlText(source)}</code></pre>`;
   }
+}
+
+function fallbackCopyText(text) {
+  const textarea = document.createElement('textarea');
+  textarea.value = text || '';
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.setAttribute('aria-hidden', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '0';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy') === true;
+  } catch (_) {
+    ok = false;
+  }
+  textarea.remove();
+  return ok;
+}
+
+async function copyTextToClipboard(text) {
+  const value = text == null ? '' : String(text);
+  if (navigator?.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch (_) {}
+  }
+  return fallbackCopyText(value);
+}
+
+function setCopyButtonState(button, state) {
+  if (!(button instanceof HTMLButtonElement)) return;
+  if (button._copyResetTimer) {
+    clearTimeout(button._copyResetTimer);
+    button._copyResetTimer = null;
+  }
+  button.classList.remove('copied', 'failed');
+  if (state === 'copied') {
+    button.textContent = 'copied';
+    button.classList.add('copied');
+  } else if (state === 'failed') {
+    button.textContent = 'failed';
+    button.classList.add('failed');
+  } else {
+    button.textContent = 'copy';
+  }
+  if (state !== 'idle') {
+    button.disabled = true;
+    button._copyResetTimer = setTimeout(() => {
+      button.disabled = false;
+      button.classList.remove('copied', 'failed');
+      button.textContent = 'copy';
+      button._copyResetTimer = null;
+    }, 1200);
+  }
+}
+
+function attachCodeCopyButtons(container) {
+  if (!container) return;
+  container.querySelectorAll('pre > code').forEach((codeBlock) => {
+    const pre = codeBlock.parentElement;
+    if (!(pre instanceof HTMLElement)) return;
+    if (pre.querySelector('.markdown-copy-button')) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'markdown-copy-button';
+    button.textContent = 'copy';
+    button.setAttribute('aria-label', 'Copy code block');
+    button.title = 'Copy code block';
+    button.addEventListener('click', async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      const ok = await copyTextToClipboard(codeBlock.textContent || '');
+      setCopyButtonState(button, ok ? 'copied' : 'failed');
+    });
+    pre.appendChild(button);
+  });
 }
 
 function emphasisTokenizeAsteriskOnly(state, silent) {
@@ -316,6 +418,8 @@ export function renderEventMarkdownInto(container, text) {
   }
   container.innerHTML = renderer.render(text || '');
   bindMarkdownLinkRouting(container);
+  bindInlineCodeCopy(container);
+  attachCodeCopyButtons(container);
 }
 
 export function renderMarkdownBlock(text, extraClass = '') {

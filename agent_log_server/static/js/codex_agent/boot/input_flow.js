@@ -151,8 +151,44 @@ export function bindInputFlow(ctx) {
   function handlePromptClick(evt) {
     const target = evt.target;
     if (!(target instanceof HTMLElement)) return;
-    if (target.classList.contains('mention-token')) {
-      const path = target.dataset.path || target.title || target.textContent || '';
+    const state = getState();
+    const removeBtn = target.closest('.mention-token-remove');
+    if (removeBtn instanceof HTMLElement) {
+      const token = removeBtn.closest('.mention-token');
+      if (!(token instanceof HTMLElement)) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      const next = token.nextSibling;
+      const prev = token.previousSibling;
+      token.remove();
+      if (!state.applyingDraft) {
+        setState({ draftDirty: true });
+      }
+      if (!state.commandRunning && !state.terminalMode) {
+        saveDraftDebounced();
+      }
+      if (promptEl) {
+        promptEl.focus();
+        const selection = windowRef.getSelection?.();
+        if (selection) {
+          const range = documentRef.createRange();
+          if (next && promptEl.contains(next)) {
+            range.setStartBefore(next);
+          } else if (prev && promptEl.contains(prev)) {
+            range.setStartAfter(prev);
+          } else {
+            range.selectNodeContents(promptEl);
+          }
+          range.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      }
+      return;
+    }
+    const mention = target.closest('.mention-token');
+    if (mention instanceof HTMLElement) {
+      const path = mention.dataset.path || mention.title || mention.textContent || '';
       console.log('Mention path:', path);
     }
   }

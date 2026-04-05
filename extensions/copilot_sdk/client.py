@@ -48,8 +48,6 @@ from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from .te2_runtime import build_copilot_mcp_servers
 from agent_log_server.prompt_context import build_effective_prompt_context
 from agent_log_server.te2_mcp_config import (
-    build_te2_mcp_streamable_http_url,
-    TE2_MCP_SERVER_NAME,
     te2_mcp_integration_enabled,
 )
 from watchfiles import awatch
@@ -1162,13 +1160,6 @@ def _build_session_runtime_config(
         conversation_id=conversation_id,
     )
     if mcp_servers is not None:
-        te2_cfg = mcp_servers.get(TE2_MCP_SERVER_NAME) if isinstance(mcp_servers, dict) else None
-        if isinstance(te2_cfg, dict):
-            mcp_servers[TE2_MCP_SERVER_NAME] = {
-                **te2_cfg,
-                "type": "http",
-                "url": build_te2_mcp_streamable_http_url(merged.get("te2_base_url") or ""),
-            }
         if mcp_servers:
             config["mcp_servers"] = mcp_servers
 
