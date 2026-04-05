@@ -1,6 +1,6 @@
 // console_bridge.js — Agnostic console monkey-patcher + Socket.IO bridge
 //
-// Patches console.log/info/warn/error/debug to emit events on the ui_ipc
+// Patches console.log/info/warn/error/debug to emit events on the TE2 console
 // Socket.IO namespace with a "console:" prefix.  Also captures uncaught
 // errors and unhandled rejections.
 //
@@ -8,9 +8,9 @@
 //   import { initConsoleBridge } from './console_bridge.js';
 //   initConsoleBridge({ workerLabel: 'my_app', uniquePerWindow: true });
 //
-// Usage (shared socket — reuse an existing ui_ipc connection):
+// Usage (shared socket — reuse an existing TE2 console connection):
 //   import { initConsoleBridge } from './console_bridge.js';
-//   initConsoleBridge({ socket: existingUiIpcSocket, workerLabel: 'my_app', uniquePerWindow: true });
+//   initConsoleBridge({ socket: existingTe2ConsoleSocket, workerLabel: 'my_app', uniquePerWindow: true });
 //
 // For multi-client/frontends that may be open in multiple windows, tabs, or iframes:
 // - use workerLabel as the human-readable grouping label
@@ -135,12 +135,12 @@ function _hookEval() {
  * Initialize the console bridge.
  *
  * @param {object} [opts]
- * @param {object} [opts.socket]   Existing ui_ipc Socket.IO instance to reuse.
+ * @param {object} [opts.socket]   Existing TE2 console Socket.IO instance to reuse.
  * @param {string} [opts.workerId] Exact identifier for this frontend. Prefer this only when you intentionally want a fixed ID.
  * @param {string} [opts.workerLabel] Human-readable label/grouping for this frontend.
  * @param {boolean} [opts.uniquePerWindow] Generate a stable unique ID per browser window/tab from workerLabel. Recommended for multi-client hosted frontends.
- * @param {string} [opts.socketPath] Socket.IO path (default '/ui_ipc_ws/socket.io').
- * @param {string} [opts.namespace] Socket.IO namespace (default '/ui_ipc').
+ * @param {string} [opts.socketPath] Socket.IO path (default '/te2_console_ws/socket.io').
+ * @param {string} [opts.namespace] Socket.IO namespace (default '/te2_console').
  * @returns {{ socket, workerId, destroy }}
  */
 export function initConsoleBridge(opts = {}) {
@@ -165,8 +165,8 @@ export function initConsoleBridge(opts = {}) {
       console.warn('[console_bridge] window.io not available — bridge not started');
       return null;
     }
-    _bridgeSocket = io(opts.namespace || '/ui_ipc', {
-      path: opts.socketPath || '/ui_ipc_ws/socket.io',
+    _bridgeSocket = io(opts.namespace || '/te2_console', {
+      path: opts.socketPath || '/te2_console_ws/socket.io',
       transports: ['websocket'],
       query: {
         app_id: 'file_editor_cm6',

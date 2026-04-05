@@ -227,6 +227,25 @@ window.CodexAgentModules.push((ctx) => {
     const selectControls = {};
     let modelItems = [];
 
+    const fieldValueKeys = (field) => {
+      const extraKeys = Array.isArray(field?.value_keys)
+        ? field.value_keys
+            .map((key) => (typeof key === 'string' ? key.trim() : ''))
+            .filter(Boolean)
+        : [];
+      return [field?.id, ...extraKeys].filter((key, index, items) => key && items.indexOf(key) === index);
+    };
+
+    const getFieldValue = (field, sourceValues) => {
+      const resolvedValues = sourceValues && typeof sourceValues === 'object' ? sourceValues : {};
+      for (const key of fieldValueKeys(field)) {
+        if (Object.prototype.hasOwnProperty.call(resolvedValues, key)) {
+          return resolvedValues[key];
+        }
+      }
+      return field.default ?? '';
+    };
+
     const normalizeEffortList = (model) => {
       const raw = model?.supported_reasoning_efforts ?? model?.supportedReasoningEfforts;
       if (!Array.isArray(raw)) return [];
@@ -356,7 +375,7 @@ window.CodexAgentModules.push((ctx) => {
       label.appendChild(span);
       
       let input;
-      const value = values[field.id] ?? field.default ?? '';
+      const value = getFieldValue(field, values);
       
       switch (field.type) {
         case 'path':
@@ -379,7 +398,7 @@ window.CodexAgentModules.push((ctx) => {
             browseBtn.addEventListener('click', () => {
               // Use the existing picker if available
               if (ctx.helpers?.openPicker) {
-                ctx.helpers.openPicker(input.value || '~');
+                ctx.helpers.openPicker(input.value || '~', 'cwd', { input });
               }
             });
             pathDiv.appendChild(browseBtn);
@@ -627,6 +646,10 @@ window.CodexAgentModules.push((ctx) => {
   function getSchemaValues() {
     return getSchemaRawValues();
   }
+
+  function getSchemaFieldInput(fieldId) {
+    return currentSchemaValues[fieldId]?.input || null;
+  }
   
   /**
    * Update settings modal based on selected agent
@@ -643,6 +666,7 @@ window.CodexAgentModules.push((ctx) => {
     if (settingsExtensionFields) {
       settingsExtensionFields.innerHTML = '';
     }
+    currentSchemaValues = {};
     
     if (!isCodex) {
       // Load and render schema for this extension
@@ -671,5 +695,6 @@ window.CodexAgentModules.push((ctx) => {
   ctx.helpers.getSchemaRawValues = getSchemaRawValues;
   ctx.helpers.getSchemaParsedValues = getSchemaParsedValues;
   ctx.helpers.getSchemaValues = getSchemaValues;
+  ctx.helpers.getSchemaFieldInput = getSchemaFieldInput;
   ctx.helpers.onAgentChange = onAgentChange;
 });

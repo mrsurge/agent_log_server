@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 TE2_MCP_SERVER_NAME = "te2-mcp"
-TE2_APP_ROUTE_PREFIX = "/api/app/file_editor_cm6"
-TE2_MCP_ROUTE = f"{TE2_APP_ROUTE_PREFIX}/te2_mcp"
-TE2_MCP_STREAMABLE_HTTP_ROUTE = f"{TE2_APP_ROUTE_PREFIX}/te2_mcp_http"
+TE2_APP_ROUTE_PREFIX = ""
+TE2_MCP_ROUTE = "/te2_mcp"
+TE2_MCP_STREAMABLE_HTTP_ROUTE = "/te2_mcp_http"
 
 
 def te2_mcp_integration_enabled(settings: Optional[Dict[str, Any]]) -> bool:
@@ -21,7 +21,7 @@ def build_te2_mcp_url(base_url: str) -> str:
 def build_te2_mcp_streamable_http_url(base_url: str) -> str:
     if not isinstance(base_url, str) or not base_url.strip():
         raise ValueError("TE2 base URL is required")
-    return f"{base_url.rstrip('/')}{TE2_MCP_STREAMABLE_HTTP_ROUTE}/"
+    return f"{base_url.rstrip('/')}{TE2_MCP_STREAMABLE_HTTP_ROUTE}"
 
 
 def build_codex_thread_config(

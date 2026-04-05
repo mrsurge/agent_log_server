@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .plan_utils import normalize_plan_steps, render_plan_markdown
+from agent_log_server import conversation_todos as _conv_todos
 from .runtime_protocol import (
     RuntimeProtocol,
     build_request_params,
@@ -850,24 +851,6 @@ def _build_plan_state(
     }
 
 
-def _latest_transcript_plan(conversation_id: str) -> Optional[Dict[str, Any]]:
-    transcript_path = _server_module()._conversation_transcript_path(conversation_id)
-    if not isinstance(transcript_path, Path) or not transcript_path.is_file():
-        return None
-    try:
-        lines = transcript_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception:
-        return None
-    for line in reversed(lines):
-        try:
-            entry = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(entry, dict) and entry.get("role") == "plan":
-            return entry
-    return None
-
-
 def init_codex_app_server_manager(
     extensions_dir: Path,
     server_root: Path,
@@ -1044,38 +1027,29 @@ async def route_event(
 
 
 async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
-    if not _meta_fns or "load" not in _meta_fns:
+    try:
+        db_todos = _conv_todos.list_todos(conversation_id)
+        db_status_map = {
+            "pending": "pending",
+            "in_progress": "in_progress",
+            "done": "completed",
+            "blocked": "pending",
+        }
+        steps = [
+            {"step": t["title"], "status": db_status_map.get(t["status"], "pending")}
+            for t in db_todos
+        ]
+        if steps:
+            return _build_plan_state(steps, source="todos_db")
+    except Exception:
         return {
             "has_plan": False,
             "has_todo": True,
             "plan_exists": False,
             "plan_content": "",
             "plan_steps": [],
-            "plan_source": "unavailable",
+            "plan_source": "todos_db_error",
         }
-
-    meta = _meta_fns["load"](conversation_id)
-    active_plan = meta.get("active_plan") if isinstance(meta, dict) and isinstance(meta.get("active_plan"), dict) else None
-    if isinstance(active_plan, dict):
-        active_steps = normalize_plan_steps(active_plan.get("steps"))
-        if active_steps:
-            explanation = active_plan.get("explanation")
-            return _build_plan_state(
-                active_steps,
-                explanation=explanation if isinstance(explanation, str) else None,
-                source="active_meta",
-            )
-
-    transcript_plan = _latest_transcript_plan(conversation_id)
-    if isinstance(transcript_plan, dict):
-        steps = normalize_plan_steps(transcript_plan.get("steps"))
-        if steps:
-            explanation = transcript_plan.get("explanation")
-            return _build_plan_state(
-                steps,
-                explanation=explanation if isinstance(explanation, str) else None,
-                source="transcript",
-            )
 
     return {
         "has_plan": False,

@@ -431,7 +431,7 @@ async def _handle_auth_failure(conversation_id: str, extension_id: str, error_me
 
 # Thread resume can legitimately take longer than a normal RPC round-trip while the
 # app-server finishes startup work and emits the idle virtual ack.
-_THREAD_RESUME_TIMEOUT_SECONDS = 30.0
+_THREAD_RESUME_TIMEOUT_SECONDS = 45.0
 
 
 async def _resume_thread_for_rpc_server(

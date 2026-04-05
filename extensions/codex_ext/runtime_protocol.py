@@ -1309,6 +1309,7 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Dict[
                 "options": _schema_options(effort_values),
                 "placeholder": "Select model first",
                 "default": "",
+                "value_keys": ["effort"],
             },
             {
                 "id": "summary",

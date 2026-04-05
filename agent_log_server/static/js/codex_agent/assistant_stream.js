@@ -8,6 +8,7 @@ export function bindAssistantStream(ctx) {
     insertRow,
     isMarkdownEnabled,
     createStreamingParser,
+    renderEventMarkdownInto,
     streamWrite,
     streamEnd,
     highlightCode,
@@ -74,7 +75,7 @@ export function bindAssistantStream(ctx) {
     if (entry.useMarkdown && entry.parser) {
       // End the streaming parser
       streamEnd(entry.parser);
-      highlightCode(entry.container);
+      renderEventMarkdownInto(entry.container, finalText);
     } else if (entry.pre && finalText) {
       entry.pre.textContent = finalText;
     }

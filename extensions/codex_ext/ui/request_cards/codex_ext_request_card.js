@@ -187,6 +187,9 @@ function parseJsonLike(text, fallback = null) {
 }
 
 function normalizeStringList(value) {
+  if (typeof value === 'string' && value.startsWith('[')) {
+    try { value = JSON.parse(value); } catch (_) { /* keep as string */ }
+  }
   const items = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
   const normalized = [];
   const seen = new Set();

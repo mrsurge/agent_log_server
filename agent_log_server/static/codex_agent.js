@@ -3040,9 +3040,7 @@ document.addEventListener('DOMContentLoaded', () => {
       insertRow(row);
     }
     if ((role === 'assistant' || role === 'user') && isMarkdownEnabled()) {
-      const rendered = role === 'user'
-        ? renderMarkdownItBlock(cleanText)
-        : renderMarkdownBlock(cleanText);
+      const rendered = renderMarkdownItBlock(cleanText);
       body.append(rendered);
     } else {
       const pre = document.createElement('pre');
@@ -3657,9 +3655,7 @@ document.addEventListener('DOMContentLoaded', () => {
         : buildRow('message', entry.role === 'assistant' ? 'assistant' : entry.role);
       if (!useMessageCard && entry.role === 'user') row.classList.add('user');
       if ((entry.role === 'assistant' || entry.role === 'user') && isMarkdownEnabled()) {
-        const container = entry.role === 'user'
-          ? renderMarkdownItBlock(cleanText)
-          : renderMarkdownBlock(cleanText);
+        const container = renderMarkdownItBlock(cleanText);
         body.append(container);
       } else {
         const pre = document.createElement('pre');
@@ -3718,6 +3714,7 @@ document.addEventListener('DOMContentLoaded', () => {
     insertRow,
     isMarkdownEnabled,
     createStreamingParser,
+    renderEventMarkdownInto,
     streamWrite,
     streamEnd,
     highlightCode,
@@ -4723,6 +4720,7 @@ document.addEventListener('DOMContentLoaded', () => {
     escapeHtml,
     toRelativePath,
     isDiffSyntaxEnabled: () => diffSyntaxHighlight === true,
+    detectLangFromPath,
     resolveHljsLanguage,
     setLastEventType: (value) => { lastEventType = value; },
     maybeAutoScroll,

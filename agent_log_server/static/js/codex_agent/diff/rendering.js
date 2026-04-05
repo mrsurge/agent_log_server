@@ -5,6 +5,7 @@ export function bindDiffRendering(ctx) {
     escapeHtml,
     toRelativePath,
     isDiffSyntaxEnabled,
+    detectLangFromPath,
     resolveHljsLanguage,
     setLastEventType,
     maybeAutoScroll,
@@ -451,13 +452,8 @@ export function bindDiffRendering(ctx) {
     let codeHtml = escapeHtml(display);
     if (isDiffSyntaxEnabled() && typeof hljs !== 'undefined' && display.trim()) {
       try {
-        const ext = activePath ? activePath.split('.').pop()?.toLowerCase() : '';
-        const extToLang = {
-          py: 'python', js: 'javascript', ts: 'typescript', tsx: 'typescript',
-          jsx: 'javascript', rb: 'ruby', rs: 'rust', go: 'go', sh: 'bash',
-          yml: 'yaml', md: 'markdown', htm: 'html',
-        };
-        const lang = resolveHljsLanguage?.(extToLang[ext] || ext) || null;
+        const langHint = detectLangFromPath?.(activePath) || null;
+        const lang = resolveHljsLanguage?.(langHint) || null;
         if (lang) {
           codeHtml = hljs.highlight(display, { language: lang, ignoreIllegals: true }).value;
         } else if (display.length > 10) {

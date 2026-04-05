@@ -46,6 +46,72 @@ export function bindSettingsUiFlow(ctx) {
     rolloutOverlayEl,
     rolloutListEl,
   } = elements;
+  const windowRef = getWindow ? getWindow() : window;
+  const pickerCloseBtn = elements.pickerCloseBtn || windowRef?.document?.getElementById('picker-close');
+  const pickerUpBtn = elements.pickerUpBtn || windowRef?.document?.getElementById('picker-up');
+  const pickerSelectBtn = elements.pickerSelectBtn || windowRef?.document?.getElementById('picker-select');
+  let pickerTargetInput = null;
+
+  function isValueInput(candidate) {
+    return !!candidate && typeof candidate.value === 'string';
+  }
+
+  function getSchemaFieldInput(fieldId) {
+    const getter = windowRef?.CodexAgent?.helpers?.getSchemaFieldInput;
+    if (typeof getter !== 'function') return null;
+    return getter(fieldId);
+  }
+
+  function getActiveCwdInput() {
+    const schemaInput = getSchemaFieldInput('cwd');
+    if (isValueInput(schemaInput)) return schemaInput;
+    if (isValueInput(settingsCwdEl)) return settingsCwdEl;
+    return null;
+  }
+
+  function getActiveCwdValue({ fallbackToSaved = true } = {}) {
+    const input = getActiveCwdInput();
+    const currentValue = isValueInput(input) ? input.value.trim() : '';
+    if (currentValue) return currentValue;
+    if (!fallbackToSaved) return '';
+    const saved = getState().conversationSettings?.cwd;
+    return typeof saved === 'string' ? saved.trim() : '';
+  }
+
+  function setPickerChrome(mode) {
+    if (pickerTitleEl) {
+      pickerTitleEl.textContent = mode === 'mention' ? 'Mentioning' : 'Pick CWD';
+    }
+    const isMention = mode === 'mention';
+    if (pickerSelectBtn) pickerSelectBtn.style.display = isMention ? 'none' : '';
+    if (pickerUpBtn) pickerUpBtn.style.display = isMention ? 'none' : '';
+  }
+
+  function applyPickedCwd(path) {
+    const nextPath = typeof path === 'string' ? path.trim() : '';
+    if (!nextPath) return;
+    const targetInput = isValueInput(pickerTargetInput) ? pickerTargetInput : getActiveCwdInput();
+    if (isValueInput(targetInput)) {
+      targetInput.value = nextPath;
+    }
+    if (isValueInput(settingsCwdEl) && targetInput !== settingsCwdEl) {
+      settingsCwdEl.value = nextPath;
+    }
+  }
+
+  function parentPickerPath(path) {
+    const raw = typeof path === 'string' ? path.trim() : '';
+    if (!raw || raw === '~' || raw === '/') return raw || '~';
+    if (raw.startsWith('~/')) {
+      const rest = raw.slice(2).replace(/\/+$/, '');
+      if (!rest) return '~';
+      const slash = rest.lastIndexOf('/');
+      return slash === -1 ? '~' : `~/${rest.slice(0, slash)}`;
+    }
+    const trimmed = raw.replace(/\/+$/, '');
+    const slash = trimmed.lastIndexOf('/');
+    return slash <= 0 ? '/' : trimmed.slice(0, slash);
+  }
 
   function normalizeRuntimeOption(option) {
     if (!option || typeof option !== 'object') return null;
@@ -223,8 +289,7 @@ export function bindSettingsUiFlow(ctx) {
       setActivity('Agent required', true);
       return;
     }
-    const cwdOk = Boolean(settingsCwdEl?.value?.trim())
-      || Boolean(state.conversationSettings?.cwd?.trim());
+    const cwdOk = Boolean(getActiveCwdValue({ fallbackToSaved: true }));
     if (!cwdOk) {
       setActivity('CWD required', true);
       return;
@@ -233,14 +298,18 @@ export function bindSettingsUiFlow(ctx) {
     settingsModalEl.classList.add('hidden');
   }
 
-  function openPicker(startPath, mode = 'cwd') {
+  function openPicker(startPath, mode = 'cwd', options = {}) {
     if (!pickerOverlayEl) return;
     const nextMode = mode || 'cwd';
-    const nextPath = startPath || settingsCwdEl?.value || '~';
+    pickerTargetInput = nextMode === 'cwd' && isValueInput(options?.input)
+      ? options.input
+      : (nextMode === 'cwd' ? getActiveCwdInput() : null);
+    const nextPath = startPath
+      || (nextMode === 'cwd' ? getActiveCwdValue({ fallbackToSaved: true }) : '')
+      || getState().pickerPath
+      || '~';
     setState({ pickerMode: nextMode, pickerPath: nextPath });
-    if (pickerTitleEl) {
-      pickerTitleEl.textContent = nextMode === 'mention' ? 'Mentioning' : 'Pick CWD';
-    }
+    setPickerChrome(nextMode);
     pickerOverlayEl.classList.remove('hidden');
     fetchPicker(nextPath);
     if (pickerFilterEl) {
@@ -252,6 +321,8 @@ export function bindSettingsUiFlow(ctx) {
   function closePicker() {
     if (!pickerOverlayEl) return;
     pickerOverlayEl.classList.add('hidden');
+    pickerTargetInput = null;
+    setPickerChrome('cwd');
     setState({ pickerMode: 'cwd' });
   }
 
@@ -269,7 +340,7 @@ export function bindSettingsUiFlow(ctx) {
 
   function openRolloutPicker() {
     if (!rolloutOverlayEl) return;
-    const cwdOk = Boolean(settingsCwdEl?.value?.trim());
+    const cwdOk = Boolean(getActiveCwdValue({ fallbackToSaved: false }));
     if (!cwdOk) {
       setActivity('select CWD first', true);
       return;
@@ -312,7 +383,7 @@ export function bindSettingsUiFlow(ctx) {
     try {
       const data = await sioCall('get_rollouts', {});
       let items = Array.isArray(data?.items) ? data.items : [];
-      const cwd = settingsCwdEl?.value?.trim();
+      const cwd = getActiveCwdValue({ fallbackToSaved: false });
       if (cwd) {
         items = items.filter((item) => item && item.cwd && String(item.cwd) === cwd);
       }
@@ -611,6 +682,19 @@ export function bindSettingsUiFlow(ctx) {
       pickerListEl.appendChild(row);
     });
   }
+
+  pickerCloseBtn?.addEventListener('click', closePicker);
+  pickerUpBtn?.addEventListener('click', () => {
+    if (getState().pickerMode === 'mention') return;
+    const currentPath = getState().pickerPath || getActiveCwdValue({ fallbackToSaved: true }) || '~';
+    fetchPicker(parentPickerPath(currentPath));
+  });
+  pickerSelectBtn?.addEventListener('click', () => {
+    if (getState().pickerMode === 'mention') return;
+    const currentPath = getState().pickerPath || pickerPathEl?.textContent || '';
+    applyPickedCwd(currentPath);
+    closePicker();
+  });
 
   return {
     openSettingsModal,

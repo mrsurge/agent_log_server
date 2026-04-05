@@ -91,8 +91,9 @@ Returns a status line + unified diff.
 
 **`kb_update(file?, id?, content, mode?, dry_run?, confirm_hash?)`**
 Returns a status line + unified diff.
-- `mode="body"` (default): replaces only the section body (preserves child headings).
-- `mode="subtree"`: replaces the heading + all descendants.
+- `mode="body"` (default): replaces only the section body. The heading and any child headings are preserved.
+- `mode="replace"`: compatibility alias for `mode="body"`; it is still body-only replacement.
+- `mode="subtree"`: replaces the heading and all descendants.
 - `id=""` targets the full file.
 - Supports `dry_run`. `confirm_hash` is accepted but ignored.
 
@@ -101,7 +102,7 @@ Returns a status line + unified diff.
 **`kb_remove(file?, id?, mode?, dry_run?, confirm_hash?)`**
 Returns a status line + unified diff.
 - `mode="subtree"` (default): removes the heading and all its children.
-- `mode="body"`: removes only the body content, keeps the heading.
+- `mode="body"`: removes only the body content and keeps the heading and child headings.
 - `id=""` targets the full file.
 - Supports `dry_run`. `confirm_hash` is accepted but ignored.
 

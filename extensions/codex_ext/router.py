@@ -1,3 +1,4 @@
+import difflib
 import hashlib
 import json
 import os
@@ -454,17 +455,10 @@ def _shell_pipeline_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[D
     }
 
 
-def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
-    inner = _unwrap_single_shell_command(_command_text(command))
-    if not inner:
-        return None
-    if any(marker in inner for marker in ("\n", "&&", "||", ";", ">", "<")):
-        return None
-    try:
-        tokens = shlex.split(inner, posix=True)
-    except ValueError:
-        return None
+def _command_tokens_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[Dict[str, Any]]:
     if not tokens:
+        return None
+    if any(token in {"&&", "||", ";", ">", "<"} for token in tokens):
         return None
     if "|" in tokens:
         return _shell_pipeline_to_view_spec(tokens, cwd)
@@ -512,6 +506,164 @@ def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[st
         "path": resolved_path,
         "view_range": view_range,
         "title": _build_view_title(resolved_path, view_range),
+    }
+
+
+def _split_shell_tokens_on_and(tokens: List[str]) -> Optional[List[List[str]]]:
+    if not tokens:
+        return None
+    segments: List[List[str]] = []
+    current: List[str] = []
+    for token in tokens:
+        if token == "&&":
+            if not current:
+                return None
+            segments.append(current)
+            current = []
+            continue
+        if token in {"||", ";"}:
+            return None
+        current.append(token)
+    if not current:
+        return None
+    segments.append(current)
+    return segments
+
+
+def _separator_tokens_to_text(tokens: List[str]) -> Optional[str]:
+    if len(tokens) != 3 or tokens[0] != "printf":
+        return None
+    if tokens[1] not in {"%s\\n", "%s\n"}:
+        return None
+    divider = str(tokens[2] or "")
+    return divider or None
+
+
+def _shell_command_to_view_sequence(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+    inner = _unwrap_single_shell_command(_command_text(command))
+    if not inner or "\n" in inner:
+        return None
+    try:
+        tokens = shlex.split(inner, posix=True)
+    except ValueError:
+        return None
+    if not tokens or "&&" not in tokens:
+        return None
+    segments = _split_shell_tokens_on_and(tokens)
+    if not segments or len(segments) < 3 or len(segments) % 2 == 0:
+        return None
+
+    specs: List[Dict[str, Any]] = []
+    divider_text: Optional[str] = None
+    for idx, segment in enumerate(segments):
+        if idx % 2 == 0:
+            spec = _command_tokens_to_view_spec(segment, cwd)
+            if spec is None:
+                return None
+            specs.append(spec)
+            continue
+        divider = _separator_tokens_to_text(segment)
+        if divider is None:
+            return None
+        if divider_text is None:
+            divider_text = divider
+        elif divider_text != divider:
+            return None
+
+    if len(specs) < 2 or not divider_text:
+        return None
+    return {
+        "separator": divider_text,
+        "specs": specs,
+    }
+
+
+def _split_view_output_by_divider(output: str, divider: str, expected_parts: int) -> Optional[List[str]]:
+    if not isinstance(output, str) or not divider or expected_parts <= 0:
+        return None
+    parts: List[str] = []
+    current: List[str] = []
+    normalized = output.replace("\r\n", "\n").replace("\r", "\n")
+    for line in normalized.splitlines(keepends=True):
+        stripped = line[:-1] if line.endswith("\n") else line
+        if stripped == divider:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(line)
+    parts.append("".join(current))
+    if len(parts) != expected_parts:
+        return None
+    return parts
+
+
+def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+    inner = _unwrap_single_shell_command(_command_text(command))
+    if not inner or any(marker in inner for marker in ("\n", "&&", "||", ";")):
+        return None
+    try:
+        tokens = shlex.split(inner, posix=True)
+    except ValueError:
+        return None
+    return _command_tokens_to_view_spec(tokens, cwd)
+
+
+def _normalized_new_file_text(value: Any) -> str:
+    text = str(value or "")
+    if not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+def _build_new_file_diff(path: str, content: str) -> str:
+    resolved_path = str(path or "").strip() or "new_file"
+    diff = "".join(
+        difflib.unified_diff(
+            [],
+            _normalized_new_file_text(content).splitlines(keepends=True),
+            fromfile="/dev/null",
+            tofile=resolved_path,
+        )
+    )
+    if diff:
+        return diff
+    return f"--- /dev/null\n+++ {resolved_path}\n"
+
+
+def _shell_command_to_new_file_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+    inner = _unwrap_single_shell_command(_command_text(command))
+    if not inner or "\n" not in inner:
+        return None
+    normalized = inner.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    if len(lines) < 3:
+        return None
+    try:
+        first_tokens = shlex.split(lines[0], posix=True)
+    except ValueError:
+        return None
+    if len(first_tokens) != 4 or first_tokens[0] != "cat" or first_tokens[1] != ">" or not first_tokens[3].startswith("<<"):
+        return None
+    path_token = str(first_tokens[2] or "").strip()
+    terminator = str(first_tokens[3][2:] or "").strip()
+    if not path_token or path_token.startswith("-") or not terminator:
+        return None
+    end_idx: Optional[int] = None
+    for idx, line in enumerate(lines[1:], start=1):
+        if line == terminator:
+            end_idx = idx
+            break
+    if end_idx is None or end_idx <= 0:
+        return None
+    if any(line.strip() for line in lines[end_idx + 1 :]):
+        return None
+    resolved_path = _resolve_view_path(path_token, cwd)
+    content = "\n".join(lines[1:end_idx])
+    return {
+        "path": resolved_path,
+        "content": content,
+        "diff": _build_new_file_diff(resolved_path, content),
+        "new_file": True,
     }
 
 
@@ -723,6 +875,23 @@ def _extract_diff_with_path(payload: Any) -> Tuple[Optional[str], Optional[str]]
             return combined, path or _extract_path_from_diff(combined)
 
     return None, None
+
+
+def _diff_is_new_file(diff_text: Optional[str]) -> bool:
+    if not isinstance(diff_text, str) or not diff_text.strip():
+        return False
+    if "new file mode" in diff_text:
+        return True
+    from_dev_null = False
+    to_real_path = False
+    for line in diff_text.splitlines():
+        if line.startswith("--- "):
+            from_dev_null = line[4:].strip() in {"/dev/null", "a/dev/null"}
+        elif line.startswith("+++ "):
+            to_path = line[4:].strip()
+            if to_path and to_path != "/dev/null":
+                to_real_path = True
+    return from_dev_null and to_real_path
 
 
 def _diff_signature(diff_text: str) -> str:
@@ -1588,7 +1757,17 @@ class CodexEventRouter:
     ) -> Dict[str, Any]:
         normalized_arguments = arguments if isinstance(arguments, dict) else {}
         question = str(normalized_arguments.get("question") or "").strip()
-        choices = normalized_arguments.get("choices") if isinstance(normalized_arguments.get("choices"), list) else []
+        raw_choices = normalized_arguments.get("choices")
+        if isinstance(raw_choices, list):
+            choices = raw_choices
+        elif isinstance(raw_choices, str):
+            try:
+                parsed = __import__("json").loads(raw_choices)
+                choices = parsed if isinstance(parsed, list) else []
+            except Exception:
+                choices = []
+        else:
+            choices = []
         allow_freeform = normalized_arguments.get(
             "allow_freeform",
             normalized_arguments.get("allowFreeform", True),
@@ -1839,16 +2018,47 @@ class CodexEventRouter:
             if item_type == "commandexecution":
                 command = item.get("command") or item.get("parsedCmd") or item.get("cmd") or item.get("argv") or ""
                 cwd = item.get("cwd") or ""
-                view_spec = _shell_command_to_view_spec(command, cwd)
-                search_spec = _shell_command_to_search_spec(command, cwd)
+                new_file_spec = _shell_command_to_new_file_spec(command, cwd)
+                view_sequence = None if new_file_spec else _shell_command_to_view_sequence(command, cwd)
+                view_spec = None if (new_file_spec or view_sequence) else _shell_command_to_view_spec(command, cwd)
+                search_spec = None if (new_file_spec or view_sequence or view_spec) else _shell_command_to_search_spec(command, cwd)
                 item_state.update({
                     "item_type": item_type,
                     "command": command,
                     "cwd": cwd,
                     "output_buffer": "",
+                    "new_file_spec": new_file_spec,
+                    "view_sequence": view_sequence,
                     "view_spec": view_spec,
                     "search_spec": search_spec,
                 })
+                if new_file_spec:
+                    path = new_file_spec.get("path") if isinstance(new_file_spec.get("path"), str) else ""
+                    arguments = {"path": path} if path else {}
+                    return self._decorate_routed_result({
+                        "handled": True,
+                        "events": [
+                            {
+                                "type": "tool_begin",
+                                "id": item_id or _assistant_id(item, thread_id, turn_id),
+                                "tool": "apply_patch",
+                                "arguments": arguments,
+                                "path": path,
+                                "diff": new_file_spec.get("diff"),
+                                "new_file": True,
+                            },
+                            {"type": "activity", "label": "creating file", "active": True},
+                        ],
+                        "transcript_entries": [],
+                    }, thread_id=thread_id, item_state=item_state)
+                if view_sequence:
+                    return self._decorate_routed_result({
+                        "handled": True,
+                        "events": [
+                            {"type": "activity", "label": "reading files", "active": True},
+                        ],
+                        "transcript_entries": [],
+                    }, thread_id=thread_id, item_state=item_state)
                 if view_spec:
                     return self._decorate_routed_result({
                         "handled": True,
@@ -1883,12 +2093,14 @@ class CodexEventRouter:
                 changes = item.get("changes")
                 diff_text, path = _extract_diff_with_path(item)
                 paths = _paths_from_changes(changes)
+                new_file = _diff_is_new_file(diff_text)
                 item_state.update({
                     "item_type": item_type,
                     "changes": changes,
                     "diff": diff_text,
                     "path": path,
                     "paths": paths,
+                    "new_file": new_file,
                     "output_buffer": "",
                 })
                 arguments: Dict[str, Any] = {}
@@ -1905,6 +2117,7 @@ class CodexEventRouter:
                             "arguments": arguments,
                             "path": path,
                             "diff": diff_text,
+                            "new_file": new_file,
                         },
                         {"type": "activity", "label": "preparing diff", "active": True},
                     ],
@@ -2052,14 +2265,14 @@ class CodexEventRouter:
             delta = _normalize_output(payload.get("delta"))
             if delta:
                 state["output_buffer"] = f"{state.get('output_buffer', '')}{delta}"
-                if state.get("view_spec") or state.get("search_spec"):
+                if state.get("view_spec") or state.get("view_sequence") or state.get("search_spec"):
                     return {"handled": True, "events": [], "transcript_entries": []}
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": [{
                         "type": "tool_delta",
                         "id": item_id or _assistant_id(payload, thread_id, turn_id),
-                        "tool": "command",
+                        "tool": "apply_patch" if state.get("new_file_spec") else "command",
                         "delta": delta,
                     }],
                     "transcript_entries": [],
@@ -2087,14 +2300,14 @@ class CodexEventRouter:
         if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "terminalinteraction" and isinstance(payload, dict):
             item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
             state = self._get_item_state(item_id, thread_id, turn_id)
-            if state.get("view_spec") or state.get("search_spec"):
+            if state.get("view_spec") or state.get("view_sequence") or state.get("search_spec"):
                 return {"handled": True, "events": [], "transcript_entries": []}
             return self._decorate_routed_result({
                 "handled": True,
                 "events": [{
                     "type": "tool_interaction",
                     "id": item_id or _assistant_id(payload, thread_id, turn_id),
-                    "tool": "command",
+                    "tool": "apply_patch" if state.get("new_file_spec") else "command",
                     "payload": {
                         "stdin": payload.get("stdin"),
                         "stdout": payload.get("stdout"),
@@ -2167,8 +2380,58 @@ class CodexEventRouter:
                 duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
                 status = str(item.get("status") or "").strip().lower()
                 is_error = _result_error_status(status, exit_code, item.get("error"))
+                view_sequence = item_state.get("view_sequence") if isinstance(item_state.get("view_sequence"), dict) else None
                 view_spec = item_state.get("view_spec") if isinstance(item_state.get("view_spec"), dict) else None
                 search_spec = item_state.get("search_spec") if isinstance(item_state.get("search_spec"), dict) else None
+                new_file_spec = item_state.get("new_file_spec") if isinstance(item_state.get("new_file_spec"), dict) else None
+                if view_sequence and not is_error:
+                    raw_specs = view_sequence.get("specs")
+                    divider = view_sequence.get("separator")
+                    if isinstance(raw_specs, list) and isinstance(divider, str) and divider:
+                        split_output = _split_view_output_by_divider(output, divider, len(raw_specs))
+                        if split_output is not None:
+                            routed_events: List[Dict[str, Any]] = []
+                            transcript_entries: List[Dict[str, Any]] = []
+                            base_id = item_id or _assistant_id(item, thread_id, turn_id)
+                            for idx, (raw_spec, segment_output) in enumerate(zip(raw_specs, split_output), start=1):
+                                if not isinstance(raw_spec, dict):
+                                    split_output = None
+                                    break
+                                view_lines = _build_codex_view_lines(segment_output, raw_spec)
+                                view_id = f"{base_id}:view:{idx}"
+                                routed_events.append({
+                                    "type": "view",
+                                    "id": view_id,
+                                    "title": raw_spec.get("title") or _build_view_title(raw_spec.get("path") or "", raw_spec.get("view_range")),
+                                    "path": raw_spec.get("path") or "",
+                                    "content": segment_output,
+                                    "view_range": raw_spec.get("view_range"),
+                                    **({"lines": view_lines} if view_lines is not None else {}),
+                                })
+                                transcript_entries.append({
+                                    "role": "view",
+                                    "id": view_id,
+                                    "title": raw_spec.get("title") or _build_view_title(raw_spec.get("path") or "", raw_spec.get("view_range")),
+                                    "path": raw_spec.get("path") or "",
+                                    "content": segment_output,
+                                    "view_range": raw_spec.get("view_range"),
+                                    **({"lines": view_lines} if view_lines is not None else {}),
+                                    "item_id": item_id,
+                                    "turn_id": turn_id,
+                                    "event": label_lower,
+                                })
+                            if split_output is not None:
+                                routed_events.append({"type": "activity", "label": "processing", "active": True})
+                                routed = {
+                                    "handled": True,
+                                    "events": routed_events,
+                                    "transcript_entries": transcript_entries,
+                                }
+                                approval_request_id = item_state.get("approval_request_id")
+                                if approval_request_id:
+                                    routed["clear_live_approval_ids"] = [approval_request_id]
+                                    self._approval_request_map.pop(str(item_id), None)
+                                return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 if view_spec and not is_error:
                     view_lines = _build_codex_view_lines(output, view_spec)
                     routed = {
@@ -2237,6 +2500,56 @@ class CodexEventRouter:
                         routed["clear_live_approval_ids"] = [approval_request_id]
                         self._approval_request_map.pop(str(item_id), None)
                     return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
+                if new_file_spec:
+                    path = new_file_spec.get("path") if isinstance(new_file_spec.get("path"), str) else ""
+                    diff_text = new_file_spec.get("diff") if isinstance(new_file_spec.get("diff"), str) else ""
+                    arguments = {"path": path} if path else {}
+                    result_payload = {
+                        "status": status or "completed",
+                        "changed_files": 1,
+                    }
+                    routed = {
+                        "handled": True,
+                        "events": [
+                            {
+                                "type": "tool_end",
+                                "id": item_id or _assistant_id(item, thread_id, turn_id),
+                                "tool": "apply_patch",
+                                "arguments": arguments,
+                                "result": result_payload,
+                                "output": output,
+                                "path": path,
+                                "diff": diff_text,
+                                "duration_ms": duration_ms,
+                                "is_error": is_error,
+                                "new_file": True,
+                            },
+                            {"type": "activity", "label": "processing", "active": True},
+                        ],
+                        "transcript_entries": [{
+                            "role": "tool",
+                            "id": item_id or _assistant_id(item, thread_id, turn_id),
+                            "tool": "apply_patch",
+                            "arguments": arguments,
+                            "result": result_payload,
+                            "output": output,
+                            "path": path,
+                            "diff": diff_text,
+                            "duration_ms": duration_ms,
+                            "status": status or ("error" if is_error else "completed"),
+                            "is_error": is_error,
+                            "new_file": True,
+                            "timestamp": utc_ts(),
+                            "item_id": item_id,
+                            "turn_id": turn_id,
+                            "event": label_lower,
+                        }],
+                    }
+                    approval_request_id = item_state.get("approval_request_id")
+                    if approval_request_id:
+                        routed["clear_live_approval_ids"] = [approval_request_id]
+                        self._approval_request_map.pop(str(item_id), None)
+                    return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 routed: Dict[str, Any] = {
                     "handled": True,
                     "events": [
@@ -2291,6 +2604,7 @@ class CodexEventRouter:
                 duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
                 primary_path = paths[0] if paths else item_state.get("path")
                 diff_text = item_state.get("diff")
+                new_file = bool(item_state.get("new_file")) or _diff_is_new_file(diff_text)
                 is_error = status in {"failed", "declined", "error"}
                 arguments = {
                     "paths": paths,
@@ -2314,6 +2628,7 @@ class CodexEventRouter:
                             "diff": diff_text,
                             "duration_ms": duration_ms,
                             "is_error": is_error,
+                            "new_file": new_file,
                         },
                         {"type": "activity", "label": "processing", "active": True},
                     ],
@@ -2329,6 +2644,7 @@ class CodexEventRouter:
                         "duration_ms": duration_ms,
                         "status": status or ("error" if is_error else "completed"),
                         "is_error": is_error,
+                        "new_file": new_file,
                         "timestamp": utc_ts(),
                         "item_id": item_id,
                         "turn_id": turn_id,

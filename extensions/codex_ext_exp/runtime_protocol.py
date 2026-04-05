@@ -524,6 +524,22 @@ def _build_event_semantics(events: Dict[str, Dict[str, Any]]) -> Dict[str, Proto
     }
 
 
+def _relax_initialize_response_for_patched_app_server(
+    responses: Dict[str, Dict[str, Any]],
+) -> None:
+    schema = responses.get("initialize")
+    if not isinstance(schema, dict):
+        return
+    required = schema.get("required")
+    if not isinstance(required, list) or "codexHome" not in required:
+        return
+    # Temporary codex-ext-exp-only deviation: the local patched experimental
+    # app-server is still on the older branch and does not emit
+    # initialize.result.codexHome yet. Once that binary is rebased/synced to the
+    # newer upstream contract, remove this relaxation and enforce codexHome here.
+    schema["required"] = [item for item in required if item != "codexHome"]
+
+
 def _build_request_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     registry: Dict[str, Dict[str, Any]] = {}
     union = definitions.get("ClientRequest", {})
@@ -1309,6 +1325,7 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Dict[
                 "options": _schema_options(effort_values),
                 "placeholder": "Select model first",
                 "default": "",
+                "value_keys": ["effort"],
             },
             {
                 "id": "summary",
@@ -1406,6 +1423,7 @@ async def get_runtime_protocol() -> RuntimeProtocol:
             _load_request_sidecar_registry(schema_path.parent, merged_definitions, request_params.keys())
         )
         responses = _build_response_registry(merged_definitions, request_params.keys())
+        _relax_initialize_response_for_patched_app_server(responses)
         server_requests = _build_server_request_registry(server_request_schema)
         server_request_responses = _build_server_request_response_registry(
             merged_definitions,

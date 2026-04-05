@@ -330,7 +330,6 @@ export function renderMarkdownItBlock(text, extraClass = '') {
   const container = document.createElement('div');
   container.className = extraClass ? `markdown-body ${extraClass}` : 'markdown-body';
   renderEventMarkdownInto(container, text);
-  highlightCode(container);
   return container;
 }
 

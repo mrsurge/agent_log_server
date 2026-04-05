@@ -258,11 +258,31 @@ export function bindToolRender(ctx) {
     return '';
   }
 
-  function toolCardLabel(toolName, serverName = '', filePath = '') {
+  function isApplyPatchNewFile(payload = {}) {
+    if (!payload || typeof payload !== 'object') return false;
+    const args = payload.arguments && typeof payload.arguments === 'object' ? payload.arguments : {};
+    const request = payload.request && typeof payload.request === 'object' ? payload.request : {};
+    const response = payload.response && typeof payload.response === 'object' ? payload.response : {};
+    const result = payload.result && typeof payload.result === 'object' ? payload.result : {};
+    return payload.new_file === true
+      || payload.newFile === true
+      || args.new_file === true
+      || args.newFile === true
+      || request.new_file === true
+      || request.newFile === true
+      || response.new_file === true
+      || response.newFile === true
+      || result.new_file === true
+      || result.newFile === true;
+  }
+
+  function toolCardLabel(toolName, serverName = '', filePath = '', payload = {}) {
     if (toolName === 'apply_patch') {
       const resolvedPath = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : '';
       const relPath = resolvedPath ? (toRelativePath(resolvedPath) || resolvedPath.split('/').pop() || resolvedPath) : '';
-      const baseLabel = relPath ? `apply_patch ${relPath}` : 'apply_patch';
+      const baseLabel = isApplyPatchNewFile(payload)
+        ? (relPath ? `new file ${relPath}` : 'new file')
+        : (relPath ? `apply_patch ${relPath}` : 'apply_patch');
       return serverName ? `${serverName}:${baseLabel}` : baseLabel;
     }
     return serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
@@ -270,7 +290,7 @@ export function bindToolRender(ctx) {
 
   function renderToolCardHeader(headerEl, toolName, serverName = '', filePath = '', payload = {}) {
     if (!headerEl) return '';
-    const label = toolCardLabel(toolName, serverName, filePath);
+    const label = toolCardLabel(toolName, serverName, filePath, payload);
     if (toolName === 'apply_patch') {
       const outcomeEmoji = applyPatchOutcomeEmoji(resolveToolCardOutcome(toolName, payload));
       const ribbonCommand = outcomeEmoji ? `${label} ${outcomeEmoji}` : label;
@@ -466,7 +486,7 @@ export function bindToolRender(ctx) {
     if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
     const filePath = resolveToolCardPath(toolName, evt);
-    const label = toolCardLabel(toolName, serverName, filePath);
+    const label = toolCardLabel(toolName, serverName, filePath, evt);
     const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
     renderToolCardHeader(entry.header, toolName, serverName, filePath, evt);
     setToolArguments(entry, evt.request ?? evt.arguments ?? evt.payload ?? {}, serverName, toolName);
@@ -479,7 +499,7 @@ export function bindToolRender(ctx) {
     if (toolName === 'command' || toolName === 'shell') return;
     const entry = getToolRow(
       evt.id,
-      toolCardLabel(toolName, evt.server || '', resolveToolCardPath(toolName, evt)),
+      toolCardLabel(toolName, evt.server || '', resolveToolCardPath(toolName, evt), evt),
       getLiveEventParent(evt),
     );
     const delta = evt.delta || '';
@@ -501,7 +521,7 @@ export function bindToolRender(ctx) {
     if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
     const filePath = resolveToolCardPath(toolName, evt);
-    const label = toolCardLabel(toolName, serverName, filePath);
+    const label = toolCardLabel(toolName, serverName, filePath, evt);
     const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
     renderToolCardHeader(entry.header, toolName, serverName, filePath, evt);
 
@@ -529,7 +549,7 @@ export function bindToolRender(ctx) {
     const toolName = evt.tool || 'tool';
     const serverName = evt.server || '';
     const filePath = resolveToolCardPath(toolName, evt);
-    const entry = getToolRow(evt.id, toolCardLabel(toolName, serverName, filePath), getLiveEventParent(evt));
+    const entry = getToolRow(evt.id, toolCardLabel(toolName, serverName, filePath, evt), getLiveEventParent(evt));
     renderToolCardHeader(entry.header, toolName, serverName, filePath, evt);
     const payload = evt.payload || {};
     const stdin = payload.stdin ? `stdin: ${payload.stdin}` : '';

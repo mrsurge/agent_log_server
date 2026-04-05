@@ -242,15 +242,114 @@ export function bindShellSemantic(ctx) {
     return out;
   }
 
-  function parsePythonHeredocCommand(command) {
-    const normalized = String(command || '').replace(/\r\n?/g, '\n');
-    if (!normalized.includes('\n')) return null;
-    const lines = normalized.split('\n');
+  const SCRIPT_LANGUAGE_BY_INTERPRETER = {
+    python: 'python',
+    python3: 'python',
+    node: 'javascript',
+  };
+
+  function stripOuterMatchingQuotes(text) {
+    const value = String(text || '').trim();
+    if (value.length < 2) return value;
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === '"' || first === '\'' || first === '`') && last === first) {
+      return value.slice(1, -1);
+    }
+    return value;
+  }
+
+  function unwrapShellWrappedCommand(command) {
+    const normalized = String(command || '').replace(/\r\n?/g, '\n').trim();
+    const match = normalized.match(/^\s*((?:\/bin\/)?(?:sh|bash)\s+-(?:c|lc))\s+([\s\S]+)$/);
+    if (!match) {
+      return { wrapperPrefix: '', innerCommand: normalized };
+    }
+    return {
+      wrapperPrefix: String(match[1] || '').trim(),
+      innerCommand: stripOuterMatchingQuotes(match[2]),
+    };
+  }
+
+  function tokenizeShellWords(text) {
+    const input = String(text || '');
+    const tokens = [];
+    let buf = '';
+    let quote = '';
+    let idx = 0;
+
+    function pushToken() {
+      if (!buf) return;
+      tokens.push(buf);
+      buf = '';
+    }
+
+    while (idx < input.length) {
+      const ch = input[idx];
+      if (!quote) {
+        if (/\s/.test(ch)) {
+          pushToken();
+          idx += 1;
+          continue;
+        }
+        if (ch === '\'' || ch === '"' || ch === '`') {
+          quote = ch;
+          idx += 1;
+          continue;
+        }
+        if (ch === '\\' && idx + 1 < input.length) {
+          buf += input[idx + 1];
+          idx += 2;
+          continue;
+        }
+        buf += ch;
+        idx += 1;
+        continue;
+      }
+      if (quote === '\'') {
+        if (ch === '\'') {
+          quote = '';
+          idx += 1;
+          continue;
+        }
+        buf += ch;
+        idx += 1;
+        continue;
+      }
+      if (ch === '\\' && idx + 1 < input.length) {
+        buf += input[idx + 1];
+        idx += 2;
+        continue;
+      }
+      if (ch === quote) {
+        quote = '';
+        idx += 1;
+        continue;
+      }
+      buf += ch;
+      idx += 1;
+    }
+
+    if (quote) return null;
+    pushToken();
+    return tokens;
+  }
+
+  function parseInterpreterHeredocCommand(command) {
+    const { wrapperPrefix, innerCommand } = unwrapShellWrappedCommand(command);
+    if (!innerCommand.includes('\n')) return null;
+    const lines = innerCommand.split('\n');
     if (lines.length < 3) return null;
     const firstLine = lines[0];
-    const match = firstLine.match(/^\s*python\s+-\s+<<(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s*$/);
-    if (!match) return null;
-    const terminator = match[1] || match[2] || match[3] || '';
+    const tokens = tokenizeShellWords(firstLine);
+    if (!Array.isArray(tokens) || tokens.length < 3) return null;
+    const interpreter = String(tokens[0] || '').trim();
+    const language = SCRIPT_LANGUAGE_BY_INTERPRETER[interpreter] || '';
+    if (!language) return null;
+    if (tokens[tokens.length - 2] !== '-') return null;
+    const heredocToken = String(tokens[tokens.length - 1] || '');
+    if (!heredocToken.startsWith('<<')) return null;
+    const terminator = heredocToken.slice(2);
     if (!terminator) return null;
     let endIndex = -1;
     for (let idx = 1; idx < lines.length; idx += 1) {
@@ -261,34 +360,74 @@ export function bindShellSemantic(ctx) {
     }
     if (endIndex <= 0) return null;
     const trailingLines = lines.slice(endIndex + 1);
-    if (trailingLines.some((line) => line.trim() !== '')) return null;
     return {
+      wrapperPrefix,
       prefix: firstLine,
       body: lines.slice(1, endIndex).join('\n'),
       terminator,
+      tail: trailingLines.join('\n'),
+      language,
     };
   }
 
-  function highlightPythonHeredocBodyHtml(body) {
+  function parseInterpreterInlineCommand(command) {
+    const { wrapperPrefix, innerCommand } = unwrapShellWrappedCommand(command);
+    const tokens = tokenizeShellWords(innerCommand);
+    if (!Array.isArray(tokens) || tokens.length < 3) return null;
+    const interpreter = String(tokens[0] || '').trim();
+    const language = SCRIPT_LANGUAGE_BY_INTERPRETER[interpreter] || '';
+    if (!language) return null;
+    let flagIndex = -1;
+    let flag = '';
+    for (let idx = 1; idx < tokens.length - 1; idx += 1) {
+      const token = String(tokens[idx] || '').trim();
+      if ((interpreter === 'python' || interpreter === 'python3') && token === '-c') {
+        flagIndex = idx;
+        flag = token;
+        break;
+      }
+      if (interpreter === 'node' && (token === '-e' || token === '--eval')) {
+        flagIndex = idx;
+        flag = token;
+        break;
+      }
+    }
+    if (flagIndex === -1) return null;
+    const body = stripOuterMatchingQuotes(tokens.slice(flagIndex + 1).join(' '));
+    if (!body) return null;
+    return {
+      wrapperPrefix,
+      prefix: tokens.slice(0, flagIndex + 1).join(' '),
+      body,
+      terminator: '',
+      tail: '',
+      language,
+    };
+  }
+
+  function highlightStructuredScriptBodyHtml(body, language) {
     const text = String(body || '');
     if (!text) return '';
-    if (typeof hljs === 'undefined' || !hljs.getLanguage?.('python')) {
+    if (typeof hljs === 'undefined' || !hljs.getLanguage?.(language)) {
       return escapeHtml(text);
     }
     try {
-      return hljs.highlight(text, { language: 'python', ignoreIllegals: true }).value;
+      return hljs.highlight(text, { language, ignoreIllegals: true }).value;
     } catch (_) {
       return escapeHtml(text);
     }
   }
 
-  function renderPythonHeredocHtml(command) {
-    const parsed = parsePythonHeredocCommand(command);
+  function renderStructuredScriptCommandHtml(command) {
+    const parsed = parseInterpreterHeredocCommand(command) || parseInterpreterInlineCommand(command);
     if (!parsed) return null;
-    const prefixHtml = treeSitterHighlightHtml(parsed.prefix);
-    const bodyHtml = highlightPythonHeredocBodyHtml(parsed.body);
-    const terminatorHtml = treeSitterHighlightHtml(parsed.terminator);
-    return `${prefixHtml}\n${bodyHtml}\n${terminatorHtml}`;
+    const parts = [];
+    if (parsed.wrapperPrefix) parts.push(treeSitterHighlightHtml(parsed.wrapperPrefix));
+    parts.push(treeSitterHighlightHtml(parsed.prefix));
+    parts.push(highlightStructuredScriptBodyHtml(parsed.body, parsed.language));
+    if (parsed.terminator) parts.push(treeSitterHighlightHtml(parsed.terminator));
+    if (parsed.tail) parts.push(treeSitterHighlightHtml(parsed.tail));
+    return parts.join('\n');
   }
 
   function renderShellCmdRibbon(el, cmd) {
@@ -304,8 +443,8 @@ export function bindShellSemantic(ctx) {
       }
       if (tsRibbonReady) {
         try {
-          const heredocHtml = renderPythonHeredocHtml(command);
-          let html = heredocHtml;
+          const structuredHtml = renderStructuredScriptCommandHtml(command);
+          let html = structuredHtml;
           if (typeof html !== 'string') {
             html = '';
           }

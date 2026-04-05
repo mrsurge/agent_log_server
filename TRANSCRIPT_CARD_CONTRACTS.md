@@ -382,6 +382,7 @@ Expected fields:
 - legacy `result` optional
 - `path` optional
 - `diff` optional
+- `new_file` optional
 - `status` optional
 - `is_error` optional
 - `duration_ms` optional
@@ -394,6 +395,7 @@ Render expectations:
 - render canonical `request` / `response` first, with legacy fallback support
 - if `tool == "apply_patch"`, use the shared patch-style tool-card behavior:
   - patch-style ribbon label
+  - when `new_file: true`, keep the same patch-style card but label it as a new-file operation instead of a generic patch
   - path-aware header behavior when path is available
   - success/failure outcome treatment from generic tool fields such as `status`, `is_error`, and `response`
   - embedded diff preview only when a real `diff` payload is present

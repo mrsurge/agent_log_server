@@ -50,6 +50,7 @@ from agent_log_server.te2_mcp_config import (
     te2_mcp_integration_enabled,
 )
 from agent_log_server import pending_context as _pending_ctx
+from agent_log_server import conversation_todos as _conv_todos
 
 from fastcore.xml import (
     Html, Head, Body, Div, Section, Header, Footer, Main, H1, H2, H3, P, Button,
@@ -312,6 +313,40 @@ async def _ipc_repo_memory_delta(sid, data):
     except Exception as exc:
         return _ipc_error(exc)
     return {"ok": True, **result}
+
+
+@socketio_server.on("conversation_todo_changed", namespace=_IPC_NAMESPACE)
+async def _ipc_conversation_todo_changed(sid, data):
+    if sid not in _IPC_SIDS:
+        return _ipc_error("unauthorized")
+    if not isinstance(data, dict):
+        return _ipc_error("payload must be an object")
+
+    conversation_id = _sanitize_conversation_id(str(data.get("conversation_id") or "").strip())
+    if not conversation_id:
+        return _ipc_error("conversation_id is required")
+    if not _conversation_meta_path(conversation_id).exists():
+        return _ipc_error("conversation not found")
+
+    meta = _load_conversation_meta(conversation_id)
+    settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
+    extension_id = str(data.get("extension_id") or settings.get("agent") or "").strip()
+    if extension_id != "codex-ext-exp":
+        return {"ok": True, "ignored": True, "reason": "not experimental codex", "conversation_id": conversation_id}
+
+    try:
+        result = await ext_loader.read_plan(extension_id, conversation_id)
+    except Exception as exc:
+        return _ipc_error(exc)
+    if not isinstance(result, dict):
+        return _ipc_error("extension plan result must be an object")
+
+    event = dict(result)
+    event["type"] = "plan_state"
+    event["conversation_id"] = conversation_id
+    event["extension_id"] = extension_id
+    await _broadcast_appserver_ui(event)
+    return {"ok": True, "conversation_id": conversation_id, "extension_id": extension_id}
 
 
 @socketio_server.on("ask_user_ack", namespace=_IPC_NAMESPACE)
@@ -1085,6 +1120,109 @@ async def _sio_shutdown_request(sid, data):
         return _sio_error(str(e))
 
 
+# ── Conversation Todos ───────────────────────────────────────────────
+
+def _resolve_conversation_id(sid, data) -> str | None:
+    if isinstance(data, dict) and data.get("conversation_id"):
+        return str(data["conversation_id"]).strip() or None
+    return None
+
+
+@socketio_server.on("todo_list", namespace="/appserver")
+async def _sio_todo_list(sid, data):
+    try:
+        cid = _resolve_conversation_id(sid, data)
+        if not cid:
+            return _sio_error("no conversation")
+        status = data.get("status") if isinstance(data, dict) else None
+        return {"ok": True, "todos": _conv_todos.list_todos(cid, status=status)}
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("todo_add", namespace="/appserver")
+async def _sio_todo_add(sid, data):
+    try:
+        cid = _resolve_conversation_id(sid, data)
+        if not cid:
+            return _sio_error("no conversation")
+        title = (data.get("title") or "").strip() if isinstance(data, dict) else ""
+        if not title:
+            return _sio_error("title required")
+        desc = data.get("description", "") if isinstance(data, dict) else ""
+        status = data.get("status", "pending") if isinstance(data, dict) else "pending"
+        todo = _conv_todos.add_todo(cid, title, description=desc, status=status)
+        return {"ok": True, "todo": todo}
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("todo_update", namespace="/appserver")
+async def _sio_todo_update(sid, data):
+    try:
+        cid = _resolve_conversation_id(sid, data)
+        if not cid:
+            return _sio_error("no conversation")
+        if not isinstance(data, dict) or "id" not in data:
+            return _sio_error("id required")
+        todo_id = int(data["id"])
+        result = _conv_todos.update_todo(
+            cid,
+            todo_id,
+            title=data.get("title"),
+            description=data.get("description"),
+            status=data.get("status"),
+        )
+        if result is None:
+            return _sio_error("todo not found")
+        return {"ok": True, "todo": result}
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("todo_remove", namespace="/appserver")
+async def _sio_todo_remove(sid, data):
+    try:
+        cid = _resolve_conversation_id(sid, data)
+        if not cid:
+            return _sio_error("no conversation")
+        if not isinstance(data, dict) or "id" not in data:
+            return _sio_error("id required")
+        todo_id = int(data["id"])
+        removed = _conv_todos.remove_todo(cid, todo_id)
+        return {"ok": True, "removed": removed}
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("todo_toggle", namespace="/appserver")
+async def _sio_todo_toggle(sid, data):
+    try:
+        cid = _resolve_conversation_id(sid, data)
+        if not cid:
+            return _sio_error("no conversation")
+        if not isinstance(data, dict) or "id" not in data:
+            return _sio_error("id required")
+        todo_id = int(data["id"])
+        result = _conv_todos.toggle_todo(cid, todo_id)
+        if result is None:
+            return _sio_error("todo not found")
+        return {"ok": True, "todo": result}
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("todo_ready", namespace="/appserver")
+async def _sio_todo_ready(sid, data):
+    try:
+        cid = _resolve_conversation_id(sid, data)
+        if not cid:
+            return _sio_error("no conversation")
+        return {"ok": True, "todos": _conv_todos.list_ready(cid)}
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 # ── End Socket.IO handlers ───────────────────────────────────────────
 
 app.include_router(fws_ui.router, dependencies=[Depends(lambda: _ensure_framework_shells_secret())])
@@ -1157,6 +1295,7 @@ USER_EXTENSIONS_DIR = APP_SERVER_DATA_PATH / "extensions"
 CODEX_CONFIG_PATH = Path(os.path.expanduser("~/.codex/config.toml"))
 LEGACY_TRANSCRIPT_DIR = CONFIG_PATH.parent / "transcripts"
 CONVERSATION_DIR = CONFIG_PATH.parent / "conversations"
+_conv_todos.configure(CONVERSATION_DIR)
 TE2_CONSOLE_BRIDGE_SOURCE_PATH = PACKAGE_ROOT / "te2_assets" / "console_bridge.js"
 TE2_CONSOLE_BRIDGE_CACHE_PATH = CONFIG_PATH.parent / "te2_console_bridge.js"
 TE2_FWS_README_SOURCE_PATH = PACKAGE_ROOT / "te2_assets" / "framework_shells_README.md"
@@ -2088,7 +2227,7 @@ def _build_approval_handoff_event(
     )
     is_ask_user = (
         str(descriptor.get("request_method") or render_event.get("request_method") or "").strip()
-        == "agent-pty-blocks.ask_user"
+        == _AGENT_PTY_ASK_USER_REQUEST_METHOD
     )
     ask_user_msg_id = _next_ask_user_msg_id(conversation_id) if is_ask_user else None
     return {
@@ -7108,6 +7247,9 @@ async def api_appserver_conversation_create(payload: Dict[str, Any] = Body(None)
     if isinstance(payload, dict) and isinstance(payload.get("settings"), dict):
         meta["settings"] = payload["settings"]
     _save_conversation_meta(convo_id, meta)
+    cwd = (meta.get("settings") or {}).get("cwd", "")
+    if isinstance(cwd, str) and cwd.strip():
+        _conv_todos.ensure_te2_dir(os.path.expanduser(cwd.strip()))
     async with _config_lock:
         cfg = _load_appserver_config()
         _add_conversation_to_config(convo_id, cfg)
@@ -7591,6 +7733,7 @@ async def api_appserver_set_cwd(payload: Dict[str, Any] = Body(...)):
     settings["cwd"] = cwd
     meta["settings"] = settings
     _save_conversation_meta(convo_id, meta)
+    _conv_todos.ensure_te2_dir(os.path.expanduser(cwd.strip()))
     return cfg
 
 

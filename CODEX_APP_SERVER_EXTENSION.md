@@ -1043,6 +1043,22 @@ All follow the same pattern: `get_handler(ext_id) â†’ hasattr(handler, method) â
 - `codex-ext-exp` keeps a separate shellspec/transport label (`shellspec/app_server_exp.yaml#app_server_exp`, `app-server:codex-experimental`) so it can point at the patched `codex-app-server` binary without adoption conflicts
 - both wrappers preserve the real stdout pipe for JSON-RPC parsing while mirroring RPC stdin/stdout to stderr for framework-shell observability
 
+#### Patched `codex-ext-exp` app-server build
+
+The experimental Codex path uses a local custom `codex-rs` checkout instead of the stock `codex app-server` binary on `PATH`.
+
+- local repo checkout: `~/downloads/codex/codex-rs`
+- upstream base tag: `rust-v0.117.0-alpha.5`
+- patch branch: `patch/dynamic-developer-instructions`
+- patched binary path: `~/downloads/codex/codex-rs/target/debug/codex-app-server`
+- purpose: add mid-thread / per-turn `developer_instructions` override support so dynamic developer-instruction and pending-context updates can land on the next turn without starting a new thread
+- Termux build recipe:
+  - `pkg install libzstd`
+  - `cd ~/downloads/codex/codex-rs`
+  - `ZSTD_SYS_USE_PKG_CONFIG=1 CC=cc cargo build -p codex-app-server`
+- canonical patch note in the Codex repo:
+  - `~/downloads/codex/codex-rs/docs/patched_app_server.md`
+
 Ongoing extension-owned work includes richer tool-card parity, approval-path parity, and continuing the experimental dynamic-context path in `codex-ext-exp`.
 
 ### Adding a New Extension

@@ -37,6 +37,8 @@ If a higher-priority approval tool is available, I will actually use it. I will 
 
 I should prefer in-turn approval tools because they preserve reasoning, investigation context, and plan state that would otherwise be lost across turns.
 
+When using an approval or user-input tool such as `ask_user`, I will include at least one explicit button/choice option. Freeform input may be allowed in addition to that, but freeform alone does not satisfy the approval prompt requirement when a choice-capable tool is available.
+
 ## Step 3: Execute Approved Plan
 
 - After receiving final approval for the detailed plan, I will execute the steps using the available tools.
@@ -64,6 +66,8 @@ For Step 1 prompt approval and Step 2 final plan approval, I will use the approv
 1. built-in harness user-input or approval tool
 2. MCP user-input or approval tool
 3. plain assistant end-of-turn message only if no approval tool is available
+
+If I use a choice-capable approval tool in Step 1 or Step 2, the prompt must include at least one explicit button/choice option. Optional freeform input may supplement the prompt, but it will not replace the button choice.
 
 # Workflow Scope
 

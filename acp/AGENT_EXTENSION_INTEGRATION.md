@@ -421,6 +421,22 @@ Legacy `codex` is not loaded from the extension registry. It remains a built-in 
 - keeps a separate shellspec/transport label so it can point at a patched `codex-app-server` binary
 - is where dynamic developer-instruction / pending-context behavior is being explored without destabilizing the stable path
 
+### Patched app-server build behind `codex-ext-exp`
+
+`codex-ext-exp` is backed by a local custom `codex-rs` checkout rather than the stock `codex app-server` on `PATH`.
+
+- local repo checkout: `~/downloads/codex/codex-rs`
+- upstream base tag: `rust-v0.117.0-alpha.5`
+- patch branch: `patch/dynamic-developer-instructions`
+- binary path: `~/downloads/codex/codex-rs/target/debug/codex-app-server`
+- why it exists: the patch adds mid-thread / per-turn `developer_instructions` override support so pending-context and repo-memory updates can take effect on the next turn without restarting the thread
+- Termux build recipe:
+  - `pkg install libzstd`
+  - `cd ~/downloads/codex/codex-rs`
+  - `ZSTD_SYS_USE_PKG_CONFIG=1 CC=cc cargo build -p codex-app-server`
+- source-of-truth patch note in the Codex repo:
+  - `~/downloads/codex/codex-rs/docs/patched_app_server.md`
+
 ### Runtime protocol architecture
 
 These extensions do **not** depend on a committed schema artifact anymore.
@@ -520,7 +536,7 @@ Unlike the Copilot SDK extension, Codex app-server does use `framework_shells`.
 - both paths use observed shellspec entries (`app_server_observed` / `app_server_exp_observed`) for framework-shell observability
 - `agent_log_server.rpc_stdio_mirror` preserves the real stdout pipe for the transport parser while mirroring RPC stdin/stdout traffic to stderr for framework-shell observability
 - both handlers harden startup by restarting locally when an adopted shell lacks a live stdin pipe
-- `codex-ext-exp` keeps a distinct transport label/shellspec so it can point at the patched `codex-app-server` binary without process adoption conflicts
+- `codex-ext-exp` keeps a distinct transport label/shellspec so it can point at the patched `codex-app-server` binary without process adoption conflicts; see `~/downloads/codex/codex-rs/docs/patched_app_server.md` for the patched build details
 
 ### Current state of the Codex extensions
 

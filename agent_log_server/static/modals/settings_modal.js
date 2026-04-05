@@ -18,7 +18,7 @@ window.CodexAgentModules.push((ctx) => {
     await ctx.helpers.saveSettings();
   });
   settingsCwdBrowseBtn?.addEventListener('click', () => {
-    ctx.helpers.openPicker(settingsCwdEl?.value || '~');
+    ctx.helpers.openPicker(settingsCwdEl?.value || '~', 'cwd', { input: settingsCwdEl || null });
   });
   settingsRolloutBrowseBtn?.addEventListener('click', () => {
     ctx.helpers.openRolloutPicker();

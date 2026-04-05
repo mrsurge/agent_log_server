@@ -50,12 +50,14 @@ export function bindSettingsSaveFlow(ctx) {
       setActivity('Agent required', true);
       return;
     }
-    let cwd = settingsCwdEl?.value?.trim();
-    if (!cwd) cwd = state.conversationSettings?.cwd?.trim();
-    if (!cwd) {
-      setActivity('CWD required', true);
-      return;
-    }
+    const normalizeStringSetting = (value) => {
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed || null;
+      }
+      return value == null ? null : value;
+    };
+
     const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || '20', 10);
     const viewWrapEnabled = settingsViewWrapEl?.checked === true;
     const mdEnabled = settingsMarkdownEl?.checked !== false;
@@ -63,9 +65,9 @@ export function bindSettingsSaveFlow(ctx) {
     const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
     const semanticRibbonEnabled = settingsSemanticShellRibbonEl?.checked === true;
 
-    let schemaRaw = {};
+    let schemaValues = {};
     try {
-      schemaRaw =
+      schemaValues =
         window.CodexAgent?.helpers?.getSchemaParsedValues?.()
         || window.CodexAgent?.helpers?.getSchemaValues?.()
         || {};
@@ -73,11 +75,34 @@ export function bindSettingsSaveFlow(ctx) {
       setActivity(err instanceof Error ? err.message : String(err), true);
       return;
     }
-    const schemaVals = Object.fromEntries(
-      Object.entries(schemaRaw).filter(([_, v]) => v !== '' && v != null)
-    );
+    if (!schemaValues || typeof schemaValues !== 'object' || Array.isArray(schemaValues)) {
+      schemaValues = {};
+    }
     const approvalKey = state.runtimeOptions?.approval?.settingKey || 'approvalPolicy';
     const sandboxKey = state.runtimeOptions?.sandbox?.settingKey || 'sandboxPolicy';
+    const schemaManagedKeys = new Set(Object.keys(schemaValues));
+    const normalizedSchemaSettings = Object.fromEntries(
+      Object.entries(schemaValues).map(([key, value]) => {
+        if (key === approvalKey) {
+          const approvalValue = typeof value === 'string' ? normalizeApprovalValue(value.trim()) : '';
+          return [key, approvalValue || null];
+        }
+        return [key, normalizeStringSetting(value)];
+      })
+    );
+    const schemaManages = (key) => schemaManagedKeys.has(key);
+
+    let cwd = schemaManages('cwd')
+      ? normalizedSchemaSettings.cwd
+      : normalizeStringSetting(settingsCwdEl?.value);
+    if (!cwd && !schemaManages('cwd')) {
+      cwd = normalizeStringSetting(state.conversationSettings?.cwd);
+    }
+    if (!cwd) {
+      setActivity('CWD required', true);
+      return;
+    }
+
     const preservedSettings = { ...(state.conversationSettings || {}) };
     [
       'cwd',
@@ -102,23 +127,17 @@ export function bindSettingsSaveFlow(ctx) {
       'agent',
       approvalKey,
       sandboxKey,
-      ...Object.keys(schemaRaw),
+      ...Object.keys(schemaValues),
     ].forEach((key) => {
       if (!key) return;
       delete preservedSettings[key];
     });
     const settings = {
       ...preservedSettings,
-      ...schemaVals,
+      ...normalizedSchemaSettings,
       cwd,
-      [approvalKey]: normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null,
-      [sandboxKey]: settingsSandboxEl?.value?.trim() || null,
-      model: settingsModelEl?.value?.trim() || null,
-      effort: settingsEffortEl?.value?.trim() || null,
-      summary: settingsSummaryEl?.value?.trim() || null,
-      developer_instructions: settingsDeveloperInstructionsEl?.value?.trim() || null,
-      label: settingsLabelEl?.value?.trim() || null,
-      alias: settingsAliasEl?.value?.trim() || null,
+      label: normalizeStringSetting(settingsLabelEl?.value),
+      alias: normalizeStringSetting(settingsAliasEl?.value),
       commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
       viewWrap: viewWrapEnabled,
       markdown: mdEnabled,
@@ -130,6 +149,24 @@ export function bindSettingsSaveFlow(ctx) {
       lineNumbers: state.lineNumbersEnabled === true,
       agent: agentType,
     };
+    if (!schemaManages(approvalKey)) {
+      settings[approvalKey] = normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null;
+    }
+    if (!schemaManages(sandboxKey)) {
+      settings[sandboxKey] = normalizeStringSetting(settingsSandboxEl?.value);
+    }
+    if (!schemaManages('model')) {
+      settings.model = normalizeStringSetting(settingsModelEl?.value);
+    }
+    if (!schemaManages('reasoning_effort')) {
+      settings.effort = normalizeStringSetting(settingsEffortEl?.value);
+    }
+    if (!schemaManages('summary')) {
+      settings.summary = normalizeStringSetting(settingsSummaryEl?.value);
+    }
+    if (!schemaManages('developer_instructions')) {
+      settings.developer_instructions = normalizeStringSetting(settingsDeveloperInstructionsEl?.value);
+    }
 
     setMarkdownEnabled(mdEnabled);
     setViewWrapEnabled(viewWrapEnabled);
