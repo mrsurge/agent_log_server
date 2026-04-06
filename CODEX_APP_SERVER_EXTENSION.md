@@ -1038,10 +1038,10 @@ All follow the same pattern: `get_handler(ext_id) â†’ hasattr(handler, method) â
 - settings modal fields are generated dynamically from the installed Codex app-server JSON schema
 - session browse uses the generic `session_picker` flow
 - bind/import uses the same generic `resume_session_with_history(...)` + `hydrate_transcript(...)` contract as Copilot, but the Codex implementation reuses internal rollout import helpers
-- stable live send/resume/interrupt/compact uses an extension-owned framework-shell transport rooted at `shellspec/app_server.yaml#app_server` with transport label `app-server:codex-extension`
-- the stable wrapper starts from `app_server_observed` and runs `python -m agent_log_server.rpc_stdio_mirror -- codex app-server`
-- `codex-ext-exp` keeps a separate shellspec/transport label (`shellspec/app_server_exp.yaml#app_server_exp`, `app-server:codex-experimental`) so it can point at the patched `codex-app-server` binary without adoption conflicts
-- both wrappers preserve the real stdout pipe for JSON-RPC parsing while mirroring RPC stdin/stdout to stderr for framework-shell observability
+- stable live send/resume/interrupt/compact uses an extension-owned framework-shell transport rooted at `shellspec/app_server.yaml#app_server_observed` with transport label `app-server:codex-extension`
+- the stable observed shell now runs `codex app-server` directly; framework-shells owns stdout observability for the pipe shell
+- `codex-ext-exp` keeps a separate shellspec/transport label (`shellspec/app_server_exp.yaml#app_server_exp_observed`, `app-server:codex-experimental`) so it can point at the patched `codex-app-server` binary without adoption conflicts
+- both observed shellspecs now run the real app-server binary directly and rely on framework-shells pipe stdout subscriptions/logging instead of mirroring RPC traffic to stderr
 
 #### Patched `codex-ext-exp` app-server build
 

@@ -274,6 +274,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let composerResizeSuppressed = false; // Suppress resize sync during initial open
   let composerLastResizeKey = null;
   let draftSaveTimer = null;
+  let explicitMentionSaveTimer = null;
   let lastDraftHash = null;
   let draftDirty = false;
   let applyingDraft = false;
@@ -428,7 +429,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!convoId) return;
 
     draftSaveTimer = setTimeout(async () => {
-      const text = getPromptText();
+      const text = getPromptDraftText();
       // Simple hash to avoid sending unchanged drafts
       const hash = text.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
       if (hash === lastDraftHash) return;
@@ -446,6 +447,45 @@ document.addEventListener('DOMContentLoaded', () => {
         console.warn('Draft save failed:', e);
       }
     }, 500);
+  }
+
+  async function persistDraftNow() {
+    const convoId = conversationMeta?.conversation_id;
+    if (!convoId || !promptEl) return;
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
+    const text = getPromptDraftText();
+    const hash = text.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
+    if (hash === lastDraftHash) {
+      draftDirty = false;
+      return;
+    }
+    lastDraftHash = hash;
+    try {
+      await sioCall('conversation_draft', {
+        conversation_id: convoId,
+        draft: text,
+      });
+      if (conversationMeta && conversationMeta.conversation_id === convoId) {
+        conversationMeta.draft = text;
+      }
+      draftDirty = false;
+    } catch (e) {
+      draftDirty = true;
+      console.warn('Immediate draft save failed:', e);
+    }
+  }
+
+  function queueExplicitMentionDraftSave() {
+    if (applyingDraft) return;
+    draftDirty = true;
+    if (explicitMentionSaveTimer) clearTimeout(explicitMentionSaveTimer);
+    explicitMentionSaveTimer = setTimeout(() => {
+      explicitMentionSaveTimer = null;
+      void persistDraftNow();
+    }, 0);
   }
 
   function restoreDraft() {
@@ -486,7 +526,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!meta || meta.ok === false || meta.conversation_id !== convoId) return;
       const serverDraft = meta.draft;
       if (typeof serverDraft !== 'string') return;
-      const localText = getPromptText();
+      const localText = getPromptDraftText();
       if (serverDraft === localText) return;
       renderPromptFromText(serverDraft);
       if (conversationMeta) conversationMeta.draft = serverDraft;
@@ -1317,6 +1357,57 @@ document.addEventListener('DOMContentLoaded', () => {
     return `${a}/${b}`;
   }
 
+  const DRAFT_MENTION_ENVELOPE_START = '\x1eCODEX_MENTION ';
+  const DRAFT_MENTION_ENVELOPE_END = '\x1f';
+
+  function buildDraftMentionPayload(rawPath, opts) {
+    opts = opts || {};
+    let pathOnly = String(rawPath || '').trim();
+    let line = opts.line ?? opts.lineNo ?? null;
+    let endLine = opts.endLine ?? opts.endLineNo ?? null;
+    const col = opts.col ?? null;
+    const endCol = opts.endCol ?? null;
+    const content = typeof opts.content === 'string' ? opts.content : '';
+    const lineMatch = pathOnly.match(/^(.+):(\d+)(?:-(\d+))?$/);
+    if (lineMatch) {
+      pathOnly = lineMatch[1];
+      if (line == null) line = lineMatch[2];
+      if (endLine == null) endLine = lineMatch[3] || null;
+    }
+    if (!pathOnly) return null;
+    const payload = { path: pathOnly };
+    if (line != null && String(line).trim()) payload.line = String(line);
+    if (endLine != null && String(endLine).trim()) payload.endLine = String(endLine);
+    if (col != null && String(col).trim()) payload.col = String(col);
+    if (endCol != null && String(endCol).trim()) payload.endCol = String(endCol);
+    if (content) payload.content = content;
+    return payload;
+  }
+
+  function encodeDraftMentionToken(rawPath, opts) {
+    const payload = buildDraftMentionPayload(rawPath, opts);
+    if (!payload) return '';
+    return DRAFT_MENTION_ENVELOPE_START + JSON.stringify(payload) + DRAFT_MENTION_ENVELOPE_END;
+  }
+
+  function decodeDraftMentionPayload(payloadText) {
+    try {
+      const parsed = JSON.parse(payloadText);
+      if (!parsed || typeof parsed !== 'object') return null;
+      const path = typeof parsed.path === 'string' ? parsed.path.trim() : '';
+      if (!path) return null;
+      const payload = { path };
+      if (parsed.line != null && String(parsed.line).trim()) payload.line = String(parsed.line);
+      if (parsed.endLine != null && String(parsed.endLine).trim()) payload.endLine = String(parsed.endLine);
+      if (parsed.col != null && String(parsed.col).trim()) payload.col = String(parsed.col);
+      if (parsed.endCol != null && String(parsed.endCol).trim()) payload.endCol = String(parsed.endCol);
+      if (typeof parsed.content === 'string' && parsed.content) payload.content = parsed.content;
+      return payload;
+    } catch {
+      return null;
+    }
+  }
+
   function toMentionAbsAndBestPath(rawPath) {
     const cwd = conversationSettings?.cwd || conversationMeta?.cwd || '';
     const absPath = isAbsPath(rawPath) ? rawPath : (cwd ? joinPath(cwd, rawPath) : String(rawPath || ''));
@@ -1388,26 +1479,46 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderPromptFromText(text) {
     if (!promptEl) return;
     applyingDraft = true;
-    promptEl.innerHTML = '';
-    // Match `path` tokens, optionally followed by a fenced code block
-    const tokenPattern = /`([^`]+)`(?:\n```\n([\s\S]*?)\n```)?/g;
-    const str = String(text || '');
-    let lastIndex = 0;
-    let match;
+    try {
+      promptEl.innerHTML = '';
+      const str = String(text || '');
+      let cursor = 0;
 
-    while ((match = tokenPattern.exec(str)) !== null) {
-      const before = str.slice(lastIndex, match.index);
-      if (before) appendTextWithBreaks(promptEl, before);
+      while (cursor < str.length) {
+        const startIdx = str.indexOf(DRAFT_MENTION_ENVELOPE_START, cursor);
+        if (startIdx === -1) {
+          const remaining = str.slice(cursor);
+          if (remaining) appendTextWithBreaks(promptEl, remaining);
+          break;
+        }
 
-      const rawPath = match[1];
-      const content = match[2] || '';
-      promptEl.appendChild(createMentionToken(rawPath, content ? { content } : undefined));
-      lastIndex = tokenPattern.lastIndex;
+        const before = str.slice(cursor, startIdx);
+        if (before) appendTextWithBreaks(promptEl, before);
+
+        const payloadStart = startIdx + DRAFT_MENTION_ENVELOPE_START.length;
+        const endIdx = str.indexOf(DRAFT_MENTION_ENVELOPE_END, payloadStart);
+        if (endIdx === -1) {
+          appendTextWithBreaks(promptEl, str.slice(startIdx));
+          break;
+        }
+
+        const mentionPayload = decodeDraftMentionPayload(str.slice(payloadStart, endIdx));
+        if (mentionPayload) {
+          promptEl.appendChild(createMentionToken(mentionPayload.path, {
+            line: mentionPayload.line,
+            endLine: mentionPayload.endLine,
+            col: mentionPayload.col,
+            endCol: mentionPayload.endCol,
+            content: mentionPayload.content,
+          }));
+        } else {
+          appendTextWithBreaks(promptEl, str.slice(startIdx, endIdx + DRAFT_MENTION_ENVELOPE_END.length));
+        }
+        cursor = endIdx + DRAFT_MENTION_ENVELOPE_END.length;
+      }
+    } finally {
+      applyingDraft = false;
     }
-
-    const remaining = str.slice(lastIndex);
-    if (remaining) appendTextWithBreaks(promptEl, remaining);
-    applyingDraft = false;
   }
 
   function serializePromptNode(node) {
@@ -1447,10 +1558,38 @@ document.addEventListener('DOMContentLoaded', () => {
     return out;
   }
 
+  function serializePromptNodeForDraft(node) {
+    if (!node) return '';
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    const el = node;
+    if (el.classList.contains('mention-token')) {
+      return encodeDraftMentionToken(el.dataset.abs || el.dataset.path || '', {
+        line: el.dataset.line,
+        endLine: el.dataset.endLine,
+        col: el.dataset.col,
+        endCol: el.dataset.endCol,
+        content: el.dataset.content || '',
+      });
+    }
+    if (el.tagName === 'BR') return '\n';
+    let out = '';
+    el.childNodes.forEach((child) => { out += serializePromptNodeForDraft(child); });
+    if (el.tagName === 'DIV' || el.tagName === 'P') out += '\n';
+    return out;
+  }
+
   function getPromptText() {
     if (!promptEl) return '';
     let text = '';
     promptEl.childNodes.forEach((child) => { text += serializePromptNode(child); });
+    return text;
+  }
+
+  function getPromptDraftText() {
+    if (!promptEl) return '';
+    let text = '';
+    promptEl.childNodes.forEach((child) => { text += serializePromptNodeForDraft(child); });
     return text;
   }
 
@@ -1499,6 +1638,7 @@ document.addEventListener('DOMContentLoaded', () => {
       selectTemplate: function(item) {
         if (!item) return '';
         const absPath = item.original.path || '';
+        queueExplicitMentionDraftSave();
         return createMentionToken(absPath).outerHTML;
       },
       menuItemTemplate: function(item) {
@@ -1602,6 +1742,7 @@ document.addEventListener('DOMContentLoaded', () => {
       moveCaretToEnd();
     }
     promptEl.focus();
+    queueExplicitMentionDraftSave();
   }
 
   function clearPlaceholder() {

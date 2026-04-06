@@ -122,6 +122,7 @@ class CodexAppServerTransport:
         self._resume_startup_barriers: Dict[str, Dict[str, Any]] = {}
         self._request_counter = int(time.time() * 1000)
         self._stdin: Optional[Any] = None
+        self._stdout_subscription: Optional[Any] = None
         self._router = CodexEventRouter()
 
     def is_ready(self) -> bool:
@@ -361,7 +362,7 @@ class CodexAppServerTransport:
 
         if self._shell_id:
             shell = await mgr.get_shell(self._shell_id)
-            if shell and shell.status == "running" and getattr(shell, "spec_id", "") == "app_server_observed":
+            if shell and shell.status == "running" and getattr(shell, "spec_id", "") == "app_server_exp_observed":
                 return self._shell_id
             self._shell_id = None
 
@@ -421,18 +422,20 @@ class CodexAppServerTransport:
     async def _pipe_available(self, shell_id: str) -> bool:
         mgr = await self._fws_getter()
         state = mgr.get_pipe_state(shell_id)
-        return bool(state and state.process.stdin and state.process.stdout)
+        return bool(state and state.process.stdin)
 
     async def _ensure_reader(self, shell_id: str) -> None:
         if self._reader_task and not self._reader_task.done():
             return
         mgr = await self._fws_getter()
         state = mgr.get_pipe_state(shell_id)
-        if not state or not state.process.stdout:
+        if not state or not state.process.stdin:
             raise RuntimeError("codex extension transport pipe not available")
         self._stdin = state.process.stdin
+        subscription = await mgr.subscribe_output_bytes(shell_id)
+        self._stdout_subscription = subscription
         self._reader_task = asyncio.create_task(
-            self._reader_loop(shell_id),
+            self._reader_loop(shell_id, subscription),
             name="codex-extension-reader",
         )
 
@@ -445,6 +448,14 @@ class CodexAppServerTransport:
                 await task
             except asyncio.CancelledError:
                 pass
+        subscription = self._stdout_subscription
+        shell_id = self._shell_id
+        if subscription is not None and shell_id and self._stdout_subscription is subscription:
+            mgr = await self._fws_getter()
+            with contextlib.suppress(Exception):
+                await mgr.unsubscribe_output_bytes(shell_id, subscription)
+            if self._stdout_subscription is subscription:
+                self._stdout_subscription = None
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
@@ -479,17 +490,17 @@ class CodexAppServerTransport:
         self._stdin = state.process.stdin
         line = json.dumps(payload, ensure_ascii=False)
         self._raw_log_fn("out", conversation_id or self.get_raw_label(), line)
-        state.process.stdin.write((line + "\n").encode("utf-8"))
-        await state.process.stdin.drain()
+        try:
+            await mgr.write_to_pipe(shell_id, line + "\n")
+        except (KeyError, RuntimeError) as exc:
+            self._stdin = None
+            raise RuntimeError("codex extension transport pipe not available") from exc
 
-    async def _reader_loop(self, shell_id: str) -> None:
+    async def _reader_loop(self, shell_id: str, subscription: Any) -> None:
         pending_label: Optional[str] = None
         buffer = b""
         max_buffer = 4_000_000
         mgr = await self._fws_getter()
-        state = mgr.get_pipe_state(shell_id)
-        if not state or not state.process.stdout:
-            return
 
         async def _process_line(text: str) -> None:
             nonlocal pending_label
@@ -594,9 +605,18 @@ class CodexAppServerTransport:
 
         try:
             while True:
-                chunk = await state.process.stdout.read(4096)
+                try:
+                    chunk = await asyncio.wait_for(subscription.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    state = mgr.get_pipe_state(shell_id)
+                    if not state or state.process.returncode is not None:
+                        break
+                    continue
                 if not chunk:
-                    break
+                    state = mgr.get_pipe_state(shell_id)
+                    if not state or state.process.returncode is not None:
+                        break
+                    continue
                 buffer += chunk
                 if len(buffer) > max_buffer and b"\n" not in buffer:
                     self._raw_log_fn("in", self.get_raw_label(), "[warn] dropping oversized line")
@@ -615,6 +635,10 @@ class CodexAppServerTransport:
                 except Exception as exc:
                     self._raw_log_fn("err", self.get_raw_label(), f"reader_process_failed {exc}")
         finally:
+            with contextlib.suppress(Exception):
+                await mgr.unsubscribe_output_bytes(shell_id, subscription)
+            if self._stdout_subscription is subscription:
+                self._stdout_subscription = None
             pending_ask_user_request_ids = [
                 request_id_text
                 for request_id_text, pending in list(self._pending_approval_requests.items())

@@ -27,6 +27,7 @@ from agent_log_server.markdown_sections import SectionNode, normalize_heading as
 from agent_log_server.ipc_auth import load_or_create_ipc_secret
 from agent_log_server.prompt_context import REPO_MEMORY_FILENAME
 from agent_log_server.repo_memory_delta import build_repo_memory_delta
+from agent_log_server import conversation_todos as _conv_todos
 
 
 def _ensure_framework_shells_secret() -> None:
@@ -265,6 +266,22 @@ async def _notify_repo_memory_ipc(path: Path, old_text: str, new_text: str) -> O
     )
 
 
+async def _notify_conversation_todo_ipc(conversation_id: str) -> None:
+    cid = str(conversation_id or "").strip()
+    if not cid:
+        return
+    client = await _get_appserver_ipc_sio()
+    ack = await client.call(
+        "conversation_todo_changed",
+        {"conversation_id": cid},
+        namespace=_APPSERVER_IPC_NAMESPACE,
+        timeout=10,
+    )
+    if not isinstance(ack, dict) or not ack.get("ok"):
+        detail = ack.get("error") if isinstance(ack, dict) else ack
+        raise RuntimeError(f"conversation_todo_changed IPC failed: {detail}")
+
+
 def _render_kb_result(header: str, diff: str, ipc_note: Optional[str] = None) -> str:
     parts = [header]
     if isinstance(ipc_note, str) and ipc_note.strip():
@@ -274,6 +291,7 @@ def _render_kb_result(header: str, diff: str, ipc_note: Optional[str] = None) ->
 
 
 _DEFAULT_CONVERSATION_DIR = Path(os.path.expanduser("~/.cache/app_server/conversations"))
+_conv_todos.configure(_DEFAULT_CONVERSATION_DIR)
 
 
 def _conversation_dir() -> Path:
@@ -2447,6 +2465,146 @@ async def conv_id() -> Dict[str, Any]:
     return {"ok": bool(cid), "conversation_id": cid}
 
 
+# ── Conversation Todo MCP tools ──────────────────────────────────────
+
+def _todo_cid() -> str:
+    """Return the conversation ID or raise."""
+    cid = os.environ.get("CONVERSATION_ID", "").strip()
+    if not cid:
+        raise ValueError("CONVERSATION_ID not set — not conversation-scoped")
+    return cid
+
+
+@mcp.tool(name="todo_list", description="List todos for this conversation. Optionally filter by status.")
+async def todo_list(status: Optional[str] = None) -> Dict[str, Any]:
+    """
+    List all todos for this conversation.
+
+    Args:
+        status: Optional filter — 'pending', 'in_progress', 'done', or 'blocked'.
+
+    Returns:
+        {ok: true, todos: [...]} or {ok: false, error: "..."}.
+    """
+    try:
+        cid = _todo_cid()
+        return {"ok": True, "todos": _conv_todos.list_todos(cid, status=status)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="todo_add", description="Add a todo to this conversation.")
+async def todo_add(title: str, description: str = "", status: str = "pending") -> Dict[str, Any]:
+    """
+    Add a new todo.
+
+    Args:
+        title: Short title for the todo.
+        description: Optional longer description.
+        status: Initial status — defaults to 'pending'.
+
+    Returns:
+        {ok: true, todo: {...}} or {ok: false, error: "..."}.
+    """
+    try:
+        cid = _todo_cid()
+        if not title.strip():
+            return {"ok": False, "error": "title required"}
+        todo = _conv_todos.add_todo(cid, title.strip(), description=description, status=status)
+        await _notify_conversation_todo_ipc(cid)
+        return {"ok": True, "todo": todo}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="todo_update", description="Update a todo's title, description, or status.")
+async def todo_update(
+    id: int,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    status: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Update fields on an existing todo.
+
+    Args:
+        id: The todo's numeric ID.
+        title: New title (optional).
+        description: New description (optional).
+        status: New status — 'pending', 'in_progress', 'done', 'blocked' (optional).
+
+    Returns:
+        {ok: true, todo: {...}} or {ok: false, error: "..."}.
+    """
+    try:
+        cid = _todo_cid()
+        result = _conv_todos.update_todo(cid, id, title=title, description=description, status=status)
+        if result is None:
+            return {"ok": False, "error": f"todo {id} not found"}
+        await _notify_conversation_todo_ipc(cid)
+        return {"ok": True, "todo": result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="todo_remove", description="Remove a todo by ID.")
+async def todo_remove(id: int) -> Dict[str, Any]:
+    """
+    Delete a todo.
+
+    Args:
+        id: The todo's numeric ID.
+
+    Returns:
+        {ok: true, removed: true/false}.
+    """
+    try:
+        cid = _todo_cid()
+        removed = _conv_todos.remove_todo(cid, id)
+        if removed:
+            await _notify_conversation_todo_ipc(cid)
+        return {"ok": True, "removed": removed}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="todo_toggle", description="Toggle a todo between 'pending' and 'done'.")
+async def todo_toggle(id: int) -> Dict[str, Any]:
+    """
+    Toggle a todo's status between 'pending' and 'done'.
+
+    Args:
+        id: The todo's numeric ID.
+
+    Returns:
+        {ok: true, todo: {...}} or {ok: false, error: "..."}.
+    """
+    try:
+        cid = _todo_cid()
+        result = _conv_todos.toggle_todo(cid, id)
+        if result is None:
+            return {"ok": False, "error": f"todo {id} not found"}
+        await _notify_conversation_todo_ipc(cid)
+        return {"ok": True, "todo": result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool(name="todo_ready", description="List todos with all dependencies satisfied (ready to work on).")
+async def todo_ready() -> Dict[str, Any]:
+    """
+    List pending todos whose dependencies are all 'done'.
+
+    Returns:
+        {ok: true, todos: [...]}.
+    """
+    try:
+        cid = _todo_cid()
+        return {"ok": True, "todos": _conv_todos.list_ready(cid)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @_legacy_terminal_mcp_tool(name="pty_exec", description="Execute a command (block mode) - waits for completion with BEGIN/END markers.")
 async def pty_exec(conversation_id: str, cmd: str, cwd: Optional[str] = None) -> Dict[str, Any]:
     state = _state(conversation_id)
@@ -3959,7 +4117,7 @@ async def kb_search_content(
     return "\n".join(out)
 
 
-@mcp.tool(name="kb_write", description="Append content or create child heading under a markdown section.")
+@mcp.tool(name="kb_write", description="Append content to a section body, or create a child heading under a markdown section.")
 async def kb_write(
     file: Optional[str] = None,
     id: str = "",
@@ -4022,7 +4180,7 @@ async def kb_write(
     return _render_kb_result(f"[kb_write: {action}  hash: {_content_hash(new_text)}]", diff, ipc_note)
 
 
-@mcp.tool(name="kb_update", description="Update body or subtree of a markdown section.")
+@mcp.tool(name="kb_update", description="Replace the body of a markdown section, or replace its full subtree.")
 async def kb_update(
     file: Optional[str] = None,
     id: str = "",
@@ -4046,12 +4204,21 @@ async def kb_update(
         return _kb_dict_to_error_text(target)
     _ = confirm_hash  # Legacy no-op; KB mutations are patch-style edits.
 
-    if mode == "body":
+    normalized_mode = str(mode or "body").strip().lower()
+    if normalized_mode == "replace":
+        normalized_mode = "body"
+
+    if normalized_mode == "body":
         start, end = target.body_start, target.body_end
-    elif mode == "subtree":
+    elif normalized_mode == "subtree":
         start, end = target.line_start, target.subtree_end
     else:
-        return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
+        return _kb_error_text(
+            "InvalidParameter",
+            f"Unsupported mode '{mode}'",
+            id=id,
+            allowed_modes="body, replace, subtree",
+        )
 
     new_lines = _replace_line_range(lines, start, end, content)
     new_text = "\n".join(new_lines)
@@ -4070,7 +4237,7 @@ async def kb_update(
     return _render_kb_result(f"[kb_update: {action}  hash: {_content_hash(content)}]", diff, ipc_note)
 
 
-@mcp.tool(name="kb_remove", description="Remove body or subtree of a markdown section.")
+@mcp.tool(name="kb_remove", description="Remove the body of a markdown section, or remove its full subtree.")
 async def kb_remove(
     file: Optional[str] = None,
     id: str = "",

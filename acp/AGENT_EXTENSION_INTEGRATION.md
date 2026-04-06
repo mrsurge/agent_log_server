@@ -531,10 +531,10 @@ The stable runtime protocol/cache logic lives in `extensions/codex_ext/runtime_p
 
 Unlike the Copilot SDK extension, Codex app-server does use `framework_shells`.
 
-- `codex-ext` starts/adopts a dedicated shell labeled `app-server:codex-extension` and uses `shellspec/app_server.yaml#app_server`
-- `codex-ext-exp` starts/adopts a dedicated shell labeled `app-server:codex-experimental` and uses `extensions/codex_ext_exp/shellspec/app_server_exp.yaml#app_server_exp`
+- `codex-ext` starts/adopts a dedicated shell labeled `app-server:codex-extension` and uses `shellspec/app_server.yaml#app_server_observed`
+- `codex-ext-exp` starts/adopts a dedicated shell labeled `app-server:codex-experimental` and uses `extensions/codex_ext_exp/shellspec/app_server_exp.yaml#app_server_exp_observed`
 - both paths use observed shellspec entries (`app_server_observed` / `app_server_exp_observed`) for framework-shell observability
-- `agent_log_server.rpc_stdio_mirror` preserves the real stdout pipe for the transport parser while mirroring RPC stdin/stdout traffic to stderr for framework-shell observability
+- both observed shellspecs now run the real app-server binary directly and rely on framework-shells pipe stdout logging/subscriptions for observability instead of stderr mirroring
 - both handlers harden startup by restarting locally when an adopted shell lacks a live stdin pipe
 - `codex-ext-exp` keeps a distinct transport label/shellspec so it can point at the patched `codex-app-server` binary without process adoption conflicts; see `~/downloads/codex/codex-rs/docs/patched_app_server.md` for the patched build details
 

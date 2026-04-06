@@ -8,13 +8,6 @@ shells:
       - json
       - jsonrpc
     command:
-      - python
-      - -u
-      - -m
-      - agent_log_server.rpc_stdio_mirror
-      - --label
-      - codex-app-server
-      - --
       - codex
       - app-server
     labels:

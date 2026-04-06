@@ -2517,9 +2517,38 @@ def _store_conversation_preview_from_event(event: Dict[str, Any]) -> None:
 
 _META_ENVELOPE_START = "\x1eCODEX_META "  # RS + prefix for false-positive guard
 _META_ENVELOPE_END = "\x1f"               # US
+_DRAFT_MENTION_ENVELOPE_START = "\x1eCODEX_MENTION "
+_DRAFT_MENTION_ENVELOPE_END = "\x1f"
 _CMD_BUFFER_MAX_ENTRIES = 10
 _CMD_PREVIEW_MAX_LINES = 20
 _CMD_PREVIEW_MAX_BYTES = 3000
+
+
+def _encode_draft_mention_token(
+    path: str,
+    *,
+    line_no: Optional[int] = None,
+    end_line_no: Optional[int] = None,
+    col: Optional[int] = None,
+    end_col: Optional[int] = None,
+    content: Optional[str] = None,
+) -> str:
+    path_text = str(path or "").strip()
+    if not path_text:
+        return ""
+    payload: Dict[str, Any] = {"path": path_text}
+    if line_no is not None:
+        payload["line"] = int(line_no)
+    if end_line_no is not None:
+        payload["endLine"] = int(end_line_no)
+    if col is not None:
+        payload["col"] = int(col)
+    if end_col is not None:
+        payload["endCol"] = int(end_col)
+    if isinstance(content, str) and content:
+        payload["content"] = content
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"{_DRAFT_MENTION_ENVELOPE_START}{encoded}{_DRAFT_MENTION_ENVELOPE_END}"
 
 
 def _get_shell_id_for_envelope(conversation_id: str) -> Optional[str]:
@@ -5519,8 +5548,9 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
     async def _reader():
         mgr = await _get_fws_manager()
         state = mgr.get_pipe_state(shell_id)
-        if not state or not state.process.stdout:
+        if not state or not state.process.stdin:
             return
+        output_q = await mgr.subscribe_output_bytes(shell_id)
         pending_label: Optional[str] = None
         buffer = b""
         max_buffer = 4_000_000
@@ -5651,9 +5681,18 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
 
         try:
             while True:
-                chunk = await state.process.stdout.read(4096)
+                try:
+                    chunk = await asyncio.wait_for(output_q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    state = mgr.get_pipe_state(shell_id)
+                    if not state or state.process.returncode is not None:
+                        break
+                    continue
                 if not chunk:
-                    break
+                    state = mgr.get_pipe_state(shell_id)
+                    if not state or state.process.returncode is not None:
+                        break
+                    continue
                 buffer += chunk
                 if len(buffer) > max_buffer and b"\n" not in buffer:
                     await _broadcast_appserver_raw("[warn] dropping oversized line")
@@ -5672,6 +5711,9 @@ async def _ensure_appserver_reader(shell_id: str) -> None:
                     pass
         except Exception:
             return
+        finally:
+            with suppress(Exception):
+                await mgr.unsubscribe_output_bytes(shell_id, output_q)
 
     _appserver_reader_task = asyncio.create_task(_reader(), name="appserver-stdout-reader")
 
@@ -5689,8 +5731,10 @@ async def _write_appserver(payload: Dict[str, Any]) -> None:
         raise HTTPException(status_code=409, detail="app-server pipe not available")
     line = json.dumps(payload, ensure_ascii=False)
     print(f"[DEBUG] Writing to appserver stdin: {line[:200]}...")
-    state.process.stdin.write((line + "\n").encode("utf-8"))
-    await state.process.stdin.drain()
+    try:
+        await mgr.write_to_pipe(shell_id, line + "\n")
+    except (KeyError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail="app-server pipe not available") from exc
     print(f"[DEBUG] Write complete")
 
 
@@ -8637,14 +8681,16 @@ async def _process_mention(payload: Dict[str, Any]) -> Dict[str, Any]:
         draft = meta.get("draft")
         if not isinstance(draft, str):
             draft = ""
-        path_token = path
-        if line_no is not None:
-            path_token += f":{int(line_no)}"
-            if end_line_no is not None and int(end_line_no) != int(line_no):
-                path_token += f"-{int(end_line_no)}"
-        token = f"`{path_token}`"
-        if content:
-            token += f"\n```\n{str(content)}\n```"
+        token = _encode_draft_mention_token(
+            path,
+            line_no=int(line_no) if line_no is not None else None,
+            end_line_no=int(end_line_no) if end_line_no is not None else None,
+            col=int(col) if col is not None else None,
+            end_col=int(end_col) if end_col is not None else None,
+            content=str(content) if isinstance(content, str) and content else None,
+        )
+        if not token:
+            token = str(path or "")
         if draft and not draft.endswith((" ", "\n", "\t")):
             draft = draft + " " + token
         else:
