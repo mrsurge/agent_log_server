@@ -27,7 +27,7 @@ import types
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, cast
 
 # Extension type -> handler module
 _extension_handlers: Dict[str, Any] = {}
@@ -43,6 +43,10 @@ _DYNAMIC_EXTENSION_NAMESPACE = "_app_server_user_extensions"
 _EXTENSION_MANIFEST_SCHEMA_VERSION = 1
 _SUPPORTED_EXTENSION_MANIFEST_SCHEMA_VERSIONS = {_EXTENSION_MANIFEST_SCHEMA_VERSION}
 _INSTALLER_METADATA_SCHEMA_VERSION = 1
+
+
+def _dict_or_empty(value: object) -> dict[str, object]:
+    return cast(dict[str, object], value) if isinstance(value, dict) else {}
 
 
 def _deep_merge_manifest(base: Any, override: Any) -> Any:
@@ -539,29 +543,30 @@ def _build_extension_state(
         ext_id = ext_info["id"]
         ext_type = ext_info["type"]
         folder = ext_info["folder"]
-        manifest = ext_info.get("manifest") if isinstance(ext_info.get("manifest"), dict) else {}
-        dependencies = manifest.get("dependencies") if isinstance(manifest.get("dependencies"), dict) else {}
+        manifest = _dict_or_empty(ext_info.get("manifest"))
+        dependencies = _dict_or_empty(manifest.get("dependencies"))
         default_enabled = bool(ext_info.get("enabled", True))
         source_root = ext_info.get("source_root")
         module_package = ext_info.get("module_package")
-        registry_entry = ext_info.get("registry_entry") if isinstance(ext_info.get("registry_entry"), dict) else {}
+        registry_entry = _dict_or_empty(ext_info.get("registry_entry"))
         install_source = _registry_install_source(registry_entry)
-        installer_meta = registry_entry.get("installer_meta") if isinstance(registry_entry.get("installer_meta"), dict) else {}
+        installer_meta = _dict_or_empty(registry_entry.get("installer_meta"))
+        current_meta = _dict_or_empty(installer_meta.get("current"))
         version_raw = manifest.get("version")
         version_text = version_raw.strip() if isinstance(version_raw, str) and version_raw.strip() else ""
         if not version_text:
             registry_version = registry_entry.get("version")
             if isinstance(registry_version, str) and registry_version.strip():
                 version_text = registry_version.strip()
-        if not version_text and isinstance(installer_meta.get("current"), dict):
-            current_version = installer_meta["current"].get("version")
+        if not version_text:
+            current_version = current_meta.get("version")
             if isinstance(current_version, str) and current_version.strip():
                 version_text = current_version.strip()
         schema_version = manifest.get("schema_version")
         if schema_version is None:
             schema_version = registry_entry.get("schema_version")
-        if schema_version is None and isinstance(installer_meta.get("current"), dict):
-            schema_version = installer_meta["current"].get("schema_version")
+        if schema_version is None:
+            schema_version = current_meta.get("schema_version")
 
         if isinstance(source_root, Path):
             source_roots[ext_id] = source_root
@@ -609,10 +614,10 @@ def _build_extension_state(
 def load_extensions(
     extensions_dir: Any,
     server_root: Path,
-    fws_getter: Callable,
-    broadcast_fn: Callable,
-    transcript_fn: Callable,
-    meta_fns: Optional[Dict[str, Callable]] = None,
+    fws_getter: Callable[..., object],
+    broadcast_fn: Callable[..., object],
+    transcript_fn: Callable[..., object],
+    meta_fns: Optional[Dict[str, Callable[..., object]]] = None,
 ) -> None:
     """
     Discover and load extensions.
@@ -863,10 +868,10 @@ def reload_extensions(
 def _load_handler(
     ext_info: Dict[str, Any],
     server_root: Path,
-    fws_getter: Callable,
-    broadcast_fn: Callable,
-    transcript_fn: Callable,
-    meta_fns: Optional[Dict[str, Callable]],
+    fws_getter: Callable[..., object],
+    broadcast_fn: Callable[..., object],
+    transcript_fn: Callable[..., object],
+    meta_fns: Optional[Dict[str, Callable[..., object]]],
     handler_extensions: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Any]:
     """Dynamically import the extension client module and call its init function."""
@@ -1351,7 +1356,7 @@ def _validate_staged_extension_root(
 
     errors.extend(_scan_for_symlinks(staged_root))
 
-    agent = manifest.get("agent") if isinstance(manifest.get("agent"), dict) else {}
+    agent = _dict_or_empty(manifest.get("agent"))
     shellspec = agent.get("shellspec")
     if shellspec is not None:
         _validate_manifest_file_reference(
@@ -1361,7 +1366,7 @@ def _validate_staged_extension_root(
             errors=errors,
         )
 
-    ui = manifest.get("ui") if isinstance(manifest.get("ui"), dict) else {}
+    ui = _dict_or_empty(manifest.get("ui"))
     request_cards = ui.get("requestCards")
     if not isinstance(request_cards, list):
         request_cards = ui.get("request_cards")
@@ -1588,16 +1593,11 @@ def _build_installer_metadata(
     action: str,
 ) -> Dict[str, Any]:
     now = _now_utc_iso()
-    existing_meta = (
-        existing_user_entry.get("installer_meta")
-        if isinstance(existing_user_entry, dict) and isinstance(existing_user_entry.get("installer_meta"), dict)
-        else {}
+    existing_meta = _dict_or_empty(
+        existing_user_entry.get("installer_meta") if isinstance(existing_user_entry, dict) else None
     )
-    installed_at = (
-        existing_meta.get("installed_at")
-        if isinstance(existing_meta.get("installed_at"), str) and existing_meta.get("installed_at").strip()
-        else None
-    )
+    installed_at_raw = existing_meta.get("installed_at")
+    installed_at = installed_at_raw.strip() if isinstance(installed_at_raw, str) and installed_at_raw.strip() else None
     if not installed_at and isinstance(existing_user_entry, dict):
         raw_installed_at = existing_user_entry.get("installed_at")
         if isinstance(raw_installed_at, str) and raw_installed_at.strip():
@@ -2197,7 +2197,7 @@ async def run_splash_action(
 def _normalize_request_card_entries(manifest: Any) -> List[Dict[str, Any]]:
     if not isinstance(manifest, dict):
         return []
-    ui = manifest.get("ui") if isinstance(manifest.get("ui"), dict) else {}
+    ui = _dict_or_empty(manifest.get("ui"))
     raw_entries = ui.get("requestCards")
     if not isinstance(raw_entries, list):
         raw_entries = ui.get("request_cards")
