@@ -17,8 +17,15 @@ import hashlib
 import importlib
 import inspect
 import json
+import os
+import shutil
+import stat
+import subprocess
 import sys
+import tempfile
 import types
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional
 
@@ -33,6 +40,9 @@ _initialized: bool = False
 # Callbacks stored for lazy init of discovered extensions
 _init_args: Dict[str, Any] = {}
 _DYNAMIC_EXTENSION_NAMESPACE = "_app_server_user_extensions"
+_EXTENSION_MANIFEST_SCHEMA_VERSION = 1
+_SUPPORTED_EXTENSION_MANIFEST_SCHEMA_VERSIONS = {_EXTENSION_MANIFEST_SCHEMA_VERSION}
+_INSTALLER_METADATA_SCHEMA_VERSION = 1
 
 
 def _deep_merge_manifest(base: Any, override: Any) -> Any:
@@ -351,6 +361,251 @@ def _import_extension_submodule(module_package: str, extension_root: Path, submo
     return importlib.import_module(f"{module_package}.{submodule}")
 
 
+def _abs_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _path_is_within(candidate: Path, base: Path) -> bool:
+    try:
+        return os.path.commonpath([os.path.abspath(os.fspath(candidate)), os.path.abspath(os.fspath(base))]) == os.path.abspath(os.fspath(base))
+    except Exception:
+        return False
+
+
+def _sanitize_install_folder(value: str) -> str:
+    safe = []
+    for char in str(value or ""):
+        if char.isalnum() or char in {"-", "_", "."}:
+            safe.append(char)
+        else:
+            safe.append("_")
+    folder = "".join(safe).strip("._-")
+    return folder or "extension"
+
+
+def _coerce_schema_version(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _extension_roots_from_state() -> List[Path]:
+    raw_roots = _init_args.get("extension_roots")
+    return [root for root in raw_roots if isinstance(root, Path)] if isinstance(raw_roots, list) else []
+
+
+def _builtin_extension_root() -> Optional[Path]:
+    roots = _extension_roots_from_state()
+    return roots[0] if roots else None
+
+
+def _user_extension_root() -> Optional[Path]:
+    roots = _extension_roots_from_state()
+    if len(roots) >= 2:
+        return roots[1]
+    return None
+
+
+def _read_extensions_registry(root: Path) -> Dict[str, Any]:
+    registry_path = root / "extensions.json"
+    if not registry_path.exists():
+        return {"version": "1.0", "extensions": []}
+    data = json.loads(registry_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid extensions.json at {registry_path}")
+    entries = data.get("extensions")
+    if not isinstance(entries, list):
+        data["extensions"] = []
+    data.setdefault("version", "1.0")
+    return data
+
+
+def _write_extensions_registry(root: Path, registry: Dict[str, Any]) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    registry_path = root / "extensions.json"
+    tmp_path = registry_path.with_name(f"{registry_path.name}.tmp")
+    payload = json.dumps(registry, indent=2, ensure_ascii=False) + "\n"
+    tmp_path.write_text(payload, encoding="utf-8")
+    tmp_path.replace(registry_path)
+
+
+def _registry_install_source(entry: Any) -> Dict[str, Any]:
+    if not isinstance(entry, dict):
+        return {}
+    install_source = entry.get("install_source")
+    if isinstance(install_source, dict):
+        return dict(install_source)
+    installer_meta = entry.get("installer_meta")
+    if not isinstance(installer_meta, dict):
+        return {}
+    current = installer_meta.get("current")
+    if not isinstance(current, dict):
+        return {}
+    current_source = current.get("install_source")
+    if isinstance(current_source, dict):
+        return dict(current_source)
+    return {}
+
+
+def _upsert_registry_entry(root: Path, entry: Dict[str, Any]) -> None:
+    registry = _read_extensions_registry(root)
+    entries = registry.get("extensions")
+    if not isinstance(entries, list):
+        entries = []
+        registry["extensions"] = entries
+    ext_id = entry.get("id")
+    if not isinstance(ext_id, str) or not ext_id:
+        raise ValueError("Registry entry requires id")
+    for index, existing in enumerate(entries):
+        if isinstance(existing, dict) and existing.get("id") == ext_id:
+            merged = dict(existing)
+            merged.update(entry)
+            entries[index] = merged
+            _write_extensions_registry(root, registry)
+            return
+    entries.append(dict(entry))
+    _write_extensions_registry(root, registry)
+
+
+def _remove_registry_entry(root: Path, extension_id: str) -> bool:
+    registry = _read_extensions_registry(root)
+    entries = registry.get("extensions")
+    if not isinstance(entries, list):
+        return False
+    filtered = [
+        entry
+        for entry in entries
+        if not (isinstance(entry, dict) and entry.get("id") == extension_id)
+    ]
+    if len(filtered) == len(entries):
+        return False
+    registry["extensions"] = filtered
+    _write_extensions_registry(root, registry)
+    return True
+
+
+def _clear_extension_module_cache(module_packages: List[str]) -> None:
+    package_names = sorted(
+        {
+            package
+            for package in module_packages
+            if isinstance(package, str) and package
+        },
+        key=len,
+        reverse=True,
+    )
+    for package in package_names:
+        for name in list(sys.modules.keys()):
+            if name == package or name.startswith(f"{package}."):
+                sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+
+
+def _extension_runtime_signature(info: Dict[str, Any]) -> str:
+    payload = {
+        "id": info.get("id"),
+        "name": info.get("name"),
+        "type": info.get("type"),
+        "path": info.get("path"),
+        "manifest": info.get("manifest"),
+        "default_enabled": info.get("default_enabled"),
+        "source_kind": info.get("source_kind"),
+        "install_source": info.get("install_source"),
+        "version": info.get("version"),
+        "schema_version": info.get("schema_version"),
+    }
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _build_extension_state(
+    discovered: List[Dict[str, Any]],
+    builtin_root: Optional[Path],
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Path], Dict[str, str], Dict[str, List[Dict[str, Any]]]]:
+    registry: Dict[str, Dict[str, Any]] = {}
+    source_roots: Dict[str, Path] = {}
+    module_packages: Dict[str, str] = {}
+    enabled_by_type: Dict[str, List[Dict[str, Any]]] = {}
+
+    for ext_info in discovered:
+        ext_id = ext_info["id"]
+        ext_type = ext_info["type"]
+        folder = ext_info["folder"]
+        manifest = ext_info.get("manifest") if isinstance(ext_info.get("manifest"), dict) else {}
+        dependencies = manifest.get("dependencies") if isinstance(manifest.get("dependencies"), dict) else {}
+        default_enabled = bool(ext_info.get("enabled", True))
+        source_root = ext_info.get("source_root")
+        module_package = ext_info.get("module_package")
+        registry_entry = ext_info.get("registry_entry") if isinstance(ext_info.get("registry_entry"), dict) else {}
+        install_source = _registry_install_source(registry_entry)
+        installer_meta = registry_entry.get("installer_meta") if isinstance(registry_entry.get("installer_meta"), dict) else {}
+        version_raw = manifest.get("version")
+        version_text = version_raw.strip() if isinstance(version_raw, str) and version_raw.strip() else ""
+        if not version_text:
+            registry_version = registry_entry.get("version")
+            if isinstance(registry_version, str) and registry_version.strip():
+                version_text = registry_version.strip()
+        if not version_text and isinstance(installer_meta.get("current"), dict):
+            current_version = installer_meta["current"].get("version")
+            if isinstance(current_version, str) and current_version.strip():
+                version_text = current_version.strip()
+        schema_version = manifest.get("schema_version")
+        if schema_version is None:
+            schema_version = registry_entry.get("schema_version")
+        if schema_version is None and isinstance(installer_meta.get("current"), dict):
+            schema_version = installer_meta["current"].get("schema_version")
+
+        if isinstance(source_root, Path):
+            source_roots[ext_id] = source_root
+        if isinstance(module_package, str) and module_package:
+            module_packages[ext_id] = module_package
+
+        source_kind = "builtin"
+        if isinstance(source_root, Path) and builtin_root is not None and source_root != builtin_root:
+            source_kind = "user"
+
+        registry[ext_id] = {
+            "id": ext_id,
+            "name": ext_info.get("name", ext_id),
+            "type": ext_type,
+            "path": folder,
+            "manifest": manifest,
+            "capabilities": manifest.get("capabilities", {}) if isinstance(manifest, dict) else {},
+            "ui": manifest.get("ui", {}) if isinstance(manifest, dict) else {},
+            "has_plan": _manifest_capability_flag(manifest, "hasPlan", "has_plan"),
+            "has_todo": _manifest_capability_flag(manifest, "hasTodo", "has_todo"),
+            "has_plan_modes": _manifest_capability_flag(manifest, "hasPlanModes", "has_plan_modes"),
+            "default_enabled": default_enabled,
+            "enabled": default_enabled,
+            "dependency_status": "unchecked",
+            "dependency_ok": True,
+            "dependency_message": "",
+            "dependency_details": {},
+            "has_dependency_check": bool(dependencies.get("has_check")),
+            "has_dependency_install": bool(dependencies.get("has_install")),
+            "active": default_enabled,
+            "source_kind": source_kind,
+            "source_root": str(source_root) if isinstance(source_root, Path) else "",
+            "install_source": dict(install_source) if install_source else {},
+            "installer_meta": dict(installer_meta) if installer_meta else {},
+            "version": version_text,
+            "schema_version": schema_version,
+        }
+
+        if default_enabled:
+            enabled_by_type.setdefault(ext_type, []).append(ext_info)
+
+    return registry, source_roots, module_packages, enabled_by_type
+
+
 def load_extensions(
     extensions_dir: Any,
     server_root: Path,
@@ -386,50 +641,12 @@ def load_extensions(
     discovered = _discover_extensions(extension_roots)
 
     _extension_handlers = {}
-    _extensions_registry = {}
-    _extension_source_roots = {}
-    _extension_module_packages = {}
-
-    enabled_by_type: Dict[str, List[Dict[str, Any]]] = {}
-    for ext_info in discovered:
-        ext_id = ext_info["id"]
-        ext_type = ext_info["type"]
-        folder = ext_info["folder"]
-        manifest = ext_info.get("manifest") if isinstance(ext_info.get("manifest"), dict) else {}
-        dependencies = manifest.get("dependencies") if isinstance(manifest.get("dependencies"), dict) else {}
-        default_enabled = bool(ext_info.get("enabled", True))
-        source_root = ext_info.get("source_root")
-        module_package = ext_info.get("module_package")
-
-        if isinstance(source_root, Path):
-            _extension_source_roots[ext_id] = source_root
-        if isinstance(module_package, str) and module_package:
-            _extension_module_packages[ext_id] = module_package
-
-        _extensions_registry[ext_id] = {
-            "id": ext_id,
-            "name": ext_info.get("name", ext_id),
-            "type": ext_type,
-            "path": folder,
-            "manifest": manifest,
-            "capabilities": manifest.get("capabilities", {}) if isinstance(manifest, dict) else {},
-            "ui": manifest.get("ui", {}) if isinstance(manifest, dict) else {},
-            "has_plan": _manifest_capability_flag(manifest, "hasPlan", "has_plan"),
-            "has_todo": _manifest_capability_flag(manifest, "hasTodo", "has_todo"),
-            "has_plan_modes": _manifest_capability_flag(manifest, "hasPlanModes", "has_plan_modes"),
-            "default_enabled": default_enabled,
-            "enabled": default_enabled,
-            "dependency_status": "unchecked",
-            "dependency_ok": True,
-            "dependency_message": "",
-            "dependency_details": {},
-            "has_dependency_check": bool(dependencies.get("has_check")),
-            "has_dependency_install": bool(dependencies.get("has_install")),
-            "active": default_enabled,
-        }
-
-        if default_enabled:
-            enabled_by_type.setdefault(ext_type, []).append(ext_info)
+    (
+        _extensions_registry,
+        _extension_source_roots,
+        _extension_module_packages,
+        enabled_by_type,
+    ) = _build_extension_state(discovered, primary_root)
 
     for ext_info in discovered:
         if not ext_info.get("enabled", True):
@@ -486,6 +703,7 @@ def _discover_extensions_in_root(extensions_dir: Path, builtin_root: Optional[Pa
                     "manifest": manifest,
                     "source_root": extensions_dir,
                     "module_package": _module_package_for_root(folder, extensions_dir, builtin_root),
+                    "registry_entry": dict(entry),
                 })
             return result
         except Exception as e:
@@ -509,6 +727,7 @@ def _discover_extensions_in_root(extensions_dir: Path, builtin_root: Optional[Pa
                 "manifest": manifest,
                 "source_root": extensions_dir,
                 "module_package": _module_package_for_root(sub.name, extensions_dir, builtin_root),
+                "registry_entry": {},
             })
         except Exception as e:
             print(f"[Extensions] Bad manifest in {sub.name}/: {e}")
@@ -529,6 +748,116 @@ def _discover_extensions(extension_roots: List[Path]) -> List[Dict[str, Any]]:
                 merged.pop(ext_id, None)
             merged[ext_id] = ext_info
     return list(merged.values())
+
+
+def reload_extensions(
+    changed_extension_ids: Optional[List[str]] = None,
+    *,
+    force: bool = False,
+) -> List[Dict[str, Any]]:
+    global _extension_handlers, _extensions_registry, _extension_source_roots
+    global _extension_module_packages
+
+    if not _initialized or not _init_args:
+        raise RuntimeError("Extensions have not been initialized")
+
+    extension_roots = _normalize_extension_roots(_init_args.get("extension_roots") or _init_args.get("extensions_dir"))
+    primary_root = extension_roots[0] if extension_roots else None
+    discovered = _discover_extensions(extension_roots)
+    (
+        new_registry,
+        new_source_roots,
+        new_module_packages,
+        enabled_by_type,
+    ) = _build_extension_state(discovered, primary_root)
+
+    old_registry = dict(_extensions_registry)
+    old_handlers = dict(_extension_handlers)
+    old_module_packages = dict(_extension_module_packages)
+
+    changed_ids = {
+        ext_id.strip()
+        for ext_id in (changed_extension_ids or [])
+        if isinstance(ext_id, str) and ext_id.strip()
+    }
+    changed_ids.update(set(old_registry.keys()) ^ set(new_registry.keys()))
+    for ext_id in set(old_registry.keys()) & set(new_registry.keys()):
+        if _extension_runtime_signature(old_registry[ext_id]) != _extension_runtime_signature(new_registry[ext_id]):
+            changed_ids.add(ext_id)
+
+    changed_types = set()
+    if force:
+        changed_types.update(
+            ext_type
+            for ext_type in (
+                info.get("type")
+                for info in [*old_registry.values(), *new_registry.values()]
+                if isinstance(info, dict)
+            )
+            if isinstance(ext_type, str) and ext_type
+        )
+    else:
+        for ext_id in changed_ids:
+            for info in (old_registry.get(ext_id), new_registry.get(ext_id)):
+                ext_type = info.get("type") if isinstance(info, dict) else None
+                if isinstance(ext_type, str) and ext_type:
+                    changed_types.add(ext_type)
+
+    module_packages_to_clear = set()
+    for ext_id, module_package in old_module_packages.items():
+        old_info = old_registry.get(ext_id)
+        ext_type = old_info.get("type") if isinstance(old_info, dict) else None
+        if force or (isinstance(ext_type, str) and ext_type in changed_types):
+            module_packages_to_clear.add(module_package)
+    for ext_id, module_package in new_module_packages.items():
+        new_info = new_registry.get(ext_id)
+        ext_type = new_info.get("type") if isinstance(new_info, dict) else None
+        if force or (isinstance(ext_type, str) and ext_type in changed_types):
+            module_packages_to_clear.add(module_package)
+    _clear_extension_module_cache(list(module_packages_to_clear))
+
+    preserved_handlers: Dict[str, Any] = {}
+    new_types = {
+        ext_type
+        for ext_type in (
+            info.get("type")
+            for info in new_registry.values()
+            if isinstance(info, dict)
+        )
+        if isinstance(ext_type, str) and ext_type
+    }
+    for ext_type, handler in old_handlers.items():
+        if ext_type in new_types and ext_type not in changed_types:
+            preserved_handlers[ext_type] = handler
+
+    _extensions_registry = new_registry
+    _extension_source_roots = new_source_roots
+    _extension_module_packages = new_module_packages
+    _extension_handlers = preserved_handlers
+
+    for ext_info in discovered:
+        if not ext_info.get("enabled", True):
+            continue
+        ext_type = ext_info["type"]
+        if ext_type in _extension_handlers:
+            continue
+        handler = _load_handler(
+            ext_info,
+            handler_extensions=enabled_by_type.get(ext_type, []),
+            server_root=_init_args["server_root"],
+            fws_getter=_init_args["fws_getter"],
+            broadcast_fn=_init_args["broadcast_fn"],
+            transcript_fn=_init_args["transcript_fn"],
+            meta_fns=_init_args.get("meta_fns"),
+        )
+        if handler:
+            _extension_handlers[ext_type] = handler
+
+    print(
+        f"[Extensions] Reloaded {len(_extensions_registry)} extension(s): "
+        f"{list(_extensions_registry.keys())}"
+    )
+    return list_extensions()
 
 
 def _load_handler(
@@ -853,6 +1182,900 @@ def get_extension_asset_path(extension_id: str, asset_path: str) -> Optional[Pat
     if not candidate.is_file():
         return None
     return candidate
+
+
+def _normalize_staged_extension_root(staging_root: Path) -> Path:
+    manifest_path = staging_root / "manifest.json"
+    if manifest_path.is_file():
+        return staging_root
+    child_roots = [
+        child
+        for child in staging_root.iterdir()
+        if child.is_dir() and not child.name.startswith(".") and (child / "manifest.json").is_file()
+    ]
+    if len(child_roots) == 1:
+        return child_roots[0]
+    raise ValueError(
+        "Could not determine extension root; expected manifest.json at the package root or in one enclosing folder"
+    )
+
+
+def _scan_for_symlinks(root: Path) -> List[str]:
+    issues: List[str] = []
+    for current, dirnames, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in dirnames:
+            candidate = current_path / name
+            if candidate.is_symlink():
+                issues.append(f"Symlinked directories are not supported: {candidate.relative_to(root)}")
+        for name in filenames:
+            candidate = current_path / name
+            if candidate.is_symlink():
+                issues.append(f"Symlinked files are not supported: {candidate.relative_to(root)}")
+    return issues
+
+
+def _validate_manifest_file_reference(
+    root: Path,
+    raw_path: Any,
+    *,
+    field_label: str,
+    errors: List[str],
+) -> None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        errors.append(f"{field_label} must be a non-empty relative file path")
+        return
+    file_part = raw_path.split("#", 1)[0].strip()
+    if not file_part:
+        errors.append(f"{field_label} must include a file path before any #fragment")
+        return
+    posix_path = PurePosixPath(file_part)
+    if posix_path.is_absolute() or any(part == ".." for part in posix_path.parts):
+        errors.append(f"{field_label} must stay within the extension root")
+        return
+    candidate = root.joinpath(*[part for part in posix_path.parts if part not in {"", "."}])
+    if not _path_is_within(candidate, root):
+        errors.append(f"{field_label} must stay within the extension root")
+        return
+    if not candidate.is_file():
+        errors.append(f"{field_label} not found: {file_part}")
+
+
+def _validate_staged_extension_root(
+    staged_root: Path,
+    *,
+    expected_extension_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    manifest_path = staged_root / "manifest.json"
+    manifest: Dict[str, Any] = {}
+    if not manifest_path.is_file():
+        return {
+            "ok": False,
+            "status": "validation_failed",
+            "errors": ["manifest.json is required"],
+            "warnings": warnings,
+        }
+    try:
+        manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "validation_failed",
+            "errors": [f"manifest.json is not valid JSON: {exc}"],
+            "warnings": warnings,
+        }
+    if not isinstance(manifest_raw, dict):
+        return {
+            "ok": False,
+            "status": "validation_failed",
+            "errors": ["manifest.json must contain a JSON object"],
+            "warnings": warnings,
+        }
+    manifest = dict(manifest_raw)
+
+    schema_missing = "schema_version" not in manifest
+    schema_version = _coerce_schema_version(
+        manifest.get("schema_version", _EXTENSION_MANIFEST_SCHEMA_VERSION)
+    )
+    if schema_version is None:
+        errors.append("manifest.schema_version must be a positive integer")
+    elif schema_version not in _SUPPORTED_EXTENSION_MANIFEST_SCHEMA_VERSIONS:
+        errors.append(
+            f"Unsupported manifest schema_version: {schema_version} "
+            f"(supported: {sorted(_SUPPORTED_EXTENSION_MANIFEST_SCHEMA_VERSIONS)})"
+        )
+    elif schema_missing:
+        warnings.append(
+            f"manifest.schema_version missing; assuming {_EXTENSION_MANIFEST_SCHEMA_VERSION} for compatibility"
+        )
+
+    normalized_fields: Dict[str, str] = {}
+    for field_name in ("id", "name", "type", "version"):
+        raw_value = manifest.get(field_name)
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            errors.append(f"manifest.{field_name} is required and must be a non-empty string")
+            continue
+        value = raw_value.strip()
+        normalized_fields[field_name] = value
+        if field_name in {"id", "type"} and any(sep in value for sep in ("/", "\\")):
+            errors.append(f"manifest.{field_name} must not contain path separators")
+
+    extension_id = normalized_fields.get("id", "")
+    if expected_extension_id and extension_id and extension_id != expected_extension_id:
+        errors.append(
+            f"manifest.id mismatch: expected {expected_extension_id}, found {extension_id}"
+        )
+
+    compat_present = "compat" in manifest
+    compat_raw = manifest.get("compat")
+    compat: Dict[str, Any] = {}
+    if compat_present:
+        if compat_raw is None:
+            compat = {}
+        elif isinstance(compat_raw, dict):
+            compat = compat_raw
+        else:
+            errors.append("manifest.compat must be an object when present")
+    else:
+        warnings.append(
+            "manifest.compat missing; defaulting to schema_version-only compatibility"
+        )
+    allowed_compat_keys = {"app_server_manifest_min", "app_server_manifest_max"}
+    if compat:
+        unknown_keys = sorted(key for key in compat.keys() if key not in allowed_compat_keys)
+        if unknown_keys:
+            warnings.append(
+                "manifest.compat includes unrecognized keys: " + ", ".join(unknown_keys)
+            )
+    compat_min = _coerce_schema_version(compat.get("app_server_manifest_min"))
+    compat_max = _coerce_schema_version(compat.get("app_server_manifest_max"))
+    if compat_min is not None and compat_max is not None and compat_min > compat_max:
+        errors.append(
+            "manifest.compat.app_server_manifest_min must not exceed "
+            "manifest.compat.app_server_manifest_max"
+        )
+    if schema_version is not None and compat_min is not None and schema_version < compat_min:
+        errors.append(
+            f"manifest.schema_version {schema_version} is below compat.app_server_manifest_min {compat_min}"
+        )
+    if schema_version is not None and compat_max is not None and schema_version > compat_max:
+        errors.append(
+            f"manifest.schema_version {schema_version} exceeds compat.app_server_manifest_max {compat_max}"
+        )
+
+    client_file = staged_root / "client.py"
+    if not client_file.is_file():
+        errors.append("client.py is required")
+
+    errors.extend(_scan_for_symlinks(staged_root))
+
+    agent = manifest.get("agent") if isinstance(manifest.get("agent"), dict) else {}
+    shellspec = agent.get("shellspec")
+    if shellspec is not None:
+        _validate_manifest_file_reference(
+            staged_root,
+            shellspec,
+            field_label="manifest.agent.shellspec",
+            errors=errors,
+        )
+
+    ui = manifest.get("ui") if isinstance(manifest.get("ui"), dict) else {}
+    request_cards = ui.get("requestCards")
+    if not isinstance(request_cards, list):
+        request_cards = ui.get("request_cards")
+    if isinstance(request_cards, list):
+        for index, entry in enumerate(request_cards):
+            if not isinstance(entry, dict):
+                errors.append(f"manifest.ui.requestCards[{index}] must be an object")
+                continue
+            _validate_manifest_file_reference(
+                staged_root,
+                entry.get("module"),
+                field_label=f"manifest.ui.requestCards[{index}].module",
+                errors=errors,
+            )
+
+    folder = _sanitize_install_folder(extension_id or staged_root.name)
+    return {
+        "ok": not errors,
+        "status": "validated" if not errors else "validation_failed",
+        "errors": errors,
+        "warnings": warnings,
+        "extension_id": extension_id,
+        "name": normalized_fields.get("name", ""),
+        "type": normalized_fields.get("type", ""),
+        "version": normalized_fields.get("version", ""),
+        "schema_version": schema_version,
+        "folder": folder,
+        "manifest": manifest,
+        "compat": {
+            "mode": "explicit" if compat_present else "schema_version_only",
+            "app_server_manifest_min": compat_min,
+            "app_server_manifest_max": compat_max,
+        },
+    }
+
+
+def _stage_extension_from_path(source_path: str, workspace_root: Path) -> tuple[Path, Dict[str, Any]]:
+    source = Path(str(source_path or "")).expanduser()
+    source_abs = _abs_path(source)
+    if not source_abs.exists() or not source_abs.is_dir():
+        raise ValueError(f"Extension source path not found: {source_abs}")
+    staged = workspace_root / "path_source"
+    shutil.copytree(source_abs, staged, symlinks=True)
+    return _normalize_staged_extension_root(staged), {
+        "type": "path",
+        "path": os.fspath(source_abs),
+    }
+
+
+def _stage_extension_from_zip(zip_path: str, workspace_root: Path) -> tuple[Path, Dict[str, Any]]:
+    archive = Path(str(zip_path or "")).expanduser()
+    archive_abs = _abs_path(archive)
+    if not archive_abs.exists() or not archive_abs.is_file():
+        raise ValueError(f"Extension archive not found: {archive_abs}")
+    extract_root = workspace_root / "zip_source"
+    extract_root.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_abs) as archive_handle:
+        members = archive_handle.infolist()
+        if not members:
+            raise ValueError("Extension archive is empty")
+        for member in members:
+            name = member.filename
+            if not isinstance(name, str) or not name:
+                raise ValueError("Extension archive contains an invalid entry name")
+            normalized = PurePosixPath(name)
+            if normalized.is_absolute() or any(part == ".." for part in normalized.parts):
+                raise ValueError(f"Extension archive entry escapes the package root: {name}")
+            mode = (member.external_attr >> 16) & 0o170000
+            if stat.S_ISLNK(mode):
+                raise ValueError(f"Extension archive contains symlink entry: {name}")
+        archive_handle.extractall(extract_root)
+    return _normalize_staged_extension_root(extract_root), {
+        "type": "zip",
+        "path": os.fspath(archive_abs),
+    }
+
+
+def _run_git_command(args: List[str], cwd: Optional[Path] = None) -> str:
+    if shutil.which("git") is None:
+        raise ValueError("git is not available on PATH")
+    result = subprocess.run(
+        ["git", *args],
+        cwd=os.fspath(cwd) if cwd is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "git command failed"
+        raise ValueError(message)
+    return result.stdout.strip()
+
+
+def _git_submodule_paths(repo_root: Path) -> List[str]:
+    if not (repo_root / ".gitmodules").is_file():
+        return []
+    try:
+        output = _run_git_command(
+            ["config", "--file", ".gitmodules", "--get-regexp", "path"],
+            cwd=repo_root,
+        )
+    except Exception:
+        return []
+    paths: List[str] = []
+    for line in output.splitlines():
+        _, _, value = line.partition(" ")
+        rel_path = value.strip()
+        if rel_path and rel_path not in paths:
+            paths.append(rel_path)
+    return paths
+
+
+def _copy_local_submodule_worktrees(source_repo: Path, clone_root: Path) -> List[str]:
+    copied: List[str] = []
+    for rel_path in _git_submodule_paths(source_repo):
+        source_path = source_repo / rel_path
+        if not source_path.exists():
+            continue
+        dest_path = clone_root / rel_path
+        if dest_path.exists():
+            shutil.rmtree(dest_path, ignore_errors=True)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_path, dest_path, symlinks=True)
+        copied.append(rel_path)
+    return copied
+
+
+def _stage_extension_from_git(
+    repo_url: str,
+    ref: Optional[str],
+    workspace_root: Path,
+) -> tuple[Path, Dict[str, Any]]:
+    repo_text = str(repo_url or "").strip()
+    if not repo_text:
+        raise ValueError("repo_url is required for git installs")
+    repo_candidate = Path(repo_text).expanduser()
+    clone_source = os.fspath(_abs_path(repo_candidate)) if repo_candidate.exists() else repo_text
+    clone_root = workspace_root / "git_source"
+    _run_git_command(["clone", clone_source, os.fspath(clone_root)])
+    ref_text = str(ref or "").strip()
+    if ref_text:
+        _run_git_command(["checkout", ref_text], cwd=clone_root)
+    submodule_paths = _git_submodule_paths(clone_root)
+    materialized_from_local: List[str] = []
+    materialization_method = "none"
+    if repo_candidate.exists() and repo_candidate.is_dir() and submodule_paths:
+        materialized_from_local = _copy_local_submodule_worktrees(repo_candidate, clone_root)
+    if submodule_paths:
+        if len(materialized_from_local) == len(submodule_paths):
+            materialization_method = "local_worktree_overlay"
+        else:
+            _run_git_command(["submodule", "sync", "--recursive"], cwd=clone_root)
+            _run_git_command(["submodule", "update", "--init", "--recursive"], cwd=clone_root)
+            materialization_method = (
+                "local_worktree_overlay+git_recursive_update"
+                if materialized_from_local
+                else "git_recursive_update"
+            )
+    commit = _run_git_command(["rev-parse", "HEAD"], cwd=clone_root)
+    return _normalize_staged_extension_root(clone_root), {
+        "type": "git",
+        "repo_url": clone_source,
+        "ref": ref_text,
+        "commit": commit,
+        "submodules": {
+            "gitmodules_present": bool(submodule_paths),
+            "paths": list(submodule_paths),
+            "materialized_from_local": list(materialized_from_local),
+            "method": materialization_method,
+        },
+    }
+
+
+def _user_registry_entry(extension_id: str) -> Optional[Dict[str, Any]]:
+    user_root = _user_extension_root()
+    if user_root is None:
+        return None
+    registry = _read_extensions_registry(user_root)
+    entries = registry.get("extensions")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("id") == extension_id:
+            return dict(entry)
+    return None
+
+
+def _registry_path_owner(root: Path, folder: str, *, excluding_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    registry = _read_extensions_registry(root)
+    entries = registry.get("extensions")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("path") != folder:
+            continue
+        if excluding_id and entry.get("id") == excluding_id:
+            continue
+        return dict(entry)
+    return None
+
+
+def _resolve_install_target_folder(
+    extension_id: str,
+    validation: Dict[str, Any],
+    existing_user_entry: Optional[Dict[str, Any]],
+) -> tuple[str, str]:
+    existing_path = existing_user_entry.get("path") if isinstance(existing_user_entry, dict) else None
+    if isinstance(existing_path, str) and existing_path.strip():
+        return existing_path.strip(), "registry.path"
+    target_folder = str(validation.get("folder") or "").strip() or _sanitize_install_folder(extension_id)
+    return target_folder, "manifest.id"
+
+
+def _build_installer_metadata(
+    *,
+    existing_user_entry: Optional[Dict[str, Any]],
+    source_meta: Dict[str, Any],
+    validation: Dict[str, Any],
+    target_folder: str,
+    path_authority: str,
+    action: str,
+) -> Dict[str, Any]:
+    now = _now_utc_iso()
+    existing_meta = (
+        existing_user_entry.get("installer_meta")
+        if isinstance(existing_user_entry, dict) and isinstance(existing_user_entry.get("installer_meta"), dict)
+        else {}
+    )
+    installed_at = (
+        existing_meta.get("installed_at")
+        if isinstance(existing_meta.get("installed_at"), str) and existing_meta.get("installed_at").strip()
+        else None
+    )
+    if not installed_at and isinstance(existing_user_entry, dict):
+        raw_installed_at = existing_user_entry.get("installed_at")
+        if isinstance(raw_installed_at, str) and raw_installed_at.strip():
+            installed_at = raw_installed_at.strip()
+    if not installed_at:
+        installed_at = now
+
+    meta: Dict[str, Any] = {
+        "schema_version": _INSTALLER_METADATA_SCHEMA_VERSION,
+        "identity_authority": "manifest.id",
+        "path_authority": path_authority,
+        "install_source_authority": "install_source",
+        "source_folder_authority": "ignored",
+        "installed_at": installed_at,
+        "updated_at": now,
+        "last_action": action,
+        "current": {
+            "path": target_folder,
+            "version": validation.get("version"),
+            "schema_version": validation.get("schema_version"),
+            "install_source": dict(source_meta),
+            "compat": dict(validation.get("compat") or {}),
+        },
+    }
+    if isinstance(existing_user_entry, dict):
+        previous_source = _registry_install_source(existing_user_entry)
+        previous_snapshot: Dict[str, Any] = {
+            "path": existing_user_entry.get("path"),
+            "version": existing_user_entry.get("version"),
+            "schema_version": existing_user_entry.get("schema_version"),
+            "install_source": dict(previous_source) if previous_source else {},
+            "captured_at": now,
+        }
+        previous_updated = existing_meta.get("updated_at")
+        if isinstance(previous_updated, str) and previous_updated.strip():
+            previous_snapshot["previous_updated_at"] = previous_updated.strip()
+        meta["previous"] = previous_snapshot
+    return meta
+
+
+def _install_staged_extension(
+    staged_root: Path,
+    validation: Dict[str, Any],
+    *,
+    source_meta: Dict[str, Any],
+    allow_override: bool = False,
+    expect_existing: bool = False,
+) -> Dict[str, Any]:
+    if not validation.get("ok"):
+        return dict(validation)
+    user_root = _user_extension_root()
+    if user_root is None:
+        return {
+            "ok": False,
+            "status": "error",
+            "message": "User extension root is not configured",
+        }
+    user_root.mkdir(parents=True, exist_ok=True)
+    extension_id = str(validation.get("extension_id") or "").strip()
+    existing_info = _extensions_registry.get(extension_id)
+    existing_user_entry = _user_registry_entry(extension_id)
+    if expect_existing and existing_user_entry is None:
+        return {
+            "ok": False,
+            "status": "not_found",
+            "message": f"User-installed extension not found: {extension_id}",
+        }
+    if (
+        existing_info
+        and existing_info.get("source_kind") == "builtin"
+        and existing_user_entry is None
+        and not allow_override
+    ):
+        return {
+            "ok": False,
+            "status": "conflict",
+            "message": f"Builtin extension id already exists: {extension_id}",
+        }
+
+    target_folder, path_authority = _resolve_install_target_folder(
+        extension_id,
+        validation,
+        existing_user_entry,
+    )
+
+    path_owner = _registry_path_owner(user_root, target_folder, excluding_id=extension_id)
+    if path_owner is not None:
+        return {
+            "ok": False,
+            "status": "conflict",
+            "message": f"Extension path already owned by {path_owner.get('id')}: {target_folder}",
+        }
+
+    live_target = user_root / target_folder
+    temp_target = user_root / f".{target_folder}.install-tmp"
+    backup_target = user_root / f".{target_folder}.install-bak"
+    if live_target.exists() and live_target.is_symlink():
+        return {
+            "ok": False,
+            "status": "conflict",
+            "message": f"Refusing to replace symlinked extension target: {live_target}",
+        }
+    if temp_target.exists():
+        shutil.rmtree(temp_target, ignore_errors=True)
+    if backup_target.exists():
+        shutil.rmtree(backup_target, ignore_errors=True)
+    shutil.copytree(staged_root, temp_target, symlinks=True)
+    try:
+        if live_target.exists():
+            live_target.rename(backup_target)
+        temp_target.rename(live_target)
+        if backup_target.exists():
+            shutil.rmtree(backup_target, ignore_errors=True)
+    except Exception:
+        shutil.rmtree(temp_target, ignore_errors=True)
+        if backup_target.exists() and not live_target.exists():
+            backup_target.rename(live_target)
+        raise
+
+    enabled_default = bool(validation.get("manifest", {}).get("enabled", True))
+    if isinstance(existing_user_entry, dict) and "enabled" in existing_user_entry:
+        enabled_default = existing_user_entry.get("enabled") is True
+    installer_meta = _build_installer_metadata(
+        existing_user_entry=existing_user_entry,
+        source_meta=source_meta,
+        validation=validation,
+        target_folder=target_folder,
+        path_authority=path_authority,
+        action="update" if existing_user_entry else "install",
+    )
+    registry_entry = {
+        "id": extension_id,
+        "name": validation.get("name"),
+        "type": validation.get("type"),
+        "path": target_folder,
+        "enabled": enabled_default,
+        "version": validation.get("version"),
+        "schema_version": validation.get("schema_version"),
+        "install_source": dict(source_meta),
+        "installer_meta": installer_meta,
+        "installed_at": installer_meta.get("installed_at"),
+        "updated_at": installer_meta.get("updated_at"),
+    }
+    _upsert_registry_entry(user_root, registry_entry)
+    return {
+        "ok": True,
+        "status": "updated" if existing_user_entry else "installed",
+        "extension_id": extension_id,
+        "name": validation.get("name"),
+        "type": validation.get("type"),
+        "version": validation.get("version"),
+        "schema_version": validation.get("schema_version"),
+        "path": target_folder,
+        "path_authority": path_authority,
+        "target_dir": os.fspath(live_target),
+        "warnings": list(validation.get("warnings") or []),
+        "install_source": dict(source_meta),
+        "installer_meta": installer_meta,
+    }
+
+
+def validate_extension_from_path(source_path: str, extension_id: Optional[str] = None) -> Dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="app_server_ext_validate_") as tmp:
+        staged_root, source_meta = _stage_extension_from_path(source_path, Path(tmp))
+        result = _validate_staged_extension_root(
+            staged_root,
+            expected_extension_id=str(extension_id or "").strip() or None,
+        )
+        result["install_source"] = source_meta
+        return result
+
+
+def validate_extension_from_zip(zip_path: str, extension_id: Optional[str] = None) -> Dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="app_server_ext_validate_") as tmp:
+        staged_root, source_meta = _stage_extension_from_zip(zip_path, Path(tmp))
+        result = _validate_staged_extension_root(
+            staged_root,
+            expected_extension_id=str(extension_id or "").strip() or None,
+        )
+        result["install_source"] = source_meta
+        return result
+
+
+def validate_extension_from_git(
+    repo_url: str,
+    ref: Optional[str] = None,
+    extension_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="app_server_ext_validate_") as tmp:
+        staged_root, source_meta = _stage_extension_from_git(repo_url, ref, Path(tmp))
+        result = _validate_staged_extension_root(
+            staged_root,
+            expected_extension_id=str(extension_id or "").strip() or None,
+        )
+        result["install_source"] = source_meta
+        return result
+
+
+def validate_extension_source(
+    *,
+    source_type: str,
+    source_path: Optional[str] = None,
+    repo_url: Optional[str] = None,
+    ref: Optional[str] = None,
+    extension_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    source_kind = str(source_type or "").strip().lower()
+    if source_kind == "path":
+        return validate_extension_from_path(source_path or "", extension_id=extension_id)
+    if source_kind == "zip":
+        return validate_extension_from_zip(source_path or "", extension_id=extension_id)
+    if source_kind == "git":
+        return validate_extension_from_git(repo_url or "", ref=ref, extension_id=extension_id)
+    return {
+        "ok": False,
+        "status": "validation_failed",
+        "errors": [f"Unsupported extension source_type: {source_type}"],
+        "warnings": [],
+    }
+
+
+def install_extension_from_path(
+    source_path: str,
+    extension_id: Optional[str] = None,
+    *,
+    allow_override: bool = False,
+) -> Dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="app_server_ext_install_") as tmp:
+        staged_root, source_meta = _stage_extension_from_path(source_path, Path(tmp))
+        validation = _validate_staged_extension_root(
+            staged_root,
+            expected_extension_id=str(extension_id or "").strip() or None,
+        )
+        return _install_staged_extension(
+            staged_root,
+            validation,
+            source_meta=source_meta,
+            allow_override=allow_override,
+            expect_existing=False,
+        )
+
+
+def install_extension_from_zip(
+    zip_path: str,
+    extension_id: Optional[str] = None,
+    *,
+    allow_override: bool = False,
+) -> Dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="app_server_ext_install_") as tmp:
+        staged_root, source_meta = _stage_extension_from_zip(zip_path, Path(tmp))
+        validation = _validate_staged_extension_root(
+            staged_root,
+            expected_extension_id=str(extension_id or "").strip() or None,
+        )
+        return _install_staged_extension(
+            staged_root,
+            validation,
+            source_meta=source_meta,
+            allow_override=allow_override,
+            expect_existing=False,
+        )
+
+
+def install_extension_from_git(
+    repo_url: str,
+    ref: Optional[str] = None,
+    extension_id: Optional[str] = None,
+    *,
+    allow_override: bool = False,
+) -> Dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="app_server_ext_install_") as tmp:
+        staged_root, source_meta = _stage_extension_from_git(repo_url, ref, Path(tmp))
+        validation = _validate_staged_extension_root(
+            staged_root,
+            expected_extension_id=str(extension_id or "").strip() or None,
+        )
+        return _install_staged_extension(
+            staged_root,
+            validation,
+            source_meta=source_meta,
+            allow_override=allow_override,
+            expect_existing=False,
+        )
+
+
+def install_extension_source(
+    *,
+    source_type: str,
+    source_path: Optional[str] = None,
+    repo_url: Optional[str] = None,
+    ref: Optional[str] = None,
+    extension_id: Optional[str] = None,
+    allow_override: bool = False,
+) -> Dict[str, Any]:
+    source_kind = str(source_type or "").strip().lower()
+    if source_kind == "path":
+        return install_extension_from_path(
+            source_path or "",
+            extension_id=extension_id,
+            allow_override=allow_override,
+        )
+    if source_kind == "zip":
+        return install_extension_from_zip(
+            source_path or "",
+            extension_id=extension_id,
+            allow_override=allow_override,
+        )
+    if source_kind == "git":
+        return install_extension_from_git(
+            repo_url or "",
+            ref=ref,
+            extension_id=extension_id,
+            allow_override=allow_override,
+        )
+    return {
+        "ok": False,
+        "status": "validation_failed",
+        "message": f"Unsupported extension source_type: {source_type}",
+    }
+
+
+def update_extension_from_path(
+    extension_id: str,
+    source_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    current_entry = _user_registry_entry(extension_id)
+    current_source = _registry_install_source(current_entry)
+    path_value = str(source_path or current_source.get("path") or "").strip()
+    if not path_value:
+        return {
+            "ok": False,
+            "status": "validation_failed",
+            "message": f"No path source recorded for extension {extension_id}",
+        }
+    with tempfile.TemporaryDirectory(prefix="app_server_ext_update_") as tmp:
+        staged_root, source_meta = _stage_extension_from_path(path_value, Path(tmp))
+        validation = _validate_staged_extension_root(
+            staged_root,
+            expected_extension_id=extension_id,
+        )
+        return _install_staged_extension(
+            staged_root,
+            validation,
+            source_meta=source_meta,
+            allow_override=False,
+            expect_existing=True,
+        )
+
+
+def update_extension_from_zip(
+    extension_id: str,
+    zip_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    current_entry = _user_registry_entry(extension_id)
+    current_source = _registry_install_source(current_entry)
+    path_value = str(zip_path or current_source.get("path") or "").strip()
+    if not path_value:
+        return {
+            "ok": False,
+            "status": "validation_failed",
+            "message": f"No zip source recorded for extension {extension_id}",
+        }
+    with tempfile.TemporaryDirectory(prefix="app_server_ext_update_") as tmp:
+        staged_root, source_meta = _stage_extension_from_zip(path_value, Path(tmp))
+        validation = _validate_staged_extension_root(
+            staged_root,
+            expected_extension_id=extension_id,
+        )
+        return _install_staged_extension(
+            staged_root,
+            validation,
+            source_meta=source_meta,
+            allow_override=False,
+            expect_existing=True,
+        )
+
+
+def update_extension_from_git(
+    extension_id: str,
+    repo_url: Optional[str] = None,
+    ref: Optional[str] = None,
+) -> Dict[str, Any]:
+    current_entry = _user_registry_entry(extension_id)
+    current_source = _registry_install_source(current_entry)
+    repo_value = str(repo_url or current_source.get("repo_url") or "").strip()
+    ref_value = str(ref or current_source.get("ref") or "").strip() or None
+    if not repo_value:
+        return {
+            "ok": False,
+            "status": "validation_failed",
+            "message": f"No git source recorded for extension {extension_id}",
+        }
+    with tempfile.TemporaryDirectory(prefix="app_server_ext_update_") as tmp:
+        staged_root, source_meta = _stage_extension_from_git(repo_value, ref_value, Path(tmp))
+        validation = _validate_staged_extension_root(
+            staged_root,
+            expected_extension_id=extension_id,
+        )
+        return _install_staged_extension(
+            staged_root,
+            validation,
+            source_meta=source_meta,
+            allow_override=False,
+            expect_existing=True,
+        )
+
+
+def update_extension_source(
+    extension_id: str,
+    *,
+    source_type: Optional[str] = None,
+    source_path: Optional[str] = None,
+    repo_url: Optional[str] = None,
+    ref: Optional[str] = None,
+) -> Dict[str, Any]:
+    current_entry = _user_registry_entry(extension_id)
+    current_source = _registry_install_source(current_entry)
+    source_kind = str(source_type or current_source.get("type") or "").strip().lower()
+    if source_kind == "path":
+        return update_extension_from_path(extension_id, source_path=source_path)
+    if source_kind == "zip":
+        return update_extension_from_zip(extension_id, zip_path=source_path)
+    if source_kind == "git":
+        return update_extension_from_git(extension_id, repo_url=repo_url, ref=ref)
+    return {
+        "ok": False,
+        "status": "validation_failed",
+        "message": f"Unsupported extension source_type for update: {source_type or current_source.get('type')}",
+    }
+
+
+def remove_user_extension(extension_id: str) -> Dict[str, Any]:
+    user_root = _user_extension_root()
+    if user_root is None:
+        return {
+            "ok": False,
+            "status": "error",
+            "message": "User extension root is not configured",
+        }
+    current_entry = _user_registry_entry(extension_id)
+    if current_entry is None:
+        return {
+            "ok": False,
+            "status": "not_found",
+            "message": f"User-installed extension not found: {extension_id}",
+        }
+    folder = current_entry.get("path")
+    if not isinstance(folder, str) or not folder.strip():
+        return {
+            "ok": False,
+            "status": "error",
+            "message": f"Installed extension path missing for {extension_id}",
+        }
+    live_target = user_root / folder
+    if live_target.exists():
+        if not _path_is_within(live_target, user_root):
+            return {
+                "ok": False,
+                "status": "error",
+                "message": f"Refusing to remove path outside user extension root: {live_target}",
+            }
+        if live_target.is_symlink():
+            return {
+                "ok": False,
+                "status": "error",
+                "message": f"Refusing to remove symlinked extension target: {live_target}",
+            }
+        if live_target.is_dir():
+            shutil.rmtree(live_target)
+        else:
+            live_target.unlink()
+    _remove_registry_entry(user_root, extension_id)
+    return {
+        "ok": True,
+        "status": "removed",
+        "extension_id": extension_id,
+        "path": folder,
+    }
 
 
 def is_initialized() -> bool:

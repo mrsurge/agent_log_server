@@ -2,6 +2,19 @@
 
 This document is the contract for installing, updating, and iterating on third-party extensions in the site-package deployment of `agent_log_server`.
 
+## Terminology
+
+- `extension root`
+  - one installable extension package directory, such as `~/.local/share/app_server/extensions/gemini-acp/`
+- `extensions root`
+  - a directory that contains many extension package directories plus a shared `extensions.json`
+
+Examples:
+
+- builtin extensions root: `extensions/`
+- user-installed extensions root: `~/.local/share/app_server/extensions/`
+- shared registry for the user-installed extensions root: `~/.local/share/app_server/extensions/extensions.json`
+
 ## Purpose
 
 - keep builtin repo extensions separate from user-installed extensions
@@ -11,13 +24,13 @@ This document is the contract for installing, updating, and iterating on third-p
 
 ## Canonical Paths
 
-### Builtin extension root
+### Builtin extensions root
 
 - `extensions/`
 
-This is the repo-owned builtin extension root.
+This is the repo-owned builtin extensions root.
 
-### User-installed extension root
+### User-installed extensions root
 
 - `~/.local/share/app_server/extensions/`
 
@@ -60,7 +73,7 @@ Do **not** run third-party extensions directly from the contributor source path.
 
 ## Registry Contract
 
-Each extension root has its own `extensions.json`.
+Each extensions root has its own shared `extensions.json`.
 
 For third-party/user-installed extensions, the live registry is:
 
@@ -86,11 +99,15 @@ The installer should be generic and should not live in `server.py`.
 
 ### Required operations
 
+- `validate(source_type, ...)`
 - `install_from_path(source_path, extension_id=None)`
+- `install_from_zip(zip_path, extension_id=None)`
 - `install_from_git(repo_url, ref=None, extension_id=None)`
 - `update_from_path(extension_id, source_path)`
+- `update_from_zip(extension_id, zip_path)`
 - `update_from_git(extension_id, repo_url=None, ref=None)`
 - `remove_extension(extension_id)`
+- `reload_extensions()`
 
 ### Install flow
 
@@ -98,17 +115,41 @@ The installer should be generic and should not live in `server.py`.
 2. validate required files:
    - `manifest.json`
    - `client.py`
-3. copy or sync into:
+3. validate path-bearing manifest references that must stay inside the extension root:
+   - `agent.shellspec`
+   - `ui.requestCards[*].module`
+4. copy or sync into:
    - `~/.local/share/app_server/extensions/<folder>/`
-4. upsert the registry entry in:
+5. upsert the registry entry in:
    - `~/.local/share/app_server/extensions/extensions.json`
-5. optionally run dependency install/check hooks
-6. restart or reload extension discovery
-7. smoke test
+6. optionally run dependency install/check hooks
+7. restart or reload extension discovery
+8. smoke test
+
+### Source types
+
+The current installer/validator contract is source-type driven:
+
+- `path`
+- `zip`
+- `git`
+
+For `zip`, the accepted layouts are:
+
+- archive root is the extension root
+- archive contains a single enclosing directory that is the extension root
+
+For `git`, the installer stages a clone, optionally checks out a ref, and records the resolved commit SHA.
+
+If `.gitmodules` is present, git installs now materialize submodules before validation:
+
+- local filesystem repos first try to overlay already-materialized local submodule working trees
+- remaining missing submodules fall back to recursive git submodule materialization
+- if recursive materialization fails, the git install/update fails
 
 ### Update flow
 
-1. fetch from the recorded source (`path` or `git`)
+1. fetch from the recorded source (`path`, `zip`, or `git`)
 2. stage into a temp/work area
 3. validate required files
 4. atomically replace the installed target
@@ -118,7 +159,7 @@ The installer should be generic and should not live in `server.py`.
 ### Remove flow
 
 1. remove the registry entry
-2. remove the installed target under the user extension root
+2. remove the installed target under the user-installed extensions root
 3. do **not** delete conversations or cache state automatically
 
 ## Metadata To Persist
@@ -126,12 +167,23 @@ The installer should be generic and should not live in `server.py`.
 If an installer tracks origin metadata, store enough to support future updates:
 
 - source type: `path` or `git`
-- source path or repo URL
+- source path, archive path, or repo URL
 - optional git ref
+- resolved git commit SHA when available
 - installed extension `id`
 - installed folder name
 
-This can live in installer-managed state or registry metadata, but it must remain machine-readable.
+This must remain machine-readable.
+
+Current authority split:
+
+- top-level registry fields (`id`, `name`, `type`, `path`, `enabled`) drive live loader/runtime identity
+- `install_source` is authoritative for later update-source resolution
+- `installer_meta` is authoritative for installer semantics/history such as:
+  - identity authority
+  - path authority
+  - current install snapshot
+  - previous replaced snapshot
 
 ## Validation Loop
 
@@ -145,5 +197,31 @@ The intended iteration loop is:
 
 This workflow applies both to extension development and extension-framework development.
 
+## Manifest schema version compatibility
 
+The contract now has a manifest/package `schema_version`.
 
+Current runtime behavior is intentionally compatibility-friendly:
+
+- if `schema_version` is present, it must be supported by the host
+- if `schema_version` is missing, validation reports a warning and assumes schema version `1`
+
+This keeps older prototype extensions installable while the explicit manifest contract is rolling out.
+
+If `compat` is absent, the current default is:
+
+- no extra compatibility gate beyond supported `schema_version`
+
+If `compat` is present, the current canonical keys are:
+
+- `app_server_manifest_min`
+- `app_server_manifest_max`
+
+## Install folder authority
+
+Current installer behavior is:
+
+- `manifest.id` is authoritative identity
+- first install resolves the live installed folder from sanitized `manifest.id`
+- once installed, registry `path` becomes authoritative for later update/remove operations
+- source folder names are not authoritative

@@ -658,11 +658,73 @@ async def _sio_extension_set_enabled(sid, data):
 
 @socketio_server.on("extension_install", namespace="/appserver")
 async def _sio_extension_install(sid, data):
-    """Mirror of POST /api/extensions/{id}/install"""
+    """Mirror of POST /api/extensions/{id}/install (dependency install)"""
     try:
         payload = data if isinstance(data, dict) else {}
         extension_id = str(payload.get("extension_id") or "").strip()
         return await api_extension_install(extension_id)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("extension_validate_package", namespace="/appserver")
+async def _sio_extension_validate_package(sid, data):
+    """Mirror of POST /api/extensions/validate"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        return await api_extensions_validate(payload)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("extension_install_package", namespace="/appserver")
+async def _sio_extension_install_package(sid, data):
+    """Mirror of POST /api/extensions/install"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        return await api_extensions_install_package(payload)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("extension_update_package", namespace="/appserver")
+async def _sio_extension_update_package(sid, data):
+    """Mirror of POST /api/extensions/{id}/update"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        extension_id = str(payload.get("extension_id") or "").strip()
+        return await api_extension_update_package(extension_id, payload)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("extension_remove_package", namespace="/appserver")
+async def _sio_extension_remove_package(sid, data):
+    """Mirror of DELETE /api/extensions/{id}"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        extension_id = str(payload.get("extension_id") or "").strip()
+        return await api_extension_remove_package(extension_id)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("extensions_reload", namespace="/appserver")
+async def _sio_extensions_reload(sid, data):
+    """Mirror of POST /api/extensions/reload"""
+    try:
+        payload = data if isinstance(data, dict) else {}
+        return await api_extensions_reload(payload)
     except HTTPException as e:
         return _sio_error(e.detail)
     except Exception as e:
@@ -1428,9 +1490,15 @@ def _clear_active_conversation_if_extension_inactive(cfg: Dict[str, Any]) -> boo
         return False
     meta = _load_conversation_meta(safe_id)
     agent = _conversation_agent(meta)
+    if not agent:
+        return False
     info = ext_loader.get_extension_info(agent)
     if not info:
-        return False
+        cfg["conversation_id"] = None
+        cfg["thread_id"] = None
+        cfg["turn_id"] = None
+        cfg["active_view"] = "splash"
+        return True
     if ext_loader.has_extension(agent):
         return False
     cfg["conversation_id"] = None
@@ -1546,6 +1614,89 @@ async def _refresh_extension_runtime_state(extension_ids: Optional[List[str]] = 
             _save_appserver_config(cfg)
 
     return results
+
+
+def _normalize_extension_package_payload(
+    payload: Any,
+    *,
+    allow_missing_source_type: bool = False,
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    source_type = str(payload.get("source_type") or "").strip().lower()
+    if not source_type and not allow_missing_source_type:
+        raise HTTPException(status_code=400, detail="Missing required field: source_type")
+    source_path = payload.get("source_path")
+    if source_path is None:
+        source_path = payload.get("path")
+    repo_url = payload.get("repo_url")
+    if repo_url is None:
+        repo_url = payload.get("url")
+    ref = payload.get("ref")
+    extension_id = payload.get("extension_id")
+    normalized = {
+        "source_type": source_type,
+        "source_path": str(source_path).strip() if isinstance(source_path, str) and source_path.strip() else None,
+        "repo_url": str(repo_url).strip() if isinstance(repo_url, str) and repo_url.strip() else None,
+        "ref": str(ref).strip() if isinstance(ref, str) and ref.strip() else None,
+        "extension_id": str(extension_id).strip() if isinstance(extension_id, str) and extension_id.strip() else None,
+        "allow_override": payload.get("allow_override") is True,
+        "install_dependencies": payload.get("install_dependencies") is True,
+        "force_reload": payload.get("force_reload") is True,
+    }
+    if normalized["source_type"] in {"path", "zip"} and not normalized["source_path"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"source_path is required for source_type={normalized['source_type']}",
+        )
+    if normalized["source_type"] == "git" and not normalized["repo_url"]:
+        raise HTTPException(status_code=400, detail="repo_url is required for source_type=git")
+    return normalized
+
+
+def _extension_package_error_detail(result: Dict[str, Any]) -> str:
+    message = result.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    errors = result.get("errors")
+    if isinstance(errors, list):
+        texts = [str(item).strip() for item in errors if str(item).strip()]
+        if texts:
+            return "; ".join(texts)
+    return "Extension package operation failed"
+
+
+def _raise_extension_package_http_error(result: Dict[str, Any]) -> None:
+    status = str(result.get("status") or "").strip().lower()
+    detail = _extension_package_error_detail(result)
+    status_code = 400
+    if status == "not_found":
+        status_code = 404
+    elif status == "conflict":
+        status_code = 409
+    elif status == "error":
+        status_code = 500
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+async def _reload_extension_registry_runtime(
+    extension_ids: Optional[List[str]] = None,
+    *,
+    force: bool = False,
+) -> Dict[str, Dict[str, Any]]:
+    await asyncio.to_thread(
+        ext_loader.reload_extensions,
+        changed_extension_ids=extension_ids,
+        force=force,
+    )
+    return await _refresh_extension_runtime_state()
+
+
+async def _wait_for_extension_ready_if_active(extension_id: str) -> None:
+    if not ext_loader.has_extension(extension_id):
+        return
+    with suppress(Exception):
+        await ext_loader.wait_extension_ready(extension_id, timeout=60.0)
 
 
 def _load_appserver_config() -> Dict[str, Any]:
@@ -9414,6 +9565,7 @@ async def api_extension_enabled(extension_id: str, payload: Dict[str, Any] = Bod
 
 @app.post("/api/extensions/{extension_id}/install")
 async def api_extension_install(extension_id: str):
+    """Install dependencies for an already-discovered extension."""
     info = ext_loader.get_extension_info(extension_id)
     if not isinstance(info, dict):
         raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
@@ -9436,6 +9588,140 @@ async def api_extension_install(extension_id: str):
             await ext_loader.wait_extension_ready(extension_id, timeout=60.0)
     refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
     return {"ok": bool(result.get("ok")), "result": result, "extension": refreshed}
+
+
+@app.post("/api/extensions/validate")
+async def api_extensions_validate(payload: Dict[str, Any] = Body(...)):
+    normalized = _normalize_extension_package_payload(payload)
+    result = await asyncio.to_thread(
+        ext_loader.validate_extension_source,
+        source_type=normalized["source_type"],
+        source_path=normalized["source_path"],
+        repo_url=normalized["repo_url"],
+        ref=normalized["ref"],
+        extension_id=normalized["extension_id"],
+    )
+    return result
+
+
+@app.post("/api/extensions/install")
+async def api_extensions_install_package(payload: Dict[str, Any] = Body(...)):
+    normalized = _normalize_extension_package_payload(payload)
+    result = await asyncio.to_thread(
+        ext_loader.install_extension_source,
+        source_type=normalized["source_type"],
+        source_path=normalized["source_path"],
+        repo_url=normalized["repo_url"],
+        ref=normalized["ref"],
+        extension_id=normalized["extension_id"],
+        allow_override=normalized["allow_override"],
+    )
+    if not result.get("ok"):
+        _raise_extension_package_http_error(result)
+    extension_id = str(result.get("extension_id") or normalized.get("extension_id") or "").strip()
+    states = await _reload_extension_registry_runtime(
+        [extension_id] if extension_id else None,
+        force=normalized["force_reload"],
+    )
+    dependency_result = None
+    if normalized["install_dependencies"] and extension_id and ext_loader.supports_dependency_install(extension_id):
+        dependency_result = await ext_loader.install_extension_dependencies(extension_id)
+        states = await _refresh_extension_runtime_state()
+    if extension_id:
+        await _wait_for_extension_ready_if_active(extension_id)
+    refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
+    ok = bool(result.get("ok")) and (
+        dependency_result is None or bool(dependency_result.get("ok"))
+    )
+    return {
+        "ok": ok,
+        "result": result,
+        "dependency_install": dependency_result,
+        "extension": refreshed,
+    }
+
+
+@app.post("/api/extensions/{extension_id}/update")
+async def api_extension_update_package(extension_id: str, payload: Dict[str, Any] = Body(...)):
+    normalized = _normalize_extension_package_payload(payload, allow_missing_source_type=True)
+    if normalized["extension_id"] and normalized["extension_id"] != extension_id:
+        raise HTTPException(status_code=400, detail="Payload extension_id does not match route extension_id")
+    result = await asyncio.to_thread(
+        ext_loader.update_extension_source,
+        extension_id,
+        source_type=normalized["source_type"] or None,
+        source_path=normalized["source_path"],
+        repo_url=normalized["repo_url"],
+        ref=normalized["ref"],
+    )
+    if not result.get("ok"):
+        _raise_extension_package_http_error(result)
+    states = await _reload_extension_registry_runtime(
+        [extension_id],
+        force=normalized["force_reload"],
+    )
+    dependency_result = None
+    if normalized["install_dependencies"] and ext_loader.supports_dependency_install(extension_id):
+        dependency_result = await ext_loader.install_extension_dependencies(extension_id)
+        states = await _refresh_extension_runtime_state()
+    await _wait_for_extension_ready_if_active(extension_id)
+    refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
+    ok = bool(result.get("ok")) and (
+        dependency_result is None or bool(dependency_result.get("ok"))
+    )
+    return {
+        "ok": ok,
+        "result": result,
+        "dependency_install": dependency_result,
+        "extension": refreshed,
+    }
+
+
+@app.delete("/api/extensions/{extension_id}")
+async def api_extension_remove_package(extension_id: str):
+    result = await asyncio.to_thread(ext_loader.remove_user_extension, extension_id)
+    if not result.get("ok"):
+        _raise_extension_package_http_error(result)
+    await _reload_extension_registry_runtime([extension_id], force=False)
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        extensions_cfg = _normalize_extensions_config(cfg.get("extensions"))
+        cfg["extensions"] = extensions_cfg
+        changed = extensions_cfg.pop(extension_id, None) is not None
+        if _clear_active_conversation_if_extension_inactive(cfg):
+            changed = True
+        if changed:
+            _save_appserver_config(cfg)
+    return {
+        "ok": True,
+        "result": result,
+        "extensions": ext_loader.list_extensions(),
+    }
+
+
+@app.post("/api/extensions/reload")
+async def api_extensions_reload(payload: Dict[str, Any] = Body(default={})):
+    normalized = _normalize_extension_package_payload(
+        payload if isinstance(payload, dict) else {},
+        allow_missing_source_type=True,
+    )
+    changed_ids: List[str] = []
+    if normalized["extension_id"]:
+        changed_ids.append(normalized["extension_id"])
+    raw_ids = payload.get("extension_ids") if isinstance(payload, dict) else None
+    if isinstance(raw_ids, list):
+        for item in raw_ids:
+            if isinstance(item, str) and item.strip() and item.strip() not in changed_ids:
+                changed_ids.append(item.strip())
+    states = await _reload_extension_registry_runtime(
+        changed_ids or None,
+        force=normalized["force_reload"],
+    )
+    return {
+        "ok": True,
+        "extensions": ext_loader.list_extensions(),
+        "states": states,
+    }
 
 
 @app.get("/api/extensions/{extension_id}")

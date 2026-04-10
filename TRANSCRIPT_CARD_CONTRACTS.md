@@ -29,6 +29,7 @@ These fields are common across live/transcript payloads when applicable:
 - `line`
 - `column`
 - `title`
+- `kind`
 - `tool`
 - `server`
 - `request`
@@ -41,6 +42,9 @@ These fields are common across live/transcript payloads when applicable:
 - `duration_ms`
 - `source`
 - `message`
+- `variant`
+- `action`
+- `assistant_id`
 - `error_type`
 - `status_code`
 - `provider_call_id`
@@ -279,6 +283,90 @@ Render expectations:
 - the frontend may map known generic action ids like `open_splash_settings` to existing shared helpers
 - do not branch on extension identity
 
+### `toast` (live-only)
+
+Use for ephemeral UI notifications that should not appear as transcript rows or normal timeline cards.
+
+Expected fields:
+
+- live event `type: "toast"`
+- `id`
+- `kind`
+- `conversation_id`
+- `message`
+- `turn_id` optional
+- `title` optional
+- `variant` optional
+- `assistant_id` optional
+- `duration_ms` optional
+- `reply_enabled` optional
+- `reply_label` optional
+- `expanded_max_lines` optional
+- optional `action`
+  - `action.id`
+  - `action.label`
+
+Turn-summary policy:
+
+- for end-of-turn assistant-message toasts, use `kind: "turn_summary"`
+- `message` should be a normalized plain-text summary derived from the last top-level assistant message that ended the turn
+- the toast event supplements, but does not replace, the underlying assistant/turn-complete live events
+- when reply UX is enabled for this kind, use `reply_enabled: true`
+- `reply_label` is optional; if omitted, the frontend may use a generic pencil/edit affordance such as `✏️`
+- `expanded_max_lines` should be treated as a bounded display hint; for the current planned turn-summary reply UX, the default target is 20 lines
+
+Reply-expansion policy:
+
+- a reply-capable toast begins as ephemeral, compact, and truncated
+- activating the reply affordance expands it into a more persistent toast/card surface for that same toast `id`
+- the expanded surface is still a live-only UI object, not a transcript row
+- the expanded surface owns a reply text field plus generic controls for:
+  - send reply
+  - go to conversation
+  - dismiss
+- reply submission targets the toast's `conversation_id`; extensions do not invent a second routing key for this UX
+
+Reply submit / response contract:
+
+- the preferred implementation is to reuse the existing generic conversation send-message transport rather than inventing an extension-specific reply RPC
+- if the toast runtime carries explicit reply metadata alongside that shared send path, the request payload should use this strict shape:
+  - `conversation_id`
+  - `toast_id`
+  - `kind`
+  - `text`
+  - `turn_id` optional
+  - `assistant_id` optional
+- if a dedicated live reply-submit request/response envelope is introduced later, it must stay generic and use the same canonical fields plus an optional transport-level `request_id`
+
+Reply response / ack expectations:
+
+- a successful reply-submit acknowledgement should echo:
+  - `ok`
+  - `conversation_id`
+  - `toast_id`
+  - optional `request_id`
+- an unsuccessful acknowledgement should echo:
+  - `ok: false`
+  - `conversation_id`
+  - `toast_id`
+  - optional `request_id`
+  - `error`
+- the ack is transport/UI state only; it does not replace the normal user-message send/result path or invent a transcript row of its own
+- the actual persisted conversation result still comes from the normal generic send-message flow
+
+Render expectations:
+
+- use a shared toast runtime, not a transcript-row or timeline-card renderer
+- do not persist toast events as transcript history
+- do not update conversation previews from `toast`
+- dedupe or replace by stable `id`
+- keep actions generic and data-driven
+- do not branch on extension identity
+- when `reply_enabled` is true, the frontend should render reply/expand behavior generically from the shared contract instead of per-extension logic
+- reuse the existing shared frontend mobile/user-agent detection value; do not introduce a second mobile check just for toasts
+- on mobile, send reply only via the explicit send button
+- on non-mobile/desktop, Enter submits and Shift+Enter inserts a newline
+
 ### Internal / hidden transcript data
 
 Use this for transcript rows or live debug events that must persist for forensic/debug reasons but must stay out of the normal conversation UI.
@@ -438,6 +526,7 @@ Render expectations:
 - Satisfy generic token/context contracts in the backend/router layer rather than relying on frontend extension-specific recovery logic.
 - Persist internal debug rows with `internal: true` / `visibility: "internal"` when durable forensics are needed, and keep them out of normal visible contracts.
 - Do not emit or record empty visible message cards for upstream control envelopes that carry no user-visible content.
+- When emitting a live-only `toast`, continue to emit the underlying live/transcript semantic events that actually describe the turn or message outcome.
 
 ## Frontend responsibilities
 
@@ -446,6 +535,7 @@ Render expectations:
 - Prefer canonical tool `request` / `response` fields and fall back to legacy fields for compatibility.
 - Do not branch on extension identity when a generic contract exists.
 - Hide internal-tagged live/transcript rows by default; only explicit debug tooling should surface them.
+- Treat `toast` as live-only UI state; do not synthesize transcript rows or conversation-preview updates from it.
 
 ## Priority order for routers
 
