@@ -6,6 +6,7 @@ from the installed binary plus the generic extension hook surface.
 """
 
 import asyncio
+import copy
 import contextlib
 import hashlib
 import importlib
@@ -324,6 +325,217 @@ def _build_auth_status_message(
     if login_pending:
         return "ChatGPT login pending. Finish sign-in in the opened browser."
     return "OpenAI auth required. Sign in with ChatGPT from splash settings."
+
+
+def _settings_info_tone_from_auth(auth_status: Dict[str, Any]) -> str:
+    status = str(auth_status.get("status") or "").strip().lower()
+    if auth_status.get("ok") is False or status == "error":
+        return "error"
+    if status in {"auth_required", "login_pending"}:
+        return "warning"
+    return "success"
+
+
+def _settings_info_tone_from_remaining(remaining_percent: Optional[float]) -> str:
+    if remaining_percent is None:
+        return "success"
+    if remaining_percent <= 10.0:
+        return "error"
+    if remaining_percent <= 25.0:
+        return "warning"
+    return "success"
+
+
+def _format_settings_timestamp(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return ""
+    with contextlib.suppress(Exception):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    return ""
+
+
+def _usage_info_unavailable(
+    message: str,
+    *,
+    tone: str = "warning",
+    detail: str = "",
+) -> Dict[str, Any]:
+    return {
+        "text": message,
+        "detail": detail,
+        "tone": tone,
+    }
+
+
+def _rate_limit_window_detail(label: str, raw_window: Any) -> tuple[Optional[float], Optional[str]]:
+    if not isinstance(raw_window, dict):
+        return None, None
+    used_percent = raw_window.get("usedPercent")
+    if isinstance(used_percent, bool) or not isinstance(used_percent, (int, float)):
+        return None, None
+    remaining_percent = max(0.0, min(100.0, 100.0 - float(used_percent)))
+    parts = [f"{label}: {remaining_percent:.0f}% remaining"]
+    window_duration = raw_window.get("windowDurationMins")
+    if isinstance(window_duration, (int, float)) and not isinstance(window_duration, bool):
+        parts.append(f"{float(window_duration):g} min window")
+    reset_text = _format_settings_timestamp(raw_window.get("resetsAt"))
+    if reset_text:
+        parts.append(f"resets {reset_text}")
+    return remaining_percent, "  •  ".join(parts)
+
+
+def _build_rate_limit_lines(snapshot: Dict[str, Any]) -> tuple[List[str], List[float]]:
+    lines: List[str] = []
+    remaining_values: List[float] = []
+    limit_name = snapshot.get("limitName") if isinstance(snapshot.get("limitName"), str) else None
+    limit_id = snapshot.get("limitId") if isinstance(snapshot.get("limitId"), str) else None
+    snapshot_prefix = (limit_name or limit_id or "").strip()
+    for label, key in (("Primary", "primary"), ("Secondary", "secondary")):
+        remaining_percent, detail = _rate_limit_window_detail(label, snapshot.get(key))
+        if detail:
+            if snapshot_prefix:
+                lines.append(f"{snapshot_prefix}: {detail}")
+                snapshot_prefix = ""
+            else:
+                lines.append(detail)
+        if remaining_percent is not None:
+            remaining_values.append(remaining_percent)
+
+    credits = snapshot.get("credits")
+    if isinstance(credits, dict):
+        if credits.get("unlimited") is True:
+            lines.append("Credits: unlimited")
+        elif credits.get("hasCredits") is True:
+            balance = credits.get("balance")
+            if isinstance(balance, str) and balance.strip():
+                lines.append(f"Credits balance: {balance.strip()}")
+            else:
+                lines.append("Credits available")
+    return lines, remaining_values
+
+
+async def get_usage_info(
+    extension_id: str,
+    *,
+    auth_status: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    resolved_auth_status = auth_status or await get_auth_status(extension_id, refresh=False)
+    if resolved_auth_status.get("ok") is False:
+        return _usage_info_unavailable(
+            resolved_auth_status.get("message") or "Failed to read Codex auth status.",
+            tone="error",
+        )
+    status = str(resolved_auth_status.get("status") or "").strip().lower()
+    if status == "login_pending":
+        return _usage_info_unavailable(
+            "Usage unavailable while ChatGPT login is pending.",
+            tone="warning",
+            detail="Finish sign-in in the opened browser, then reopen settings.",
+        )
+    if status == "auth_required":
+        return _usage_info_unavailable(
+            "Usage unavailable until ChatGPT sign-in is complete.",
+            tone="warning",
+        )
+    if not resolved_auth_status.get("requires_openai_auth"):
+        return _usage_info_unavailable(
+            "Usage info is not required for the current provider.",
+            tone="success",
+        )
+    if resolved_auth_status.get("account_type") == "apiKey":
+        return _usage_info_unavailable(
+            "Usage info is unavailable for API key authentication.",
+            tone="success",
+            detail="ChatGPT rate-limit snapshots are only available for ChatGPT-authenticated accounts.",
+        )
+
+    try:
+        transport = await _ensure_transport_ready()
+        raw = await transport.rpc_request(
+            "account/rateLimits/read",
+            timeout=15.0,
+        )
+    except Exception as exc:
+        return _usage_info_unavailable(
+            f"Failed to read Codex usage info: {exc}",
+            tone="error",
+        )
+
+    payload = raw if isinstance(raw, dict) else {}
+    snapshots: List[Dict[str, Any]] = []
+    rate_limits_by_id = payload.get("rateLimitsByLimitId")
+    if isinstance(rate_limits_by_id, dict):
+        for limit_id, value in sorted(rate_limits_by_id.items()):
+            if not isinstance(value, dict):
+                continue
+            snapshot = dict(value)
+            if not isinstance(snapshot.get("limitId"), str) and isinstance(limit_id, str):
+                snapshot["limitId"] = limit_id
+            snapshots.append(snapshot)
+    legacy_snapshot = payload.get("rateLimits")
+    if not snapshots and isinstance(legacy_snapshot, dict):
+        snapshots.append(dict(legacy_snapshot))
+    if not snapshots:
+        return _usage_info_unavailable(
+            "Usage info unavailable.",
+            tone="warning",
+            detail="No rate-limit snapshots were returned.",
+        )
+
+    lines: List[str] = []
+    remaining_values: List[float] = []
+    for snapshot in snapshots:
+        snapshot_lines, snapshot_remaining = _build_rate_limit_lines(snapshot)
+        lines.extend(snapshot_lines)
+        remaining_values.extend(snapshot_remaining)
+    if not lines:
+        return _usage_info_unavailable(
+            "Usage info unavailable.",
+            tone="warning",
+            detail="No rate-limit window details were returned.",
+        )
+
+    minimum_remaining = min(remaining_values) if remaining_values else None
+    text = (
+        f"Usage remaining: {minimum_remaining:.0f}%"
+        if minimum_remaining is not None
+        else "Usage details available."
+    )
+    return {
+        "text": text,
+        "detail": "\n".join(lines),
+        "tone": _settings_info_tone_from_remaining(minimum_remaining),
+    }
+
+
+def _build_information_section_fields(
+    auth_status: Dict[str, Any],
+    usage_info: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            "id": "information_section",
+            "type": "section",
+            "label": "Information",
+            "description": "Live provider account and usage data.",
+        },
+        {
+            "id": "auth_information",
+            "type": "info",
+            "label": "Account",
+            "text": auth_status.get("message") or "Account status unavailable.",
+            "detail": auth_status.get("detail") or "",
+            "tone": _settings_info_tone_from_auth(auth_status),
+        },
+        {
+            "id": "usage_information",
+            "type": "info",
+            "label": "Usage",
+            "text": usage_info.get("text") or "Usage info unavailable.",
+            "detail": usage_info.get("detail") or "",
+            "tone": usage_info.get("tone") or "warning",
+        },
+    ]
 
 
 def _normalize_auth_status(
@@ -936,7 +1148,15 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
 
 async def get_settings_schema(extension_id: str) -> Dict[str, Any]:
     protocol = await get_runtime_protocol()
-    return build_settings_schema(protocol, extension_id)
+    schema = copy.deepcopy(build_settings_schema(protocol, extension_id))
+    auth_status = await get_auth_status(extension_id, refresh=False)
+    usage_info = await get_usage_info(extension_id, auth_status=auth_status)
+    fields = schema.get("fields")
+    schema["fields"] = _build_information_section_fields(auth_status, usage_info) + (
+        list(fields) if isinstance(fields, list) else []
+    )
+    schema["cache"] = "none"
+    return schema
 
 
 async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:

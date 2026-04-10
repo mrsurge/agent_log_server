@@ -9,6 +9,7 @@ export function bindBootInitFlow(ctx) {
     resetWsReady,
     connectWS,
     waitForWs,
+    recheckSidebarConnection,
     fetchHostUi,
     fetchAppConfig,
     bindPickerFilter,
@@ -77,6 +78,7 @@ export function bindBootInitFlow(ctx) {
         ensureActivityRow();
         return;
       }
+      await recheckSidebarConnection?.();
       await fetchHostUi();
       await fetchAppConfig();
       await fetchConversation();

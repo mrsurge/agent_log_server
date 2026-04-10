@@ -13,6 +13,7 @@ export function bindConversationDrawer(ctx) {
     getConversationPreview: ctx.getConversationPreview,
     selectConversation: (...args) => actionsRef?.selectConversation?.(...args),
     selectConversationWithView: (...args) => actionsRef?.selectConversationWithView?.(...args),
+    setConversationPins: (...args) => actionsRef?.setConversationPins?.(...args),
     openSettingsModal: ctx.openSettingsModal,
     deleteConversation: (...args) => actionsRef?.deleteConversation?.(...args),
     documentRef: ctx.documentRef,

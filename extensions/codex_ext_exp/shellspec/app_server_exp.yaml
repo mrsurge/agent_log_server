@@ -2,6 +2,8 @@ version: "1"
 shells:
   app_server_exp:
     backend: pipe
+    pipe:
+      mode: native_pipe_testing
     cwd: ${CWD}
     subgroups: ["codex_agent", "app_server", "codex_exp"]
     inspect_hints:
@@ -13,6 +15,8 @@ shells:
       app: "codex-app-server-exp"
   app_server_exp_observed:
     backend: pipe
+    pipe:
+      mode: native_pipe_testing
     cwd: ${CWD}
     subgroups: ["codex_agent", "app_server", "codex_exp", "observed"]
     inspect_hints:

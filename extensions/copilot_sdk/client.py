@@ -1279,6 +1279,159 @@ def _runtime_option_descriptor(
     }
 
 
+def _json_safe(value: Any) -> Any:
+    if is_dataclass(value):
+        return _json_safe(asdict(value))
+    if isinstance(value, Enum):
+        return value.value
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "__dict__"):
+        return {
+            k: _json_safe(v)
+            for k, v in vars(value).items()
+            if not str(k).startswith("_")
+        }
+    return str(value)
+
+
+def _load_settings_schema_template() -> Dict[str, Any]:
+    schema_path = Path(__file__).with_name("settings_schema.json")
+    with schema_path.open("r", encoding="utf-8") as handle:
+        loaded = json.load(handle)
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _format_settings_datetime(value: Optional[str]) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    text = value.strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _quota_info_unavailable(
+    message: str,
+    *,
+    tone: str = "warning",
+    detail: str = "",
+) -> Dict[str, Any]:
+    return {
+        "text": message,
+        "detail": detail,
+        "tone": tone,
+    }
+
+
+def _quota_tone_from_remaining(remaining_percentage: Optional[float]) -> str:
+    if remaining_percentage is None:
+        return "success"
+    if remaining_percentage <= 10.0:
+        return "error"
+    if remaining_percentage <= 25.0:
+        return "warning"
+    return "success"
+
+
+def _format_quota_info(raw: Any) -> Dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    snapshots_raw = payload.get("quota_snapshots")
+    if not isinstance(snapshots_raw, dict):
+        snapshots_raw = payload.get("quotaSnapshots")
+    if not isinstance(snapshots_raw, dict) or not snapshots_raw:
+        return _quota_info_unavailable(
+            "Usage info unavailable.",
+            tone="warning",
+            detail="No quota snapshots were returned.",
+        )
+
+    lines: List[str] = []
+    remaining_values: List[float] = []
+    for quota_name, raw_snapshot in sorted(snapshots_raw.items()):
+        snapshot = _json_safe(raw_snapshot)
+        if not isinstance(snapshot, dict):
+            continue
+        remaining_percentage = snapshot.get("remaining_percentage")
+        if remaining_percentage is None:
+            remaining_percentage = snapshot.get("remainingPercentage")
+        if isinstance(remaining_percentage, bool) or not isinstance(remaining_percentage, (int, float)):
+            continue
+        remaining = max(0.0, min(100.0, float(remaining_percentage)))
+        remaining_values.append(remaining)
+        label = str(quota_name or "quota").replace("_", " ").title()
+        parts = [f"{label}: {remaining:.0f}% remaining"]
+
+        used_requests = snapshot.get("used_requests")
+        if used_requests is None:
+            used_requests = snapshot.get("usedRequests")
+        entitlement_requests = snapshot.get("entitlement_requests")
+        if entitlement_requests is None:
+            entitlement_requests = snapshot.get("entitlementRequests")
+        if isinstance(used_requests, (int, float)) and not isinstance(used_requests, bool):
+            if isinstance(entitlement_requests, (int, float)) and not isinstance(entitlement_requests, bool) and entitlement_requests > 0:
+                parts.append(f"{float(used_requests):g}/{float(entitlement_requests):g} used")
+            else:
+                parts.append(f"{float(used_requests):g} used")
+
+        overage = snapshot.get("overage")
+        if isinstance(overage, (int, float)) and not isinstance(overage, bool) and float(overage) > 0:
+            parts.append(f"{float(overage):g} overage")
+        if snapshot.get("overage_allowed_with_exhausted_quota") is True or snapshot.get("overageAllowedWithExhaustedQuota") is True:
+            parts.append("overage allowed")
+
+        reset_text = _format_settings_datetime(snapshot.get("reset_date") or snapshot.get("resetDate"))
+        if reset_text:
+            parts.append(f"resets {reset_text}")
+        lines.append("  •  ".join(parts))
+
+    if not lines:
+        return _quota_info_unavailable(
+            "Usage info unavailable.",
+            tone="warning",
+            detail="No usable quota snapshots were returned.",
+        )
+
+    minimum_remaining = min(remaining_values) if remaining_values else None
+    return {
+        "text": (
+            f"Usage remaining: {minimum_remaining:.0f}%"
+            if minimum_remaining is not None
+            else "Usage details available."
+        ),
+        "detail": "\n".join(lines),
+        "tone": _quota_tone_from_remaining(minimum_remaining),
+    }
+
+
+async def _get_quota_info() -> Dict[str, Any]:
+    try:
+        client = await _ensure_client()
+        rpc = getattr(client, "_rpc", None)
+        account_api = getattr(rpc, "account", None)
+        get_quota = getattr(account_api, "get_quota", None)
+        if not callable(get_quota):
+            return _quota_info_unavailable(
+                "Usage info unavailable in this Copilot SDK build.",
+                tone="warning",
+            )
+        quota_result = await get_quota(timeout=15.0)
+    except Exception as exc:
+        return _quota_info_unavailable(
+            f"Failed to read Copilot usage info: {exc}",
+            tone="error",
+        )
+    return _format_quota_info(_json_safe(quota_result))
+
+
 async def get_runtime_options(
     extension_id: str,
     conversation_id: Optional[str] = None,
@@ -1319,6 +1472,31 @@ async def get_runtime_options(
             _DEFAULT_MODE,
         ),
     }
+
+
+async def get_settings_schema(extension_id: str) -> Dict[str, Any]:
+    schema = _load_settings_schema_template()
+    fields = schema.get("fields")
+    usage_info = await _get_quota_info()
+    schema["fields"] = [
+        {
+            "id": "information_section",
+            "type": "section",
+            "label": "Information",
+            "description": "Live provider usage data from the active Copilot runtime.",
+        },
+        {
+            "id": "usage_information",
+            "type": "info",
+            "label": "Usage",
+            "text": usage_info.get("text") or "Usage info unavailable.",
+            "detail": usage_info.get("detail") or "",
+            "tone": usage_info.get("tone") or "warning",
+        },
+        *(list(fields) if isinstance(fields, list) else []),
+    ]
+    schema["cache"] = "none"
+    return schema
 
 
 async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
@@ -2274,27 +2452,15 @@ async def list_models() -> List[Dict[str, Any]]:
     try:
         client = await _ensure_client()
         models = await client.list_models()
-        def _safe(obj):
-            """Recursively convert SDK objects to JSON-safe dicts/primitives."""
-            if obj is None or isinstance(obj, (str, int, float, bool)):
-                return obj
-            if isinstance(obj, dict):
-                return {k: _safe(v) for k, v in obj.items()}
-            if isinstance(obj, (list, tuple)):
-                return [_safe(v) for v in obj]
-            if hasattr(obj, "__dict__"):
-                return {k: _safe(v) for k, v in vars(obj).items() if not k.startswith("_")}
-            return str(obj)
-
         return [
             {
                 "id": m.id,
                 "name": getattr(m, "name", m.id),
-                "billing": _safe(getattr(m, "billing", None)),
-                "capabilities": _safe(getattr(m, "capabilities", None)),
-                "policy": _safe(getattr(m, "policy", None)),
-                "supported_reasoning_efforts": _safe(getattr(m, "supported_reasoning_efforts", None)),
-                "default_reasoning_effort": _safe(getattr(m, "default_reasoning_effort", None)),
+                "billing": _json_safe(getattr(m, "billing", None)),
+                "capabilities": _json_safe(getattr(m, "capabilities", None)),
+                "policy": _json_safe(getattr(m, "policy", None)),
+                "supported_reasoning_efforts": _json_safe(getattr(m, "supported_reasoning_efforts", None)),
+                "default_reasoning_effort": _json_safe(getattr(m, "default_reasoning_effort", None)),
             }
             for m in models
         ]

@@ -323,7 +323,19 @@ Supported field patterns already used in the repo:
 | `session_picker` | Copilot + Codex port-in flows | Browse and bind existing backend sessions |
 | `textarea` | developer instructions | Multi-line prompt/config input |
 | `json` | MCP server config | Structured config input |
+| `section` | shared schema modal | Read-only heading/description block |
+| `info` | live provider/account/quota panels | Read-only information row |
+| `cache: "none"` | live dynamic settings schemas | Refetch schema on modal open instead of using the frontend schema cache |
 | runtime-generated schema | Codex app-server | Build UI fields directly from backend protocol schema |
+
+Extension-owned settings are SSOT. The shared modal renderer must not depend on hidden builtin-Codex fields for extension save/hydrate behavior; the extension schema payload is the source of truth.
+
+Dynamic schemas may also wrap a static template. Current examples:
+
+- `codex-ext` / `codex-ext-exp` prepend live account + rate-limit information blocks
+- `copilot-sdk` prepends live quota information blocks in front of a base schema template
+
+Dynamic-source fields are resolved over the shared Socket.IO contract. If a TE2 relay/proxy sits in front of the appserver, it must explicitly forward the matching events (for example `get_extension_models` or `get_runtime_options`) instead of adding HTTP fallback logic.
 
 Special case: legacy `codex` still returns `{useBuiltin: true}` from `/api/extensions/codex/settings_schema`.
 
@@ -336,8 +348,8 @@ Special case: legacy `codex` still returns `{useBuiltin: true}` from `/api/exten
 | File | Purpose |
 |------|---------|
 | `extensions/copilot_sdk/manifest.json` | extension metadata/capabilities |
-| `extensions/copilot_sdk/settings_schema.json` | static schema for session picker, model, policies, MCP, developer instructions |
-| `extensions/copilot_sdk/client.py` | client lifecycle, session init/resume/send, approvals, transcript hydration |
+| `extensions/copilot_sdk/settings_schema.json` | base schema template for session picker, model, policies, MCP, developer instructions |
+| `extensions/copilot_sdk/client.py` | client lifecycle, session init/resume/send, approvals, transcript hydration, and dynamic settings-schema augmentation for live usage info |
 | `extensions/copilot_sdk/router.py` | SDK `SessionEvent` → internal event/transcript translation |
 
 ### Process model
@@ -450,11 +462,15 @@ At runtime it:
    - `codex app-server generate-json-schema --out <cache_dir>`
 4. loads the generated bundle
 5. builds in-memory registries from:
-   - `ClientRequest`
+   - `ClientRequest` request params
+   - response definitions in the schema bundle
+   - `ServerRequest`
    - `ServerNotification`
    - `EventMsg`
 
 The stable runtime protocol/cache logic lives in `extensions/codex_ext/runtime_protocol.py`. The experimental fork mirrors the same pattern in `extensions/codex_ext_exp/runtime_protocol.py`.
+
+Response registries are keyed by lowercase method names. Manual overrides should only exist where the schema naming and method naming are genuinely semantically different; they should not be used as a lazy substitute for building the registry from the schema bundle.
 
 ### What the runtime schema is used for
 
@@ -481,6 +497,11 @@ The stable runtime protocol/cache logic lives in `extensions/codex_ext/runtime_p
 
 - **runtime signature tracking**
   - thread-level runtime settings are hashed from the protocol-shaped payload, not from a handwritten config subset
+
+- **response decoding**
+  - JSON-RPC results are validated/decoded through the runtime response registry
+  - response lookups are keyed by lowercase method names
+  - the schema bundle / TS bindings define the semantics and typing for those responses
 
 - **event routing**
   - the router checks runtime-known notification and event types before translating them
@@ -535,6 +556,10 @@ Unlike the Copilot SDK extension, Codex app-server does use `framework_shells`.
 - `codex-ext-exp` starts/adopts a dedicated shell labeled `app-server:codex-experimental` and uses `extensions/codex_ext_exp/shellspec/app_server_exp.yaml#app_server_exp_observed`
 - both paths use observed shellspec entries (`app_server_observed` / `app_server_exp_observed`) for framework-shell observability
 - both observed shellspecs now run the real app-server binary directly and rely on framework-shells pipe stdout logging/subscriptions for observability instead of stderr mirroring
+- pipe-backed consumers must treat framework-shells as the owner of stdout consumption:
+  - reads go through `subscribe_output()` / `subscribe_output_bytes()`
+  - stdin writes go through `write_to_pipe()`
+  - direct `state.process.stdout.read(...)` loops are invalid because they race framework-shells' own tee/log readers
 - both handlers harden startup by restarting locally when an adopted shell lacks a live stdin pipe
 - `codex-ext-exp` keeps a distinct transport label/shellspec so it can point at the patched `codex-app-server` binary without process adoption conflicts; see `~/downloads/codex/codex-rs/docs/patched_app_server.md` for the patched build details
 
@@ -545,9 +570,11 @@ What works now:
 - runtime schema generation from the installed binary
 - versioned schema cache
 - dynamic schema-driven settings
+- live provider information blocks in the schema-driven settings modal
 - runtime-schema-backed reasoning summary setting persisted through the shared settings/meta flow
 - session picker / new session from port-in
 - request building from runtime schema
+- response decoding from the runtime schema registry
 - extension-owned app-server transport
 - real two-way message flow
 - interrupt support
@@ -620,6 +647,8 @@ Use this to store callbacks and initialize any shared backend state.
 
 - choose **static `settings_schema.json`** when the backend config surface is stable
 - choose **`get_settings_schema()`** when the backend protocol is runtime-generated or version-dependent
+- dynamic schema hooks may also wrap a static template so they can prepend live read-only `section` / `info` fields
+- use `cache: "none"` when the schema includes live provider/account/quota data that must refresh on each modal open
 - if the extension participates in shared footer/runtime quick controls, expose that through schema metadata (`runtime_option`) 
 - for plan/collaboration mode, expose a normal enumerated schema field (for example `mode`) and set the capability in the manifest
 
@@ -676,6 +705,7 @@ Recommended checklist:
 
 - extension appears in `/api/extensions`
 - settings schema loads correctly
+- if schema is dynamic/live, repeated opens refetch and show fresh data when the schema declares `cache: "none"`
 - model list loads correctly
 - first message creates or resumes backend state
 - session picker works if implemented

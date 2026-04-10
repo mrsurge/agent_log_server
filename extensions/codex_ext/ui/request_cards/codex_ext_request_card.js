@@ -384,15 +384,21 @@ function renderUserInputCard(body, event, _schema, helpers) {
 
   const buildAnswers = (overrides = {}) => {
     const answers = {};
-    body.querySelectorAll('[data-question-id]').forEach((inputEl) => {
-      const questionId = inputEl.getAttribute('data-question-id') || '';
+    const assignAnswers = (questionId, raw) => {
       if (!questionId) return;
-      const override = overrides[questionId];
-      const raw = override !== undefined ? override : ('value' in inputEl ? inputEl.value : '');
       const values = Array.isArray(raw) ? raw : splitAnswers(raw);
       if (values.length) {
         answers[questionId] = { answers: values };
       }
+    };
+    Object.entries(overrides).forEach(([questionId, raw]) => {
+      assignAnswers(questionId, raw);
+    });
+    body.querySelectorAll('[data-question-id]').forEach((inputEl) => {
+      const questionId = inputEl.getAttribute('data-question-id') || '';
+      if (!questionId || Object.prototype.hasOwnProperty.call(overrides, questionId)) return;
+      const raw = 'value' in inputEl ? inputEl.value : '';
+      assignAnswers(questionId, raw);
     });
     return answers;
   };

@@ -245,7 +245,7 @@ export function bindApprovalUi(ctx) {
     container.append(row);
   }
 
-  async function respondApproval(requestId, result) {
+  async function respondApproval(requestId, result, options = {}) {
     if (requestId === null || requestId === undefined) return;
     const resultPayload = typeof result === 'string'
       ? { decision: result }
@@ -261,14 +261,19 @@ export function bindApprovalUi(ctx) {
       payload.decision = resultPayload.decision;
     }
     try {
-      return await sioCall('approval_response', payload);
+      const sioOptions = {};
+      if (Object.prototype.hasOwnProperty.call(options, 'timeoutMs')) {
+        sioOptions.timeoutMs = options.timeoutMs;
+      }
+      return await sioCall('approval_response', payload, sioOptions);
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error || 'approval failed') };
     }
   }
 
   async function submitApproval(requestId, result, meta = {}) {
-    const response = await respondApproval(requestId, result);
+    const timeoutMs = meta?.requestMethod === 'agent-pty/ask-user' ? null : undefined;
+    const response = await respondApproval(requestId, result, { timeoutMs });
     if (!response || response.ok === false) return { ok: false, response };
     if (response?.handoff_event && typeof response.handoff_event === 'object') {
       handoffApproval(response.handoff_event, {

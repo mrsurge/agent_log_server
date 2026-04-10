@@ -190,6 +190,12 @@ export function createConversationDrawerActions(ctx) {
     syncMiniDrawerUi();
   }
 
+  async function setConversationPins(pinnedConversationIds) {
+    if (!Array.isArray(pinnedConversationIds)) return;
+    await sioCall('conversation_pins_update', { pinned_conversations: pinnedConversationIds });
+    await fetchConversations();
+  }
+
   function bindHeaderHandlers() {
     conversationCreateBtn?.addEventListener('click', async () => {
       setState({ pendingNewConversation: true });
@@ -270,6 +276,7 @@ export function createConversationDrawerActions(ctx) {
     selectConversationWithView,
     createConversation,
     deleteConversation,
+    setConversationPins,
     bindHeaderHandlers,
     bindSplashTabHandlers,
   };

@@ -275,6 +275,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let composerLastResizeKey = null;
   let draftSaveTimer = null;
   let explicitMentionSaveTimer = null;
+  let lastComposerSelectionRange = null;
+  let lastComposerSelectionConversationId = null;
   let lastDraftHash = null;
   let draftDirty = false;
   let applyingDraft = false;
@@ -486,6 +488,90 @@ document.addEventListener('DOMContentLoaded', () => {
       explicitMentionSaveTimer = null;
       void persistDraftNow();
     }, 0);
+  }
+
+  function clearStoredComposerSelection() {
+    lastComposerSelectionRange = null;
+    lastComposerSelectionConversationId = null;
+  }
+
+  function isPromptRangeNode(node) {
+    if (!promptEl || !node) return false;
+    try {
+      return node === promptEl || promptEl.contains(node);
+    } catch {
+      return false;
+    }
+  }
+
+  function rememberComposerSelection() {
+    if (!promptEl || applyingDraft) return false;
+    const selection = window.getSelection?.();
+    if (!selection || selection.rangeCount < 1) return false;
+    const range = selection.getRangeAt(0);
+    if (!range) return false;
+    if (!isPromptRangeNode(range.commonAncestorContainer) || !isPromptRangeNode(range.startContainer) || !isPromptRangeNode(range.endContainer)) {
+      return false;
+    }
+    try {
+      lastComposerSelectionRange = range.cloneRange();
+      lastComposerSelectionConversationId = conversationMeta?.conversation_id || null;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function getStoredComposerSelectionRange() {
+    if (!lastComposerSelectionRange) return null;
+    if ((conversationMeta?.conversation_id || null) !== lastComposerSelectionConversationId) {
+      clearStoredComposerSelection();
+      return null;
+    }
+    try {
+      if (!isPromptRangeNode(lastComposerSelectionRange.startContainer) || !isPromptRangeNode(lastComposerSelectionRange.endContainer)) {
+        clearStoredComposerSelection();
+        return null;
+      }
+      return lastComposerSelectionRange.cloneRange();
+    } catch {
+      clearStoredComposerSelection();
+      return null;
+    }
+  }
+
+  function resolveComposerInsertTarget() {
+    const selection = window.getSelection?.();
+    if (selection && selection.rangeCount > 0) {
+      const liveRange = selection.getRangeAt(0);
+      if (liveRange && isPromptRangeNode(liveRange.commonAncestorContainer) && isPromptRangeNode(liveRange.startContainer) && isPromptRangeNode(liveRange.endContainer)) {
+        return { selection, range: liveRange };
+      }
+    }
+    const storedRange = getStoredComposerSelectionRange();
+    if (!storedRange) return null;
+    promptEl?.focus();
+    const restoredSelection = window.getSelection?.();
+    if (!restoredSelection) return null;
+    try {
+      restoredSelection.removeAllRanges();
+      restoredSelection.addRange(storedRange);
+      return { selection: restoredSelection, range: restoredSelection.getRangeAt(0) };
+    } catch {
+      clearStoredComposerSelection();
+      return null;
+    }
+  }
+
+  function bindComposerSelectionTracking() {
+    if (!promptEl) return;
+    const remember = () => { rememberComposerSelection(); };
+    document.addEventListener('selectionchange', remember);
+    promptEl.addEventListener('input', remember);
+    promptEl.addEventListener('keyup', remember);
+    promptEl.addEventListener('mouseup', remember);
+    promptEl.addEventListener('focus', remember);
+    mentionPillEl?.addEventListener('pointerdown', remember);
   }
 
   function restoreDraft() {
@@ -1480,6 +1566,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!promptEl) return;
     applyingDraft = true;
     try {
+      clearStoredComposerSelection();
       promptEl.innerHTML = '';
       const str = String(text || '');
       let cursor = 0;
@@ -1596,6 +1683,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function clearPrompt() {
     if (!promptEl) return;
     promptEl.innerHTML = '';
+    clearStoredComposerSelection();
   }
 
   function normalizeMentions() {
@@ -1611,6 +1699,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const sel = window.getSelection();
     sel?.removeAllRanges();
     sel?.addRange(range);
+    rememberComposerSelection();
   }
 
   // Get relative path from CWD
@@ -1723,10 +1812,10 @@ document.addEventListener('DOMContentLoaded', () => {
       endCol: opts.endCol,
       content: opts.content,
     });
-    
-    const selection = window.getSelection();
-    if (selection && selection.rangeCount > 0 && promptEl.contains(selection.getRangeAt(0).commonAncestorContainer)) {
-      const range = selection.getRangeAt(0);
+
+    const insertTarget = resolveComposerInsertTarget();
+    if (insertTarget) {
+      const { selection, range } = insertTarget;
       range.deleteContents();
       range.insertNode(token);
       const space = document.createTextNode(' ');
@@ -1736,6 +1825,7 @@ document.addEventListener('DOMContentLoaded', () => {
       range.collapse(true);
       selection.removeAllRanges();
       selection.addRange(range);
+      rememberComposerSelection();
     } else {
       promptEl.appendChild(token);
       promptEl.appendChild(document.createTextNode(' '));
@@ -1924,6 +2014,14 @@ document.addEventListener('DOMContentLoaded', () => {
 	      applyHostUi();
 	    } catch {
 	      // ignore
+	    }
+	  }
+
+	  async function recheckSidebarConnection() {
+	    try {
+	      await sioCall('sidebar_recheck', {});
+	    } catch {
+	      // Best-effort only; host UI fetch still runs after this.
 	    }
 	  }
 
@@ -5030,21 +5128,27 @@ document.addEventListener('DOMContentLoaded', () => {
    * Send a Socket.IO event with ack only.
    * @param {string} event - SIO event name (e.g. 'send_message')
    * @param {object} data - Payload to send
-   * @param {object} [options] - { timeoutMs }
+   * @param {object} [options] - { timeoutMs } where timeoutMs: null disables the ack timeout
    * @returns {Promise<any>} Server response (ack value)
    */
   async function sioCall(event, data = {}, options = {}) {
     if (options && (Object.prototype.hasOwnProperty.call(options, 'fallbackUrl') || Object.prototype.hasOwnProperty.call(options, 'fallbackMethod'))) {
       throw new Error(`HTTP fallbacks are disabled for Socket.IO contract: ${event}`);
     }
-    const timeoutMs = options.timeoutMs || 10000;
+    const hasExplicitTimeout = Boolean(options) && Object.prototype.hasOwnProperty.call(options, 'timeoutMs');
+    const timeoutMs = hasExplicitTimeout
+      ? (options.timeoutMs === null ? null : (Number.isFinite(options.timeoutMs) ? options.timeoutMs : 10000))
+      : 10000;
     if (_socket && _socket.connected) {
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(new Error(`sioCall timeout: ${event}`));
-        }, timeoutMs);
+        let timer = null;
+        if (Number.isFinite(timeoutMs)) {
+          timer = setTimeout(() => {
+            reject(new Error(`sioCall timeout: ${event}`));
+          }, timeoutMs);
+        }
         _socket.emit(event, data, (ack) => {
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
           if (ack && ack.__error) {
             resolve({ ok: false, error: ack.__error });
           } else {
@@ -5361,6 +5465,7 @@ document.addEventListener('DOMContentLoaded', () => {
     resetWsReady,
     connectWS,
     waitForWs,
+    recheckSidebarConnection,
     fetchHostUi,
     fetchAppConfig,
     bindPickerFilter,
@@ -5498,4 +5603,5 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   bindInputHandlers();
+  bindComposerSelectionTracking();
 });

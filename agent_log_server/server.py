@@ -532,6 +532,17 @@ async def _sio_conversation_delete(sid, data):
         return _sio_error(str(e))
 
 
+@socketio_server.on("conversation_pins_update", namespace="/appserver")
+async def _sio_conversation_pins_update(sid, data):
+    """Mirror of POST /api/appserver/conversations/pins"""
+    try:
+        return await api_appserver_conversation_pins(data)
+    except HTTPException as e:
+        return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
 @socketio_server.on("conversation_bind_rollout", namespace="/appserver")
 async def _sio_conversation_bind_rollout(sid, data):
     """Mirror of POST /api/appserver/conversations/bind-rollout"""
@@ -835,6 +846,15 @@ async def _sio_get_host_ui(sid, data):
         return await api_host_ui_get()
     except HTTPException as e:
         return _sio_error(e.detail)
+    except Exception as e:
+        return _sio_error(str(e))
+
+
+@socketio_server.on("sidebar_recheck", namespace="/appserver")
+async def _sio_sidebar_recheck(sid, data):
+    """Best-effort frontend-triggered sidebar connection recheck."""
+    try:
+        return await _sidebar_recheck_status()
     except Exception as e:
         return _sio_error(str(e))
 
@@ -1313,6 +1333,7 @@ def _default_appserver_config() -> Dict[str, Any]:
         "turn_id": None,
         "conversation_id": None,
         "conversations": [],
+        "pinned_conversations": [],
         "active_view": "splash",
         "app_server_command": None,
         "shell_id": None,
@@ -1731,6 +1752,26 @@ def _remove_conversation_from_config(conversation_id: str, cfg: Dict[str, Any]) 
     if conversation_id in conversations:
         conversations = [c for c in conversations if c != conversation_id]
     cfg["conversations"] = conversations
+    pinned = _normalize_pinned_conversation_list(cfg, conversations)
+    if conversation_id in pinned:
+        cfg["pinned_conversations"] = [c for c in pinned if c != conversation_id]
+
+
+def _normalize_pinned_conversation_list(cfg: Dict[str, Any], valid_ids: Optional[List[str]] = None) -> List[str]:
+    pinned = cfg.get("pinned_conversations")
+    if not isinstance(pinned, list):
+        pinned = []
+    out: List[str] = []
+    valid_set = set(valid_ids) if isinstance(valid_ids, list) else None
+    for item in pinned:
+        if not isinstance(item, str) or not item:
+            continue
+        if valid_set is not None and item not in valid_set:
+            continue
+        if item not in out:
+            out.append(item)
+    cfg["pinned_conversations"] = out
+    return out
 
 
 def _conversation_ids_from_disk() -> List[str]:
@@ -1753,6 +1794,13 @@ def _sync_conversation_index(cfg: Dict[str, Any]) -> List[str]:
             ids.append(cid)
     cfg["conversations"] = ids
     return ids
+
+
+def _conversation_display_order(cfg: Dict[str, Any]) -> List[str]:
+    ids = _sync_conversation_index(cfg)
+    pinned = _normalize_pinned_conversation_list(cfg, ids)
+    pinned_set = set(pinned)
+    return pinned + [cid for cid in ids if cid not in pinned_set]
 
 
 def _find_conversation_by_thread_id(thread_id: Optional[str]) -> Optional[str]:
@@ -4085,6 +4133,14 @@ def _extract_line_from_diff(diff_text: str) -> int:
 # ── TE2 Sidebar IPC client ──────────────────────────────────────────────
 _sidebar_sio: Optional[socketio.AsyncClient] = None
 _sidebar_sio_lock = asyncio.Lock()
+
+
+async def _sidebar_recheck_status() -> Dict[str, Any]:
+    sio = await _get_sidebar_sio()
+    return {
+        "ok": True,
+        "connected": bool(sio and getattr(sio, "connected", False)),
+    }
 
 
 async def _get_sidebar_sio() -> Optional[socketio.AsyncClient]:
@@ -6535,33 +6591,31 @@ try {{
             ),
             Body(
                 Div(
-	                    Header(
-	                        Div(
-	                            H1("CodexAS-Extension"),
-	                            Small("App-Server JSON-RPC • Unified Timeline"),
-	                            cls="brand"
-	                        ),
-	                        Div(
-	                            Div(
-                                Button("⚙", id="splash-settings", cls="btn ghost", title="Splash settings"),
-                                Button("×", id="host-close-top", cls="btn ghost host-close-btn"),
-                                cls="toolbar"
-                            ),
-	                        cls="topbar"
-	                    ),
 	                    Main(
 	                        # Threads panel intentionally removed for now.
 	                        # NOTE: No native browser modals/dialogs/dropdowns allowed.
 	                        # All future controls must be DOM-rendered.
                         Section(
                             Div(
-	                            H2("Conversations"),
-	                            Div(
-	                                Button("Project", id="splash-tab-project", cls="btn tiny toggle"),
-	                                Button("All", id="splash-tab-all", cls="btn tiny toggle active"),
-	                                cls="splash-tabs",
-	                                id="splash-tabs",
+                                Div(
+	                                Div(
+	                                    H1("CodexAS-Extension"),
+	                                    Small("App-Server JSON-RPC • Unified Timeline"),
+	                                    cls="brand"
+	                                ),
+	                                Div(
+	                                    Button("Project", id="splash-tab-project", cls="btn tiny toggle"),
+	                                    Button("All", id="splash-tab-all", cls="btn tiny toggle active"),
+	                                    cls="splash-tabs",
+	                                    id="splash-tabs",
+	                                ),
+	                                cls="splash-header-main",
 	                            ),
+	                            Div(
+                                    Button("⚙", id="splash-settings", cls="btn ghost", title="Splash settings"),
+                                    Button("×", id="host-close-top", cls="btn ghost host-close-btn"),
+                                    cls="splash-header-actions",
+                                ),
                                 cls="splash-header",
                             ),
 	                            Div(
@@ -6869,11 +6923,10 @@ try {{
                     ),
                     cls="appshell"
                 )
-            )
+                )
             )
             )
         )
-    )
 
 
 @app.get("/codex-agent")
@@ -6913,7 +6966,8 @@ async def api_health():
 async def api_appserver_config():
     async with _config_lock:
         cfg = _load_appserver_config()
-        _sync_conversation_index(cfg)
+        ids = _sync_conversation_index(cfg)
+        _normalize_pinned_conversation_list(cfg, ids)
         _save_appserver_config(cfg)
         return cfg
 
@@ -7264,14 +7318,16 @@ async def api_appserver_repo_memory(conversation_id: Optional[str] = Query(None)
 async def api_appserver_conversations():
     async with _config_lock:
         cfg = _load_appserver_config()
-        ids = _sync_conversation_index(cfg)
+        ids = _conversation_display_order(cfg)
         _save_appserver_config(cfg)
     if not ids and _latest_legacy_transcript():
         await _ensure_conversation()
         async with _config_lock:
             cfg = _load_appserver_config()
-            ids = _sync_conversation_index(cfg)
+            ids = _conversation_display_order(cfg)
             _save_appserver_config(cfg)
+    pinned_ids = _normalize_pinned_conversation_list(cfg)
+    pinned_set = set(pinned_ids)
     items: List[Dict[str, Any]] = []
     for convo_id in ids:
         if not convo_id:
@@ -7280,8 +7336,15 @@ async def api_appserver_conversations():
             meta = await _validate_conversation_pending_approvals(convo_id, _load_conversation_meta(convo_id))
         else:
             meta = {"conversation_id": convo_id, "thread_id": None, "pending_approvals": {}, "settings": {}, "status": "none"}
+        meta = dict(meta)
+        meta["pinned"] = convo_id in pinned_set
         items.append(meta)
-    return {"items": items, "active_conversation_id": cfg.get("conversation_id"), "active_view": cfg.get("active_view", "splash")}
+    return {
+        "items": items,
+        "active_conversation_id": cfg.get("conversation_id"),
+        "active_view": cfg.get("active_view", "splash"),
+        "pinned_conversations": pinned_ids,
+    }
 
 
 @app.post("/api/appserver/conversations")
@@ -7366,6 +7429,30 @@ async def api_appserver_conversation_select(payload: Dict[str, Any] = Body(...))
         cfg["thread_id"] = meta.get("thread_id")
         _save_appserver_config(cfg)
     return meta
+
+
+@app.post("/api/appserver/conversations/pins")
+async def api_appserver_conversation_pins(payload: Dict[str, Any] = Body(...)):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    requested = payload.get("pinned_conversations")
+    if not isinstance(requested, list):
+        raise HTTPException(status_code=400, detail="pinned_conversations must be a list")
+    async with _config_lock:
+        cfg = _load_appserver_config()
+        valid_ids = _sync_conversation_index(cfg)
+        valid_set = set(valid_ids)
+        pinned: List[str] = []
+        for item in requested:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            convo_id = _sanitize_conversation_id(item.strip())
+            if not convo_id or convo_id not in valid_set or convo_id in pinned:
+                continue
+            pinned.append(convo_id)
+        cfg["pinned_conversations"] = pinned
+        _save_appserver_config(cfg)
+    return {"ok": True, "pinned_conversations": pinned}
 
 
 @app.post("/api/appserver/conversations/bind-rollout")

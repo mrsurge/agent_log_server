@@ -52,6 +52,7 @@ _CLIENT_RESPONSE_METHODS = frozenset({
     "account/login/cancel",
     "account/login/start",
     "account/logout",
+    "account/ratelimits/read",
     "account/read",
     "initialize",
     "command/exec",
@@ -67,6 +68,7 @@ _RESPONSE_SCHEMA_OVERRIDES: Dict[str, str] = {
     "account/login/cancel": "CancelLoginAccountResponse",
     "account/login/start": "LoginAccountResponse",
     "account/logout": "LogoutAccountResponse",
+    "account/ratelimits/read": "GetAccountRateLimitsResponse",
     "account/read": "GetAccountResponse",
 }
 _SERVER_REQUEST_RESPONSE_DEFINITIONS: Dict[str, str] = {
@@ -122,7 +124,24 @@ class RuntimeProtocol:
         return self.request_params.get(method.lower())
 
     def response_schema(self, method: str) -> Optional[Dict[str, Any]]:
-        return self.responses.get(method.lower())
+        normalized = method.lower()
+        schema = self.responses.get(normalized)
+        if isinstance(schema, dict):
+            return schema
+        schema = _resolve_response_schema_from_definitions(method, self.definitions)
+        if isinstance(schema, dict):
+            self.responses[normalized] = schema
+            return schema
+        with contextlib.suppress(Exception):
+            _refresh_runtime_protocol_from_disk(self)
+            schema = self.responses.get(normalized)
+            if isinstance(schema, dict):
+                return schema
+            schema = _resolve_response_schema_from_definitions(method, self.definitions)
+            if isinstance(schema, dict):
+                self.responses[normalized] = schema
+                return schema
+        return None
 
     def notification_schema(self, method: str) -> Optional[Dict[str, Any]]:
         return self.notifications.get(method.lower())
@@ -603,6 +622,75 @@ def _response_definition_name(method: str) -> Optional[str]:
     return f'{"".join(parts)}Response'
 
 
+def _method_lookup_tokens(value: str) -> List[str]:
+    expanded = re.sub(r"(?<!^)(?=[A-Z])", " ", str(value or "").strip())
+    return [token.lower() for token in re.split(r"[^A-Za-z0-9]+", expanded) if token]
+
+
+def _infer_response_definition_name(
+    method: str,
+    definitions: Dict[str, Any],
+) -> Optional[str]:
+    normalized = method.lower().strip()
+    if not normalized:
+        return None
+
+    parts = [part for part in normalized.split("/") if part]
+    if parts and parts[-1] == "read":
+        read_candidate = f'Get{"".join(_pascalize_identifier(part) for part in parts[:-1])}Response'
+        schema = definitions.get(read_candidate)
+        if isinstance(schema, dict):
+            return read_candidate
+
+    required_tokens = [token for token in _method_lookup_tokens(method) if token not in {"read"}]
+    if not required_tokens:
+        return None
+
+    matches: List[Tuple[Tuple[int, int, int, str], str]] = []
+    for definition_name, schema in definitions.items():
+        if not isinstance(definition_name, str) or not definition_name.endswith("Response"):
+            continue
+        if not isinstance(schema, dict):
+            continue
+        definition_tokens = _method_lookup_tokens(definition_name[:-8])
+        if not all(token in definition_tokens for token in required_tokens):
+            continue
+        score = (
+            len(definition_tokens) - len(required_tokens),
+            0 if definition_tokens[:1] == ["get"] else 1,
+            len(definition_name),
+            definition_name,
+        )
+        matches.append((score, definition_name))
+
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0])
+    if len(matches) == 1 or matches[0][0] != matches[1][0]:
+        return matches[0][1]
+    return None
+
+
+def _resolve_response_schema_from_definitions(
+    method: str,
+    definitions: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    raw_method = str(method or "").strip()
+    normalized = raw_method.lower()
+    candidates: List[str] = []
+    direct_name = _response_definition_name(normalized)
+    if isinstance(direct_name, str) and direct_name:
+        candidates.append(direct_name)
+    inferred_name = _infer_response_definition_name(raw_method, definitions)
+    if isinstance(inferred_name, str) and inferred_name and inferred_name not in candidates:
+        candidates.append(inferred_name)
+    for definition_name in candidates:
+        schema = definitions.get(definition_name)
+        if isinstance(schema, dict):
+            return _resolve_schema(schema, definitions)
+    return None
+
+
 def _build_response_registry(
     definitions: Dict[str, Any],
     methods: Iterable[str],
@@ -630,6 +718,83 @@ def _build_response_registry(
             + ", ".join(missing)
         )
     return registry
+
+
+def _build_runtime_protocol_from_schema(
+    version: str,
+    version_key: str,
+    schema_path: Path,
+) -> RuntimeProtocol:
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    server_request_path = schema_path.parent / "ServerRequest.json"
+    server_request_schema = (
+        json.loads(server_request_path.read_text(encoding="utf-8"))
+        if server_request_path.exists()
+        else {"oneOf": [], "definitions": schema.get("definitions") if isinstance(schema.get("definitions"), dict) else {}}
+    )
+    definitions = schema.get("definitions")
+    if not isinstance(definitions, dict):
+        raise RuntimeError(f"runtime schema missing definitions: {schema_path}")
+    merged_definitions: Dict[str, Any] = {}
+    legacy_schema_path = _legacy_schema_bundle_path(schema_path.parent)
+    if legacy_schema_path.exists():
+        legacy_schema = json.loads(legacy_schema_path.read_text(encoding="utf-8"))
+        legacy_definitions = legacy_schema.get("definitions")
+        if isinstance(legacy_definitions, dict):
+            merged_definitions.update(legacy_definitions)
+    merged_definitions.update(definitions)
+    merged_definitions.update(_load_request_sidecar_definitions(schema_path.parent))
+    request_params = _build_request_registry(merged_definitions)
+    request_params.update(
+        _load_request_sidecar_registry(schema_path.parent, merged_definitions, request_params.keys())
+    )
+    responses = _build_response_registry(merged_definitions, request_params.keys())
+    server_requests = _build_server_request_registry(server_request_schema)
+    server_request_responses = _build_server_request_response_registry(
+        merged_definitions,
+        server_requests.keys(),
+    )
+    notifications = _build_notification_registry(merged_definitions)
+    events = _build_event_registry(merged_definitions)
+    return RuntimeProtocol(
+        version=version,
+        version_key=version_key,
+        cache_dir=schema_path.parent,
+        schema_path=schema_path,
+        definitions=merged_definitions,
+        request_params=request_params,
+        responses=responses,
+        server_requests=server_requests,
+        server_request_responses=server_request_responses,
+        notifications=notifications,
+        events=events,
+        server_request_semantics=_build_server_request_semantics(server_requests),
+        notification_semantics=_build_notification_semantics(notifications),
+        event_semantics=_build_event_semantics(events),
+    )
+
+
+def _refresh_runtime_protocol_from_disk(protocol: RuntimeProtocol) -> None:
+    refreshed = _build_runtime_protocol_from_schema(
+        protocol.version,
+        protocol.version_key,
+        protocol.schema_path,
+    )
+    protocol.version = refreshed.version
+    protocol.version_key = refreshed.version_key
+    protocol.cache_dir = refreshed.cache_dir
+    protocol.schema_path = refreshed.schema_path
+    protocol.definitions = refreshed.definitions
+    protocol.request_params = refreshed.request_params
+    protocol.responses = refreshed.responses
+    protocol.server_requests = refreshed.server_requests
+    protocol.server_request_responses = refreshed.server_request_responses
+    protocol.notifications = refreshed.notifications
+    protocol.events = refreshed.events
+    protocol.server_request_semantics = refreshed.server_request_semantics
+    protocol.notification_semantics = refreshed.notification_semantics
+    protocol.event_semantics = refreshed.event_semantics
+    protocol.settings_cache.clear()
 
 
 def _build_server_request_response_registry(
@@ -1383,51 +1548,5 @@ async def get_runtime_protocol() -> RuntimeProtocol:
         if _runtime_protocol is not None:
             return _runtime_protocol
         version, version_key, schema_path = await _ensure_schema_bundle()
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        server_request_path = schema_path.parent / "ServerRequest.json"
-        server_request_schema = (
-            json.loads(server_request_path.read_text(encoding="utf-8"))
-            if server_request_path.exists()
-            else {"oneOf": [], "definitions": schema.get("definitions") if isinstance(schema.get("definitions"), dict) else {}}
-        )
-        definitions = schema.get("definitions")
-        if not isinstance(definitions, dict):
-            raise RuntimeError(f"runtime schema missing definitions: {schema_path}")
-        merged_definitions: Dict[str, Any] = {}
-        legacy_schema_path = _legacy_schema_bundle_path(schema_path.parent)
-        if legacy_schema_path.exists():
-            legacy_schema = json.loads(legacy_schema_path.read_text(encoding="utf-8"))
-            legacy_definitions = legacy_schema.get("definitions")
-            if isinstance(legacy_definitions, dict):
-                merged_definitions.update(legacy_definitions)
-        merged_definitions.update(definitions)
-        merged_definitions.update(_load_request_sidecar_definitions(schema_path.parent))
-        request_params = _build_request_registry(merged_definitions)
-        request_params.update(
-            _load_request_sidecar_registry(schema_path.parent, merged_definitions, request_params.keys())
-        )
-        responses = _build_response_registry(merged_definitions, request_params.keys())
-        server_requests = _build_server_request_registry(server_request_schema)
-        server_request_responses = _build_server_request_response_registry(
-            merged_definitions,
-            server_requests.keys(),
-        )
-        notifications = _build_notification_registry(merged_definitions)
-        events = _build_event_registry(merged_definitions)
-        _runtime_protocol = RuntimeProtocol(
-            version=version,
-            version_key=version_key,
-            cache_dir=schema_path.parent,
-            schema_path=schema_path,
-            definitions=merged_definitions,
-            request_params=request_params,
-            responses=responses,
-            server_requests=server_requests,
-            server_request_responses=server_request_responses,
-            notifications=notifications,
-            events=events,
-            server_request_semantics=_build_server_request_semantics(server_requests),
-            notification_semantics=_build_notification_semantics(notifications),
-            event_semantics=_build_event_semantics(events),
-        )
+        _runtime_protocol = _build_runtime_protocol_from_schema(version, version_key, schema_path)
         return _runtime_protocol

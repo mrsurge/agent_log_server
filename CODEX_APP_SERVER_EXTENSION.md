@@ -615,36 +615,20 @@ app.include_router(fws_ui.router, dependencies=[Depends(lambda: _ensure_framewor
 
 ### Shell Management Flow
 
-```
-1. _ensure_framework_shells_secret()
-   │  - Creates stable secret based on repo fingerprint
-   │  - Sets environment variables:
-   │    - FRAMEWORK_SHELLS_SECRET
-   │    - FRAMEWORK_SHELLS_REPO_FINGERPRINT  
-   │    - FRAMEWORK_SHELLS_BASE_DIR (~/.cache/framework_shells)
-   │
-2. _get_or_start_appserver_shell()
-   │  - Gets shell manager: mgr = await get_framework_shell_manager()
-   │  - Checks if existing shell is running
-   │  - If not, starts via Orchestrator:
-   │    │
-   │    └─> orch = Orchestrator(mgr)
-   │        await orch.start_from_ref(
-   │            "shellspec/app_server.yaml#app_server",
-   │            ctx={"CWD": cwd, "APP_SERVER_COMMAND": command},
-   │            label="app-server:codex"
-   │        )
-   │
-3. Shell spec (shellspec/app_server.yaml) defines:
-   │  - Command template: ${APP_SERVER_COMMAND} --json-rpc
-   │  - Working directory: ${CWD}
-   │  - stdin/stdout handling
-   │
-4. _stop_appserver_shell()
-   │  - Cancels reader task
-   │  - Calls mgr.terminate_shell(shell_id, force=True)
-   │  - Clears state
-```
+1. The extension manager configures the runtime protocol and extension-owned transport.
+2. The transport adopts or starts an **observed** framework-shell entry:
+   - stable Codex: `shellspec/app_server.yaml#app_server_observed`
+   - experimental Codex: `extensions/codex_ext_exp/shellspec/app_server_exp.yaml#app_server_exp_observed`
+3. The observed shellspec runs the real app-server binary directly:
+   - stable label: `app-server:codex-extension`
+   - experimental label: `app-server:codex-experimental`
+4. `framework_shells` owns pipe stdout consumption/logging:
+   - transports read via `subscribe_output()` / `subscribe_output_bytes()`
+   - stdin writes go through `write_to_pipe()`
+   - direct `state.process.stdout.read(...)` loops are invalid because they race the framework-shell tee/log readers
+5. Stop/reset paths clear transport-local state and terminate the observed shell through the manager when needed.
+
+This is the current extension-owned Codex contract; the old legacy builtin shellspec path is no longer the live extension path.
 
 ### FWS Web UI Endpoints
 
@@ -748,6 +732,19 @@ Approval and sandbox dropdowns in the shared frontend are driven by a backend ru
 
 This keeps shared frontend files platform-agnostic while still reflecting runtime-supported values such as `on-request`.
 
+### Schema-Driven Extension Information Blocks (Implemented)
+
+Extension settings now stay entirely on the schema-driven extension path.
+
+- `static/modals/settings_schema.js` renders generic field shapes only; it does **not** own extension-specific save/hydrate logic
+- extensions may still start from a static template, but `get_settings_schema(extension_id)` can prepend live dynamic fields before the modal renders
+- shared non-persisted field types now include:
+  - `section` — heading/description blocks
+  - `info` — read-only information rows
+- dynamic schemas can set `cache: "none"` when they surface live provider/account/quota/rate-limit data so the modal refetches fresh values on open
+- extension settings must not depend on hidden builtin Codex modal inputs; the extension schema payload is the source of truth for extension-owned save/hydrate behavior
+- `codex-ext` / `codex-ext-exp` now inject live account + rate-limit info, and `copilot-sdk` injects live quota info, through these schema-owned information blocks
+
 ### Dynamic Model/Effort Dropdowns (Implemented)
 
 **Problem:** Different models support different reasoning effort levels (e.g., `gpt-5.1-codex-mini` supports `low/medium/high` but not `xhigh`). Users could select invalid combinations.
@@ -783,9 +780,12 @@ This keeps shared frontend files platform-agnostic while still reflecting runtim
 - Integrated `streaming-markdown` (smd) library for live markdown parsing during token deltas
 - Markdown parser is created per message and receives deltas incrementally via `smd.parser_write()`
 - On message complete, `smd.parser_end()` finalizes rendering
+- finalized assistant cards and replay/static assistant cards are rendered through the markdown-it event renderer instead of keeping the live streaming parser around
 - User toggle in conversation header and settings modal to enable/disable markdown
 - Setting persisted in conversation SSOT as `markdown: true|false`
 - Citations like `'citeturn1file0L11-L26'` are stripped from rendered output
+- markdown file links are intercepted and routed through the TE2 open flow, including `#L123`, `#L123C4`, and `path:line[:column]` location syntax
+- external `http/https` links are intercepted and opened through the backend `xdg-open` path instead of raw iframe/browser navigation
 
 **Key Code:**
 ```javascript
@@ -1036,12 +1036,15 @@ All follow the same pattern: `get_handler(ext_id) → hasattr(handler, method) �
 `codex-ext` is the stable extension-owned Codex path. `codex-ext-testing` remains a compatibility registry alias that resolves to the same `extensions/codex_ext` implementation, and `codex-ext-exp` is the experimental fork in `extensions/codex_ext_exp`.
 
 - settings modal fields are generated dynamically from the installed Codex app-server JSON schema
+- extension-owned settings are fully schema-driven and do **not** depend on hidden builtin Codex modal fields for save or hydrate
+- shared settings modals now support read-only `section` / `info` fields plus `cache: "none"` so extensions can prepend live provider information without polluting persisted settings
 - session browse uses the generic `session_picker` flow
 - bind/import uses the same generic `resume_session_with_history(...)` + `hydrate_transcript(...)` contract as Copilot, but the Codex implementation reuses internal rollout import helpers
 - stable live send/resume/interrupt/compact uses an extension-owned framework-shell transport rooted at `shellspec/app_server.yaml#app_server_observed` with transport label `app-server:codex-extension`
 - the stable observed shell now runs `codex app-server` directly; framework-shells owns stdout observability for the pipe shell
 - `codex-ext-exp` keeps a separate shellspec/transport label (`shellspec/app_server_exp.yaml#app_server_exp_observed`, `app-server:codex-experimental`) so it can point at the patched `codex-app-server` binary without adoption conflicts
 - both observed shellspecs now run the real app-server binary directly and rely on framework-shells pipe stdout subscriptions/logging instead of mirroring RPC traffic to stderr
+- runtime response schemas are keyed by lowercase method names, and the request/response/notification/event registries are all derived from the generated schema bundle; manual overrides should only remain for true semantic naming mismatches, not lazy registry gaps
 
 #### Patched `codex-ext-exp` app-server build
 
@@ -1106,3 +1109,17 @@ PTY (bash + rcfile)
 ```
 
 **Note:** Shell markers (`__FWS_BLOCK_BEGIN__`, etc.) are in raw output because they're printed by the rcfile. The `agent_block_delta` events are already filtered (clean). Screen model currently includes markers; filtering planned.
+
+### `ask_user` identity contract
+
+The current MCP `ask_user` contract is split into two identities on purpose:
+
+- canonical `requestId` / approval rendezvous key = the conversation's own `conversationId`
+- router-owned `card_id` = the stable DOM/replay identity for each rendered ask-user card
+
+Important live-routing detail:
+
+- Codex/Codex-exp bind live `agent-pty-blocks.ask_user` cards from the `item/started` notification carrying `item.type == "mcpToolCall"`
+- they do **not** rely on a separate emitted `item/tool/call` request in the tested runtime path
+
+This lets multiple `ask_user` cards coexist in one conversation while keeping the actual approval submission keyed to the conversation-scoped IPC/MCP rendezvous id.

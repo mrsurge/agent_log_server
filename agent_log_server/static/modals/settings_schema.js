@@ -199,16 +199,21 @@ window.CodexAgentModules.push((ctx) => {
    * Load settings schema for an extension
    */
   async function loadSettingsSchema(extensionId) {
-    if (schemaCache[extensionId]) {
+    const cachedSchema = schemaCache[extensionId];
+    if (cachedSchema && cachedSchema.cache !== 'none') {
       console.log(`[schema] cache hit for ${extensionId}`);
-      return schemaCache[extensionId];
+      return cachedSchema;
     }
     
     try {
       console.log(`[schema] loading schema for ${extensionId} sioCall=${!!ctx.helpers?.sioCall}`);
       const schema = await requireSioCall()('get_extension_settings_schema', { extension_id: extensionId });
       console.log(`[schema] loaded schema for ${extensionId}`, schema ? Object.keys(schema) : null);
-      schemaCache[extensionId] = schema;
+      if (schema && schema.cache !== 'none') {
+        schemaCache[extensionId] = schema;
+      } else {
+        delete schemaCache[extensionId];
+      }
       return schema;
     } catch {
       return null;
@@ -369,6 +374,56 @@ window.CodexAgentModules.push((ctx) => {
     };
     
     schema.fields.forEach(field => {
+      if (field.type === 'section') {
+        const section = document.createElement('div');
+        section.className = 'settings-schema-section';
+
+        const title = document.createElement('div');
+        title.className = 'settings-schema-section-title';
+        title.textContent = field.label || field.id || 'Section';
+        section.appendChild(title);
+
+        if (typeof field.description === 'string' && field.description.trim()) {
+          const description = document.createElement('div');
+          description.className = 'settings-schema-section-description';
+          description.textContent = field.description.trim();
+          section.appendChild(description);
+        }
+
+        settingsExtensionFields.appendChild(section);
+        return;
+      }
+
+      if (field.type === 'info') {
+        const info = document.createElement('div');
+        info.className = 'settings-schema-info';
+        if (typeof field.tone === 'string' && field.tone.trim()) {
+          info.dataset.tone = field.tone.trim();
+        }
+
+        const infoLabel = document.createElement('div');
+        infoLabel.className = 'settings-schema-info-label';
+        infoLabel.textContent = field.label || field.id || 'Information';
+        info.appendChild(infoLabel);
+
+        const infoText = document.createElement('div');
+        infoText.className = 'settings-schema-info-text';
+        infoText.textContent = typeof field.text === 'string' && field.text.trim()
+          ? field.text.trim()
+          : 'Information unavailable.';
+        info.appendChild(infoText);
+
+        if (typeof field.detail === 'string' && field.detail.trim()) {
+          const infoDetail = document.createElement('div');
+          infoDetail.className = 'settings-schema-info-detail';
+          infoDetail.textContent = field.detail.trim();
+          info.appendChild(infoDetail);
+        }
+
+        settingsExtensionFields.appendChild(info);
+        return;
+      }
+
       const label = document.createElement('label');
       const span = document.createElement('span');
       span.textContent = field.label || field.id;

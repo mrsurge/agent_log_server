@@ -202,6 +202,73 @@ def _direct_event_text(payload: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _notification_text(payload: Dict[str, Any]) -> Optional[str]:
+    error_value = payload.get("error")
+    if isinstance(error_value, str) and error_value.strip():
+        return error_value.strip()
+    if isinstance(error_value, dict):
+        for key in ("message", "details", "summary", "error"):
+            candidate = error_value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+
+    warning_value = payload.get("warning")
+    if isinstance(warning_value, str) and warning_value.strip():
+        return warning_value.strip()
+
+    for key in ("message", "text", "summary", "detail", "details", "reason", "status_text", "statusText"):
+        candidate = payload.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    return _direct_event_text(payload)
+
+
+def _notification_severity(
+    label_lower: str,
+    notification_spec: Optional[ProtocolSemanticSpec],
+    event_spec: Optional[ProtocolSemanticSpec],
+    payload: Dict[str, Any],
+) -> Optional[str]:
+    label_text = label_lower.lower()
+    if "interrupt" in label_text:
+        return "warning"
+
+    tokens: List[str] = []
+    for spec in (notification_spec, event_spec):
+        if spec is None:
+            continue
+        for candidate in (spec.category, spec.subject, spec.phase):
+            if isinstance(candidate, str) and candidate.strip():
+                tokens.append(candidate.strip().lower())
+
+    for key in ("level", "severity", "status", "type", "kind"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            tokens.append(value.strip().lower())
+
+    error_value = payload.get("error")
+    if isinstance(error_value, (str, dict)):
+        tokens.append("error")
+    if isinstance(error_value, dict):
+        for key in ("type", "kind", "level", "severity", "status", "error_type", "errorType"):
+            value = error_value.get(key)
+            if isinstance(value, str) and value.strip():
+                tokens.append(value.strip().lower())
+
+    if "error" in label_text or "failed" in label_text or "fatal" in label_text:
+        return "error"
+    if any(token in {"error", "failed", "failure", "fatal"} for token in tokens):
+        return "error"
+
+    if "warning" in label_text or "warn" in label_text:
+        return "warning"
+    if any(token in {"warning", "warn", "interrupted"} for token in tokens):
+        return "warning"
+
+    return None
+
+
 def _append_text_parts(parts: List[str], value: Any) -> None:
     if isinstance(value, str):
         text = _normalize_output(value).strip()
@@ -667,6 +734,75 @@ def _build_new_file_diff(path: str, content: str) -> str:
     return f"--- /dev/null\n+++ {resolved_path}\n"
 
 
+def _parse_cat_heredoc_line(tokens: List[str]) -> Optional[Tuple[str, str]]:
+    if len(tokens) != 4 or tokens[0] != "cat" or tokens[1] != ">" or not tokens[3].startswith("<<"):
+        return None
+    path_token = str(tokens[2] or "").strip()
+    terminator = str(tokens[3][2:] or "").strip()
+    if not path_token or path_token.startswith("-") or not terminator:
+        return None
+    return path_token, terminator
+
+
+def _parse_mkdir_p_directories(tokens: List[str], cwd: str = "") -> Optional[List[str]]:
+    if not tokens or tokens[0] != "mkdir":
+        return None
+    directories: List[str] = []
+    for token in tokens[1:]:
+        if token in {"-p", "--parents", "--"}:
+            continue
+        if token.startswith("-"):
+            return None
+        resolved = _resolve_view_path(token, cwd)
+        if resolved not in directories:
+            directories.append(resolved)
+    return directories or None
+
+
+def _parse_new_file_command_preamble(lines: List[str], cwd: str = "") -> Optional[Tuple[int, str, str, List[str]]]:
+    created_dirs: List[str] = []
+    for idx, raw_line in enumerate(lines):
+        if not raw_line.strip():
+            continue
+        try:
+            tokens = shlex.split(raw_line, posix=True)
+        except ValueError:
+            return None
+        if not tokens:
+            continue
+        mkdir_dirs = _parse_mkdir_p_directories(tokens, cwd)
+        if mkdir_dirs is not None:
+            for directory in mkdir_dirs:
+                if directory not in created_dirs:
+                    created_dirs.append(directory)
+            continue
+        cat_spec = _parse_cat_heredoc_line(tokens)
+        if cat_spec is None:
+            return None
+        path_token, terminator = cat_spec
+        return idx, path_token, terminator, created_dirs
+    return None
+
+
+def _new_file_arguments(spec: Dict[str, Any]) -> Dict[str, Any]:
+    arguments: Dict[str, Any] = {}
+    path = spec.get("path")
+    if isinstance(path, str) and path:
+        arguments["path"] = path
+    directory = spec.get("directory")
+    if isinstance(directory, str) and directory:
+        arguments["directory"] = directory
+        return arguments
+    directories = spec.get("directories")
+    if isinstance(directories, list):
+        normalized = [value for value in directories if isinstance(value, str) and value]
+        if len(normalized) == 1:
+            arguments["directory"] = normalized[0]
+        elif normalized:
+            arguments["directories"] = normalized
+    return arguments
+
+
 def _shell_command_to_new_file_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner or "\n" not in inner:
@@ -675,18 +811,12 @@ def _shell_command_to_new_file_spec(command: Any, cwd: str = "") -> Optional[Dic
     lines = normalized.split("\n")
     if len(lines) < 3:
         return None
-    try:
-        first_tokens = shlex.split(lines[0], posix=True)
-    except ValueError:
+    preamble = _parse_new_file_command_preamble(lines, cwd)
+    if preamble is None:
         return None
-    if len(first_tokens) != 4 or first_tokens[0] != "cat" or first_tokens[1] != ">" or not first_tokens[3].startswith("<<"):
-        return None
-    path_token = str(first_tokens[2] or "").strip()
-    terminator = str(first_tokens[3][2:] or "").strip()
-    if not path_token or path_token.startswith("-") or not terminator:
-        return None
+    cat_line_idx, path_token, terminator, created_dirs = preamble
     end_idx: Optional[int] = None
-    for idx, line in enumerate(lines[1:], start=1):
+    for idx, line in enumerate(lines[cat_line_idx + 1 :], start=cat_line_idx + 1):
         if line == terminator:
             end_idx = idx
             break
@@ -695,13 +825,18 @@ def _shell_command_to_new_file_spec(command: Any, cwd: str = "") -> Optional[Dic
     if any(line.strip() for line in lines[end_idx + 1 :]):
         return None
     resolved_path = _resolve_view_path(path_token, cwd)
-    content = "\n".join(lines[1:end_idx])
-    return {
+    content = "\n".join(lines[cat_line_idx + 1 : end_idx])
+    spec = {
         "path": resolved_path,
         "content": content,
         "diff": _build_new_file_diff(resolved_path, content),
         "new_file": True,
     }
+    if len(created_dirs) == 1:
+        spec["directory"] = created_dirs[0]
+    elif created_dirs:
+        spec["directories"] = created_dirs
+    return spec
 
 
 def _shell_command_to_search_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
@@ -1515,8 +1650,12 @@ class CodexEventRouter:
         payload: Dict[str, Any],
         turn_id: Optional[str],
     ) -> Dict[str, Any]:
-        error_obj = payload.get("error") if isinstance(payload.get("error"), dict) else payload
-        if not isinstance(error_obj, dict):
+        error_value = payload.get("error")
+        if isinstance(error_value, dict):
+            error_obj = error_value
+        elif isinstance(error_value, str) and error_value.strip():
+            error_obj = {"message": error_value.strip()}
+        else:
             error_obj = payload
 
         message = ""
@@ -1584,6 +1723,44 @@ class CodexEventRouter:
             ],
             "transcript_entries": [error_entry],
         }
+
+    def _warning_result(self, *, message: str) -> Dict[str, Any]:
+        text = message.strip()
+        if not text:
+            return {"handled": True, "events": [], "transcript_entries": []}
+        return {
+            "handled": True,
+            "events": [
+                {"type": "warning", "message": text},
+                {"type": "activity", "label": "warning", "active": False},
+            ],
+            "transcript_entries": [],
+        }
+
+    def _generic_notification_result(
+        self,
+        *,
+        label_lower: str,
+        payload: Dict[str, Any],
+        notification_spec: Optional[ProtocolSemanticSpec],
+        event_spec: Optional[ProtocolSemanticSpec],
+        turn_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        severity = _notification_severity(label_lower, notification_spec, event_spec, payload)
+        if severity is None:
+            return None
+
+        message = _notification_text(payload)
+        if severity == "warning":
+            if not message and "interrupt" in label_lower:
+                message = "Interrupted"
+            if not message:
+                return None
+            return self._warning_result(message=message)
+
+        if not message:
+            return None
+        return self._error_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
 
     def _token_usage_result(
         self,
@@ -1930,6 +2107,9 @@ class CodexEventRouter:
                 },
                 {"type": "activity", "label": "idle", "active": False},
             ]
+            if turn_status == "interrupted":
+                interrupted_message = turn_error or _notification_text(payload) or "Interrupted"
+                events.insert(0, {"type": "warning", "message": interrupted_message})
             transcript_entries: List[Dict[str, Any]] = [{
                 "role": "status",
                 "status": ribbon_status,
@@ -2063,7 +2243,7 @@ class CodexEventRouter:
                 })
                 if new_file_spec:
                     path = new_file_spec.get("path") if isinstance(new_file_spec.get("path"), str) else ""
-                    arguments = {"path": path} if path else {}
+                    arguments = _new_file_arguments(new_file_spec)
                     return self._decorate_routed_result({
                         "handled": True,
                         "events": [
@@ -2532,7 +2712,7 @@ class CodexEventRouter:
                 if new_file_spec:
                     path = new_file_spec.get("path") if isinstance(new_file_spec.get("path"), str) else ""
                     diff_text = new_file_spec.get("diff") if isinstance(new_file_spec.get("diff"), str) else ""
-                    arguments = {"path": path} if path else {}
+                    arguments = _new_file_arguments(new_file_spec)
                     result_payload = {
                         "status": status or "completed",
                         "changed_files": 1,
@@ -3155,6 +3335,17 @@ class CodexEventRouter:
             # These codex/event wrappers mirror approval context but do not carry the actionable
             # JSON-RPC request id; only item/*/requestApproval should create live approval cards.
             return {"handled": True, "events": [], "transcript_entries": []}
+
+        if isinstance(payload, dict):
+            generic_notification = self._generic_notification_result(
+                label_lower=label_lower,
+                payload=payload,
+                notification_spec=notification_spec,
+                event_spec=event_spec,
+                turn_id=turn_id,
+            )
+            if generic_notification is not None:
+                return generic_notification
 
         return result
 
