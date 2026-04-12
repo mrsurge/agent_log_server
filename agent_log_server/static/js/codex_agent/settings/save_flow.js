@@ -197,16 +197,6 @@ export function bindSettingsSaveFlow(ctx) {
       conversation_id: nextState.conversationMeta?.conversation_id, settings,
     });
 
-    nextState = getState();
-    if (nextState.pendingRollout?.id && Array.isArray(nextState.pendingRollout.items)) {
-      setActivity('loading rollout', true);
-      await sioCall('conversation_bind_rollout', {
-        rollout_id: nextState.pendingRollout.id,
-      });
-      setState({ pendingRollout: null });
-      setActivity('rollout loaded', false);
-    }
-
     closeSettingsModal();
     await fetchConversation(getState().conversationMeta?.conversation_id);
     await fetchConversations();

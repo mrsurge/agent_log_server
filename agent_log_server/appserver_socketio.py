@@ -34,14 +34,11 @@ class AppserverSocketioDeps:
     api_appserver_conversation_select: _AsyncAnyCallable
     api_appserver_conversation_delete: _AsyncAnyCallable
     api_appserver_conversation_pins: _AsyncAnyCallable
-    api_appserver_conversation_bind_rollout: _AsyncAnyCallable
     api_appserver_set_view: _AsyncAnyCallable
     api_appserver_config: _AsyncAnyCallable
     api_appserver_config_update: _AsyncAnyCallable
     api_appserver_models: _AsyncAnyCallable
     api_appserver_runtime_options: _AsyncAnyCallable
-    api_appserver_rollouts: _AsyncAnyCallable
-    api_appserver_rollout_preview: _AsyncAnyCallable
     api_appserver_status: _AsyncAnyCallable
     api_appserver_start: _AsyncAnyCallable
     api_appserver_stop: _AsyncAnyCallable
@@ -258,14 +255,6 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversation_bind_rollout(sid: str, data: object) -> Any:
-        try:
-            return await deps.api_appserver_conversation_bind_rollout(_payload(data))
-        except HTTPException as exc:
-            return _sio_error(exc.detail)
-        except Exception as exc:
-            return _sio_error(exc)
-
     async def _sio_set_view(sid: str, data: object) -> Any:
         try:
             return await deps.api_appserver_set_view(_payload(data))
@@ -303,22 +292,6 @@ def register_appserver_socketio_handlers(
                 conversation_id=payload.get("conversation_id"),
                 agent=payload.get("agent"),
             )
-        except HTTPException as exc:
-            return _sio_error(exc.detail)
-        except Exception as exc:
-            return _sio_error(exc)
-
-    async def _sio_get_rollouts(sid: str, data: object) -> Any:
-        try:
-            return await deps.api_appserver_rollouts()
-        except HTTPException as exc:
-            return _sio_error(exc.detail)
-        except Exception as exc:
-            return _sio_error(exc)
-
-    async def _sio_get_rollout_preview(sid: str, data: object) -> Any:
-        try:
-            return await deps.api_appserver_rollout_preview(_payload(data).get("rollout_id", ""))
         except HTTPException as exc:
             return _sio_error(exc.detail)
         except Exception as exc:
@@ -781,14 +754,11 @@ def register_appserver_socketio_handlers(
         ("conversation_select", _sio_conversation_select),
         ("conversation_delete", _sio_conversation_delete),
         ("conversation_pins_update", _sio_conversation_pins_update),
-        ("conversation_bind_rollout", _sio_conversation_bind_rollout),
         ("set_view", _sio_set_view),
         ("get_config", _sio_get_config),
         ("update_config", _sio_update_config),
         ("get_models", _sio_get_models),
         ("get_runtime_options", _sio_get_runtime_options),
-        ("get_rollouts", _sio_get_rollouts),
-        ("get_rollout_preview", _sio_get_rollout_preview),
         ("get_extensions", _sio_get_extensions),
         ("extension_set_enabled", _sio_extension_set_enabled),
         ("extension_install", _sio_extension_install),

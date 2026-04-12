@@ -17,8 +17,6 @@ import uuid
 import subprocess
 import socketio
 import binascii
-import shutil
-import tomlkit
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException
@@ -50,20 +48,19 @@ from agent_log_server.extension_api import (
     ExtensionApiDeps,
     register_extension_api_routes,
 )
+from agent_log_server.conversation_store import conversation_store, utc_ts
 from agent_log_server.host_routes import HostRoutes, HostRoutesDeps, HostRoutesState
 from agent_log_server.index import create_app_index
 from agent_log_server.page_routes import PageRoutesDeps, register_page_routes
+from agent_log_server.te2_sync import Te2SyncHelpers
 from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD as _AGENT_PTY_ASK_USER_REQUEST_METHOD,
 )
 from agent_log_server.ipc_auth import load_or_create_ipc_secret
 from agent_log_server.te2_mcp_config import (
-    TE2_MCP_SERVER_NAME,
-    build_te2_mcp_streamable_http_url,
     te2_mcp_integration_enabled,
 )
 from agent_log_server import pending_context as _pending_ctx
-from agent_log_server import conversation_todos as _conv_todos
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -391,125 +388,46 @@ def _set_debug_mode(enabled: bool) -> Optional[Path]:
     return DEBUG_RAW_LOG_PATH
 
 # Persist app server config under ~/.cache/app_server.
-CONFIG_PATH = Path(os.path.expanduser("~/.cache/app_server/app_server_config.json"))
-APP_SERVER_DATA_PATH = Path(os.path.expanduser("~/.local/share/app_server"))
-USER_EXTENSIONS_DIR = APP_SERVER_DATA_PATH / "extensions"
+CONFIG_PATH = conversation_store.config_path
+APP_SERVER_DATA_PATH = conversation_store.app_server_data_path
+USER_EXTENSIONS_DIR = conversation_store.user_extensions_dir
 CODEX_CONFIG_PATH = Path(os.path.expanduser("~/.codex/config.toml"))
-LEGACY_TRANSCRIPT_DIR = CONFIG_PATH.parent / "transcripts"
-CONVERSATION_DIR = CONFIG_PATH.parent / "conversations"
-_conv_todos.configure(CONVERSATION_DIR)
-TE2_CONSOLE_BRIDGE_SOURCE_PATH = PACKAGE_ROOT / "te2_assets" / "console_bridge.js"
-TE2_CONSOLE_BRIDGE_CACHE_PATH = CONFIG_PATH.parent / "te2_console_bridge.js"
-TE2_FWS_README_SOURCE_PATH = PACKAGE_ROOT / "te2_assets" / "framework_shells_README.md"
-TE2_FWS_README_CACHE_PATH = CONFIG_PATH.parent / "framework_shells_README.md"
-TE2_PROXY_SHELL_README_SOURCE_PATH = PACKAGE_ROOT / "te2_assets" / "proxy_shell_wrapper_README.md"
-TE2_PROXY_SHELL_README_CACHE_PATH = CONFIG_PATH.parent / "proxy_shell_wrapper_README.md"
+LEGACY_TRANSCRIPT_DIR = conversation_store.legacy_transcript_dir
+CONVERSATION_DIR = conversation_store.conversations_dir
+conversation_store.set_meta_save_callback(_pending_ctx.refresh_conversation)
+_default_appserver_config = conversation_store.default_appserver_config
+_load_appserver_config = conversation_store.load_appserver_config
+_save_appserver_config = conversation_store.save_appserver_config
+_normalize_conversation_list = conversation_store.normalize_conversation_list
+_add_conversation_to_config = conversation_store.add_conversation_to_config
+_remove_conversation_from_config = conversation_store.remove_conversation_from_config
+_normalize_pinned_conversation_list = conversation_store.normalize_pinned_conversation_list
+_conversation_ids_from_disk = conversation_store.conversation_ids_from_disk
+_sync_conversation_index = conversation_store.sync_conversation_index
+_conversation_display_order = conversation_store.conversation_display_order
+_find_conversation_by_thread_id = conversation_store.find_conversation_by_thread_id
+_sanitize_conversation_id = conversation_store.sanitize_conversation_id
+_conversation_dir = conversation_store.conversation_dir
+_conversation_meta_path = conversation_store.conversation_meta_path
+_conversation_transcript_path = conversation_store.conversation_transcript_path
+_default_conversation_meta = conversation_store.default_conversation_meta
+_load_conversation_meta = conversation_store.load_conversation_meta
+_save_conversation_meta = conversation_store.save_conversation_meta
+_latest_legacy_transcript = conversation_store.latest_legacy_transcript
+_te2_sync_helpers = Te2SyncHelpers(
+    package_root=PACKAGE_ROOT,
+    config_path=CONFIG_PATH,
+    codex_config_path=CODEX_CONFIG_PATH,
+    te2_base_url=_host_routes_state.te2_base_url,
+    load_appserver_config=_load_appserver_config,
+)
+_sync_te2_console_bridge_cache = _te2_sync_helpers.sync_te2_console_bridge_cache
+_sync_te2_fws_readme_cache = _te2_sync_helpers.sync_te2_fws_readme_cache
+_sync_te2_proxy_shell_readme_cache = _te2_sync_helpers.sync_te2_proxy_shell_readme_cache
+_write_codex_te2_mcp_config = _te2_sync_helpers.write_codex_te2_mcp_config
+_sync_codex_te2_mcp_from_app_config = _te2_sync_helpers.sync_codex_te2_mcp_from_app_config
 _transcript_lock = asyncio.Lock()
 _transcript_seen: set[tuple[str, str, str]] = set()
-
-
-def _default_appserver_config() -> Dict[str, Any]:
-    return {
-        "cwd": None,
-        "thread_id": None,
-        "turn_id": None,
-        "conversation_id": None,
-        "conversations": [],
-        "pinned_conversations": [],
-        "active_view": "splash",
-        "app_server_command": None,
-        "shell_id": None,
-        "user_name": None,
-        "te2_mcp_integration": False,
-        "extensions": {},
-    }
-
-
-def _load_appserver_config() -> Dict[str, Any]:
-    cfg = _default_appserver_config()
-    try:
-        if CONFIG_PATH.exists():
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                cfg.update(data)
-                cfg["extensions"] = _normalize_extensions_config(cfg.get("extensions"))
-        else:
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        # Fall back to defaults on any read/parse error.
-        return cfg
-    return cfg
-
-
-def _save_appserver_config(cfg: Dict[str, Any]) -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def _sync_cached_asset(label: str, source_path: Path, cache_path: Path) -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not source_path.exists():
-        print(f"[Startup] {label} source missing: {source_path}")
-        return
-    try:
-        source_stat = source_path.stat()
-        target_stat = cache_path.stat() if cache_path.exists() else None
-        if (
-            target_stat is not None
-            and target_stat.st_size == source_stat.st_size
-            and int(target_stat.st_mtime) >= int(source_stat.st_mtime)
-        ):
-            return
-        shutil.copy2(source_path, cache_path)
-    except Exception as e:
-        print(f"[Startup] {label} cache sync error: {e}")
-
-
-def _sync_te2_console_bridge_cache() -> None:
-    _sync_cached_asset("TE2 console bridge", TE2_CONSOLE_BRIDGE_SOURCE_PATH, TE2_CONSOLE_BRIDGE_CACHE_PATH)
-
-
-def _sync_te2_fws_readme_cache() -> None:
-    _sync_cached_asset("Framework-shells README", TE2_FWS_README_SOURCE_PATH, TE2_FWS_README_CACHE_PATH)
-
-
-def _sync_te2_proxy_shell_readme_cache() -> None:
-    _sync_cached_asset(
-        "Proxy shell wrapper README",
-        TE2_PROXY_SHELL_README_SOURCE_PATH,
-        TE2_PROXY_SHELL_README_CACHE_PATH,
-    )
-
-
-def _write_codex_te2_mcp_config(enabled: bool) -> None:
-    CODEX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if CODEX_CONFIG_PATH.exists():
-        raw = CODEX_CONFIG_PATH.read_text(encoding="utf-8")
-        doc = tomlkit.parse(raw) if raw.strip() else tomlkit.document()
-    else:
-        doc = tomlkit.document()
-
-    mcp_servers = doc.get("mcp_servers")
-    if not isinstance(mcp_servers, dict):
-        mcp_servers = tomlkit.table()
-        doc["mcp_servers"] = mcp_servers
-
-    if enabled:
-        te2_table = tomlkit.table()
-        te2_table["url"] = build_te2_mcp_streamable_http_url(_host_routes_state.te2_base_url())
-        mcp_servers[TE2_MCP_SERVER_NAME] = te2_table
-    else:
-        mcp_servers.pop(TE2_MCP_SERVER_NAME, None)
-        if not list(mcp_servers):
-            doc.pop("mcp_servers", None)
-
-    CODEX_CONFIG_PATH.write_text(tomlkit.dumps(doc), encoding="utf-8")
-
-
-def _sync_codex_te2_mcp_from_app_config() -> None:
-    cfg = _load_appserver_config()
-    _write_codex_te2_mcp_config(cfg.get("te2_mcp_integration") is True)
 
 
 async def _require_conversation_id(*, create_if_missing: bool = True) -> str:
@@ -517,126 +435,6 @@ async def _require_conversation_id(*, create_if_missing: bool = True) -> str:
     if not convo_id:
         raise RuntimeError("Conversation not initialized")
     return convo_id
-
-
-def _normalize_conversation_list(cfg: Dict[str, Any]) -> List[str]:
-    conversations = cfg.get("conversations")
-    if not isinstance(conversations, list):
-        conversations = []
-    out: List[str] = []
-    for item in conversations:
-        if isinstance(item, str) and item and item not in out:
-            out.append(item)
-    return out
-
-
-def _add_conversation_to_config(conversation_id: str, cfg: Dict[str, Any]) -> bool:
-    conversations = _normalize_conversation_list(cfg)
-    if conversation_id in conversations:
-        cfg["conversations"] = conversations
-        return False
-    conversations.append(conversation_id)
-    cfg["conversations"] = conversations
-    return True
-
-
-def _remove_conversation_from_config(conversation_id: str, cfg: Dict[str, Any]) -> None:
-    conversations = _normalize_conversation_list(cfg)
-    if conversation_id in conversations:
-        conversations = [c for c in conversations if c != conversation_id]
-    cfg["conversations"] = conversations
-    pinned = _normalize_pinned_conversation_list(cfg, conversations)
-    if conversation_id in pinned:
-        cfg["pinned_conversations"] = [c for c in pinned if c != conversation_id]
-
-
-def _normalize_pinned_conversation_list(cfg: Dict[str, Any], valid_ids: Optional[List[str]] = None) -> List[str]:
-    pinned = cfg.get("pinned_conversations")
-    if not isinstance(pinned, list):
-        pinned = []
-    out: List[str] = []
-    valid_set = set(valid_ids) if isinstance(valid_ids, list) else None
-    for item in pinned:
-        if not isinstance(item, str) or not item:
-            continue
-        if valid_set is not None and item not in valid_set:
-            continue
-        if item not in out:
-            out.append(item)
-    cfg["pinned_conversations"] = out
-    return out
-
-
-def _conversation_ids_from_disk() -> List[str]:
-    if not CONVERSATION_DIR.exists():
-        return []
-    ids = []
-    for child in CONVERSATION_DIR.iterdir():
-        if not child.is_dir():
-            continue
-        meta_path = child / "meta.json"
-        if meta_path.exists():
-            ids.append(child.name)
-    return ids
-
-
-def _sync_conversation_index(cfg: Dict[str, Any]) -> List[str]:
-    ids = _normalize_conversation_list(cfg)
-    for cid in _conversation_ids_from_disk():
-        if cid not in ids:
-            ids.append(cid)
-    cfg["conversations"] = ids
-    return ids
-
-
-def _conversation_display_order(cfg: Dict[str, Any]) -> List[str]:
-    ids = _sync_conversation_index(cfg)
-    pinned = _normalize_pinned_conversation_list(cfg, ids)
-    pinned_set = set(pinned)
-    return pinned + [cid for cid in ids if cid not in pinned_set]
-
-
-def _find_conversation_by_thread_id(thread_id: Optional[str]) -> Optional[str]:
-    if not thread_id or not CONVERSATION_DIR.exists():
-        return None
-    for child in CONVERSATION_DIR.iterdir():
-        if not child.is_dir():
-            continue
-        meta_path = child / "meta.json"
-        if not meta_path.exists():
-            continue
-        try:
-            data = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(data, dict) and data.get("thread_id") == thread_id:
-            return child.name
-    return None
-
-def _conversation_dir(conversation_id: str) -> Path:
-    safe_id = _sanitize_conversation_id(conversation_id)
-    return CONVERSATION_DIR / safe_id
-
-
-def _conversation_meta_path(conversation_id: str) -> Path:
-    return _conversation_dir(conversation_id) / "meta.json"
-
-
-def _conversation_transcript_path(conversation_id: str) -> Path:
-    return _conversation_dir(conversation_id) / "transcript.jsonl"
-
-
-def _default_conversation_meta(conversation_id: str) -> Dict[str, Any]:
-    return {
-        "conversation_id": conversation_id,
-        "created_at": utc_ts(),
-        "thread_id": None,
-        "pending_approvals": {},
-        "ask_user_msg_counter": 0,
-        "active_plan": None,
-        "settings": {},
-        "status": "draft",
-    }
 
 
 def _ansi_strip(text: str) -> str:
@@ -816,29 +614,6 @@ async def _append_pending_cmd_buffer(conversation_id: str, entry: Dict[str, Any]
 
     meta["pending_cmd_buffer"] = buffer
     _save_conversation_meta(conversation_id, meta)
-
-def _load_conversation_meta(conversation_id: str) -> Dict[str, Any]:
-    path = _conversation_meta_path(conversation_id)
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-    meta = _default_conversation_meta(conversation_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-    return meta
-
-
-def _save_conversation_meta(conversation_id: str, meta: Dict[str, Any]) -> None:
-    path = _conversation_meta_path(conversation_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-    with suppress(Exception):
-        _pending_ctx.refresh_conversation(conversation_id)
-
 
 def _coerce_json_object(value: object) -> Dict[str, Any]:
     if not isinstance(value, dict):
@@ -1673,13 +1448,6 @@ def _coerce_query_bool(value: Any) -> bool:
     return bool(candidate)
 
 
-def _latest_legacy_transcript() -> Optional[Path]:
-    if not LEGACY_TRANSCRIPT_DIR.exists():
-        return None
-    files = sorted(LEGACY_TRANSCRIPT_DIR.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return files[0] if files else None
-
-
 async def _ensure_conversation(create_if_missing: bool = True) -> Optional[str]:
     async with _config_lock:
         cfg = _load_appserver_config()
@@ -1809,11 +1577,6 @@ def _set_conversation_turn_id(conversation_id: str, turn_id: Optional[str]) -> N
     _save_conversation_meta(convo_id, meta)
 
 
-def _sanitize_conversation_id(value: str) -> str:
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
-    return safe or "unknown"
-
-
 def _transcript_path(conversation_id: str) -> Path:
     return _conversation_transcript_path(conversation_id)
 
@@ -1848,162 +1611,6 @@ async def _append_transcript_entry(conversation_id: str, entry: Dict[str, Any]) 
             _transcript_seen.add(key)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def _rollout_sessions_dir() -> Path:
-    return Path(os.path.expanduser("~/.codex/sessions"))
-
-
-def _find_rollout_path(rollout_id: str) -> Optional[Path]:
-    safe = _sanitize_conversation_id(rollout_id)
-    if not safe:
-        return None
-    base = _rollout_sessions_dir()
-    if not base.exists():
-        return None
-    for path in base.rglob(f"*{safe}*.jsonl"):
-        if path.is_file():
-            return path
-    return None
-
-
-def _parse_rollout_timestamp(ts: Optional[str]) -> Optional[int]:
-    if not ts:
-        return None
-    try:
-        return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
-    except Exception:
-        return None
-
-
-def _rollout_content_text(payload: Dict[str, Any]) -> Optional[str]:
-    content = payload.get("content")
-    parts: List[str] = []
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-    if not parts and isinstance(payload.get("text"), str):
-        parts.append(payload["text"])
-    if not parts and isinstance(payload.get("message"), str):
-        parts.append(payload["message"])
-    text = "\n".join(parts).strip()
-    return text or None
-
-
-def _rollout_reasoning_text(payload: Dict[str, Any]) -> Optional[str]:
-    summary = payload.get("summary")
-    parts: List[str] = []
-    if isinstance(summary, list):
-        for item in summary:
-            if isinstance(item, dict):
-                text = item.get("text") or item.get("summary_text")
-                if isinstance(text, str):
-                    parts.append(text)
-    if not parts and isinstance(payload.get("text"), str):
-        parts.append(payload["text"])
-    text = "\n".join(parts).strip()
-    return text or None
-
-
-def _rollout_extract_diff(payload: Any) -> Optional[str]:
-    if isinstance(payload, dict):
-        for key in ("diff", "unified_diff", "patch"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
-        for value in payload.values():
-            diff = _rollout_extract_diff(value)
-            if diff:
-                return diff
-    if isinstance(payload, list):
-        for value in payload:
-            diff = _rollout_extract_diff(value)
-            if diff:
-                return diff
-    return None
-
-
-def _rollout_preview_entries(path: Path, limit: int = 400) -> Dict[str, Any]:
-    items: List[Dict[str, Any]] = []
-    seen: set[tuple[str, str, Optional[int]]] = set()
-    token_total: Optional[int] = None
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                if len(items) >= limit:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                ts_bucket = _parse_rollout_timestamp(rec.get("timestamp"))
-                rtype = rec.get("type")
-                payload = rec.get("payload") if isinstance(rec, dict) else None
-                if rtype == "response_item" and isinstance(payload, dict):
-                    ptype = payload.get("type")
-                    if ptype == "message":
-                        role = payload.get("role")
-                        if role in {"user", "assistant"}:
-                            text = _rollout_content_text(payload)
-                            if text:
-                                key = (role, text, ts_bucket)
-                                if key not in seen:
-                                    seen.add(key)
-                                    items.append({"role": role, "text": text, "ts": rec.get("timestamp")})
-                    elif ptype == "reasoning":
-                        text = _rollout_reasoning_text(payload)
-                        if text:
-                            key = ("reasoning", text, ts_bucket)
-                            if key not in seen:
-                                seen.add(key)
-                                items.append({"role": "reasoning", "text": text, "ts": rec.get("timestamp")})
-                elif rtype == "event_msg" and isinstance(payload, dict):
-                    ptype = payload.get("type")
-                    if ptype == "user_message":
-                        text = payload.get("message")
-                        if isinstance(text, str):
-                            text = _strip_meta_envelope(text)  # Strip BEFORE .strip()
-                            text = text.strip()
-                            if text:
-                                key = ("user", text, ts_bucket)
-                                if key not in seen:
-                                    seen.add(key)
-                                    items.append({"role": "user", "text": text, "ts": rec.get("timestamp")})
-                    elif ptype == "agent_message":
-                        text = payload.get("message")
-                        if isinstance(text, str) and text.strip():
-                            key = ("assistant", text, ts_bucket)
-                            if key not in seen:
-                                seen.add(key)
-                                items.append({"role": "assistant", "text": text.strip(), "ts": rec.get("timestamp")})
-                    elif ptype == "agent_reasoning":
-                        text = payload.get("text")
-                        if isinstance(text, str) and text.strip():
-                            key = ("reasoning", text, ts_bucket)
-                            if key not in seen:
-                                seen.add(key)
-                                items.append({"role": "reasoning", "text": text.strip(), "ts": rec.get("timestamp")})
-                    elif ptype == "token_count":
-                        info = payload.get("info")
-                        if isinstance(info, dict):
-                            usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
-                            if isinstance(usage, dict) and isinstance(usage.get("total_tokens"), (int, float)):
-                                token_total = int(usage["total_tokens"])
-                diff = _rollout_extract_diff(payload)
-                if diff:
-                    key = ("diff", diff, ts_bucket)
-                    if key not in seen:
-                        seen.add(key)
-                        items.append({"role": "diff", "text": diff, "ts": rec.get("timestamp")})
-    except Exception:
-        return {"items": [], "token_total": None}
-    return {"items": items, "token_total": token_total}
 
 
 def _ensure_framework_shells_secret() -> None:
@@ -2173,10 +1780,6 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-
-
-def utc_ts() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def ensure_log_file(path: Path) -> None:
@@ -2445,6 +2048,7 @@ _extension_api = ExtensionApi(
         write_transcript_entries=_write_transcript_entries,
     )
 )
+conversation_store.set_extensions_config_normalizer(_extension_api.normalize_extensions_config)
 
 _normalize_extensions_config = _extension_api.normalize_extensions_config
 _default_active_extension_id = _extension_api.default_active_extension_id
@@ -2496,8 +2100,6 @@ appserver_routes = AppserverRoutes(
         legacy_builtin_codex_disabled_detail=_legacy_builtin_codex_disabled_detail,
         emit_command_result_mirror=_emit_command_result_mirror,
         broadcast_appserver_ui=_broadcast_appserver_ui,
-        find_rollout_path=_find_rollout_path,
-        rollout_preview_entries=_rollout_preview_entries,
         logical_absolute_path=_logical_absolute_path,
         resolved_existing_path=_resolved_existing_path,
         logical_alias_for_resolved_ancestor=_logical_alias_for_resolved_ancestor,
@@ -2524,15 +2126,12 @@ api_appserver_conversations = appserver_routes.api_appserver_conversations
 api_appserver_conversation_create = appserver_routes.api_appserver_conversation_create
 api_appserver_conversation_select = appserver_routes.api_appserver_conversation_select
 api_appserver_conversation_pins = appserver_routes.api_appserver_conversation_pins
-api_appserver_conversation_bind_rollout = appserver_routes.api_appserver_conversation_bind_rollout
 api_appserver_conversation_delete = appserver_routes.api_appserver_conversation_delete
 api_appserver_set_view = appserver_routes.api_appserver_set_view
 api_fs_list = appserver_routes.api_fs_list
 api_fs_search = appserver_routes.api_fs_search
 api_appserver_transcript = appserver_routes.api_appserver_transcript
 api_appserver_transcript_range = appserver_routes.api_appserver_transcript_range
-api_appserver_rollouts = appserver_routes.api_appserver_rollouts
-api_appserver_rollout_preview = appserver_routes.api_appserver_rollout_preview
 api_appserver_config_update = appserver_routes.api_appserver_config_update
 api_appserver_set_cwd = appserver_routes.api_appserver_set_cwd
 api_appserver_thread_start = appserver_routes.api_appserver_thread_start
@@ -2654,14 +2253,11 @@ def _register_appserver_socketio() -> None:
             api_appserver_conversation_select=api_appserver_conversation_select,
             api_appserver_conversation_delete=api_appserver_conversation_delete,
             api_appserver_conversation_pins=api_appserver_conversation_pins,
-            api_appserver_conversation_bind_rollout=api_appserver_conversation_bind_rollout,
             api_appserver_set_view=api_appserver_set_view,
             api_appserver_config=api_appserver_config,
             api_appserver_config_update=api_appserver_config_update,
             api_appserver_models=api_appserver_models,
             api_appserver_runtime_options=api_appserver_runtime_options,
-            api_appserver_rollouts=api_appserver_rollouts,
-            api_appserver_rollout_preview=api_appserver_rollout_preview,
             api_appserver_status=api_appserver_status,
             api_appserver_start=api_appserver_start,
             api_appserver_stop=api_appserver_stop,

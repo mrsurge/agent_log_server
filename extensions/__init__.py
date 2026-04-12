@@ -2560,7 +2560,7 @@ async def hydrate_transcript(
 
     Returns a list of transcript entries in the standard format:
       {role: "user"|"assistant"|"reasoning"|"command"|"diff", text: "...", ...}
-    Server.py writes these via _write_transcript_entries — same as bind-rollout.
+    Server writes these via _write_transcript_entries during port-in/import.
     """
     handler = get_handler(extension_id)
     if handler and hasattr(handler, "hydrate_transcript"):

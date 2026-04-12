@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .plan_utils import normalize_plan_steps, render_plan_markdown
+from .rollout_import import find_rollout_path, preview_entries
 from .runtime_protocol import (
     RuntimeProtocol,
     build_request_params,
@@ -1371,12 +1372,11 @@ async def hydrate_transcript(
     model: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    server = _server_module()
-    path = server._find_rollout_path(session_id)
+    path = find_rollout_path(session_id)
     if not path:
         _add_to_raw_buffer("err", conversation_id, f"hydrate_transcript rollout_not_found session={session_id[:8]}")
         return []
-    preview = await asyncio.to_thread(server._rollout_preview_entries, path, 200000)
+    preview = await asyncio.to_thread(preview_entries, path, 200000)
     items = preview.get("items", []) if isinstance(preview, dict) else []
     _add_to_raw_buffer("out", conversation_id, f"hydrate_transcript imported={len(items)} session={session_id[:8]}")
     return items if isinstance(items, list) else []

@@ -3018,7 +3018,7 @@ async def hydrate_transcript(
     """
     Build flat transcript entries from an existing SDK session's history.
 
-    This is the SDK equivalent of _rollout_preview_entries() for Codex.
+    This is the SDK equivalent of Codex rollout transcript import.
     Calls get_messages() on the SDK session and converts each SessionEvent
     into the standard transcript entry format that _write_transcript_entries
     expects: {role, text, ts, ...}.

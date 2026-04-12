@@ -354,13 +354,19 @@ export function bindSettingsUiFlow(ctx) {
     rolloutOverlayEl.classList.add('hidden');
   }
 
-  function renderRolloutList(items) {
+  function getRolloutPickerProvider() {
+    const provider = getState().rolloutPickerProvider;
+    if (provider && typeof provider === 'object') return provider;
+    return null;
+  }
+
+  function renderRolloutList(items, emptyText = 'No rollouts found') {
     if (!rolloutListEl) return;
     rolloutListEl.innerHTML = '';
     if (!items.length) {
       const empty = document.createElement('div');
       empty.className = 'picker-item';
-      empty.textContent = 'No rollouts found';
+      empty.textContent = emptyText;
       rolloutListEl.appendChild(empty);
       return;
     }
@@ -380,24 +386,43 @@ export function bindSettingsUiFlow(ctx) {
   }
 
   async function fetchRollouts() {
+    const provider = getRolloutPickerProvider();
+    if (!provider || typeof provider.list !== 'function') {
+      renderRolloutList([], 'No rollout provider');
+      setActivity('rollout picker unavailable', true);
+      return;
+    }
     try {
-      const data = await sioCall('get_rollouts', {});
-      let items = Array.isArray(data?.items) ? data.items : [];
       const cwd = getActiveCwdValue({ fallbackToSaved: false });
+      const data = await provider.list({ cwd, state: getState(), setState, setActivity, sioCall });
+      let items = Array.isArray(data?.items) ? data.items : [];
       if (cwd) {
         items = items.filter((item) => item && item.cwd && String(item.cwd) === cwd);
       }
       renderRolloutList(items);
     } catch (err) {
       console.warn('rollout list failed', err);
-      renderRolloutList([]);
+      renderRolloutList([], 'Rollout list unavailable');
     }
   }
 
   async function loadRolloutPreview(rolloutId) {
     if (!rolloutId) return;
+    const provider = getRolloutPickerProvider();
+    if (!provider || typeof provider.preview !== 'function') {
+      setActivity('rollout preview unavailable', true);
+      return;
+    }
     try {
-      const data = await sioCall('get_rollout_preview', { rollout_id: rolloutId });
+      const cwd = getActiveCwdValue({ fallbackToSaved: false });
+      const data = await provider.preview({
+        rolloutId,
+        cwd,
+        state: getState(),
+        setState,
+        setActivity,
+        sioCall,
+      });
       const items = Array.isArray(data?.items) ? data.items : [];
       setState({
         pendingRollout: {

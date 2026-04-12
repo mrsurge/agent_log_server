@@ -76,8 +76,6 @@ class AppserverRoutesDeps:
     legacy_builtin_codex_disabled_detail: Callable[[], str]
     emit_command_result_mirror: _AsyncAnyCallable
     broadcast_appserver_ui: _AsyncAnyCallable
-    find_rollout_path: Callable[[str], Optional[Path]]
-    rollout_preview_entries: Callable[..., dict[str, Any]]
     logical_absolute_path: Callable[[str | None, str], Path]
     resolved_existing_path: Callable[[Path, Optional[Path]], Path]
     logical_alias_for_resolved_ancestor: Callable[[Path, Path, Path], Optional[Path]]
@@ -707,42 +705,6 @@ class AppserverRoutes:
             self._deps.save_appserver_config(cfg)
         return {"ok": True, "pinned_conversations": pinned}
 
-    async def api_appserver_conversation_bind_rollout(
-        self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="Payload must be a JSON object")
-        rollout_id = payload.get("rollout_id")
-        if not isinstance(rollout_id, str) or not rollout_id.strip():
-            raise HTTPException(status_code=400, detail="Missing rollout_id")
-        rollout_id = rollout_id.strip()
-        items = payload.get("items")
-        convo_id = await self._deps.require_conversation_id()
-        meta = self._deps.load_conversation_meta(convo_id)
-        meta["thread_id"] = rollout_id
-        meta["status"] = "active"
-        meta_settings = self._deps.meta_settings(meta)
-        meta_settings["rolloutId"] = rollout_id
-        meta["settings"] = meta_settings
-        self._deps.save_conversation_meta(convo_id, meta)
-        async with self._deps.config_lock:
-            cfg = self._deps.load_appserver_config()
-            cfg["thread_id"] = rollout_id
-            self._deps.save_appserver_config(cfg)
-        if isinstance(items, list):
-            transcript_items = [item for item in items if isinstance(item, dict)]
-            await self._deps.write_transcript_entries(convo_id, transcript_items)
-        else:
-            path = self._deps.find_rollout_path(self._deps.sanitize_conversation_id(rollout_id))
-            if not path:
-                raise HTTPException(status_code=404, detail="Rollout not found")
-            preview = self._deps.rollout_preview_entries(path, limit=200000)
-            preview_items = preview.get("items")
-            transcript_items = [item for item in preview_items if isinstance(item, dict)] if isinstance(preview_items, list) else []
-            await self._deps.write_transcript_entries(convo_id, transcript_items)
-        return {"ok": True, "conversation_id": convo_id, "thread_id": rollout_id}
-
     async def api_appserver_conversation_delete(self, conversation_id: str) -> dict[str, Any]:
         if not conversation_id:
             raise HTTPException(status_code=400, detail="Missing conversation_id")
@@ -986,19 +948,6 @@ class AppserverRoutes:
             "offset": offset,
             "items": items,
         }
-
-    async def api_appserver_rollouts(self) -> dict[str, Any]:
-        return self._deps.legacy_builtin_codex_disabled_result(ok=True, items=[])
-
-    async def api_appserver_rollout_preview(self, rollout_id: str) -> dict[str, Any]:
-        safe = self._deps.sanitize_conversation_id(rollout_id)
-        if not safe:
-            raise HTTPException(status_code=400, detail="Invalid rollout id")
-        path = self._deps.find_rollout_path(safe)
-        if not path:
-            raise HTTPException(status_code=404, detail="Rollout not found")
-        preview = self._deps.rollout_preview_entries(path)
-        return {"items": preview.get("items", []), "token_total": preview.get("token_total")}
 
     async def api_appserver_config_update(
         self,
@@ -1563,11 +1512,6 @@ def register_appserver_routes(app: FastAPI, routes: AppserverRoutes) -> None:
     _add("/api/appserver/conversations/select", routes.api_appserver_conversation_select, ["POST"])
     _add("/api/appserver/conversations/pins", routes.api_appserver_conversation_pins, ["POST"])
     _add(
-        "/api/appserver/conversations/bind-rollout",
-        routes.api_appserver_conversation_bind_rollout,
-        ["POST"],
-    )
-    _add(
         "/api/appserver/conversations/{conversation_id}",
         routes.api_appserver_conversation_delete,
         ["DELETE"],
@@ -1577,12 +1521,6 @@ def register_appserver_routes(app: FastAPI, routes: AppserverRoutes) -> None:
     _add("/api/fs/search", routes.api_fs_search, ["GET"])
     _add("/api/appserver/transcript", routes.api_appserver_transcript, ["GET"])
     _add("/api/appserver/transcript/range", routes.api_appserver_transcript_range, ["GET"])
-    _add("/api/appserver/rollouts", routes.api_appserver_rollouts, ["GET"])
-    _add(
-        "/api/appserver/rollouts/{rollout_id}/preview",
-        routes.api_appserver_rollout_preview,
-        ["GET"],
-    )
     _add("/api/appserver/config", routes.api_appserver_config_update, ["POST"])
     _add("/api/appserver/cwd", routes.api_appserver_set_cwd, ["POST"])
     _add("/api/appserver/thread/start", routes.api_appserver_thread_start, ["POST"])
