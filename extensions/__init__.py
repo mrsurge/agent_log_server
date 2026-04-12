@@ -4,7 +4,7 @@ Extension Loader
 Discovers and loads pluggable agent extensions by scanning subfolders for
 manifest.json files.  Each extension lives in its own directory under
 extensions/ with:
-    manifest.json   — metadata (id, name, type, enabled, capabilities)
+    manifest.json   — metadata (id, name, type, version, enabled, capabilities)
     client.py       — handler module (init_*_manager, handle_message, etc.)
     router.py       — event translation (optional)
     settings_schema.json — UI schema (optional)
@@ -398,6 +398,21 @@ def _coerce_schema_version(value: Any) -> Optional[int]:
     return None
 
 
+def _manifest_version_text(manifest: Any) -> str:
+    if not isinstance(manifest, dict):
+        return ""
+    raw_value = manifest.get("version")
+    return raw_value.strip() if isinstance(raw_value, str) and raw_value.strip() else ""
+
+
+def _missing_manifest_version_message(extension_id: str) -> str:
+    ext_label = str(extension_id or "").strip() or "unknown extension"
+    return (
+        f"Extension manifest.version is required for {ext_label}; "
+        "add a version string such as 0.1.0"
+    )
+
+
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -552,16 +567,9 @@ def _build_extension_state(
         install_source = _registry_install_source(registry_entry)
         installer_meta = _dict_or_empty(registry_entry.get("installer_meta"))
         current_meta = _dict_or_empty(installer_meta.get("current"))
-        version_raw = manifest.get("version")
-        version_text = version_raw.strip() if isinstance(version_raw, str) and version_raw.strip() else ""
-        if not version_text:
-            registry_version = registry_entry.get("version")
-            if isinstance(registry_version, str) and registry_version.strip():
-                version_text = registry_version.strip()
-        if not version_text:
-            current_version = current_meta.get("version")
-            if isinstance(current_version, str) and current_version.strip():
-                version_text = current_version.strip()
+        version_text = _manifest_version_text(manifest)
+        manifest_ok = bool(version_text)
+        manifest_message = "" if manifest_ok else _missing_manifest_version_message(ext_id)
         schema_version = manifest.get("schema_version")
         if schema_version is None:
             schema_version = registry_entry.get("schema_version")
@@ -590,22 +598,24 @@ def _build_extension_state(
             "has_plan_modes": _manifest_capability_flag(manifest, "hasPlanModes", "has_plan_modes"),
             "default_enabled": default_enabled,
             "enabled": default_enabled,
-            "dependency_status": "unchecked",
-            "dependency_ok": True,
-            "dependency_message": "",
+            "dependency_status": "unchecked" if manifest_ok else "error",
+            "dependency_ok": manifest_ok,
+            "dependency_message": "" if manifest_ok else manifest_message,
             "dependency_details": {},
             "has_dependency_check": bool(dependencies.get("has_check")),
             "has_dependency_install": bool(dependencies.get("has_install")),
-            "active": default_enabled,
+            "active": default_enabled and manifest_ok,
             "source_kind": source_kind,
             "source_root": str(source_root) if isinstance(source_root, Path) else "",
             "install_source": dict(install_source) if install_source else {},
             "installer_meta": dict(installer_meta) if installer_meta else {},
             "version": version_text,
             "schema_version": schema_version,
+            "manifest_ok": manifest_ok,
+            "manifest_message": manifest_message,
         }
 
-        if default_enabled:
+        if default_enabled and manifest_ok:
             enabled_by_type.setdefault(ext_type, []).append(ext_info)
 
     return registry, source_roots, module_packages, enabled_by_type
@@ -993,7 +1003,11 @@ def _recompute_extension_active_state(extension_id: str) -> bool:
     info = _extensions_registry.get(extension_id)
     if not isinstance(info, dict):
         return False
-    info["active"] = bool(info.get("enabled")) and bool(info.get("dependency_ok"))
+    info["active"] = (
+        bool(info.get("enabled"))
+        and bool(info.get("manifest_ok", True))
+        and bool(info.get("dependency_ok"))
+    )
     return bool(info.get("active"))
 
 
@@ -1072,9 +1086,15 @@ def set_extension_dependency_result(extension_id: str, result: Optional[Dict[str
         status = "met" if payload.get("ok") else "error"
     message = payload.get("message")
     details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    message_text = message if isinstance(message, str) else ""
+    if not bool(info.get("manifest_ok", True)):
+        status = "error"
+        manifest_message = info.get("manifest_message")
+        if isinstance(manifest_message, str) and manifest_message.strip():
+            message_text = manifest_message.strip()
     info["dependency_status"] = status
-    info["dependency_ok"] = status == "met"
-    info["dependency_message"] = message if isinstance(message, str) else ""
+    info["dependency_ok"] = bool(info.get("manifest_ok", True)) and status == "met"
+    info["dependency_message"] = message_text
     info["dependency_details"] = details
     became_active = _recompute_extension_active_state(extension_id)
     if became_active:
@@ -2499,7 +2519,16 @@ async def resume_session_with_history(
     model: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Resume a session and hydrate transcript. Handler must implement resume_session_with_history()."""
+    """Bind/import a remote session/thread into a local conversation.
+
+    Handler must implement resume_session_with_history().
+
+    Existing harness-conversation reload is transcript-first and lazy-resumes on
+    first send; transcript hydration remains a separate hydrate_transcript()
+    concern for port-in/import flows.
+
+    See acp/AGENT_EXTENSION_INTEGRATION.md and CODEX_APP_SERVER_EXTENSION.md.
+    """
     handler = get_handler(extension_id)
     if handler and hasattr(handler, "resume_session_with_history"):
         return await handler.resume_session_with_history(
@@ -2521,9 +2550,14 @@ async def hydrate_transcript(
     model: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Get flat transcript entries for an existing session (port-in).
+    """Get flat transcript entries for a new local conversation from port-in/import.
 
     Handler must implement hydrate_transcript(session_id, conversation_id, ...).
+    Existing harness-conversation reload replays the already-local transcript and
+    should not use vendor history loading for ordinary reload/select.
+
+    See acp/AGENT_EXTENSION_INTEGRATION.md and CODEX_APP_SERVER_EXTENSION.md.
+
     Returns a list of transcript entries in the standard format:
       {role: "user"|"assistant"|"reasoning"|"command"|"diff", text: "...", ...}
     Server.py writes these via _write_transcript_entries — same as bind-rollout.

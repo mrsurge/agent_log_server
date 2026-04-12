@@ -36,15 +36,21 @@ These rules matter more than any individual implementation detail:
    - replay/hydration reads our transcript
    - vendor-native history is only used for bind/import when an extension explicitly supports it
 
-5. **Live event output and transcript output must match**
+5. **Existing harness conversation reload is transcript-first and lazy**
+   - reloading/selecting a conversation that already exists on our harness replays the local `transcript.jsonl`
+   - if a remote `thread_id` / `session_id` is already bound, the extension stays cold until the first new send
+   - that first send may fail against a cold backend; the extension then resumes/reattaches and retries the buffered message
+   - resume-time history / hydration noise must be suppressed until the backend ack because the local transcript is already present
+
+6. **Live event output and transcript output must match**
    Any router that emits frontend events must write equivalent transcript entries for replay parity. Missing transcript fields become replay bugs.
 
-6. **Internal-only debug data must be explicitly tagged**
+7. **Internal-only debug data must be explicitly tagged**
    - use `internal: true` on both the live event and the transcript entry
    - normal frontend live-play, replay, and conversation-preview paths must ignore internal-tagged records
    - `/api/appserver/transcript/range` hides internal-tagged rows by default; opt in with `include_internal=true` when you need to inspect them directly
 
-7. **Runtime UI/backend contracts are Socket.IO-only**
+8. **Runtime UI/backend contracts are Socket.IO-only**
    - generic HTTP endpoints still exist for data loading, session browsing, debug, and admin flows
    - do not add HTTP fallback paths for runtime UI/backend behavior unless the user explicitly approves that fallback
 
@@ -59,6 +65,13 @@ These rules matter more than any individual implementation detail:
   - replay an already-local `transcript.jsonl`
   - uses platform-agnostic frontend/server replay helpers
   - does not require backend-specific transport ownership
+  - if a remote thread/session is already bound, keep the backend cold until the first new send
+  - do not import vendor-native history during this ordinary reload/select flow
+
+See also:
+
+- `AGENTS.md` — short repo-wide invariant/guardrail
+- `CODEX_APP_SERVER_EXTENSION.md` — architecture/reference implementation manual
 
 ## High-level architecture
 
@@ -225,8 +238,8 @@ The extension system is intentionally small. Implement only the hooks your backe
 | `get_runtime_options(extension_id, conversation_id=None, settings=None)` | `GET /api/appserver/runtime_options` | Expose shared runtime quick controls/current values such as plan or collaboration mode |
 | `list_models()` | `GET /api/extensions/{id}/models` | Populate schema-driven model selectors |
 | `list_sessions(cwd=None)` | `GET /api/extensions/{id}/sessions` | Populate `session_picker` browse flows |
-| `resume_session_with_history(...)` | session bind/resume endpoint | Bind a backend session/thread to a local conversation and make live backend state ready |
-| `hydrate_transcript(...)` | session bind/resume endpoint | Return flat transcript entries for a new session from port-in |
+| `resume_session_with_history(...)` | session bind/import endpoint | Bind a backend session/thread to a local conversation; ordinary existing-conversation reload still stays cold until first-send lazy resume |
+| `hydrate_transcript(...)` | session bind/import endpoint | Return flat transcript entries for a **new local conversation from port-in/import** |
 | `route_event(...)` | live app-server notification routing | Translate backend live events into UI + transcript output |
 | `resolve_approval(request_id, decision)` | approval response handlers | Complete a pending approval request |
 | `validate_pending_approval(...)` | approval validation | Confirm a persisted approval is still valid |
@@ -375,7 +388,8 @@ That makes it a good example of an extension whose backend transport is fully hi
 
 - **`resume_session_with_history(...)`**
   - binds `thread_id`
-  - resumes the SDK session into in-memory state
+  - for port-in/import, resumes the SDK session into in-memory state
+  - does **not** redefine the ordinary existing-harness-conversation reload contract
 
 - **`hydrate_transcript(...)`**
   - calls `session.get_messages()`
@@ -527,7 +541,8 @@ Response registries are keyed by lowercase method names. Manual overrides should
 
 - **`resume_session_with_history(...)`**
   - binds `thread_id`
-  - resumes the selected Codex thread through the extension-owned transport
+  - for port-in/import, resumes the selected Codex thread through the extension-owned transport
+  - does **not** redefine the ordinary existing-harness-conversation reload contract
 
 - **`hydrate_transcript(...)`**
   - supports the **session from port-in** flow
@@ -628,6 +643,10 @@ Minimum recommended structure for a user-installed extension:
 
 Builtin repo extensions under `extensions/<folder>/` still follow the same layout, but that is the builtin root, not the normal target for user-installed additions.
 
+`manifest.json` must include a non-empty `version` string for both builtin and
+user-installed extensions. If you are adding versioning to an older manifest
+for the first time, start at `0.1.0`.
+
 ### 3. Implement the manager init hook
 
 Your client module should expose one of the init function names recognized by `ext_loader`, preferably:
@@ -679,11 +698,24 @@ For bind/import flows, keep the responsibilities split:
 
 - `resume_session_with_history(...)`
   - bind the remote thread/session id to the local conversation
-  - make the live backend state ready
+  - for **new local conversation from port-in/import**, it may also prepare live backend state if that import flow requires it
+  - for **ordinary reload/select of an existing harness conversation**, it must **not** eagerly load/attach the backend session
 - `hydrate_transcript(...)`
   - return flat transcript entries for a **new session from port-in**
-- existing conversation hydration
+- existing harness conversation hydration/reload
   - replay the already-local transcript through the generic platform-agnostic helpers
+  - leave the backend cold until the first new send
+  - use the buffered-send lazy resume/retry path when that first send hits a cold backend
+  - suppress resume/load history noise until the backend ack so it does not duplicate the already-local transcript
+
+Some backends only expose a history-bearing `load_session()` path and do not advertise a true `session/resume` capability. In that case, `load_session()` may act as the synthetic reattach ack for the retry path, but suppression still has to stay active until replay updates reach a real quiet period. Do not treat RPC completion by itself as proof that replay delivery is finished.
+
+This lifecycle split is part of the repo contract, not an extension-specific preference.
+
+See also:
+
+- `AGENTS.md`
+- `CODEX_APP_SERVER_EXTENSION.md`
 
 ### 7. Add a router if the backend streams events
 
@@ -711,6 +743,7 @@ Recommended checklist:
 - session picker works if implemented
 - new session from port-in works if implemented
 - transcript replay still works locally
+- ordinary existing-conversation reload with a bound session stays transcript-first and cold, and the first-send retry path does not absorb delayed replay updates into the live turn
 - approvals/interrupts work if the backend supports them
 - stderr/log observability works if the extension owns a custom transport wrapper
 - live output and replay output match

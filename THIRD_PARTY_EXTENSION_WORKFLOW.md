@@ -22,6 +22,30 @@ Examples:
 - let agents iterate quickly with `install`, `update`, `smoke`, repeat
 - keep `server.py` and the shared frontend generic
 
+## Operator CLI
+
+The repo now also exposes a thin operator-facing CLI through the existing `codex-agent` entrypoint.
+
+This CLI is **local/direct** by default. It uses the installer helpers in-process, so a running `agent_log_server` instance is **not required** to validate, install, update, or remove an extension package.
+
+If a long-running server process is already up, it still needs its own reload path to see newly installed files in-memory. The package install itself is local filesystem + registry work; the running server is only relevant for live runtime refresh.
+
+Examples:
+
+- `codex-agent extension validate --path /path/to/ext`
+- `codex-agent extension validate --zip /path/to/ext.zip`
+- `codex-agent extension validate --git /path/or/repo/url --ref main`
+- `codex-agent extension install --path /path/to/ext`
+- `codex-agent extension update my-ext --git /path/or/repo/url --ref main`
+- `codex-agent extension remove my-ext`
+- `codex-agent extension reload`
+
+Source selection is explicit:
+
+- `--path`
+- `--zip`
+- `--git`
+
 ## Canonical Paths
 
 ### Builtin extensions root
@@ -63,6 +87,8 @@ Examples:
 - a checked-out git repo
 - a local source directory
 
+This is the authoritative patch/review/commit surface for third-party extension work. If the contributor source is a repo, it should normally carry its own `README.md` describing the extension's purpose, architecture, and update flow.
+
 ### Installed target
 
 The live extension directory that the app actually loads from:
@@ -70,6 +96,7 @@ The live extension directory that the app actually loads from:
 - `~/.local/share/app_server/extensions/<folder>/`
 
 Do **not** run third-party extensions directly from the contributor source path.
+Do **not** treat the installed target as the place to make source edits and then expect later installs/updates to reflect those manual patches.
 
 ## Registry Contract
 
@@ -189,11 +216,17 @@ Current authority split:
 
 The intended iteration loop is:
 
-1. patch contributor source
-2. `update_from_path(...)` or `update_from_git(...)`
-3. restart or hot-reload extension discovery
-4. run a targeted smoke test
-5. repeat
+1. reproduce/test the installed extension behavior
+2. investigate in the contributor source and runtime/log surfaces
+3. patch contributor source
+4. run repo-side validation
+5. run a small non-server smoke if the change affects transport/session timing or transcript shaping
+6. ensure the contributor-source manifest version is correct for the revision being shipped
+7. commit and push the contributor source if the install/update flow depends on git
+8. `install_from_git(...)`, `update_from_git(...)`, `update_from_path(...)`, or the equivalent operator CLI command
+9. restart or hot-reload extension discovery if needed
+10. retest the installed extension
+11. repeat
 
 This workflow applies both to extension development and extension-framework development.
 
@@ -207,6 +240,16 @@ Current runtime behavior is intentionally compatibility-friendly:
 - if `schema_version` is missing, validation reports a warning and assumes schema version `1`
 
 This keeps older prototype extensions installable while the explicit manifest contract is rolling out.
+
+## Manifest package version
+
+`manifest.version` is required for third-party packages.
+
+- it must be a non-empty string in the extension's own `manifest.json`
+- if a legacy manifest is being versioned for the first time, start at `0.1.0`
+- installer/runtime metadata must not be treated as a substitute for a missing manifest version
+
+The contributor source manifest is the source of truth for the package version you are shipping.
 
 If `compat` is absent, the current default is:
 

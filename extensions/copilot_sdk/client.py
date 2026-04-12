@@ -2,11 +2,9 @@
 Copilot SDK Client Handler for Extension System
 
 Manages Copilot CLI agent sessions via the vendored Copilot SDK source.
-Replaces the ACP client handler with a cleaner, SDK-managed approach.
 
-Key advantages over ACP:
+Key advantages:
 - Session resume built-in (client.resume_session)
-- SDK manages CLI process lifecycle (no shellspec/FWS pipe needed)
 - Streaming via SessionConfig.streaming=True
 - All Copilot models including Gemini
 - Rich event model via session.on(handler)
@@ -24,6 +22,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable, Awaitable, Deque, Tuple, get_args
 from collections import deque
+
+from framework_shells.orchestrator import Orchestrator
 
 from ._vendor.copilot import (
     CopilotClient,
@@ -44,6 +44,7 @@ from ._vendor.copilot.types import (
 )
 
 from .file_change_preview import build_file_change_preview
+from .fws_pipe_process import FrameworkShellPipeProcess
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from .te2_runtime import build_copilot_mcp_servers
 from agent_log_server.prompt_context import build_effective_prompt_context
@@ -57,6 +58,9 @@ from watchfiles import awatch
 
 _client: Optional[CopilotClient] = None
 _client_lock: Optional[asyncio.Lock] = None
+_fws_getter: Optional[Callable] = None
+_copilot_shell_id: Optional[str] = None
+_copilot_fws_process: Optional[FrameworkShellPipeProcess] = None
 
 
 def _get_client_lock() -> asyncio.Lock:
@@ -191,6 +195,8 @@ _COPILOT_SESSION_STATE_ROOT = Path.home() / ".copilot" / "session-state"
 _COPILOT_TODO_FILENAMES = frozenset({"session.db", "session.db-wal", "session.db-shm"})
 _COPILOT_PLAN_FILENAME = "plan.md"
 _COPILOT_SESSION_STATE_READ_SETTLE_SECONDS = 0.10
+_COPILOT_SHELL_LABEL = "copilot-sdk:cli"
+_COPILOT_SHELL_SPEC_ID = "copilot_cli"
 
 
 def _next_debug_raw_entry_index(conversation_id: str) -> int:
@@ -1072,6 +1078,75 @@ def _resolve_external_copilot_cli_path() -> Optional[str]:
     return None
 
 
+def _copilot_shell_cwd() -> str:
+    return os.path.expanduser("~")
+
+
+async def _adopt_existing_copilot_shell(mgr: Any) -> Optional[str]:
+    try:
+        records = await mgr.list_shells()
+    except Exception:
+        return None
+    for rec in records:
+        if rec.status != "running":
+            continue
+        if (rec.label or "") != _COPILOT_SHELL_LABEL:
+            continue
+        if getattr(rec, "spec_id", "") != _COPILOT_SHELL_SPEC_ID:
+            continue
+        return rec.id
+    return None
+
+
+async def _start_new_copilot_shell(mgr: Any) -> str:
+    spec_path = Path(__file__).parent / "shellspec" / "copilot_cli.yaml"
+    orch = Orchestrator(mgr)
+    cli_path = _resolve_external_copilot_cli_path() or "copilot"
+    shell = await orch.start_from_ref(
+        f"{spec_path}#{_COPILOT_SHELL_SPEC_ID}",
+        base_dir=spec_path.parent,
+        ctx={
+            "CWD": _copilot_shell_cwd(),
+            "COPILOT_CLI_PATH": cli_path,
+            "LOG_LEVEL": "info",
+        },
+        label=_COPILOT_SHELL_LABEL,
+        wait_ready=False,
+    )
+    return shell.id
+
+
+async def _get_or_start_copilot_shell() -> str:
+    global _copilot_shell_id
+    if _fws_getter is None:
+        raise RuntimeError("FWS getter not initialized")
+    mgr = await _fws_getter()
+    if _copilot_shell_id:
+        shell = await mgr.get_shell(_copilot_shell_id)
+        if shell and shell.status == "running" and getattr(shell, "spec_id", "") == _COPILOT_SHELL_SPEC_ID:
+            return _copilot_shell_id
+        _copilot_shell_id = None
+    adopted = await _adopt_existing_copilot_shell(mgr)
+    if adopted:
+        _copilot_shell_id = adopted
+        return adopted
+    _copilot_shell_id = await _start_new_copilot_shell(mgr)
+    return _copilot_shell_id
+
+
+async def _stop_copilot_shell() -> None:
+    global _copilot_shell_id
+    if _copilot_shell_id is None or _fws_getter is None:
+        _copilot_shell_id = None
+        return
+    mgr = await _fws_getter()
+    try:
+        await mgr.terminate_shell(_copilot_shell_id, force=True)
+    except Exception:
+        pass
+    _copilot_shell_id = None
+
+
 def _runtime_signature_payload(
     conversation_id: str,
     settings: Optional[Dict[str, Any]] = None,
@@ -1937,20 +2012,20 @@ def init_copilot_manager(
     Initialize the Copilot SDK manager with server callbacks.
     
     Called by extensions/__init__.py during load_extensions().
-    The fws_getter is accepted for interface compat but not used —
-    the SDK manages its own CLI process.
+    The FWS getter is used for the observed raw-pipe Copilot CLI transport.
     """
-    global _broadcast_fn, _transcript_fn, _meta_fns, _initialized
+    global _broadcast_fn, _transcript_fn, _meta_fns, _initialized, _fws_getter
     _broadcast_fn = broadcast_fn
     _transcript_fn = transcript_fn
     _meta_fns = meta_fns or {}
+    _fws_getter = fws_getter
     _initialized = True
     print("[CopilotSDK] Manager initialized")
 
 
 async def _ensure_client() -> CopilotClient:
     """Get or create the global CopilotClient singleton."""
-    global _client
+    global _client, _copilot_fws_process
     async with _get_client_lock():
         if _client is None:
             client_options: Dict[str, Any] = {
@@ -1958,14 +2033,34 @@ async def _ensure_client() -> CopilotClient:
                 "auto_start": True,
                 "auto_restart": True,
                 "log_level": "info",
-                "cwd": os.path.expanduser("~"),
+                "cwd": _copilot_shell_cwd(),
             }
             cli_path = _resolve_external_copilot_cli_path()
-            if cli_path:
-                client_options["cli_path"] = cli_path
+            if _fws_getter is not None:
+                shell_id = await _get_or_start_copilot_shell()
+                mgr = await _fws_getter()
+                _copilot_fws_process = await FrameworkShellPipeProcess.create(
+                    mgr,
+                    shell_id,
+                    asyncio.get_running_loop(),
+                )
+                client_options["process"] = _copilot_fws_process
+                launch_mode = f"fws:{shell_id}"
+            else:
+                if cli_path:
+                    client_options["cli_path"] = cli_path
+                launch_mode = cli_path or "bundled/default"
             _client = CopilotClient(client_options)
-            await _client.start()
-            print(f"[CopilotSDK] Client started, state={_client.get_state()} cli_path={cli_path or 'bundled/default'}")
+            try:
+                await _client.start()
+            except Exception:
+                _client = None
+                if _copilot_fws_process is not None:
+                    with contextlib.suppress(Exception):
+                        await _copilot_fws_process.aclose()
+                    _copilot_fws_process = None
+                raise
+            print(f"[CopilotSDK] Client started, state={_client.get_state()} transport={launch_mode}")
         return _client
 
 
@@ -2775,7 +2870,7 @@ async def delete_session(conversation_id: str) -> bool:
 
 async def stop_client() -> None:
     """Stop the global CopilotClient (server shutdown)."""
-    global _client
+    global _client, _copilot_fws_process
     for conversation_id in list(_todo_watch_tasks.keys()):
         await _stop_todo_watch(conversation_id)
     if _client:
@@ -2787,6 +2882,11 @@ async def stop_client() -> None:
             print("[CopilotSDK] Client stopped")
         except Exception as e:
             print(f"[CopilotSDK] stop_client error: {e}")
+    if _copilot_fws_process is not None:
+        with contextlib.suppress(Exception):
+            await _copilot_fws_process.aclose()
+        _copilot_fws_process = None
+    await _stop_copilot_shell()
 
 
 # ── Abort ───────────────────────────────────────────────────────────

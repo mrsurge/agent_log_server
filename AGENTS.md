@@ -126,6 +126,23 @@ result = await list_models()
 
 ---
 
+# Invariant: Existing Harness Conversation Reload Is Transcript-First, Extension Resume Is Lazy
+
+**THIS IS A REPO-WIDE SESSION LIFECYCLE CONTRACT.**
+
+- Reloading/selecting a conversation that already exists on our harness replays the local `transcript.jsonl` only.
+- If a remote `thread_id` / `session_id` is already bound, the extension/backend stays cold until the first new send.
+- That first send may fail against the cold backend; the extension then resumes/reattaches and retries the buffered message.
+- Resume/load history noise must be suppressed until the backend ack because the local transcript is already present.
+- New port-in/import flows are different: they may materialize transcript entries before the response returns.
+
+See also:
+
+- `acp/AGENT_EXTENSION_INTEGRATION.md` — canonical extension hook/lifecycle contract
+- `CODEX_APP_SERVER_EXTENSION.md` — architecture/reference implementation manual
+
+---
+
 # Invariant: Every `_emit()` Must Have a Matching `_record()` — Replay Is a Mirror of Live
 
 **THIS IS NON-NEGOTIABLE. VIOLATING THIS WILL BREAK PLAYBACK AND WASTE HOURS OF DEBUGGING.**

@@ -391,7 +391,7 @@ class CodexAppServerTransport:
         return None
 
     async def _start_new_shell(self, mgr: Any) -> str:
-        spec_path = self._server_root / "shellspec" / "app_server.yaml"
+        spec_path = Path(__file__).parent / "shellspec" / "app_server.yaml"
         orch = Orchestrator(mgr)
         shell = await orch.start_from_ref(
             f"{spec_path}#app_server_observed",

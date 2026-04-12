@@ -136,9 +136,13 @@ class CopilotClient:
         """
         opts = options or {}
 
+        injected_process = opts.get("process")
+
         # Validate mutually exclusive options
-        if opts.get("cli_url") and (opts.get("use_stdio") or opts.get("cli_path")):
+        if opts.get("cli_url") and (opts.get("use_stdio") or opts.get("cli_path") or injected_process is not None):
             raise ValueError("cli_url is mutually exclusive with use_stdio and cli_path")
+        if injected_process is not None and opts.get("cli_path"):
+            raise ValueError("process is mutually exclusive with cli_path")
 
         # Validate auth options with external server
         if opts.get("cli_url") and (
@@ -163,6 +167,8 @@ class CopilotClient:
         # Not needed when connecting to external server via cli_url
         if opts.get("cli_url"):
             default_cli_path = ""  # Not used for external server
+        elif injected_process is not None:
+            default_cli_path = ""
         elif opts.get("cli_path"):
             default_cli_path = opts["cli_path"]
         else:
@@ -199,8 +205,11 @@ class CopilotClient:
             self.options["env"] = opts["env"]
         if github_token:
             self.options["github_token"] = github_token
+        if injected_process is not None:
+            self.options["process"] = injected_process
 
-        self._process: subprocess.Popen | None = None
+        self._process: Any | None = injected_process
+        self._owns_process = injected_process is None and not self._is_external_server
         self._client: JsonRpcClient | None = None
         self._state: ConnectionState = "disconnected"
         self._sessions: dict[str, CopilotSession] = {}
@@ -301,7 +310,7 @@ class CopilotClient:
 
         try:
             # Only start CLI server process if not connecting to external server
-            if not self._is_external_server:
+            if not self._is_external_server and self._process is None:
                 await self._start_cli_server()
 
             # Connect to the server
@@ -367,6 +376,11 @@ class CopilotClient:
                     StopError(message=f"Failed to disconnect session {session.session_id}: {e}")
                 )
 
+        if self._process and hasattr(self._process, "close_streams"):
+            maybe_close = self._process.close_streams()
+            if inspect.isawaitable(maybe_close):
+                await maybe_close
+
         # Close client
         if self._client:
             await self._client.stop()
@@ -378,13 +392,13 @@ class CopilotClient:
             self._models_cache = None
 
         # Kill CLI process (only if we spawned it)
-        if self._process and not self._is_external_server:
+        if self._process and self._owns_process:
             self._process.terminate()
             try:
                 self._process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._process.kill()
-            self._process = None
+        self._process = None
 
         self._state = "disconnected"
         if not self._is_external_server:
@@ -413,6 +427,11 @@ class CopilotClient:
         with self._sessions_lock:
             self._sessions.clear()
 
+        if self._process and hasattr(self._process, "close_streams"):
+            maybe_close = self._process.close_streams()
+            if inspect.isawaitable(maybe_close):
+                await maybe_close
+
         # Close the transport first to signal the server immediately.
         # For external servers (TCP), this closes the socket.
         # For spawned processes (stdio), this kills the process.
@@ -420,11 +439,13 @@ class CopilotClient:
             try:
                 if self._is_external_server:
                     self._process.terminate()  # closes the TCP socket
-                else:
+                elif self._owns_process:
                     self._process.kill()
-                    self._process = None
+                else:
+                    pass
             except Exception:
                 pass
+            self._process = None
 
         # Then clean up the JSON-RPC client
         if self._client:

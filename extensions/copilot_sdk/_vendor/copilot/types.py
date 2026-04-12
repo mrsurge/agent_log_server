@@ -98,6 +98,9 @@ class CopilotClientOptions(TypedDict, total=False):
     # When False, only explicit tokens (github_token or environment variables) are used.
     # Default: True (but defaults to False when github_token is provided)
     use_logged_in_user: bool
+    # Optional externally managed stdio transport/process-like object.
+    # Must expose stdin/stdout attributes compatible with JsonRpcClient.
+    process: Any
 
 
 ToolResultType = Literal["success", "failure", "rejected", "denied"]

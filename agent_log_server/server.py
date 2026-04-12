@@ -4,11 +4,12 @@ import base64
 import json
 import os
 import argparse
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from contextlib import suppress, asynccontextmanager
+from contextlib import suppress, asynccontextmanager, redirect_stdout
 import hashlib
 import re
 import secrets
@@ -35,6 +36,10 @@ from framework_shells.orchestrator import Orchestrator
 
 import extensions as ext_loader
 from agent_log_server import ask_user_interactions
+from agent_log_server.extension_cli import (
+    register_extension_subcommands as _register_extension_subcommands,
+    run_extension_command as _run_extension_command,
+)
 from agent_log_server.prompt_context import (
     build_effective_prompt_context,
     load_repo_memory_snapshot,
@@ -63,6 +68,8 @@ async def _lifespan(app: FastAPI):
     agent_pty_monitor_task: Optional[asyncio.Task] = None
     warmup_task: Optional[asyncio.Task] = None
     try:
+        if not ext_loader.is_initialized():
+            _init_extensions()
         _sync_te2_console_bridge_cache()
         _sync_te2_fws_readme_cache()
         _sync_te2_proxy_shell_readme_cache()
@@ -9527,10 +9534,6 @@ def _init_extensions():
             },
         )
 
-# Call on module load
-_init_extensions()
-
-
 @app.get("/api/extensions")
 async def api_extensions_list():
     """List all available extensions."""
@@ -10735,10 +10738,12 @@ def _resolve_agent_log_path(raw: str) -> Path:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--log", default="agent_chat.log.jsonl")
-    p.add_argument("--port", type=int, default=12356)
+    p.add_argument("--port", type=int, default=12359)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--debug", action="store_true")
     p.add_argument("--broadcast-all", action="store_true", help="Bind to 0.0.0.0 for LAN access")
+    subparsers = p.add_subparsers(dest="command")
+    _register_extension_subcommands(subparsers)
     return p.parse_args()
 
 def main():
@@ -10746,6 +10751,11 @@ def main():
     global LOG_PATH
     global DEBUG_RAW_LOG_PATH
     args = parse_args()
+    if getattr(args, "command", None) == "extension":
+        if not ext_loader.is_initialized():
+            with redirect_stdout(sys.stderr):
+                _init_extensions()
+        raise SystemExit(_run_extension_command(args))
     DEBUG_MODE = bool(args.debug)
     if args.broadcast_all:
         args.host = "0.0.0.0"

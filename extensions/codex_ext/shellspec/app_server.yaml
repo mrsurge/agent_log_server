@@ -1,0 +1,14 @@
+version: "1"
+shells:
+  app_server_observed:
+    backend: pipe
+    cwd: ${CWD}
+    subgroups: ["codex_agent", "app_server", "codex", "observed"]
+    inspect_hints:
+      - json
+      - jsonrpc
+    command:
+      - codex
+      - app-server
+    labels:
+      app: "codex-app-server-observed"

@@ -13,6 +13,16 @@ from agent_log_server.ask_user_interactions import (
     is_agent_pty_ask_user_tool,
 )
 
+from ..message_card_contracts import (
+    build_assistant_delta_event,
+    build_assistant_finalize_event,
+    build_message_event,
+    build_message_transcript_entry,
+    build_reasoning_delta_event,
+    build_reasoning_finalize_event,
+    build_reasoning_transcript_entry,
+    build_thought_event,
+)
 from .plan_utils import normalize_plan_steps, plan_signature, render_plan_markdown
 from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
 from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
@@ -288,6 +298,27 @@ def _assistant_id(payload: Dict[str, Any], thread_id: Optional[str], turn_id: Op
     if thread_id:
         return f"assistant_{thread_id}"
     return "assistant"
+
+
+def _payload_string(payload: Dict[str, Any], *keys: str) -> Optional[str]:
+    sources: List[Dict[str, Any]] = [payload]
+    item = payload.get("item")
+    if isinstance(item, dict):
+        sources.append(item)
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _payload_thread_id(payload: Dict[str, Any], fallback: Optional[str]) -> Optional[str]:
+    return _payload_string(payload, "thread_id", "threadId") or fallback
+
+
+def _payload_turn_id(payload: Dict[str, Any], fallback: Optional[str]) -> Optional[str]:
+    return _payload_string(payload, "turn_id", "turnId") or fallback
 
 
 def _normalize_turn_status(payload: Dict[str, Any]) -> tuple[str, Optional[str]]:
@@ -2161,26 +2192,35 @@ class CodexEventRouter:
             if not isinstance(item, dict):
                 return result
             item_type = _item_type(item)
+            effective_thread_id = _payload_thread_id(payload, thread_id)
+            effective_turn_id = _payload_turn_id(payload, turn_id)
             item_id = item.get("id") if isinstance(item.get("id"), str) else None
-            item_state = self._get_item_state(item_id, thread_id, turn_id)
+            item_state = self._get_item_state(item_id, effective_thread_id, effective_turn_id)
 
             if extract_item_text:
                 entry = extract_item_text(item)
                 if entry and entry.get("role") == "user":
-                    return {
+                    return self._decorate_routed_result({
                         "handled": True,
-                        "events": [{"type": "message", "role": "user", "id": item_id, "text": entry["text"]}],
-                        "transcript_entries": [{
-                            "role": "user",
-                            "text": entry["text"],
-                            "item_id": item_id,
-                            "turn_id": turn_id,
-                            "event": label_lower,
-                        }],
-                    }
+                        "events": [build_message_event(
+                            role="user",
+                            entry_id=item_id,
+                            text=entry["text"],
+                            turn_id=effective_turn_id,
+                        )],
+                        "transcript_entries": [build_message_transcript_entry(
+                            role="user",
+                            entry_id=item_id,
+                            item_id=item_id,
+                            text=entry["text"],
+                            timestamp=utc_ts(),
+                            turn_id=effective_turn_id,
+                            event=label_lower,
+                        )],
+                    }, thread_id=effective_thread_id, item_state=item_state)
 
             if item_type == "reasoning":
-                turn_state = self._get_turn_state(thread_id, turn_id)
+                turn_state = self._get_turn_state(effective_thread_id, effective_turn_id)
                 current_source = turn_state.get("reason_source")
                 if current_source in {None, "item"}:
                     turn_state["reason_source"] = current_source or "item"
@@ -2377,15 +2417,23 @@ class CodexEventRouter:
         if notification_spec and notification_spec.category == "item" and notification_spec.subject == "agentmessage" and notification_spec.phase == "delta" and isinstance(payload, dict):
             delta = payload.get("delta")
             if isinstance(delta, str):
-                item_id = _assistant_id(payload, thread_id, turn_id)
+                effective_thread_id = _payload_thread_id(payload, thread_id)
+                effective_turn_id = _payload_turn_id(payload, turn_id)
+                item_id = _assistant_id(payload, effective_thread_id, effective_turn_id)
+                item_state = self._get_item_state(item_id, effective_thread_id, effective_turn_id)
+                item_state["item_type"] = "assistant_message"
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": [
-                        {"type": "assistant_delta", "id": item_id, "delta": delta},
+                        build_assistant_delta_event(
+                            entry_id=item_id,
+                            delta=delta,
+                            turn_id=effective_turn_id,
+                        ),
                         {"type": "activity", "label": "responding", "active": True},
                     ],
                     "transcript_entries": [],
-                }, thread_id=thread_id)
+                }, thread_id=effective_thread_id, item_state=item_state)
 
         if notification_spec and notification_spec.category == "item" and notification_spec.subject == "plan" and notification_spec.phase == "delta":
             return {"handled": True, "events": [], "transcript_entries": []}
@@ -2393,11 +2441,13 @@ class CodexEventRouter:
         if notification_spec and notification_spec.category == "item" and isinstance(payload, dict):
             spec_name = notification_spec.name
             if spec_name in {"item/reasoning/summarytextdelta", "item/reasoning/textdelta"}:
+                effective_thread_id = _payload_thread_id(payload, thread_id)
+                effective_turn_id = _payload_turn_id(payload, turn_id)
                 prepared = self._prepare_reasoning_state(
                     source="item",
                     payload=payload,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
+                    thread_id=effective_thread_id,
+                    turn_id=effective_turn_id,
                 )
                 if prepared is None:
                     return {"handled": True, "events": [], "transcript_entries": []}
@@ -2406,10 +2456,17 @@ class CodexEventRouter:
                 if isinstance(delta, str):
                     turn_state["reasoning_buffer"] = f"{turn_state.get('reasoning_buffer', '')}{delta}"
                     scrubbed_delta, thoughts = _extract_and_scrub_thoughts_stream(delta, turn_state)
-                    events: List[Dict[str, Any]] = [{"type": "thought", "text": thought} for thought in thoughts]
+                    events: List[Dict[str, Any]] = [
+                        build_thought_event(text=thought, turn_id=effective_turn_id)
+                        for thought in thoughts
+                    ]
                     live_delta = _consume_live_reasoning_delta(scrubbed_delta, turn_state)
                     if live_delta:
-                        events.append({"type": "reasoning_delta", "id": item_id, "delta": live_delta})
+                        events.append(build_reasoning_delta_event(
+                            entry_id=item_id,
+                            delta=live_delta,
+                            turn_id=effective_turn_id,
+                        ))
                     if thoughts:
                         events.append({"type": "activity", "label": thoughts[-1], "active": True})
                     elif live_delta:
@@ -2418,15 +2475,17 @@ class CodexEventRouter:
                         "handled": True,
                         "events": events,
                         "transcript_entries": [],
-                    }, thread_id=thread_id, item_state=item_state)
+                    }, thread_id=effective_thread_id, item_state=item_state)
                 return {"handled": True, "events": [], "transcript_entries": []}
 
             if spec_name == "item/reasoning/summarypartadded":
+                effective_thread_id = _payload_thread_id(payload, thread_id)
+                effective_turn_id = _payload_turn_id(payload, turn_id)
                 prepared = self._prepare_reasoning_state(
                     source="item",
                     payload=payload,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
+                    thread_id=effective_thread_id,
+                    turn_id=effective_turn_id,
                 )
                 if prepared is None:
                     return {"handled": True, "events": [], "transcript_entries": []}
@@ -2435,9 +2494,13 @@ class CodexEventRouter:
                 live_delta = _consume_live_reasoning_delta("\n", turn_state)
                 return self._decorate_routed_result({
                     "handled": True,
-                    "events": [{"type": "reasoning_delta", "id": item_id, "delta": live_delta}] if live_delta else [],
+                    "events": [build_reasoning_delta_event(
+                        entry_id=item_id,
+                        delta=live_delta,
+                        turn_id=effective_turn_id,
+                    )] if live_delta else [],
                     "transcript_entries": [],
-                }, thread_id=thread_id, item_state=item_state)
+                }, thread_id=effective_thread_id, item_state=item_state)
 
         if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "outputdelta" and isinstance(payload, dict):
             item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
@@ -2502,26 +2565,35 @@ class CodexEventRouter:
             if not isinstance(item, dict):
                 return result
             item_type = _item_type(item)
+            effective_thread_id = _payload_thread_id(payload, thread_id)
+            effective_turn_id = _payload_turn_id(payload, turn_id)
             item_id = item.get("id") if isinstance(item.get("id"), str) else None
             item_state = self._clear_item_state(item_id)
 
             if extract_item_text:
                 entry = extract_item_text(item)
                 if entry and entry.get("role") == "assistant":
+                    assistant_id = item_id or _assistant_id(item, effective_thread_id, effective_turn_id)
                     return self._decorate_routed_result({
                         "handled": True,
-                        "events": [{"type": "assistant_finalize", "id": item_id or _assistant_id(item, thread_id, turn_id), "text": entry["text"]}],
-                    "transcript_entries": [{
-                            "role": "assistant",
-                            "text": entry["text"],
-                            "item_id": item_id,
-                            "turn_id": turn_id,
-                            "event": label_lower,
-                        }],
-                    }, thread_id=thread_id, item_state=item_state)
+                        "events": [build_assistant_finalize_event(
+                            entry_id=assistant_id,
+                            text=entry["text"],
+                            turn_id=effective_turn_id,
+                        )],
+                        "transcript_entries": [build_message_transcript_entry(
+                            role="assistant",
+                            entry_id=assistant_id,
+                            item_id=item_id,
+                            text=entry["text"],
+                            timestamp=utc_ts(),
+                            turn_id=effective_turn_id,
+                            event=label_lower,
+                        )],
+                    }, thread_id=effective_thread_id, item_state=item_state)
 
             if item_type == "reasoning":
-                turn_state = self._get_turn_state(thread_id, turn_id)
+                turn_state = self._get_turn_state(effective_thread_id, effective_turn_id)
                 effective_id = item_id or _reasoning_event_id(item, turn_state)
                 text = _extract_reasoning_text(item, fallback=turn_state.get("reasoning_buffer"))
                 scrubbed_text, thoughts = _extract_and_scrub_thoughts(text) if text else ("", [])
@@ -2529,25 +2601,33 @@ class CodexEventRouter:
                 should_finalize_live = turn_state.get("reason_source") in {None, "item"} and has_visible_reasoning
                 events: List[Dict[str, Any]] = []
                 if thoughts:
-                    events.extend({"type": "thought", "text": thought} for thought in thoughts)
+                    events.extend(
+                        build_thought_event(text=thought, turn_id=effective_turn_id)
+                        for thought in thoughts
+                    )
                 if should_finalize_live:
-                    events.append({"type": "reasoning_finalize", "id": effective_id, "text": scrubbed_text})
+                    events.append(build_reasoning_finalize_event(
+                        entry_id=effective_id,
+                        text=scrubbed_text,
+                        turn_id=effective_turn_id,
+                    ))
                 transcript_entries: List[Dict[str, Any]] = []
                 if has_visible_reasoning and self._should_record_reasoning(turn_state, effective_id):
-                    transcript_entries.append({
-                        "role": "reasoning",
-                        "text": scrubbed_text,
-                        "item_id": effective_id,
-                        "turn_id": turn_id,
-                        "event": label_lower,
-                    })
+                    transcript_entries.append(build_reasoning_transcript_entry(
+                        entry_id=effective_id,
+                        item_id=effective_id,
+                        text=scrubbed_text,
+                        timestamp=utc_ts(),
+                        turn_id=effective_turn_id,
+                        event=label_lower,
+                    ))
                 if turn_state.get("reason_source") != "codex":
                     self._reset_reasoning_stream(turn_state)
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": events,
                     "transcript_entries": transcript_entries,
-                }, thread_id=thread_id, item_state=item_state)
+                }, thread_id=effective_thread_id, item_state=item_state)
 
             if item_type == "commandexecution":
                 command = item.get("command") or item.get("parsedCmd") or item_state.get("command") or ""
@@ -3161,18 +3241,28 @@ class CodexEventRouter:
         if event_spec and event_spec.category == "user" and event_spec.subject == "message" and isinstance(payload, dict):
             text = _direct_event_text(payload)
             if text:
-                item_id = _assistant_id(payload, thread_id, turn_id)
-                return {
+                effective_thread_id = _payload_thread_id(payload, thread_id)
+                effective_turn_id = _payload_turn_id(payload, turn_id)
+                item_id = _assistant_id(payload, effective_thread_id, effective_turn_id)
+                item_state = self._get_item_state(item_id, effective_thread_id, effective_turn_id)
+                return self._decorate_routed_result({
                     "handled": True,
-                    "events": [{"type": "message", "role": "user", "id": item_id, "text": text}],
-                    "transcript_entries": [{
-                        "role": "user",
-                        "text": text,
-                        "item_id": payload.get("item_id") or payload.get("itemId"),
-                        "turn_id": turn_id,
-                        "event": label_lower,
-                    }],
-                }
+                    "events": [build_message_event(
+                        role="user",
+                        entry_id=item_id,
+                        text=text,
+                        turn_id=effective_turn_id,
+                    )],
+                    "transcript_entries": [build_message_transcript_entry(
+                        role="user",
+                        entry_id=item_id,
+                        item_id=payload.get("item_id") or payload.get("itemId"),
+                        text=text,
+                        timestamp=utc_ts(),
+                        turn_id=effective_turn_id,
+                        event=label_lower,
+                    )],
+                }, thread_id=effective_thread_id, item_state=item_state)
 
         if event_spec and isinstance(payload, dict):
             if (
@@ -3187,11 +3277,13 @@ class CodexEventRouter:
                     and event_spec.phase == "delta"
                 )
             ):
+                effective_thread_id = _payload_thread_id(payload, thread_id)
+                effective_turn_id = _payload_turn_id(payload, turn_id)
                 prepared = self._prepare_reasoning_state(
                     source="codex",
                     payload=payload,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
+                    thread_id=effective_thread_id,
+                    turn_id=effective_turn_id,
                 )
                 if prepared is None:
                     return {"handled": True, "events": [], "transcript_entries": []}
@@ -3200,10 +3292,17 @@ class CodexEventRouter:
                 if isinstance(delta, str):
                     turn_state["reasoning_buffer"] = f"{turn_state.get('reasoning_buffer', '')}{delta}"
                     scrubbed_delta, thoughts = _extract_and_scrub_thoughts_stream(delta, turn_state)
-                    events: List[Dict[str, Any]] = [{"type": "thought", "text": thought} for thought in thoughts]
+                    events: List[Dict[str, Any]] = [
+                        build_thought_event(text=thought, turn_id=effective_turn_id)
+                        for thought in thoughts
+                    ]
                     live_delta = _consume_live_reasoning_delta(scrubbed_delta, turn_state)
                     if live_delta:
-                        events.append({"type": "reasoning_delta", "id": item_id, "delta": live_delta})
+                        events.append(build_reasoning_delta_event(
+                            entry_id=item_id,
+                            delta=live_delta,
+                            turn_id=effective_turn_id,
+                        ))
                     if thoughts:
                         events.append({"type": "activity", "label": thoughts[-1], "active": True})
                     elif live_delta:
@@ -3212,15 +3311,17 @@ class CodexEventRouter:
                         "handled": True,
                         "events": events,
                         "transcript_entries": [],
-                    }, thread_id=thread_id, item_state=item_state)
+                    }, thread_id=effective_thread_id, item_state=item_state)
                 return {"handled": True, "events": [], "transcript_entries": []}
 
             if event_spec.category == "agent" and event_spec.subject == "reasoning_section_break":
+                effective_thread_id = _payload_thread_id(payload, thread_id)
+                effective_turn_id = _payload_turn_id(payload, turn_id)
                 prepared = self._prepare_reasoning_state(
                     source="codex",
                     payload=payload,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
+                    thread_id=effective_thread_id,
+                    turn_id=effective_turn_id,
                 )
                 if prepared is None:
                     return {"handled": True, "events": [], "transcript_entries": []}
@@ -3229,20 +3330,26 @@ class CodexEventRouter:
                 live_delta = _consume_live_reasoning_delta("\n\n", turn_state)
                 return self._decorate_routed_result({
                     "handled": True,
-                    "events": [{"type": "reasoning_delta", "id": item_id, "delta": live_delta}] if live_delta else [],
+                    "events": [build_reasoning_delta_event(
+                        entry_id=item_id,
+                        delta=live_delta,
+                        turn_id=effective_turn_id,
+                    )] if live_delta else [],
                     "transcript_entries": [],
-                }, thread_id=thread_id, item_state=item_state)
+                }, thread_id=effective_thread_id, item_state=item_state)
 
             if event_spec.category == "agent" and event_spec.subject in {"reasoning", "reasoning_raw_content"} and event_spec.phase is None:
-                turn_state = self._get_turn_state(thread_id, turn_id)
+                effective_thread_id = _payload_thread_id(payload, thread_id)
+                effective_turn_id = _payload_turn_id(payload, turn_id)
+                turn_state = self._get_turn_state(effective_thread_id, effective_turn_id)
                 if not self._claim_reasoning_source(turn_state, "codex"):
                     return {"handled": True, "events": [], "transcript_entries": []}
                 effective_id = _reasoning_event_id(payload, turn_state)
                 turn_state["reasoning_id"] = effective_id
                 item_state = self._get_item_state(
                     effective_id if effective_id != "reasoning" else None,
-                    thread_id,
-                    turn_id,
+                    effective_thread_id,
+                    effective_turn_id,
                 )
                 item_state["item_type"] = "reasoning"
                 text = _extract_reasoning_text(payload, fallback=turn_state.get("reasoning_buffer"))
@@ -3251,53 +3358,79 @@ class CodexEventRouter:
                 should_finalize_live = turn_state.get("reason_source") in {None, "codex"} and has_visible_reasoning
                 events: List[Dict[str, Any]] = []
                 if thoughts:
-                    events.extend({"type": "thought", "text": thought} for thought in thoughts)
+                    events.extend(
+                        build_thought_event(text=thought, turn_id=effective_turn_id)
+                        for thought in thoughts
+                    )
                 if should_finalize_live:
-                    events.append({"type": "reasoning_finalize", "id": effective_id, "text": scrubbed_text})
+                    events.append(build_reasoning_finalize_event(
+                        entry_id=effective_id,
+                        text=scrubbed_text,
+                        turn_id=effective_turn_id,
+                    ))
                 transcript_entries: List[Dict[str, Any]] = []
                 if has_visible_reasoning and self._should_record_reasoning(turn_state, effective_id):
-                    transcript_entries.append({
-                        "role": "reasoning",
-                        "text": scrubbed_text,
-                        "item_id": effective_id,
-                        "turn_id": turn_id,
-                        "event": label_lower,
-                    })
+                    transcript_entries.append(build_reasoning_transcript_entry(
+                        entry_id=effective_id,
+                        item_id=effective_id,
+                        text=scrubbed_text,
+                        timestamp=utc_ts(),
+                        turn_id=effective_turn_id,
+                        event=label_lower,
+                    ))
                 self._reset_reasoning_stream(turn_state)
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": events,
                     "transcript_entries": transcript_entries,
-                }, thread_id=thread_id, item_state=item_state)
+                }, thread_id=effective_thread_id, item_state=item_state)
 
         if event_spec and event_spec.category == "agent" and event_spec.subject in {"message", "message_content"} and event_spec.phase == "delta" and isinstance(payload, dict):
             delta = payload.get("delta")
             if isinstance(delta, str):
-                item_id = _assistant_id(payload, thread_id, turn_id)
+                effective_thread_id = _payload_thread_id(payload, thread_id)
+                effective_turn_id = _payload_turn_id(payload, turn_id)
+                item_id = _assistant_id(payload, effective_thread_id, effective_turn_id)
+                item_state = self._get_item_state(item_id, effective_thread_id, effective_turn_id)
+                item_state["item_type"] = "assistant_message"
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": [
-                        {"type": "assistant_delta", "id": item_id, "delta": delta},
+                        build_assistant_delta_event(
+                            entry_id=item_id,
+                            delta=delta,
+                            turn_id=effective_turn_id,
+                        ),
                         {"type": "activity", "label": "responding", "active": True},
                     ],
                     "transcript_entries": [],
-                }, thread_id=thread_id)
+                }, thread_id=effective_thread_id, item_state=item_state)
 
         if event_spec and event_spec.category == "agent" and event_spec.subject == "message" and event_spec.phase is None and isinstance(payload, dict):
             text = _direct_event_text(payload)
             if text:
-                item_id = _assistant_id(payload, thread_id, turn_id)
+                effective_thread_id = _payload_thread_id(payload, thread_id)
+                effective_turn_id = _payload_turn_id(payload, turn_id)
+                item_id = _assistant_id(payload, effective_thread_id, effective_turn_id)
+                item_state = self._get_item_state(item_id, effective_thread_id, effective_turn_id)
+                item_state["item_type"] = "assistant_message"
                 return self._decorate_routed_result({
                     "handled": True,
-                    "events": [{"type": "assistant_finalize", "id": item_id, "text": text}],
-                    "transcript_entries": [{
-                        "role": "assistant",
-                        "text": text,
-                        "item_id": payload.get("item_id") or payload.get("itemId"),
-                        "turn_id": turn_id,
-                        "event": label_lower,
-                    }],
-                }, thread_id=thread_id)
+                    "events": [build_assistant_finalize_event(
+                        entry_id=item_id,
+                        text=text,
+                        turn_id=effective_turn_id,
+                    )],
+                    "transcript_entries": [build_message_transcript_entry(
+                        role="assistant",
+                        entry_id=item_id,
+                        item_id=payload.get("item_id") or payload.get("itemId"),
+                        text=text,
+                        timestamp=utc_ts(),
+                        turn_id=effective_turn_id,
+                        event=label_lower,
+                    )],
+                }, thread_id=effective_thread_id, item_state=item_state)
 
         if event_spec and event_spec.phase == "request" and isinstance(payload, dict) and (
             (event_spec.category == "exec" and event_spec.subject == "approval")

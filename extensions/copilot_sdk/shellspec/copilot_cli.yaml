@@ -1,0 +1,20 @@
+version: "1"
+shells:
+  copilot_cli:
+    backend: pipe
+    pipe:
+      mode: native_pipe_testing
+    cwd: ${CWD}
+    subgroups: ["codex_agent", "copilot", "sdk", "observed"]
+    inspect_hints:
+      - json
+      - jsonrpc
+    command:
+      - ${COPILOT_CLI_PATH}
+      - --headless
+      - --no-auto-update
+      - --log-level
+      - ${LOG_LEVEL}
+      - --stdio
+    labels:
+      app: "copilot-sdk-cli"

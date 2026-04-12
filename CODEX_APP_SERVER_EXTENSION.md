@@ -977,7 +977,7 @@ All extension HTTP endpoints use `{extension_id}` path parameters:
 | Event | Data | Purpose |
 |-------|------|---------|
 | `get_sessions` | `{extension_id, cwd}` | List sessions |
-| `session_resume` | `{extension_id, session_id, conversation_id}` | Resume + hydrate |
+| `session_resume` | `{extension_id, session_id, conversation_id}` | Bind/import session for a new local conversation |
 | `approval_response` | `{request_id, decision}` | Resolve approval (reads agent from meta) |
 | `get_extension_models` | `{extension_id}` | List models |
 
@@ -991,6 +991,9 @@ There are two different flows that are easy to conflate:
 - **existing conversation hydration**
   - replay an already-local `transcript.jsonl`
   - uses the platform-agnostic replay helpers
+  - if a remote thread/session is already bound, keep the backend cold until the first new send
+  - the first new send uses the backend-specific lazy resume/retry path
+  - suppress resume/load history noise until the backend ack so it does not duplicate the already-local transcript
 
 Reference patterns:
 
@@ -1008,9 +1011,32 @@ codex-ext port-in (also used by the `codex-ext-testing` compat shim):
   1. ext_loader.resume_session_with_history(ext_id, ...)    → bind + resume
   2. ext_loader.hydrate_transcript(ext_id, session_id, ...) → List[{role, text, ts}]  (internal rollout import helper)
   3. _write_transcript_entries(items)                       → writes transcript.jsonl
+
+Existing harness conversation reload with bound backend session/thread:
+  1. replay the already-local transcript.jsonl              → frontend conversation cards
+  2. leave the backend session/thread cold
+  3. first new send hits the normal backend send path
+  4. extension resumes/reattaches on cold-backend failure
+  5. retry the buffered message
+  6. suppress resume/load history noise until backend ack
+
+Gemini ACP-style fallback when the backend does not advertise a true `session/resume` capability:
+  1. replay the already-local transcript.jsonl              → frontend conversation cards
+  2. leave the bound backend session cold
+  3. first new send fails against the cold session
+  4. extension calls `load_session()` as the synthetic reattach ack
+  5. keep replay suppression active until delayed history notifications reach a quiet period
+  6. only then enter prompt-capture mode and retry the buffered message
 ```
 
 **Critical:** Port-in hydration MUST complete before the HTTP response returns. The frontend transitions to conversation view and calls `replayTranscript()` immediately — if transcript is not written yet, the view is empty.
+
+**Also critical:** for load-only backends, waiting for the `load_session()` RPC to return is not enough. The replay update stream may still be draining after the RPC result is delivered, so the extension needs a real quiet-period barrier before it switches into live prompt capture.
+
+See also:
+
+- `acp/AGENT_EXTENSION_INTEGRATION.md` — canonical extension hook/lifecycle contract
+- `AGENTS.md` — short repo-wide invariant/guardrail
 
 ### ext_loader Pass-Through Methods
 
@@ -1021,8 +1047,8 @@ codex-ext port-in (also used by the `codex-ext-testing` compat shim):
 | `list_models(ext_id)` | `async → List` | Get available models |
 | `get_settings_schema(ext_id)` | `async → Dict` | Get dynamic or static settings schema |
 | `list_sessions(ext_id, cwd)` | `async → List` | Get resumable sessions |
-| `resume_session_with_history(ext_id, session_id, convo_id, ...)` | `async → Dict` | Bind session to conversation |
-| `hydrate_transcript(ext_id, session_id, convo_id, ...)` | `async → List[Dict]` | Build flat transcript entries for a new session from port-in |
+| `resume_session_with_history(ext_id, session_id, convo_id, ...)` | `async → Dict` | Bind/import session to conversation; ordinary existing-conversation reload remains cold until first-send lazy resume |
+| `hydrate_transcript(ext_id, session_id, convo_id, ...)` | `async → List[Dict]` | Build flat transcript entries for a new session from port-in/import |
 | `get_runtime_options(ext_id, conversation_id, settings)` | `async → Dict` | Return generic approval/sandbox descriptors |
 | `resolve_approval(ext_id, request_id, decision)` | `sync → None` | Resolve pending approval |
 | `compact_session(ext_id, convo_id)` | `async → Dict` | Trigger extension-owned compaction |

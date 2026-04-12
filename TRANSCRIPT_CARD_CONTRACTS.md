@@ -150,6 +150,137 @@ Contract rule:
 
 - when a compaction/truncation event also updates token totals, emit/record the matching `token_count` / `token_usage` state too
 
+## Message / reasoning contracts
+
+These contracts define the shared user/assistant/reasoning lane that routers should emit, independent of provider/runtime.
+
+### User send / user message
+
+Success-side rule:
+
+- the transport ack from `send_message` confirms backend acceptance only
+- the visible user row remains backend-owned
+- the frontend must not invent an optimistic transcript row of its own
+
+Live shape:
+
+- `type: "message"`
+- `role: "user"`
+- `id`
+- `text`
+- `turn_id`
+- `conversation_id` optional at router level; transport may inject it
+- `subagent_id` optional
+
+Replay shape:
+
+- `role: "user"`
+- `id` when known
+- `item_id` optional legacy/source identifier
+- `text`
+- `turn_id`
+- `timestamp`
+- `subagent_id` optional
+
+Failure-side rule:
+
+- failed initial sends still use the shared composer-draft restore contract documented below
+- user-send failure does not invent a separate user-row contract
+
+### Assistant message
+
+Live streaming shape:
+
+- zero or more `assistant_delta` events
+- one `assistant_finalize` event with the full final text
+
+Expected live fields:
+
+- `type: "assistant_delta"` or `type: "assistant_finalize"`
+- `id`
+- `delta` for `assistant_delta`
+- `text` for `assistant_finalize`
+- `turn_id`
+- `conversation_id` optional at router level; transport may inject it
+- `subagent_id` optional
+
+Replay shape:
+
+- `role: "assistant"`
+- `id` when known
+- `item_id` optional legacy/source identifier
+- `text`
+- `turn_id`
+- `timestamp`
+- `subagent_id` optional
+
+Contract rule:
+
+- live deltas are transient rendering state
+- replay uses the finalized transcript row
+- if an upstream runtime only emits a one-shot complete assistant message, routers should still normalize it onto `assistant_finalize` plus replay `role: "assistant"`
+
+### Reasoning
+
+The reasoning lane is split into:
+
+- live-only `thought`
+- visible reasoning body (`reasoning_delta` / `reasoning_finalize`)
+
+#### Live-only `thought`
+
+Use for short live reasoning labels/headings/ribbon text that should not become transcript rows.
+
+Expected fields:
+
+- `type: "thought"`
+- `text`
+- `turn_id` optional
+- `conversation_id` optional at router level; transport may inject it
+- `subagent_id` optional
+
+Rule:
+
+- `thought` is live-only and has no replay row
+
+#### Live reasoning body
+
+Expected live fields:
+
+- `type: "reasoning_delta"` or `type: "reasoning_finalize"`
+- `id`
+- `delta` for `reasoning_delta`
+- `text` for `reasoning_finalize`
+- `turn_id`
+- `conversation_id` optional at router level; transport may inject it
+- `subagent_id` optional
+
+Replay shape:
+
+- `role: "reasoning"`
+- `id` when known
+- `item_id` optional legacy/source identifier
+- `text`
+- `turn_id`
+- `timestamp`
+- `subagent_id` optional
+
+Reasoning rule:
+
+- only visible reasoning body becomes replay `role: "reasoning"`
+- title-only / label-only reasoning belongs in live `thought`, not transcript `reasoning`
+- routers may scrub title wrappers from live/provider payloads before persisting transcript reasoning text
+
+### Ordering and identity rules
+
+- user rows must appear before assistant/reasoning/tool output for the same turn
+- when visible reasoning precedes assistant finalization in live play, replay must preserve that order
+- when assistant prose finalizes before a later tool/result card in live play, replay must preserve that order
+- `assistant_delta` and `assistant_finalize` for one logical row must share the same stable `id`
+- `reasoning_delta` and `reasoning_finalize` for one logical row must share the same stable `id`
+- when known, replay rows should preserve the same semantic `id`
+- if a live message/assistant/reasoning event is nested under `subagent_id`, the replay row must carry the same `subagent_id`
+
 ## Click target semantics
 
 - Cards may have a header click listener even when they have no concrete target.

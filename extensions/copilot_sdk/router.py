@@ -17,6 +17,15 @@ from datetime import datetime, timezone
 
 from ._vendor.copilot import SessionEvent
 from ._vendor.copilot.generated.session_events import SessionEventType
+from ..message_card_contracts import (
+    build_assistant_delta_event,
+    build_assistant_finalize_event,
+    build_message_event,
+    build_message_transcript_entry,
+    build_reasoning_delta_event,
+    build_reasoning_finalize_event,
+    build_reasoning_transcript_entry,
+)
 from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
 
 
@@ -448,40 +457,39 @@ class CopilotEventRouter:
             reasoning_id = f"reasoning_{self._turn_counter}_{self._block_counter}"
             self.current_reasoning_id = reasoning_id
 
-        await self._record({
-            "role": "reasoning",
-            "id": reasoning_id,
-            "text": text,
-            "timestamp": utc_ts(),
-            "turn_id": self.current_turn_id,
-        })
+        await self._emit(build_reasoning_finalize_event(
+            entry_id=reasoning_id,
+            text=text,
+            conversation_id=self.conversation_id,
+            turn_id=self.current_turn_id,
+        ))
+        await self._record(build_reasoning_transcript_entry(
+            entry_id=reasoning_id,
+            text=text,
+            timestamp=utc_ts(),
+            turn_id=self.current_turn_id,
+        ))
 
         self._recorded_reasoning_ids.add(reasoning_id)
         self.current_thought_text = ""
         return True
 
     async def _finalize_message(self, text: str, *, subagent_id: Optional[str]) -> None:
-        finalize_evt = {
-            "type": "assistant_finalize",
-            "conversation_id": self.conversation_id,
-            "id": self.current_message_id,
-            "text": text,
-            "turn_id": self.current_turn_id,
-        }
-        if subagent_id:
-            finalize_evt["subagent_id"] = subagent_id
-        await self._emit(finalize_evt)
-
-        record = {
-            "role": "assistant",
-            "id": self.current_message_id,
-            "text": text,
-            "timestamp": utc_ts(),
-            "turn_id": self.current_turn_id,
-        }
-        if subagent_id:
-            record["subagent_id"] = subagent_id
-        await self._record(record)
+        await self._emit(build_assistant_finalize_event(
+            entry_id=self.current_message_id,
+            text=text,
+            conversation_id=self.conversation_id,
+            turn_id=self.current_turn_id,
+            subagent_id=subagent_id,
+        ))
+        await self._record(build_message_transcript_entry(
+            role="assistant",
+            entry_id=self.current_message_id,
+            text=text,
+            timestamp=utc_ts(),
+            turn_id=self.current_turn_id,
+            subagent_id=subagent_id,
+        ))
 
         self.current_message_text = ""
         self.current_message_subagent_id = None
@@ -700,16 +708,13 @@ class CopilotEventRouter:
                 resolved_subagent_id=subagent_id,
             )
 
-        evt = {
-            "type": "assistant_delta",
-            "conversation_id": self.conversation_id,
-            "id": self.current_message_id,
-            "delta": text,
-            "turn_id": self.current_turn_id,
-        }
-        if subagent_id:
-            evt["subagent_id"] = subagent_id
-        await self._emit(evt)
+        await self._emit(build_assistant_delta_event(
+            entry_id=self.current_message_id,
+            delta=text,
+            conversation_id=self.conversation_id,
+            turn_id=self.current_turn_id,
+            subagent_id=subagent_id,
+        ))
 
     async def _handle_reasoning_delta(self, data: Any) -> None:
         text = getattr(data, "delta_content", None) or ""
@@ -723,13 +728,12 @@ class CopilotEventRouter:
             self._last_block_type = "reasoning"
             self.current_reasoning_id = f"reasoning_{self._turn_counter}_{self._block_counter}"
 
-        await self._emit({
-            "type": "reasoning_delta",
-            "conversation_id": self.conversation_id,
-            "id": self.current_reasoning_id,
-            "delta": text,
-            "turn_id": self.current_turn_id,
-        })
+        await self._emit(build_reasoning_delta_event(
+            entry_id=self.current_reasoning_id,
+            delta=text,
+            conversation_id=self.conversation_id,
+            turn_id=self.current_turn_id,
+        ))
 
     # ── Message/reasoning complete ──────────────────────────────────
 
@@ -1608,14 +1612,13 @@ class CopilotEventRouter:
 
         user_msg_id = f"user_{self._turn_counter}"
 
-        await self._emit({
-            "type": "message",
-            "conversation_id": self.conversation_id,
-            "id": user_msg_id,
-            "role": "user",
-            "text": text,
-            "turn_id": self.current_turn_id,
-        })
+        await self._emit(build_message_event(
+            role="user",
+            entry_id=user_msg_id,
+            text=text,
+            conversation_id=self.conversation_id,
+            turn_id=self.current_turn_id,
+        ))
 
         await self._emit({
             "type": "turn_started",
@@ -1631,10 +1634,10 @@ class CopilotEventRouter:
             "turn_id": self.current_turn_id,
         })
 
-        await self._record({
-            "role": "user",
-            "id": user_msg_id,
-            "text": text,
-            "timestamp": utc_ts(),
-            "turn_id": self.current_turn_id,
-        })
+        await self._record(build_message_transcript_entry(
+            role="user",
+            entry_id=user_msg_id,
+            text=text,
+            timestamp=utc_ts(),
+            turn_id=self.current_turn_id,
+        ))
