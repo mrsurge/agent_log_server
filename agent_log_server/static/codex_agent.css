@@ -1899,22 +1899,6 @@ textarea {
   transition: background-color 0.2s ease;
 }
 
-/* Stdin mode - composer becomes black when streaming input to PTY */
-.composer.stdin-mode,
-.footer.stdin-mode .composer {
-  background: #000;
-}
-.composer.stdin-mode .prompt-input,
-.footer.stdin-mode .composer .prompt-input {
-  background: #000;
-  color: #69eea3;
-}
-
-body.terminal-mode #footer-terminal-toggle.pill {
-  border-color: rgba(105, 238, 163, 0.65);
-  box-shadow: 0 0 0 1px rgba(105, 238, 163, 0.15) inset;
-}
-
 .composer textarea,
 .composer .prompt-input { flex: 1; }
 .composer textarea,
@@ -2814,37 +2798,6 @@ body.line-numbers-enabled .transcript-line-no {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-/* Composer xterm terminal mode */
-.composer.terminal-active {
-  height: 33vh;
-  min-height: 200px;
-  max-height: 50vh;
-  padding: 0;
-  flex-direction: column;
-  border-top: none;
-}
-.composer.terminal-active .prompt-input,
-.composer.terminal-active #agent-send {
-  display: none;
-}
-.composer-terminal {
-  display: none;
-  width: 100%;
-  height: 100%;
-  background: #000;
-  overflow: hidden;
-}
-.composer.terminal-active .composer-terminal {
-  display: block;
-}
-/* Ensure xterm fills container */
-.composer-terminal .xterm {
-  height: 100%;
-}
-.composer-terminal .xterm-viewport {
-  overflow-y: auto !important;
 }
 
 .settings-subheading {

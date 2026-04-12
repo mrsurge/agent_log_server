@@ -8,7 +8,6 @@ export function bindInputFlow(ctx) {
     getPromptText,
     clearPrompt,
     clearDraft,
-    setTerminalMode,
     saveDraftDebounced,
     openPicker,
     sendHostCloseMessage,
@@ -35,7 +34,6 @@ export function bindInputFlow(ctx) {
 
   const {
     sendBtn,
-    footerTerminalToggleEl,
     promptEl,
     mentionPillEl,
     hostCloseTopEl,
@@ -59,61 +57,9 @@ export function bindInputFlow(ctx) {
     }
   }
 
-  async function sendPtyStdin(data) {
-    const state = getState();
-    if (state.ptyWebSocket && state.ptyWebSocket.readyState === WebSocket.OPEN) {
-      state.ptyWebSocket.send(data);
-      return;
-    }
-    try {
-      const result = await sioCall('pty_stdin', { data });
-      if (result?.ok === false) {
-        throw new Error(result.error || 'PTY stdin failed');
-      }
-    } catch (e) {
-      console.error('Failed to send PTY stdin:', e);
-    }
-  }
-
   async function handlePromptKeydown(evt) {
-    const state = getState();
-    if (state.terminalMode && state.composerTerm) {
-      evt.preventDefault();
-      return;
-    }
-    if (state.commandRunning && state.terminalMode) {
-      evt.preventDefault();
-      let data = '';
-      if (evt.key === 'Enter') {
-        data = '\n';
-      } else if (evt.key === 'Backspace') {
-        data = '\x7f';
-      } else if (evt.key === 'Tab') {
-        data = '\t';
-      } else if (evt.key === 'Escape') {
-        data = '\x1b';
-      } else if (evt.key === 'ArrowUp') {
-        data = '\x1b[A';
-      } else if (evt.key === 'ArrowDown') {
-        data = '\x1b[B';
-      } else if (evt.key === 'ArrowRight') {
-        data = '\x1b[C';
-      } else if (evt.key === 'ArrowLeft') {
-        data = '\x1b[D';
-      } else if (evt.ctrlKey && evt.key.length === 1) {
-        const code = evt.key.toUpperCase().charCodeAt(0) - 64;
-        if (code > 0 && code < 32) data = String.fromCharCode(code);
-      } else if (evt.key.length === 1) {
-        data = evt.key;
-      }
-      if (data) {
-        await sendPtyStdin(data);
-      }
-      return;
-    }
-
     if (evt.key === 'Enter' && !evt.shiftKey) {
-      if (getState().isMobile && !getState().terminalMode) return;
+      if (getState().isMobile) return;
       evt.preventDefault();
       const text = getPromptText().trim();
       if (!text) return;
@@ -130,20 +76,8 @@ export function bindInputFlow(ctx) {
 
   function handlePromptInput() {
     const state = getState();
-    if (state.terminalMode && state.composerTerm) {
-      return;
-    }
     if (!state.applyingDraft) {
       setState({ draftDirty: true });
-    }
-    if (state.commandRunning && state.terminalMode) {
-      const text = getPromptText();
-      if (text) {
-        clearPrompt();
-        sendPtyStdin(text);
-      }
-    }
-    if (!state.commandRunning && !state.terminalMode) {
       saveDraftDebounced();
     }
   }
@@ -163,8 +97,6 @@ export function bindInputFlow(ctx) {
       token.remove();
       if (!state.applyingDraft) {
         setState({ draftDirty: true });
-      }
-      if (!state.commandRunning && !state.terminalMode) {
         saveDraftDebounced();
       }
       if (promptEl) {
@@ -308,11 +240,6 @@ export function bindInputFlow(ctx) {
       await dispatchInput(text);
     });
 
-    footerTerminalToggleEl?.addEventListener('click', () => {
-      setTerminalMode(!getState().terminalMode);
-      promptEl?.focus();
-    });
-
     promptEl?.addEventListener('keydown', handlePromptKeydown);
     promptEl?.addEventListener('input', handlePromptInput);
     promptEl?.addEventListener('click', handlePromptClick);
@@ -360,7 +287,6 @@ export function bindInputFlow(ctx) {
 
   return {
     dispatchInput,
-    sendPtyStdin,
     bindInputHandlers,
     syncMarkdownFromSettings,
   };

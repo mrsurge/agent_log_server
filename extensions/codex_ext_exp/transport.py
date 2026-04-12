@@ -63,19 +63,19 @@ def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
         return None
 
     if item_type in {"usermessage", "user_message"}:
-        text_parts: List[str] = []
+        user_text_parts: List[str] = []
         content = item.get("content") or []
         if isinstance(content, list):
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text":
                     text = part.get("text")
                     if isinstance(text, str):
-                        text_parts.append(text)
-        if not text_parts and isinstance(item.get("text"), str):
-            text_parts.append(item["text"])
-        if not text_parts and isinstance(item.get("message"), str):
-            text_parts.append(item["message"])
-        text = _strip_meta_envelope("\n".join(text_parts)).strip()
+                        user_text_parts.append(text)
+        if not user_text_parts and isinstance(item.get("text"), str):
+            user_text_parts.append(item["text"])
+        if not user_text_parts and isinstance(item.get("message"), str):
+            user_text_parts.append(item["message"])
+        text = _strip_meta_envelope("\n".join(user_text_parts)).strip()
         if text:
             return {"role": "user", "text": text}
 
@@ -792,8 +792,9 @@ class CodexAppServerTransport:
         request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
         if not request_id_text:
             return
-        meta = self._load_meta(conversation_id) or {}
-        settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+        meta_dict: Dict[str, Any] = self._load_meta(conversation_id) or {}
+        raw_settings = meta_dict.get("settings")
+        settings: Dict[str, Any] = raw_settings if isinstance(raw_settings, dict) else {}
         created_at = str(descriptor.get("created_at") or datetime.now(timezone.utc).isoformat())
         render_event = dict(descriptor.get("render_event") or {})
         render_event["type"] = "approval"
@@ -812,9 +813,9 @@ class CodexAppServerTransport:
             "request_method": descriptor.get("request_method"),
             "request_params": dict(descriptor.get("request_params") or {}),
             "payload": dict(descriptor.get("payload") or {}),
-            "thread_id": descriptor.get("thread_id") or meta.get("thread_id"),
+            "thread_id": descriptor.get("thread_id") or meta_dict.get("thread_id"),
             "turn_id": descriptor.get("turn_id"),
-            "runtime_signature": descriptor.get("runtime_signature") or meta.get("thread_runtime_signature"),
+            "runtime_signature": descriptor.get("runtime_signature") or meta_dict.get("thread_runtime_signature"),
             "runtime_instance_id": descriptor.get("runtime_instance_id") or self.runtime_instance_id(),
             "transcript_anchor": dict(descriptor.get("transcript_anchor") or {"turn_id": descriptor.get("turn_id")}),
             "source": descriptor.get("source") or "live",
@@ -826,11 +827,11 @@ class CodexAppServerTransport:
         if callable(upsert):
             upsert(conversation_id, persisted)
         else:
-            meta = meta if isinstance(meta, dict) else {}
-            pending = meta.get("pending_approvals") if isinstance(meta.get("pending_approvals"), dict) else {}
-            pending[request_id_text] = persisted
-            meta["pending_approvals"] = pending
-            self._save_meta(conversation_id, meta)
+            raw_pending = meta_dict.get("pending_approvals")
+            pending_dict: Dict[str, Any] = raw_pending if isinstance(raw_pending, dict) else {}
+            pending_dict[request_id_text] = persisted
+            meta_dict["pending_approvals"] = pending_dict
+            self._save_meta(conversation_id, meta_dict)
 
         self._pending_approval_requests[request_id_text] = {
             "conversation_id": conversation_id,
@@ -957,21 +958,24 @@ class CodexAppServerTransport:
         barrier = self._resume_startup_barriers.get(conversation_id)
         if not isinstance(barrier, dict):
             return
-        barrier_thread_id = barrier.get("thread_id")
+        barrier_dict: Dict[str, Any] = barrier
+        barrier_thread_id = barrier_dict.get("thread_id")
         if isinstance(barrier_thread_id, str) and barrier_thread_id and thread_id and barrier_thread_id != thread_id:
             return
         event_type = self._transport_event_type(label, payload)
         if event_type == "mcp_startup_update":
-            barrier["saw_startup"] = True
-            msg_payload = payload.get("msg") if isinstance(payload, dict) and isinstance(payload.get("msg"), dict) else payload
-            msg_dict = msg_payload if isinstance(msg_payload, dict) else {}
-            status = msg_dict.get("status") if isinstance(msg_dict.get("status"), dict) else {}
-            state = str(status.get("state") or "").strip().lower()
+            barrier_dict["saw_startup"] = True
+            payload_dict: Dict[str, Any] = payload if isinstance(payload, dict) else {}
+            raw_msg = payload_dict.get("msg")
+            msg_dict: Dict[str, Any] = raw_msg if isinstance(raw_msg, dict) else payload_dict
+            raw_status = msg_dict.get("status")
+            status_dict: Dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
+            state = str(status_dict.get("state") or "").strip().lower()
             if state == "failed":
-                future = barrier.get("future")
+                future = barrier_dict.get("future")
                 if isinstance(future, asyncio.Future) and not future.done():
                     server_name = str(msg_dict.get("server") or "").strip()
-                    error_text = str(status.get("error") or "").strip()
+                    error_text = str(status_dict.get("error") or "").strip()
                     message = error_text or "MCP startup failed during thread resume"
                     future.set_exception(RuntimeError(message))
                     server_suffix = f" server={server_name}" if server_name else ""
@@ -982,12 +986,14 @@ class CodexAppServerTransport:
                         f"source=mcp_startup_update state=failed{server_suffix}",
                     )
             return
-        future = barrier.get("future")
+        future = barrier_dict.get("future")
         if not isinstance(future, asyncio.Future) or future.done():
             return
         if event_type == "thread/status/changed":
-            status = payload.get("status") if isinstance(payload, dict) and isinstance(payload.get("status"), dict) else {}
-            status_type = str(status.get("type") or "").strip().lower()
+            payload_dict = payload if isinstance(payload, dict) else {}
+            raw_status = payload_dict.get("status")
+            thread_status_dict: Dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
+            status_type = str(thread_status_dict.get("type") or "").strip().lower()
             if status_type == "idle":
                 future.set_result({
                     "source": "thread/status/changed",

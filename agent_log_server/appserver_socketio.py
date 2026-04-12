@@ -65,10 +65,6 @@ class AppserverSocketioDeps:
     api_extension_plan: _AsyncAnyCallable
     api_fs_list: _AsyncAnyCallable
     api_fs_search: _AsyncAnyCallable
-    api_mcp_agent_pty_resize: _AsyncAnyCallable
-    api_pty_raw_tail: _AsyncAnyCallable
-    api_pty_fws_tail: _AsyncAnyCallable
-    api_pty_stdin: _AsyncAnyCallable
     api_host_ui_get: _AsyncAnyCallable
     api_shutdown: _AsyncAnyCallable
     append_record: _AsyncAnyCallable
@@ -600,54 +596,6 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_agent_pty_resize(sid: str, data: object) -> Any:
-        try:
-            return await deps.api_mcp_agent_pty_resize(_payload(data))
-        except HTTPException as exc:
-            return _sio_error(exc.detail)
-        except Exception as exc:
-            return _sio_error(exc)
-
-    async def _sio_get_pty_raw_tail(sid: str, data: object) -> Any:
-        try:
-            payload = _payload(data)
-            try:
-                max_bytes = int(payload.get("max_bytes", 65536) or 65536)
-            except Exception:
-                return _sio_error("max_bytes must be an integer")
-            return await deps.api_pty_raw_tail(
-                conversation_id=payload.get("conversation_id"),
-                max_bytes=max_bytes,
-            )
-        except HTTPException as exc:
-            return _sio_error(exc.detail)
-        except Exception as exc:
-            return _sio_error(exc)
-
-    async def _sio_get_pty_fws_tail(sid: str, data: object) -> Any:
-        try:
-            payload = _payload(data)
-            try:
-                tail_lines = int(payload.get("tail_lines", 200) or 200)
-            except Exception:
-                return _sio_error("tail_lines must be an integer")
-            return await deps.api_pty_fws_tail(
-                conversation_id=payload.get("conversation_id"),
-                tail_lines=tail_lines,
-            )
-        except HTTPException as exc:
-            return _sio_error(exc.detail)
-        except Exception as exc:
-            return _sio_error(exc)
-
-    async def _sio_pty_stdin(sid: str, data: object) -> Any:
-        try:
-            return await deps.api_pty_stdin(_payload(data))
-        except HTTPException as exc:
-            return _sio_error(exc.detail)
-        except Exception as exc:
-            return _sio_error(exc)
-
     async def _sio_get_transcript(sid: str, data: object) -> Any:
         try:
             return await deps.api_appserver_transcript(conversation_id=_payload(data).get("conversation_id"))
@@ -867,10 +815,6 @@ def register_appserver_socketio_handlers(
         ("approval_response", _sio_approval_response),
         ("fs_list", _sio_fs_list),
         ("fs_search", _sio_fs_search),
-        ("agent_pty_resize", _sio_agent_pty_resize),
-        ("get_pty_raw_tail", _sio_get_pty_raw_tail),
-        ("get_pty_fws_tail", _sio_get_pty_fws_tail),
-        ("pty_stdin", _sio_pty_stdin),
         ("get_transcript", _sio_get_transcript),
         ("get_transcript_range", _sio_get_transcript_range),
         ("get_extension_models", _sio_get_extension_models),

@@ -3,7 +3,7 @@ import contextlib
 import queue
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional, cast
 
 
 class _BlockingBytesReader:
@@ -139,12 +139,13 @@ class FrameworkShellPipeProcess:
     async def write_bytes(self, data: bytes) -> None:
         text = data.decode("utf-8")
         writer = getattr(self._mgr, "write_to_shell", None)
-        if callable(writer):
+        write_to_shell = cast(Optional[Callable[..., Awaitable[Any]]], writer if callable(writer) else None)
+        if write_to_shell is not None:
             try:
-                await writer(self._shell_id, text, append_newline=False)
+                await write_to_shell(self._shell_id, text, append_newline=False)
                 return
             except TypeError:
-                await writer(self._shell_id, text)
+                await write_to_shell(self._shell_id, text)
                 return
         await self._mgr.write_to_pipe(self._shell_id, text)
 

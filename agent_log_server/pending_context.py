@@ -329,14 +329,16 @@ def _watch_target_for_conversation(conversation_id: str) -> Optional[Dict[str, s
     if not isinstance(meta, dict):
         return None
 
-    settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
+    settings_raw = meta.get("settings")
+    settings: Dict[str, Any] = settings_raw if isinstance(settings_raw, dict) else {}
     agent = settings.get("agent")
     if not isinstance(agent, str) or agent.strip() not in TARGETED_AGENT_TYPES:
         return None
     if not te2_mcp_integration_enabled(settings):
         return None
 
-    snapshot = load_repo_memory_snapshot(settings.get("cwd"))
+    cwd = settings.get("cwd")
+    snapshot = load_repo_memory_snapshot(cwd if isinstance(cwd, str) else None)
     if not snapshot.get("exists"):
         return None
 

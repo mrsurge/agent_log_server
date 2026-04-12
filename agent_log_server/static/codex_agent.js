@@ -26,7 +26,6 @@ import { bindApprovalUi } from './js/codex_agent/approvals/ui.js';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
 import { bindRequestCardRuntime } from './js/codex_agent/request_cards/runtime.js';
-import { bindPtyRuntime } from './js/codex_agent/pty/runtime.js';
 import { bindShellSemantic } from './js/codex_agent/shell_semantic.js';
 import { formatJsonSetting, parseJsonSetting } from './js/codex_agent/settings/runtime_helpers.js';
 import { bindSettingsSaveFlow } from './js/codex_agent/settings/save_flow.js';
@@ -48,9 +47,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const stopBtn = document.getElementById('agent-stop');
   const promptEl = document.getElementById('agent-prompt');
   const footerEl = document.querySelector('.composer');
-  const footerTerminalToggleEl = document.getElementById('footer-terminal-toggle');
   const footerRuntimeControlsEl = document.getElementById('footer-runtime-controls');
-  const composerTerminalEl = document.getElementById('composer-terminal');
   const sendBtn = document.getElementById('agent-send');
   const interruptBtn = document.getElementById('turn-interrupt');
   const counterMessagesEl = document.getElementById('counter-messages');
@@ -213,8 +210,6 @@ document.addEventListener('DOMContentLoaded', () => {
     rules: [],
   };
   let commandRunning = false; // Whether a PTY command is currently running
-  let ptyWebSocket = null; // Raw PTY WebSocket connection
-  let ptyWebSocketConvoId = null; // conversation_id currently bound to ptyWebSocket
   let activeAgentPtyBlockId = null;
   const pending = new Map();
   const WIDESCREEN_BREAKPOINT = 1280;
@@ -259,20 +254,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let transcriptLimit = 500;
   let transcriptLoading = false;
   let estimatedRowHeight = 28;
-  let terminalMode = false;
-  let composerTerm = null;        // xterm instance for composer terminal
-  let composerFitAddon = null;    // FitAddon for auto-sizing
-  let composerResizeObserver = null;
-  let composerPrimedConvoId = null;
-  let composerPriming = false;
-  let composerPendingChunks = [];
-  let composerPendingBytes = 0;
-  let composerPrimedWithTail = false;
-  let composerResizeSyncTimer = null;
-  let composerFitRaf = null;
-  let composerFitFramesRemaining = 0;
-  let composerResizeSuppressed = false; // Suppress resize sync during initial open
-  let composerLastResizeKey = null;
   let draftSaveTimer = null;
   let explicitMentionSaveTimer = null;
   let lastComposerSelectionRange = null;
@@ -280,6 +261,50 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastDraftHash = null;
   let draftDirty = false;
   let applyingDraft = false;
+
+  function isMarkdownEnabled() {
+    return markdownEnabled;
+  }
+
+  function setMarkdownEnabled(enabled) {
+    markdownEnabled = enabled === true;
+    if (markdownToggleEl) markdownToggleEl.checked = markdownEnabled;
+    if (settingsMarkdownEl) settingsMarkdownEl.checked = markdownEnabled;
+  }
+
+  function setTrackEditsEnabled(enabled) {
+    trackEditsEnabled = enabled === true;
+    if (trackEditsToggleEl) trackEditsToggleEl.checked = trackEditsEnabled;
+  }
+
+  function setLineNumbersEnabled(enabled) {
+    lineNumbersEnabled = enabled === true;
+    if (lineNumbersToggleEl) lineNumbersToggleEl.checked = lineNumbersEnabled;
+    document.body.classList.toggle('line-numbers-enabled', lineNumbersEnabled);
+  }
+
+  function setViewWrapEnabled(enabled) {
+    viewWrapEnabled = enabled === true;
+    if (settingsViewWrapEl) settingsViewWrapEl.checked = viewWrapEnabled;
+  }
+
+  function isXtermEnabled() {
+    return useXterm;
+  }
+
+  function setXtermEnabled(enabled) {
+    useXterm = enabled === true;
+    if (settingsXtermEl) settingsXtermEl.checked = useXterm;
+  }
+
+  function isDiffSyntaxEnabled() {
+    return diffSyntaxHighlight;
+  }
+
+  function setDiffSyntaxEnabled(enabled) {
+    diffSyntaxHighlight = enabled === true;
+    if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = diffSyntaxHighlight;
+  }
 
   // ── Subagent containers ──────────────────────────────────────────
   const subagentContainers = new Map(); // subagent_id -> { row, body, header, statusEl, items: [] }
@@ -623,315 +648,59 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function setTerminalMode(enabled) {
-    terminalMode = Boolean(enabled);
-    document.body.classList.toggle('terminal-mode', terminalMode);
-    footerEl?.classList.toggle('terminal-active', terminalMode);
-    
-    if (terminalMode) {
-      // Hide send button, show terminal
-      if (sendBtn) sendBtn.style.display = 'none';
-      initComposerTerminal();
-    } else {
-      // Show send button, focus prompt
-      if (sendBtn) sendBtn.style.display = '';
-      promptEl?.focus();
-      
-      // Close WebSocket so next open gets a fresh connection with proper resize
-      if (ptyWebSocket) {
-        try {
-          ptyWebSocket.onopen = null;
-          ptyWebSocket.onmessage = null;
-          ptyWebSocket.onerror = null;
-          ptyWebSocket.onclose = null;
-        } catch (_) {}
-        try { ptyWebSocket.close(); } catch (_) {}
-        ptyWebSocket = null;
-        ptyWebSocketConvoId = null;
-      }
-    }
-    
-    if (promptEl) {
-      promptEl.setAttribute(
-        'data-placeholder',
-        terminalMode ? 'Command… (Enter to run)' : '@ to mention files'
-      );
-    }
-    if (footerTerminalToggleEl) {
-      footerTerminalToggleEl.classList.toggle('active', terminalMode);
-      footerTerminalToggleEl.textContent = terminalMode ? 'chat' : '>_';
-    }
+  const shellSemantic = bindShellSemantic({
+    getEnabled: () => semanticShellRibbonEnabled,
+    setEnabled: (enabled) => { semanticShellRibbonEnabled = enabled === true; },
+    getQuoteParsingEnabled: () => semanticShellQuoteParsingEnabled,
+    setQuoteParsingEnabled: (enabled) => { semanticShellQuoteParsingEnabled = enabled === true; },
+    getCheckboxEl: () => document.getElementById('settings-semantic-shell-ribbon'),
+    escapeHtml,
+  });
+
+  function isSemanticShellRibbonEnabled() {
+    return shellSemantic.isSemanticShellRibbonEnabled();
   }
 
-  // Initialize composer terminal (xterm in footer)
-  function initComposerTerminal() {
-    if (!composerTerminalEl) return;
-    const convoId = conversationMeta?.conversation_id;
-    
-    // Create xterm if not exists
-    const createdNow = !composerTerm;
-    if (createdNow && typeof Terminal !== 'undefined') {
-      composerTerm = new Terminal({
-        convertEol: true,
-        cursorBlink: true,
-        scrollback: 5000,
-        fontFamily: 'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-        fontSize: 12,
-        theme: { background: '#000000', foreground: '#c9d1d9' },
-      });
-      composerTerm.open(composerTerminalEl);
-      
-      // FitAddon DISABLED - it causes readline redraw cascades
-      // if (typeof FitAddon !== 'undefined') {
-      //   composerFitAddon = new FitAddon.FitAddon();
-      //   composerTerm.loadAddon(composerFitAddon);
-      // }
-      
-      // ResizeObserver DISABLED - it triggers fit which causes issues
-      // if (typeof ResizeObserver !== 'undefined') {
-      //   composerResizeObserver = new ResizeObserver(() => fitComposerTerminal());
-      //   composerResizeObserver.observe(composerTerminalEl);
-      // }
-      
-      // Send input to PTY via WebSocket
-      composerTerm.onData((data) => {
-        if (ptyWebSocket && ptyWebSocket.readyState === WebSocket.OPEN) {
-          ptyWebSocket.send(data);
-        }
-      });
-      
-      // Sync resize to backend (but respect suppression flag during open)
-      composerTerm.onResize(({ cols, rows }) => {
-        if (composerResizeSuppressed) {
-          console.log('onResize suppressed during open:', cols, 'x', rows);
-          return;
-        }
-        scheduleComposerTerminalResizeSync(cols, rows);
-      });
-    }
-    
-    // Keep the composer terminal continuously in sync with the live PTY stream.
-    // This avoids needing to rehydrate on every open/close (which is inherently
-    // lossy without full screen state) and prevents cursor/prompt drift.
-    const needsPrime = Boolean(createdNow) || (convoId && composerPrimedConvoId !== convoId);
-    if (needsPrime) {
-      composerPriming = true;
-      composerPendingChunks = [];
-      composerPendingBytes = 0;
-      composerPrimedWithTail = false;
-    }
-    
-    // Suppress auto-resize during open sequence to prevent FitAddon/ResizeObserver interference
-    composerResizeSuppressed = true;
-    composerLastResizeKey = null; // Reset so we always send resize on open
-    
-    // Fit and focus after DOM update
-    requestAnimationFrame(async () => {
-      // Ensure font is loaded before fit so cols/rows are stable.
-      await ensureFontLoaded('JetBrains Mono', 900);
-
-      if (needsPrime) {
-        // Start from a blank viewport, then hydrate once, then stream live forever.
-        try { composerTerm?.reset(); } catch (_) {}
-        const didPrime = await primeComposerTerminalFromRawTail();
-        composerPrimedWithTail = Boolean(didPrime);
-        composerPriming = false;
-        // If we primed from tail, buffered chunks likely overlap; drop them.
-        if (!composerPrimedWithTail && composerPendingChunks.length && composerTerm) {
-          for (const chunk of composerPendingChunks) {
-            try { composerTerm.write(chunk); } catch (_) {}
-          }
-        }
-        composerPendingChunks = [];
-        composerPendingBytes = 0;
-      }
-
-      // Connect PTY WebSocket
-      connectPtyWebSocket();
-      
-      // Send resize with SIGWINCH after short delay to let layout settle
-      setTimeout(() => {
-        const cols = composerTerm?.cols || 80;
-        const rows = composerTerm?.rows || 24;
-        console.log('Sending resize on open:', cols, 'x', rows);
-        syncComposerTerminalSize(cols, rows);
-      }, 150);
-      
-      // Re-enable auto-resize (FitAddon is disabled anyway)
-      composerResizeSuppressed = false;
-      
-      composerTerm?.focus();
-    });
+  function setSemanticShellRibbonEnabled(enabled) {
+    shellSemantic.setSemanticShellRibbonEnabled(enabled);
   }
 
-  function fitComposerTerminal() {
-    if (composerFitAddon && composerTerm) {
-      try { composerFitAddon.fit(); } catch (_) {}
-    }
+  function setSemanticShellQuoteParsingEnabled(enabled) {
+    semanticShellQuoteParsingEnabled = enabled === true;
+    shellSemantic.setSemanticShellQuoteParsingEnabled(enabled);
   }
 
-  function requestComposerFit(frames = 8) {
-    if (!composerTerm || !composerFitAddon) return;
-    composerFitFramesRemaining = Math.max(composerFitFramesRemaining, Math.max(1, Number(frames) || 0));
-    if (composerFitRaf) return;
-    const step = () => {
-      composerFitRaf = null;
-      if (!composerTerm || !composerFitAddon) return;
-      try { composerFitAddon.fit(); } catch (_) {}
-      composerFitFramesRemaining = Math.max(0, composerFitFramesRemaining - 1);
-      if (composerFitFramesRemaining > 0) {
-        composerFitRaf = requestAnimationFrame(step);
-      }
+  function setActiveToolRenderPolicy(policy) {
+    if (policy && typeof policy === 'object') {
+      activeToolRenderPolicy = policy;
+      return;
+    }
+    activeToolRenderPolicy = {
+      default: {
+        request: { kind: 'plain' },
+        response: { kind: 'plain' },
+      },
+      rules: [],
     };
-    composerFitRaf = requestAnimationFrame(step);
   }
 
-  async function ensureFontLoaded(fontFamily, timeoutMs = 900) {
-    const fam = String(fontFamily || '').trim();
-    if (!fam) return;
-    if (!document.fonts || typeof document.fonts.load !== 'function') return;
-    try {
-      await Promise.race([
-        document.fonts.load(`12px "${fam}"`),
-        new Promise(resolve => setTimeout(resolve, Math.max(0, Number(timeoutMs) || 0))),
-      ]);
-    } catch (_) {}
+  async function ensureTreeSitterRibbonReady() {
+    return shellSemantic.ensureTreeSitterRibbonReady();
   }
 
-  function syncComposerTerminalSize(cols, rows) {
-    const convoId = conversationMeta?.conversation_id;
-    if (!convoId || !cols || !rows) return;
-    void sioCall('agent_pty_resize', {
-      conversation_id: convoId,
-      cols,
-      rows,
-    }).catch(() => {});
+  function renderShellCmdRibbon(el, cmd) {
+    return shellSemantic.renderShellCmdRibbon(el, cmd);
   }
 
-  function scheduleComposerTerminalResizeSync(cols, rows, opts = {}) {
-    const convoId = conversationMeta?.conversation_id;
-    if (!convoId) return;
-    const c = Math.max(1, Number(cols) || 0);
-    const r = Math.max(1, Number(rows) || 0);
-    if (!c || !r) return;
-
-    const key = `${convoId}:${c}x${r}`;
-    if (!opts.force && composerLastResizeKey === key) return;
-    composerLastResizeKey = key;
-
-    if (composerResizeSyncTimer) {
-      try { clearTimeout(composerResizeSyncTimer); } catch (_) {}
-      composerResizeSyncTimer = null;
-    }
-
-    let attempts = 0;
-    const tryOnce = async () => {
-      attempts += 1;
-      // Conversation may have switched mid-retry; stop.
-      if (conversationMeta?.conversation_id !== convoId) return;
-      try {
-        const resp = await sioCall('agent_pty_resize', {
-          conversation_id: convoId,
-          cols: c,
-          rows: r,
-        });
-        if (resp?.ok) return;
-      } catch (_) {}
-      if (attempts >= 12) return;
-      const delay = Math.min(1500, 80 * attempts);
-      composerResizeSyncTimer = setTimeout(tryOnce, delay);
-    };
-
-    // If not forced and we already have a websocket + a stable terminal, one attempt is enough.
-    void tryOnce();
+  function setCommandRunning(running) {
+    commandRunning = Boolean(running);
   }
 
-  async function primeComposerTerminalFromRawTail() {
-    const convoId = conversationMeta?.conversation_id;
-    if (!convoId) return;
-    if (!terminalMode || !composerTerm) return;
-    if (composerPrimedConvoId === convoId) return;
-
-    try {
-      // Prefer framework_shells log tail for UI rehydration (matches what the user sees).
-      const data1 = await sioCall('get_pty_fws_tail', {
-        conversation_id: convoId,
-        tail_lines: 200,
-      });
-      if (data1 && data1.ok && Array.isArray(data1.stdout_tail)) {
-        const text1 = data1.stdout_tail.join('');
-        if (text1) {
-          composerTerm.write(text1);
-          composerPrimedConvoId = convoId;
-          return true;
-        }
-      }
-
-      const data2 = await sioCall('get_pty_raw_tail', {
-        conversation_id: convoId,
-        max_bytes: 65536,
-      });
-      if (!data2 || !data2.ok) return;
-      const b64 = data2.data_b64 || '';
-      if (!b64) {
-        composerPrimedConvoId = convoId;
-        return false;
-      }
-      const text2 = _decodeBase64ToUtf8(b64);
-      if (text2) {
-        composerTerm.write(text2);
-      }
-      composerPrimedConvoId = convoId;
-      return Boolean(text2);
-    } catch (_) {
-      // Best-effort; live WS will still work.
-    }
-    return false;
-  }
-
-  function isMarkdownEnabled() {
-    return markdownEnabled;
-  }
-
-  function setMarkdownEnabled(enabled) {
-    markdownEnabled = enabled;
-    if (markdownToggleEl) markdownToggleEl.checked = enabled;
-    if (settingsMarkdownEl) settingsMarkdownEl.checked = enabled;
-  }
-
-  function setTrackEditsEnabled(enabled) {
-    trackEditsEnabled = enabled;
-    if (trackEditsToggleEl) trackEditsToggleEl.checked = enabled;
-  }
-
-  function setLineNumbersEnabled(enabled) {
-    lineNumbersEnabled = enabled === true;
-    if (lineNumbersToggleEl) lineNumbersToggleEl.checked = lineNumbersEnabled;
-    document.body.classList.toggle('line-numbers-enabled', lineNumbersEnabled);
-  }
-
-  function setViewWrapEnabled(enabled) {
-    viewWrapEnabled = enabled === true;
-    if (settingsViewWrapEl) settingsViewWrapEl.checked = viewWrapEnabled;
-  }
-
-  function isXtermEnabled() {
-    return useXterm;
-  }
-
-  function setXtermEnabled(enabled) {
-    useXterm = enabled;
-    if (settingsXtermEl) settingsXtermEl.checked = enabled;
-  }
-
-  function isDiffSyntaxEnabled() {
-    return diffSyntaxHighlight;
-  }
-
-  function setDiffSyntaxEnabled(enabled) {
-    diffSyntaxHighlight = enabled;
-    const el = document.getElementById('settings-diff-syntax');
-    if (el) el.checked = enabled;
+  // Strip OpenAI citation markers like 'citeturn1file0L11-L26'
+  function stripCitations(text) {
+    if (!text) return text;
+    // Match patterns like 'citeturn0file0' or 'citeturn1file0L11-L26'
+    return text.replace(/'citeturn\d+file\d+(?:L\d+(?:-L\d+)?)?'/g, '');
   }
 
   const FILE_EXT_LANG_MAP = {
@@ -1005,38 +774,30 @@ document.addEventListener('DOMContentLoaded', () => {
     return shortPath || fallbackTitle || 'view';
   }
 
-  // Detect language from command for syntax highlighting
   function detectLangFromCommand(command) {
     if (!command) return null;
-    
-    // Handle sh -c 'command' wrapper - extract inner command
+
     const shCMatch = command.match(/sh\s+-[lc]+\s+['"](.+)['"]\s*$/);
     const innerCmd = shCMatch ? shCMatch[1] : command;
-    
-    // Pattern 1: cat/head/tail/less + file
+
     const catMatch = innerCmd.match(/\b(?:cat|head|tail|less|more|bat)\s+['"]*([^\s'"]+)/);
     if (catMatch) {
       const lang = detectLangFromPath(catMatch[1]);
       if (lang) return lang;
     }
-    
-    // Pattern 2: sed -n 'range' file (file is last argument)
+
     const sedMatch = innerCmd.match(/\bsed\s+(?:-[^\s]+\s+)*'[^']+'\s+([^\s'"]+)\s*$/);
     if (sedMatch) {
       const lang = detectLangFromPath(sedMatch[1]);
       if (lang) return lang;
     }
-    
-    // Pattern 3: awk/grep with file argument
+
     const awkGrepMatch = innerCmd.match(/\b(?:awk|grep)\s+(?:-[^\s]+\s+)*(?:'[^']+'|"[^"]+")\s+([^\s'"]+)\s*$/);
     if (awkGrepMatch) {
       const lang = detectLangFromPath(awkGrepMatch[1]);
       if (lang) return lang;
     }
 
-    // Pattern 3.5: "best effort" file token anywhere in command (helps with pipes/&& chains)
-    // Example: `... mcp_agent_pty_server.py | sed -n ...` or `... web-tree-sitter.js | head -n 40`
-    // Strategy: split by pipes/&&/||/; and prefer the last file-like token in the first segment(s).
     const segments = innerCmd.split(/\s*(?:\|\||&&|\||;)\s*/g);
     let best = null;
     for (const seg of segments) {
@@ -1044,11 +805,9 @@ document.addEventListener('DOMContentLoaded', () => {
       for (const t of toks) {
         const raw = String(t || '').trim();
         if (!raw) continue;
-        // Strip wrapping quotes for file detection only.
         const unq = (raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('`') && raw.endsWith('`'))
           ? raw.slice(1, -1)
           : raw;
-        // Ignore obvious flags/ops
         if (unq.startsWith('-')) continue;
         const m = unq.match(/([^\s'"]+\.\w+)$/);
         if (m) {
@@ -1056,18 +815,15 @@ document.addEventListener('DOMContentLoaded', () => {
           if (lang) best = lang;
         }
       }
-      // We prefer the first segment that yields a result (usually contains the file), but allow update if later segments also yield.
     }
     if (best) return best;
-    
-    // Pattern 4: Any file path with known extension at end of command
+
     const anyFileMatch = innerCmd.match(/([^\s'"]+\.\w+)\s*$/);
     if (anyFileMatch) {
       const lang = detectLangFromPath(anyFileMatch[1]);
       if (lang) return lang;
     }
-    
-    // Check for inline code execution (use innerCmd)
+
     if (innerCmd.includes('python') || innerCmd.includes('python3')) return 'python';
     if (innerCmd.includes('node ') || innerCmd.includes('npx ')) return 'javascript';
     if (innerCmd.includes('ruby ')) return 'ruby';
@@ -1076,28 +832,6 @@ document.addEventListener('DOMContentLoaded', () => {
     return null;
   }
 
-  // Apply syntax highlighting to text if enabled and hljs available
-  function highlightCodeText(text, lang) {
-    if (!isDiffSyntaxEnabled() || typeof hljs === 'undefined' || !text?.trim()) {
-      return escapeHtml(text || '');
-    }
-    try {
-      if (lang && hljs.getLanguage(lang)) {
-        return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
-      }
-      // Try auto-detection
-      const result = hljs.highlightAuto(text);
-      if (result.relevance > 5) {
-        return result.value;
-      }
-    } catch (e) {
-      // Fall back to escaped text
-    }
-    return escapeHtml(text);
-  }
-
-  // Syntax highlight for command outputs (independent of diffSyntaxHighlight toggle).
-  // This is used for shell command ribbons/outputs, not for diff rendering.
   function highlightCodeAlways(text, lang) {
     if (typeof hljs === 'undefined' || !text?.trim()) {
       return escapeHtml(text || '');
@@ -1259,69 +993,6 @@ document.addEventListener('DOMContentLoaded', () => {
     table.appendChild(tableBody);
     output.appendChild(table);
     return output;
-  }
-
-  // --- Tree-sitter semantic shell ribbon (optional) ---
-  const shellSemantic = bindShellSemantic({
-    getEnabled: () => semanticShellRibbonEnabled,
-    setEnabled: (enabled) => { semanticShellRibbonEnabled = enabled === true; },
-    getQuoteParsingEnabled: () => semanticShellQuoteParsingEnabled,
-    setQuoteParsingEnabled: (enabled) => { semanticShellQuoteParsingEnabled = enabled === true; },
-    getCheckboxEl: () => document.getElementById('settings-semantic-shell-ribbon'),
-    escapeHtml,
-  });
-
-  function isSemanticShellRibbonEnabled() {
-    return shellSemantic.isSemanticShellRibbonEnabled();
-  }
-
-  function setSemanticShellRibbonEnabled(enabled) {
-    shellSemantic.setSemanticShellRibbonEnabled(enabled);
-  }
-
-  function setSemanticShellQuoteParsingEnabled(enabled) {
-    semanticShellQuoteParsingEnabled = enabled === true;
-    shellSemantic.setSemanticShellQuoteParsingEnabled(enabled);
-  }
-
-  function setActiveToolRenderPolicy(policy) {
-    if (policy && typeof policy === 'object') {
-      activeToolRenderPolicy = policy;
-      return;
-    }
-    activeToolRenderPolicy = {
-      default: {
-        request: { kind: 'plain' },
-        response: { kind: 'plain' },
-      },
-      rules: [],
-    };
-  }
-
-  async function ensureTreeSitterRibbonReady() {
-    return shellSemantic.ensureTreeSitterRibbonReady();
-  }
-
-  function renderShellCmdRibbon(el, cmd) {
-    return shellSemantic.renderShellCmdRibbon(el, cmd);
-  }
-
-  function setCommandRunning(running) {
-    commandRunning = running;
-    // Visual indicator: composer background goes black when stdin is active
-    if (promptEl) {
-      promptEl.classList.toggle('stdin-mode', running && terminalMode);
-    }
-    if (footerEl) {
-      footerEl.classList.toggle('stdin-mode', running && terminalMode);
-    }
-  }
-
-  // Strip OpenAI citation markers like 'citeturn1file0L11-L26'
-  function stripCitations(text) {
-    if (!text) return text;
-    // Match patterns like 'citeturn0file0' or 'citeturn1file0L11-L26'
-    return text.replace(/'citeturn\d+file\d+(?:L\d+(?:-L\d+)?)?'/g, '');
   }
 
   // Render text with code block highlighting
@@ -4075,7 +3746,7 @@ document.addEventListener('DOMContentLoaded', () => {
     entry.text = '';
     entry.screenRows = null;
     entry.renderMode = 'raw';
-    entry.hasRawStream = Boolean(ptyWebSocket && ptyWebSocket.readyState === WebSocket.OPEN);
+    entry.hasRawStream = false;
     activeAgentPtyBlockId = blockId;
     if (entry.term) {
       entry.term.reset();
@@ -4155,20 +3826,6 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) {
       return '';
     }
-  }
-
-  function renderAgentPtyRaw(evt) {
-    // Raw PTY events are now handled by PTY WebSocket for user terminal
-    // Agent transcript should use screen_delta events for clean rendering
-    // Skip processing here to avoid duplicate/noisy output
-    return;
-    
-    // Original code kept for reference:
-    // const blockId = evt.block_id || evt.blockId;
-    // if (!blockId) return;
-    // const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
-    // if (entry.renderMode === 'screen') return;
-    // ...
   }
 
   function renderAgentBlockEnd(evt) {
@@ -5214,17 +4871,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (conversationSettings?.semanticShellRibbon === true) {
         ensureTreeSitterRibbonReady();
       }
-      // If conversation switched, reset composer terminal state so we don't mix streams.
-      const convoId = conversationMeta?.conversation_id;
-      if (convoId && ptyWebSocketConvoId && ptyWebSocketConvoId !== convoId) {
-        composerPrimedConvoId = null;
-        if (composerTerm && terminalMode) {
-          try { composerTerm.reset(); } catch (_) {}
-        }
-      }
-	      // Connect PTY WebSocket for user terminal
-	      connectPtyWebSocket();
-	      // Restore draft from conversation meta
+      // Restore draft from conversation meta
 	      restoreDraft();
 	    } catch {
 	      // Don't touch statusEl here - it's for server status only
@@ -5256,7 +4903,6 @@ document.addEventListener('DOMContentLoaded', () => {
       conversationSettings,
       conversationMeta,
       autoScroll,
-      terminalMode,
     }),
     setState: (patch) => {
       if (patch.initialized !== undefined) initialized = patch.initialized;
@@ -5355,7 +5001,6 @@ document.addEventListener('DOMContentLoaded', () => {
     renderAgentBlockDelta,
     renderAgentBlockEnd,
     renderScreenDelta,
-    renderAgentPtyRaw,
     renderShellBegin,
     renderShellDelta,
     renderShellEnd,
@@ -5376,29 +5021,6 @@ document.addEventListener('DOMContentLoaded', () => {
     insertMention,
     renderPromptFromText,
     applyRuntimeMode,
-  });
-
-  const { connectPtyWebSocket, handleUserPtyOutput } = bindPtyRuntime({
-    getState: () => ({
-      conversationMeta,
-      ptyWebSocket,
-      ptyWebSocketConvoId,
-      activeAgentPtyBlockId,
-      composerTerm,
-      composerPriming,
-      composerPendingBytes,
-      composerPendingChunks,
-      useXterm,
-    }),
-    setState: (patch) => {
-      if (patch.ptyWebSocket !== undefined) ptyWebSocket = patch.ptyWebSocket;
-      if (patch.ptyWebSocketConvoId !== undefined) ptyWebSocketConvoId = patch.ptyWebSocketConvoId;
-      if (patch.composerPendingBytes !== undefined) composerPendingBytes = patch.composerPendingBytes;
-    },
-    getWindow: () => window,
-    createXterm,
-    maybeAutoScroll,
-    getAgentBlockRows: () => agentBlockRows,
   });
 
   const {
@@ -5529,10 +5151,8 @@ document.addEventListener('DOMContentLoaded', () => {
   bindStartStopButtons();
   initExternalModules();
   bindDropdownClose();
-  const { dispatchInput, sendPtyStdin, bindInputHandlers, syncMarkdownFromSettings } = bindInputFlow({
+  const { dispatchInput, bindInputHandlers, syncMarkdownFromSettings } = bindInputFlow({
     getState: () => ({
-      terminalMode,
-      composerTerm,
       commandRunning,
       applyingDraft,
       draftDirty,
@@ -5545,7 +5165,6 @@ document.addEventListener('DOMContentLoaded', () => {
       estimatedRowHeight,
       scrollProgrammatic: _scrollProgrammatic,
       autoScroll,
-      ptyWebSocket,
     }),
     setState: (patch) => {
       if (patch.draftDirty !== undefined) draftDirty = patch.draftDirty;
@@ -5557,7 +5176,6 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     elements: {
       sendBtn,
-      footerTerminalToggleEl,
       promptEl,
       mentionPillEl,
       hostCloseTopEl,
@@ -5577,7 +5195,6 @@ document.addEventListener('DOMContentLoaded', () => {
     getPromptText,
     clearPrompt,
     clearDraft,
-    setTerminalMode,
     saveDraftDebounced,
     openPicker,
     sendHostCloseMessage,

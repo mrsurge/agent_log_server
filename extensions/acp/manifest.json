@@ -1,8 +1,0 @@
-{
-  "id": "gemini-acp",
-  "name": "Gemini ACP (Deprecated)",
-  "version": "1.0.0",
-  "type": "acp",
-  "description": "Legacy ACP protocol extension — deprecated, use copilot-sdk instead",
-  "enabled": false
-}

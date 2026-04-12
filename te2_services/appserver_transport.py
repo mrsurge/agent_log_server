@@ -20,6 +20,8 @@ from typing import Optional
 
 import httpx
 import socketio
+from socketio.exceptions import ConnectionRefusedError as SocketIOConnectionRefusedError
+from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +57,13 @@ class _AppserverRelay(socketio.AsyncNamespace):
         client = socketio.AsyncClient(reconnection=True, reconnection_attempts=5)
 
         # Forward broadcast events from appserver back to this specific TE2 client
-        @client.on("appserver_event", namespace="/appserver")
         async def _on_event(data):
             try:
                 await self.emit("appserver_event", data, room=sid)
             except Exception:
                 pass
+
+        client.on("appserver_event", _on_event, namespace="/appserver")
 
         try:
             await client.connect(
@@ -79,7 +82,7 @@ class _AppserverRelay(socketio.AsyncNamespace):
         logger.info("TE2 client connected to /appserver relay: %s", sid)
         backend = await self._get_backend(sid)
         if not backend:
-            raise socketio.exceptions.ConnectionRefusedError("Backend unavailable")
+            raise SocketIOConnectionRefusedError("Backend unavailable")
 
     async def on_disconnect(self, sid):
         logger.info("TE2 client disconnected from /appserver relay: %s", sid)
@@ -101,7 +104,7 @@ class _AppserverRelay(socketio.AsyncNamespace):
         try:
             result = await backend.call(event, data, namespace="/appserver", timeout=30)
             return result
-        except socketio.exceptions.TimeoutError:
+        except SocketIOTimeoutError:
             return {"__error": f"Timeout relaying {event}"}
         except Exception as e:
             return {"__error": str(e)}
@@ -271,7 +274,7 @@ def register(app) -> None:
             "creating standalone SIO server for /appserver relay"
         )
         sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
-        sio_app = socketio.ASGIApp(sio, other_app=app)
+        sio_app = socketio.ASGIApp(sio, other_asgi_app=app)
         # This is a fallback — ideally the TE2 framework provides the SIO server
         app.mount("/appserver_sio", sio_app)
 

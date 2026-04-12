@@ -12,6 +12,7 @@ Key advantages:
 
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 import shutil
@@ -20,7 +21,7 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Callable, Awaitable, Deque, Tuple, get_args
+from typing import Any, Dict, List, Optional, Callable, Awaitable, Deque, Tuple, cast, get_args
 from collections import deque
 
 from framework_shells.orchestrator import Orchestrator
@@ -37,10 +38,24 @@ from ._vendor.copilot import (
 )
 from ._vendor.copilot.generated.rpc import SessionModeSetParams, Mode as SessionMode
 from ._vendor.copilot.types import (
+    CopilotClientOptions,
+    ErrorOccurredHandler,
+    MCPLocalServerConfig,
+    MCPRemoteServerConfig,
+    MCPServerConfig,
+    PostToolUseHandler,
+    PreToolUseHandler,
+    _PermissionHandlerFn,
+    ReasoningEffort,
     SessionHooks,
+    SessionEndHandler,
+    SessionStartHandler,
+    SystemMessageConfig,
     PermissionRequestResultKind,
+    UserInputHandler,
     UserInputRequest,
     UserInputResponse,
+    UserPromptSubmittedHandler,
 )
 
 from .file_change_preview import build_file_change_preview
@@ -61,6 +76,8 @@ _client_lock: Optional[asyncio.Lock] = None
 _fws_getter: Optional[Callable] = None
 _copilot_shell_id: Optional[str] = None
 _copilot_fws_process: Optional[FrameworkShellPipeProcess] = None
+_BroadcastFn = Callable[[Dict[str, Any]], Awaitable[None]]
+_TranscriptFn = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
 
 def _get_client_lock() -> asyncio.Lock:
@@ -70,9 +87,30 @@ def _get_client_lock() -> asyncio.Lock:
         _client_lock = asyncio.Lock()
     return _client_lock
 
+
+async def _noop_broadcast(_: Dict[str, Any]) -> None:
+    return None
+
+
+async def _noop_transcript(_: str, __: Dict[str, Any]) -> None:
+    return None
+
+
+def _resolved_broadcast_fn() -> _BroadcastFn:
+    return _broadcast_fn if _broadcast_fn is not None else _noop_broadcast
+
+
+def _resolved_transcript_fn() -> _TranscriptFn:
+    return _transcript_fn if _transcript_fn is not None else _noop_transcript
+
+
+async def _append_debug_transcript(conversation_id: str, transcript_entry: Dict[str, Any]) -> None:
+    await _resolved_transcript_fn()(conversation_id, transcript_entry)
+
+
 # Server callbacks (injected by init_copilot_manager)
-_broadcast_fn: Optional[Callable] = None
-_transcript_fn: Optional[Callable] = None
+_broadcast_fn: Optional[_BroadcastFn] = None
+_transcript_fn: Optional[_TranscriptFn] = None
 _meta_fns: Optional[Dict[str, Callable]] = None
 
 # Session tracking: conversation_id -> CopilotSession
@@ -348,7 +386,7 @@ def _add_to_raw_buffer(
 
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_transcript_fn(conversation_id, transcript_entry))
+        loop.create_task(_append_debug_transcript(conversation_id, transcript_entry))
     except RuntimeError:
         print(f"[CopilotSDK] No running loop for debug transcript append: {conversation_id[:8]}")
 
@@ -398,6 +436,246 @@ def _log_runtime_config(stage: str, conversation_id: str, config: Dict[str, Any]
 _pending_approvals: Dict[str, asyncio.Future[Any]] = {}
 _pending_request_specs: Dict[str, Dict[str, Any]] = {}
 _PERMISSION_RESULT_KIND_VALUES = set(get_args(PermissionRequestResultKind))
+
+
+def _string_or_empty(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _optional_string(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) else None
+
+
+def _normalize_reasoning_effort(value: Any) -> Optional[ReasoningEffort]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if text == "low":
+        return "low"
+    if text == "medium":
+        return "medium"
+    if text == "high":
+        return "high"
+    if text == "xhigh":
+        return "xhigh"
+    return None
+
+
+def _normalize_string_list(value: Any, *, field_name: str) -> List[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} must be a list of strings")
+    return list(value)
+
+
+def _normalize_string_dict(value: Any, *, field_name: str) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    normalized: Dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise ValueError(f"{field_name} must contain only string keys and values")
+        normalized[key] = item
+    return normalized
+
+
+def _normalize_system_message_config(value: Any) -> Optional[SystemMessageConfig]:
+    if not isinstance(value, dict):
+        return None
+    content = value.get("content")
+    if not isinstance(content, str):
+        return None
+    mode = value.get("mode")
+    if mode == "replace":
+        return {"mode": "replace", "content": content}
+    if mode in (None, "", "append"):
+        return {"mode": "append", "content": content}
+    return None
+
+
+def _normalize_session_hooks(value: Any) -> Optional[SessionHooks]:
+    if not isinstance(value, dict):
+        return None
+    hooks: SessionHooks = {}
+    on_pre_tool_use = value.get("on_pre_tool_use")
+    if callable(on_pre_tool_use):
+        pre_tool_use = cast(PreToolUseHandler, on_pre_tool_use)
+        hooks["on_pre_tool_use"] = pre_tool_use
+    on_post_tool_use = value.get("on_post_tool_use")
+    if callable(on_post_tool_use):
+        post_tool_use = cast(PostToolUseHandler, on_post_tool_use)
+        hooks["on_post_tool_use"] = post_tool_use
+    on_user_prompt_submitted = value.get("on_user_prompt_submitted")
+    if callable(on_user_prompt_submitted):
+        user_prompt_submitted = cast(UserPromptSubmittedHandler, on_user_prompt_submitted)
+        hooks["on_user_prompt_submitted"] = user_prompt_submitted
+    on_session_start = value.get("on_session_start")
+    if callable(on_session_start):
+        session_start = cast(SessionStartHandler, on_session_start)
+        hooks["on_session_start"] = session_start
+    on_session_end = value.get("on_session_end")
+    if callable(on_session_end):
+        session_end = cast(SessionEndHandler, on_session_end)
+        hooks["on_session_end"] = session_end
+    on_error_occurred = value.get("on_error_occurred")
+    if callable(on_error_occurred):
+        error_occurred = cast(ErrorOccurredHandler, on_error_occurred)
+        hooks["on_error_occurred"] = error_occurred
+    return hooks or None
+
+
+def _normalize_mcp_server_config(name: str, value: Any) -> MCPServerConfig:
+    if not isinstance(value, dict):
+        raise ValueError(f"MCP server '{name}' must be a JSON object")
+    tools = _normalize_string_list(value.get("tools"), field_name=f"MCP server '{name}'.tools")
+    server_type = value.get("type")
+    timeout = value.get("timeout")
+    if timeout is not None and not isinstance(timeout, int):
+        raise ValueError(f"MCP server '{name}'.timeout must be an integer")
+
+    command = value.get("command")
+    if isinstance(command, str) and command.strip():
+        local: MCPLocalServerConfig = {
+            "command": command,
+            "tools": tools,
+        }
+        args = value.get("args")
+        if args is not None:
+            local["args"] = _normalize_string_list(args, field_name=f"MCP server '{name}'.args")
+        env = value.get("env")
+        if env is not None:
+            local["env"] = _normalize_string_dict(env, field_name=f"MCP server '{name}'.env")
+        cwd = value.get("cwd")
+        if cwd is not None:
+            if not isinstance(cwd, str):
+                raise ValueError(f"MCP server '{name}'.cwd must be a string")
+            local["cwd"] = cwd
+        if timeout is not None:
+            local["timeout"] = timeout
+        if server_type is not None:
+            if server_type not in {"local", "stdio"}:
+                raise ValueError(f"MCP server '{name}'.type must be 'local' or 'stdio'")
+            local["type"] = server_type
+        return local
+
+    url = value.get("url")
+    if server_type == "http" and isinstance(url, str) and url.strip():
+        remote: MCPRemoteServerConfig = {
+            "type": "http",
+            "url": url,
+            "tools": tools,
+        }
+        headers = value.get("headers")
+        if headers is not None:
+            remote["headers"] = _normalize_string_dict(headers, field_name=f"MCP server '{name}'.headers")
+        if timeout is not None:
+            remote["timeout"] = timeout
+        return remote
+
+    if server_type == "sse" and isinstance(url, str) and url.strip():
+        remote_sse: MCPRemoteServerConfig = {
+            "type": "sse",
+            "url": url,
+            "tools": tools,
+        }
+        headers = value.get("headers")
+        if headers is not None:
+            remote_sse["headers"] = _normalize_string_dict(headers, field_name=f"MCP server '{name}'.headers")
+        if timeout is not None:
+            remote_sse["timeout"] = timeout
+        return remote_sse
+
+    raise ValueError(f"MCP server '{name}' must be a valid local/stdio or http/sse config")
+
+
+def _normalize_mcp_servers(value: Any) -> Optional[Dict[str, MCPServerConfig]]:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("MCP servers must be a JSON object")
+    normalized: Dict[str, MCPServerConfig] = {}
+    for name, server in value.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("MCP server names must be non-empty strings")
+        normalized[name] = _normalize_mcp_server_config(name, server)
+    return normalized or None
+
+
+def _populate_common_session_config(
+    target: SessionConfig | ResumeSessionConfig,
+    config: Dict[str, Any],
+) -> None:
+    streaming = config.get("streaming")
+    if isinstance(streaming, bool):
+        target["streaming"] = streaming
+
+    config_dir = config.get("config_dir")
+    if isinstance(config_dir, str) and config_dir:
+        target["config_dir"] = config_dir
+
+    on_permission_request = config.get("on_permission_request")
+    if callable(on_permission_request):
+        permission_handler = cast(_PermissionHandlerFn, on_permission_request)
+        target["on_permission_request"] = permission_handler
+
+    on_user_input_request = config.get("on_user_input_request")
+    if callable(on_user_input_request):
+        user_input_handler = cast(UserInputHandler, on_user_input_request)
+        target["on_user_input_request"] = user_input_handler
+
+    hooks = _normalize_session_hooks(config.get("hooks"))
+    if hooks is not None:
+        target["hooks"] = hooks
+
+    working_directory = config.get("working_directory")
+    if isinstance(working_directory, str) and working_directory:
+        target["working_directory"] = working_directory
+
+    model = config.get("model")
+    if isinstance(model, str) and model:
+        target["model"] = model
+
+    reasoning_effort = _normalize_reasoning_effort(config.get("reasoning_effort"))
+    if reasoning_effort is not None:
+        target["reasoning_effort"] = reasoning_effort
+
+    system_message = _normalize_system_message_config(config.get("system_message"))
+    if system_message is not None:
+        target["system_message"] = system_message
+
+    mcp_servers = _normalize_mcp_servers(config.get("mcp_servers"))
+    if mcp_servers is not None:
+        target["mcp_servers"] = mcp_servers
+
+
+def _build_create_session_config(config: Dict[str, Any]) -> SessionConfig:
+    typed: SessionConfig = {}
+    _populate_common_session_config(typed, config)
+    return typed
+
+
+def _build_resume_session_config(config: Dict[str, Any]) -> ResumeSessionConfig:
+    typed: ResumeSessionConfig = {}
+    _populate_common_session_config(typed, config)
+    return typed
+
+
+def _coerce_permission_result_kind(
+    kind: Any,
+    *,
+    decision_text: str,
+) -> PermissionRequestResultKind:
+    kind_text = str(kind or "").strip()
+    if kind_text not in _PERMISSION_RESULT_KIND_VALUES:
+        kind_text = "approved" if decision_text == "accept" else "denied-interactively-by-user"
+    if kind_text == "approved":
+        return "approved"
+    if kind_text == "denied-by-rules":
+        return "denied-by-rules"
+    if kind_text == "denied-by-content-exclusion-policy":
+        return "denied-by-content-exclusion-policy"
+    if kind_text == "denied-no-approval-rule-and-could-not-request-from-user":
+        return "denied-no-approval-rule-and-could-not-request-from-user"
+    return "denied-interactively-by-user"
 
 
 def _get_conversation_settings(conversation_id: str) -> Dict[str, Any]:
@@ -652,12 +930,15 @@ async def _read_plan_doc_snapshot(
 
 
 def _apply_plan_doc_snapshot(conversation_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    plan_content = _string_or_empty(snapshot.get("plan_content"))
+    plan_path = _optional_string(snapshot.get("plan_path"))
+    plan_source = _string_or_empty(snapshot.get("plan_source")) or "unknown"
     return _set_plan_doc_state(
         conversation_id,
         plan_exists=bool(snapshot.get("plan_exists")),
-        plan_content=snapshot.get("plan_content") if isinstance(snapshot.get("plan_content"), str) else "",
-        plan_path=snapshot.get("plan_path") if isinstance(snapshot.get("plan_path"), str) else None,
-        plan_source=snapshot.get("plan_source") if isinstance(snapshot.get("plan_source"), str) else "unknown",
+        plan_content=plan_content,
+        plan_path=plan_path,
+        plan_source=plan_source,
     )
 
 
@@ -721,12 +1002,14 @@ async def _emit_todo_plan_state(
     previous_plan_signature = _plan_doc_signatures.get(conversation_id)
     plan_snapshot = await _read_plan_doc_snapshot(conversation_id, sdk_session_id=sdk_session_id)
     plan_state = _select_plan_doc_state_for_read(conversation_id, plan_snapshot)
+    plan_content = _string_or_empty(plan_state.get("plan_content"))
     plan_signature = _plan_doc_signature(
         bool(plan_state.get("plan_exists")),
-        plan_state.get("plan_content") if isinstance(plan_state.get("plan_content"), str) else "",
+        plan_content,
     )
     snapshot = await _read_todo_snapshot(conversation_id, sdk_session_id=sdk_session_id)
-    todo_signature = snapshot.get("signature") if isinstance(snapshot.get("signature"), str) else "[]"
+    signature_value = snapshot.get("signature")
+    todo_signature = signature_value if isinstance(signature_value, str) else "[]"
     changed_todo = previous_todo_signature != todo_signature
     changed_plan = previous_plan_signature != plan_signature
     if not force and not changed_todo and not changed_plan:
@@ -819,16 +1102,20 @@ async def _build_live_plan_state(
     conversation_id: str,
     plan_doc_update: Dict[str, Any],
 ) -> Dict[str, Any]:
+    plan_content = _string_or_empty(plan_doc_update.get("plan_content"))
+    plan_path = _optional_string(plan_doc_update.get("plan_path"))
+    plan_source = _string_or_empty(plan_doc_update.get("plan_source")) or "sdk"
     plan_state = _set_plan_doc_state(
         conversation_id,
         plan_exists=bool(plan_doc_update.get("plan_exists")),
-        plan_content=plan_doc_update.get("plan_content") if isinstance(plan_doc_update.get("plan_content"), str) else "",
-        plan_path=plan_doc_update.get("plan_path") if isinstance(plan_doc_update.get("plan_path"), str) else None,
-        plan_source=plan_doc_update.get("plan_source") if isinstance(plan_doc_update.get("plan_source"), str) else "sdk",
+        plan_content=plan_content,
+        plan_path=plan_path,
+        plan_source=plan_source,
     )
+    state_plan_content = _string_or_empty(plan_state.get("plan_content"))
     _plan_doc_signatures[conversation_id] = _plan_doc_signature(
         bool(plan_state.get("plan_exists")),
-        plan_state.get("plan_content") if isinstance(plan_state.get("plan_content"), str) else "",
+        state_plan_content,
     )
     sdk_session_id = _resolve_sdk_session_id(conversation_id)
     if isinstance(sdk_session_id, str) and sdk_session_id:
@@ -873,7 +1160,7 @@ def _json_safe_sdk_value(value: Any) -> Any:
         return value.value
     if hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
         return _json_safe_sdk_value(value.to_dict())
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return {key: _json_safe_sdk_value(val) for key, val in asdict(value).items() if val is not None}
     if isinstance(value, dict):
         return {str(key): _json_safe_sdk_value(val) for key, val in value.items() if val is not None}
@@ -922,11 +1209,10 @@ def _normalize_permission_resolution(resolution: Any) -> PermissionRequestResult
         or (resolution.get("decision") if isinstance(resolution, dict) else "")
         or ""
     ).strip().lower()
-    kind_text = str(result_payload.get("kind") or "").strip()
-    if kind_text not in _PERMISSION_RESULT_KIND_VALUES:
-        kind_text = ""
-    if not kind_text:
-        kind_text = "approved" if decision_text == "accept" else "denied-interactively-by-user"
+    kind_value = _coerce_permission_result_kind(
+        result_payload.get("kind"),
+        decision_text=decision_text,
+    )
 
     rules = result_payload.get("rules")
     if not isinstance(rules, list):
@@ -942,7 +1228,7 @@ def _normalize_permission_resolution(resolution: Any) -> PermissionRequestResult
         path = str(path)
 
     return PermissionRequestResult(
-        kind=kind_text,
+        kind=kind_value,
         rules=rules,
         feedback=feedback,
         message=message,
@@ -1259,8 +1545,9 @@ async def _apply_session_mode(
         return None
     result = await session.rpc.mode.set(SessionModeSetParams(mode=SessionMode(desired_mode)))
     applied = getattr(result, "mode", None)
-    if isinstance(getattr(applied, "value", None), str):
-        return applied.value
+    applied_value = getattr(applied, "value", None)
+    if isinstance(applied_value, str):
+        return applied_value
     return _normalize_mode_value(applied)
 
 
@@ -1355,7 +1642,7 @@ def _runtime_option_descriptor(
 
 
 def _json_safe(value: Any) -> Any:
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return _json_safe(asdict(value))
     if isinstance(value, Enum):
         return value.value
@@ -1498,7 +1785,8 @@ async def _get_quota_info() -> Dict[str, Any]:
                 "Usage info unavailable in this Copilot SDK build.",
                 tone="warning",
             )
-        quota_result = await get_quota(timeout=15.0)
+        quota_call = get_quota(timeout=15.0)
+        quota_result = await quota_call if inspect.isawaitable(quota_call) else quota_call
     except Exception as exc:
         return _quota_info_unavailable(
             f"Failed to read Copilot usage info: {exc}",
@@ -1590,9 +1878,10 @@ async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
 
         plan_snapshot = await _read_plan_doc_snapshot(conversation_id, sdk_session_id=sdk_session_id)
         plan_doc_state = _select_plan_doc_state_for_read(conversation_id, plan_snapshot)
+        plan_doc_content = _string_or_empty(plan_doc_state.get("plan_content"))
         _plan_doc_signatures[conversation_id] = _plan_doc_signature(
             bool(plan_doc_state.get("plan_exists")),
-            plan_doc_state.get("plan_content") if isinstance(plan_doc_state.get("plan_content"), str) else "",
+            plan_doc_content,
         )
 
         if _broadcast_fn is not None:
@@ -2028,7 +2317,7 @@ async def _ensure_client() -> CopilotClient:
     global _client, _copilot_fws_process
     async with _get_client_lock():
         if _client is None:
-            client_options: Dict[str, Any] = {
+            client_options: CopilotClientOptions = {
                 "use_stdio": True,
                 "auto_start": True,
                 "auto_restart": True,
@@ -2155,8 +2444,8 @@ async def _init_session_unlocked(
         # Create router for this conversation
         router = CopilotEventRouter(
             conversation_id=conversation_id,
-            broadcast_fn=_broadcast_fn,
-            transcript_fn=_transcript_fn,
+            broadcast_fn=_resolved_broadcast_fn(),
+            transcript_fn=_resolved_transcript_fn(),
             debug_trace=_copilot_debug_trace_enabled(
                 conversation_id,
                 settings=settings,
@@ -2173,10 +2462,11 @@ async def _init_session_unlocked(
             settings=settings,
             cwd=cwd,
         )
+        create_config = _build_create_session_config(config)
         _log_runtime_config("create_session", conversation_id, config)
 
         # Let SDK generate its own session_id (don't pass ours)
-        session = await client.create_session(config)
+        session = await client.create_session(create_config)
         sdk_session_id = session.session_id
         _sessions[conversation_id] = session
         _runtime_signatures[conversation_id] = runtime_signature
@@ -2272,8 +2562,8 @@ async def _resume_session_unlocked(
         # Create router keyed by our conversation_id
         router = CopilotEventRouter(
             conversation_id=conversation_id,
-            broadcast_fn=_broadcast_fn,
-            transcript_fn=_transcript_fn,
+            broadcast_fn=_resolved_broadcast_fn(),
+            transcript_fn=_resolved_transcript_fn(),
             debug_trace=_copilot_debug_trace_enabled(
                 conversation_id,
                 settings=settings,
@@ -2292,12 +2582,13 @@ async def _resume_session_unlocked(
             cwd=cwd,
             model=model,
         )
+        resume_config = _build_resume_session_config(config)
         _log_runtime_config("resume_session", conversation_id, config)
 
         # Resume using the real SDK session ID
         session = await client.resume_session(
             sdk_session_id,
-            config,
+            resume_config,
         )
         # Key in-memory by our conversation_id
         _sessions[conversation_id] = session
@@ -2322,7 +2613,7 @@ def _register_attached_session(
     conversation_id: str,
     sdk_session_id: str,
     runtime_signature: str,
-    config: Dict[str, Any],
+    config: ResumeSessionConfig,
     debug_trace: bool = False,
 ) -> CopilotSession:
     """
@@ -2334,8 +2625,8 @@ def _register_attached_session(
     """
     router = CopilotEventRouter(
         conversation_id=conversation_id,
-        broadcast_fn=_broadcast_fn,
-        transcript_fn=_transcript_fn,
+        broadcast_fn=_resolved_broadcast_fn(),
+        transcript_fn=_resolved_transcript_fn(),
         debug_trace=debug_trace,
         plan_state_provider=_build_live_plan_state,
         initial_model=(config.get("model") if isinstance(config.get("model"), str) else None),
@@ -2393,6 +2684,7 @@ async def handle_message(
             cwd=cwd,
             model=settings.get("model"),
         )
+        resume_config = _build_resume_session_config(config)
 
         # Ensure session exists — attach/send first for known sessions, init for new ones
         if conversation_id not in _sessions:
@@ -2411,7 +2703,7 @@ async def handle_message(
                     conversation_id,
                     str(thread_id),
                     desired_signature,
-                    config,
+                    resume_config,
                     debug_trace=_copilot_debug_trace_enabled(
                         conversation_id,
                         settings=settings,

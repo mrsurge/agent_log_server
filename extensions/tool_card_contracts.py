@@ -28,20 +28,20 @@ def build_tool_card_request(server_name: str, tool_name: str, arguments: Any) ->
     request_args = arguments if isinstance(arguments, dict) else {}
 
     if server == "te2-mcp" and tool == "te2_console_eval":
-        request: Dict[str, Any] = {}
+        te2_request: Dict[str, Any] = {}
         if "target_worker_id" in request_args:
-            request["target_worker_id"] = _copy_jsonish(request_args.get("target_worker_id"))
+            te2_request["target_worker_id"] = _copy_jsonish(request_args.get("target_worker_id"))
         if "code" in request_args:
-            request["code"] = _copy_jsonish(request_args.get("code"))
-        return request
+            te2_request["code"] = _copy_jsonish(request_args.get("code"))
+        return te2_request
 
     if not server and tool == "sql":
-        request: Dict[str, Any] = {}
+        sql_request: Dict[str, Any] = {}
         if "description" in request_args:
-            request["description"] = _copy_jsonish(request_args.get("description"))
+            sql_request["description"] = _copy_jsonish(request_args.get("description"))
         if "query" in request_args:
-            request["query"] = _copy_jsonish(request_args.get("query"))
-        return request
+            sql_request["query"] = _copy_jsonish(request_args.get("query"))
+        return sql_request
 
     if isinstance(arguments, dict):
         return _copy_jsonish(arguments)

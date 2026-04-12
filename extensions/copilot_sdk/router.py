@@ -83,7 +83,7 @@ def _json_safe_value(value: Any) -> Any:
         return {str(key): _json_safe_value(inner) for key, inner in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe_value(item) for item in value]
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return _json_safe_value(asdict(value))
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
@@ -443,6 +443,20 @@ class CopilotEventRouter:
             or ""
         )
 
+    def _ensure_message_entry_id(self) -> str:
+        if not self.current_message_id:
+            self._block_counter += 1
+            self._last_block_type = "message"
+            self.current_message_id = f"msg_{self._turn_counter}_{self._block_counter}"
+        return self.current_message_id
+
+    def _ensure_reasoning_entry_id(self) -> str:
+        if not self.current_reasoning_id:
+            self._block_counter += 1
+            self._last_block_type = "reasoning"
+            self.current_reasoning_id = f"reasoning_{self._turn_counter}_{self._block_counter}"
+        return self.current_reasoning_id
+
     async def _record_reasoning(self, text: str, *, data: Any = None) -> bool:
         if not text:
             return False
@@ -475,8 +489,9 @@ class CopilotEventRouter:
         return True
 
     async def _finalize_message(self, text: str, *, subagent_id: Optional[str]) -> None:
+        entry_id = self._ensure_message_entry_id()
         await self._emit(build_assistant_finalize_event(
-            entry_id=self.current_message_id,
+            entry_id=entry_id,
             text=text,
             conversation_id=self.conversation_id,
             turn_id=self.current_turn_id,
@@ -484,7 +499,7 @@ class CopilotEventRouter:
         ))
         await self._record(build_message_transcript_entry(
             role="assistant",
-            entry_id=self.current_message_id,
+            entry_id=entry_id,
             text=text,
             timestamp=utc_ts(),
             turn_id=self.current_turn_id,
@@ -708,8 +723,9 @@ class CopilotEventRouter:
                 resolved_subagent_id=subagent_id,
             )
 
+        entry_id = self._ensure_message_entry_id()
         await self._emit(build_assistant_delta_event(
-            entry_id=self.current_message_id,
+            entry_id=entry_id,
             delta=text,
             conversation_id=self.conversation_id,
             turn_id=self.current_turn_id,
@@ -728,8 +744,9 @@ class CopilotEventRouter:
             self._last_block_type = "reasoning"
             self.current_reasoning_id = f"reasoning_{self._turn_counter}_{self._block_counter}"
 
+        reasoning_id = self._ensure_reasoning_entry_id()
         await self._emit(build_reasoning_delta_event(
-            entry_id=self.current_reasoning_id,
+            entry_id=reasoning_id,
             delta=text,
             conversation_id=self.conversation_id,
             turn_id=self.current_turn_id,

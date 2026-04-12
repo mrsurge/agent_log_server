@@ -89,6 +89,15 @@ def _server_module():
     return importlib.import_module("agent_log_server.server")
 
 
+def _object_dict(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _save_meta(conversation_id: str, meta: Dict[str, Any]) -> None:
+    if _meta_fns and "save" in _meta_fns:
+        _save_meta(conversation_id, meta)
+
+
 def _merge_runtime_settings(
     conversation_id: str,
     settings: Optional[Dict[str, Any]] = None,
@@ -122,15 +131,17 @@ def _materialize_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[st
     if not isinstance(settings, dict):
         return {}
     merged = dict(settings)
-    if not isinstance(merged.get("model"), str) or not merged.get("model", "").strip():
-        extension_id = merged.get("agent") if isinstance(merged.get("agent"), str) and merged.get("agent").strip() else "codex"
+    model_value = merged.get("model")
+    if not isinstance(model_value, str) or not model_value.strip():
+        agent_value = merged.get("agent")
+        extension_id = agent_value if isinstance(agent_value, str) and agent_value.strip() else "codex"
         try:
             ext_loader = importlib.import_module("extensions")
             ext_info = ext_loader.get_extension_info(extension_id)
         except Exception:
             ext_info = None
-        manifest = ext_info.get("manifest") if isinstance(ext_info, dict) and isinstance(ext_info.get("manifest"), dict) else {}
-        model = manifest.get("model") if isinstance(manifest.get("model"), dict) else {}
+        manifest = _object_dict(ext_info.get("manifest")) if isinstance(ext_info, dict) else {}
+        model = _object_dict(manifest.get("model"))
         model_name = model.get("name")
         if isinstance(model_name, str) and model_name.strip():
             merged["model"] = model_name.strip()
@@ -661,8 +672,10 @@ def _normalize_repo_memory_update(update: Any) -> Optional[Dict[str, Any]]:
     mode = str(update.get("mode") or "full").strip().lower()
     if mode not in {"delta", "full"}:
         mode = "full"
-    content = update.get("content") if isinstance(update.get("content"), str) else ""
-    snapshot_content = update.get("snapshot_content") if isinstance(update.get("snapshot_content"), str) else content
+    content_value = update.get("content")
+    content = content_value if isinstance(content_value, str) else ""
+    snapshot_content_value = update.get("snapshot_content")
+    snapshot_content = snapshot_content_value if isinstance(snapshot_content_value, str) else content
     snapshot_text = snapshot_content.strip()
     content_text = content.strip() or snapshot_text
     if not content_text and not snapshot_text:
@@ -833,7 +846,7 @@ async def _resume_thread_for_rpc_server(
     meta["thread_runtime_signature"] = _thread_runtime_signature(protocol, merged_settings)
     meta["settings"] = merged_settings
     _clear_repo_memory_resume_state(conversation_id, meta)
-    _meta_fns["save"](conversation_id, meta)
+    _save_meta(conversation_id, meta)
 
 
 async def get_auth_status(extension_id: str, refresh: bool = False) -> Dict[str, Any]:
@@ -1237,7 +1250,7 @@ async def route_event(
 ) -> Dict[str, Any]:
     transport = _ensure_transport()
     return await transport.route_event(
-        label=label,
+        label=label or "",
         payload=payload,
         conversation_id=conversation_id,
         thread_id=thread_id,
@@ -1352,7 +1365,7 @@ async def handle_message(
         if thread_id:
             pending_update, queued_changed = _stage_repo_memory_update_for_turn(conversation_id, meta)
             if queued_changed:
-                _meta_fns["save"](conversation_id, meta)
+                _save_meta(conversation_id, meta)
             turn_params = build_request_params(
                 protocol,
                 "turn/start",
@@ -1384,7 +1397,7 @@ async def handle_message(
                 meta["settings"] = merged_settings
                 if used_pending_update:
                     _clear_queued_repo_memory_updates(meta)
-                _meta_fns["save"](conversation_id, meta)
+                _save_meta(conversation_id, meta)
             except Exception as exc:
                 if not _looks_like_thread_not_loaded_error(exc):
                     raise
@@ -1444,7 +1457,7 @@ async def handle_message(
             meta["settings"] = merged_settings
             meta["thread_runtime_signature"] = current_signature
             cleared_meta_queue = _clear_queued_repo_memory_updates(meta)
-            _meta_fns["save"](conversation_id, meta)
+            _save_meta(conversation_id, meta)
 
             turn_params = build_request_params(
                 protocol,
@@ -1517,7 +1530,7 @@ async def resume_session_with_history(
     meta["thread_id"] = session_id
     meta["status"] = "active"
     meta["settings"] = merged_settings
-    _meta_fns["save"](conversation_id, meta)
+    _save_meta(conversation_id, meta)
 
     result = await resume_session(
         conversation_id,
@@ -1650,7 +1663,7 @@ async def compact_session(conversation_id: str) -> Dict[str, Any]:
             transport.mark_thread_ready(thread_id)
             meta["status"] = "active"
             meta["settings"] = merged_settings
-            _meta_fns["save"](conversation_id, meta)
+            _save_meta(conversation_id, meta)
         except Exception as exc:
             if not _looks_like_thread_not_loaded_error(exc):
                 raise

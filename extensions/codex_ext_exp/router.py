@@ -86,6 +86,16 @@ def _extract_known_fields(spec: Optional[ProtocolSemanticSpec], payload: Dict[st
     return fields
 
 
+def _dict_payload(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _string_value(value: Any, default: str = "") -> str:
+    if isinstance(value, str) and value:
+        return value
+    return default
+
+
 def _subagent_display_name(fields: Dict[str, Any], call_id: str) -> str:
     nickname = fields.get("receiver_agent_nickname") or fields.get("new_agent_nickname")
     role = fields.get("receiver_agent_role") or fields.get("new_agent_role")
@@ -2077,13 +2087,13 @@ class CodexEventRouter:
         notification_spec = protocol.notification_spec(label_lower)
         request_spec = protocol.server_request_spec(label_lower)
 
-        if event_spec is not None and isinstance(payload, dict):
+        if event_spec is not None and event_type is not None and isinstance(payload, dict):
             collab = self._route_collab_event(protocol, event_type, payload, thread_id, turn_id)
             if collab is not None:
                 return collab
 
         if notification_spec and notification_spec.category == "thread" and notification_spec.subject == "thread" and notification_spec.phase == "started":
-            thread_obj = payload.get("thread") if isinstance(payload, dict) and isinstance(payload.get("thread"), dict) else {}
+            thread_obj = _dict_payload(payload.get("thread")) if isinstance(payload, dict) else {}
             next_thread_id = thread_obj.get("id") if isinstance(thread_obj.get("id"), str) else None
             return {
                 "handled": True,
@@ -2129,7 +2139,7 @@ class CodexEventRouter:
             else:
                 ribbon_status = "success"
             self._turn_states.pop(self._turn_key(thread_id, turn_id), None)
-            events: List[Dict[str, Any]] = [
+            events = [
                 {
                     "type": "status",
                     "status": ribbon_status,
@@ -2141,7 +2151,7 @@ class CodexEventRouter:
             if turn_status == "interrupted":
                 interrupted_message = turn_error or _notification_text(payload) or "Interrupted"
                 events.insert(0, {"type": "warning", "message": interrupted_message})
-            transcript_entries: List[Dict[str, Any]] = [{
+            transcript_entries = [{
                 "role": "status",
                 "status": ribbon_status,
                 "turn_status": turn_status,
@@ -2374,9 +2384,9 @@ class CodexEventRouter:
                 }, thread_id=thread_id, item_state=item_state)
 
             if item_type in {"mcptoolcall", "websearch", "imageview"}:
-                tool_name = item.get("tool")
-                server_name = item.get("server")
-                arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+                tool_name = _string_value(item.get("tool"))
+                server_name = _string_value(item.get("server"))
+                arguments = _dict_payload(item.get("arguments"))
                 if item_type == "websearch":
                     tool_name = "web_search"
                     arguments = {"query": item.get("query")}
@@ -2485,7 +2495,7 @@ class CodexEventRouter:
                 if isinstance(delta, str):
                     turn_state["reasoning_buffer"] = f"{turn_state.get('reasoning_buffer', '')}{delta}"
                     scrubbed_delta, thoughts = _extract_and_scrub_thoughts_stream(delta, turn_state)
-                    events: List[Dict[str, Any]] = [
+                    events = [
                         build_thought_event(text=thought, turn_id=effective_turn_id)
                         for thought in thoughts
                     ]
@@ -2628,7 +2638,7 @@ class CodexEventRouter:
                 scrubbed_text, thoughts = _extract_and_scrub_thoughts(text) if text else ("", [])
                 has_visible_reasoning = _has_visible_reasoning_text(scrubbed_text)
                 should_finalize_live = turn_state.get("reason_source") in {None, "item"} and has_visible_reasoning
-                events: List[Dict[str, Any]] = []
+                events = []
                 if thoughts:
                     events.extend(
                         build_thought_event(text=thought, turn_id=effective_turn_id)
@@ -2640,7 +2650,7 @@ class CodexEventRouter:
                         text=scrubbed_text,
                         turn_id=effective_turn_id,
                     ))
-                transcript_entries: List[Dict[str, Any]] = []
+                transcript_entries = []
                 if has_visible_reasoning and self._should_record_reasoning(turn_state, effective_id):
                     transcript_entries.append(build_reasoning_transcript_entry(
                         entry_id=effective_id,
@@ -2680,7 +2690,7 @@ class CodexEventRouter:
                         split_output = _split_view_output_by_divider(output, divider, len(raw_specs))
                         if split_output is not None:
                             routed_events: List[Dict[str, Any]] = []
-                            transcript_entries: List[Dict[str, Any]] = []
+                            transcript_entries = []
                             base_id = item_id or _assistant_id(item, thread_id, turn_id)
                             for idx, (raw_spec, segment_output) in enumerate(zip(raw_specs, split_output), start=1):
                                 if not isinstance(raw_spec, dict):
@@ -2947,9 +2957,9 @@ class CodexEventRouter:
                 return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
 
             if item_type in {"mcptoolcall", "websearch", "imageview"}:
-                tool_name = item.get("tool") or item_state.get("tool") or item_type
-                server_name = item.get("server") or item_state.get("server") or ""
-                arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else item_state.get("arguments") or {}
+                tool_name = _string_value(item.get("tool"), _string_value(item_state.get("tool"), item_type))
+                server_name = _string_value(item.get("server"), _string_value(item_state.get("server")))
+                arguments = _dict_payload(item.get("arguments")) or _dict_payload(item_state.get("arguments"))
                 if item_type == "websearch":
                     tool_name = "web_search"
                     arguments = {"query": item.get("query")}
@@ -3094,14 +3104,14 @@ class CodexEventRouter:
             tool_id = payload.get("callId") or payload.get("call_id") or payload.get("id")
             if not isinstance(tool_id, str) or not tool_id:
                 tool_id = _assistant_id(payload, thread_id, turn_id)
-            tool_name = payload.get("tool") or "tool"
-            arguments = payload.get("arguments")
-            server_name = (
-                payload.get("server")
-                or payload.get("serverName")
-                or payload.get("server_name")
-                or payload.get("mcpServer")
-                or ""
+            tool_name = _string_value(payload.get("tool"), "tool")
+            arguments = _dict_payload(payload.get("arguments"))
+            server_name = _string_value(
+                payload.get("server"),
+                _string_value(
+                    payload.get("serverName"),
+                    _string_value(payload.get("server_name"), _string_value(payload.get("mcpServer"))),
+                ),
             )
             item_state = self._get_item_state(tool_id, thread_id, turn_id)
             item_state.update({
@@ -3321,7 +3331,7 @@ class CodexEventRouter:
                 if isinstance(delta, str):
                     turn_state["reasoning_buffer"] = f"{turn_state.get('reasoning_buffer', '')}{delta}"
                     scrubbed_delta, thoughts = _extract_and_scrub_thoughts_stream(delta, turn_state)
-                    events: List[Dict[str, Any]] = [
+                    events = [
                         build_thought_event(text=thought, turn_id=effective_turn_id)
                         for thought in thoughts
                     ]

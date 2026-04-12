@@ -2149,7 +2149,7 @@ def is_extension_ready(extension_id: str) -> bool:
     if handler and hasattr(handler, "is_extension_ready"):
         return handler.is_extension_ready(extension_id)
     
-    return True  # Non-ACP extensions are always ready
+    return True  # Extensions without a readiness hook are treated as ready
 
 
 async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool:
@@ -2164,7 +2164,7 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
     if handler and hasattr(handler, "wait_extension_ready"):
         return await handler.wait_extension_ready(extension_id, timeout=timeout)
     
-    return True  # Non-ACP extensions are always ready
+    return True  # Extensions without a readiness hook are treated as ready
 
 
 def requires_eager_session_init(extension_id: str) -> bool:

@@ -33,7 +33,6 @@ export function bindEventRouter(ctx) {
     renderAgentBlockDelta,
     renderAgentBlockEnd,
     renderScreenDelta,
-    renderAgentPtyRaw,
     renderShellBegin,
     renderShellDelta,
     renderShellEnd,
@@ -324,9 +323,6 @@ export function bindEventRouter(ctx) {
         return;
       case 'screen_delta':
         renderScreenDelta(evt);
-        return;
-      case 'agent_pty_raw':
-        renderAgentPtyRaw(evt);
         return;
       case 'shell_begin':
         renderShellBegin(evt);

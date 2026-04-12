@@ -58,7 +58,6 @@ export function bindSessionFlow(ctx) {
       const resp = await sioCall('shell_exec', {
         conversation_id: state.conversationMeta?.conversation_id,
         command,
-        terminal_mode: !!state.terminalMode,
       });
       if (resp.error && !shellRows.has(resp.callId)) {
         renderShellBatchResult({

@@ -489,7 +489,7 @@ def _semantic_tokens(name: str, separator: str) -> List[str]:
 
 
 def _build_semantic_spec(name: str, schema: Dict[str, Any], *, separator: str) -> ProtocolSemanticSpec:
-    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    props = _schema_properties(schema)
     properties = tuple(key for key in props if key not in {"type", "method"})
     property_set = set(properties)
 
@@ -559,7 +559,7 @@ def _build_request_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[str, 
             continue
         method = method_values[0]
         if isinstance(method, str):
-            registry[method.lower()] = _resolve_schema(params_prop, definitions)
+            registry[method.lower()] = _resolve_schema(params_prop, definitions) if isinstance(params_prop, dict) else {}
     return registry
 
 
@@ -828,7 +828,7 @@ def _build_server_request_response_registry(
 
 def _build_server_request_registry(schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     registry: Dict[str, Dict[str, Any]] = {}
-    definitions = schema.get("definitions") if isinstance(schema.get("definitions"), dict) else {}
+    definitions: Dict[str, Any] = _dict_value(schema.get("definitions"))
     union = schema
     for variant in union.get("oneOf") or []:
         if not isinstance(variant, dict):
@@ -843,7 +843,7 @@ def _build_server_request_registry(schema: Dict[str, Any]) -> Dict[str, Dict[str
             continue
         method = method_values[0]
         if isinstance(method, str):
-            registry[method.lower()] = _resolve_schema(params_prop, definitions)
+            registry[method.lower()] = _resolve_schema(params_prop, definitions) if isinstance(params_prop, dict) else {}
     return registry
 
 
@@ -863,7 +863,7 @@ def _build_notification_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[
             continue
         method = method_values[0]
         if isinstance(method, str):
-            registry[method.lower()] = _resolve_schema(params_prop, definitions)
+            registry[method.lower()] = _resolve_schema(params_prop, definitions) if isinstance(params_prop, dict) else {}
     return registry
 
 
@@ -939,8 +939,9 @@ def _decode_schema_value(
     if type_decl == "object" or props is not None or additional is not True:
         if not isinstance(value, dict):
             raise _SchemaDecodeError(f"{path}: expected object, got {type(value).__name__}")
-        required = resolved.get("required") if isinstance(resolved.get("required"), list) else []
-        for key in required:
+        required_value = resolved.get("required")
+        required_fields = required_value if isinstance(required_value, list) else []
+        for key in required_fields:
             if key not in value:
                 raise _SchemaDecodeError(f"{path}.{key}: missing required property")
         output: Dict[str, Any] = {}
@@ -1079,7 +1080,7 @@ def _coerce_schema_value(
                 if _normalize_identifier(value) != _normalize_identifier(tag):
                     continue
                 out: Dict[str, Any] = {"type": tag}
-                props = variant.get("properties") if isinstance(variant.get("properties"), dict) else {}
+                props = _schema_properties(variant)
                 if tag == "workspaceWrite" and "writableRoots" in props:
                     cwd = _expand_path(settings.get("cwd"))
                     if cwd:
@@ -1144,6 +1145,16 @@ def _resolve_object_schema(spec: Any, definitions: Dict[str, Any]) -> Dict[str, 
     return resolved
 
 
+def _dict_value(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _schema_properties(spec: Any) -> Dict[str, Any]:
+    if isinstance(spec, dict):
+        return _dict_value(spec.get("properties"))
+    return {}
+
+
 def _build_collaboration_mode_setting(
     props: Dict[str, Any],
     definitions: Dict[str, Any],
@@ -1160,7 +1171,7 @@ def _build_collaboration_mode_setting(
         return None
 
     resolved = _resolve_schema(schema, definitions)
-    collab_props = resolved.get("properties") if isinstance(resolved.get("properties"), dict) else {}
+    collab_props = _schema_properties(resolved)
     mode_schema = collab_props.get("mode")
     settings_schema = collab_props.get("settings")
     if not isinstance(mode_schema, dict) or not isinstance(settings_schema, dict):
@@ -1171,7 +1182,7 @@ def _build_collaboration_mode_setting(
         return None
 
     nested_settings_schema = _resolve_schema(settings_schema, definitions)
-    nested_props = nested_settings_schema.get("properties") if isinstance(nested_settings_schema.get("properties"), dict) else {}
+    nested_props = _schema_properties(nested_settings_schema)
 
     model_value = _first_setting(settings, ["model"])
     if not isinstance(model_value, str) or not model_value.strip():
@@ -1211,14 +1222,10 @@ def build_initialize_params(protocol: RuntimeProtocol) -> Dict[str, Any]:
     schema = protocol.request_schema("initialize")
     if not isinstance(schema, dict):
         raise RuntimeError("runtime protocol missing request schema for initialize")
-    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    props = _schema_properties(schema)
 
     client_info_schema = _resolve_object_schema(props.get("clientInfo"), protocol.definitions)
-    client_info_props = (
-        client_info_schema.get("properties")
-        if isinstance(client_info_schema.get("properties"), dict)
-        else {}
-    )
+    client_info_props = _schema_properties(client_info_schema)
     if not client_info_props:
         raise RuntimeError("runtime protocol missing initialize.clientInfo schema")
 
@@ -1240,11 +1247,7 @@ def build_initialize_params(protocol: RuntimeProtocol) -> Dict[str, Any]:
     params: Dict[str, Any] = {"clientInfo": client_info}
 
     capabilities_schema = _resolve_object_schema(props.get("capabilities"), protocol.definitions)
-    capability_props = (
-        capabilities_schema.get("properties")
-        if isinstance(capabilities_schema.get("properties"), dict)
-        else {}
-    )
+    capability_props = _schema_properties(capabilities_schema)
     experimental_schema = capability_props.get("experimentalApi")
     if isinstance(experimental_schema, dict):
         experimental_api = _coerce_schema_value(True, experimental_schema, protocol.definitions, {})
@@ -1277,7 +1280,7 @@ def _build_agent_pty_blocks_mcp_server(
 
     command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
     merged: Dict[str, Any] = dict(existing_server) if isinstance(existing_server, dict) else {}
-    env = dict(merged.get("env")) if isinstance(merged.get("env"), dict) else {}
+    env = _dict_value(merged.get("env"))
     env["PWD"] = launch_cwd
     if isinstance(conversation_id, str) and conversation_id.strip():
         env["CONVERSATION_ID"] = conversation_id.strip()
@@ -1345,7 +1348,7 @@ def build_request_params(
     schema = protocol.request_schema(method)
     if not isinstance(schema, dict):
         raise RuntimeError(f"runtime protocol missing request schema for {method}")
-    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    props = _schema_properties(schema)
     params: Dict[str, Any] = {}
 
     if "threadId" in props:
@@ -1420,8 +1423,8 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Dict[
 
     thread_start = protocol.request_schema("thread/start") or {}
     turn_start = protocol.request_schema("turn/start") or {}
-    thread_props = thread_start.get("properties") if isinstance(thread_start.get("properties"), dict) else {}
-    turn_props = turn_start.get("properties") if isinstance(turn_start.get("properties"), dict) else {}
+    thread_props = _schema_properties(thread_start)
+    turn_props = _schema_properties(turn_start)
 
     approval_values = _schema_string_enums(thread_props.get("approvalPolicy", {}), protocol.definitions)
     sandbox_values = _schema_string_enums(thread_props.get("sandbox", {}), protocol.definitions)
@@ -1431,7 +1434,7 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Dict[
     if not isinstance(collaboration_ref, dict) and isinstance(protocol.definitions.get("CollaborationMode"), dict):
         collaboration_ref = {"$ref": "#/definitions/CollaborationMode"}
     collaboration_schema = _resolve_schema(collaboration_ref or {}, protocol.definitions)
-    collaboration_props = collaboration_schema.get("properties") if isinstance(collaboration_schema.get("properties"), dict) else {}
+    collaboration_props = _schema_properties(collaboration_schema)
     mode_values = _schema_string_enums(collaboration_props.get("mode", {}), protocol.definitions)
     mode_options = _schema_options(mode_values)
 
