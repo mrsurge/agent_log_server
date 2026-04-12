@@ -1,3 +1,8 @@
+import { getRpcRegistryPlaceholder } from '../rpc/registry.ts';
+
+const _rpcRegistryPlaceholder = getRpcRegistryPlaceholder;
+void _rpcRegistryPlaceholder;
+
 export function bindRpcFlow(ctx) {
   const {
     waitForWs,

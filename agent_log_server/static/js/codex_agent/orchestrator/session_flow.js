@@ -1,3 +1,8 @@
+import { createConversationsRpcClientPlaceholder } from '../rpc/conversations/client.ts';
+
+const _conversationsRpcClientPlaceholder = createConversationsRpcClientPlaceholder;
+void _conversationsRpcClientPlaceholder;
+
 export function bindSessionFlow(ctx) {
   const {
     getState,

@@ -1,3 +1,10 @@
+import { RPC_NAMESPACES } from '../rpc/namespaces.ts';
+import { describeRpcTransportPlaceholder } from '../rpc/transport.ts';
+
+const _rpcTransportPlaceholder = describeRpcTransportPlaceholder;
+void _rpcTransportPlaceholder;
+void RPC_NAMESPACES;
+
 export function bindSocketEvents(ctx) {
   const {
     getWsState,

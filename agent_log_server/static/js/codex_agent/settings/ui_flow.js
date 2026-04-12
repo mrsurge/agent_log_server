@@ -1,3 +1,8 @@
+import { createSettingsRpcClientPlaceholder } from '../rpc/settings/client.ts';
+
+const _settingsRpcClientPlaceholder = createSettingsRpcClientPlaceholder;
+void _settingsRpcClientPlaceholder;
+
 export function bindSettingsUiFlow(ctx) {
   const {
     getState,

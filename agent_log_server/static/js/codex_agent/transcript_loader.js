@@ -1,3 +1,8 @@
+import { createConversationsRpcClientPlaceholder } from './rpc/conversations/client.ts';
+
+const _conversationsReplayRpcPlaceholder = createConversationsRpcClientPlaceholder;
+void _conversationsReplayRpcPlaceholder;
+
 export function bindTranscriptLoader(ctx) {
   const {
     getConversationId,

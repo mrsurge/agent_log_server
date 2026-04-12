@@ -1,4 +1,8 @@
 import * as smd from '/static/vendor/streaming-markdown/smd.min.js';
+import { createUiRpcClientPlaceholder } from './rpc/ui/client.ts';
+
+const _uiRpcClientPlaceholder = createUiRpcClientPlaceholder;
+void _uiRpcClientPlaceholder;
 
 let markdownLinkHandlers = {
   openFilePath: null,
