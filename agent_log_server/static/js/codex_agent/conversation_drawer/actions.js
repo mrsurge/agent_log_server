@@ -255,6 +255,8 @@ export function createConversationDrawerActions(ctx) {
     const doc = documentRef || document;
     const splashTabAllBtn = doc.getElementById('splash-tab-all');
     const splashTabProjectBtn = doc.getElementById('splash-tab-project');
+    const splashRpcToggleEl = doc.getElementById('splash-rpc-toggle');
+    const splashGoConversationBtn = doc.getElementById('splash-go-conversation');
     splashTabAllBtn?.addEventListener('click', () => {
       setState({ splashTab: 'all' });
       const state = getState();
@@ -267,6 +269,16 @@ export function createConversationDrawerActions(ctx) {
       renderSplashTabs();
       renderConversationList(state.conversationList, state.conversationMeta?.conversation_id || null);
     });
+    splashRpcToggleEl?.addEventListener('change', () => {
+      setState({ rpcTransportEnabled: splashRpcToggleEl.checked });
+      renderSplashTabs();
+    });
+    splashGoConversationBtn?.addEventListener('click', async () => {
+      const activeConversationId = getActiveConversationId();
+      if (!activeConversationId) return;
+      await selectConversationWithView(activeConversationId, 'conversation');
+    });
+    renderSplashTabs();
   }
 
   return {

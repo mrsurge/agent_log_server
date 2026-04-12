@@ -49,6 +49,10 @@ function buildConversationDisplay(meta, getConversationPreview) {
   };
 }
 
+function getActiveConversationIdFromState(state) {
+  return state?.clientConversationId || state?.conversationMeta?.conversation_id || null;
+}
+
 export function createConversationDrawerList(ctx) {
   const {
     conversationListEl,
@@ -357,11 +361,24 @@ export function createConversationDrawerList(ctx) {
 
   function renderSplashTabs() {
     const doc = documentRef || document;
+    const state = getState();
     const splashTabAllBtn = doc.getElementById('splash-tab-all');
     const splashTabProjectBtn = doc.getElementById('splash-tab-project');
+    const splashRpcToggleEl = doc.getElementById('splash-rpc-toggle');
+    const splashGoConversationBtn = doc.getElementById('splash-go-conversation');
     const activeTab = getSplashTab();
+    const activeConversationId = getActiveConversationIdFromState(state);
     splashTabAllBtn?.classList.toggle('active', activeTab === 'all');
     splashTabProjectBtn?.classList.toggle('active', activeTab === 'project');
+    if (splashRpcToggleEl instanceof HTMLInputElement) {
+      splashRpcToggleEl.checked = state?.rpcTransportEnabled !== false;
+    }
+    if (splashGoConversationBtn instanceof HTMLButtonElement) {
+      splashGoConversationBtn.disabled = !activeConversationId;
+      splashGoConversationBtn.title = activeConversationId
+        ? 'Go to active conversation'
+        : 'No active conversation selected';
+    }
   }
 
   return {
