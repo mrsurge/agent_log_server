@@ -24,6 +24,7 @@ from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD,
 )
 from agent_log_server.prompt_context import load_repo_memory_snapshot
+from agent_log_server.transcript_sanitizer import sanitize_transcript_item
 
 _AsyncAnyCallable = Callable[..., Awaitable[Any]]
 
@@ -64,7 +65,6 @@ class AppserverRoutesDeps:
     append_approval_handoff_transcript_entry: _AsyncAnyCallable
     append_transcript_entry: _AsyncAnyCallable
     write_transcript_entries: Callable[[str, list[dict[str, Any]]], Awaitable[Any]]
-    sanitize_transcript_item: Callable[[dict[str, Any]], dict[str, Any]]
     is_internal_transcript_item: Callable[[Any], bool]
     conversation_agent: Callable[[dict[str, Any] | None], str]
     extension_unavailable_detail: Callable[[str], str | None]
@@ -879,7 +879,7 @@ class AppserverRoutes:
                     except json.JSONDecodeError:
                         continue
                     if isinstance(record, dict):
-                        items.append(self._deps.sanitize_transcript_item(record))
+                        items.append(sanitize_transcript_item(record))
         except Exception:
             return {"conversation_id": str(convo_id), "items": []}
         return {"conversation_id": str(convo_id), "items": items}
@@ -917,7 +917,7 @@ class AppserverRoutes:
                     if not include_internal and self._deps.is_internal_transcript_item(record):
                         continue
                     total += 1
-                    buf.append(self._deps.sanitize_transcript_item(record))
+                    buf.append(sanitize_transcript_item(record))
             items = list(buf)
             offset = max(0, total - len(items))
         else:
@@ -937,7 +937,7 @@ class AppserverRoutes:
                     if not include_internal and self._deps.is_internal_transcript_item(record):
                         continue
                     if total >= start and total < end:
-                        items.append(self._deps.sanitize_transcript_item(record))
+                        items.append(sanitize_transcript_item(record))
                     total += 1
                     if total >= end and total >= start and len(items) >= limit:
                         continue

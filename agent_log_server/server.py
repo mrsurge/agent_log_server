@@ -19,15 +19,15 @@ import socketio
 import binascii
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException
-from fastapi.responses import JSONResponse, Response, RedirectResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, Request, Body, HTTPException
+from fastapi.responses import Response, RedirectResponse
 
 from framework_shells import get_manager as get_framework_shell_manager
 from framework_shells.api import fws_ui
 
 import extensions as ext_loader
 from agent_log_server import ask_user_interactions
+from agent_log_server.agent_log_subsystem import AgentLogSubsystem
 from agent_log_server.extension_cli import (
     register_extension_subcommands as _register_extension_subcommands,
     run_extension_command as _run_extension_command,
@@ -67,7 +67,7 @@ async def _lifespan(app: FastAPI):
     warmup_task: Optional[asyncio.Task] = None
     try:
         if not ext_loader.is_initialized():
-            _init_extensions()
+            _extension_api.init_extensions()
         _sync_te2_console_bridge_cache()
         _sync_te2_fws_readme_cache()
         _sync_te2_proxy_shell_readme_cache()
@@ -131,6 +131,7 @@ app = _APP_INDEX.app
 socketio_server = _APP_INDEX.socketio_server
 socketio_app = _APP_INDEX.socketio_app
 PACKAGE_ROOT = Path(__file__).resolve().parent
+_agent_log = AgentLogSubsystem(socketio_server=socketio_server, utc_ts=utc_ts)
 
 # Host-provided UI hints are runtime-only (not persisted). These are meant for iframe/drawer integration.
 _host_routes_state = HostRoutesState()
@@ -362,8 +363,6 @@ _register_ipc_socketio_handlers()
 # argument on the client.  Errors are returned as {"__error": "..."}.
 
 # --- Config & State ---
-LOG_PATH: Optional[Path] = None
-_lock = asyncio.Lock()
 _config_lock = asyncio.Lock()
 DEBUG_MODE = False
 DEBUG_RAW_LOG_PATH: Optional[Path] = None
@@ -576,45 +575,6 @@ def _safe_b64decode(s: str) -> str:
             return raw.decode("utf-8", errors="replace")
         except Exception:
             return ""
-
-
-async def _append_pending_cmd_buffer(conversation_id: str, entry: Dict[str, Any]) -> None:
-    """Append a pre-built command entry to pending_cmd_buffer (for CODEX_META injection)."""
-    meta = _load_conversation_meta(conversation_id)
-    buffer = meta.get("pending_cmd_buffer", {})
-    shell_id = _get_shell_id_for_envelope(conversation_id)
-
-    if "commands" not in buffer:
-        buffer = {
-            "v": 1,
-            "shell_id": shell_id,
-            "conversation_id": conversation_id,
-            "commands": [],
-            "total_commands_run": 0,
-        }
-
-    # Drop stale/legacy entries that used older block_id formats. The envelope is
-    # for *user terminal* commands and we standardize those as `user:<convo>:...`.
-    try:
-        cmds = buffer.get("commands", [])
-        if isinstance(cmds, list) and cmds:
-            buffer["commands"] = [
-                c for c in cmds
-                if isinstance(c, dict) and str(c.get("block_id") or "").startswith("user:")
-            ]
-    except Exception:
-        pass
-
-    buffer["total_commands_run"] = buffer.get("total_commands_run", 0) + 1
-    buffer["commands"].append(entry)
-    if len(buffer["commands"]) > _CMD_BUFFER_MAX_ENTRIES:
-        buffer["commands"] = buffer["commands"][-_CMD_BUFFER_MAX_ENTRIES:]
-    if shell_id:
-        buffer["shell_id"] = shell_id
-
-    meta["pending_cmd_buffer"] = buffer
-    _save_conversation_meta(conversation_id, meta)
-
 def _coerce_json_object(value: object) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -1176,19 +1136,9 @@ def _store_conversation_preview_from_event(event: Dict[str, Any]) -> None:
 
 
 # =============================================================================
-# META ENVELOPE: User command context injection
-# =============================================================================
-# When user runs terminal commands, we buffer context and prepend it to the
-# next chat message as a sentinel-wrapped envelope. Agents see the full context;
-# transcript/frontend see clean messages (envelope stripped).
-
-_META_ENVELOPE_START = "\x1eCODEX_META "  # RS + prefix for false-positive guard
-_META_ENVELOPE_END = "\x1f"               # US
+# Draft mention envelope tokens
 _DRAFT_MENTION_ENVELOPE_START = "\x1eCODEX_MENTION "
 _DRAFT_MENTION_ENVELOPE_END = "\x1f"
-_CMD_BUFFER_MAX_ENTRIES = 10
-_CMD_PREVIEW_MAX_LINES = 20
-_CMD_PREVIEW_MAX_BYTES = 3000
 
 
 def _encode_draft_mention_token(
@@ -1216,217 +1166,6 @@ def _encode_draft_mention_token(
         payload["content"] = content
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"{_DRAFT_MENTION_ENVELOPE_START}{encoded}{_DRAFT_MENTION_ENVELOPE_END}"
-
-
-def _get_shell_id_for_envelope(conversation_id: str) -> Optional[str]:
-    """Read shell_id from persisted file for meta envelope."""
-    path = _conversation_dir(conversation_id) / "agent_pty" / "shell_id.txt"
-    if path.exists():
-        try:
-            return path.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
-    return None
-
-
-def _record_last_injected_meta_envelope(conversation_id: str, envelope_json: str, *, command_count: int) -> None:
-    """Persist last injected meta envelope for debugging/visibility.
-
-    This does NOT affect what is sent to the model; it only stores a copy in SSOT.
-    """
-    try:
-        meta = _load_conversation_meta(conversation_id)
-        debug = _coerce_json_object(meta.get("debug"))
-        debug["last_meta_envelope"] = {
-            "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
-            "command_count": int(command_count),
-            "envelope_json": envelope_json,
-        }
-        meta["debug"] = debug
-        _save_conversation_meta(conversation_id, meta)
-    except Exception:
-        # Debug-only; do not fail the request.
-        pass
-
-
-async def _build_cmd_preview(conversation_id: str, block: Optional[dict] = None) -> dict:
-    """Build bounded tail preview from per-block output file.
-    
-    Uses the block's output_path for command-scoped output.
-    Falls back to inline stdout or conversation-wide snapshot if output_path unavailable.
-    """
-    def _read_block_output() -> List[str]:
-        """Sync helper to read block output file."""
-        result: List[str] = []
-        
-        # Try per-block output_path first (command-scoped)
-        if block:
-            output_path = block.get("output_path")
-            if output_path:
-                try:
-                    text = Path(output_path).read_text(encoding="utf-8")
-                    lines = text.splitlines()[-_CMD_PREVIEW_MAX_LINES:]
-                    if lines:
-                        return lines
-                except Exception:
-                    pass
-            
-            # Fallback to inline stdout
-            stdout = block.get("stdout", "")
-            if stdout:
-                lines = stdout.splitlines()[-_CMD_PREVIEW_MAX_LINES:]
-                if lines:
-                    return lines
-        
-        # Last resort: conversation-wide scrollback (legacy/fallback)
-        scrollback_path = _conversation_dir(conversation_id) / "agent_pty" / "scrollback.snapshot.json"
-        if scrollback_path.exists():
-            try:
-                data = json.loads(scrollback_path.read_text(encoding="utf-8"))
-                result = data.get("lines", [])[-_CMD_PREVIEW_MAX_LINES:]
-                if result:
-                    return result
-            except Exception:
-                pass
-        
-        return result
-    
-    lines = await asyncio.to_thread(_read_block_output)
-    truncated = False
-    
-    # Apply byte cap
-    total_bytes = 0
-    capped_lines: List[str] = []
-    for line in reversed(lines):
-        line_bytes = len(line.encode("utf-8"))
-        if total_bytes + line_bytes > _CMD_PREVIEW_MAX_BYTES:
-            truncated = True
-            break
-        capped_lines.insert(0, line)
-        total_bytes += line_bytes
-    
-    if len(capped_lines) < len(lines):
-        truncated = True
-    
-    return {"lines": capped_lines, "truncated": truncated}
-
-
-async def _buffer_cmd_context(conversation_id: str, block: dict) -> None:
-    """Append command context to buffer for next user message.
-    
-    Called on agent_block_end events. Accumulates up to N commands.
-    """
-    cmd = block.get("cmd", "")
-    exit_code = block.get("exit_code")
-    cwd = block.get("cwd", "")
-    block_id = block.get("block_id", "")
-    ts = block.get("ts_end") or block.get("ts_begin") or int(datetime.now(timezone.utc).timestamp() * 1000)
-    
-    shell_id = _get_shell_id_for_envelope(conversation_id)
-    preview = await _build_cmd_preview(conversation_id, block)
-    
-    # The CODEX_META envelope is reserved for *user terminal* command context.
-    # Skip buffering legacy agent blocks here (they can be read from transcript/blocks).
-    if not str(block_id or "").startswith("user:"):
-        return
-
-    entry = {
-        "cmd": cmd,
-        "exit_code": exit_code,
-        "cwd": cwd,
-        "block_id": block_id,
-        "ts": ts,
-        "preview": preview,
-    }
-    
-    meta = _load_conversation_meta(conversation_id)
-    buffer = meta.get("pending_cmd_buffer", {})
-    
-    # Initialize or update buffer
-    if "commands" not in buffer:
-        buffer = {
-            "v": 1,
-            "shell_id": shell_id,
-            "conversation_id": conversation_id,
-            "commands": [],
-            "total_commands_run": 0,
-        }
-
-    # Ensure we don't carry legacy entries across versions.
-    try:
-        cmds = buffer.get("commands", [])
-        if isinstance(cmds, list) and cmds:
-            buffer["commands"] = [
-                c for c in cmds
-                if isinstance(c, dict) and str(c.get("block_id") or "").startswith("user:")
-            ]
-    except Exception:
-        pass
-    
-    buffer["total_commands_run"] = buffer.get("total_commands_run", 0) + 1
-    buffer["commands"].append(entry)
-    
-    # Cap at max entries (drop oldest)
-    if len(buffer["commands"]) > _CMD_BUFFER_MAX_ENTRIES:
-        buffer["commands"] = buffer["commands"][-_CMD_BUFFER_MAX_ENTRIES:]
-    
-    # Update shell_id if changed
-    if shell_id:
-        buffer["shell_id"] = shell_id
-    
-    meta["pending_cmd_buffer"] = buffer
-    _save_conversation_meta(conversation_id, meta)
-
-
-def _build_envelope_from_buffer(buffer: dict) -> str:
-    """Build envelope JSON from command buffer."""
-    total = buffer.get("total_commands_run", len(buffer.get("commands", [])))
-    kept = len(buffer.get("commands", []))
-    dropped = total - kept
-    
-    envelope = {
-        "v": 1,
-        "type": "user_cmd_context",
-        "conversation_id": buffer.get("conversation_id"),
-        "shell_id": buffer.get("shell_id"),
-        "total_commands_run": total,
-        "kept": kept,
-        "dropped": dropped,
-        "commands": buffer.get("commands", []),
-        "mcp": ["pty_read_screen", "pty_read_scrollback"],
-    }
-    return json.dumps(envelope, ensure_ascii=False)
-
-
-def _strip_meta_envelope(text: str) -> str:
-    """Strip leading meta envelope from text if present.
-    
-    The envelope is prepended to user messages to provide command context
-    to agents. It must be stripped before writing to transcript or
-    displaying in frontend.
-    """
-    if text.startswith(_META_ENVELOPE_START):
-        end_idx = text.find(_META_ENVELOPE_END)
-        if end_idx != -1:
-            return text[end_idx + 1:]
-    return text
-
-
-def _sanitize_transcript_item(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip meta envelope from transcript items for display.
-    
-    Applies to user messages that may have envelope in 'text' field.
-    Returns a copy with envelope stripped.
-    """
-    if not isinstance(item, dict):
-        return item
-    role = item.get("role", "")
-    if role == "user" and isinstance(item.get("text"), str):
-        text = _strip_meta_envelope(item["text"])
-        if text != item["text"]:
-            item = dict(item)  # Shallow copy
-            item["text"] = text
-    return item
 
 
 def _is_internal_transcript_item(item: Any) -> bool:
@@ -1759,240 +1498,10 @@ def _extract_line_from_diff(diff_text: str) -> int:
     return int(m.group(1)) if m else 1
 
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: Dict[str, Any]):
-        data = json.dumps(message)
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(data)
-            except Exception:
-                pass
-
-
-manager = ConnectionManager()
-
-
-def ensure_log_file(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.write_text("", encoding="utf-8")
-
-
-_next_msg_num: int = 1
-
-
-def _init_msg_num() -> None:
-    global _next_msg_num
-    if LOG_PATH is None or not LOG_PATH.exists():
-        _next_msg_num = 1
-        return
-
-    records = []
-    with LOG_PATH.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-
-    if not records:
-        _next_msg_num = 1
-        return
-
-    needs_rewrite = any("msg_num" not in rec for rec in records)
-    if needs_rewrite:
-        for i, rec in enumerate(records, start=1):
-            rec["msg_num"] = i
-        with LOG_PATH.open("w", encoding="utf-8") as f:
-            for rec in records:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        _next_msg_num = len(records) + 1
-        return
-
-    max_num = max(rec.get("msg_num", 0) for rec in records)
-    _next_msg_num = max_num + 1
-
-
-def _delete_record_by_msg_num(msg_num: int) -> bool:
-    assert LOG_PATH is not None
-    if not LOG_PATH.exists():
-        return False
-
-    records = []
-    found = False
-    with LOG_PATH.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-                if rec.get("msg_num") == msg_num:
-                    found = True
-                    continue
-                records.append(rec)
-            except json.JSONDecodeError:
-                continue
-
-    if found:
-        with LOG_PATH.open("w", encoding="utf-8") as f:
-            for rec in records:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return found
-
-
-async def append_record(record: Dict[str, Any]) -> None:
-    global _next_msg_num
-    assert LOG_PATH is not None
-    async with _lock:
-        if "msg_num" not in record:
-            record["msg_num"] = _next_msg_num
-            _next_msg_num += 1
-        else:
-            if isinstance(record["msg_num"], int) and record["msg_num"] >= _next_msg_num:
-                _next_msg_num = record["msg_num"] + 1
-        line = json.dumps(record, ensure_ascii=False)
-        with LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-            f.flush()
-    await manager.broadcast(record)
-    with suppress(Exception):
-        await socketio_server.emit("agent_log_message", record, namespace="/appserver")
-
-
-def read_records(limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    assert LOG_PATH is not None
-    if not LOG_PATH.exists():
-        return []
-
-    records = []
-    with LOG_PATH.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-
-    if limit is not None and limit > 0:
-        return records[-limit:]
-    return records
-
-
-def get_record_by_msg_num(msg_num: int) -> Optional[Dict[str, Any]]:
-    assert LOG_PATH is not None
-    if not LOG_PATH.exists():
-        return None
-    with LOG_PATH.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-                if rec.get("msg_num") == msg_num:
-                    return rec
-            except json.JSONDecodeError:
-                continue
-    return None
-
-
-# --- Models ---
-class MessageIn(BaseModel):
-    who: str
-    message: str
-
-# --- Routes ---
-
-@app.get("/api/messages")
-async def get_messages(limit: int = Query(None, gt=0)):
-    return read_records(limit=limit)
-
-@app.get("/api/messages/{msg_num}")
-async def get_message_by_num(msg_num: int):
-    """Get a specific message by its msg_num."""
-    record = get_record_by_msg_num(msg_num)
-    if record is None:
-        return JSONResponse({"error": f"Message {msg_num} not found"}, status_code=404)
-    return record
-
-@app.delete("/api/messages/{msg_num}")
-async def delete_message_by_num(msg_num: int):
-    """Delete a specific message by its msg_num."""
-    async with _lock:
-        deleted = _delete_record_by_msg_num(msg_num)
-    if not deleted:
-        return JSONResponse({"error": f"Message {msg_num} not found"}, status_code=404)
-    return {"ok": True, "deleted": msg_num}
-
-@app.post("/api/messages", status_code=201)
-async def post_message(msg: MessageIn):
-    who = msg.who.strip()
-    text = msg.message.strip()
-    if not who or not text:
-        return JSONResponse({"error": "Both 'who' and 'message' are required"}, status_code=400)
-
-    record = {"ts": utc_ts(), "who": who, "message": text}
-    await append_record(record)
-    # record now has msg_num assigned by append_record
-    return record
-
-
-class AwaitIn(BaseModel):
-    after_msg_num: int
-    from_who: Optional[str] = None
-    timeout_ms: int = 180000  # default 3 minutes
-
-
-@app.post("/api/messages/await")
-async def await_message(req: AwaitIn):
-    """Long-poll for the next message after a given msg_num, optionally filtered by author."""
-    after_num = req.after_msg_num
-    from_who = req.from_who.strip() if req.from_who else None
-    timeout_s = max(1, min(req.timeout_ms, 600000)) / 1000.0  # cap at 10 minutes
-    
-    poll_interval = 0.5  # seconds
-    elapsed = 0.0
-    
-    while elapsed < timeout_s:
-        # Read all records and find first one after after_num matching criteria
-        records = read_records()
-        for rec in records:
-            rec_num = rec.get("msg_num")
-            if rec_num is None or rec_num <= after_num:
-                continue
-            if from_who and rec.get("who") != from_who:
-                continue
-            # Found a matching message
-            return rec
-        
-        # No match yet, wait and poll again
-        await asyncio.sleep(poll_interval)
-        elapsed += poll_interval
-    
-    return JSONResponse({"error": "timeout", "after_msg_num": after_num}, status_code=408)
-
-
 # =============================================================================
-# EXTENSION SYSTEM (ACP)
+# EXTENSION SYSTEM
 # =============================================================================
-# Dynamic extension loading for ACP-based agents (e.g., Gemini CLI)
-# Extensions are loaded from extensions/ and communicate via ACP protocol
+# Dynamic extension loading.
 
 
 def _materialize_extension_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2050,13 +1559,9 @@ _extension_api = ExtensionApi(
 )
 conversation_store.set_extensions_config_normalizer(_extension_api.normalize_extensions_config)
 
-_normalize_extensions_config = _extension_api.normalize_extensions_config
-_default_active_extension_id = _extension_api.default_active_extension_id
-_conversation_agent = _extension_api.conversation_agent
 _extension_unavailable_detail = _extension_api.extension_unavailable_detail
 _emit_extension_unavailable_warning = _extension_api.emit_extension_unavailable_warning
 _refresh_extension_runtime_state = _extension_api.refresh_extension_runtime_state
-_init_extensions = _extension_api.init_extensions
 
 appserver_routes = AppserverRoutes(
     AppserverRoutesDeps(
@@ -2088,12 +1593,11 @@ appserver_routes = AppserverRoutes(
         append_approval_handoff_transcript_entry=_append_approval_handoff_transcript_entry,
         append_transcript_entry=_append_transcript_entry,
         write_transcript_entries=_write_transcript_entries,
-        sanitize_transcript_item=_sanitize_transcript_item,
         is_internal_transcript_item=_is_internal_transcript_item,
-        conversation_agent=_conversation_agent,
+        conversation_agent=_extension_api.conversation_agent,
         extension_unavailable_detail=_extension_unavailable_detail,
         emit_extension_unavailable_warning=_emit_extension_unavailable_warning,
-        default_active_extension_id=_default_active_extension_id,
+        default_active_extension_id=_extension_api.default_active_extension_id,
         materialize_extension_runtime_settings=_materialize_extension_runtime_settings,
         merge_extension_bind_settings=_merge_extension_bind_settings,
         legacy_builtin_codex_disabled_result=_legacy_builtin_codex_disabled_result,
@@ -2115,70 +1619,10 @@ appserver_routes = AppserverRoutes(
     state=_appserver_routes_state,
 )
 
-api_health = appserver_routes.api_health
-api_appserver_config = appserver_routes.api_appserver_config
-api_appserver_conversation = appserver_routes.api_appserver_conversation
-api_appserver_conversation_meta = appserver_routes.api_appserver_conversation_meta
-api_appserver_conversation_update = appserver_routes.api_appserver_conversation_update
-api_appserver_conversation_draft = appserver_routes.api_appserver_conversation_draft
-api_appserver_repo_memory = appserver_routes.api_appserver_repo_memory
-api_appserver_conversations = appserver_routes.api_appserver_conversations
-api_appserver_conversation_create = appserver_routes.api_appserver_conversation_create
-api_appserver_conversation_select = appserver_routes.api_appserver_conversation_select
-api_appserver_conversation_pins = appserver_routes.api_appserver_conversation_pins
-api_appserver_conversation_delete = appserver_routes.api_appserver_conversation_delete
-api_appserver_set_view = appserver_routes.api_appserver_set_view
-api_fs_list = appserver_routes.api_fs_list
-api_fs_search = appserver_routes.api_fs_search
-api_appserver_transcript = appserver_routes.api_appserver_transcript
-api_appserver_transcript_range = appserver_routes.api_appserver_transcript_range
-api_appserver_config_update = appserver_routes.api_appserver_config_update
-api_appserver_set_cwd = appserver_routes.api_appserver_set_cwd
-api_appserver_thread_start = appserver_routes.api_appserver_thread_start
-api_appserver_thread_kill = appserver_routes.api_appserver_thread_kill
-api_appserver_stop = appserver_routes.api_appserver_stop
-api_appserver_start = appserver_routes.api_appserver_start
-api_appserver_status = appserver_routes.api_appserver_status
-api_appserver_message = appserver_routes.api_appserver_message
-api_appserver_rpc = appserver_routes.api_appserver_rpc
-api_appserver_approval_record = appserver_routes.api_appserver_approval_record
-api_appserver_approval_response = appserver_routes.api_appserver_approval_response
-api_appserver_interrupt = appserver_routes.api_appserver_interrupt
-api_appserver_shell_exec = appserver_routes.api_appserver_shell_exec
-api_appserver_compact = appserver_routes.api_appserver_compact
-api_appserver_mention = appserver_routes.api_appserver_mention
-api_appserver_mention_options = appserver_routes.api_appserver_mention_options
-api_appserver_initialize = appserver_routes.api_appserver_initialize
-api_appserver_models = appserver_routes.api_appserver_models
-api_appserver_runtime_options = appserver_routes.api_appserver_runtime_options
-api_appserver_debug_raw = appserver_routes.api_appserver_debug_raw
-api_appserver_debug_state = appserver_routes.api_appserver_debug_state
-api_appserver_debug_toggle = appserver_routes.api_appserver_debug_toggle
-process_mention = appserver_routes.process_mention
-
-api_extensions_list = _extension_api.api_extensions_list
-api_extension_enabled = _extension_api.api_extension_enabled
-api_extension_install = _extension_api.api_extension_install
-api_extensions_validate = _extension_api.api_extensions_validate
-api_extensions_install_package = _extension_api.api_extensions_install_package
-api_extension_update_package = _extension_api.api_extension_update_package
-api_extension_remove_package = _extension_api.api_extension_remove_package
-api_extensions_reload = _extension_api.api_extensions_reload
-api_extension_get = _extension_api.api_extension_get
-api_extension_settings_schema = _extension_api.api_extension_settings_schema
-api_extension_splash_schema = _extension_api.api_extension_splash_schema
-api_extension_splash_action = _extension_api.api_extension_splash_action
-api_extension_request_cards = _extension_api.api_extension_request_cards
-api_extension_asset = _extension_api.api_extension_asset
-api_extension_models = _extension_api.api_extension_models
-api_extension_plan = _extension_api.api_extension_plan
-api_extension_sessions = _extension_api.api_extension_sessions
-api_extension_session_resume = _extension_api.api_extension_session_resume
-api_extension_debug_raw = _extension_api.api_extension_debug_raw
-
 register_page_routes(app, PageRoutesDeps(package_root=PACKAGE_ROOT))
 register_extension_api_routes(app, _extension_api)
 register_appserver_routes(app, appserver_routes)
+_agent_log.register_routes(app)
 
 @app.post("/api/shutdown")
 async def api_shutdown():
@@ -2186,42 +1630,13 @@ async def api_shutdown():
     loop.call_later(0.1, os._exit, 0)
     return {"ok": True}
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-
-
-# --- Startup ---
-def _default_agent_log_dir() -> Path:
-    return Path.home() / ".cache" / "app_server" / "agent-log"
-
-
-def _resolve_agent_log_path(raw: str) -> Path:
-    text = str(raw or "").strip()
-    if not text:
-        return _default_agent_log_dir() / "agent_chat.log.jsonl"
-
-    expanded = Path(os.path.expanduser(text))
-    if expanded.is_absolute():
-        return expanded
-
-    if text.startswith("./") or text.startswith("../") or "/" in text:
-        return Path.cwd() / expanded
-
-    return _default_agent_log_dir() / expanded.name
-
 
 host_routes = HostRoutes(
     HostRoutesDeps(
         config_lock=_config_lock,
         load_appserver_config=_load_appserver_config,
         broadcast_appserver_ui=_broadcast_appserver_ui,
-        process_mention=process_mention,
+        process_mention=appserver_routes.process_mention,
         load_conversation_meta=_load_conversation_meta,
         meta_settings=_meta_settings,
     ),
@@ -2239,56 +1654,56 @@ def _register_appserver_socketio() -> None:
                 conversation_id=conversation_id,
                 text=text,
             ),
-            api_appserver_message=api_appserver_message,
-            api_appserver_shell_exec=api_appserver_shell_exec,
-            api_appserver_rpc=api_appserver_rpc,
-            api_appserver_interrupt=api_appserver_interrupt,
-            api_appserver_compact=api_appserver_compact,
-            api_appserver_conversation=api_appserver_conversation,
-            api_appserver_conversation_meta=api_appserver_conversation_meta,
-            api_appserver_conversation_update=api_appserver_conversation_update,
-            api_appserver_conversation_draft=api_appserver_conversation_draft,
-            api_appserver_conversations=api_appserver_conversations,
-            api_appserver_conversation_create=api_appserver_conversation_create,
-            api_appserver_conversation_select=api_appserver_conversation_select,
-            api_appserver_conversation_delete=api_appserver_conversation_delete,
-            api_appserver_conversation_pins=api_appserver_conversation_pins,
-            api_appserver_set_view=api_appserver_set_view,
-            api_appserver_config=api_appserver_config,
-            api_appserver_config_update=api_appserver_config_update,
-            api_appserver_models=api_appserver_models,
-            api_appserver_runtime_options=api_appserver_runtime_options,
-            api_appserver_status=api_appserver_status,
-            api_appserver_start=api_appserver_start,
-            api_appserver_stop=api_appserver_stop,
-            api_appserver_initialize=api_appserver_initialize,
-            api_appserver_approval_record=api_appserver_approval_record,
-            api_appserver_approval_response=api_appserver_approval_response,
-            api_appserver_transcript=api_appserver_transcript,
-            api_appserver_transcript_range=api_appserver_transcript_range,
-            api_extensions_list=api_extensions_list,
-            api_extension_enabled=api_extension_enabled,
-            api_extension_install=api_extension_install,
-            api_extensions_validate=api_extensions_validate,
-            api_extensions_install_package=api_extensions_install_package,
-            api_extension_update_package=api_extension_update_package,
-            api_extension_remove_package=api_extension_remove_package,
-            api_extensions_reload=api_extensions_reload,
-            api_extension_settings_schema=api_extension_settings_schema,
-            api_extension_splash_schema=api_extension_splash_schema,
-            api_extension_splash_action=api_extension_splash_action,
-            api_extension_request_cards=api_extension_request_cards,
-            api_extension_plan=api_extension_plan,
-            api_fs_list=api_fs_list,
-            api_fs_search=api_fs_search,
+            api_appserver_message=appserver_routes.api_appserver_message,
+            api_appserver_shell_exec=appserver_routes.api_appserver_shell_exec,
+            api_appserver_rpc=appserver_routes.api_appserver_rpc,
+            api_appserver_interrupt=appserver_routes.api_appserver_interrupt,
+            api_appserver_compact=appserver_routes.api_appserver_compact,
+            api_appserver_conversation=appserver_routes.api_appserver_conversation,
+            api_appserver_conversation_meta=appserver_routes.api_appserver_conversation_meta,
+            api_appserver_conversation_update=appserver_routes.api_appserver_conversation_update,
+            api_appserver_conversation_draft=appserver_routes.api_appserver_conversation_draft,
+            api_appserver_conversations=appserver_routes.api_appserver_conversations,
+            api_appserver_conversation_create=appserver_routes.api_appserver_conversation_create,
+            api_appserver_conversation_select=appserver_routes.api_appserver_conversation_select,
+            api_appserver_conversation_delete=appserver_routes.api_appserver_conversation_delete,
+            api_appserver_conversation_pins=appserver_routes.api_appserver_conversation_pins,
+            api_appserver_set_view=appserver_routes.api_appserver_set_view,
+            api_appserver_config=appserver_routes.api_appserver_config,
+            api_appserver_config_update=appserver_routes.api_appserver_config_update,
+            api_appserver_models=appserver_routes.api_appserver_models,
+            api_appserver_runtime_options=appserver_routes.api_appserver_runtime_options,
+            api_appserver_status=appserver_routes.api_appserver_status,
+            api_appserver_start=appserver_routes.api_appserver_start,
+            api_appserver_stop=appserver_routes.api_appserver_stop,
+            api_appserver_initialize=appserver_routes.api_appserver_initialize,
+            api_appserver_approval_record=appserver_routes.api_appserver_approval_record,
+            api_appserver_approval_response=appserver_routes.api_appserver_approval_response,
+            api_appserver_transcript=appserver_routes.api_appserver_transcript,
+            api_appserver_transcript_range=appserver_routes.api_appserver_transcript_range,
+            api_extensions_list=_extension_api.api_extensions_list,
+            api_extension_enabled=_extension_api.api_extension_enabled,
+            api_extension_install=_extension_api.api_extension_install,
+            api_extensions_validate=_extension_api.api_extensions_validate,
+            api_extensions_install_package=_extension_api.api_extensions_install_package,
+            api_extension_update_package=_extension_api.api_extension_update_package,
+            api_extension_remove_package=_extension_api.api_extension_remove_package,
+            api_extensions_reload=_extension_api.api_extensions_reload,
+            api_extension_settings_schema=_extension_api.api_extension_settings_schema,
+            api_extension_splash_schema=_extension_api.api_extension_splash_schema,
+            api_extension_splash_action=_extension_api.api_extension_splash_action,
+            api_extension_request_cards=_extension_api.api_extension_request_cards,
+            api_extension_plan=_extension_api.api_extension_plan,
+            api_fs_list=appserver_routes.api_fs_list,
+            api_fs_search=appserver_routes.api_fs_search,
             api_host_ui_get=host_routes.api_host_ui_get,
             api_shutdown=api_shutdown,
-            append_record=append_record,
+            append_record=_agent_log.append_record,
             coerce_query_bool=_coerce_query_bool,
             emit_sidebar_agent_open=host_routes.emit_sidebar_agent_open,
             ensure_conversation=_require_conversation_id,
             merge_extension_bind_settings=_merge_extension_bind_settings,
-            read_records=read_records,
+            read_records=_agent_log.read_records,
             sidebar_recheck_status=host_routes.sidebar_recheck_status,
             utc_ts=utc_ts,
             write_transcript_entries=_write_transcript_entries,
@@ -2312,24 +1727,18 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     global DEBUG_MODE
-    global LOG_PATH
     global DEBUG_RAW_LOG_PATH
     args = parse_args()
     if getattr(args, "command", None) == "extension":
         if not ext_loader.is_initialized():
             with redirect_stdout(sys.stderr):
-                _init_extensions()
+                _extension_api.init_extensions()
         raise SystemExit(_run_extension_command(args))
     DEBUG_MODE = bool(args.debug)
     if args.broadcast_all:
         args.host = "0.0.0.0"
-    
-    log_p = _resolve_agent_log_path(args.log)
-    ensure_log_file(log_p)
-    LOG_PATH = log_p
-    
-    # Initialize message number counter from existing log
-    _init_msg_num()
+
+    _agent_log.initialize_log_path(args.log)
 
     # Set up debug raw log in .cache directory
     if DEBUG_MODE:
