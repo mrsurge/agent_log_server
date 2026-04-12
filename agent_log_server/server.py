@@ -19,13 +19,12 @@ import socketio
 import binascii
 import urllib.request
 import urllib.error
-import urllib.parse
 import shutil
 import tomlkit
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException, Depends
-from fastapi.responses import HTMLResponse, JSONResponse, Response, RedirectResponse, FileResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query, Body, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -40,17 +39,22 @@ from agent_log_server.extension_cli import (
     register_extension_subcommands as _register_extension_subcommands,
     run_extension_command as _run_extension_command,
 )
-from agent_log_server.prompt_context import (
-    build_effective_prompt_context,
-    load_repo_memory_snapshot,
+from agent_log_server.appserver_socketio import (
+    AppserverSocketioDeps,
+    register_appserver_socketio_handlers,
 )
+from agent_log_server.extension_api import (
+    ExtensionApi,
+    ExtensionApiDeps,
+    register_extension_api_routes,
+)
+from agent_log_server.prompt_context import load_repo_memory_snapshot
 from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD as _AGENT_PTY_ASK_USER_REQUEST_METHOD,
 )
 from agent_log_server.ipc_auth import load_or_create_ipc_secret
 from agent_log_server.te2_mcp_config import (
     TE2_MCP_SERVER_NAME,
-    build_codex_thread_config,
     build_te2_mcp_streamable_http_url,
     te2_mcp_integration_enabled,
 )
@@ -83,10 +87,7 @@ async def _lifespan(app: FastAPI):
             print(f"[Startup] Extension dependency sync error: {e}")
         # DEPRECATED: Legacy builtin codex app-server auto-start is disabled.
         # All codex conversations should use codex-ext or codex-ext-exp extensions,
-        # which manage their own app-server processes via the extension transport.
-        # info = await _get_or_start_appserver_shell()
-        # await _ensure_appserver_reader(info["shell_id"])
-        # await _ensure_appserver_initialized()
+        # which manage their own runtime through the generic extension transport.
         # Ensure the shell manager is available for agent PTY attach/terminate operations.
         # This keeps the backend stable even when the MCP stdio worker is session-scoped.
         await _get_or_start_shell_manager()
@@ -164,16 +165,6 @@ _HOST_UI_STATE: Dict[str, Any] = {
 }
 _IPC_NAMESPACE = "/ipc"
 _IPC_SIDS: set[str] = set()
-
-
-@socketio_server.on("connect", namespace="/appserver")
-async def _appserver_connect(sid, environ):
-    return None
-
-
-@socketio_server.on("disconnect", namespace="/appserver")
-async def _appserver_disconnect(sid):
-    return None
 
 
 def _ipc_error(msg: str) -> Dict[str, Any]:
@@ -383,956 +374,14 @@ async def _ipc_ask_user_ack(sid, data):
 # Each handler returns a value which Socket.IO delivers as the ack callback
 # argument on the client.  Errors are returned as {"__error": "..."}.
 
-def _sio_error(msg: str) -> Dict[str, str]:
-    return {"__error": str(msg)}
-
-
-@socketio_server.on("send_message", namespace="/appserver")
-async def _sio_send_message(sid, data):
-    """Mirror of POST /api/appserver/message"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        return await api_appserver_message(
-            AppserverMessageIn(
-                conversation_id=payload.get("conversation_id") or "",
-                text=payload.get("text") or "",
-            )
-        )
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("shell_exec", namespace="/appserver")
-async def _sio_shell_exec(sid, data):
-    """Mirror of POST /api/appserver/shell/exec"""
-    try:
-        return await api_appserver_shell_exec(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("rpc", namespace="/appserver")
-async def _sio_rpc(sid, data):
-    """Mirror of POST /api/appserver/rpc"""
-    try:
-        return await api_appserver_rpc(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("interrupt", namespace="/appserver")
-async def _sio_interrupt(sid, data):
-    """Mirror of POST /api/appserver/interrupt"""
-    try:
-        return await api_appserver_interrupt(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("compact", namespace="/appserver")
-async def _sio_compact(sid, data):
-    """Mirror of POST /api/appserver/compact"""
-    try:
-        return await api_appserver_compact(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversation_get", namespace="/appserver")
-async def _sio_conversation_get(sid, data):
-    """Mirror of GET /api/appserver/conversation or /conversations/{id}/meta"""
-    try:
-        cid = data.get("conversation_id") if isinstance(data, dict) else None
-        if cid:
-            return await api_appserver_conversation_meta(cid)
-        return await api_appserver_conversation()
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversation_meta", namespace="/appserver")
-async def _sio_conversation_meta(sid, data):
-    """Mirror of GET /api/appserver/conversations/{id}/meta"""
-    try:
-        cid = data.get("conversation_id", "")
-        return await api_appserver_conversation_meta(cid)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversation_update", namespace="/appserver")
-async def _sio_conversation_update(sid, data):
-    """Mirror of POST /api/appserver/conversation"""
-    try:
-        return await api_appserver_conversation_update(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversation_draft", namespace="/appserver")
-async def _sio_conversation_draft(sid, data):
-    """Mirror of POST /api/appserver/conversation/draft"""
-    try:
-        return await api_appserver_conversation_draft(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversations_list", namespace="/appserver")
-async def _sio_conversations_list(sid, data):
-    """Mirror of GET /api/appserver/conversations"""
-    try:
-        return await api_appserver_conversations()
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversation_create", namespace="/appserver")
-async def _sio_conversation_create(sid, data):
-    """Mirror of POST /api/appserver/conversations"""
-    try:
-        return await api_appserver_conversation_create(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversation_select", namespace="/appserver")
-async def _sio_conversation_select(sid, data):
-    """Mirror of POST /api/appserver/conversations/select"""
-    try:
-        return await api_appserver_conversation_select(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversation_delete", namespace="/appserver")
-async def _sio_conversation_delete(sid, data):
-    """Mirror of DELETE /api/appserver/conversations/{id}"""
-    try:
-        cid = data.get("conversation_id", "")
-        return await api_appserver_conversation_delete(cid)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversation_pins_update", namespace="/appserver")
-async def _sio_conversation_pins_update(sid, data):
-    """Mirror of POST /api/appserver/conversations/pins"""
-    try:
-        return await api_appserver_conversation_pins(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("conversation_bind_rollout", namespace="/appserver")
-async def _sio_conversation_bind_rollout(sid, data):
-    """Mirror of POST /api/appserver/conversations/bind-rollout"""
-    try:
-        return await api_appserver_conversation_bind_rollout(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("set_view", namespace="/appserver")
-async def _sio_set_view(sid, data):
-    """Mirror of POST /api/appserver/view"""
-    try:
-        return await api_appserver_set_view(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_config", namespace="/appserver")
-async def _sio_get_config(sid, data):
-    """Mirror of GET /api/appserver/config"""
-    try:
-        return await api_appserver_config()
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("update_config", namespace="/appserver")
-async def _sio_update_config(sid, data):
-    """Mirror of POST /api/appserver/config"""
-    try:
-        return await api_appserver_config_update(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_models", namespace="/appserver")
-async def _sio_get_models(sid, data):
-    """Mirror of GET /api/appserver/models"""
-    try:
-        return await api_appserver_models()
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_runtime_options", namespace="/appserver")
-async def _sio_get_runtime_options(sid, data):
-    """Mirror of GET /api/appserver/runtime_options"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        return await api_appserver_runtime_options(
-            conversation_id=payload.get("conversation_id"),
-            agent=payload.get("agent"),
-        )
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_rollouts", namespace="/appserver")
-async def _sio_get_rollouts(sid, data):
-    """Mirror of GET /api/appserver/rollouts"""
-    try:
-        return await api_appserver_rollouts()
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_rollout_preview", namespace="/appserver")
-async def _sio_get_rollout_preview(sid, data):
-    """Mirror of GET /api/appserver/rollouts/{id}/preview"""
-    try:
-        rid = data.get("rollout_id", "")
-        return await api_appserver_rollout_preview(rid)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_extensions", namespace="/appserver")
-async def _sio_get_extensions(sid, data):
-    """Mirror of GET /api/extensions"""
-    try:
-        return await api_extensions_list()
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("extension_set_enabled", namespace="/appserver")
-async def _sio_extension_set_enabled(sid, data):
-    """Mirror of POST /api/extensions/{id}/enabled"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        extension_id = str(payload.get("extension_id") or "").strip()
-        return await api_extension_enabled(extension_id, {"enabled": payload.get("enabled")})
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("extension_install", namespace="/appserver")
-async def _sio_extension_install(sid, data):
-    """Mirror of POST /api/extensions/{id}/install (dependency install)"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        extension_id = str(payload.get("extension_id") or "").strip()
-        return await api_extension_install(extension_id)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("extension_validate_package", namespace="/appserver")
-async def _sio_extension_validate_package(sid, data):
-    """Mirror of POST /api/extensions/validate"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        return await api_extensions_validate(payload)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("extension_install_package", namespace="/appserver")
-async def _sio_extension_install_package(sid, data):
-    """Mirror of POST /api/extensions/install"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        return await api_extensions_install_package(payload)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("extension_update_package", namespace="/appserver")
-async def _sio_extension_update_package(sid, data):
-    """Mirror of POST /api/extensions/{id}/update"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        extension_id = str(payload.get("extension_id") or "").strip()
-        return await api_extension_update_package(extension_id, payload)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("extension_remove_package", namespace="/appserver")
-async def _sio_extension_remove_package(sid, data):
-    """Mirror of DELETE /api/extensions/{id}"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        extension_id = str(payload.get("extension_id") or "").strip()
-        return await api_extension_remove_package(extension_id)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("extensions_reload", namespace="/appserver")
-async def _sio_extensions_reload(sid, data):
-    """Mirror of POST /api/extensions/reload"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        return await api_extensions_reload(payload)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_extension_settings_schema", namespace="/appserver")
-async def _sio_get_extension_settings_schema(sid, data):
-    """Mirror of GET /api/extensions/{id}/settings_schema"""
-    try:
-        eid = data.get("extension_id", "")
-        result = await api_extension_settings_schema(eid)
-        if isinstance(result, JSONResponse):
-            return _sio_error("Extension not found")
-        return result
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_extension_splash_schema", namespace="/appserver")
-async def _sio_get_extension_splash_schema(sid, data):
-    """Mirror of GET /api/extensions/{id}/splash_schema"""
-    try:
-        eid = data.get("extension_id", "")
-        result = await api_extension_splash_schema(eid)
-        if isinstance(result, JSONResponse):
-            try:
-                body = json.loads(result.body.decode("utf-8"))
-                return {"ok": False, **body}
-            except Exception:
-                return _sio_error("Extension splash schema unavailable")
-        return result
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("run_extension_splash_action", namespace="/appserver")
-async def _sio_run_extension_splash_action(sid, data):
-    """Mirror of POST /api/extensions/{id}/splash_action"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        eid = payload.get("extension_id", "")
-        result = await api_extension_splash_action(eid, payload)
-        if isinstance(result, JSONResponse):
-            try:
-                body = json.loads(result.body.decode("utf-8"))
-                return {"ok": False, **body}
-            except Exception:
-                return _sio_error("Extension splash action failed")
-        return result
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_extension_request_cards", namespace="/appserver")
-async def _sio_get_extension_request_cards(sid, data):
-    """Mirror of GET /api/extensions/{id}/request_cards"""
-    try:
-        eid = data.get("extension_id", "")
-        result = await api_extension_request_cards(eid)
-        if isinstance(result, JSONResponse):
-            try:
-                body = json.loads(result.body.decode("utf-8"))
-                return {"ok": False, **body}
-            except Exception:
-                return _sio_error("Extension request-card config unavailable")
-        return result
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_extension_ui_features", namespace="/appserver")
-async def _sio_get_extension_ui_features(sid, data):
-    """Return generic manifest-driven frontend behavior flags for one extension."""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        extension_id = str(payload.get("extension_id") or "").strip()
-        if not extension_id:
-            return _sio_error("Missing required field: extension_id")
-        info = ext_loader.get_extension_info(extension_id)
-        if not isinstance(info, dict):
-            return _sio_error(f"Extension not found: {extension_id}")
-        return {
-            "ok": True,
-            "extension_id": extension_id,
-            "ui_features": ext_loader.get_extension_ui_features(extension_id),
-        }
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_extension_plan", namespace="/appserver")
-async def _sio_get_extension_plan(sid, data):
-    """Mirror of GET /api/extensions/{id}/plan"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        eid = payload.get("extension_id", "")
-        conversation_id = payload.get("conversation_id")
-        result = await api_extension_plan(extension_id=eid, conversation_id=conversation_id)
-        if isinstance(result, JSONResponse):
-            try:
-                body = json.loads(result.body.decode("utf-8"))
-                return {"ok": False, **body}
-            except Exception:
-                return _sio_error("Failed to read extension plan")
-        return result
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_sessions", namespace="/appserver")
-async def _sio_get_sessions(sid, data):
-    """Generic: list sessions for any extension."""
-    try:
-        ext_id = data.get("extension_id", "")
-        if not ext_id or not ext_loader.has_extension(ext_id):
-            return _sio_error(f"Unknown extension: {ext_id}")
-        return await ext_loader.list_sessions(ext_id, cwd=data.get("cwd"))
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("session_resume", namespace="/appserver")
-async def _sio_session_resume(sid, data):
-    """Generic: resume session for any extension."""
-    try:
-        ext_id = data.get("extension_id", "")
-        if not ext_id or not ext_loader.has_extension(ext_id):
-            return _sio_error(f"Unknown extension: {ext_id}")
-        session_id = data.get("session_id")
-        if not session_id:
-            return _sio_error("Missing session_id")
-        conversation_id = data.get("conversation_id") or await _ensure_conversation()
-        bind_settings = _merge_extension_bind_settings(
-            conversation_id,
-            cwd=data.get("cwd"),
-            model=data.get("model"),
-            settings=data.get("settings"),
-        )
-        # 1. Bind
-        result = await ext_loader.resume_session_with_history(
-            ext_id, session_id=session_id, conversation_id=conversation_id,
-            cwd=data.get("cwd"), model=data.get("model"),
-            settings=bind_settings,
-        )
-        if not result.get("ok"):
-            return result
-        # 2. Hydrate transcript (like bind-rollout)
-        items = await ext_loader.hydrate_transcript(
-            ext_id, session_id=session_id, conversation_id=conversation_id,
-            cwd=data.get("cwd"), model=data.get("model"),
-            settings=bind_settings,
-        )
-        if items:
-            await _write_transcript_entries(conversation_id, items)
-        result["history_count"] = len(items)
-        return result
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_status", namespace="/appserver")
-async def _sio_get_status(sid, data):
-    """Mirror of GET /api/appserver/status"""
-    try:
-        return await api_appserver_status()
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_host_ui", namespace="/appserver")
-async def _sio_get_host_ui(sid, data):
-    """Mirror of GET /api/host/ui"""
-    try:
-        return await api_host_ui_get()
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("sidebar_recheck", namespace="/appserver")
-async def _sio_sidebar_recheck(sid, data):
-    """Best-effort frontend-triggered sidebar connection recheck."""
-    try:
-        return await _sidebar_recheck_status()
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("app_start", namespace="/appserver")
-async def _sio_app_start(sid, data):
-    """Mirror of POST /api/appserver/start"""
-    try:
-        return await api_appserver_start()
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("app_stop", namespace="/appserver")
-async def _sio_app_stop(sid, data):
-    """Mirror of POST /api/appserver/stop"""
-    try:
-        return await api_appserver_stop()
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("app_initialize", namespace="/appserver")
-async def _sio_app_initialize(sid, data):
-    """Mirror of POST /api/appserver/initialize"""
-    try:
-        return await api_appserver_initialize()
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("approval_record", namespace="/appserver")
-async def _sio_approval_record(sid, data):
-    """Mirror of POST /api/appserver/approval_record"""
-    try:
-        return await api_appserver_approval_record(data)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("approval_response", namespace="/appserver")
-async def _sio_approval_response(sid, data):
-    """Mirror of POST /api/appserver/approval_response."""
-    try:
-        return await api_appserver_approval_response(data)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("fs_list", namespace="/appserver")
-async def _sio_fs_list(sid, data):
-    """Mirror of GET /api/fs/list"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        return await api_fs_list(path=payload.get("path"))
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("fs_search", namespace="/appserver")
-async def _sio_fs_search(sid, data):
-    """Mirror of GET /api/fs/search"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        try:
-            limit = int(payload.get("limit", 200) or 200)
-        except Exception:
-            return _sio_error("limit must be an integer")
-        return await api_fs_search(
-            query=str(payload.get("query") or ""),
-            root=payload.get("root"),
-            limit=min(max(limit, 1), 200),
-        )
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("agent_pty_resize", namespace="/appserver")
-async def _sio_agent_pty_resize(sid, data):
-    """Mirror of POST /api/mcp/agent-pty/resize"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        return await api_mcp_agent_pty_resize(payload)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_pty_raw_tail", namespace="/appserver")
-async def _sio_get_pty_raw_tail(sid, data):
-    """Mirror of GET /api/pty/raw_tail"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        try:
-            max_bytes = int(payload.get("max_bytes", 65536) or 65536)
-        except Exception:
-            return _sio_error("max_bytes must be an integer")
-        return await api_pty_raw_tail(
-            conversation_id=payload.get("conversation_id"),
-            max_bytes=max_bytes,
-        )
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_pty_fws_tail", namespace="/appserver")
-async def _sio_get_pty_fws_tail(sid, data):
-    """Mirror of GET /api/pty/fws_tail"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        try:
-            tail_lines = int(payload.get("tail_lines", 200) or 200)
-        except Exception:
-            return _sio_error("tail_lines must be an integer")
-        return await api_pty_fws_tail(
-            conversation_id=payload.get("conversation_id"),
-            tail_lines=tail_lines,
-        )
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("pty_stdin", namespace="/appserver")
-async def _sio_pty_stdin(sid, data):
-    """Mirror of POST /api/pty/stdin"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        return await api_pty_stdin(payload)
-    except HTTPException as e:
-        return _sio_error(e.detail)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_transcript", namespace="/appserver")
-async def _sio_get_transcript(sid, data):
-    """Mirror of GET /api/appserver/transcript"""
-    try:
-        cid = data.get("conversation_id")
-        return await api_appserver_transcript(conversation_id=cid)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_transcript_range", namespace="/appserver")
-async def _sio_get_transcript_range(sid, data):
-    """Mirror of GET /api/appserver/transcript/range"""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        cid = payload.get("conversation_id")
-        offset = payload.get("offset", 0)
-        limit = payload.get("limit", 120)
-        include_internal = _coerce_query_bool(payload.get("include_internal", False))
-        return await api_appserver_transcript_range(
-            conversation_id=cid,
-            offset=offset,
-            limit=min(limit, 500),
-            include_internal=include_internal,
-        )
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_extension_models", namespace="/appserver")
-async def _sio_get_extension_models(sid, data):
-    """Generic: list models for any extension."""
-    try:
-        ext_id = data.get("extension_id", "")
-        if not ext_id or not ext_loader.has_extension(ext_id):
-            return _sio_error(f"Unknown extension: {ext_id}")
-        return await ext_loader.list_models(ext_id)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("te2_agent_open", namespace="/appserver")
-async def _sio_te2_agent_open(sid, data):
-    """User-initiated file open → sidebar:agent_open to TE2."""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        print(f"[Sidebar] te2_agent_open received: {payload}")
-        await _emit_sidebar_agent_open(payload)
-        return {"ok": True}
-    except Exception as e:
-        print(f"[Sidebar] te2_agent_open error: {e}")
-        return _sio_error(str(e))
-
-
-async def _open_external_http_url(url: str) -> tuple[bool, str]:
-    opener = shutil.which("xdg-open")
-    if not opener:
-        return False, "xdg-open not found"
-    target = str(url or "").strip()
-    if not target:
-        return False, "Empty URL"
-    parsed = urllib.parse.urlparse(target)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return False, "Only http/https URLs are supported"
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            opener,
-            target,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-    except Exception as exc:
-        return False, str(exc)
-    try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1.0)
-    except asyncio.TimeoutError:
-        return True, ""
-    if proc.returncode == 0:
-        return True, ""
-    message = stderr.decode("utf-8", errors="replace").strip() if isinstance(stderr, (bytes, bytearray)) else ""
-    return False, message or f"xdg-open exited with {proc.returncode}"
-
-
-@socketio_server.on("open_external_url", namespace="/appserver")
-async def _sio_open_external_url(sid, data):
-    """User-initiated external URL open via backend xdg-open."""
-    try:
-        payload = data if isinstance(data, dict) else {}
-        url = payload.get("url")
-        ok, error = await _open_external_http_url(str(url or ""))
-        if not ok:
-            return _sio_error(error or "Failed to open URL")
-        return {"ok": True, "url": str(url or "").strip()}
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("get_log_messages", namespace="/appserver")
-async def _sio_get_log_messages(sid, data):
-    try:
-        payload = data if isinstance(data, dict) else {}
-        limit = payload.get("limit")
-        if limit is not None:
-            try:
-                limit = int(limit)
-            except Exception:
-                return _sio_error("limit must be an integer")
-        return read_records(limit=limit)
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("post_log_message", namespace="/appserver")
-async def _sio_post_log_message(sid, data):
-    try:
-        payload = data if isinstance(data, dict) else {}
-        who = str(payload.get("who") or "").strip()
-        text = str(payload.get("message") or "").strip()
-        if not who or not text:
-            return _sio_error("Both 'who' and 'message' are required")
-        record = {"ts": utc_ts(), "who": who, "message": text}
-        await append_record(record)
-        return record
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("shutdown_request", namespace="/appserver")
-async def _sio_shutdown_request(sid, data):
-    try:
-        return await api_shutdown()
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-# ── Conversation Todos ───────────────────────────────────────────────
-
-def _resolve_conversation_id(sid, data) -> str | None:
-    if isinstance(data, dict) and data.get("conversation_id"):
-        return str(data["conversation_id"]).strip() or None
-    return None
-
-
-@socketio_server.on("todo_list", namespace="/appserver")
-async def _sio_todo_list(sid, data):
-    try:
-        cid = _resolve_conversation_id(sid, data)
-        if not cid:
-            return _sio_error("no conversation")
-        status = data.get("status") if isinstance(data, dict) else None
-        return {"ok": True, "todos": _conv_todos.list_todos(cid, status=status)}
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("todo_add", namespace="/appserver")
-async def _sio_todo_add(sid, data):
-    try:
-        cid = _resolve_conversation_id(sid, data)
-        if not cid:
-            return _sio_error("no conversation")
-        title = (data.get("title") or "").strip() if isinstance(data, dict) else ""
-        if not title:
-            return _sio_error("title required")
-        desc = data.get("description", "") if isinstance(data, dict) else ""
-        status = data.get("status", "pending") if isinstance(data, dict) else "pending"
-        todo = _conv_todos.add_todo(cid, title, description=desc, status=status)
-        return {"ok": True, "todo": todo}
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("todo_update", namespace="/appserver")
-async def _sio_todo_update(sid, data):
-    try:
-        cid = _resolve_conversation_id(sid, data)
-        if not cid:
-            return _sio_error("no conversation")
-        if not isinstance(data, dict) or "id" not in data:
-            return _sio_error("id required")
-        todo_id = int(data["id"])
-        result = _conv_todos.update_todo(
-            cid,
-            todo_id,
-            title=data.get("title"),
-            description=data.get("description"),
-            status=data.get("status"),
-        )
-        if result is None:
-            return _sio_error("todo not found")
-        return {"ok": True, "todo": result}
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("todo_remove", namespace="/appserver")
-async def _sio_todo_remove(sid, data):
-    try:
-        cid = _resolve_conversation_id(sid, data)
-        if not cid:
-            return _sio_error("no conversation")
-        if not isinstance(data, dict) or "id" not in data:
-            return _sio_error("id required")
-        todo_id = int(data["id"])
-        removed = _conv_todos.remove_todo(cid, todo_id)
-        return {"ok": True, "removed": removed}
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("todo_toggle", namespace="/appserver")
-async def _sio_todo_toggle(sid, data):
-    try:
-        cid = _resolve_conversation_id(sid, data)
-        if not cid:
-            return _sio_error("no conversation")
-        if not isinstance(data, dict) or "id" not in data:
-            return _sio_error("id required")
-        todo_id = int(data["id"])
-        result = _conv_todos.toggle_todo(cid, todo_id)
-        if result is None:
-            return _sio_error("todo not found")
-        return {"ok": True, "todo": result}
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-@socketio_server.on("todo_ready", namespace="/appserver")
-async def _sio_todo_ready(sid, data):
-    try:
-        cid = _resolve_conversation_id(sid, data)
-        if not cid:
-            return _sio_error("no conversation")
-        return {"ok": True, "todos": _conv_todos.list_ready(cid)}
-    except Exception as e:
-        return _sio_error(str(e))
-
-
-# ── End Socket.IO handlers ───────────────────────────────────────────
-
-app.include_router(fws_ui.router, dependencies=[Depends(lambda: _ensure_framework_shells_secret())])
-
 # --- Config & State ---
 LOG_PATH: Optional[Path] = None
 _lock = asyncio.Lock()
 _config_lock = asyncio.Lock()
-_appserver_shell_id: Optional[str] = None
-_appserver_reader_task: Optional[asyncio.Task] = None
 _appserver_turn_state: Dict[str, Dict[str, Any]] = {}
 _appserver_item_state: Dict[str, Dict[str, Any]] = {}
-_appserver_raw_buffer: List[str] = []
 _approval_item_cache: Dict[str, Dict[str, Any]] = {}
 _approval_request_map: Dict[str, str] = {}
-_appserver_rpc_waiters: Dict[str, asyncio.Future] = {}
-_pending_turn_starts: Dict[str, Dict[str, Any]] = {}  # request_id -> original payload for auto-resume
-_appserver_initialized = False
-_shell_call_ids: Dict[str, Dict[str, Any]] = {}  # Track active shell commands for streaming
-_model_list_cache: Optional[List[Dict[str, Any]]] = None
-_model_list_cache_time: float = 0
 _agent_pty_event_tasks: Dict[str, asyncio.Task] = {}
 _agent_pty_ws_offsets: Dict[str, int] = {}
 _agent_pty_transcript_offsets: Dict[str, int] = {}
@@ -1412,298 +461,6 @@ def _default_appserver_config() -> Dict[str, Any]:
         "te2_mcp_integration": False,
         "extensions": {},
     }
-
-
-def _ensure_user_extensions_root() -> Path:
-    USER_EXTENSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    registry_path = USER_EXTENSIONS_DIR / "extensions.json"
-    if not registry_path.exists():
-        registry_path.write_text(json.dumps({"version": "1.0", "extensions": []}, indent=2) + "\n", encoding="utf-8")
-    return USER_EXTENSIONS_DIR
-
-
-def _normalize_extension_config_entry(raw: Any, default_enabled: bool) -> Dict[str, Any]:
-    if isinstance(raw, dict):
-        enabled = raw.get("enabled")
-        return {"enabled": default_enabled if enabled is None else enabled is True}
-    if isinstance(raw, bool):
-        return {"enabled": raw}
-    return {"enabled": default_enabled}
-
-
-def _normalize_extensions_config(raw: Any) -> Dict[str, Dict[str, Any]]:
-    if not isinstance(raw, dict):
-        return {}
-    normalized: Dict[str, Dict[str, Any]] = {}
-    for ext_id, value in raw.items():
-        if not isinstance(ext_id, str) or not ext_id.strip():
-            continue
-        normalized[ext_id.strip()] = _normalize_extension_config_entry(value, True)
-    return normalized
-
-
-def _seed_extension_config(cfg: Dict[str, Any]) -> bool:
-    extensions_cfg = _normalize_extensions_config(cfg.get("extensions"))
-    changed = extensions_cfg != cfg.get("extensions")
-    cfg["extensions"] = extensions_cfg
-    for info in ext_loader.list_extensions():
-        ext_id = info.get("id")
-        if not isinstance(ext_id, str) or not ext_id:
-            continue
-        default_enabled = bool(info.get("default_enabled", True))
-        current = cfg["extensions"].get(ext_id)
-        normalized = _normalize_extension_config_entry(current, default_enabled)
-        if cfg["extensions"].get(ext_id) != normalized:
-            cfg["extensions"][ext_id] = normalized
-            changed = True
-    return changed
-
-
-def _get_configured_extension_enabled(cfg: Dict[str, Any], extension_id: str, default_enabled: bool = True) -> bool:
-    extensions_cfg = _normalize_extensions_config(cfg.get("extensions"))
-    cfg["extensions"] = extensions_cfg
-    entry = extensions_cfg.get(extension_id)
-    normalized = _normalize_extension_config_entry(entry, default_enabled)
-    if entry != normalized:
-        extensions_cfg[extension_id] = normalized
-    return normalized.get("enabled") is True
-
-
-def _default_active_extension_id() -> Optional[str]:
-    for info in ext_loader.list_extensions():
-        ext_id = info.get("id") if isinstance(info, dict) else None
-        if not isinstance(ext_id, str) or not ext_id.strip():
-            continue
-        ext_id = ext_id.strip()
-        if info.get("active") is True and ext_loader.has_extension(ext_id):
-            return ext_id
-    return None
-
-
-def _conversation_agent(meta: Optional[Dict[str, Any]]) -> str:
-    settings = meta.get("settings") if isinstance(meta, dict) and isinstance(meta.get("settings"), dict) else {}
-    agent = settings.get("agent")
-    if isinstance(agent, str) and agent.strip():
-        return agent.strip()
-    return _default_active_extension_id() or ""
-
-
-def _clear_active_conversation_if_extension_inactive(cfg: Dict[str, Any]) -> bool:
-    conversation_id = cfg.get("conversation_id")
-    if not isinstance(conversation_id, str) or not conversation_id.strip():
-        return False
-    safe_id = _sanitize_conversation_id(conversation_id)
-    if not safe_id or not _conversation_meta_path(safe_id).exists():
-        return False
-    meta = _load_conversation_meta(safe_id)
-    agent = _conversation_agent(meta)
-    if not agent:
-        return False
-    info = ext_loader.get_extension_info(agent)
-    if not info:
-        cfg["conversation_id"] = None
-        cfg["thread_id"] = None
-        cfg["turn_id"] = None
-        cfg["active_view"] = "splash"
-        return True
-    if ext_loader.has_extension(agent):
-        return False
-    cfg["conversation_id"] = None
-    cfg["thread_id"] = None
-    cfg["turn_id"] = None
-    cfg["active_view"] = "splash"
-    return True
-
-
-def _extension_unavailable_detail(extension_id: str) -> Optional[str]:
-    extension_id = str(extension_id or "").strip()
-    if not extension_id:
-        return "No active extension available"
-    if extension_id == "codex":
-        return "Legacy builtin Codex is disabled"
-    info = ext_loader.get_extension_info(extension_id)
-    if not isinstance(info, dict):
-        return f"Extension unavailable: {extension_id}"
-    if info.get("enabled") is not True:
-        return f"Extension disabled: {extension_id}"
-    status = str(info.get("dependency_status") or "").strip().lower()
-    message = info.get("dependency_message")
-    if status in {"unmet", "error"}:
-        if isinstance(message, str) and message.strip():
-            return message.strip()
-        return f"Extension dependencies unmet: {extension_id}"
-    if not ext_loader.has_extension(extension_id):
-        return f"Extension unavailable: {extension_id}"
-    return None
-
-
-def _extension_unavailable_action(extension_id: str) -> Optional[Dict[str, Any]]:
-    info = ext_loader.get_extension_info(extension_id)
-    if not isinstance(info, dict):
-        return None
-    details = info.get("dependency_details") if isinstance(info.get("dependency_details"), dict) else {}
-    if details.get("auth_required") and not details.get("authenticated"):
-        return {
-            "id": "open_splash_settings",
-            "label": "Open Splash Settings",
-            "extension_id": extension_id,
-        }
-    return None
-
-
-def _build_extension_unavailable_warning_event(extension_id: str, detail: Optional[str] = None) -> Dict[str, Any]:
-    message = detail.strip() if isinstance(detail, str) and detail.strip() else f"Extension unavailable: {extension_id}"
-    action = _extension_unavailable_action(extension_id)
-    if action and "splash settings" not in message.lower():
-        message = f"{message} Open splash settings to configure."
-    event = {
-        "type": "warning",
-        "message": message,
-    }
-    if action:
-        event["action"] = action
-    return event
-
-
-async def _emit_extension_unavailable_warning(
-    conversation_id: Optional[str],
-    extension_id: str,
-    *,
-    detail: Optional[str] = None,
-) -> None:
-    event = _build_extension_unavailable_warning_event(extension_id, detail=detail)
-    if conversation_id:
-        event["conversation_id"] = conversation_id
-    await _broadcast_appserver_ui(event)
-
-
-async def _refresh_extension_runtime_state(extension_ids: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
-    async with _config_lock:
-        cfg = _load_appserver_config()
-        changed = _seed_extension_config(cfg)
-        target_ids = [
-            info["id"]
-            for info in ext_loader.list_extensions()
-            if isinstance(info, dict) and isinstance(info.get("id"), str) and info.get("id")
-        ]
-        if extension_ids:
-            wanted = {str(ext_id).strip() for ext_id in extension_ids if isinstance(ext_id, str) and ext_id.strip()}
-            target_ids = [ext_id for ext_id in target_ids if ext_id in wanted]
-        enabled_map: Dict[str, bool] = {}
-        for ext_id in target_ids:
-            info = ext_loader.get_extension_info(ext_id) or {}
-            enabled_map[ext_id] = _get_configured_extension_enabled(
-                cfg,
-                ext_id,
-                bool(info.get("default_enabled", True)),
-            )
-        if changed:
-            _save_appserver_config(cfg)
-
-    results: Dict[str, Dict[str, Any]] = {}
-    for ext_id in target_ids:
-        ext_loader.set_extension_enabled(ext_id, enabled_map.get(ext_id, True))
-        if ext_loader.supports_dependency_check(ext_id):
-            result = await ext_loader.check_extension_dependencies(ext_id)
-        else:
-            result = {"ok": True, "status": "met", "message": "No dependency check required"}
-        ext_loader.set_extension_dependency_result(ext_id, result)
-        info = ext_loader.get_extension_info(ext_id)
-        if isinstance(info, dict):
-            results[ext_id] = info
-
-    async with _config_lock:
-        cfg = _load_appserver_config()
-        changed = _seed_extension_config(cfg)
-        if _clear_active_conversation_if_extension_inactive(cfg):
-            changed = True
-        if changed:
-            _save_appserver_config(cfg)
-
-    return results
-
-
-def _normalize_extension_package_payload(
-    payload: Any,
-    *,
-    allow_missing_source_type: bool = False,
-) -> Dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
-    source_type = str(payload.get("source_type") or "").strip().lower()
-    if not source_type and not allow_missing_source_type:
-        raise HTTPException(status_code=400, detail="Missing required field: source_type")
-    source_path = payload.get("source_path")
-    if source_path is None:
-        source_path = payload.get("path")
-    repo_url = payload.get("repo_url")
-    if repo_url is None:
-        repo_url = payload.get("url")
-    ref = payload.get("ref")
-    extension_id = payload.get("extension_id")
-    normalized = {
-        "source_type": source_type,
-        "source_path": str(source_path).strip() if isinstance(source_path, str) and source_path.strip() else None,
-        "repo_url": str(repo_url).strip() if isinstance(repo_url, str) and repo_url.strip() else None,
-        "ref": str(ref).strip() if isinstance(ref, str) and ref.strip() else None,
-        "extension_id": str(extension_id).strip() if isinstance(extension_id, str) and extension_id.strip() else None,
-        "allow_override": payload.get("allow_override") is True,
-        "install_dependencies": payload.get("install_dependencies") is True,
-        "force_reload": payload.get("force_reload") is True,
-    }
-    if normalized["source_type"] in {"path", "zip"} and not normalized["source_path"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"source_path is required for source_type={normalized['source_type']}",
-        )
-    if normalized["source_type"] == "git" and not normalized["repo_url"]:
-        raise HTTPException(status_code=400, detail="repo_url is required for source_type=git")
-    return normalized
-
-
-def _extension_package_error_detail(result: Dict[str, Any]) -> str:
-    message = result.get("message")
-    if isinstance(message, str) and message.strip():
-        return message.strip()
-    errors = result.get("errors")
-    if isinstance(errors, list):
-        texts = [str(item).strip() for item in errors if str(item).strip()]
-        if texts:
-            return "; ".join(texts)
-    return "Extension package operation failed"
-
-
-def _raise_extension_package_http_error(result: Dict[str, Any]) -> None:
-    status = str(result.get("status") or "").strip().lower()
-    detail = _extension_package_error_detail(result)
-    status_code = 400
-    if status == "not_found":
-        status_code = 404
-    elif status == "conflict":
-        status_code = 409
-    elif status == "error":
-        status_code = 500
-    raise HTTPException(status_code=status_code, detail=detail)
-
-
-async def _reload_extension_registry_runtime(
-    extension_ids: Optional[List[str]] = None,
-    *,
-    force: bool = False,
-) -> Dict[str, Dict[str, Any]]:
-    await asyncio.to_thread(
-        ext_loader.reload_extensions,
-        changed_extension_ids=extension_ids,
-        force=force,
-    )
-    return await _refresh_extension_runtime_state()
-
-
-async def _wait_for_extension_ready_if_active(extension_id: str) -> None:
-    if not ext_loader.has_extension(extension_id):
-        return
-    with suppress(Exception):
-        await ext_loader.wait_extension_ready(extension_id, timeout=60.0)
 
 
 def _load_appserver_config() -> Dict[str, Any]:
@@ -1793,14 +550,6 @@ def _sync_codex_te2_mcp_from_app_config() -> None:
     _write_codex_te2_mcp_config(cfg.get("te2_mcp_integration") is True)
 
 
-def _apply_codex_app_defaults(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    merged = dict(settings) if isinstance(settings, dict) else {}
-    if "te2_mcp_integration" not in merged:
-        cfg = _load_appserver_config()
-        merged["te2_mcp_integration"] = cfg.get("te2_mcp_integration") is True
-    return merged
-
-
 def _normalize_codex_approval_policy(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
@@ -1836,28 +585,6 @@ def _normalize_codex_thread_sandbox(value: Any) -> Optional[str]:
     }.get(normalized, normalized)
     if normalized in {"read-only", "workspace-write", "danger-full-access"}:
         return normalized
-    return None
-
-
-def _normalize_codex_turn_sandbox_policy(value: Any) -> Optional[Dict[str, Any]]:
-    if isinstance(value, dict):
-        type_name = value.get("type")
-        if type_name in {"dangerFullAccess", "readOnly", "workspaceWrite", "externalSandbox"}:
-            return dict(value)
-        return None
-    if isinstance(value, str):
-        normalized = value.strip()
-        if not normalized:
-            return None
-        if normalized == "externalSandbox":
-            return {"type": "externalSandbox"}
-        normalized = _normalize_codex_thread_sandbox(normalized)
-        if normalized == "danger-full-access":
-            return {"type": "dangerFullAccess"}
-        if normalized == "read-only":
-            return {"type": "readOnly"}
-        if normalized == "workspace-write":
-            return {"type": "workspaceWrite"}
     return None
 
 
@@ -2505,20 +1232,21 @@ def _remove_pending_approval(conversation_id: str, request_id: Any) -> bool:
     return True
 
 
-async def _resolve_codex_approval(request_id: str, resolution: Any) -> bool:
-    request_id_text = str(request_id or "").strip()
-    if not request_id_text:
-        return False
-    decision = resolution
-    if isinstance(resolution, dict):
-        if isinstance(resolution.get("result"), dict):
-            decision = resolution["result"].get("decision")
-        else:
-            decision = resolution.get("decision")
-    result = {"decision": "accept" if decision == "accept" else "decline"}
-    payload = {"id": int(request_id_text) if request_id_text.isdigit() else request_id_text, "result": result}
-    await _write_appserver(payload)
-    return True
+def _legacy_builtin_codex_disabled_detail() -> str:
+    return (
+        "Legacy builtin Codex runtime is disabled. "
+        "Use codex-ext or codex-ext-exp through the generic extension path."
+    )
+
+
+def _legacy_builtin_codex_disabled_result(**extra: Any) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "ok": False,
+        "legacy_disabled": True,
+        "error": _legacy_builtin_codex_disabled_detail(),
+    }
+    result.update(extra)
+    return result
 
 
 async def _validate_pending_approval_descriptor(
@@ -2544,29 +1272,8 @@ async def _validate_pending_approval_descriptor(
         return False
     agent = str(descriptor.get("agent") or ((meta.get("settings") or {}).get("agent") or "codex")).strip() or "codex"
     if agent == "codex":
-        current_signature = meta.get("thread_runtime_signature")
-        descriptor_signature = descriptor.get("runtime_signature")
-        if descriptor_signature and not current_signature:
-            return False
-        if descriptor_signature and current_signature and descriptor_signature != current_signature:
-            return False
-        if cfg is None:
-            async with _config_lock:
-                cfg = _load_appserver_config()
-        current_shell_id = _appserver_shell_id or cfg.get("shell_id")
-        descriptor_shell_id = descriptor.get("runtime_instance_id")
-        if descriptor_shell_id and not current_shell_id:
-            return False
-        if descriptor_shell_id and current_shell_id and descriptor_shell_id != current_shell_id:
-            return False
-        if not current_shell_id:
-            return False
-        try:
-            mgr = await _get_fws_manager()
-            shell = await mgr.get_shell(current_shell_id)
-        except Exception:
-            return False
-        return bool(shell and shell.status == "running")
+        # Builtin Codex runtime no longer exists; any surviving pending approval is stale.
+        return False
     if ext_loader.has_extension(agent):
         try:
             return bool(ext_loader.validate_pending_approval(agent, conversation_id, request_id_text, descriptor))
@@ -3955,70 +2662,6 @@ async def _get_fws_manager():
     return await get_framework_shell_manager(run_id=os.environ.get("FRAMEWORK_SHELLS_RUN_ID", "app-server"))
 
 
-async def _get_or_start_appserver_shell() -> Dict[str, Any]:
-    global _appserver_shell_id
-    _ensure_framework_shells_secret()
-    async with _config_lock:
-        cfg = _load_appserver_config()
-        if cfg.get("shell_id"):
-            _appserver_shell_id = cfg["shell_id"]
-
-    if _appserver_shell_id:
-        mgr = await _get_fws_manager()
-        shell = await mgr.get_shell(_appserver_shell_id)
-        if shell and shell.status == "running":
-            return {"shell_id": _appserver_shell_id, "status": "running", "pid": shell.pid}
-
-    # Start a new app-server shell via shellspec
-    mgr = await _get_fws_manager()
-    orch = Orchestrator(mgr)
-    cfg = _load_appserver_config()
-    cwd = cfg.get("cwd") or "."
-    command = cfg.get("app_server_command") or "codex app-server"
-    spec_path = PACKAGE_ROOT / "shellspec" / "app_server.yaml"
-    shell = await orch.start_from_ref(
-        f"{spec_path}#app_server",
-        base_dir=spec_path.parent,
-        ctx={"CWD": cwd},
-        label="app-server:codex",
-        wait_ready=False,
-    )
-    _appserver_shell_id = shell.id
-    async with _config_lock:
-        cfg = _load_appserver_config()
-        cfg["shell_id"] = shell.id
-        _save_appserver_config(cfg)
-    return {"shell_id": shell.id, "status": "running", "pid": shell.pid}
-
-
-async def _stop_appserver_shell() -> None:
-    global _appserver_shell_id
-    global _appserver_reader_task
-    global _appserver_initialized
-    _ensure_framework_shells_secret()
-    if not _appserver_shell_id:
-        cfg = _load_appserver_config()
-        _appserver_shell_id = cfg.get("shell_id")
-    if not _appserver_shell_id:
-        return
-    if _appserver_reader_task:
-        _appserver_reader_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await _appserver_reader_task
-        _appserver_reader_task = None
-    mgr = await _get_fws_manager()
-    try:
-        await mgr.terminate_shell(_appserver_shell_id, force=True)
-    except Exception:
-        pass
-    async with _config_lock:
-        cfg = _load_appserver_config()
-        cfg["shell_id"] = None
-        _save_appserver_config(cfg)
-    _appserver_shell_id = None
-    _appserver_initialized = False
-
-
 async def _get_or_start_shell_manager() -> Dict[str, Any]:
     global _shell_manager_shell_id
     _ensure_framework_shells_secret()
@@ -4156,15 +2799,6 @@ async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
         return
     evt = dict(event)
     evt_type = str(evt.get("type") or "").strip().lower()
-    if evt_type in {"shell_begin", "shell_end"}:
-        shell_state = _shell_call_ids.get(str(evt.get("id") or ""))
-        if isinstance(shell_state, dict):
-            if not evt.get("conversation_id") and shell_state.get("convo_id"):
-                evt["conversation_id"] = shell_state.get("convo_id")
-            if not evt.get("command") and shell_state.get("command"):
-                evt["command"] = shell_state.get("command")
-            if not evt.get("cwd") and shell_state.get("cwd"):
-                evt["cwd"] = shell_state.get("cwd")
     _store_conversation_preview_from_event(evt)
     try:
         await socketio_server.emit("appserver_event", evt, namespace="/appserver")
@@ -4421,19 +3055,6 @@ async def _emit_sidebar_agent_open(payload: Dict[str, Any]) -> None:
         except Exception:
             pass
         _sidebar_sio = None
-
-
-async def _broadcast_appserver_raw(message: str) -> None:
-    _appserver_raw_buffer.append(message)
-    if len(_appserver_raw_buffer) > 500:
-        _appserver_raw_buffer[:] = _appserver_raw_buffer[-500:]
-    # Write to debug log file if enabled
-    if DEBUG_MODE and DEBUG_RAW_LOG_PATH:
-        try:
-            with DEBUG_RAW_LOG_PATH.open("a", encoding="utf-8") as f:
-                f.write(message + "\n")
-        except Exception:
-            pass
 
 
 def _agent_pty_events_path(conversation_id: str) -> Path:
@@ -5754,276 +4375,6 @@ async def _route_appserver_event(
 # =============================================================================
 
 
-async def _ensure_appserver_reader(shell_id: str) -> None:
-    global _appserver_reader_task
-    if _appserver_reader_task and not _appserver_reader_task.done():
-        return
-
-    async def _reader():
-        mgr = await _get_fws_manager()
-        state = mgr.get_pipe_state(shell_id)
-        if not state or not state.process.stdin:
-            return
-        output_q = await mgr.subscribe_output_bytes(shell_id)
-        pending_label: Optional[str] = None
-        buffer = b""
-        max_buffer = 4_000_000
-
-        async def _process_line(text: str) -> None:
-            nonlocal pending_label
-            text = text.strip()
-            if not text:
-                return
-            await _broadcast_appserver_raw(text)
-
-            # Handle label + JSON on same line.
-            if "{" in text and not text.lstrip().startswith("{"):
-                prefix, rest = text.split("{", 1)
-                if prefix.strip() and rest.strip().startswith("{"):
-                    pending_label = prefix.strip()
-                    text = "{" + rest
-
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                if "/" in text or text.endswith("started") or text.endswith("completed"):
-                    pending_label = text
-                return
-
-            # JSON-RPC response (result/error) - forward as UI event
-            if isinstance(parsed, dict) and "id" in parsed and ("result" in parsed or "error" in parsed) and "method" not in parsed:
-                if pending_label:
-                    pending_label = None
-                if parsed.get("error"):
-                    error_msg = parsed.get("error", {}).get("message", "")
-                    req_id = str(parsed.get("id"))
-                    
-                    # Ignore "Already initialized" - harmless
-                    if "Already initialized" in error_msg:
-                        _pending_turn_starts.pop(req_id, None)
-                        return
-                    
-                    lowered_error = error_msg.lower()
-
-                    # Auto-resume on startup-not-ready errors for pending turn/start
-                    if (
-                        (
-                            "thread not found" in lowered_error
-                            or "conversation not found" in lowered_error
-                            or "no rollout found" in lowered_error
-                        )
-                        and req_id in _pending_turn_starts
-                    ):
-                        original_payload = _pending_turn_starts.pop(req_id)
-                        thread_id = original_payload.get("params", {}).get("threadId")
-                        if thread_id:
-                            print(
-                                f"[DEBUG] Auto-resuming thread {thread_id} after startup error: {error_msg}",
-                                flush=True,
-                            )
-                            asyncio.create_task(_auto_resume_and_retry(thread_id, original_payload))
-                            return  # Don't broadcast error to frontend
-                    
-                    # Clean up tracking for other errors
-                    _pending_turn_starts.pop(req_id, None)
-                    
-                    await _broadcast_appserver_ui({
-                        "type": "rpc_error",
-                        "id": parsed.get("id"),
-                        "message": parsed.get("error", {}).get("message"),
-                        "code": parsed.get("error", {}).get("code"),
-                    })
-                else:
-                    result = parsed.get("result")
-                    if isinstance(result, dict):
-                        thread = result.get("thread")
-                        if isinstance(thread, dict) and thread.get("id"):
-                            await _set_thread_id(str(thread.get("id")))
-                    await _broadcast_appserver_ui({
-                        "type": "rpc_response",
-                        "id": parsed.get("id"),
-                        "result": result,
-                    })
-                # Clean up pending turn/start tracking on any response
-                _pending_turn_starts.pop(str(parsed.get("id")), None)
-                waiter = _appserver_rpc_waiters.pop(str(parsed.get("id")), None)
-                if waiter and not waiter.done():
-                    waiter.set_result(parsed)
-                return
-
-            label = None
-            payload: Any = parsed
-            conversation_id = None
-            request_id: Optional[str] = None
-            if pending_label:
-                label = pending_label
-                pending_label = None
-                if isinstance(parsed, dict) and isinstance(parsed.get("msg"), dict):
-                    payload = parsed.get("msg")
-                    conversation_id = parsed.get("conversationId")
-                else:
-                    payload = parsed
-            elif isinstance(parsed, dict):
-                if "method" in parsed:
-                    label = parsed.get("method")
-                    payload = parsed.get("params", parsed)
-                    if parsed.get("id") is not None:
-                        request_id = str(parsed.get("id"))
-                elif isinstance(parsed.get("msg"), dict):
-                    msg = parsed.get("msg", {})
-                    label = f"codex/event/{msg.get('type', 'event')}"
-                    payload = msg
-                    conversation_id = parsed.get("conversationId")
-                elif "type" in parsed:
-                    label = str(parsed.get("type"))
-                    payload = parsed
-            if isinstance(parsed, dict) and parsed.get("conversationId"):
-                conversation_id = parsed.get("conversationId")
-            if isinstance(payload, dict):
-                conversation_id = conversation_id or payload.get("threadId") or payload.get("thread_id")
-                if not conversation_id and isinstance(payload.get("thread"), dict):
-                    conversation_id = payload["thread"].get("id")
-                if request_id is not None:
-                    payload["_request_id"] = request_id
-
-            resolved_convo_id, events = await _route_appserver_event(label, payload, conversation_id, request_id)
-            for event in events:
-                # Include conversation_id in every event so frontend can filter
-                if resolved_convo_id:
-                    event["conversation_id"] = resolved_convo_id
-                await _broadcast_appserver_ui(event)
-
-        try:
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(output_q.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    state = mgr.get_pipe_state(shell_id)
-                    if not state or state.process.returncode is not None:
-                        break
-                    continue
-                if not chunk:
-                    state = mgr.get_pipe_state(shell_id)
-                    if not state or state.process.returncode is not None:
-                        break
-                    continue
-                buffer += chunk
-                if len(buffer) > max_buffer and b"\n" not in buffer:
-                    await _broadcast_appserver_raw("[warn] dropping oversized line")
-                    buffer = b""
-                    continue
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    try:
-                        await _process_line(line.decode("utf-8", errors="replace"))
-                    except Exception:
-                        continue
-            if buffer:
-                try:
-                    await _process_line(buffer.decode("utf-8", errors="replace"))
-                except Exception:
-                    pass
-        except Exception:
-            return
-        finally:
-            with suppress(Exception):
-                await mgr.unsubscribe_output_bytes(shell_id, output_q)
-
-    _appserver_reader_task = asyncio.create_task(_reader(), name="appserver-stdout-reader")
-
-
-async def _write_appserver(payload: Dict[str, Any]) -> None:
-    shell_id = _appserver_shell_id
-    if not shell_id:
-        cfg = _load_appserver_config()
-        shell_id = cfg.get("shell_id")
-    if not shell_id:
-        raise HTTPException(status_code=409, detail="app-server not running")
-    mgr = await _get_fws_manager()
-    state = mgr.get_pipe_state(shell_id)
-    if not state or not state.process.stdin:
-        raise HTTPException(status_code=409, detail="app-server pipe not available")
-    line = json.dumps(payload, ensure_ascii=False)
-    print(f"[DEBUG] Writing to appserver stdin: {line[:200]}...")
-    try:
-        await mgr.write_to_pipe(shell_id, line + "\n")
-    except (KeyError, RuntimeError) as exc:
-        raise HTTPException(status_code=409, detail="app-server pipe not available") from exc
-    print(f"[DEBUG] Write complete")
-
-
-def _inject_codex_runtime_settings(
-    params: Dict[str, Any],
-    method: str,
-    settings: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
-    if not isinstance(params, dict):
-        params = {}
-    settings = _apply_codex_app_defaults(settings)
-    approval_value = _normalize_codex_approval_policy(settings.get("approvalPolicy"))
-
-    if method == "turn/start":
-        for key in ("model", "cwd", "summary"):
-            if key in settings and settings[key] and key not in params:
-                params[key] = settings[key]
-        if approval_value and "approvalPolicy" not in params:
-            params["approvalPolicy"] = approval_value
-        if "sandboxPolicy" not in params:
-            sandbox_policy = _normalize_codex_turn_sandbox_policy(
-                settings.get("sandboxPolicy") or settings.get("sandbox")
-            )
-            if sandbox_policy:
-                params["sandboxPolicy"] = sandbox_policy
-        effort = settings.get("effort") or settings.get("reasoning_effort")
-        if effort and "effort" not in params:
-            params["effort"] = effort
-        return params
-
-    if method in ("thread/start", "thread/resume"):
-        for key in ("model", "cwd"):
-            if key in settings and settings[key] and key not in params:
-                params[key] = settings[key]
-        if approval_value and "approvalPolicy" not in params:
-            params["approvalPolicy"] = approval_value
-        if "sandbox" not in params:
-            sandbox_value = _normalize_codex_thread_sandbox(
-                settings.get("sandbox") or settings.get("sandboxPolicy")
-            )
-            if sandbox_value:
-                params["sandbox"] = sandbox_value
-        if method == "thread/start":
-            effort = settings.get("effort") or settings.get("reasoning_effort")
-            if effort and "reasoningEffort" not in params:
-                params["reasoningEffort"] = effort
-        effective_developer_instructions = build_effective_prompt_context(
-            settings.get("developer_instructions"),
-            te2_enabled=te2_mcp_integration_enabled(settings),
-            cwd=settings.get("cwd") if isinstance(settings, dict) else None,
-        )
-        if effective_developer_instructions and "developerInstructions" not in params:
-            params["developerInstructions"] = effective_developer_instructions
-        effective_config = build_codex_thread_config(
-            settings.get("config"),
-            te2_enabled=te2_mcp_integration_enabled(settings),
-            base_url=_te2_base_url() if te2_mcp_integration_enabled(settings) else None,
-        )
-        if effective_config:
-            current_config = params.get("config")
-            if isinstance(current_config, dict):
-                merged_config = dict(current_config)
-                merged_config.update(effective_config)
-                current_mcp = current_config.get("mcp_servers")
-                next_mcp = effective_config.get("mcp_servers")
-                if isinstance(current_mcp, dict) and isinstance(next_mcp, dict):
-                    merged_mcp = dict(current_mcp)
-                    merged_mcp.update(next_mcp)
-                    merged_config["mcp_servers"] = merged_mcp
-                params["config"] = merged_config
-            elif "config" not in params:
-                params["config"] = effective_config
-    return params
-
-
 def _materialize_extension_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(settings, dict):
         return {}
@@ -6031,62 +4382,6 @@ def _materialize_extension_runtime_settings(settings: Optional[Dict[str, Any]]) 
     if te2_mcp_integration_enabled(merged):
         merged["te2_base_url"] = _te2_base_url()
     return merged
-
-
-def _codex_thread_runtime_signature(settings: Optional[Dict[str, Any]]) -> str:
-    effective_settings = _apply_codex_app_defaults(settings)
-    effective_config = build_codex_thread_config(
-        effective_settings.get("config"),
-        te2_enabled=te2_mcp_integration_enabled(effective_settings),
-        base_url=_te2_base_url() if te2_mcp_integration_enabled(effective_settings) else None,
-        force_te2_mcp_entry=True,
-    )
-    payload = {
-        "model": effective_settings.get("model"),
-        "cwd": effective_settings.get("cwd"),
-        "approvalPolicy": _normalize_codex_approval_policy(effective_settings.get("approvalPolicy")),
-        "sandbox": _normalize_codex_thread_sandbox(
-            effective_settings.get("sandbox") or effective_settings.get("sandboxPolicy")
-        ),
-        "developerInstructions": build_effective_prompt_context(
-            effective_settings.get("developer_instructions"),
-            te2_enabled=te2_mcp_integration_enabled(effective_settings),
-            cwd=effective_settings.get("cwd"),
-        ),
-        "config": effective_config,
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
-
-
-def _build_codex_thread_reconfigure_params(thread_id: str, settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    effective_settings = _apply_codex_app_defaults(settings)
-    params: Dict[str, Any] = {"threadId": thread_id}
-    for key in ("model", "cwd"):
-        value = effective_settings.get(key)
-        if value:
-            params[key] = value
-    approval_value = _normalize_codex_approval_policy(effective_settings.get("approvalPolicy"))
-    if approval_value:
-        params["approvalPolicy"] = approval_value
-    sandbox_value = _normalize_codex_thread_sandbox(
-        effective_settings.get("sandbox") or effective_settings.get("sandboxPolicy")
-    )
-    if sandbox_value:
-        params["sandbox"] = sandbox_value
-    params["developerInstructions"] = build_effective_prompt_context(
-        effective_settings.get("developer_instructions"),
-        te2_enabled=te2_mcp_integration_enabled(effective_settings),
-        cwd=effective_settings.get("cwd"),
-    )
-    params["config"] = build_codex_thread_config(
-        effective_settings.get("config"),
-        te2_enabled=te2_mcp_integration_enabled(effective_settings),
-        base_url=_te2_base_url() if te2_mcp_integration_enabled(effective_settings) else None,
-        force_te2_mcp_entry=True,
-    )
-    return params
 
 
 def _merge_extension_bind_settings(
@@ -6110,74 +4405,6 @@ def _merge_extension_bind_settings(
         merged["model"] = model
     return _materialize_extension_runtime_settings(merged)
 
-
-async def _auto_resume_and_retry(thread_id: str, original_payload: Dict[str, Any]) -> None:
-    """Auto-resume a thread and retry the original turn/start request.
-    
-    Called when codex-app-server returns a startup-not-ready error for turn/start.
-    Silently resumes the thread and re-sends the original request.
-    """
-    try:
-        # Build thread/resume request
-        resume_payload: Dict[str, Any] = {
-            "params": {"threadId": thread_id}
-        }
-        
-        # Inject settings from SSOT (same logic as in api_appserver_rpc)
-        async with _config_lock:
-            cfg = _load_appserver_config()
-        convo_id = cfg.get("conversation_id")
-        if convo_id:
-            meta = _load_conversation_meta(convo_id)
-            settings = meta.get("settings", {})
-            resume_payload["params"] = _inject_codex_runtime_settings(
-                resume_payload["params"],
-                "thread/resume",
-                settings,
-            )
-        
-        print(f"[DEBUG] Sending thread/resume for {thread_id}")
-        await _rpc_request("thread/resume", params=resume_payload["params"], timeout=10.0)
-        
-        # Re-send original turn/start with a new request ID
-        retry_id = int(datetime.now(timezone.utc).timestamp() * 1000) + 1
-        retry_payload = original_payload.copy()
-        retry_payload["id"] = retry_id
-        
-        print(f"[DEBUG] Retrying turn/start after resume: {retry_payload}")
-        await _write_appserver(retry_payload)
-        
-    except Exception as e:
-        print(f"[ERROR] Auto-resume failed for thread {thread_id}: {e}")
-
-
-async def _ensure_appserver_initialized() -> None:
-    global _appserver_initialized
-    if _appserver_initialized:
-        return
-    try:
-        await _write_appserver({
-            "id": 0,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "agent_log_server",
-                    "title": "Agent Log Server",
-                    "version": "0.1.0"
-                }
-            }
-        })
-        await _write_appserver({
-            "method": "initialized",
-            "params": {}
-        })
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, dict) else {}
-        if isinstance(detail, dict) and detail.get("message") == "Already initialized":
-            _appserver_initialized = True
-            return
-        raise
-    _appserver_initialized = True
 
 class ConnectionManager:
     def __init__(self):
@@ -7943,31 +6170,7 @@ async def api_appserver_transcript_range(
 
 @app.get("/api/appserver/rollouts")
 async def api_appserver_rollouts():
-    info = await _get_or_start_appserver_shell()
-    await _ensure_appserver_reader(info["shell_id"])
-    await _ensure_appserver_initialized()
-    try:
-        response = await _rpc_request("thread/list", params={"limit": 200}, timeout=15.0)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="thread/list timed out")
-    # _rpc_request already extracts the "result" key, so response is the result directly
-    items_raw = []
-    if isinstance(response, dict):
-        items_raw = response.get("data") or []
-    items: List[Dict[str, Any]] = []
-    for item in items_raw:
-        if not isinstance(item, dict):
-            continue
-        rid = str(item.get("id") or "")
-        preview = str(item.get("preview") or "")
-        cwd = item.get("cwd")
-        items.append({
-            "id": rid,
-            "short_id": rid[-8:] if len(rid) > 8 else rid,
-            "preview": preview,
-            "cwd": cwd,
-        })
-    return {"items": items}
+    return _legacy_builtin_codex_disabled_result(ok=True, items=[])
 
 
 @app.get("/api/appserver/rollouts/{rollout_id}/preview")
@@ -8051,57 +6254,17 @@ async def api_appserver_thread_kill():
 
 @app.post("/api/appserver/stop")
 async def api_appserver_stop():
-    await _stop_appserver_shell()
-    return {"ok": True}
+    return _legacy_builtin_codex_disabled_result(ok=True)
 
 
 @app.post("/api/appserver/start")
 async def api_appserver_start():
-    info = await _get_or_start_appserver_shell()
-    await _ensure_appserver_reader(info["shell_id"])
-    # Persist current app-server shell id into the SSOT conversation meta so
-    # a fresh frontend session can decide whether a `thread/resume` is needed.
-    try:
-        async with _config_lock:
-            cfg = _load_appserver_config()
-        convo_id = cfg.get("conversation_id")
-        if isinstance(convo_id, str) and convo_id and _conversation_meta_path(convo_id).exists():
-            meta = _load_conversation_meta(convo_id)
-            settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
-            if settings.get("appserver_shell_id") != info["shell_id"]:
-                settings["appserver_shell_id"] = info["shell_id"]
-                meta["settings"] = settings
-                _save_conversation_meta(convo_id, meta)
-    except Exception:
-        pass
-    return {"ok": True, **info}
+    return _legacy_builtin_codex_disabled_result(ok=True, running=False)
 
 
 @app.get("/api/appserver/status")
 async def api_appserver_status():
-    _ensure_framework_shells_secret()
-    cfg = _load_appserver_config()
-    shell_id = cfg.get("shell_id")
-    if not shell_id:
-        return {"running": False}
-    mgr = await _get_fws_manager()
-    shell = await mgr.get_shell(shell_id)
-    if shell and shell.status == "running":
-        # Best-effort: keep SSOT in sync with the live app-server shell id so a
-        # brand new frontend session can decide whether it must `thread/resume`.
-        try:
-            convo_id = cfg.get("conversation_id")
-            if isinstance(convo_id, str) and convo_id and _conversation_meta_path(convo_id).exists():
-                meta = _load_conversation_meta(convo_id)
-                settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
-                if settings.get("appserver_shell_id") != shell_id:
-                    settings["appserver_shell_id"] = shell_id
-                    meta["settings"] = settings
-                    _save_conversation_meta(convo_id, meta)
-        except Exception:
-            pass
-        return {"running": True, "shell_id": shell_id, "pid": shell.pid}
-    return {"running": False, "shell_id": shell_id}
+    return _legacy_builtin_codex_disabled_result(ok=True, running=False, shell_id=None)
 
 
 @app.post("/api/mcp/agent-pty/start")
@@ -8249,35 +6412,19 @@ class AppserverMessageIn(BaseModel):
 
 @app.post("/api/appserver/message")
 async def api_appserver_message(payload: AppserverMessageIn):
-    """
-    Unified message endpoint - send a message to any conversation.
-    
-    Handles all thread logic internally:
-    1. Lookup thread_id from conversation meta
-    2. Resume thread if it exists but not in memory
-    3. Start new thread if none exists
-    4. Send turn/start with the message
-    
-    Returns: { ok: bool, thread_id: str, error?: str }
-    """
     convo_id = payload.conversation_id
     text = payload.text
-    
+
     if not convo_id or not text:
         raise HTTPException(status_code=400, detail="conversation_id and text required")
-    
-    # Load conversation meta
+
     meta = _load_conversation_meta(convo_id)
     if not meta:
         raise HTTPException(status_code=404, detail=f"Conversation not found: {convo_id}")
-    
+
     settings = meta.get("settings", {})
     agent_type = _conversation_agent(meta)
     runtime_settings = _materialize_extension_runtime_settings(settings)
-    unavailable_detail = _extension_unavailable_detail(agent_type)
-    if unavailable_detail:
-        await _emit_extension_unavailable_warning(convo_id, agent_type or "unknown", detail=unavailable_detail)
-        raise HTTPException(status_code=409, detail=unavailable_detail)
     if ext_loader.has_extension(agent_type):
         _buffer_user_message(convo_id, text, agent_type)
         try:
@@ -8290,177 +6437,34 @@ async def api_appserver_message(payload: AppserverMessageIn):
         except Exception as exc:
             result = {"ok": False, "error": str(exc)}
         return await _apply_send_message_contract(convo_id, agent_type, result)
-    
-    # Default: route to codex-app-server
-    thread_id = meta.get("thread_id")
+
+    unavailable_detail = _extension_unavailable_detail(agent_type)
+    detail = (
+        _legacy_builtin_codex_disabled_detail()
+        if agent_type == "codex"
+        else (unavailable_detail or _legacy_builtin_codex_disabled_detail())
+    )
     _buffer_user_message(convo_id, text, agent_type)
-
-    # Generate request IDs for async turn/start writes.
-    base_id = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    # Helper to inject settings into params
-    def inject_settings(params: Dict[str, Any], method: str) -> Dict[str, Any]:
-        return _inject_codex_runtime_settings(params, method, settings)
-    
-    result: Dict[str, Any]
-    try:
-        # Ensure the codex-app-server framework shell is running and reader is attached.
-        info = await _get_or_start_appserver_shell()
-        await _ensure_appserver_reader(info["shell_id"])
-        await _ensure_appserver_initialized()
-
-        if thread_id:
-            current_signature = _codex_thread_runtime_signature(settings)
-            if meta.get("thread_runtime_signature") != current_signature:
-                resume_params = _build_codex_thread_reconfigure_params(thread_id, settings)
-                await _rpc_request("thread/resume", params=resume_params)
-                meta["thread_runtime_signature"] = current_signature
-                _save_conversation_meta(convo_id, meta)
-            # Send turn/start directly. If the thread isn't in the RPC
-            # server's memory, the reader auto-resumes via _pending_turn_starts.
-            turn_params = inject_settings({
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": text}]
-            }, "turn/start")
-            turn_payload = {
-                "id": base_id + 1,
-                "method": "turn/start",
-                "params": turn_params
-            }
-            _pending_turn_starts[str(base_id + 1)] = turn_payload.copy()
-            await _write_appserver(turn_payload)
-            result = {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
-        else:
-            # No thread yet - negotiate a new one synchronously on the backend.
-            start_params = inject_settings({}, "thread/start")
-            start_result = await _rpc_request("thread/start", params=start_params, timeout=15.0)
-            thread_id = _extract_thread_id_from_rpc_result(start_result)
-
-            if not thread_id:
-                # Fallback to persisted state if the response shape changes.
-                meta = _load_conversation_meta(convo_id)
-                thread_id = meta.get("thread_id")
-                if not thread_id:
-                    async with _config_lock:
-                        cfg = _load_appserver_config()
-                    thread_id = cfg.get("thread_id")
-
-            if not thread_id:
-                result = {"ok": False, "error": "Failed to start thread - no thread_id received"}
-            else:
-                meta["thread_id"] = thread_id
-                meta["status"] = "active"
-
-                meta["thread_runtime_signature"] = _codex_thread_runtime_signature(settings)
-                _save_conversation_meta(convo_id, meta)
-
-                async with _config_lock:
-                    cfg = _load_appserver_config()
-                    cfg["thread_id"] = thread_id
-                    _save_appserver_config(cfg)
-                
-                # Send turn/start with new thread
-                turn_params = inject_settings({
-                    "threadId": thread_id,
-                    "input": [{"type": "text", "text": text}]
-                }, "turn/start")
-                turn_payload = {
-                    "id": base_id + 1,
-                    "method": "turn/start",
-                    "params": turn_params
-                }
-                _pending_turn_starts[str(base_id + 1)] = turn_payload.copy()
-                await _write_appserver(turn_payload)
-                result = {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
-    except Exception as e:
-        result = {"ok": False, "error": str(e)}
-    return await _apply_send_message_contract(convo_id, agent_type, result)
+    await _emit_extension_unavailable_warning(convo_id, agent_type or "unknown", detail=detail)
+    return await _apply_send_message_contract(
+        convo_id,
+        agent_type,
+        _legacy_builtin_codex_disabled_result(
+            error=detail,
+            legacy_disabled=(agent_type == "codex"),
+            restore_draft=True,
+            surface_error=True,
+            error_source=agent_type or "codex",
+            error_type=("legacy_builtin_disabled" if agent_type == "codex" else "extension_unavailable"),
+        ),
+    )
 
 
 @app.post("/api/appserver/rpc")
 async def api_appserver_rpc(payload: Dict[str, Any] = Body(...)):
-    print(f"[DEBUG] /api/appserver/rpc received: {payload}")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object")
-    
-    # Route approval responses for extension agents (non-codex).
-    # JSON-RPC responses have "result" but no "method".
-    method = payload.get("method", "")
-    if not method and "result" in payload:
-        # This is a JSON-RPC response — likely an approval decision.
-        # Check if the active conversation uses an extension agent.
-        async with _config_lock:
-            cfg = _load_appserver_config()
-        cid = cfg.get("conversation_id")
-        if cid:
-            meta = _load_conversation_meta(cid)
-            agent = (meta.get("settings") or {}).get("agent", "codex")
-            if agent != "codex" and ext_loader.has_extension(agent):
-                request_id = str(payload.get("id", ""))
-                result_payload = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-                decision = result_payload.get("decision", "decline")
-                resolution = dict(result_payload)
-                resolution["decision"] = "accept" if str(decision).strip().lower() == "accept" else "decline"
-                try:
-                    ext_loader.resolve_approval(agent, request_id, resolution)
-                    return {"ok": True}
-                except Exception as e:
-                    print(f"[WARN] Extension approval routing failed: {e}")
-                    # Fall through to codex path
-    convo_id: Optional[str] = None
-    if method in ("thread/resume", "thread/start", "turn/start"):
-        async with _config_lock:
-            cfg = _load_appserver_config()
-        convo_id = cfg.get("conversation_id")
-        if convo_id:
-            meta = _load_conversation_meta(convo_id)
-            settings = meta.get("settings", {})
-            params = payload.get("params", {})
-            payload["params"] = _inject_codex_runtime_settings(params, method, settings)
-            print(f"[DEBUG] SSOT injection for {method}: {params}")
-    
-    # Inject pending command context envelope on turn/start
-    if method == "turn/start" and convo_id:
-        meta = _load_conversation_meta(convo_id)
-        buffer = meta.pop("pending_cmd_buffer", None)
-        if buffer and buffer.get("commands"):
-            _save_conversation_meta(convo_id, meta)  # Clear buffer
-            
-            # Build envelope
-            envelope_json = _build_envelope_from_buffer(buffer)
-            envelope = _META_ENVELOPE_START + envelope_json + _META_ENVELOPE_END
-            command_count = len(buffer.get("commands", []))
-            _record_last_injected_meta_envelope(convo_id, envelope_json, command_count=command_count)
-            # Debug-only: optionally surface to UI so you can see what the model saw.
-            if DEBUG_MODE:
-                try:
-                    await _broadcast_appserver_ui({
-                        "type": "meta_envelope_injected",
-                        "conversation_id": convo_id,
-                        "command_count": command_count,
-                        "envelope_json": envelope_json,
-                    })
-                except Exception:
-                    pass
-            
-            # Prepend envelope to first text input item
-            # Frontend sends: params.input = [{ type: 'text', text: '...' }]
-            params = payload.get("params", {})
-            input_items = params.get("input", [])
-            if input_items and isinstance(input_items[0], dict):
-                if input_items[0].get("type") == "text":
-                    original_text = input_items[0].get("text", "")
-                    input_items[0]["text"] = envelope + original_text
-                    print(f"[DEBUG] Meta envelope injected: {command_count} commands")
-            
-            payload["params"] = params
-    
-    # Track turn/start requests for auto-resume on "conversation not found" error
-    if method == "turn/start" and payload.get("id") is not None:
-        _pending_turn_starts[str(payload["id"])] = payload.copy()
-    
-    await _write_appserver(payload)
-    return {"ok": True}
+    return _legacy_builtin_codex_disabled_result()
 
 
 @app.post("/api/appserver/approval_record")
@@ -8597,10 +6601,9 @@ async def api_appserver_approval_response(payload: Dict[str, Any] = Body(...)):
 
     resolved = False
     if agent == "codex":
-        decision = "accept" if str(resolution.get("decision") or "decline").strip().lower() == "accept" else "decline"
-        resolution["decision"] = decision
-        resolved = await _resolve_codex_approval(request_id, resolution)
-    elif ext_loader.has_extension(agent):
+        _remove_pending_approval(conversation_id, request_id)
+        raise HTTPException(status_code=409, detail=_legacy_builtin_codex_disabled_detail())
+    if ext_loader.has_extension(agent):
         resolved = bool(ext_loader.resolve_approval(agent, request_id, resolution))
     else:
         _remove_pending_approval(conversation_id, request_id)
@@ -8646,10 +6649,9 @@ async def api_appserver_interrupt(payload: Optional[Dict[str, Any]] = Body(None)
     convo_id = _sanitize_conversation_id(convo_id)
     meta = _load_conversation_meta(convo_id)
 
-    # Route by agent type — non-codex agents use ext_loader
     agent_type = _conversation_agent(meta)
     unavailable_detail = _extension_unavailable_detail(agent_type)
-    if unavailable_detail:
+    if unavailable_detail and agent_type != "codex":
         raise HTTPException(status_code=409, detail=unavailable_detail)
     if ext_loader.has_extension(agent_type):
         result = await ext_loader.interrupt_session(agent_type, convo_id)
@@ -8662,120 +6664,27 @@ async def api_appserver_interrupt(payload: Optional[Dict[str, Any]] = Body(None)
         )
         return result
 
-    # Codex path: JSON-RPC turn/interrupt
-    info = await _get_or_start_appserver_shell()
-    await _ensure_appserver_reader(info["shell_id"])
-    await _ensure_appserver_initialized()
-    thread_id = meta.get("thread_id")
-    turn_id = meta.get("turn_id")
-    if not thread_id or not turn_id:
-        raise HTTPException(status_code=409, detail="No active turn to interrupt")
-    await _rpc_request("turn/interrupt", params={"threadId": thread_id, "turnId": turn_id})
-    await ask_user_interactions.cancel_interactions(
+    return _legacy_builtin_codex_disabled_result(
         conversation_id=convo_id,
-        turn_id=turn_id,
-        resolution={"status": "interrupted"},
+        thread_id=meta.get("thread_id"),
+        turn_id=meta.get("turn_id"),
     )
-    return {"ok": True, "thread_id": thread_id, "turn_id": turn_id, "conversation_id": convo_id}
 
 
 @app.post("/api/appserver/shell/exec")
 async def api_appserver_shell_exec(payload: Dict[str, Any] = Body(...)):
-    """Execute a shell command via codex-app-server's command/exec RPC with streaming."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
     command = payload.get("command", "")
     if not command:
         raise HTTPException(status_code=400, detail="No command provided")
-    
-    info = await _get_or_start_appserver_shell()
-    await _ensure_appserver_reader(info["shell_id"])
-    await _ensure_appserver_initialized()
-    cfg = _load_appserver_config()
-    cwd = cfg.get("cwd")
-    convo_id = cfg.get("conversation_id")
-    
-    # Generate tracking ID for streaming
-    call_id = f"shell_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-    
-    # Split command into array for shell execution
-    # Using shell=True style by wrapping in sh -c
-    cmd_array = ["sh", "-c", command]
-    
-    params = {
-        "command": cmd_array,
-        "timeoutMs": 30000,  # 30 second timeout
-        "cwd": cwd,
-        "sandboxPolicy": None,  # Use server default
-    }
-    
-    # Track this call_id for routing deltas
-    _shell_call_ids[call_id] = {"command": command, "cwd": cwd, "convo_id": convo_id}
-
-    # Emit shell_begin immediately so frontend can create streaming row
-    await _broadcast_appserver_ui({
-        "type": "shell_begin",
-        "id": call_id,
-        "command": command,
-        "cwd": cwd,
-        "conversation_id": convo_id,
-    })
-    
-    try:
-        result = await _rpc_request("command/exec", params=params, timeout=35.0)
-        exit_code = result.get("exitCode", 1)
-        stdout = result.get("stdout", "")
-        stderr = result.get("stderr", "")
-        
-        # Emit shell_end with full result
-        await _broadcast_appserver_ui({
-            "type": "shell_end",
-            "id": call_id,
-            "command": command,
-            "cwd": cwd,
-            "exitCode": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-            "conversation_id": convo_id,
-        })
-        
-        # Write to transcript
-        if convo_id:
-            await _append_transcript_entry(convo_id, {
-                "role": "shell",
-                "command": command,
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code,
-                "event": "command/exec",
-            })
-        
-        return {"exitCode": exit_code, "stdout": stdout, "stderr": stderr, "callId": call_id}
-    except Exception as e:
-        error_msg = str(e)
-        # Emit shell_end with error
-        await _broadcast_appserver_ui({
-            "type": "shell_end",
-            "id": call_id,
-            "command": command,
-            "cwd": cwd,
-            "exitCode": 1,
-            "stdout": "",
-            "stderr": error_msg,
-            "error": True,
-            "conversation_id": convo_id,
-        })
-        if convo_id:
-            await _append_transcript_entry(convo_id, {
-                "role": "shell",
-                "command": command,
-                "stdout": "",
-                "stderr": error_msg,
-                "exit_code": 1,
-                "event": "command/exec",
-                "error": True,
-            })
-        return {"exitCode": 1, "stdout": "", "stderr": error_msg, "error": error_msg, "callId": call_id}
-    finally:
-        _shell_call_ids.pop(call_id, None)
+    detail = _legacy_builtin_codex_disabled_detail()
+    return _legacy_builtin_codex_disabled_result(
+        exitCode=1,
+        stdout="",
+        stderr=detail,
+        error=detail,
+    )
 
 
 @app.post("/api/appserver/compact")
@@ -8789,10 +6698,9 @@ async def api_appserver_compact(payload: Optional[Dict[str, Any]] = Body(None)):
     if not thread_id:
         raise HTTPException(status_code=409, detail="No active thread to compact")
 
-    # Route to extension if non-legacy agent
     agent_type = _conversation_agent(meta)
     unavailable_detail = _extension_unavailable_detail(agent_type)
-    if unavailable_detail:
+    if unavailable_detail and agent_type != "codex":
         raise HTTPException(status_code=409, detail=unavailable_detail)
     if ext_loader.has_extension(agent_type):
         await _emit_command_result_mirror(
@@ -8826,47 +6734,10 @@ async def api_appserver_compact(payload: Optional[Dict[str, Any]] = Body(None)):
         )
         return {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
 
-    # Legacy codex path (DEPRECATED — will be removed)
-    info = await _get_or_start_appserver_shell()
-    await _ensure_appserver_reader(info["shell_id"])
-    await _ensure_appserver_initialized()
-    await _emit_command_result_mirror(
-        convo_id,
-        command="context compact",
-        output=f"request: sending thread/compact/start for thread {thread_id}",
-        event="thread/compact/start/request",
-        source="system",
-        shared_fields={"thread_id": thread_id, "phase": "request"},
+    return _legacy_builtin_codex_disabled_result(
+        conversation_id=convo_id,
+        thread_id=thread_id,
     )
-    try:
-        await _rpc_request("thread/compact/start", params={"threadId": thread_id})
-    except Exception as exc:
-        if isinstance(exc, HTTPException):
-            detail = exc.detail
-        else:
-            detail = str(exc)
-        detail_text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
-        await _emit_command_result_mirror(
-            convo_id,
-            command="context compact",
-            output=f"error: thread/compact/start failed for thread {thread_id}: {detail_text}",
-            event="thread/compact/start/error",
-            exit_code=1,
-            source="system",
-            shared_fields={"thread_id": thread_id, "phase": "error", "error": True},
-        )
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(status_code=500, detail=f"thread/compact/start failed: {detail_text}") from exc
-    await _emit_command_result_mirror(
-        convo_id,
-        command="context compact",
-        output=f"response: app-server accepted thread/compact/start for thread {thread_id}; waiting for thread/compacted",
-        event="thread/compact/start/response",
-        source="system",
-        shared_fields={"thread_id": thread_id, "phase": "response"},
-    )
-    return {"ok": True, "thread_id": thread_id, "conversation_id": convo_id}
 
 
 async def _process_mention(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -9276,49 +7147,12 @@ async def api_host_ui_options():
 
 @app.post("/api/appserver/initialize")
 async def api_appserver_initialize():
-    await _ensure_appserver_initialized()
-    return {"ok": True}
-
-
-async def _rpc_request(method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 6.0) -> Dict[str, Any]:
-    req_id = str(int(datetime.now(timezone.utc).timestamp() * 1000))
-    future: asyncio.Future = asyncio.get_event_loop().create_future()
-    _appserver_rpc_waiters[req_id] = future
-    payload = {"id": int(req_id), "method": method}
-    if params is not None:
-        payload["params"] = params
-    await _write_appserver(payload)
-    try:
-        result = await asyncio.wait_for(future, timeout=timeout)
-    finally:
-        _appserver_rpc_waiters.pop(req_id, None)
-    if isinstance(result, dict):
-        if result.get("error"):
-            raise HTTPException(status_code=500, detail=result.get("error"))
-        # RPC responses have the actual data nested in "result" key
-        return result.get("result", result)
-    raise HTTPException(status_code=500, detail="Invalid RPC response")
+    return _legacy_builtin_codex_disabled_result(ok=True)
 
 
 @app.get("/api/appserver/models")
 async def api_appserver_models():
-    global _model_list_cache, _model_list_cache_time
-    # Cache for 5 minutes
-    if _model_list_cache is not None and (time.time() - _model_list_cache_time) < 300:
-        return {"data": _model_list_cache}
-    
-    info = await _get_or_start_appserver_shell()
-    await _ensure_appserver_reader(info["shell_id"])
-    await _ensure_appserver_initialized()
-    response = await _rpc_request("model/list", params={})
-    
-    # _rpc_request already extracts the "result" key, so response is the result directly
-    models = response.get("data", []) if isinstance(response, dict) else []
-    if isinstance(models, list):
-        _model_list_cache = models
-        _model_list_cache_time = time.time()
-    
-    return {"data": models}
+    return _legacy_builtin_codex_disabled_result(ok=True, data=[])
 
 
 @app.get("/api/appserver/runtime_options")
@@ -9403,7 +7237,7 @@ async def api_appserver_runtime_options(
 
 @app.get("/api/appserver/debug/raw")
 async def api_appserver_debug_raw(limit: int = Query(200, gt=0, le=500)):
-    return {"items": _appserver_raw_buffer[-limit:]}
+    return {"items": []}
 
 
 @app.get("/api/appserver/debug/state")
@@ -9415,8 +7249,7 @@ async def api_appserver_debug_state():
     return {
         "config": cfg,
         "conversation": meta,
-        "shell_id": _appserver_shell_id,
-        "reader_task": _appserver_reader_task is not None and not _appserver_reader_task.done(),
+        "legacy_builtin_codex_disabled": True,
         "debug_mode": DEBUG_MODE,
         "debug_raw_log_path": str(DEBUG_RAW_LOG_PATH) if DEBUG_RAW_LOG_PATH else None,
     }
@@ -9513,476 +7346,60 @@ async def await_message(req: AwaitIn):
 # Dynamic extension loading for ACP-based agents (e.g., Gemini CLI)
 # Extensions are loaded from extensions/ and communicate via ACP protocol
 
-# Initialize extensions on startup
-def _init_extensions():
-    server_root = PACKAGE_ROOT
-    builtin_extensions_dir = Path(ext_loader.__file__).resolve().parent
-    user_extensions_dir = _ensure_user_extensions_root()
-    extension_roots = [root for root in (builtin_extensions_dir, user_extensions_dir) if root.exists()]
-    if extension_roots:
-        ext_loader.load_extensions(
-            extensions_dir=extension_roots,
-            server_root=server_root,
-            fws_getter=_get_fws_manager,
-            broadcast_fn=_broadcast_appserver_ui,
-            transcript_fn=_append_transcript_entry,
-            meta_fns={
-                "load": _load_conversation_meta,
-                "save": _save_conversation_meta,
-                "upsert_pending_approval": _upsert_pending_approval,
-                "remove_pending_approval": _remove_pending_approval,
-            },
-        )
-
-@app.get("/api/extensions")
-async def api_extensions_list():
-    """List all available extensions."""
-    return {"extensions": ext_loader.list_extensions()}
-
-
-@app.post("/api/extensions/{extension_id}/enabled")
-async def api_extension_enabled(extension_id: str, payload: Dict[str, Any] = Body(...)):
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
-    info = ext_loader.get_extension_info(extension_id)
-    if not isinstance(info, dict):
-        raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
-    if "enabled" not in payload:
-        raise HTTPException(status_code=400, detail="Missing required field: enabled")
-    enabled = payload.get("enabled") is True
-    async with _config_lock:
-        cfg = _load_appserver_config()
-        _seed_extension_config(cfg)
-        cfg["extensions"][extension_id] = _normalize_extension_config_entry(
-            cfg["extensions"].get(extension_id),
-            bool(info.get("default_enabled", True)),
-        )
-        cfg["extensions"][extension_id]["enabled"] = enabled
-        _save_appserver_config(cfg)
-    states = await _refresh_extension_runtime_state([extension_id])
-    if enabled:
-        with suppress(Exception):
-            await ext_loader.wait_extension_ready(extension_id, timeout=60.0)
-    return {"ok": True, "extension": states.get(extension_id) or ext_loader.get_extension_info(extension_id)}
-
-
-@app.post("/api/extensions/{extension_id}/install")
-async def api_extension_install(extension_id: str):
-    """Install dependencies for an already-discovered extension."""
-    info = ext_loader.get_extension_info(extension_id)
-    if not isinstance(info, dict):
-        raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
-    if not ext_loader.supports_dependency_install(extension_id):
-        raise HTTPException(status_code=409, detail=f"Extension does not support dependency install: {extension_id}")
-    result = await ext_loader.install_extension_dependencies(extension_id)
-    async with _config_lock:
-        cfg = _load_appserver_config()
-        _seed_extension_config(cfg)
-        cfg["extensions"][extension_id] = _normalize_extension_config_entry(
-            cfg["extensions"].get(extension_id),
-            bool(info.get("default_enabled", True)),
-        )
-        if result.get("ok"):
-            cfg["extensions"][extension_id]["enabled"] = True
-        _save_appserver_config(cfg)
-    states = await _refresh_extension_runtime_state([extension_id])
-    if result.get("ok"):
-        with suppress(Exception):
-            await ext_loader.wait_extension_ready(extension_id, timeout=60.0)
-    refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
-    return {"ok": bool(result.get("ok")), "result": result, "extension": refreshed}
-
-
-@app.post("/api/extensions/validate")
-async def api_extensions_validate(payload: Dict[str, Any] = Body(...)):
-    normalized = _normalize_extension_package_payload(payload)
-    result = await asyncio.to_thread(
-        ext_loader.validate_extension_source,
-        source_type=normalized["source_type"],
-        source_path=normalized["source_path"],
-        repo_url=normalized["repo_url"],
-        ref=normalized["ref"],
-        extension_id=normalized["extension_id"],
+_extension_api = ExtensionApi(
+    ExtensionApiDeps(
+        package_root=PACKAGE_ROOT,
+        user_extensions_dir=USER_EXTENSIONS_DIR,
+        config_lock=_config_lock,
+        broadcast_appserver_ui=_broadcast_appserver_ui,
+        get_fws_manager=_get_fws_manager,
+        append_transcript_entry=_append_transcript_entry,
+        load_conversation_meta=_load_conversation_meta,
+        save_conversation_meta=_save_conversation_meta,
+        upsert_pending_approval=_upsert_pending_approval,
+        remove_pending_approval=_remove_pending_approval,
+        sanitize_conversation_id=_sanitize_conversation_id,
+        conversation_meta_path=_conversation_meta_path,
+        load_appserver_config=_load_appserver_config,
+        save_appserver_config=_save_appserver_config,
+        ensure_conversation=_ensure_conversation,
+        merge_extension_bind_settings=_merge_extension_bind_settings,
+        write_transcript_entries=_write_transcript_entries,
     )
-    return result
+)
 
+_normalize_extensions_config = _extension_api.normalize_extensions_config
+_default_active_extension_id = _extension_api.default_active_extension_id
+_conversation_agent = _extension_api.conversation_agent
+_extension_unavailable_detail = _extension_api.extension_unavailable_detail
+_emit_extension_unavailable_warning = _extension_api.emit_extension_unavailable_warning
+_refresh_extension_runtime_state = _extension_api.refresh_extension_runtime_state
+_init_extensions = _extension_api.init_extensions
 
-@app.post("/api/extensions/install")
-async def api_extensions_install_package(payload: Dict[str, Any] = Body(...)):
-    normalized = _normalize_extension_package_payload(payload)
-    result = await asyncio.to_thread(
-        ext_loader.install_extension_source,
-        source_type=normalized["source_type"],
-        source_path=normalized["source_path"],
-        repo_url=normalized["repo_url"],
-        ref=normalized["ref"],
-        extension_id=normalized["extension_id"],
-        allow_override=normalized["allow_override"],
-    )
-    if not result.get("ok"):
-        _raise_extension_package_http_error(result)
-    extension_id = str(result.get("extension_id") or normalized.get("extension_id") or "").strip()
-    states = await _reload_extension_registry_runtime(
-        [extension_id] if extension_id else None,
-        force=normalized["force_reload"],
-    )
-    dependency_result = None
-    if normalized["install_dependencies"] and extension_id and ext_loader.supports_dependency_install(extension_id):
-        dependency_result = await ext_loader.install_extension_dependencies(extension_id)
-        states = await _refresh_extension_runtime_state()
-    if extension_id:
-        await _wait_for_extension_ready_if_active(extension_id)
-    refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
-    ok = bool(result.get("ok")) and (
-        dependency_result is None or bool(dependency_result.get("ok"))
-    )
-    return {
-        "ok": ok,
-        "result": result,
-        "dependency_install": dependency_result,
-        "extension": refreshed,
-    }
+api_extensions_list = _extension_api.api_extensions_list
+api_extension_enabled = _extension_api.api_extension_enabled
+api_extension_install = _extension_api.api_extension_install
+api_extensions_validate = _extension_api.api_extensions_validate
+api_extensions_install_package = _extension_api.api_extensions_install_package
+api_extension_update_package = _extension_api.api_extension_update_package
+api_extension_remove_package = _extension_api.api_extension_remove_package
+api_extensions_reload = _extension_api.api_extensions_reload
+api_extension_get = _extension_api.api_extension_get
+api_extension_settings_schema = _extension_api.api_extension_settings_schema
+api_extension_splash_schema = _extension_api.api_extension_splash_schema
+api_extension_splash_action = _extension_api.api_extension_splash_action
+api_extension_request_cards = _extension_api.api_extension_request_cards
+api_extension_asset = _extension_api.api_extension_asset
+api_extension_models = _extension_api.api_extension_models
+api_extension_plan = _extension_api.api_extension_plan
+api_extension_sessions = _extension_api.api_extension_sessions
+api_extension_session_resume = _extension_api.api_extension_session_resume
+api_extension_debug_raw = _extension_api.api_extension_debug_raw
 
-
-@app.post("/api/extensions/{extension_id}/update")
-async def api_extension_update_package(extension_id: str, payload: Dict[str, Any] = Body(...)):
-    normalized = _normalize_extension_package_payload(payload, allow_missing_source_type=True)
-    if normalized["extension_id"] and normalized["extension_id"] != extension_id:
-        raise HTTPException(status_code=400, detail="Payload extension_id does not match route extension_id")
-    result = await asyncio.to_thread(
-        ext_loader.update_extension_source,
-        extension_id,
-        source_type=normalized["source_type"] or None,
-        source_path=normalized["source_path"],
-        repo_url=normalized["repo_url"],
-        ref=normalized["ref"],
-    )
-    if not result.get("ok"):
-        _raise_extension_package_http_error(result)
-    states = await _reload_extension_registry_runtime(
-        [extension_id],
-        force=normalized["force_reload"],
-    )
-    dependency_result = None
-    if normalized["install_dependencies"] and ext_loader.supports_dependency_install(extension_id):
-        dependency_result = await ext_loader.install_extension_dependencies(extension_id)
-        states = await _refresh_extension_runtime_state()
-    await _wait_for_extension_ready_if_active(extension_id)
-    refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
-    ok = bool(result.get("ok")) and (
-        dependency_result is None or bool(dependency_result.get("ok"))
-    )
-    return {
-        "ok": ok,
-        "result": result,
-        "dependency_install": dependency_result,
-        "extension": refreshed,
-    }
-
-
-@app.delete("/api/extensions/{extension_id}")
-async def api_extension_remove_package(extension_id: str):
-    result = await asyncio.to_thread(ext_loader.remove_user_extension, extension_id)
-    if not result.get("ok"):
-        _raise_extension_package_http_error(result)
-    await _reload_extension_registry_runtime([extension_id], force=False)
-    async with _config_lock:
-        cfg = _load_appserver_config()
-        extensions_cfg = _normalize_extensions_config(cfg.get("extensions"))
-        cfg["extensions"] = extensions_cfg
-        changed = extensions_cfg.pop(extension_id, None) is not None
-        if _clear_active_conversation_if_extension_inactive(cfg):
-            changed = True
-        if changed:
-            _save_appserver_config(cfg)
-    return {
-        "ok": True,
-        "result": result,
-        "extensions": ext_loader.list_extensions(),
-    }
-
-
-@app.post("/api/extensions/reload")
-async def api_extensions_reload(payload: Dict[str, Any] = Body(default={})):
-    normalized = _normalize_extension_package_payload(
-        payload if isinstance(payload, dict) else {},
-        allow_missing_source_type=True,
-    )
-    changed_ids: List[str] = []
-    if normalized["extension_id"]:
-        changed_ids.append(normalized["extension_id"])
-    raw_ids = payload.get("extension_ids") if isinstance(payload, dict) else None
-    if isinstance(raw_ids, list):
-        for item in raw_ids:
-            if isinstance(item, str) and item.strip() and item.strip() not in changed_ids:
-                changed_ids.append(item.strip())
-    states = await _reload_extension_registry_runtime(
-        changed_ids or None,
-        force=normalized["force_reload"],
-    )
-    return {
-        "ok": True,
-        "extensions": ext_loader.list_extensions(),
-        "states": states,
-    }
-
-
-@app.get("/api/extensions/{extension_id}")
-async def api_extension_get(extension_id: str):
-    """Get extension details."""
-    if not ext_loader.has_extension(extension_id):
-        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    ext = ext_loader.get_extension_info(extension_id)
-    if isinstance(ext, dict):
-        return ext
-    return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-
-
-@app.get("/api/extensions/{extension_id}/settings_schema")
-async def api_extension_settings_schema(extension_id: str):
-    """Get settings schema for an extension."""
-    if not ext_loader.has_extension(extension_id):
-        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-
-    try:
-        dynamic_schema = await ext_loader.get_settings_schema(extension_id)
-    except Exception as e:
-        return JSONResponse({"error": f"Failed to build schema: {e}"}, status_code=500)
-    if isinstance(dynamic_schema, dict):
-        return dynamic_schema
-
-    try:
-        static_schema = ext_loader.get_static_settings_schema(extension_id)
-    except Exception as e:
-        return JSONResponse({"error": f"Failed to load schema: {e}"}, status_code=500)
-    if isinstance(static_schema, dict):
-        return static_schema
-
-    # No schema found - return empty (extension has no custom settings)
-    return {"version": "1", "fields": []}
-
-
-@app.get("/api/extensions/{extension_id}/splash_schema")
-async def api_extension_splash_schema(extension_id: str):
-    """Get splash-settings schema for an extension, even when inactive."""
-    info = ext_loader.get_extension_info(extension_id)
-    if not isinstance(info, dict):
-        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    try:
-        schema = await ext_loader.get_splash_schema(extension_id)
-    except Exception as e:
-        return JSONResponse({"error": f"Failed to build splash schema: {e}"}, status_code=500)
-    if isinstance(schema, dict):
-        schema.setdefault("extension_id", extension_id)
-        return schema
-    return {"version": "1", "extension_id": extension_id, "fields": []}
-
-
-@app.post("/api/extensions/{extension_id}/splash_action")
-async def api_extension_splash_action(extension_id: str, payload: Dict[str, Any] = Body(...)):
-    """Run a splash-settings action for an extension, even when inactive."""
-    info = ext_loader.get_extension_info(extension_id)
-    if not isinstance(info, dict):
-        raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
-    action_id = str(payload.get("action_id") or "").strip()
-    if not action_id:
-        raise HTTPException(status_code=400, detail="Missing action_id")
-    try:
-        result = await ext_loader.run_splash_action(
-            extension_id,
-            action_id=action_id,
-            payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
-        )
-        states = await _refresh_extension_runtime_state([extension_id])
-        refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
-        schema = await ext_loader.get_splash_schema(extension_id)
-        return {
-            "ok": bool(isinstance(result, dict) and result.get("ok")),
-            "result": result if isinstance(result, dict) else {"ok": False, "error": "Invalid splash action result"},
-            "extension": refreshed,
-            "schema": schema if isinstance(schema, dict) else {"version": "1", "extension_id": extension_id, "fields": []},
-        }
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/api/extensions/{extension_id}/request_cards")
-async def api_extension_request_cards(extension_id: str):
-    if not ext_loader.has_extension(extension_id):
-        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    try:
-        config = await ext_loader.get_request_cards(extension_id)
-    except Exception as e:
-        return JSONResponse({"error": f"Failed to build request-card config: {e}"}, status_code=500)
-    cards: List[Dict[str, Any]] = []
-    raw_cards = config.get("cards") if isinstance(config, dict) else None
-    if isinstance(raw_cards, list):
-        for raw_entry in raw_cards:
-            if not isinstance(raw_entry, dict):
-                continue
-            module_path = str(raw_entry.get("module") or "").strip().lstrip("/")
-            if not module_path:
-                continue
-            entry = dict(raw_entry)
-            entry["module"] = module_path
-            entry["module_url"] = f"/api/extensions/{extension_id}/assets/{module_path}"
-            entry["export"] = str(entry.get("export") or "renderRequestCard").strip() or "renderRequestCard"
-            cards.append(entry)
-    schemas = config.get("schemas") if isinstance(config, dict) and isinstance(config.get("schemas"), dict) else {}
-    return {
-        "extension_id": extension_id,
-        "cards": cards,
-        "schemas": schemas,
-    }
-
-
-@app.get("/api/extensions/{extension_id}/assets/{asset_path:path}")
-async def api_extension_asset(extension_id: str, asset_path: str):
-    asset_file = ext_loader.get_extension_asset_path(extension_id, asset_path)
-    if asset_file is None:
-        raise HTTPException(status_code=404, detail="Extension asset not found")
-    return FileResponse(asset_file)
-
-
-@app.get("/api/extensions/{extension_id}/models")
-async def api_extension_models(extension_id: str):
-    """List available models for any extension."""
-    if not ext_loader.has_extension(extension_id):
-        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    try:
-        result = await ext_loader.list_models(extension_id)
-        # Normalize: if handler returned a list, wrap it
-        if isinstance(result, list):
-            return {"models": result}
-        return result if isinstance(result, dict) else {"models": result}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/api/extensions/{extension_id}/plan")
-async def api_extension_plan(extension_id: str, conversation_id: Optional[str] = Query(None)):
-    """Read extension-backed plan state for a conversation."""
-    if not ext_loader.has_extension(extension_id):
-        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    convo_id = conversation_id
-    if not convo_id:
-        convo_id = await _ensure_conversation(create_if_missing=False)
-    if not convo_id:
-        raise HTTPException(status_code=400, detail="Missing conversation_id")
-    try:
-        result = await ext_loader.read_plan(extension_id, convo_id)
-        if isinstance(result, dict):
-            result.setdefault("conversation_id", convo_id)
-            result.setdefault("extension_id", extension_id)
-            return result
-        return {
-            "conversation_id": convo_id,
-            "extension_id": extension_id,
-            "has_plan": False,
-            "plan_exists": False,
-            "plan_content": "",
-            "plan_steps": [],
-        }
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/api/extensions/{extension_id}/sessions")
-async def api_extension_sessions(extension_id: str, cwd: Optional[str] = Query(None)):
-    """List sessions for any extension, sorted by CWD relevance if provided."""
-    if not ext_loader.has_extension(extension_id):
-        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    try:
-        sessions = await ext_loader.list_sessions(extension_id, cwd=cwd)
-        return {"sessions": sessions}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.post("/api/extensions/{extension_id}/sessions/resume")
-async def api_extension_session_resume(extension_id: str, payload: Dict[str, Any] = Body(...)):
-    """Resume an extension session into a conversation."""
-    if not ext_loader.has_extension(extension_id):
-        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    session_id = payload.get("session_id")
-    if not session_id:
-        raise HTTPException(status_code=400, detail="Missing session_id")
-    
-    conversation_id = payload.get("conversation_id")
-    if not conversation_id:
-        conversation_id = await _ensure_conversation()
-    
-    try:
-        bind_settings = _merge_extension_bind_settings(
-            conversation_id,
-            cwd=payload.get("cwd"),
-            model=payload.get("model"),
-            settings=payload.get("settings"),
-        )
-        # 1. Bind: resume the SDK session
-        result = await ext_loader.resume_session_with_history(
-            extension_id,
-            session_id=session_id,
-            conversation_id=conversation_id,
-            cwd=payload.get("cwd"),
-            model=payload.get("model"),
-            settings=bind_settings,
-        )
-        if not result.get("ok"):
-            return JSONResponse({"error": result.get("error", "Resume failed")}, status_code=500)
-        
-        # 2. Hydrate: get flat transcript entries + write to JSONL
-        items = await ext_loader.hydrate_transcript(
-            extension_id,
-            session_id=session_id,
-            conversation_id=conversation_id,
-            cwd=payload.get("cwd"),
-            model=payload.get("model"),
-            settings=bind_settings,
-        )
-        if items:
-            await _write_transcript_entries(conversation_id, items)
-
-        async with _config_lock:
-            cfg = _load_appserver_config()
-            cfg["conversation_id"] = conversation_id
-            cfg["thread_id"] = session_id
-            cfg["active_view"] = "conversation"
-            _save_appserver_config(cfg)
-        
-        return {
-            "ok": True,
-            "conversation_id": conversation_id,
-            "session_id": session_id,
-            "history_count": len(items),
-        }
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/api/extensions/{extension_id}/debug/raw")
-async def api_extension_debug_raw(extension_id: str, limit: int = Query(50, gt=0, le=200)):
-    """Get raw extension message buffer for debugging."""
-    if not ext_loader.has_extension(extension_id):
-        return JSONResponse({"error": f"Extension not found: {extension_id}"}, status_code=404)
-    try:
-        items = ext_loader.get_raw_buffer(extension_id, limit)
-        return {"items": items}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
+register_extension_api_routes(app, _extension_api)
 
 @app.post("/api/shutdown")
 async def api_shutdown():
-    try:
-        await _stop_appserver_shell()
-    except Exception:
-        pass
-    
     loop = asyncio.get_event_loop()
     loop.call_later(0.1, os._exit, 0)
     return {"ok": True}
@@ -10733,6 +8150,81 @@ def _resolve_agent_log_path(raw: str) -> Path:
         return Path.cwd() / expanded
 
     return _default_agent_log_dir() / expanded.name
+
+
+def _register_appserver_socketio() -> None:
+    register_appserver_socketio_handlers(
+        socketio_server,
+        AppserverSocketioDeps(
+            make_appserver_message_in=lambda conversation_id, text: AppserverMessageIn(
+                conversation_id=conversation_id,
+                text=text,
+            ),
+            api_appserver_message=api_appserver_message,
+            api_appserver_shell_exec=api_appserver_shell_exec,
+            api_appserver_rpc=api_appserver_rpc,
+            api_appserver_interrupt=api_appserver_interrupt,
+            api_appserver_compact=api_appserver_compact,
+            api_appserver_conversation=api_appserver_conversation,
+            api_appserver_conversation_meta=api_appserver_conversation_meta,
+            api_appserver_conversation_update=api_appserver_conversation_update,
+            api_appserver_conversation_draft=api_appserver_conversation_draft,
+            api_appserver_conversations=api_appserver_conversations,
+            api_appserver_conversation_create=api_appserver_conversation_create,
+            api_appserver_conversation_select=api_appserver_conversation_select,
+            api_appserver_conversation_delete=api_appserver_conversation_delete,
+            api_appserver_conversation_pins=api_appserver_conversation_pins,
+            api_appserver_conversation_bind_rollout=api_appserver_conversation_bind_rollout,
+            api_appserver_set_view=api_appserver_set_view,
+            api_appserver_config=api_appserver_config,
+            api_appserver_config_update=api_appserver_config_update,
+            api_appserver_models=api_appserver_models,
+            api_appserver_runtime_options=api_appserver_runtime_options,
+            api_appserver_rollouts=api_appserver_rollouts,
+            api_appserver_rollout_preview=api_appserver_rollout_preview,
+            api_appserver_status=api_appserver_status,
+            api_appserver_start=api_appserver_start,
+            api_appserver_stop=api_appserver_stop,
+            api_appserver_initialize=api_appserver_initialize,
+            api_appserver_approval_record=api_appserver_approval_record,
+            api_appserver_approval_response=api_appserver_approval_response,
+            api_appserver_transcript=api_appserver_transcript,
+            api_appserver_transcript_range=api_appserver_transcript_range,
+            api_extensions_list=api_extensions_list,
+            api_extension_enabled=api_extension_enabled,
+            api_extension_install=api_extension_install,
+            api_extensions_validate=api_extensions_validate,
+            api_extensions_install_package=api_extensions_install_package,
+            api_extension_update_package=api_extension_update_package,
+            api_extension_remove_package=api_extension_remove_package,
+            api_extensions_reload=api_extensions_reload,
+            api_extension_settings_schema=api_extension_settings_schema,
+            api_extension_splash_schema=api_extension_splash_schema,
+            api_extension_splash_action=api_extension_splash_action,
+            api_extension_request_cards=api_extension_request_cards,
+            api_extension_plan=api_extension_plan,
+            api_fs_list=api_fs_list,
+            api_fs_search=api_fs_search,
+            api_mcp_agent_pty_resize=api_mcp_agent_pty_resize,
+            api_pty_raw_tail=api_pty_raw_tail,
+            api_pty_fws_tail=api_pty_fws_tail,
+            api_pty_stdin=api_pty_stdin,
+            api_host_ui_get=api_host_ui_get,
+            api_shutdown=api_shutdown,
+            append_record=append_record,
+            coerce_query_bool=_coerce_query_bool,
+            emit_sidebar_agent_open=_emit_sidebar_agent_open,
+            ensure_conversation=_ensure_conversation,
+            merge_extension_bind_settings=_merge_extension_bind_settings,
+            read_records=read_records,
+            sidebar_recheck_status=_sidebar_recheck_status,
+            utc_ts=utc_ts,
+            write_transcript_entries=_write_transcript_entries,
+        ),
+    )
+
+
+_register_appserver_socketio()
 
 
 def parse_args() -> argparse.Namespace:
