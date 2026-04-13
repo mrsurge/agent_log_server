@@ -14,6 +14,7 @@ import re
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional, Callable, Awaitable, List
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from ._vendor.copilot import SessionEvent
 from ._vendor.copilot.generated.session_events import SessionEventType
@@ -150,11 +151,9 @@ class CopilotEventRouter:
         self.current_message_subagent_id: Optional[str] = None
         self.current_thought_text: str = ""
         self.tool_calls: Dict[str, Dict[str, Any]] = {}
-        self._turn_counter: int = 0
         self._seq: int = 0
 
         # Block tracking for interleaved reasoning/message
-        self._block_counter: int = 0
         self._last_block_type: Optional[str] = None
         self._suppressed_tools: set = set()  # tool_call_ids for UI-only tools (e.g. report_intent)
         self._active_subagents: Dict[str, Dict[str, Any]] = {}  # tool_call_id -> subagent info
@@ -424,14 +423,34 @@ class CopilotEventRouter:
 
     def _resolve_reasoning_id(self, data: Any = None) -> Optional[str]:
         for candidate in (
-            getattr(data, "reasoning_id", None) if data is not None else None,
-            getattr(data, "reasoningId", None) if data is not None else None,
+            self._extract_reasoning_id(data),
             self.current_reasoning_id,
         ):
             normalized = self._normalize_id(candidate)
             if normalized:
                 return normalized
         return None
+
+    def _extract_reasoning_id(self, data: Any = None) -> Optional[str]:
+        if data is None:
+            return None
+        return (
+            self._normalize_id(getattr(data, "reasoning_id", None))
+            or self._normalize_id(getattr(data, "reasoningId", None))
+        )
+
+    def _extract_message_id(self, data: Any = None) -> Optional[str]:
+        if data is None:
+            return None
+        return (
+            self._normalize_id(getattr(data, "message_id", None))
+            or self._normalize_id(getattr(data, "messageId", None))
+        )
+
+    @staticmethod
+    def _build_local_id(prefix: str, token: Optional[str] = None) -> str:
+        normalized = str(token).strip() if token is not None else ""
+        return f"{prefix}_{normalized or uuid4().hex}"
 
     @staticmethod
     def _extract_reasoning_text(data: Any) -> str:
@@ -445,16 +464,12 @@ class CopilotEventRouter:
 
     def _ensure_message_entry_id(self) -> str:
         if not self.current_message_id:
-            self._block_counter += 1
-            self._last_block_type = "message"
-            self.current_message_id = f"msg_{self._turn_counter}_{self._block_counter}"
+            self.current_message_id = self._build_local_id("msg")
         return self.current_message_id
 
     def _ensure_reasoning_entry_id(self) -> str:
         if not self.current_reasoning_id:
-            self._block_counter += 1
-            self._last_block_type = "reasoning"
-            self.current_reasoning_id = f"reasoning_{self._turn_counter}_{self._block_counter}"
+            self.current_reasoning_id = self._build_local_id("reasoning")
         return self.current_reasoning_id
 
     async def _record_reasoning(self, text: str, *, data: Any = None) -> bool:
@@ -467,8 +482,7 @@ class CopilotEventRouter:
             return False
 
         if not reasoning_id:
-            self._block_counter += 1
-            reasoning_id = f"reasoning_{self._turn_counter}_{self._block_counter}"
+            reasoning_id = self._build_local_id("reasoning")
             self.current_reasoning_id = reasoning_id
 
         await self._emit(build_reasoning_finalize_event(
@@ -700,12 +714,16 @@ class CopilotEventRouter:
             return
 
         started_new_message = False
-        if self._last_block_type != "message":
-            self._block_counter += 1
-            self._last_block_type = "message"
-            self.current_message_id = f"msg_{self._turn_counter}_{self._block_counter}"
+        message_id = self._extract_message_id(data)
+        if message_id and message_id != self.current_message_id:
+            self.current_message_id = message_id
             self.current_message_subagent_id = None
             started_new_message = True
+        elif not message_id and self._last_block_type != "message":
+            self.current_message_id = self._build_local_id("msg")
+            self.current_message_subagent_id = None
+            started_new_message = True
+        self._last_block_type = "message"
 
         self.current_message_text += text
 
@@ -739,10 +757,12 @@ class CopilotEventRouter:
 
         self.current_thought_text += text
 
-        if self._last_block_type != "reasoning":
-            self._block_counter += 1
-            self._last_block_type = "reasoning"
-            self.current_reasoning_id = f"reasoning_{self._turn_counter}_{self._block_counter}"
+        reasoning_id = self._extract_reasoning_id(data)
+        if reasoning_id:
+            self.current_reasoning_id = reasoning_id
+        elif self._last_block_type != "reasoning":
+            self.current_reasoning_id = self._build_local_id("reasoning")
+        self._last_block_type = "reasoning"
 
         reasoning_id = self._ensure_reasoning_entry_id()
         await self._emit(build_reasoning_delta_event(
@@ -757,6 +777,9 @@ class CopilotEventRouter:
     async def _handle_message_complete(self, event: SessionEvent) -> None:
         """Authoritative complete message (replaces accumulated deltas)."""
         data = event.data
+        provider_message_id = self._extract_message_id(data)
+        if provider_message_id:
+            self.current_message_id = provider_message_id
         content = getattr(data, "content", None) or self.current_message_text
         if not content:
             return
@@ -789,9 +812,9 @@ class CopilotEventRouter:
         # SDK sends ASSISTANT_MESSAGE (complete) without preceding deltas for
         # subagent messages. Each complete message must get a unique ID.
         if not self.current_message_text or content != self.current_message_text:
-            self._block_counter += 1
             self._last_block_type = "message"
-            self.current_message_id = f"msg_{self._turn_counter}_{self._block_counter}"
+            if not provider_message_id:
+                self.current_message_id = self._build_local_id("msg")
             self.current_message_subagent_id = None
             trace_needed = True
 
@@ -1613,21 +1636,20 @@ class CopilotEventRouter:
 
     # ── Called externally by client ─────────────────────────────────
 
-    async def on_turn_start(self, text: str) -> None:
+    async def on_turn_start(self, text: str, *, turn_token: Optional[str] = None) -> None:
         """Called when a new turn starts (user sends message)."""
-        self._turn_counter += 1
-        self.current_turn_id = f"turn_{self._turn_counter}"
-        self.current_message_id = f"msg_{self._turn_counter}_0"
-        self.current_reasoning_id = f"reasoning_{self._turn_counter}_0"
+        local_turn_token = self._normalize_id(turn_token) or uuid4().hex
+        self.current_turn_id = self._build_local_id("turn", local_turn_token)
+        self.current_message_id = None
+        self.current_reasoning_id = None
         self.current_message_text = ""
         self.current_message_subagent_id = None
         self.current_thought_text = ""
         self.tool_calls = {}
-        self._block_counter = 0
         self._last_block_type = None
         self._recorded_reasoning_ids.clear()
 
-        user_msg_id = f"user_{self._turn_counter}"
+        user_msg_id = self._build_local_id("user", local_turn_token)
 
         await self._emit(build_message_event(
             role="user",

@@ -23,6 +23,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable, Awaitable, Deque, Tuple, cast, get_args
 from collections import deque
+from uuid import uuid4
 
 from framework_shells.orchestrator import Orchestrator
 
@@ -2781,8 +2782,10 @@ async def handle_message(
         if applied_mode:
             settings["mode"] = applied_mode
 
+        turn_token = uuid4().hex
+
         # Notify router of turn start
-        await router.on_turn_start(text)
+        await router.on_turn_start(text, turn_token=turn_token)
 
         try:
             _add_to_raw_buffer("out", conversation_id, f"prompt: {text[:200]}")
@@ -2819,7 +2822,7 @@ async def handle_message(
                     return {"ok": False, "error": str(retry_error)}
                 if applied_mode:
                     settings["mode"] = applied_mode
-                await router.on_turn_start(text)
+                await router.on_turn_start(text, turn_token=turn_token)
                 try:
                     await session.send(MessageOptions(prompt=text, attachments=[]))
                     return {"ok": True, "session_id": conversation_id}
