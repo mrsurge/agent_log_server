@@ -10,19 +10,16 @@ import {
   streamEnd,
   streamWrite,
 } from './js/codex_agent/markdown.ts';
-import { bindAssistantStream } from './js/codex_agent/assistant_stream.ts';
 import { bindShellRender } from './js/codex_agent/shell_render.ts';
 import { bindToolRender } from './js/codex_agent/tool_render.ts';
 import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.ts';
 import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.ts';
 import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.ts';
-import { bindDiffRendering } from './js/codex_agent/diff/rendering.ts';
 import { bindSocketEvents } from './js/codex_agent/events/socket.ts';
 import { bindEventRouter } from './js/codex_agent/events/router.ts';
 import { bindPlanOverlay } from './js/codex_agent/plan_overlay.ts';
 import { bindPlanModal } from './js/codex_agent/plan_modal.ts';
 import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.ts';
-import { bindApprovalUi } from './js/codex_agent/approvals/ui.ts';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.ts';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.ts';
 import { bindRequestCardRuntime } from './js/codex_agent/request_cards/runtime.ts';
@@ -35,7 +32,11 @@ import { bindTranscriptCards } from './js/codex_agent/transcript_cards.ts';
 import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.ts';
 import { bindInputFlow } from './js/codex_agent/boot/input_flow.ts';
 import { bindComposerRuntime } from './js/codex_agent/composer/runtime.ts';
+import { bindHostRuntime } from './js/codex_agent/host/runtime.ts';
 import { bindWidescreenLayout } from './js/codex_agent/layout/widescreen.ts';
+import { bindTimelineRows } from './js/codex_agent/timeline/rows.ts';
+import { bindTimelineLiveItems } from './js/codex_agent/timeline/live_items.ts';
+import { bindTimelineReplay } from './js/codex_agent/timeline/replay.ts';
 import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations/client.ts';
 import {
   readRpcTransportEnabledPreference,
@@ -942,68 +943,114 @@ document.addEventListener('DOMContentLoaded', () => {
     insertMention,
   } = composerRuntime;
 
-  function clearPlaceholder() {
-    if (placeholderCleared) return;
-    const placeholder = byId('timeline-placeholder') ||
-      timelineEl.querySelector('.timeline-row.muted');
-    if (placeholder) placeholder.remove();
-    placeholderCleared = true;
-  }
+  let getUserDisplayName = () => 'user';
+  let getAssistantDisplayName = () => 'assistant';
+  let refreshMessageCardHeaders = () => {};
+  let resetTimeline = () => {};
+  let renderTranscriptEntries = (_items: AnyRecord[], _opts: AnyRecord = {}) => {};
+  let restorePendingApprovals = () => {};
 
-  function applyHostUi() {
-	    const show = Boolean(hostUi?.showClose) && !Boolean(hostUi?.ideMode);
-	    if (hostCloseTopEl) {
-	      hostCloseTopEl.style.display = (show && activeView !== 'conversation') ? 'inline-flex' : 'none';
-	    }
-	    if (hostCloseDrawerEl) {
-	      hostCloseDrawerEl.style.display = (show && activeView === 'conversation') ? 'inline-flex' : 'none';
-	    }
-	    const tabsEl = byId('splash-tabs');
-	    if (tabsEl) {
-	      const ideMode = Boolean(hostUi?.ideMode);
-	      tabsEl.style.display = ideMode ? 'flex' : 'none';
-	    }
-	  }
+  const timelineRows = bindTimelineRows({
+    getState: () => ({
+      bottomSpacerEl,
+      placeholderCleared,
+      messageCount,
+      tokenCount,
+    }),
+    setState: (patch) => {
+      if (patch.bottomSpacerEl !== undefined) bottomSpacerEl = patch.bottomSpacerEl;
+      if (patch.placeholderCleared !== undefined) placeholderCleared = patch.placeholderCleared === true;
+      if (patch.messageCount !== undefined) messageCount = Number(patch.messageCount || 0);
+      if (patch.tokenCount !== undefined) tokenCount = Number(patch.tokenCount || 0);
+    },
+    timelineEl,
+    counterMessagesEl,
+    counterTokensEl,
+    contextRemainingEl,
+    statusRibbonEl,
+    statusLabelEl,
+    statusReasoningEl,
+    statusDotEl,
+    documentRef: document,
+    getUserDisplayName: () => getUserDisplayName(),
+    getAssistantDisplayName: () => getAssistantDisplayName(),
+    isMarkdownEnabled,
+    renderMarkdownItBlock,
+    stripCitations,
+    maybeAutoScroll,
+  });
 
-  function sendHostCloseMessage() {
-    if (!window.parent || window.parent === window) return;
-    const payload = {
-      type: 'codex_agent_close',
-      conversation_id: conversationMeta?.conversation_id || null,
-      active_view: activeView || null,
-    };
-    const origin = hostUi?.parentOrigin || '*';
-    try {
-      window.parent.postMessage(payload, origin);
-    } catch {
-      // ignore
-    }
-  }
+  const {
+    clearPlaceholder,
+    ensureActivityRow,
+    insertRow,
+    buildRow,
+    updateMessageCardHeader,
+    refreshMessageCardHeaders: refreshMessageCardHeadersImpl,
+    buildMessageCard,
+    createRow,
+    setActivity,
+    setReasoningRibbon,
+    clearReasoningRibbon,
+    setStatusDot,
+    setCounter,
+    incrementMessages,
+    updateTokens,
+    updateContextRemaining,
+    addMessage,
+  } = timelineRows;
 
-	  async function fetchHostUi() {
-	    try {
-	      const data = await sioCall('get_host_ui', {});
-	      if (!data || data.ok === false) return;
-	      const ui = data?.host_ui || {};
-	      hostUi = {
-	        showClose: Boolean(ui.show_close),
-	        parentOrigin: (typeof ui.parent_origin === 'string' && ui.parent_origin) ? ui.parent_origin : null,
-	        ideMode: Boolean(ui.ide_mode),
-	        projectRoot: (typeof ui.project_root === 'string' && ui.project_root) ? ui.project_root : null,
-	      };
-	      applyHostUi();
-	    } catch {
-	      // ignore
-	    }
-	  }
+  refreshMessageCardHeaders = refreshMessageCardHeadersImpl;
 
-	  async function recheckSidebarConnection() {
-	    try {
-	      await sioCall('sidebar_recheck', {});
-	    } catch {
-	      // Best-effort only; host UI fetch still runs after this.
-	    }
-	  }
+  const hostRuntime = bindHostRuntime({
+    getState: () => ({
+      hostUi,
+      conversationMeta,
+      conversationSettings,
+      activeView,
+      appConfig,
+    }),
+    setState: (patch) => {
+      if (patch.hostUi !== undefined) hostUi = patch.hostUi;
+      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
+      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
+      if (patch.activeView !== undefined) activeView = patch.activeView || activeView;
+      if (patch.appConfig !== undefined) appConfig = patch.appConfig;
+    },
+    sioCall,
+    refreshMessageCardHeaders,
+    hostCloseTopEl,
+    hostCloseDrawerEl,
+    activeConversationEl,
+    conversationTitleEl,
+    splashSettingsModalEl,
+    splashSettingsUserNameEl,
+    splashSettingsTe2McpIntegrationEl,
+    documentRef: document,
+    windowRef: window,
+    getSocketConnected: () => Boolean(_socket && _socket.connected),
+  });
+
+  const {
+    applyHostUi,
+    sendHostCloseMessage,
+    fetchHostUi,
+    recheckSidebarConnection,
+    postTe2OpenRequest,
+    postExternalUrlOpenRequest,
+    updateActiveConversationLabel,
+    getUserDisplayName: getUserDisplayNameImpl,
+    getAssistantDisplayName: getAssistantDisplayNameImpl,
+    updateConversationHeaderLabel,
+    applyAppConfig,
+    fetchAppConfig,
+    openSplashSettingsModal,
+    closeSplashSettingsModal,
+    saveSplashSettings,
+  } = hostRuntime;
+
+  getUserDisplayName = getUserDisplayNameImpl;
+  getAssistantDisplayName = getAssistantDisplayNameImpl;
 
   const {
     isConversationInProject,
@@ -1101,53 +1148,6 @@ document.addEventListener('DOMContentLoaded', () => {
 	    return null;
 	  }
 
-		  async function postTe2OpenRequest({ path, line, column }) {
-		    const payload: AnyRecord = {
-		      source: 'codex-agent',
-		      conversation_id: conversationMeta?.conversation_id || null,
-		    };
-		    if (typeof path === 'string' && path) {
-		      // Normalize: ensure absolute paths start with /
-		      let p = path;
-		      if (!p.startsWith('/') && /^(?:data|home|tmp|usr|var|etc|storage)\//.test(p)) {
-		        p = '/' + p;
-		      }
-		      if (p.startsWith('/')) {
-		        payload.path = p;
-		      } else {
-		        // Relative path — prepend conversation CWD to make absolute
-		        const cwd = (conversationSettings?.cwd || '').replace(/\/+$/, '');
-		        payload.path = cwd ? cwd + '/' + p : '/' + p;
-		      }
-		    }
-		    if (Number.isFinite(line)) payload.line = Number(line);
-		    if (Number.isFinite(column)) payload.column = Number(column);
-		    console.log('[TE2_OPEN] payload:', JSON.stringify(payload), 'socket_connected:', !!(_socket && _socket.connected));
-		    try {
-		      const result = await sioCall('te2_agent_open', payload);
-		      console.log('[TE2_OPEN] result:', JSON.stringify(result));
-		    } catch (e) {
-		      console.warn('[TE2_OPEN] error:', e);
-		    }
-		  }
-
-  async function postExternalUrlOpenRequest(url) {
-    const target = typeof url === 'string' ? url.trim() : '';
-    if (!target) return;
-    try {
-      const result = await sioCall('open_external_url', {
-        url: target,
-        source: 'codex-agent',
-        conversation_id: conversationMeta?.conversation_id || null,
-      });
-      if (result?.ok === false) {
-        console.warn('[OPEN_EXTERNAL_URL] failed:', JSON.stringify(result));
-      }
-    } catch (e) {
-      console.warn('[OPEN_EXTERNAL_URL] error:', e);
-    }
-  }
-
   setMarkdownLinkHandlers({
     openFilePath: (target) => {
       const next: AnyRecord = target && typeof target === 'object' ? target : { path: target };
@@ -1162,91 +1162,8 @@ document.addEventListener('DOMContentLoaded', () => {
     },
   });
 
-  function updateActiveConversationLabel() {
-    if (!activeConversationEl) return;
-    activeConversationEl.textContent = '';
-  }
-
-  function getUserDisplayName() {
-    const userName = typeof appConfig?.user_name === 'string' ? appConfig.user_name.trim() : '';
-    return userName || 'user';
-  }
-
-  function getAssistantDisplayName() {
-    const alias = typeof conversationSettings?.alias === 'string' ? conversationSettings.alias.trim() : '';
-    return alias || 'assistant';
-  }
-
-  function getConversationHeaderTitle() {
-    const alias = typeof conversationSettings?.alias === 'string' ? conversationSettings.alias.trim() : '';
-    return alias || 'Conversation';
-  }
-
-  function updateConversationHeaderLabel() {
-    if (conversationTitleEl) {
-      conversationTitleEl.textContent = getConversationHeaderTitle();
-    }
-    const el = byId('conversation-label');
-    if (!el) return;
-    const label = conversationSettings?.label || '—';
-    el.textContent = label;
-    refreshMessageCardHeaders();
-  }
-
   async function openSettingsModal(...args) {
     return settingsUi?.openSettingsModal(...args);
-  }
-
-  function applyAppConfig(cfg) {
-    appConfig = (cfg && typeof cfg === 'object') ? cfg : {};
-    if (splashSettingsUserNameEl) {
-      splashSettingsUserNameEl.value = typeof appConfig?.user_name === 'string' ? appConfig.user_name : '';
-    }
-    if (splashSettingsTe2McpIntegrationEl) {
-      splashSettingsTe2McpIntegrationEl.checked = appConfig?.te2_mcp_integration === true;
-    }
-    refreshMessageCardHeaders();
-  }
-
-  async function fetchAppConfig() {
-    try {
-      const data = await sioCall('get_config', {});
-      if (!data || data.ok === false) return null;
-      applyAppConfig(data);
-      return data;
-    } catch {
-      return null;
-    }
-  }
-
-  function openSplashSettingsModal() {
-    if (!splashSettingsModalEl) return;
-    if (splashSettingsUserNameEl) {
-      splashSettingsUserNameEl.value = typeof appConfig?.user_name === 'string' ? appConfig.user_name : '';
-    }
-    if (splashSettingsTe2McpIntegrationEl) {
-      splashSettingsTe2McpIntegrationEl.checked = appConfig?.te2_mcp_integration === true;
-    }
-    splashSettingsModalEl.classList.remove('hidden');
-  }
-
-  function closeSplashSettingsModal() {
-    if (!splashSettingsModalEl) return;
-    splashSettingsModalEl.classList.add('hidden');
-  }
-
-  async function saveSplashSettings() {
-    try {
-      const data = await sioCall('update_config', {
-        user_name: splashSettingsUserNameEl?.value?.trim() || null,
-        te2_mcp_integration: splashSettingsTe2McpIntegrationEl?.checked === true,
-      });
-      if (!data || data.ok === false) return;
-      applyAppConfig(data);
-      closeSplashSettingsModal();
-    } catch {
-      // ignore
-    }
   }
 
   function closeSettingsModal(...args) {
@@ -1500,123 +1417,6 @@ document.addEventListener('DOMContentLoaded', () => {
     documentRef: document,
     windowRef: window,
   });
-
-  function ensureActivityRow() {
-    // No longer needed - status ribbon is always present in HTML
-    // Kept as no-op for compatibility
-  }
-
-  function insertRow(row, beforeEl = null) {
-    clearPlaceholder();
-    if (beforeEl && beforeEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(row, beforeEl);
-    } else if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(row, bottomSpacerEl);
-    } else {
-      timelineEl.appendChild(row);
-    }
-    maybeAutoScroll();
-  }
-
-  function buildRow(kind, title) {
-    const row = document.createElement('div');
-    row.className = `timeline-row ${kind || ''}`.trim();
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = title || '';
-    const body = document.createElement('div');
-    body.className = 'body';
-    row.append(meta, body);
-    return { row, body };
-  }
-
-  function getMessageRoleLabel(role) {
-    if (role === 'assistant') return getAssistantDisplayName();
-    if (role === 'user') return getUserDisplayName();
-    return role || 'message';
-  }
-
-  function updateMessageCardHeader(row, role, text) {
-    if (!row) return;
-    row.dataset.messageRole = role || 'message';
-    row._messageText = text || '';
-    const headerEl = row.querySelector(':scope > .message-header');
-    if (!headerEl) return;
-    const titleEl = headerEl.querySelector('.message-header-title');
-    if (titleEl) titleEl.textContent = getMessageRoleLabel(role);
-    headerEl.dataset.expanded = 'true';
-  }
-
-  function refreshMessageCardHeaders() {
-    if (!timelineEl) return;
-    timelineEl.querySelectorAll('.message-card').forEach((row) => {
-      updateMessageCardHeader(
-        row,
-        row.dataset.messageRole || row._messageRole || 'message',
-        row._messageText || '',
-      );
-    });
-  }
-
-  function buildMessageCard(role, text = '') {
-    const row = document.createElement('div');
-    row.className = `timeline-row message message-card ${role === 'user' ? 'user' : ''}`.trim();
-
-    const header = document.createElement('div');
-    header.className = 'message-header command-ribbon';
-    const title = document.createElement('span');
-    title.className = 'message-header-title';
-    header.append(title);
-
-    const body = document.createElement('div');
-    body.className = 'body message-body';
-
-    row.append(header, body);
-    (row as any)._messageRole = role || 'message';
-    updateMessageCardHeader(row, role, text);
-    return { row, body, header, title };
-  }
-
-  function createRow(kind, title, beforeEl = null, parentEl = null) {
-    const { row, body } = buildRow(kind, title);
-    if (parentEl) {
-      clearPlaceholder();
-      if (row.parentElement !== parentEl) parentEl.appendChild(row);
-      maybeAutoScroll();
-    } else {
-      insertRow(row, beforeEl);
-    }
-    return { row, body };
-  }
-
-  function setActivity(label, active) {
-    // Update status ribbon instead of activity row
-    if (statusLabelEl) statusLabelEl.textContent = label || 'idle';
-    if (statusRibbonEl) statusRibbonEl.classList.toggle('active', Boolean(active));
-  }
-
-  function setReasoningRibbon(text) {
-    if (!statusReasoningEl) return;
-    if (!text) {
-      clearReasoningRibbon();
-      return;
-    }
-    statusReasoningEl.textContent = text;
-    statusReasoningEl.classList.add('active');
-  }
-
-  function clearReasoningRibbon() {
-    if (!statusReasoningEl) return;
-    statusReasoningEl.textContent = '';
-    statusReasoningEl.classList.remove('active');
-  }
-
-  function setStatusDot(status) {
-    // status: 'success', 'error', 'warning', or null/'' for neutral
-    if (!statusDotEl) return;
-    statusDotEl.classList.remove('success', 'error', 'warning');
-    if (status) statusDotEl.classList.add(status);
-  }
 
   const planOverlay = bindPlanOverlay({
     timelineEl,
@@ -1946,89 +1746,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function setCounter(el, value) {
-    if (!el) return;
-    el.textContent = String(value);
-  }
-
-  function incrementMessages() {
-    messageCount += 1;
-    setCounter(counterMessagesEl, messageCount);
-  }
-
-  function updateTokens(total) {
-    if (!Number.isFinite(total)) return;
-    tokenCount = Number(total);
-    setCounter(counterTokensEl, tokenCount);
-    // Don't update context percentage here - only update when we get both
-    // total and context_window from the same event to avoid stale data
-  }
-
-  function updateContextRemaining(total, windowSize) {
-    if (!contextRemainingEl) return;
-    if (!Number.isFinite(total) || !Number.isFinite(windowSize) || windowSize <= 0) {
-      contextRemainingEl.textContent = '—';
-      return;
-    }
-    const pct = Math.min(100, Math.round((Number(total) / Number(windowSize)) * 100));
-    contextRemainingEl.textContent = `${pct}%`;
-    // Color code based on usage
-    if (pct >= 90) {
-      contextRemainingEl.classList.add('critical');
-      contextRemainingEl.classList.remove('warn');
-    } else if (pct >= 70) {
-      contextRemainingEl.classList.add('warn');
-      contextRemainingEl.classList.remove('critical');
-    } else {
-      contextRemainingEl.classList.remove('warn', 'critical');
-    }
-  }
-
-  function resetTimeline() {
-    if (!timelineEl) return;
-    timelineEl.innerHTML = '';
-    assistantRows.clear();
-    reasoningRows.clear();
-    diffRows.clear();
-    toolRows.clear();
-    shellRows.clear();
-    planOverlayEl = null;
-    planListEl = null;
-    planItems.clear();
-    planDocState = createEmptyPlanDocumentState(Boolean(runtimeOptions?.has_plan));
-    todoState = createEmptyTodoState(Boolean(runtimeOptions?.has_todo));
-    closePlanModal();
-    topSpacerEl = document.createElement('div');
-    topSpacerEl.className = 'timeline-spacer';
-    bottomSpacerEl = document.createElement('div');
-    bottomSpacerEl.className = 'timeline-spacer';
-    placeholderCleared = false;
-    messageCount = 0;
-    tokenCount = 0;
-    transcriptTotal = 0;
-    transcriptStart = 0;
-    transcriptEnd = 0;
-    lastEventType = null;
-    setCounter(counterMessagesEl, messageCount);
-    setCounter(counterTokensEl, tokenCount);
-    if (contextRemainingEl) contextRemainingEl.textContent = '—';
-    // Reset status ribbon
-    setActivity('idle', false);
-    setStatusDot(null);
-    clearReasoningRibbon();
-    timelineEl.appendChild(topSpacerEl);
-    const placeholder = document.createElement('div');
-    placeholder.id = 'timeline-placeholder';
-    placeholder.className = 'timeline-row muted';
-    placeholder.textContent = 'Waiting for events...';
-    timelineEl.appendChild(placeholder);
-    timelineEl.appendChild(placeholder);
-    timelineEl.appendChild(bottomSpacerEl);
-    ensureActivityRow();
-    maybeAutoScroll(true);
-    timelineStickyHeaders?.update?.();
-  }
-
   async function requestContextCompact() {
     try {
       const convoId = conversationMeta?.conversation_id || null;
@@ -2039,33 +1756,6 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (err) {
       console.warn('compact failed', err);
     }
-  }
-
-  function addMessage(role, text, parentEl = null) {
-    const cleanText = role === 'assistant' ? stripCitations(text || '') : (text || '');
-    const useMessageCard = role === 'assistant' || role === 'user';
-    const { row, body } = useMessageCard
-      ? buildMessageCard(role, cleanText)
-      : buildRow('message', role === 'assistant' ? 'assistant' : role);
-    if (!useMessageCard && role === 'user') row.classList.add('user');
-    if (parentEl) {
-      clearPlaceholder();
-      parentEl.appendChild(row);
-    } else {
-      insertRow(row);
-    }
-    if ((role === 'assistant' || role === 'user') && isMarkdownEnabled()) {
-      const rendered = renderMarkdownItBlock(cleanText);
-      body.append(rendered);
-    } else {
-      const pre = document.createElement('pre');
-      pre.textContent = cleanText;
-      body.append(pre);
-    }
-    incrementMessages();
-    lastEventType = 'message';
-    // Scroll after content is fully added
-    maybeAutoScroll();
   }
 
   const {
@@ -2117,540 +1807,33 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.estimatedRowHeight !== undefined) estimatedRowHeight = patch.estimatedRowHeight;
     },
   });
+  const agentBlockRows = new Map();
 
-  function isInternalTranscriptItem(entry) {
-    if (!entry || typeof entry !== 'object') return false;
-    if (entry.internal === true) return true;
-    if (typeof entry.internal === 'string' && ['1', 'true', 'yes', 'on'].includes(entry.internal.trim().toLowerCase())) {
-      return true;
-    }
-    return typeof entry.visibility === 'string' && entry.visibility.trim().toLowerCase() === 'internal';
-  }
-
-  function renderTranscriptEntries(items, opts = {}) {
-    if (!items || !items.length || !timelineEl) return;
-    const fragment = document.createDocumentFragment();
-    const truncateLines = conversationSettings?.commandOutputLines || 20;
-    const pendingAgentPtyTerms = [];
-    const agentPtyByBlock = new Map(); // blockId -> { row, termEl, cmd, buf }
-    // Track subagent containers for replay grouping
-    const replaySubagents = new Map(); // id -> { row, body, statusEl, label }
-    items.forEach((entry) => {
-      if (isInternalTranscriptItem(entry)) return;
-      if (!entry || !entry.role) return;
-
-      // Subagent lifecycle entries
-      if (entry.role === 'subagent_start') {
-        // Check if a synthetic container already exists in the DOM
-        // (created by getTarget when subagent_start was outside the window)
-        const existing = timelineEl.querySelector(`.subagent-card[data-subagent-id="${entry.id}"]`);
-        if (existing) {
-          // Update the synthetic container's label with real name/intent
-          const lbl = existing.querySelector('.subagent-header span:first-child');
-          if (lbl) lbl.textContent = `${entry.name || 'subagent'}: ${entry.intent || 'working'}`;
-          return;
-        }
-        const row = document.createElement('div');
-        row.className = 'timeline-row subagent-card';
-        row.dataset.subagentId = entry.id;
-        // Header OUTSIDE body — always visible when collapsed
-        const header = document.createElement('div');
-        header.className = 'subagent-header command-ribbon';
-        const label = document.createElement('span');
-        label.textContent = `${entry.name || 'subagent'}: ${entry.intent || 'working'}`;
-        const statusEl = document.createElement('span');
-        statusEl.className = 'subagent-status';
-        statusEl.textContent = '⏳ running';
-        header.append(label, statusEl);
-        row.appendChild(header);
-        const body = document.createElement('div');
-        body.className = 'subagent-body';
-        row.appendChild(body);
-        makeCollapsible(row, `subagent:${entry.id}`, false, {
-          headerEl: header,
-          fullHeaderToggle: true,
-        });
-        replaySubagents.set(entry.id, { row, body, statusEl, label });
-        fragment.appendChild(row);
-        return;
-      }
-      if (entry.role === 'subagent_end') {
-        let sa = replaySubagents.get(entry.id);
-        // Also check DOM for synthetic container from a prior render batch
-        if (!sa) {
-          const existing = timelineEl.querySelector(`.subagent-card[data-subagent-id="${entry.id}"]`);
-          if (existing) {
-            sa = {
-              statusEl: existing.querySelector('.subagent-status'),
-              body: existing.querySelector('.subagent-body'),
-            };
-          }
-        }
-        if (sa) {
-          if (sa.statusEl) sa.statusEl.textContent = entry.success !== false ? '✓ done' : '✗ failed';
-          if (entry.summary) {
-            const summaryEl = document.createElement('div');
-            summaryEl.className = 'subagent-summary';
-            summaryEl.style.cssText = 'padding: 4px 14px; font-size: 0.85em; opacity: 0.7; font-style: italic;';
-            summaryEl.textContent = entry.summary;
-            if (sa.body) sa.body.appendChild(summaryEl);
-          }
-        }
-        return;
-      }
-
-      // Helper: resolve target container (subagent body or main fragment)
-      // If subagent_start was outside the pagination window, create a
-      // synthetic container so child events still group correctly.
-      function getTarget() {
-        if (entry.subagent_id) {
-          if (_dbg) console.log('[SUBAGENT-REPLAY] entry has subagent_id:', entry.subagent_id, 'role:', entry.role, 'map has:', replaySubagents.has(entry.subagent_id));
-          let sa = replaySubagents.get(entry.subagent_id);
-          if (!sa) {
-            if (_dbg) console.log('[SUBAGENT-REPLAY] Creating synthetic container for:', entry.subagent_id);
-            // Synthetic subagent container (subagent_start was outside window)
-            const row = document.createElement('div');
-            row.className = 'timeline-row subagent-card';
-            row.dataset.subagentId = entry.subagent_id;
-            const header = document.createElement('div');
-            header.className = 'subagent-header command-ribbon';
-            const label = document.createElement('span');
-            label.textContent = 'subagent: (earlier in transcript)';
-            const statusEl = document.createElement('span');
-            statusEl.className = 'subagent-status';
-            statusEl.textContent = '✓ done';
-            header.append(label, statusEl);
-            row.appendChild(header);
-            const body = document.createElement('div');
-            body.className = 'subagent-body';
-            row.appendChild(body);
-            makeCollapsible(row, `subagent:${entry.subagent_id}`, true, {
-              headerEl: header,
-              fullHeaderToggle: true,
-            });
-            sa = { row, body, statusEl, label };
-            replaySubagents.set(entry.subagent_id, sa);
-            fragment.appendChild(row);
-          }
-          return sa.body;
-        }
-        return fragment;
-      }
-
-      if (entry.role === 'reasoning') {
-        const { row, body } = buildRow('reasoning', 'reasoning');
-        const pre = document.createElement('pre');
-        pre.textContent = entry.text || '';
-        body.append(pre);
-        getTarget().appendChild(row);
-        return;
-      }
-      if (entry.role === 'diff') {
-        const { row, body } = buildRow('diff', 'diff');
-        // Build ribbon — extract path from diff header if not provided
-        let diffPath = entry.path || '';
-        if (!diffPath && entry.text) {
-          const m = entry.text.match(/^diff --git a\/.+ b\/(.+)$/m);
-          if (m) diffPath = m[1];
-        }
-          const pathDiv = document.createElement('div');
-        pathDiv.className = 'diff-path-label command-ribbon';
-        if (diffPath) {
-          pathDiv.innerHTML = `<strong>${escapeHtml(toRelativePath(diffPath))}</strong>`;
-          pathDiv.style.cursor = 'pointer';
-          pathDiv.dataset.hasClickHandler = 'true';
-          pathDiv.addEventListener('click', (e) => {
-            const target = e.target;
-            if (target instanceof Element && target.closest('.twisty')) return;
-            postTe2OpenRequest({ path: diffPath, line: 1, column: 1 });
-          });
-        } else {
-          pathDiv.innerHTML = '<strong>diff</strong>';
-        }
-        body.append(pathDiv);
-        const block = document.createElement('div');
-        block.className = 'diff-block';
-        renderDiffBlock(block, entry.text || '', diffPath);
-        body.append(block);
-        makeCollapsible(row, `diff:${entry.id || diffPath || 'diff'}`, false);
-        getTarget().appendChild(row);
-        return;
-      }
-      if (entry.role === 'view') {
-        renderViewCard({
-          id: entry.id || entry.item_id || '',
-          title: entry.title || '',
-          path: entry.path || '',
-          content: entry.content ?? entry.output ?? '',
-          lines: Array.isArray(entry.lines) ? entry.lines : null,
-          view_range: entry.view_range ?? entry.viewRange ?? null,
-        }, getTarget());
-        return;
-      }
-      if (entry.role === 'search') {
-        renderSearchCard({
-          id: entry.id || entry.item_id || '',
-          title: entry.title || '',
-          mode: entry.mode || entry.tool || 'search',
-          path: entry.path || '',
-          pattern: entry.pattern || '',
-          arguments: entry.arguments && typeof entry.arguments === 'object' ? entry.arguments : {},
-          content: entry.content ?? entry.result ?? '',
-        }, getTarget());
-        return;
-      }
-      if (entry.role === 'command') {
-        renderCommandResult(entry, getTarget(), {
-          linkPathFromRibbon: Boolean(entry.path),
-          updateLiveState: false,
-          autoScroll: false,
-        });
-        return;
-      }
-      if (entry.role === 'plan') {
-        const { row, body } = buildRow('plan', 'plan');
-        
-        // Collapsible header
-        const header = document.createElement('div');
-        header.className = 'plan-card-header';
-        let collapsed = false;
-        
-        const toggleBtn = document.createElement('span');
-        toggleBtn.className = 'plan-toggle';
-        toggleBtn.textContent = '[-]';
-        
-        const title = document.createElement('span');
-        title.className = 'plan-title';
-        title.textContent = 'Plan';
-        
-        header.append(toggleBtn, title);
-        body.appendChild(header);
-        
-        const list = document.createElement('div');
-        list.className = 'plan-list';
-        const steps = entry.steps || [];
-        steps.forEach((item) => {
-          const stepEl = document.createElement('div');
-          stepEl.className = `plan-item ${item.status || 'pending'}`;
-          const checkbox = document.createElement('span');
-          checkbox.className = 'plan-checkbox';
-          if (item.status === 'completed') {
-            checkbox.textContent = '☑';
-          } else if (item.status === 'in_progress') {
-            checkbox.textContent = '◐';
-          } else {
-            checkbox.textContent = '☐';
-          }
-          const text = document.createElement('span');
-          text.className = 'plan-text';
-          text.textContent = item.step || '';
-          stepEl.append(checkbox, text);
-          list.appendChild(stepEl);
-        });
-        body.appendChild(list);
-        
-        // Toggle collapse
-        toggleBtn.addEventListener('click', () => {
-          collapsed = !collapsed;
-          toggleBtn.textContent = collapsed ? '[+]' : '[-]';
-          list.style.display = collapsed ? 'none' : 'flex';
-        });
-        
-        getTarget().appendChild(row);
-        return;
-      }
-      // Token usage entries - update context display on replay
-      if (entry.role === 'token_usage') {
-        if (Number.isFinite(entry.total)) {
-          tokenCount = Number(entry.total);
-          setCounter(counterTokensEl, tokenCount);
-        }
-        if (Number.isFinite(entry.context_window)) {
-          contextWindow = Number(entry.context_window);
-          // Use total tokens for percentage (matches CLI behavior)
-          updateContextRemaining(entry.total, entry.context_window);
-        }
-        // Don't render token_usage as a visible row
-        return;
-      }
-      if (entry.role === 'mode') {
-        if (typeof entry.kind === 'string') {
-          applyRuntimeMode(entry.kind);
-        }
-        return;
-      }
-      // Status entries - update ribbon dot on replay
-      if (entry.role === 'status') {
-        if (entry.status) {
-          setStatusDot(entry.status);
-        }
-        // Don't render status as a visible row
-        return;
-      }
-      // Context compacted entries
-      if (entry.role === 'context_compacted') {
-        const row = document.createElement('div');
-        row.className = 'timeline-row system';
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        meta.textContent = 'context compacted';
-        const body = document.createElement('div');
-        body.className = 'body';
-        const msg = document.createElement('div');
-        msg.className = 'system-message';
-        msg.textContent = 'Context was compacted to fit within the model\'s context window.';
-        body.appendChild(msg);
-        row.append(meta, body);
-        fragment.appendChild(row);
-        return;
-      }
-      // Shell command entries
-      if (entry.role === 'shell') {
-        // Match live render: single command-result row with ribbon + output
-        const exitCode = entry.exit_code || 0;
-        
-        const row = document.createElement('div');
-        row.className = 'timeline-row command-result';
-        
-        const body = document.createElement('div');
-        body.className = 'body';
-        
-        // Command ribbon
-        const cmdRibbon = document.createElement('div');
-        cmdRibbon.className = 'command-ribbon';
-        const shellCmd = String(entry.command || '');
-        renderShellCmdRibbon(cmdRibbon, shellCmd);
-        body.appendChild(cmdRibbon);
-        
-        // Output
-        const pre = document.createElement('pre');
-        pre.className = 'command-output';
-        const stdout = String(entry.stdout || '');
-        const stderr = String(entry.stderr || '');
-        const outLang = detectLangFromCommand(shellCmd);
-        if (stdout) {
-          if (outLang && typeof hljs !== 'undefined') {
-            pre.innerHTML = highlightCodeAlways(stdout, outLang);
-          } else {
-            pre.appendChild(document.createTextNode(stdout));
-          }
-        }
-        if (entry.stderr) {
-          const stderrEl = document.createElement('span');
-          stderrEl.className = 'shell-stderr';
-          stderrEl.textContent = stderr;
-          pre.appendChild(stderrEl);
-        }
-        if (!stdout && !stderr) {
-          pre.textContent = '(no output)';
-        }
-        body.appendChild(pre);
-        
-        // Footer with exit code if non-zero
-        if (exitCode !== 0) {
-          const footer = document.createElement('div');
-          footer.className = 'command-footer';
-          footer.textContent = `exit ${exitCode}`;
-          body.appendChild(footer);
-        }
-        
-        row.appendChild(body);
-        getTarget().appendChild(row);
-        
-        setStatusDot(exitCode === 0 ? 'success' : 'error');
-        return;
-      }
-      // Agent PTY block entries (replay)
-      if (entry.role === 'agent_pty') {
-        const eventType = entry.event || entry.type;
-        const block = entry.block || {};
-        const blockId = entry.block_id || block.block_id || entry.blockId || 'agent';
-        if (eventType === 'agent_block_begin') {
-          const cmd = block.cmd || '';
-          const row = document.createElement('div');
-          row.className = 'timeline-row command-result terminal-card';
-          row.dataset.agentBlockId = blockId;
-
-          const body = document.createElement('div');
-          body.className = 'body';
-
-          const cmdRibbon = document.createElement('div');
-          cmdRibbon.className = 'command-ribbon';
-          cmdRibbon.textContent = cmd ? `$ ${cmd}` : '';
-          body.appendChild(cmdRibbon);
-
-          const termEl = document.createElement('div');
-          termEl.className = 'command-output';
-          body.appendChild(termEl);
-
-          row.appendChild(body);
-          getTarget().appendChild(row);
-          const rec = { row, termEl, cmdRibbon, cmd, buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
-          agentPtyByBlock.set(blockId, rec);
-          // Also register in global map so live handlers don't duplicate
-          agentBlockRows.set(blockId, rec);
-          pendingAgentPtyTerms.push(rec);
-          return;
-        }
-        if (eventType === 'agent_block_delta') {
-          const delta = entry.delta || '';
-          if (!delta) return;
-          // Check global map first (from previous replay or live)
-          let rec = agentPtyByBlock.get(blockId) || agentBlockRows.get(blockId);
-          if (!rec) {
-            // If we got deltas without a begin (paging/replay edge), create a minimal row.
-            const row = document.createElement('div');
-            row.className = 'timeline-row command-result terminal-card';
-            row.dataset.agentBlockId = blockId;
-
-            const body = document.createElement('div');
-            body.className = 'body';
-
-            const cmdRibbon = document.createElement('div');
-            cmdRibbon.className = 'command-ribbon';
-            cmdRibbon.textContent = '';
-            body.appendChild(cmdRibbon);
-
-            const termEl = document.createElement('div');
-            termEl.className = 'command-output';
-            body.appendChild(termEl);
-
-            row.appendChild(body);
-            getTarget().appendChild(row);
-            rec = { row, termEl, cmdRibbon, cmd: '', buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
-            agentPtyByBlock.set(blockId, rec);
-            agentBlockRows.set(blockId, rec);
-            pendingAgentPtyTerms.push(rec);
-          }
-          rec.buf += delta;
-          return;
-        }
-        if (eventType === 'agent_block_end') {
-          // Footer + exit code (optional)
-          const rec = agentPtyByBlock.get(blockId) || agentBlockRows.get(blockId);
-          if (rec && !rec.cmd && (block.cmd || '')) {
-            rec.cmd = block.cmd || '';
-            // Update ribbon if cmd was set from end event
-            if (rec.cmdRibbon) {
-              rec.cmdRibbon.textContent = `$ ${rec.cmd}`;
-            }
-          }
-          const exitCode = block.exit_code ?? block.exitCode;
-          if (rec && exitCode !== undefined && exitCode !== null && exitCode !== 0) {
-            const footer = document.createElement('div');
-            footer.className = 'command-footer';
-            footer.textContent = `exit ${exitCode}`;
-            rec.row.querySelector('.body')?.appendChild(footer);
-          }
-          return;
-        }
-        // Unknown agent_pty event: skip rendering rather than showing noisy role labels.
-        return;
-      }
-      // Error entries
-      if (entry.role === 'error') {
-        const { row, body } = buildRow('error', 'error');
-        appendErrorContent(body, entry);
-        getTarget().appendChild(row);
-        return;
-      }
-      // Generic tool call entries
-      if (entry.role === 'mcp_tool' || entry.role === 'tool') {
-        const row = buildReplayToolRow(entry);
-        getTarget().appendChild(row);
-        return;
-      }
-      // Web search entries
-      if (entry.role === 'web_search') {
-        const row = document.createElement('div');
-        row.className = 'timeline-row command-result web-search-card';
-        const body = document.createElement('div');
-        body.className = 'body';
-        const header = document.createElement('div');
-        header.className = 'command-ribbon';
-        header.textContent = `🔍 web_search`;
-        body.appendChild(header);
-        if (entry.query) {
-          const queryPre = document.createElement('pre');
-          queryPre.textContent = entry.query;
-          body.appendChild(queryPre);
-        }
-        row.appendChild(body);
-        makeCollapsible(row, `web:${entry.call_id || entry.id || entry.query || 'search'}`, false);
-        getTarget().appendChild(row);
-        return;
-      }
-      if (entry.role === 'approval') {
-        const requestId = entry.request_id || entry.id || entry.item_id;
-        const askUserMsgId = entry.ask_user_msg_id ?? entry.askUserMsgId;
-        const resolvedCardId = askUserMsgId != null
-          ? `ask_user_resolved_${askUserMsgId}`
-          : (entry.card_id || entry.item_id || entry.id || requestId);
-        const cardId = resolvedCardId;
-        renderApproval({
-          ...entry,
-          id: resolvedCardId,
-          request_id: requestId,
-          card_id: cardId,
-          ask_user_msg_id: askUserMsgId,
-          request_method: entry.request_method || entry.requestMethod || '',
-          request_params: entry.payload && typeof entry.payload === 'object' ? entry.payload : {},
-          payload: entry.payload && typeof entry.payload === 'object' ? entry.payload : {},
-          replay: true,
-        }, {
-          parentEl: getTarget(),
-          readOnly: true,
-          source: 'replay',
-          useExisting: false,
-          extensionId: currentExtensionId(),
-        });
-        return;
-      }
-      const cleanText = entry.role === 'assistant' ? stripCitations(entry.text || '') : (entry.text || '');
-      const useMessageCard = entry.role === 'assistant' || entry.role === 'user';
-      const { row, body } = useMessageCard
-        ? buildMessageCard(entry.role, cleanText)
-        : buildRow('message', entry.role === 'assistant' ? 'assistant' : entry.role);
-      if (!useMessageCard && entry.role === 'user') row.classList.add('user');
-      if ((entry.role === 'assistant' || entry.role === 'user') && isMarkdownEnabled()) {
-        const container = renderMarkdownItBlock(cleanText);
-        body.append(container);
-      } else {
-        const pre = document.createElement('pre');
-        pre.textContent = cleanText;
-        body.append(pre);
-      }
-      getTarget().appendChild(row);
-      incrementMessages();
-    });
-    clearPlaceholder();
-    const insertBefore = (opts as AnyRecord).prepend
-      ? ((planOverlayEl && planOverlayEl.parentElement === timelineEl) ? planOverlayEl.nextSibling : topSpacerEl?.nextSibling)
-      : bottomSpacerEl;
-    if (insertBefore && insertBefore.parentElement === timelineEl) {
-      timelineEl.insertBefore(fragment, insertBefore);
-    } else {
-      timelineEl.appendChild(fragment);
-    }
-    syncPlanOverlayUi();
-
-    // Initialize terminal-like content after rows are in the DOM.
-    if (pendingAgentPtyTerms.length) {
-      requestAnimationFrame(() => {
-        pendingAgentPtyTerms.forEach((rec) => {
-          rec.termEl.textContent = rec.buf || '';
-        });
-      });
-    }
-    measureRowHeight();
-    updateSpacerHeights();
-  }
-
-  const { getAssistantRow, appendAssistantDelta, finalizeAssistant } = bindAssistantStream({
+  const timelineLiveItems = bindTimelineLiveItems({
+    getState: () => ({
+      lastEventType,
+      activeAgentPtyBlockId,
+    }),
+    setState: (patch) => {
+      if (patch.lastEventType !== undefined) lastEventType = patch.lastEventType || null;
+      if (patch.activeAgentPtyBlockId !== undefined) activeAgentPtyBlockId = patch.activeAgentPtyBlockId || null;
+    },
     assistantRows,
+    reasoningRows,
+    diffRows,
+    agentBlockRows,
+    timelineEl,
     buildMessageCard,
     updateMessageCardHeader,
     insertRow,
+    createRow,
+    buildRow,
+    makeCollapsible,
+    clearPlaceholder,
+    setActivity,
+    setStatusDot,
+    setCommandRunning,
+    maybeAutoScroll,
     isMarkdownEnabled,
     createStreamingParser,
     renderEventMarkdownInto,
@@ -2659,209 +1842,56 @@ document.addEventListener('DOMContentLoaded', () => {
     highlightCode,
     incrementMessages,
     stripCitations,
-    maybeAutoScroll,
+    escapeHtml,
+    toRelativePath,
+    postTe2OpenRequest,
+    renderShellCmdRibbon,
+    highlightCodeAlways,
+    detectLangFromPath,
+    resolveHljsLanguage,
+    detectLangFromCommand,
+    isDiffSyntaxEnabled,
+    sioCall,
+    getConversationId: () => conversationMeta?.conversation_id || null,
+    getConversationMeta: () => conversationMeta,
+    setConversationMeta: (nextMeta) => { conversationMeta = nextMeta; },
+    getCurrentExtensionId: () => currentExtensionId(),
+    getSubagentContainer,
+    requestCardRuntime,
+    onAfterRender: () => {
+      timelineStickyHeaders?.update?.();
+      maybeAutoScroll();
+    },
   });
 
-  function getReasoningRow(id, parentEl = null) {
-    const key = id || 'reasoning';
-    let entry = reasoningRows.get(key);
-    if (!entry) {
-      const { row, body } = createRow('reasoning', 'reasoning', undefined, parentEl);
-      const pre = document.createElement('pre');
-      pre.textContent = '';
-      body.append(pre);
-      entry = { row, body, pre };
-      reasoningRows.set(key, entry);
-    } else if (parentEl && entry.row && entry.row.parentElement !== parentEl) {
-      parentEl.appendChild(entry.row);
-    }
-    return entry;
-  }
+  const {
+    getAssistantRow,
+    appendAssistantDelta,
+    finalizeAssistant,
+    getReasoningRow,
+    appendReasoningDelta,
+    finalizeReasoning,
+    getDiffRow,
+    addDiff,
+    addDeclinedDiff,
+    formatDiff,
+    renderDiffBlock,
+    getDiffRenderState,
+    setDiffRenderMode,
+    getAgentBlockRow,
+    renderAgentBlockBegin,
+    renderAgentBlockDelta,
+    renderScreenDelta,
+    renderAgentBlockEnd,
+    renderPlanCard,
+    renderApproval,
+    respondApproval: respondApprovalImpl,
+    handoffApproval,
+    restorePendingApprovals: restorePendingApprovalsImpl,
+  } = timelineLiveItems;
 
-  function appendReasoningDelta(id, delta, parentEl = null) {
-    if (delta === undefined || delta === null) return;
-    const entry = getReasoningRow(id, parentEl);
-    entry.pre.textContent += delta;
-    lastEventType = 'reasoning';
-    maybeAutoScroll();
-  }
+  restorePendingApprovals = restorePendingApprovalsImpl;
 
-  function finalizeReasoning(id, text, parentEl = null) {
-    const entry = getReasoningRow(id, parentEl);
-    if (text) entry.pre.textContent = text;
-    lastEventType = 'reasoning';
-    maybeAutoScroll();
-  }
-
-  function getDiffRow(id, path, parentEl) {
-    const key = id || 'diff';
-    let entry = diffRows.get(key);
-    if (!entry) {
-      const { row, body } = buildRow('diff', 'diff');
-      const pathLabel = document.createElement('div');
-      pathLabel.className = 'diff-path-label command-ribbon';
-      if (path) {
-        pathLabel.innerHTML = `<strong>${escapeHtml(toRelativePath(path))}</strong>`;
-        pathLabel.style.cursor = 'pointer';
-        pathLabel.dataset.hasClickHandler = 'true';
-        pathLabel.addEventListener('click', (e) => {
-          const target = e.target;
-          if (target instanceof Element && target.closest('.twisty')) return;
-          postTe2OpenRequest({ path, line: 1, column: 1 });
-        });
-      } else {
-        pathLabel.innerHTML = '<strong>diff</strong>';
-      }
-      body.append(pathLabel);
-      const block = document.createElement('div');
-      block.className = 'diff-block';
-      body.append(block);
-      if (parentEl) {
-        parentEl.appendChild(row);
-      } else {
-        insertRow(row);
-      }
-      makeCollapsible(row, `diff:${key}`, false);
-      entry = { block, row };
-      diffRows.set(key, entry);
-    }
-    return entry;
-  }
-
-  // --- Agent PTY block streaming (from MCP sidecar) ---
-  const agentBlockRows = new Map();
-
-  function getAgentBlockRow(blockId, label) {
-    const key = blockId || `agent-block:${label || 'agent'}`;
-    let entry = agentBlockRows.get(key);
-    if (!entry) {
-      clearPlaceholder();
-      const row = document.createElement('div');
-      row.className = 'timeline-row command-result terminal-card';
-      row.dataset.agentBlockId = key;
-
-      const body = document.createElement('div');
-      body.className = 'body';
-
-      const cmdRibbon = document.createElement('div');
-      cmdRibbon.className = 'command-ribbon';
-      cmdRibbon.textContent = label ? `[agent] ${label}` : '[agent]';
-      body.appendChild(cmdRibbon);
-
-      const termEl = document.createElement('div');
-      termEl.className = 'command-output';
-      body.appendChild(termEl);
-
-      row.appendChild(body);
-      insertRow(row);
-      entry = { row, cmdRibbon, termEl, text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
-      agentBlockRows.set(key, entry);
-    }
-    return entry;
-  }
-
-  function renderAgentBlockBegin(evt) {
-    const block = evt.block || {};
-    const blockId = evt.block_id || block.block_id || evt.blockId || 'agent';
-    const cmd = block.cmd || '';
-    const label = cmd ? `$ ${cmd}` : 'agent pty';
-    const entry = getAgentBlockRow(blockId, label);
-    // Show command in styled ribbon (white on gray), not inside xterm
-    entry.cmdRibbon.textContent = cmd ? `$ ${cmd}` : '';
-    entry.text = '';
-    entry.screenRows = null;
-    entry.renderMode = 'raw';
-    entry.hasRawStream = false;
-    activeAgentPtyBlockId = blockId;
-    entry.termEl.textContent = '';
-    lastEventType = 'shell';
-    setActivity('agent pty', true);
-    setCommandRunning(true);
-    maybeAutoScroll();
-  }
-
-  function renderAgentBlockDelta(evt) {
-    const blockId = evt.block_id || evt.blockId || 'agent';
-    const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
-    if (entry.renderMode === 'screen' || entry.hasRawStream) return;
-    const delta = evt.delta || '';
-    if (!delta) return;
-    entry.text += delta;
-    entry.termEl.textContent = entry.text;
-    lastEventType = 'shell';
-    maybeAutoScroll();
-  }
-
-  function renderScreenDelta(evt) {
-    const blockId = evt.block_id || evt.blockId;
-    if (!blockId) return;
-    const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
-    if (entry.renderMode !== 'screen') return;
-    if (entry.renderMode !== 'screen') {
-      entry.renderMode = 'screen';
-      entry.text = '';
-      entry.buf = '';
-      if (entry.term) {
-        entry.term.reset();
-      }
-    }
-    const rowCount = Number.isFinite(evt.rows_count) ? evt.rows_count : 40;
-    if (!entry.screenRows || entry.screenRows.length !== rowCount) {
-      entry.screenRows = new Array(rowCount).fill('');
-    }
-    const rows = Array.isArray(evt.rows) ? evt.rows : [];
-    rows.forEach((r) => {
-      if (!r || !Number.isFinite(r.row)) return;
-      const idx = r.row;
-      if (idx >= 0 && idx < entry.screenRows.length) {
-        entry.screenRows[idx] = r.text || '';
-      }
-    });
-    entry.termEl.textContent = entry.screenRows.join('\n');
-    lastEventType = 'shell';
-    maybeAutoScroll();
-  }
-
-  function _decodeBase64ToUtf8(b64) {
-    try {
-      const binary = atob(b64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      return new TextDecoder('utf-8').decode(bytes);
-    } catch (e) {
-      return '';
-    }
-  }
-
-  function renderAgentBlockEnd(evt) {
-    const block = evt.block || {};
-    const blockId = evt.block_id || block.block_id || evt.blockId || 'agent';
-    const entry = agentBlockRows.get(blockId);
-    if (!entry) return;
-    const exitCode = block.exit_code ?? block.exitCode;
-    if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
-      const footer = document.createElement('div');
-      footer.className = 'command-footer';
-      footer.textContent = `exit ${exitCode}`;
-      entry.row.querySelector('.body').appendChild(footer);
-      setStatusDot('error');
-    } else {
-      setStatusDot('success');
-    }
-    setActivity('idle', false);
-    setCommandRunning(false);
-    lastEventType = 'shell';
-    maybeAutoScroll();
-    if (activeAgentPtyBlockId === blockId) {
-      activeAgentPtyBlockId = null;
-    }
-    // keep row in map for later deltas (should not happen) but don't delete yet
-  }
-
-  // --- Shell streaming functions ---
-  // Uses same styling as command-result (renderCommandResult)
   const {
     getShellRow,
     renderShellBegin,
@@ -2884,111 +1914,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setLastEventType: (v) => { lastEventType = v; },
     _dbg,
   });
-
-  // Render a plan card (completed plan from turn) - collapsible
-  function renderPlanCard(steps) {
-    if (!steps || !steps.length) return;
-    
-    const { row, body } = createRow('plan', 'plan');
-    
-    // Collapsible header
-    const header = document.createElement('div');
-    header.className = 'plan-card-header';
-    let collapsed = false;
-    
-    const toggleBtn = document.createElement('span');
-    toggleBtn.className = 'plan-toggle';
-    toggleBtn.textContent = '[-]';
-    
-    const title = document.createElement('span');
-    title.className = 'plan-title';
-    title.textContent = 'Plan';
-    
-    header.append(toggleBtn, title);
-    body.appendChild(header);
-    
-    const list = document.createElement('div');
-    list.className = 'plan-list';
-    
-    steps.forEach((item) => {
-      const stepEl = document.createElement('div');
-      stepEl.className = `plan-item ${item.status || 'pending'}`;
-      
-      const checkbox = document.createElement('span');
-      checkbox.className = 'plan-checkbox';
-      if (item.status === 'completed') {
-        checkbox.textContent = '☑';
-      } else if (item.status === 'in_progress') {
-        checkbox.textContent = '◐';
-      } else {
-        checkbox.textContent = '☐';
-      }
-      
-      const text = document.createElement('span');
-      text.className = 'plan-text';
-      text.textContent = item.step || '';
-      
-      stepEl.append(checkbox, text);
-      list.appendChild(stepEl);
-    });
-    
-    body.appendChild(list);
-    
-    // Toggle collapse on header click
-    toggleBtn.addEventListener('click', () => {
-      collapsed = !collapsed;
-      toggleBtn.textContent = collapsed ? '[+]' : '[-]';
-      list.style.display = collapsed ? 'none' : 'flex';
-    });
-    
-    // Insert before bottom spacer
-    if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(row, bottomSpacerEl);
-    } else {
-      timelineEl.appendChild(row);
-    }
-    
-    lastEventType = 'plan';
-    maybeAutoScroll();
-  }
-
-  const diffRendering = bindDiffRendering({
-    getDiffRow,
-    createRow,
-    escapeHtml,
-    toRelativePath,
-    isDiffSyntaxEnabled: () => diffSyntaxHighlight === true,
-    detectLangFromPath,
-    resolveHljsLanguage,
-    setLastEventType: (value) => { lastEventType = value; },
-    maybeAutoScroll,
-    timelineEl,
-    postTe2OpenRequest,
-  });
-
-  function addDiff(id, text, path, parentEl) {
-    return diffRendering.addDiff(id, text, path, parentEl);
-  }
-
-  function addDeclinedDiff(id, text, path) {
-    return diffRendering.addDeclinedDiff(id, text, path);
-  }
-
-  function formatDiff(text, filePath) {
-    return diffRendering.formatDiff(text, filePath);
-  }
-
-  function renderDiffBlock(block, text, filePath) {
-    return diffRendering.renderDiffBlock(block, text, filePath);
-  }
-
-  function getDiffRenderState() {
-    return diffRendering.getDiffRenderState();
-  }
-
-  function setDiffRenderMode(mode) {
-    return diffRendering.setDiffRenderMode(mode);
-  }
 
   const {
     buildReplayToolRow,
@@ -3015,45 +1940,97 @@ document.addEventListener('DOMContentLoaded', () => {
     highlightCodeAlways,
   });
 
+  const timelineReplay = bindTimelineReplay({
+    getState: () => ({
+      conversationSettings,
+      runtimeOptions,
+      planOverlayEl,
+      topSpacerEl,
+      bottomSpacerEl,
+      transcriptTotal,
+      transcriptStart,
+      transcriptEnd,
+      debugEnabled: _dbg,
+    }),
+    setState: (patch) => {
+      if (patch.topSpacerEl !== undefined) topSpacerEl = patch.topSpacerEl as HTMLElement | null;
+      if (patch.bottomSpacerEl !== undefined) bottomSpacerEl = patch.bottomSpacerEl as HTMLElement | null;
+      if (patch.messageCount !== undefined) messageCount = Number(patch.messageCount || 0);
+      if (patch.tokenCount !== undefined) tokenCount = Number(patch.tokenCount || 0);
+      if (patch.transcriptTotal !== undefined) transcriptTotal = Number(patch.transcriptTotal || 0);
+      if (patch.transcriptStart !== undefined) transcriptStart = Number(patch.transcriptStart || 0);
+      if (patch.transcriptEnd !== undefined) transcriptEnd = Number(patch.transcriptEnd || 0);
+      if (patch.lastEventType !== undefined) lastEventType = patch.lastEventType as string | null;
+      if (patch.contextWindow !== undefined) {
+        contextWindow = typeof patch.contextWindow === 'number' && Number.isFinite(patch.contextWindow)
+          ? patch.contextWindow
+          : null;
+      }
+    },
+    timelineEl,
+    counterMessagesEl,
+    counterTokensEl,
+    contextRemainingEl,
+    assistantRows,
+    reasoningRows,
+    diffRows,
+    toolRows,
+    shellRows,
+    agentBlockRows,
+    documentRef: document,
+    clearPlaceholder,
+    setPlaceholderCleared: (value) => { placeholderCleared = value === true; },
+    ensureActivityRow,
+    setCounter,
+    setActivity,
+    clearReasoningRibbon,
+    setStatusDot,
+    maybeAutoScroll,
+    resetPlanState: () => {
+      planOverlayEl = null;
+      planListEl = null;
+      planItems.clear();
+      planDocState = createEmptyPlanDocumentState(Boolean(runtimeOptions?.has_plan));
+      todoState = createEmptyTodoState(Boolean(runtimeOptions?.has_todo));
+      closePlanModal();
+    },
+    syncPlanOverlayUi,
+    timelineStickyUpdate: () => timelineStickyHeaders?.update?.(),
+    currentExtensionId,
+    buildRow,
+    appendErrorContent,
+    renderCommandResult,
+    renderViewCard,
+    renderSearchCard,
+    renderApproval,
+    buildReplayToolRow,
+    renderShellCmdRibbon,
+    highlightCodeAlways,
+    detectLangFromCommand,
+    escapeHtml,
+    toRelativePath,
+    postTe2OpenRequest,
+    makeCollapsible,
+    addMessage,
+    finalizeReasoning,
+    addDiff,
+    renderPlanCard,
+    updateTokens,
+    updateContextRemaining,
+    applyRuntimeMode,
+    measureRowHeight,
+    updateSpacerHeights,
+  });
+
+  resetTimeline = timelineReplay.resetTimeline;
+  renderTranscriptEntries = timelineReplay.renderTranscriptEntries;
+
   const rpcFlow = bindRpcFlow({
     waitForWs: (...args) => waitForWs(...args),
     sioCall,
     getPending: () => pending,
     getConversationId: () => conversationMeta?.conversation_id || null,
   });
-
-  const approvalUi = bindApprovalUi({
-    sioCall,
-    getConversationId: () => conversationMeta?.conversation_id || null,
-    getConversationMeta: () => conversationMeta,
-    setConversationMeta: (nextMeta) => { conversationMeta = nextMeta; },
-    getCurrentExtensionId: () => currentExtensionId(),
-    createRow,
-    getSubagentContainer,
-    escapeHtml,
-    formatDiff,
-    renderDiffBlock,
-    renderEventMarkdownInto,
-    toRelativePath,
-    requestCardRuntime,
-    timelineEl,
-    onAfterRender: () => {
-      timelineStickyHeaders?.update?.();
-      maybeAutoScroll();
-    },
-  });
-
-  function renderApproval(evt, options = {}) {
-    return approvalUi.renderApproval(evt, options);
-  }
-
-  function handoffApproval(evt) {
-    return approvalUi.handoffApproval(evt);
-  }
-
-  function restorePendingApprovals() {
-    approvalUi.restorePendingApprovals();
-  }
 
   const { saveSettings } = bindSettingsSaveFlow({
     getState: () => ({
@@ -3115,7 +2092,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function respondApproval(requestId, decision) {
-    return approvalUi.respondApproval(requestId, decision);
+    return respondApprovalImpl(requestId, decision);
   }
 
   const conversationsRpcClient = createConversationsRpcClient({
