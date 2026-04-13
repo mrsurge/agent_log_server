@@ -229,6 +229,98 @@ window.CodexAgentModules.push((ctx) => {
     currentSchemaValues = {};
     
     if (!schema || !Array.isArray(schema.fields)) return;
+    const getConversationInfoFields = () => {
+      const state = window.CodexAgent?.state;
+      if (state?.pendingNewConversation) return [];
+
+      const meta = state?.conversationMeta;
+      if (!meta || typeof meta !== 'object') return [];
+
+      const conversationId = typeof meta.conversation_id === 'string' ? meta.conversation_id.trim() : '';
+      const threadId = typeof meta.thread_id === 'string' ? meta.thread_id.trim() : '';
+      const status = typeof meta.status === 'string' ? meta.status.trim().toLowerCase() : '';
+      if (!conversationId || !threadId || status !== 'active') return [];
+
+      return [
+        {
+          id: '__conversation_info_section',
+          type: 'section',
+          label: 'Conversation Info',
+          description: 'Current harness conversation binding for this active provider-backed conversation.',
+        },
+        {
+          id: '__conversation_info_conversation_id',
+          type: 'info',
+          label: 'Conversation ID',
+          text: conversationId,
+          detail: 'Harness conversation identifier.',
+        },
+        {
+          id: '__conversation_info_provider_thread_id',
+          type: 'info',
+          label: 'Provider Session / Thread ID',
+          text: threadId,
+          detail: 'Bound provider session or thread identifier.',
+        },
+      ];
+    };
+
+    const moveFieldAfterIndex = (fields, fieldIndex, afterIndex) => {
+      if (!Array.isArray(fields) || fieldIndex < 0 || afterIndex < 0 || fieldIndex === afterIndex + 1) {
+        return fields;
+      }
+
+      const reordered = fields.slice();
+      const [field] = reordered.splice(fieldIndex, 1);
+      if (!field) return fields;
+
+      const normalizedAfterIndex = fieldIndex < afterIndex ? afterIndex - 1 : afterIndex;
+      reordered.splice(normalizedAfterIndex + 1, 0, field);
+      return reordered;
+    };
+
+    const getRenderFields = () => {
+      const fields = Array.isArray(schema.fields) ? schema.fields.slice() : [];
+      const conversationInfoFields = getConversationInfoFields();
+      if (!conversationInfoFields.length) return fields;
+
+      const sessionPickerIndex = fields.findIndex((field) => field && field.type === 'session_picker');
+      if (sessionPickerIndex >= 0) {
+        let renderFields = [
+          ...fields.slice(0, sessionPickerIndex + 1),
+          ...conversationInfoFields,
+          ...fields.slice(sessionPickerIndex + 1),
+        ];
+
+        const cwdIndex = fields.findIndex((field) => field && field.id === 'cwd');
+        if (cwdIndex >= 0 && cwdIndex < sessionPickerIndex) {
+          const renderedCwdIndex = renderFields.findIndex((field) => field && field.id === 'cwd');
+          const conversationInfoEndIndex = sessionPickerIndex + conversationInfoFields.length;
+          renderFields = moveFieldAfterIndex(renderFields, renderedCwdIndex, conversationInfoEndIndex);
+        }
+
+        return renderFields;
+      }
+
+      let insertAt = 0;
+      while (insertAt < fields.length) {
+        const type = typeof fields[insertAt]?.type === 'string' ? fields[insertAt].type : '';
+        if (type === 'section' || type === 'info') {
+          insertAt += 1;
+          continue;
+        }
+        break;
+      }
+
+      return [
+        ...fields.slice(0, insertAt),
+        ...conversationInfoFields,
+        ...fields.slice(insertAt),
+      ];
+    };
+
+    const renderFields = getRenderFields();
+    if (!renderFields.length) return;
     const selectControls = {};
     let modelItems = [];
 
@@ -373,7 +465,7 @@ window.CodexAgentModules.push((ctx) => {
       effortControl.input.value = nextValue;
     };
     
-    schema.fields.forEach(field => {
+    renderFields.forEach(field => {
       if (field.type === 'section') {
         const section = document.createElement('div');
         section.className = 'settings-schema-section';
