@@ -1,14 +1,14 @@
 import asyncio
 import contextlib
+import importlib
 import json
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Protocol, TypedDict, cast
 
 from agent_log_server import ask_user_interactions
-from framework_shells.orchestrator import Orchestrator
 
 from .router import CodexEventRouter
 from .runtime_protocol import (
@@ -26,6 +26,86 @@ _META_ENVELOPE_START = "\x1eCODEX_META "
 _META_ENVELOPE_END = "\x1f"
 
 
+class _PipeWriter(Protocol):
+    def write(self, data: bytes) -> object: ...
+
+    async def drain(self) -> object: ...
+
+
+class _OutputSubscription(Protocol):
+    async def get(self) -> bytes | None: ...
+
+
+class _PipeProcess(Protocol):
+    stdin: _PipeWriter | None
+    returncode: int | None
+
+
+class _PipeState(Protocol):
+    process: _PipeProcess
+
+
+class _ShellRecord(Protocol):
+    id: str
+    status: str
+    label: str | None
+    spec_id: str | None
+
+
+class _ShellManager(Protocol):
+    async def get_shell(self, shell_id: str) -> _ShellRecord | None: ...
+
+    async def list_shells(self) -> list[_ShellRecord]: ...
+
+    async def terminate_shell(self, shell_id: str, force: bool = False) -> object: ...
+
+    def get_pipe_state(self, shell_id: str) -> _PipeState | None: ...
+
+    async def subscribe_output_bytes(self, shell_id: str) -> _OutputSubscription: ...
+
+    async def unsubscribe_output_bytes(self, shell_id: str, subscription: _OutputSubscription) -> object: ...
+
+    async def write_to_pipe(self, shell_id: str, data: str) -> object: ...
+
+
+class _ShellStarterRecord(Protocol):
+    id: str
+
+
+class _Orchestrator(Protocol):
+    async def start_from_ref(
+        self,
+        ref: str,
+        *,
+        base_dir: Path,
+        ctx: Dict[str, str],
+        label: str,
+        wait_ready: bool,
+    ) -> _ShellStarterRecord: ...
+
+
+class _OrchestratorFactory(Protocol):
+    def __call__(self, mgr: _ShellManager) -> _Orchestrator: ...
+
+
+class _MetaFns(TypedDict, total=False):
+    load: Callable[[str], object]
+    save: Callable[[str, Dict[str, object]], None]
+    upsert_pending_approval: Callable[[str, Dict[str, object]], None]
+
+
+def _object_dict(value: object) -> Dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _load_orchestrator_factory() -> _OrchestratorFactory:
+    module = importlib.import_module("framework_shells.orchestrator")
+    orchestrator = getattr(module, "Orchestrator", None)
+    if orchestrator is None:
+        raise RuntimeError("framework_shells.orchestrator.Orchestrator unavailable")
+    return cast(_OrchestratorFactory, orchestrator)
+
+
 def _strip_meta_envelope(text: str) -> str:
     if text.startswith(_META_ENVELOPE_START):
         end_idx = text.find(_META_ENVELOPE_END)
@@ -34,7 +114,7 @@ def _strip_meta_envelope(text: str) -> str:
     return text
 
 
-def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
+def _extract_item_text(item: Dict[str, object]) -> Optional[Dict[str, str]]:
     raw_type = str(item.get("type") or "")
     item_type = raw_type.lower()
 
@@ -44,12 +124,13 @@ def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
         content = item.get("content") or []
         if isinstance(content, list):
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text = part.get("text")
+                part_dict = _object_dict(part)
+                if part_dict.get("type") == "text":
+                    text = part_dict.get("text")
                     if isinstance(text, str):
                         text_parts.append(text)
         if not text_parts and isinstance(item.get("text"), str):
-            text_parts.append(item["text"])
+            text_parts.append(cast(str, item["text"]))
         text = "\n".join(text_parts)
 
         if role == "user":
@@ -67,14 +148,15 @@ def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
         content = item.get("content") or []
         if isinstance(content, list):
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text = part.get("text")
+                part_dict = _object_dict(part)
+                if part_dict.get("type") == "text":
+                    text = part_dict.get("text")
                     if isinstance(text, str):
                         user_text_parts.append(text)
         if not user_text_parts and isinstance(item.get("text"), str):
-            user_text_parts.append(item["text"])
+            user_text_parts.append(cast(str, item["text"]))
         if not user_text_parts and isinstance(item.get("message"), str):
-            user_text_parts.append(item["message"])
+            user_text_parts.append(cast(str, item["message"]))
         text = _strip_meta_envelope("\n".join(user_text_parts)).strip()
         if text:
             return {"role": "user", "text": text}
@@ -94,12 +176,12 @@ class CodexAppServerTransport:
         self,
         *,
         server_root: Path,
-        fws_getter: Callable[[], Awaitable[Any]],
-        broadcast_fn: Callable[[Dict[str, Any]], Awaitable[None]],
-        transcript_fn: Callable[[str, Dict[str, Any]], Awaitable[None]],
-        meta_fns: Optional[Dict[str, Callable]],
-        raw_log_fn: Callable[[str, str, Any], None],
-        auth_event_handler: Optional[Callable[..., Awaitable[List[Dict[str, Any]]]]] = None,
+        fws_getter: Callable[[], Awaitable[_ShellManager]],
+        broadcast_fn: Callable[[Dict[str, object]], Awaitable[None]],
+        transcript_fn: Callable[[str, Dict[str, object]], Awaitable[None]],
+        meta_fns: Optional[_MetaFns],
+        raw_log_fn: Callable[[str, str, object], None],
+        auth_event_handler: Optional[Callable[..., Awaitable[List[Dict[str, object]]]]] = None,
     ) -> None:
         self._server_root = server_root
         self._fws_getter = fws_getter
@@ -118,11 +200,11 @@ class CodexAppServerTransport:
         self._resumed_threads: set[str] = set()
         self._thread_conversations: Dict[str, str] = {}
         self._turn_conversations: Dict[str, str] = {}
-        self._pending_approval_requests: Dict[str, Dict[str, Any]] = {}
-        self._resume_startup_barriers: Dict[str, Dict[str, Any]] = {}
+        self._pending_approval_requests: Dict[str, Dict[str, object]] = {}
+        self._resume_startup_barriers: Dict[str, Dict[str, object]] = {}
         self._request_counter = int(time.time() * 1000)
-        self._stdin: Optional[Any] = None
-        self._stdout_subscription: Optional[Any] = None
+        self._stdin: Optional[_PipeWriter] = None
+        self._stdout_subscription: Optional[_OutputSubscription] = None
         self._router = CodexEventRouter()
 
     def is_ready(self) -> bool:
@@ -179,7 +261,7 @@ class CodexAppServerTransport:
         request_id_text = str(request_id or "").strip()
         return bool(request_id_text and request_id_text in self._pending_approval_requests)
 
-    def resolve_approval(self, request_id: str, resolution: Any) -> bool:
+    def resolve_approval(self, request_id: str, resolution: object) -> bool:
         request_id_text = str(request_id or "").strip()
         if not request_id_text:
             return False
@@ -191,13 +273,14 @@ class CodexAppServerTransport:
             self._pending_approval_requests[request_id_text] = pending
             return False
 
-        result_value: Dict[str, Any] = {}
-        if isinstance(resolution, dict) and isinstance(resolution.get("result"), dict):
-            result_value = dict(resolution["result"])
-        elif isinstance(resolution, dict):
+        result_value: Dict[str, object] = {}
+        resolution_dict = _object_dict(resolution)
+        if isinstance(resolution_dict.get("result"), dict):
+            result_value = _object_dict(resolution_dict["result"])
+        elif resolution_dict:
             result_value = {
                 key: value
-                for key, value in resolution.items()
+                for key, value in resolution_dict.items()
                 if key not in {"feedback", "kind", "message", "path", "rules"}
             }
 
@@ -208,28 +291,30 @@ class CodexAppServerTransport:
         }
         decision = result_value.get("decision")
         if decision is None:
-            decision = resolution.get("decision") if isinstance(resolution, dict) else resolution
+            decision = resolution_dict.get("decision") if resolution_dict else resolution
         if requires_decision and "decision" not in result_value:
             result_value["decision"] = "accept" if str(decision).strip().lower() == "accept" else "decline"
         if request_method:
             protocol = peek_runtime_protocol()
             if protocol is None:
                 raise RuntimeError("runtime protocol unavailable for approval resolution")
-            encoded_result = encode_server_request_result(protocol, request_method, result_value)
+            encoded_result = cast(object, encode_server_request_result(protocol, request_method, result_value))
         else:
             encoded_result = {
                 "decision": "accept" if str(result_value.get("decision")).strip().lower() == "accept" else "decline",
             }
 
-        response_id: Any = int(request_id_text) if request_id_text.isdigit() else request_id_text
-        response_payload: Dict[str, Any] = {
+        response_id: int | str = int(request_id_text) if request_id_text.isdigit() else request_id_text
+        response_payload: Dict[str, object] = {
             "jsonrpc": "2.0",
             "id": response_id,
             "result": encoded_result,
         }
         line = json.dumps(response_payload, ensure_ascii=False)
         try:
-            self._raw_log_fn("out", pending.get("conversation_id") or self.get_raw_label(), line)
+            raw_conversation = pending.get("conversation_id")
+            conversation_label = raw_conversation if isinstance(raw_conversation, str) and raw_conversation else self.get_raw_label()
+            self._raw_log_fn("out", conversation_label, line)
             writer.write((line + "\n").encode("utf-8"))
             try:
                 loop = asyncio.get_running_loop()
@@ -242,7 +327,7 @@ class CodexAppServerTransport:
             self._pending_approval_requests[request_id_text] = pending
             return False
 
-    def _approval_request_method(self, pending: Dict[str, Any]) -> Optional[str]:
+    def _approval_request_method(self, pending: Dict[str, object]) -> Optional[str]:
         method = pending.get("method")
         if isinstance(method, str) and method.strip():
             return method.strip().lower()
@@ -257,10 +342,10 @@ class CodexAppServerTransport:
         self,
         method: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, object]] = None,
         conversation_id: Optional[str] = None,
         timeout: float = 6.0,
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, object]:
         await self.ensure_ready()
         return await self._rpc_request_unchecked(
             method,
@@ -273,19 +358,19 @@ class CodexAppServerTransport:
         self,
         method: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, object]] = None,
         conversation_id: Optional[str] = None,
         timeout: float = 6.0,
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, object]:
         method_name = str(method or "").strip().lower()
         resume_thread_id = self._extract_resume_thread_id(params) if method_name == "thread/resume" else None
         if conversation_id and resume_thread_id:
             self._begin_resume_startup_barrier(conversation_id, resume_thread_id)
         req_id = self._next_request_id()
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[Dict[str, object]] = asyncio.get_running_loop().create_future()
         self._rpc_waiters[req_id] = future
         self._request_conversations[req_id] = conversation_id
-        payload: Dict[str, Any] = {"id": int(req_id), "method": method}
+        payload: Dict[str, object] = {"id": int(req_id), "method": method}
         if params is not None:
             payload["params"] = params
         await self._write_payload(payload, conversation_id=conversation_id)
@@ -331,15 +416,18 @@ class CodexAppServerTransport:
                 "_virtual_ack_source": response.get("_virtual_ack_source"),
             }
         protocol = await get_runtime_protocol()
-        decoded_result = decode_response_result(protocol, method, response.get("result", response))
-        self._remember_response_bindings(conversation_id=conversation_id, result=decoded_result)
-        return decoded_result
+        decoded_result = cast(object, decode_response_result(protocol, method, response.get("result", response)))
+        if not isinstance(decoded_result, dict):
+            raise RuntimeError("invalid rpc response result")
+        decoded_result_dict = _object_dict(decoded_result)
+        self._remember_response_bindings(conversation_id=conversation_id, result=decoded_result_dict)
+        return decoded_result_dict
 
     async def notify(
         self,
         method: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, object]] = None,
         conversation_id: Optional[str] = None,
     ) -> None:
         await self.ensure_ready()
@@ -349,10 +437,10 @@ class CodexAppServerTransport:
         self,
         method: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, object]] = None,
         conversation_id: Optional[str] = None,
     ) -> None:
-        payload: Dict[str, Any] = {"method": method}
+        payload: Dict[str, object] = {"method": method}
         if params is not None:
             payload["params"] = params
         await self._write_payload(payload, conversation_id=conversation_id)
@@ -375,7 +463,7 @@ class CodexAppServerTransport:
         self._set_shell(shell_id)
         return shell_id
 
-    async def _adopt_existing_shell(self, mgr: Any) -> Optional[str]:
+    async def _adopt_existing_shell(self, mgr: _ShellManager) -> Optional[str]:
         try:
             records = await mgr.list_shells()
         except Exception:
@@ -390,9 +478,9 @@ class CodexAppServerTransport:
             return rec.id
         return None
 
-    async def _start_new_shell(self, mgr: Any) -> str:
+    async def _start_new_shell(self, mgr: _ShellManager) -> str:
         spec_path = Path(__file__).parent / "shellspec" / "app_server.yaml"
-        orch = Orchestrator(mgr)
+        orch = _load_orchestrator_factory()(mgr)
         shell = await orch.start_from_ref(
             f"{spec_path}#app_server_observed",
             base_dir=spec_path.parent,
@@ -475,7 +563,7 @@ class CodexAppServerTransport:
 
     async def _write_payload(
         self,
-        payload: Dict[str, Any],
+        payload: Dict[str, object],
         *,
         conversation_id: Optional[str] = None,
     ) -> None:
@@ -496,7 +584,7 @@ class CodexAppServerTransport:
             self._stdin = None
             raise RuntimeError("codex extension transport pipe not available") from exc
 
-    async def _reader_loop(self, shell_id: str, subscription: Any) -> None:
+    async def _reader_loop(self, shell_id: str, subscription: _OutputSubscription) -> None:
         pending_label: Optional[str] = None
         buffer = b""
         max_buffer = 4_000_000
@@ -515,14 +603,15 @@ class CodexAppServerTransport:
                     text = "{" + rest
 
             try:
-                parsed = json.loads(text)
+                parsed_value = cast(object, json.loads(text))
             except Exception:
                 self._raw_log_fn("in", self.get_raw_label(), text)
                 if "/" in text or text.endswith("started") or text.endswith("completed"):
                     pending_label = text
                 return
+            parsed = _object_dict(parsed_value)
 
-            if isinstance(parsed, dict) and "id" in parsed and ("result" in parsed or "error" in parsed) and "method" not in parsed:
+            if parsed and "id" in parsed and ("result" in parsed or "error" in parsed) and "method" not in parsed:
                 req_id = str(parsed.get("id"))
                 conversation_id = self._request_conversations.get(req_id)
                 self._raw_log_fn("in", conversation_id or self.get_raw_label(), text)
@@ -532,50 +621,58 @@ class CodexAppServerTransport:
                 return
 
             label = None
-            payload: Any = parsed
+            payload: object = parsed_value
             raw_conversation_id: Optional[str] = None
             request_id: Optional[str] = None
 
             if pending_label:
                 label = pending_label
                 pending_label = None
-                if isinstance(parsed, dict) and isinstance(parsed.get("msg"), dict):
-                    payload = parsed.get("msg")
-                    raw_conversation_id = parsed.get("conversationId")
+                msg = _object_dict(parsed.get("msg"))
+                if msg:
+                    payload = msg
+                    raw_conversation = parsed.get("conversationId")
+                    raw_conversation_id = raw_conversation if isinstance(raw_conversation, str) and raw_conversation else None
                 else:
-                    payload = parsed
-            elif isinstance(parsed, dict):
+                    payload = parsed_value
+            elif parsed:
                 if "method" in parsed:
-                    label = parsed.get("method")
-                    params = parsed.get("params", parsed)
+                    label_value = parsed.get("method")
+                    label = label_value if isinstance(label_value, str) else None
+                    params_obj = parsed.get("params", parsed_value)
+                    params = _object_dict(params_obj)
                     payload = params
-                    if isinstance(params, dict):
+                    if params:
                         param_conversation_id = params.get("conversationId")
                         if isinstance(param_conversation_id, str) and param_conversation_id:
                             raw_conversation_id = param_conversation_id
                         if (
-                            isinstance(label, str)
+                            label is not None
                             and label.startswith("codex/event/collab_")
                             and isinstance(params.get("msg"), dict)
                         ):
-                            payload = dict(params["msg"])
+                            payload = _object_dict(params["msg"])
                             for key in ("id", "conversationId", "conversation_id", "threadId", "thread_id", "turnId", "turn_id"):
                                 value = params.get(key)
-                                if value is not None and payload.get(key) is None:
-                                    payload[key] = value
+                                payload_dict = _object_dict(payload)
+                                if value is not None and payload_dict.get(key) is None:
+                                    payload_dict[key] = value
+                                    payload = payload_dict
                     if parsed.get("id") is not None:
                         request_id = str(parsed.get("id"))
                 elif isinstance(parsed.get("msg"), dict):
-                    msg = parsed.get("msg", {})
+                    msg = _object_dict(parsed.get("msg"))
                     label = f"codex/event/{msg.get('type', 'event')}"
                     payload = msg
-                    raw_conversation_id = parsed.get("conversationId")
+                    raw_conversation = parsed.get("conversationId")
+                    raw_conversation_id = raw_conversation if isinstance(raw_conversation, str) and raw_conversation else None
                 elif "type" in parsed:
                     label = str(parsed.get("type"))
                     payload = parsed
 
-            if isinstance(parsed, dict) and isinstance(parsed.get("conversationId"), str):
-                raw_conversation_id = parsed.get("conversationId")
+            raw_conversation = parsed.get("conversationId")
+            if isinstance(raw_conversation, str) and raw_conversation:
+                raw_conversation_id = raw_conversation
 
             conversation_id = self._resolve_conversation_id(raw_conversation_id, payload)
             self._raw_log_fn("in", conversation_id or raw_conversation_id or self.get_raw_label(), text)
@@ -666,15 +763,15 @@ class CodexAppServerTransport:
     async def route_event(
         self,
         label: str,
-        payload: Any,
+        payload: object,
         *,
         conversation_id: Optional[str],
         thread_id: Optional[str],
         turn_id: Optional[str],
         request_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, object]:
         protocol = await get_runtime_protocol()
-        routed_payload = dict(payload) if isinstance(payload, dict) else payload
+        routed_payload: object = _object_dict(payload) if isinstance(payload, dict) else payload
         if request_id is not None and isinstance(routed_payload, dict) and routed_payload.get("_request_id") is None:
             routed_payload["_request_id"] = str(request_id)
         routed = self._router.route_event(
@@ -709,7 +806,7 @@ class CodexAppServerTransport:
     async def _route_transport_event(
         self,
         label: str,
-        payload: Any,
+        payload: object,
         *,
         conversation_id: Optional[str],
         thread_id: Optional[str],
@@ -725,7 +822,7 @@ class CodexAppServerTransport:
             request_id=request_id,
         )
 
-        extra_events: List[Dict[str, Any]] = []
+        extra_events: List[Dict[str, object]] = []
         if self._auth_event_handler is not None:
             handled_events = await self._auth_event_handler(
                 label=label,
@@ -742,8 +839,13 @@ class CodexAppServerTransport:
             return
 
         routed_result = routed if isinstance(routed, dict) else {}
-        resolved_conversation_id = routed_result.get("conversation_id") or conversation_id
-        descriptors_by_request: Dict[str, Dict[str, Any]] = {}
+        routed_conversation_id = routed_result.get("conversation_id")
+        resolved_conversation_id = (
+            routed_conversation_id
+            if isinstance(routed_conversation_id, str) and routed_conversation_id
+            else conversation_id
+        )
+        descriptors_by_request: Dict[str, Dict[str, object]] = {}
         routed_descriptors = routed_result.get("approval_descriptors")
         if isinstance(routed_descriptors, list):
             for descriptor in routed_descriptors:
@@ -770,12 +872,12 @@ class CodexAppServerTransport:
                     await self._transcript_fn(resolved_conversation_id, entry)
 
         next_turn_id = routed_result.get("set_turn_id")
-        if resolved_conversation_id and next_turn_id is not None:
+        if resolved_conversation_id and isinstance(next_turn_id, str) and next_turn_id:
             self._persist_turn_id(resolved_conversation_id, next_turn_id)
         elif resolved_conversation_id and routed_result.get("clear_turn_id"):
             self._persist_turn_id(resolved_conversation_id, None)
 
-        events: List[Dict[str, Any]] = []
+        events: List[Dict[str, object]] = []
         routed_events = routed_result.get("events")
         if isinstance(routed_events, list):
             events.extend(event for event in routed_events if isinstance(event, dict))
@@ -788,15 +890,15 @@ class CodexAppServerTransport:
                 outbound["request_id"] = request_id
             await self._broadcast_fn(outbound)
 
-    def _persist_pending_approval(self, conversation_id: str, descriptor: Dict[str, Any]) -> None:
+    def _persist_pending_approval(self, conversation_id: str, descriptor: Dict[str, object]) -> None:
         request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
         if not request_id_text:
             return
-        meta_dict: Dict[str, Any] = self._load_meta(conversation_id) or {}
+        meta_dict = self._load_meta(conversation_id) or {}
         raw_settings = meta_dict.get("settings")
-        settings: Dict[str, Any] = raw_settings if isinstance(raw_settings, dict) else {}
+        settings = _object_dict(raw_settings)
         created_at = str(descriptor.get("created_at") or datetime.now(timezone.utc).isoformat())
-        render_event = dict(descriptor.get("render_event") or {})
+        render_event = _object_dict(descriptor.get("render_event"))
         render_event["type"] = "approval"
         render_event["conversation_id"] = render_event.get("conversation_id") or conversation_id
         render_event["id"] = render_event.get("id") or request_id_text
@@ -811,13 +913,13 @@ class CodexAppServerTransport:
             "agent": settings.get("agent") or "codex",
             "kind": descriptor.get("kind") or "unknown",
             "request_method": descriptor.get("request_method"),
-            "request_params": dict(descriptor.get("request_params") or {}),
-            "payload": dict(descriptor.get("payload") or {}),
+            "request_params": _object_dict(descriptor.get("request_params")),
+            "payload": _object_dict(descriptor.get("payload")),
             "thread_id": descriptor.get("thread_id") or meta_dict.get("thread_id"),
             "turn_id": descriptor.get("turn_id"),
             "runtime_signature": descriptor.get("runtime_signature") or meta_dict.get("thread_runtime_signature"),
             "runtime_instance_id": descriptor.get("runtime_instance_id") or self.runtime_instance_id(),
-            "transcript_anchor": dict(descriptor.get("transcript_anchor") or {"turn_id": descriptor.get("turn_id")}),
+            "transcript_anchor": _object_dict(descriptor.get("transcript_anchor")) or {"turn_id": descriptor.get("turn_id")},
             "source": descriptor.get("source") or "live",
             "created_at": created_at,
             "render_event": render_event,
@@ -828,7 +930,7 @@ class CodexAppServerTransport:
             upsert(conversation_id, persisted)
         else:
             raw_pending = meta_dict.get("pending_approvals")
-            pending_dict: Dict[str, Any] = raw_pending if isinstance(raw_pending, dict) else {}
+            pending_dict = _object_dict(raw_pending)
             pending_dict[request_id_text] = persisted
             meta_dict["pending_approvals"] = pending_dict
             self._save_meta(conversation_id, meta_dict)
@@ -843,7 +945,7 @@ class CodexAppServerTransport:
     def _resolve_conversation_id(
         self,
         raw_conversation_id: Optional[str],
-        payload: Any,
+        payload: object,
     ) -> Optional[str]:
         if isinstance(raw_conversation_id, str) and self._conversation_exists(raw_conversation_id):
             return raw_conversation_id
@@ -868,7 +970,7 @@ class CodexAppServerTransport:
             return self._find_conversation_by_turn_id(turn_id)
         return None
 
-    def _extract_resume_thread_id(self, params: Optional[Dict[str, Any]]) -> Optional[str]:
+    def _extract_resume_thread_id(self, params: Optional[Dict[str, object]]) -> Optional[str]:
         if not isinstance(params, dict):
             return None
         for key in ("threadId", "thread_id"):
@@ -877,13 +979,14 @@ class CodexAppServerTransport:
                 return value
         return None
 
-    def _begin_resume_startup_barrier(self, conversation_id: str, thread_id: str) -> Dict[str, Any]:
+    def _begin_resume_startup_barrier(self, conversation_id: str, thread_id: str) -> Dict[str, object]:
         existing = self._resume_startup_barriers.get(conversation_id)
+        existing_future = existing.get("future") if isinstance(existing, dict) else None
         if (
             isinstance(existing, dict)
             and existing.get("thread_id") == thread_id
-            and isinstance(existing.get("future"), asyncio.Future)
-            and not existing["future"].done()
+            and isinstance(existing_future, asyncio.Future)
+            and not existing_future.done()
         ):
             return existing
         future = asyncio.get_running_loop().create_future()
@@ -916,17 +1019,19 @@ class CodexAppServerTransport:
         else:
             future.set_result(None)
 
-    def _transport_event_type(self, label: str, payload: Any) -> Optional[str]:
+    def _transport_event_type(self, label: str, payload: object) -> Optional[str]:
         special_types = {
             "thread/status/changed",
             "mcp_startup_update",
             "mcp_startup_complete",
         }
         candidates: List[str] = []
-        if isinstance(payload, dict) and isinstance(payload.get("type"), str) and payload.get("type"):
-            candidates.append(payload["type"])
-        if isinstance(payload, dict) and isinstance(payload.get("msg"), dict):
-            msg_type = payload["msg"].get("type")
+        payload_dict = _object_dict(payload)
+        if isinstance(payload_dict.get("type"), str) and payload_dict.get("type"):
+            candidates.append(cast(str, payload_dict["type"]))
+        msg = _object_dict(payload_dict.get("msg"))
+        if msg:
+            msg_type = msg.get("type")
             if isinstance(msg_type, str) and msg_type:
                 candidates.append(msg_type)
         if isinstance(label, str) and label:
@@ -951,25 +1056,25 @@ class CodexAppServerTransport:
         conversation_id: Optional[str],
         thread_id: Optional[str],
         label: str,
-        payload: Any,
+        payload: object,
     ) -> None:
         if not conversation_id:
             return
         barrier = self._resume_startup_barriers.get(conversation_id)
         if not isinstance(barrier, dict):
             return
-        barrier_dict: Dict[str, Any] = barrier
+        barrier_dict = barrier
         barrier_thread_id = barrier_dict.get("thread_id")
         if isinstance(barrier_thread_id, str) and barrier_thread_id and thread_id and barrier_thread_id != thread_id:
             return
         event_type = self._transport_event_type(label, payload)
         if event_type == "mcp_startup_update":
             barrier_dict["saw_startup"] = True
-            payload_dict: Dict[str, Any] = payload if isinstance(payload, dict) else {}
+            payload_dict = _object_dict(payload)
             raw_msg = payload_dict.get("msg")
-            msg_dict: Dict[str, Any] = raw_msg if isinstance(raw_msg, dict) else payload_dict
+            msg_dict = _object_dict(raw_msg) or payload_dict
             raw_status = msg_dict.get("status")
-            status_dict: Dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
+            status_dict = _object_dict(raw_status)
             state = str(status_dict.get("state") or "").strip().lower()
             if state == "failed":
                 future = barrier_dict.get("future")
@@ -990,9 +1095,9 @@ class CodexAppServerTransport:
         if not isinstance(future, asyncio.Future) or future.done():
             return
         if event_type == "thread/status/changed":
-            payload_dict = payload if isinstance(payload, dict) else {}
+            payload_dict = _object_dict(payload)
             raw_status = payload_dict.get("status")
-            thread_status_dict: Dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
+            thread_status_dict = _object_dict(raw_status)
             status_type = str(thread_status_dict.get("type") or "").strip().lower()
             if status_type == "idle":
                 future.set_result({
@@ -1022,11 +1127,11 @@ class CodexAppServerTransport:
         self,
         *,
         req_id: str,
-        response_future: asyncio.Future,
+        response_future: asyncio.Future[Dict[str, object]],
         conversation_id: str,
         thread_id: str,
         timeout: float,
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, object]:
         barrier = self._resume_startup_barriers.get(conversation_id)
         if not isinstance(barrier, dict):
             try:
@@ -1123,7 +1228,7 @@ class CodexAppServerTransport:
             if not meta_path.exists():
                 continue
             try:
-                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                data = cast(object, json.loads(meta_path.read_text(encoding="utf-8")))
             except Exception:
                 continue
             if isinstance(data, dict) and data.get("thread_id") == thread_id:
@@ -1140,7 +1245,7 @@ class CodexAppServerTransport:
             if not meta_path.exists():
                 continue
             try:
-                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                data = cast(object, json.loads(meta_path.read_text(encoding="utf-8")))
             except Exception:
                 continue
             if isinstance(data, dict) and data.get("turn_id") == turn_id:
@@ -1151,29 +1256,29 @@ class CodexAppServerTransport:
         config_path = _CONFIG_ROOT / "config.json"
         try:
             if config_path.exists():
-                data = json.loads(config_path.read_text(encoding="utf-8"))
-                cwd = data.get("cwd")
+                data = cast(object, json.loads(config_path.read_text(encoding="utf-8")))
+                cwd = _object_dict(data).get("cwd")
                 if isinstance(cwd, str) and cwd.strip():
                     return cwd
         except Exception:
             pass
         return str(Path.cwd())
 
-    def _load_meta(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+    def _load_meta(self, conversation_id: str) -> Optional[Dict[str, object]]:
         load = self._meta_fns.get("load")
         if callable(load):
             meta = load(conversation_id)
-            return meta if isinstance(meta, dict) else None
+            return _object_dict(meta) if isinstance(meta, dict) else None
         path = self._conversation_meta_path(conversation_id)
         if not path.exists():
             return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = cast(object, json.loads(path.read_text(encoding="utf-8")))
         except Exception:
             return None
-        return data if isinstance(data, dict) else None
+        return _object_dict(data) if isinstance(data, dict) else None
 
-    def _save_meta(self, conversation_id: str, meta: Dict[str, Any]) -> None:
+    def _save_meta(self, conversation_id: str, meta: Dict[str, object]) -> None:
         save = self._meta_fns.get("save")
         if callable(save):
             save(conversation_id, meta)
@@ -1237,18 +1342,19 @@ class CodexAppServerTransport:
         self,
         *,
         conversation_id: Optional[str],
-        result: Any,
+        result: object,
     ) -> None:
-        if not conversation_id or not isinstance(result, dict):
+        result_dict = _object_dict(result)
+        if not conversation_id or not result_dict:
             return
         thread_id: Optional[str] = None
         turn_id: Optional[str] = None
-        thread = result.get("thread")
+        thread = result_dict.get("thread")
         if isinstance(thread, dict):
             thread_value = thread.get("id")
             if isinstance(thread_value, str) and thread_value:
                 thread_id = thread_value
-        turn = result.get("turn")
+        turn = result_dict.get("turn")
         if isinstance(turn, dict):
             turn_value = turn.get("id")
             if isinstance(turn_value, str) and turn_value:
@@ -1260,33 +1366,35 @@ class CodexAppServerTransport:
                 turn_id=turn_id,
             )
 
-    def _get_thread_id(self, payload: Any, fallback: Optional[str]) -> Optional[str]:
-        if isinstance(payload, dict):
-            thread = payload.get("thread")
+    def _get_thread_id(self, payload: object, fallback: Optional[str]) -> Optional[str]:
+        payload_dict = _object_dict(payload)
+        if payload_dict:
+            thread = payload_dict.get("thread")
             if isinstance(thread, dict) and isinstance(thread.get("id"), str) and thread.get("id"):
                 return thread["id"]
             for key in ("threadId", "thread_id", "conversationId", "conversation_id", "sender_thread_id"):
-                value = payload.get(key)
+                value = payload_dict.get(key)
                 if isinstance(value, str) and value:
                     return value
         if isinstance(fallback, str) and fallback:
             return fallback
         return None
 
-    def _get_turn_id(self, payload: Any) -> Optional[str]:
-        if not isinstance(payload, dict):
+    def _get_turn_id(self, payload: object) -> Optional[str]:
+        payload_dict = _object_dict(payload)
+        if not payload_dict:
             return None
         for key in ("turnId", "turn_id"):
-            value = payload.get(key)
+            value = payload_dict.get(key)
             if isinstance(value, str) and value:
                 return value
-        turn = payload.get("turn")
+        turn = payload_dict.get("turn")
         if isinstance(turn, dict):
             turn_id = turn.get("id")
             if isinstance(turn_id, str) and turn_id:
                 return turn_id
-        if payload.get("id") and payload.get("status") is not None:
-            value = payload.get("id")
+        if payload_dict.get("id") and payload_dict.get("status") is not None:
+            value = payload_dict.get("id")
             if isinstance(value, str) and value:
                 return value
         return None

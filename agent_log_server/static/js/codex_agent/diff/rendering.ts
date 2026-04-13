@@ -1,15 +1,104 @@
-declare const hljs: any;
+type HighlightResult = {
+  value: string;
+};
+
+type HighlightAutoResult = HighlightResult & {
+  relevance: number;
+};
+
+declare const hljs: {
+  highlight(code: string, options: { language: string; ignoreIllegals: boolean }): HighlightResult;
+  highlightAuto(code: string): HighlightAutoResult;
+};
 
 type DiffBlockState = {
   text: string;
   path: string;
 };
 
+type DiffOp = {
+  type: 'common' | 'del' | 'add';
+  value: string;
+};
+
+type IntralinePart = {
+  text: string;
+  changed: boolean;
+};
+
+type IntralinePair = {
+  leftParts: IntralinePart[];
+  rightParts: IntralinePart[];
+};
+
+type DiffRenderMode = 'auto' | 'heuristic-only';
+
+type DiffRenderState = {
+  mode: DiffRenderMode;
+  jsDiffEnabled: boolean;
+  jsDiffLoaded: boolean;
+  jsDiffLoading: boolean;
+  jsDiffActive: boolean;
+  jsDiffCdnUrl: string;
+};
+
+type JsDiffChange = {
+  value?: string;
+  added?: boolean;
+  removed?: boolean;
+};
+
+type JsDiffApi = {
+  diffWords(leftText: string, rightText: string): JsDiffChange[];
+  diffChars(leftText: string, rightText: string): JsDiffChange[];
+};
+
+type DiffTableRow = {
+  kind: 'file' | 'meta' | 'code';
+  cls: string;
+  path: string;
+  oldLine: string;
+  newLine: string;
+  gutterText: string;
+  display: string;
+  codeHtml: string;
+  activePath: string;
+};
+
+type DiffAlignmentPair = {
+  deletionIndex: number;
+  additionIndex: number;
+  similarity: number;
+};
+
+type DiffRowEntry = {
+  block: HTMLElement;
+};
+
+type CreatedRow = {
+  row: HTMLElement;
+  body: HTMLElement;
+};
+
+type DiffRenderingContext = {
+  getDiffRow(id: string, path: string, parentEl?: HTMLElement | null): DiffRowEntry;
+  createRow(kind: string, cls?: string): CreatedRow;
+  escapeHtml(text: string): string;
+  toRelativePath(path: string | null | undefined): string;
+  isDiffSyntaxEnabled(): boolean;
+  detectLangFromPath?(path: string | null | undefined): string | null;
+  resolveHljsLanguage?(lang: string | null | undefined): string | null;
+  setLastEventType(value: string): void;
+  maybeAutoScroll(force?: boolean): void;
+  timelineEl: HTMLElement | null;
+  postTe2OpenRequest(target: { path: string; line: number; column: number }): void;
+};
+
 type DiffBlockElement = HTMLElement & {
   __diffRender?: DiffBlockState;
 };
 
-export function bindDiffRendering(ctx) {
+export function bindDiffRendering(ctx: DiffRenderingContext) {
   const {
     getDiffRow,
     createRow,
@@ -25,13 +114,13 @@ export function bindDiffRendering(ctx) {
   } = ctx;
   const JSDIFF_CDN_URL = 'https://cdn.jsdelivr.net/npm/diff@8.0.2/+esm';
   const DIFF_RENDER_MODE_STORAGE_KEY = 'codex_diff_render_mode';
-  const DIFF_RENDER_MODE_AUTO = 'auto';
-  const DIFF_RENDER_MODE_HEURISTIC_ONLY = 'heuristic-only';
-  let jsDiffApi = null;
-  let jsDiffLoadPromise = null;
+  const DIFF_RENDER_MODE_AUTO: DiffRenderMode = 'auto';
+  const DIFF_RENDER_MODE_HEURISTIC_ONLY: DiffRenderMode = 'heuristic-only';
+  let jsDiffApi: JsDiffApi | null = null;
+  let jsDiffLoadPromise: Promise<JsDiffApi | null> | null = null;
   let diffRenderMode = readStoredDiffRenderMode();
 
-  function normalizeDiffRenderMode(value) {
+  function normalizeDiffRenderMode(value: string | null | undefined): DiffRenderMode {
     const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
     if (
       normalized === DIFF_RENDER_MODE_HEURISTIC_ONLY
@@ -45,7 +134,7 @@ export function bindDiffRendering(ctx) {
     return DIFF_RENDER_MODE_AUTO;
   }
 
-  function readStoredDiffRenderMode() {
+  function readStoredDiffRenderMode(): DiffRenderMode {
     if (typeof window === 'undefined' || !window.localStorage) return DIFF_RENDER_MODE_AUTO;
     try {
       return normalizeDiffRenderMode(window.localStorage.getItem(DIFF_RENDER_MODE_STORAGE_KEY));
@@ -54,31 +143,31 @@ export function bindDiffRendering(ctx) {
     }
   }
 
-  function persistDiffRenderMode(mode) {
+  function persistDiffRenderMode(mode: DiffRenderMode): void {
     if (typeof window === 'undefined' || !window.localStorage) return;
     try {
       window.localStorage.setItem(DIFF_RENDER_MODE_STORAGE_KEY, mode);
     } catch {}
   }
 
-  function isJsDiffEnabled() {
+  function isJsDiffEnabled(): boolean {
     return diffRenderMode !== DIFF_RENDER_MODE_HEURISTIC_ONLY;
   }
 
-  function hasJsDiffApi(value) {
+  function hasJsDiffApi(value: unknown): value is JsDiffApi {
     return Boolean(
       value
-      && typeof value.diffWords === 'function'
-      && typeof value.diffChars === 'function',
+      && typeof (value as JsDiffApi).diffWords === 'function'
+      && typeof (value as JsDiffApi).diffChars === 'function',
     );
   }
 
-  function getJsDiffApi() {
+  function getJsDiffApi(): JsDiffApi | null {
     if (!isJsDiffEnabled()) return null;
     return hasJsDiffApi(jsDiffApi) ? jsDiffApi : null;
   }
 
-  function getDiffRenderState() {
+  function getDiffRenderState(): DiffRenderState {
     return {
       mode: diffRenderMode,
       jsDiffEnabled: isJsDiffEnabled(),
@@ -89,7 +178,7 @@ export function bindDiffRendering(ctx) {
     };
   }
 
-  function renderDiffBlock(block, text, path) {
+  function renderDiffBlock(block: HTMLElement | null, text: string | null | undefined, path: string | null | undefined): void {
     if (!(block instanceof HTMLElement)) return;
     const diffBlock = block as DiffBlockElement;
     diffBlock.__diffRender = {
@@ -99,7 +188,7 @@ export function bindDiffRendering(ctx) {
     diffBlock.innerHTML = formatDiff(text || '', path);
   }
 
-  function rerenderKnownDiffBlocks() {
+  function rerenderKnownDiffBlocks(): void {
     if (typeof document === 'undefined') return;
     document.querySelectorAll('.diff-block').forEach((node) => {
       if (!(node instanceof HTMLElement)) return;
@@ -109,12 +198,12 @@ export function bindDiffRendering(ctx) {
     });
   }
 
-  function preloadJsDiff() {
+  function preloadJsDiff(): Promise<JsDiffApi | null> | null {
     if (getJsDiffApi() || jsDiffLoadPromise) return jsDiffLoadPromise;
     if (typeof document === 'undefined' || typeof window === 'undefined') return null;
     if (!isJsDiffEnabled()) return null;
     jsDiffLoadPromise = import(JSDIFF_CDN_URL)
-      .then((mod) => {
+      .then((mod: unknown) => {
         if (!hasJsDiffApi(mod)) return null;
         jsDiffApi = mod;
         rerenderKnownDiffBlocks();
@@ -128,7 +217,7 @@ export function bindDiffRendering(ctx) {
     return jsDiffLoadPromise;
   }
 
-  function setDiffRenderMode(nextMode) {
+  function setDiffRenderMode(nextMode: string | null | undefined): DiffRenderState {
     diffRenderMode = normalizeDiffRenderMode(nextMode);
     persistDiffRenderMode(diffRenderMode);
     rerenderKnownDiffBlocks();
@@ -138,14 +227,14 @@ export function bindDiffRendering(ctx) {
     return getDiffRenderState();
   }
 
-  function addDiff(id, text, path, parentEl) {
+  function addDiff(id: string, text: string | null | undefined, path: string, parentEl?: HTMLElement | null): void {
     const entry = getDiffRow(id, path, parentEl);
     renderDiffBlock(entry.block, text || '', path);
     setLastEventType('diff');
     maybeAutoScroll();
   }
 
-  function addDeclinedDiff(id, text, path) {
+  function addDeclinedDiff(_id: string, text: string | null | undefined, path: string): void {
     const { row, body } = createRow('diff', 'diff-declined');
     row.classList.add('declined');
     if (path) {
@@ -162,21 +251,21 @@ export function bindDiffRendering(ctx) {
     maybeAutoScroll();
   }
 
-  function tokenizeDiffWords(text) {
+  function tokenizeDiffWords(text: string): string[] {
     if (typeof text !== 'string' || !text) return [];
     return text.match(/(\s+|[A-Za-z0-9_]+|[^A-Za-z0-9_\s]+)/g) || Array.from(text);
   }
 
-  function tokenizeDiffChars(text) {
+  function tokenizeDiffChars(text: string): string[] {
     return Array.from(text || '');
   }
 
-  function tokenizeLineAlignmentTokens(text) {
+  function tokenizeLineAlignmentTokens(text: string): string[] {
     return tokenizeDiffWords(text).filter((token) => token && !/^\s+$/.test(token));
   }
 
-  function buildLcsTable(leftTokens, rightTokens) {
-    const table = Array.from({ length: leftTokens.length + 1 }, () => Array(rightTokens.length + 1).fill(0));
+  function buildLcsTable(leftTokens: string[], rightTokens: string[]): number[][] {
+    const table = Array.from({ length: leftTokens.length + 1 }, () => Array<number>(rightTokens.length + 1).fill(0));
     for (let leftIdx = leftTokens.length - 1; leftIdx >= 0; leftIdx -= 1) {
       for (let rightIdx = rightTokens.length - 1; rightIdx >= 0; rightIdx -= 1) {
         if (leftTokens[leftIdx] === rightTokens[rightIdx]) {
@@ -189,8 +278,8 @@ export function bindDiffRendering(ctx) {
     return table;
   }
 
-  function buildWeightedLcsTable(leftTokens, rightTokens) {
-    const table = Array.from({ length: leftTokens.length + 1 }, () => Array(rightTokens.length + 1).fill(0));
+  function buildWeightedLcsTable(leftTokens: string[], rightTokens: string[]): number[][] {
+    const table = Array.from({ length: leftTokens.length + 1 }, () => Array<number>(rightTokens.length + 1).fill(0));
     for (let leftIdx = leftTokens.length - 1; leftIdx >= 0; leftIdx -= 1) {
       for (let rightIdx = rightTokens.length - 1; rightIdx >= 0; rightIdx -= 1) {
         if (leftTokens[leftIdx] === rightTokens[rightIdx]) {
@@ -203,9 +292,9 @@ export function bindDiffRendering(ctx) {
     return table;
   }
 
-  function diffTokenSequences(leftTokens, rightTokens) {
+  function diffTokenSequences(leftTokens: string[], rightTokens: string[]): DiffOp[] {
     const table = buildLcsTable(leftTokens, rightTokens);
-    const ops = [];
+    const ops: DiffOp[] = [];
     let leftIdx = 0;
     let rightIdx = 0;
     while (leftIdx < leftTokens.length && rightIdx < rightTokens.length) {
@@ -234,11 +323,11 @@ export function bindDiffRendering(ctx) {
     return ops;
   }
 
-  function sumTokenWeights(tokens) {
+  function sumTokenWeights(tokens: string[]): number {
     return tokens.reduce((total, token) => total + token.length, 0);
   }
 
-  function measureCharSimilarity(leftText, rightText) {
+  function measureCharSimilarity(leftText: string, rightText: string): number {
     const leftChars = tokenizeDiffChars(leftText);
     const rightChars = tokenizeDiffChars(rightText);
     if (!leftChars.length || !rightChars.length) return 0;
@@ -246,14 +335,14 @@ export function bindDiffRendering(ctx) {
     return sharedChars / Math.max(leftChars.length, rightChars.length, 1);
   }
 
-  function shouldRefineCharLevel(leftText, rightText) {
+  function shouldRefineCharLevel(leftText: string, rightText: string): boolean {
     if (!leftText || !rightText) return false;
     if (leftText.length > 160 || rightText.length > 160) return false;
     if (!/\S/.test(leftText) || !/\S/.test(rightText)) return false;
     return measureCharSimilarity(leftText, rightText) >= 0.5;
   }
 
-  function measureLinePairSimilarity(leftText, rightText) {
+  function measureLinePairSimilarity(leftText: string, rightText: string): number {
     const leftTokens = tokenizeLineAlignmentTokens(leftText);
     const rightTokens = tokenizeLineAlignmentTokens(rightText);
     if (!leftTokens.length || !rightTokens.length) return 0;
@@ -262,12 +351,12 @@ export function bindDiffRendering(ctx) {
     return sharedWeight / totalWeight;
   }
 
-  function alignChangedLineRuns(deletions, additions, threshold = 0.45) {
+  function alignChangedLineRuns(deletions: DiffTableRow[], additions: DiffTableRow[], threshold = 0.45): DiffAlignmentPair[] {
     if (!deletions.length || !additions.length) return [];
     const scores = deletions.map((deletion) => additions.map((addition) => measureLinePairSimilarity(deletion.display || '', addition.display || '')));
     const rowCount = deletions.length;
     const colCount = additions.length;
-    const dp = Array.from({ length: rowCount + 1 }, () => Array(colCount + 1).fill(0));
+    const dp = Array.from({ length: rowCount + 1 }, () => Array<number>(colCount + 1).fill(0));
 
     for (let rowIdx = rowCount - 1; rowIdx >= 0; rowIdx -= 1) {
       for (let colIdx = colCount - 1; colIdx >= 0; colIdx -= 1) {
@@ -279,7 +368,7 @@ export function bindDiffRendering(ctx) {
       }
     }
 
-    const pairs = [];
+    const pairs: DiffAlignmentPair[] = [];
     let rowIdx = 0;
     let colIdx = 0;
     while (rowIdx < rowCount && colIdx < colCount) {
@@ -306,7 +395,7 @@ export function bindDiffRendering(ctx) {
     return pairs;
   }
 
-  function appendDiffPart(parts, text, changed) {
+  function appendDiffPart(parts: IntralinePart[], text: string, changed: boolean): void {
     if (!text) return;
     const last = parts[parts.length - 1];
     if (last && last.changed === changed) {
@@ -316,18 +405,18 @@ export function bindDiffRendering(ctx) {
     parts.push({ text, changed });
   }
 
-  function mergeDiffParts(targetParts, sourceParts) {
+  function mergeDiffParts(targetParts: IntralinePart[], sourceParts: IntralinePart[]): void {
     sourceParts.forEach((part) => appendDiffPart(targetParts, part.text, part.changed));
   }
 
-  function buildIntralineParts(leftText, rightText, allowCharRefine = true) {
-    const leftParts = [];
-    const rightParts = [];
+  function buildIntralineParts(leftText: string, rightText: string, allowCharRefine = true): IntralinePair | null {
+    const leftParts: IntralinePart[] = [];
+    const rightParts: IntralinePart[] = [];
     const ops = diffTokenSequences(tokenizeDiffWords(leftText), tokenizeDiffWords(rightText));
-    const pendingLeft = [];
-    const pendingRight = [];
+    const pendingLeft: string[] = [];
+    const pendingRight: string[] = [];
 
-    function flushPending() {
+    function flushPending(): void {
       const leftPendingText = pendingLeft.join('');
       const rightPendingText = pendingRight.join('');
       pendingLeft.length = 0;
@@ -347,7 +436,7 @@ export function bindDiffRendering(ctx) {
     }
 
     const tokenOps = allowCharRefine ? ops : diffTokenSequences(tokenizeDiffChars(leftText), tokenizeDiffChars(rightText));
-    tokenOps.forEach((op) => {
+    tokenOps.forEach((op: DiffOp) => {
       if (op.type === 'common') {
         flushPending();
         appendDiffPart(leftParts, op.value, false);
@@ -371,13 +460,13 @@ export function bindDiffRendering(ctx) {
     return { leftParts, rightParts };
   }
 
-  function buildJsDiffCharParts(leftText, rightText) {
+  function buildJsDiffCharParts(leftText: string, rightText: string): IntralinePair | null {
     const api = getJsDiffApi();
     if (!api) return null;
-    const leftParts = [];
-    const rightParts = [];
+    const leftParts: IntralinePart[] = [];
+    const rightParts: IntralinePart[] = [];
     let hasChangedSegments = false;
-    api.diffChars(leftText, rightText).forEach((change) => {
+    api.diffChars(leftText, rightText).forEach((change: JsDiffChange) => {
       const value = typeof change?.value === 'string' ? change.value : '';
       if (!value) return;
       if (change.added) {
@@ -396,15 +485,15 @@ export function bindDiffRendering(ctx) {
     return hasChangedSegments ? { leftParts, rightParts } : null;
   }
 
-  function buildJsDiffIntralineParts(leftText, rightText) {
+  function buildJsDiffIntralineParts(leftText: string, rightText: string): IntralinePair | null {
     const api = getJsDiffApi();
     if (!api) return null;
-    const leftParts = [];
-    const rightParts = [];
+    const leftParts: IntralinePart[] = [];
+    const rightParts: IntralinePart[] = [];
     let pendingLeft = '';
     let pendingRight = '';
 
-    function flushPending() {
+    function flushPending(): void {
       const leftPendingText = pendingLeft;
       const rightPendingText = pendingRight;
       pendingLeft = '';
@@ -423,7 +512,7 @@ export function bindDiffRendering(ctx) {
       appendDiffPart(rightParts, rightPendingText, true);
     }
 
-    api.diffWords(leftText, rightText).forEach((change) => {
+    api.diffWords(leftText, rightText).forEach((change: JsDiffChange) => {
       const value = typeof change?.value === 'string' ? change.value : '';
       if (!value) return;
       if (change.added) {
@@ -449,18 +538,18 @@ export function bindDiffRendering(ctx) {
     return { leftParts, rightParts };
   }
 
-  function renderDiffPartsHtml(parts, emphasisClass) {
+  function renderDiffPartsHtml(parts: IntralinePart[], emphasisClass: string): string {
     return parts.map((part) => {
       const safeText = escapeHtml(part.text);
       return part.changed ? `<span class="${emphasisClass}">${safeText}</span>` : safeText;
     }).join('');
   }
 
-  function hasMeaningfulChangedContent(parts) {
+  function hasMeaningfulChangedContent(parts: IntralinePart[]): boolean {
     return parts.some((part) => part.changed && /\S/.test(part.text));
   }
 
-  function renderDiffCodeHtml(display, activePath) {
+  function renderDiffCodeHtml(display: string, activePath: string): string {
     let codeHtml = escapeHtml(display);
     if (isDiffSyntaxEnabled() && typeof hljs !== 'undefined' && display.trim()) {
       try {
@@ -474,12 +563,12 @@ export function bindDiffRendering(ctx) {
             codeHtml = auto.value;
           }
         }
-      } catch (_) {}
+      } catch {}
     }
     return codeHtml;
   }
 
-  function applyIntralineHighlights(rows) {
+  function applyIntralineHighlights(rows: DiffTableRow[]): void {
     let idx = 0;
     while (idx < rows.length) {
       const row = rows[idx];
@@ -488,13 +577,13 @@ export function bindDiffRendering(ctx) {
         continue;
       }
 
-      const deletions = [];
+      const deletions: DiffTableRow[] = [];
       while (idx < rows.length && rows[idx]?.kind === 'code' && rows[idx].cls === 'diff-del') {
         deletions.push(rows[idx]);
         idx += 1;
       }
 
-      const additions = [];
+      const additions: DiffTableRow[] = [];
       let addIdx = idx;
       while (addIdx < rows.length && rows[addIdx]?.kind === 'code' && rows[addIdx].cls === 'diff-add') {
         additions.push(rows[addIdx]);
@@ -521,7 +610,7 @@ export function bindDiffRendering(ctx) {
     }
   }
 
-  function renderDiffRowHtml(row) {
+  function renderDiffRowHtml(row: DiffTableRow): string {
     const codeHtml = row.codeHtml || renderDiffCodeHtml(row.display || '', row.activePath || '');
     const safePath = row.path ? escapeHtml(String(row.path)) : '';
     const safeOldLine = escapeHtml(String(row.oldLine || ''));
@@ -529,7 +618,7 @@ export function bindDiffRendering(ctx) {
     return `<tr class="diff-line ${row.cls}" data-path="${safePath}" data-old-line="${safeOldLine}" data-new-line="${safeNewLine}"><td class="diff-gutter transcript-line-no">${escapeHtml(row.gutterText || '')}</td><td class="diff-text">${codeHtml}</td></tr>`;
   }
 
-  function formatDiff(text, filePath) {
+  function formatDiff(text: string, filePath?: string | null): string {
     if (!text) return '';
     const diffGitCount = (text.match(/^diff --git /gm) || []).length;
     const showFileHeaders = diffGitCount > 1 || !filePath;
@@ -556,7 +645,7 @@ export function bindDiffRendering(ctx) {
     newLine = 0;
     let currentFilePath = filePath || null;
     const fileGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
-    const rows = [];
+    const rows: DiffTableRow[] = [];
     text.split('\n').forEach((line) => {
       let cls = 'diff-context';
       let display = line;
@@ -584,6 +673,7 @@ export function bindDiffRendering(ctx) {
           gutterText: fileGutter,
           display: '',
           codeHtml: `<strong>${escapeHtml(relLabel)}</strong>`,
+          activePath: currentFilePath || '',
         });
         return;
       }

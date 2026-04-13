@@ -5,7 +5,7 @@ import os
 import re
 import shlex
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, cast
 
 from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD,
@@ -27,6 +27,8 @@ from .plan_utils import normalize_plan_steps, plan_signature, render_plan_markdo
 from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
 from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
 
+ObjectDict = Dict[str, object]
+
 
 def utc_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -38,10 +40,10 @@ def _event_type_from_label(label_lower: str) -> Optional[str]:
     return None
 
 
-def _extract_known_fields(spec: Optional[ProtocolSemanticSpec], payload: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_known_fields(spec: Optional[ProtocolSemanticSpec], payload: ObjectDict) -> ObjectDict:
     if spec is None:
         return {}
-    fields: Dict[str, Any] = {}
+    fields: ObjectDict = {}
     for key in spec.properties:
         value = payload.get(key)
         if value is not None:
@@ -49,17 +51,42 @@ def _extract_known_fields(spec: Optional[ProtocolSemanticSpec], payload: Dict[st
     return fields
 
 
-def _dict_payload(value: Any) -> Dict[str, Any]:
+def _dict_payload(value: object) -> ObjectDict:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _string_value(value: Any, default: str = "") -> str:
+def _dict_list(value: object) -> List[ObjectDict]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _string_list(value: object) -> List[str]:
+    return [item for item in value if isinstance(item, str) and item] if isinstance(value, list) else []
+
+
+def _ensure_dict_list(container: ObjectDict, key: str) -> List[ObjectDict]:
+    value = container.get(key)
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        return cast(List[ObjectDict], value)
+    items: List[ObjectDict] = []
+    container[key] = items
+    return items
+
+
+def _ensure_string_set(container: ObjectDict, key: str) -> set[str]:
+    value = container.get(key)
+    normalized = {item for item in value if isinstance(item, str)} if isinstance(value, set) else set()
+    if value != normalized:
+        container[key] = normalized
+    return normalized
+
+
+def _string_value(value: object, default: str = "") -> str:
     if isinstance(value, str) and value:
         return value
     return default
 
 
-def _subagent_display_name(fields: Dict[str, Any], call_id: str) -> str:
+def _subagent_display_name(fields: ObjectDict, call_id: str) -> str:
     nickname = fields.get("receiver_agent_nickname") or fields.get("new_agent_nickname")
     role = fields.get("receiver_agent_role") or fields.get("new_agent_role")
     if not nickname and not role:
@@ -80,8 +107,8 @@ def _subagent_display_name(fields: Dict[str, Any], call_id: str) -> str:
     return "subagent"
 
 
-def _collab_agent_records(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
-    records: List[Dict[str, Any]] = []
+def _collab_agent_records(fields: ObjectDict) -> List[ObjectDict]:
+    records: List[ObjectDict] = []
     for key in ("receiver_agents", "agent_statuses"):
         value = fields.get(key)
         if not isinstance(value, list):
@@ -92,10 +119,10 @@ def _collab_agent_records(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
     return records
 
 
-def _collab_thread_ids(fields: Dict[str, Any]) -> List[str]:
+def _collab_thread_ids(fields: ObjectDict) -> List[str]:
     thread_ids: List[str] = []
 
-    def add(value: Any) -> None:
+    def add(value: object) -> None:
         if isinstance(value, str) and value and value not in thread_ids:
             thread_ids.append(value)
 
@@ -118,7 +145,7 @@ def _collab_thread_ids(fields: Dict[str, Any]) -> List[str]:
     return thread_ids
 
 
-def _collab_status_for_thread(fields: Dict[str, Any], thread_id: str) -> Any:
+def _collab_status_for_thread(fields: ObjectDict, thread_id: str) -> object:
     for record in _collab_agent_records(fields):
         if record.get("thread_id") == thread_id and record.get("status") is not None:
             return record.get("status")
@@ -132,7 +159,7 @@ def _collab_status_for_thread(fields: Dict[str, Any], thread_id: str) -> Any:
     return fields.get("status")
 
 
-def _subagent_terminal_summary(name: str, status: Any, *, success_text: str, failure_text: str) -> str:
+def _subagent_terminal_summary(name: str, status: object, *, success_text: str, failure_text: str) -> str:
     if isinstance(status, dict):
         errored = status.get("errored")
         if isinstance(errored, str) and errored.strip():
@@ -144,19 +171,19 @@ def _subagent_terminal_summary(name: str, status: Any, *, success_text: str, fai
     return success_text if _agent_status_success(status) else failure_text
 
 
-def _agent_status_is_terminal(status: Any) -> bool:
+def _agent_status_is_terminal(status: object) -> bool:
     if isinstance(status, dict):
         return "completed" in status or "errored" in status
     return status in {"shutdown", "not_found"}
 
 
-def _agent_status_success(status: Any) -> bool:
+def _agent_status_success(status: object) -> bool:
     if isinstance(status, dict):
         return "completed" in status
     return False
 
 
-def _agent_status_summary(status: Any, default: str) -> str:
+def _agent_status_summary(status: object, default: str) -> str:
     if isinstance(status, dict):
         completed = status.get("completed")
         if isinstance(completed, str) and completed.strip():
@@ -171,7 +198,7 @@ def _agent_status_summary(status: Any, default: str) -> str:
     return default
 
 
-def _direct_event_text(payload: Dict[str, Any]) -> Optional[str]:
+def _direct_event_text(payload: ObjectDict) -> Optional[str]:
     text = payload.get("message")
     if not isinstance(text, str):
         text = payload.get("text")
@@ -185,7 +212,7 @@ def _direct_event_text(payload: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _notification_text(payload: Dict[str, Any]) -> Optional[str]:
+def _notification_text(payload: ObjectDict) -> Optional[str]:
     error_value = payload.get("error")
     if isinstance(error_value, str) and error_value.strip():
         return error_value.strip()
@@ -211,7 +238,7 @@ def _notification_severity(
     label_lower: str,
     notification_spec: Optional[ProtocolSemanticSpec],
     event_spec: Optional[ProtocolSemanticSpec],
-    payload: Dict[str, Any],
+    payload: ObjectDict,
 ) -> Optional[str]:
     label_text = label_lower.lower()
     if "interrupt" in label_text:
@@ -252,7 +279,7 @@ def _notification_severity(
     return None
 
 
-def _append_text_parts(parts: List[str], value: Any) -> None:
+def _append_text_parts(parts: List[str], value: object) -> None:
     if isinstance(value, str):
         text = _normalize_output(value).strip()
         if text:
@@ -273,7 +300,7 @@ def _append_text_parts(parts: List[str], value: Any) -> None:
                 return
 
 
-def _extract_reasoning_text(item: Dict[str, Any], fallback: Optional[str] = None) -> Optional[str]:
+def _extract_reasoning_text(item: ObjectDict, fallback: Optional[str] = None) -> Optional[str]:
     parts: List[str] = []
     for key in ("summary", "summary_text", "summaryText", "text", "raw_content", "rawContent", "content"):
         _append_text_parts(parts, item.get(key))
@@ -285,7 +312,7 @@ def _extract_reasoning_text(item: Dict[str, Any], fallback: Optional[str] = None
     return text or None
 
 
-def _reasoning_event_id(payload: Dict[str, Any], turn_state: Dict[str, Any]) -> str:
+def _reasoning_event_id(payload: ObjectDict, turn_state: ObjectDict) -> str:
     for key in ("item_id", "itemId", "id"):
         value = payload.get(key)
         if isinstance(value, str) and value:
@@ -296,9 +323,10 @@ def _reasoning_event_id(payload: Dict[str, Any], turn_state: Dict[str, Any]) -> 
     return "reasoning"
 
 
-def _assistant_id(payload: Dict[str, Any], thread_id: Optional[str], turn_id: Optional[str]) -> str:
-    if isinstance(payload.get("item"), dict) and isinstance(payload["item"].get("id"), str):
-        return payload["item"]["id"]
+def _assistant_id(payload: ObjectDict, thread_id: Optional[str], turn_id: Optional[str]) -> str:
+    item = _dict_payload(payload.get("item"))
+    if isinstance(item.get("id"), str):
+        return cast(str, item["id"])
     for key in ("item_id", "itemId", "id", "callId", "call_id"):
         value = payload.get(key)
         if isinstance(value, str) and value:
@@ -310,8 +338,8 @@ def _assistant_id(payload: Dict[str, Any], thread_id: Optional[str], turn_id: Op
     return "assistant"
 
 
-def _payload_string(payload: Dict[str, Any], *keys: str) -> Optional[str]:
-    sources: List[Dict[str, Any]] = [payload]
+def _payload_string(payload: ObjectDict, *keys: str) -> Optional[str]:
+    sources: List[ObjectDict] = [payload]
     item = payload.get("item")
     if isinstance(item, dict):
         sources.append(item)
@@ -323,15 +351,15 @@ def _payload_string(payload: Dict[str, Any], *keys: str) -> Optional[str]:
     return None
 
 
-def _payload_thread_id(payload: Dict[str, Any], fallback: Optional[str]) -> Optional[str]:
+def _payload_thread_id(payload: ObjectDict, fallback: Optional[str]) -> Optional[str]:
     return _payload_string(payload, "thread_id", "threadId") or fallback
 
 
-def _payload_turn_id(payload: Dict[str, Any], fallback: Optional[str]) -> Optional[str]:
+def _payload_turn_id(payload: ObjectDict, fallback: Optional[str]) -> Optional[str]:
     return _payload_string(payload, "turn_id", "turnId") or fallback
 
 
-def _normalize_turn_status(payload: Dict[str, Any]) -> tuple[str, Optional[str]]:
+def _normalize_turn_status(payload: ObjectDict) -> tuple[str, Optional[str]]:
     turn_obj = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
     status = turn_obj.get("status") if isinstance(turn_obj, dict) else None
     if isinstance(status, dict):
@@ -346,17 +374,17 @@ def _normalize_turn_status(payload: Dict[str, Any]) -> tuple[str, Optional[str]]
     return turn_status, turn_error
 
 
-def _item_type(item: Dict[str, Any]) -> str:
+def _item_type(item: ObjectDict) -> str:
     return str(item.get("type") or "").strip().lower()
 
 
-def _normalize_output(value: Any) -> str:
+def _normalize_output(value: object) -> str:
     if not isinstance(value, str):
         return ""
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _stringify_value(value: Any) -> str:
+def _stringify_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
@@ -367,7 +395,7 @@ def _stringify_value(value: Any) -> str:
         return str(value)
 
 
-def _duration_ms(value: Any) -> Optional[int]:
+def _duration_ms(value: object) -> Optional[int]:
     if isinstance(value, dict):
         secs = value.get("secs")
         nanos = value.get("nanos")
@@ -379,7 +407,7 @@ def _duration_ms(value: Any) -> Optional[int]:
     return None
 
 
-def _extract_tool_result(value: Any, *, status: str, error: Any = None) -> Tuple[Any, bool]:
+def _extract_tool_result(value: object, *, status: str, error: object = None) -> Tuple[object, bool]:
     is_error = bool(error) or status in {"failed", "error"}
     if error is not None:
         return {"error": error}, True
@@ -404,7 +432,7 @@ def _extract_tool_result(value: Any, *, status: str, error: Any = None) -> Tuple
     return value, is_error
 
 
-def _command_text(value: Any) -> str:
+def _command_text(value: object) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, list):
@@ -431,17 +459,41 @@ def _build_view_title(path: str, view_range: Optional[List[int]]) -> str:
     return short_path
 
 
+def _view_spec_path(spec: ObjectDict) -> str:
+    path = spec.get("path")
+    return path if isinstance(path, str) else ""
+
+
+def _view_spec_range(spec: ObjectDict) -> Optional[List[int]]:
+    value = spec.get("view_range")
+    if not isinstance(value, list):
+        return None
+    result: List[int] = []
+    for item in value:
+        if not isinstance(item, (int, float)):
+            return None
+        result.append(int(item))
+    return result
+
+
+def _view_spec_title(spec: ObjectDict) -> str:
+    title = spec.get("title")
+    if isinstance(title, str) and title:
+        return title
+    return _build_view_title(_view_spec_path(spec), _view_spec_range(spec))
+
+
 _CODEX_VIEW_LINE_RE = re.compile(r"^\s*(\d+):(.*)$")
 _CODEX_NL_VIEW_LINE_RE = re.compile(r"^\s*(\d+)\t(.*)$")
 
 
-def _parse_codex_view_lines(content: str) -> Optional[List[Dict[str, Any]]]:
+def _parse_codex_view_lines(content: str) -> Optional[List[ObjectDict]]:
     if not isinstance(content, str):
         return None
     if not content:
         return []
 
-    parsed: List[Dict[str, Any]] = []
+    parsed: List[ObjectDict] = []
     for raw_line in content.splitlines():
         match = _CODEX_VIEW_LINE_RE.match(raw_line)
         if match:
@@ -464,7 +516,7 @@ def _parse_codex_view_lines(content: str) -> Optional[List[Dict[str, Any]]]:
     return parsed
 
 
-def _build_codex_view_lines(content: str, view_spec: Optional[Dict[str, Any]] = None) -> Optional[List[Dict[str, Any]]]:
+def _build_codex_view_lines(content: str, view_spec: Optional[ObjectDict] = None) -> Optional[List[ObjectDict]]:
     parsed = _parse_codex_view_lines(content)
     if parsed is not None:
         return parsed
@@ -516,7 +568,7 @@ def _last_non_flag_token(tokens: List[str], start: int = 1) -> Optional[str]:
     return candidate
 
 
-def _parse_sed_view_range(range_token: Any) -> Optional[List[int]]:
+def _parse_sed_view_range(range_token: object) -> Optional[List[int]]:
     text = str(range_token or "").strip()
     if not text:
         return None
@@ -529,7 +581,7 @@ def _parse_sed_view_range(range_token: Any) -> Optional[List[int]]:
     return None
 
 
-def _shell_pipeline_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_pipeline_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[ObjectDict]:
     if tokens.count("|") != 1:
         return None
     pipe_index = tokens.index("|")
@@ -563,7 +615,7 @@ def _shell_pipeline_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[D
     }
 
 
-def _command_tokens_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[Dict[str, Any]]:
+def _command_tokens_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[ObjectDict]:
     if not tokens:
         return None
     if any(token in {"&&", "||", ";", ">", "<"} for token in tokens):
@@ -647,7 +699,7 @@ def _separator_tokens_to_text(tokens: List[str]) -> Optional[str]:
     return divider or None
 
 
-def _shell_command_to_view_sequence(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_command_to_view_sequence(command: object, cwd: str = "") -> Optional[ObjectDict]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner or "\n" in inner:
         return None
@@ -661,7 +713,7 @@ def _shell_command_to_view_sequence(command: Any, cwd: str = "") -> Optional[Dic
     if not segments or len(segments) < 3 or len(segments) % 2 == 0:
         return None
 
-    specs: List[Dict[str, Any]] = []
+    specs: List[ObjectDict] = []
     divider_text: Optional[str] = None
     for idx, segment in enumerate(segments):
         if idx % 2 == 0:
@@ -705,7 +757,7 @@ def _split_view_output_by_divider(output: str, divider: str, expected_parts: int
     return parts
 
 
-def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_command_to_view_spec(command: object, cwd: str = "") -> Optional[ObjectDict]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner or any(marker in inner for marker in ("\n", "&&", "||", ";")):
         return None
@@ -716,7 +768,7 @@ def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[st
     return _command_tokens_to_view_spec(tokens, cwd)
 
 
-def _normalized_new_file_text(value: Any) -> str:
+def _normalized_new_file_text(value: object) -> str:
     text = str(value or "")
     if not text.endswith("\n"):
         text += "\n"
@@ -788,8 +840,8 @@ def _parse_new_file_command_preamble(lines: List[str], cwd: str = "") -> Optiona
     return None
 
 
-def _new_file_arguments(spec: Dict[str, Any]) -> Dict[str, Any]:
-    arguments: Dict[str, Any] = {}
+def _new_file_arguments(spec: ObjectDict) -> ObjectDict:
+    arguments: ObjectDict = {}
     path = spec.get("path")
     if isinstance(path, str) and path:
         arguments["path"] = path
@@ -807,7 +859,7 @@ def _new_file_arguments(spec: Dict[str, Any]) -> Dict[str, Any]:
     return arguments
 
 
-def _shell_command_to_new_file_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_command_to_new_file_spec(command: object, cwd: str = "") -> Optional[ObjectDict]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner or "\n" not in inner:
         return None
@@ -843,7 +895,7 @@ def _shell_command_to_new_file_spec(command: Any, cwd: str = "") -> Optional[Dic
     return spec
 
 
-def _shell_command_to_search_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_command_to_search_spec(command: object, cwd: str = "") -> Optional[ObjectDict]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner or "\n" in inner:
         return None
@@ -887,7 +939,7 @@ def _shell_command_to_search_spec(command: Any, cwd: str = "") -> Optional[Dict[
         "--max-count": "head_limit",
     }
 
-    args: Dict[str, Any] = {}
+    args: ObjectDict = {}
     positional: List[str] = []
     idx = 1
     while idx < len(tokens):
@@ -957,7 +1009,7 @@ def _shell_command_to_search_spec(command: Any, cwd: str = "") -> Optional[Dict[
     }
 
 
-def _normalize_search_output(output: str, search_spec: Optional[Dict[str, Any]]) -> str:
+def _normalize_search_output(output: str, search_spec: Optional[ObjectDict]) -> str:
     text = _normalize_output(output)
     if not text or not isinstance(search_spec, dict):
         return text
@@ -1011,7 +1063,7 @@ def _extract_path_from_diff(diff_text: str) -> Optional[str]:
     return None
 
 
-def _extract_diff_with_path(payload: Any) -> Tuple[Optional[str], Optional[str]]:
+def _extract_diff_with_path(payload: object) -> Tuple[Optional[str], Optional[str]]:
     if not isinstance(payload, dict):
         return None, None
     path = payload.get("path") if isinstance(payload.get("path"), str) else None
@@ -1105,7 +1157,7 @@ def _split_unified_diff_by_file(diff_text: str) -> List[Tuple[Optional[str], str
     return sections
 
 
-def _paths_from_changes(changes: Any) -> List[str]:
+def _paths_from_changes(changes: object) -> List[str]:
     paths: List[str] = []
     if isinstance(changes, list):
         for change in changes:
@@ -1134,7 +1186,7 @@ def _summarize_paths(paths: List[str]) -> Optional[str]:
     return f"{paths[0]} (+{len(paths) - 1} more)"
 
 
-def _result_error_status(status: str, exit_code: Optional[int], error: Any = None) -> bool:
+def _result_error_status(status: str, exit_code: Optional[int], error: object = None) -> bool:
     return bool(error) or status in {"failed", "declined", "error"} or exit_code not in (None, 0)
 
 
@@ -1145,10 +1197,11 @@ def _has_visible_reasoning_text(text: str) -> bool:
     return isinstance(text, str) and bool(text.strip())
 
 
-def _extract_and_scrub_thoughts_stream(delta: str, state: Dict[str, Any]) -> Tuple[str, List[str]]:
+def _extract_and_scrub_thoughts_stream(delta: str, state: ObjectDict) -> Tuple[str, List[str]]:
     if not isinstance(delta, str) or not delta:
         return delta, []
-    buffer = state.get("thought_buffer", "")
+    buffer_value = state.get("thought_buffer")
+    buffer = buffer_value if isinstance(buffer_value, str) else ""
     text = buffer + delta
     thoughts: List[str] = []
     scrubbed_parts: List[str] = []
@@ -1184,7 +1237,7 @@ def _extract_and_scrub_thoughts(text: str) -> Tuple[str, List[str]]:
     return scrubbed, thoughts
 
 
-def _consume_live_reasoning_delta(delta: str, state: Dict[str, Any]) -> Optional[str]:
+def _consume_live_reasoning_delta(delta: str, state: ObjectDict) -> Optional[str]:
     if not isinstance(delta, str) or not delta:
         return None
     if state.get("reasoning_live_visible"):
@@ -1201,10 +1254,10 @@ def _consume_live_reasoning_delta(delta: str, state: Dict[str, Any]) -> Optional
 
 class CodexEventRouter:
     def __init__(self) -> None:
-        self._turn_states: Dict[str, Dict[str, Any]] = {}
-        self._item_states: Dict[str, Dict[str, Any]] = {}
+        self._turn_states: Dict[str, ObjectDict] = {}
+        self._item_states: Dict[str, ObjectDict] = {}
         self._approval_request_map: Dict[str, str] = {}
-        self._subagent_states: Dict[str, Dict[str, Any]] = {}
+        self._subagent_states: Dict[str, ObjectDict] = {}
         self._thread_subagent_ids: Dict[str, str] = {}
 
     def reset(self) -> None:
@@ -1217,7 +1270,7 @@ class CodexEventRouter:
     def _turn_key(self, thread_id: Optional[str], turn_id: Optional[str]) -> str:
         return f"{thread_id or 'unknown'}:{turn_id or 'unknown'}"
 
-    def _get_turn_state(self, thread_id: Optional[str], turn_id: Optional[str]) -> Dict[str, Any]:
+    def _get_turn_state(self, thread_id: Optional[str], turn_id: Optional[str]) -> ObjectDict:
         key = self._turn_key(thread_id, turn_id)
         state = self._turn_states.get(key)
         if state is None:
@@ -1232,7 +1285,7 @@ class CodexEventRouter:
             self._turn_states[key] = state
         return state
 
-    def _get_item_state(self, item_id: Optional[str], thread_id: Optional[str], turn_id: Optional[str]) -> Dict[str, Any]:
+    def _get_item_state(self, item_id: Optional[str], thread_id: Optional[str], turn_id: Optional[str]) -> ObjectDict:
         turn_state = self._get_turn_state(thread_id, turn_id)
         if not item_id:
             return turn_state
@@ -1249,13 +1302,17 @@ class CodexEventRouter:
         else:
             state["thread_id"] = thread_id or state.get("thread_id")
             state["turn_id"] = turn_id or state.get("turn_id")
-            state["turn_key"] = self._turn_key(thread_id or state.get("thread_id"), turn_id or state.get("turn_id"))
+            existing_thread_id = state.get("thread_id")
+            next_thread_id = thread_id or (existing_thread_id if isinstance(existing_thread_id, str) else None)
+            existing_turn_id = state.get("turn_id")
+            next_turn_id = turn_id or (existing_turn_id if isinstance(existing_turn_id, str) else None)
+            state["turn_key"] = self._turn_key(next_thread_id, next_turn_id)
         subagent_id = self._subagent_id_for_context(thread_id)
         if subagent_id:
             state["subagent_id"] = subagent_id
         return state
 
-    def _clear_item_state(self, item_id: Optional[str]) -> Dict[str, Any]:
+    def _clear_item_state(self, item_id: Optional[str]) -> ObjectDict:
         if not item_id:
             return {}
         return self._item_states.pop(item_id, {})
@@ -1267,7 +1324,7 @@ class CodexEventRouter:
         name: Optional[str] = None,
         intent: Optional[str] = None,
         parent_thread_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ObjectDict:
         state = self._subagent_states.get(subagent_id)
         if state is None:
             state = {
@@ -1303,7 +1360,7 @@ class CodexEventRouter:
             return None
         return self._thread_subagent_ids.get(thread_id)
 
-    def _claim_reasoning_source(self, turn_state: Dict[str, Any], source: str) -> bool:
+    def _claim_reasoning_source(self, turn_state: ObjectDict, source: str) -> bool:
         current = turn_state.get("reason_source")
         if current not in {None, source}:
             return False
@@ -1315,10 +1372,10 @@ class CodexEventRouter:
         self,
         *,
         source: str,
-        payload: Dict[str, Any],
+        payload: ObjectDict,
         thread_id: Optional[str],
         turn_id: Optional[str],
-    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], str]]:
+    ) -> Optional[Tuple[ObjectDict, ObjectDict, str]]:
         turn_state = self._get_turn_state(thread_id, turn_id)
         if not self._claim_reasoning_source(turn_state, source):
             return None
@@ -1329,7 +1386,7 @@ class CodexEventRouter:
         item_state["item_type"] = "reasoning"
         return turn_state, item_state, item_id
 
-    def _should_record_reasoning(self, turn_state: Dict[str, Any], item_id: str) -> bool:
+    def _should_record_reasoning(self, turn_state: ObjectDict, item_id: str) -> bool:
         recorded = turn_state.setdefault("reasoning_transcript_ids", set())
         if not isinstance(recorded, set):
             if isinstance(recorded, (list, tuple)):
@@ -1342,7 +1399,7 @@ class CodexEventRouter:
         recorded.add(item_id)
         return True
 
-    def _reset_reasoning_stream(self, turn_state: Dict[str, Any]) -> None:
+    def _reset_reasoning_stream(self, turn_state: ObjectDict) -> None:
         turn_state["reasoning_started"] = False
         turn_state["reasoning_buffer"] = ""
         turn_state["reasoning_id"] = None
@@ -1354,10 +1411,10 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: ObjectDict,
         thread_id: Optional[str],
         turn_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> ObjectDict:
         turn_state = self._get_turn_state(thread_id, turn_id)
         steps = normalize_plan_steps(payload.get("plan"))
         explanation_raw = payload.get("explanation")
@@ -1370,7 +1427,7 @@ class CodexEventRouter:
         turn_state["plan_signature"] = signature
         turn_state["plan_explanation"] = explanation
 
-        events: List[Dict[str, Any]] = []
+        events: List[ObjectDict] = []
         if steps:
             plan_content = render_plan_markdown(steps, explanation)
             events.append({
@@ -1381,7 +1438,7 @@ class CodexEventRouter:
                 "plan_content": plan_content,
                 "plan_steps": steps,
             })
-            plan_event: Dict[str, Any] = {
+            plan_event: ObjectDict = {
                 "type": "plan_update",
                 "steps": steps,
             }
@@ -1399,7 +1456,7 @@ class CodexEventRouter:
                 "plan_steps": [],
             })
 
-        active_plan: Optional[Dict[str, Any]]
+        active_plan: Optional[ObjectDict]
         if steps:
             active_plan = {
                 "steps": steps,
@@ -1418,23 +1475,23 @@ class CodexEventRouter:
             "meta_patch": {"active_plan": active_plan},
         }
 
-    def _decorate_event(self, entry: Dict[str, Any], subagent_id: Optional[str]) -> Dict[str, Any]:
+    def _decorate_event(self, entry: ObjectDict, subagent_id: Optional[str]) -> ObjectDict:
         if subagent_id:
             entry["subagent_id"] = subagent_id
         return entry
 
-    def _decorate_transcript_entry(self, entry: Dict[str, Any], subagent_id: Optional[str]) -> Dict[str, Any]:
+    def _decorate_transcript_entry(self, entry: ObjectDict, subagent_id: Optional[str]) -> ObjectDict:
         if subagent_id:
             entry["subagent_id"] = subagent_id
         return entry
 
     def _decorate_routed_result(
         self,
-        routed: Dict[str, Any],
+        routed: ObjectDict,
         *,
         thread_id: Optional[str],
-        item_state: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        item_state: Optional[ObjectDict] = None,
+    ) -> ObjectDict:
         subagent_id = None
         if isinstance(item_state, dict):
             candidate = item_state.get("subagent_id")
@@ -1463,13 +1520,13 @@ class CodexEventRouter:
         }
         transcript_roles = {"assistant", "user", "command", "diff", "reasoning", "mcp_tool", "tool", "view", "search", "web_search"}
 
-        for event in routed.get("events", []):
+        for event in _dict_list(routed.get("events")):
             if not isinstance(event, dict) or event.get("subagent_id"):
                 continue
             if event.get("type") in event_types:
                 event["subagent_id"] = subagent_id
 
-        for entry in routed.get("transcript_entries", []):
+        for entry in _dict_list(routed.get("transcript_entries")):
             if not isinstance(entry, dict) or entry.get("subagent_id"):
                 continue
             if entry.get("role") in transcript_roles:
@@ -1489,10 +1546,10 @@ class CodexEventRouter:
         self,
         protocol: RuntimeProtocol,
         event_type: str,
-        payload: Dict[str, Any],
+        payload: ObjectDict,
         thread_id: Optional[str],
         turn_id: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[ObjectDict]:
         event_spec = protocol.event_spec(event_type)
         if event_spec is None or event_spec.category != "collab":
             return None
@@ -1529,10 +1586,10 @@ class CodexEventRouter:
                 bind_thread_ids.append(candidate)
 
         ts = utc_ts()
-        events: List[Dict[str, Any]] = []
-        transcript_entries: List[Dict[str, Any]] = []
+        events: List[ObjectDict] = []
+        transcript_entries: List[ObjectDict] = []
 
-        def emit_start(target_id: str, target_state: Dict[str, Any]) -> None:
+        def emit_start(target_id: str, target_state: ObjectDict) -> None:
             if target_state.get("started") and not target_state.get("ended"):
                 return
             target_state["started"] = True
@@ -1557,7 +1614,7 @@ class CodexEventRouter:
                 "timestamp": ts,
             })
 
-        def emit_end(target_id: str, target_state: Dict[str, Any], success: bool, summary: str) -> None:
+        def emit_end(target_id: str, target_state: ObjectDict, success: bool, summary: str) -> None:
             if target_state.get("ended"):
                 return
             target_state["active"] = False
@@ -1660,9 +1717,9 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: ObjectDict,
         turn_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> ObjectDict:
         error_value = payload.get("error")
         if isinstance(error_value, dict):
             error_obj = error_value
@@ -1681,12 +1738,12 @@ class CodexEventRouter:
         if not message:
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        error_event: Dict[str, Any] = {
+        error_event: ObjectDict = {
             "type": "error",
             "message": message,
             "source": label_lower,
         }
-        error_entry: Dict[str, Any] = {
+        error_entry: ObjectDict = {
             "role": "error",
             "message": message,
             "turn_id": turn_id,
@@ -1737,7 +1794,7 @@ class CodexEventRouter:
             "transcript_entries": [error_entry],
         }
 
-    def _warning_result(self, *, message: str) -> Dict[str, Any]:
+    def _warning_result(self, *, message: str) -> ObjectDict:
         text = message.strip()
         if not text:
             return {"handled": True, "events": [], "transcript_entries": []}
@@ -1754,11 +1811,11 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: ObjectDict,
         notification_spec: Optional[ProtocolSemanticSpec],
         event_spec: Optional[ProtocolSemanticSpec],
         turn_id: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[ObjectDict]:
         severity = _notification_severity(label_lower, notification_spec, event_spec, payload)
         if severity is None:
             return None
@@ -1779,16 +1836,16 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: ObjectDict,
         turn_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> ObjectDict:
         total = None
         input_tokens = None
         cached_input_tokens = None
         context_window = None
 
         if isinstance(payload.get("info"), dict):
-            info = payload["info"]
+            info = _dict_payload(payload.get("info"))
             usage = info.get("last_token_usage") or {}
             if isinstance(usage, dict):
                 total = usage.get("input_tokens")
@@ -1797,7 +1854,7 @@ class CodexEventRouter:
             context_window = info.get("model_context_window")
 
         if total is None and isinstance(payload.get("tokenUsage"), dict):
-            token_usage = payload["tokenUsage"]
+            token_usage = _dict_payload(payload.get("tokenUsage"))
             last_breakdown = token_usage.get("last") or {}
             if isinstance(last_breakdown, dict):
                 total = last_breakdown.get("inputTokens") or last_breakdown.get("input_tokens")
@@ -1814,8 +1871,8 @@ class CodexEventRouter:
             return {"handled": True, "events": [], "transcript_entries": []}
 
         total_int = int(total)
-        event: Dict[str, Any] = {"type": "token_count", "total": total_int}
-        transcript_entry: Dict[str, Any] = {
+        event: ObjectDict = {"type": "token_count", "total": total_int}
+        transcript_entry: ObjectDict = {
             "role": "token_usage",
             "total": total_int,
             "event": label_lower,
@@ -1845,18 +1902,18 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: ObjectDict,
         turn_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> ObjectDict:
         raw_kind = payload.get("collaboration_mode_kind") or payload.get("collaborationModeKind")
         if not isinstance(raw_kind, str) or not raw_kind.strip():
             return {"handled": True, "events": [], "transcript_entries": []}
         kind = raw_kind.strip()
-        event: Dict[str, Any] = {
+        event: ObjectDict = {
             "type": "mode",
             "kind": kind,
         }
-        transcript_entry: Dict[str, Any] = {
+        transcript_entry: ObjectDict = {
             "role": "mode",
             "kind": kind,
             "turn_id": turn_id,
@@ -1874,7 +1931,7 @@ class CodexEventRouter:
 
     def _emit_diff_entries(
         self,
-        result: Dict[str, Any],
+        result: ObjectDict,
         *,
         diff_text: str,
         path: Optional[str],
@@ -1884,8 +1941,10 @@ class CodexEventRouter:
         event_name: str,
     ) -> None:
         turn_state = self._get_turn_state(thread_id, turn_id)
-        diff_hashes = turn_state.setdefault("diff_hashes", set())
+        diff_hashes = _ensure_string_set(turn_state, "diff_hashes")
         subagent_id = self._subagent_id_for_context(thread_id)
+        event_entries = _ensure_dict_list(result, "events")
+        transcript_entries = _ensure_dict_list(result, "transcript_entries")
         for section_path, section_text in _split_unified_diff_by_file(diff_text):
             if not section_text:
                 continue
@@ -1900,13 +1959,13 @@ class CodexEventRouter:
                 diff_id = f"item:{item_id}:{diff_hash[:12]}"
             else:
                 diff_id = f"diff:{diff_hash[:12]}"
-            result["events"].append(self._decorate_event({
+            event_entries.append(self._decorate_event({
                 "type": "diff",
                 "id": diff_id,
                 "text": section_text,
                 "path": effective_path,
             }, subagent_id))
-            result["transcript_entries"].append(self._decorate_transcript_entry({
+            transcript_entries.append(self._decorate_transcript_entry({
                 "role": "diff",
                 "text": section_text,
                 "path": effective_path,
@@ -1920,13 +1979,13 @@ class CodexEventRouter:
         *,
         request_id: str,
         kind: str,
-        payload: Dict[str, Any],
+        payload: ObjectDict,
         thread_id: Optional[str],
         turn_id: Optional[str],
         request_method: Optional[str] = None,
-        request_params: Optional[Dict[str, Any]] = None,
+        request_params: Optional[ObjectDict] = None,
         activity_label: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ObjectDict:
         subagent_id = self._subagent_id_for_context(thread_id)
         approval_event = {
             "type": "approval",
@@ -1968,11 +2027,11 @@ class CodexEventRouter:
         *,
         tool_id: str,
         request_id: str,
-        arguments: Any,
-        item_state: Dict[str, Any],
+        arguments: object,
+        item_state: ObjectDict,
         thread_id: Optional[str],
         turn_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> ObjectDict:
         normalized_arguments = arguments if isinstance(arguments, dict) else {}
         question = str(normalized_arguments.get("question") or "").strip()
         raw_choices = normalized_arguments.get("choices")
@@ -1980,7 +2039,7 @@ class CodexEventRouter:
             choices = raw_choices
         elif isinstance(raw_choices, str):
             try:
-                parsed = __import__("json").loads(raw_choices)
+                parsed = cast(object, json.loads(raw_choices))
                 choices = parsed if isinstance(parsed, list) else []
             except Exception:
                 choices = []
@@ -2039,13 +2098,13 @@ class CodexEventRouter:
         protocol: RuntimeProtocol,
         *,
         label: Optional[str],
-        payload: Any,
+        payload: object,
         thread_id: Optional[str],
         turn_id: Optional[str],
         conversation_id: Optional[str] = None,
-        extract_item_text: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, str]]]] = None,
-    ) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
+        extract_item_text: Optional[Callable[[ObjectDict], Optional[Dict[str, str]]]] = None,
+    ) -> ObjectDict:
+        result: ObjectDict = {
             "handled": False,
             "events": [],
             "transcript_entries": [],
@@ -2141,11 +2200,11 @@ class CodexEventRouter:
                     "plan_content": plan_content,
                     "plan_steps": plan_steps,
                 })
-                plan_event: Dict[str, Any] = {
+                plan_event: ObjectDict = {
                     "type": "plan",
                     "steps": plan_steps,
                 }
-                plan_entry: Dict[str, Any] = {
+                plan_entry: ObjectDict = {
                     "role": "plan",
                     "steps": plan_steps,
                     "turn_id": turn_id,
@@ -2333,7 +2392,7 @@ class CodexEventRouter:
                     "new_file": new_file,
                     "output_buffer": "",
                 })
-                arguments: Dict[str, Any] = {}
+                arguments: ObjectDict = {}
                 if paths:
                     arguments["paths"] = paths
                     arguments["change_count"] = len(paths)
@@ -2364,7 +2423,7 @@ class CodexEventRouter:
                 elif item_type == "imageview":
                     tool_name = "view_image"
                     arguments = {"path": item.get("path")}
-                request_payload = build_tool_card_request(server_name or "", tool_name or item_type, arguments)
+                request_payload = cast(ObjectDict, build_tool_card_request(server_name or "", tool_name or item_type, arguments))
                 item_state.update({
                     "item_type": item_type,
                     "tool": tool_name or item_type,
@@ -2605,7 +2664,11 @@ class CodexEventRouter:
             if item_type == "reasoning":
                 turn_state = self._get_turn_state(effective_thread_id, effective_turn_id)
                 effective_id = item_id or _reasoning_event_id(item, turn_state)
-                text = _extract_reasoning_text(item, fallback=turn_state.get("reasoning_buffer"))
+                reasoning_buffer = turn_state.get("reasoning_buffer")
+                text = _extract_reasoning_text(
+                    item,
+                    fallback=reasoning_buffer if isinstance(reasoning_buffer, str) else None,
+                )
                 scrubbed_text, thoughts = _extract_and_scrub_thoughts(text) if text else ("", [])
                 has_visible_reasoning = _has_visible_reasoning_text(scrubbed_text)
                 should_finalize_live = turn_state.get("reason_source") in {None, "item"} and has_visible_reasoning
@@ -2650,41 +2713,38 @@ class CodexEventRouter:
                 duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
                 status = str(item.get("status") or "").strip().lower()
                 is_error = _result_error_status(status, exit_code, item.get("error"))
-                view_sequence = item_state.get("view_sequence") if isinstance(item_state.get("view_sequence"), dict) else None
-                view_spec = item_state.get("view_spec") if isinstance(item_state.get("view_spec"), dict) else None
-                search_spec = item_state.get("search_spec") if isinstance(item_state.get("search_spec"), dict) else None
-                new_file_spec = item_state.get("new_file_spec") if isinstance(item_state.get("new_file_spec"), dict) else None
+                view_sequence = _dict_payload(item_state.get("view_sequence"))
+                view_spec = _dict_payload(item_state.get("view_spec"))
+                search_spec = _dict_payload(item_state.get("search_spec"))
+                new_file_spec = _dict_payload(item_state.get("new_file_spec"))
                 if view_sequence and not is_error:
-                    raw_specs = view_sequence.get("specs")
-                    divider = view_sequence.get("separator")
-                    if isinstance(raw_specs, list) and isinstance(divider, str) and divider:
+                    raw_specs = _dict_list(view_sequence.get("specs"))
+                    divider = _string_value(view_sequence.get("separator"))
+                    if raw_specs and divider:
                         split_output = _split_view_output_by_divider(output, divider, len(raw_specs))
                         if split_output is not None:
-                            routed_events: List[Dict[str, Any]] = []
-                            transcript_entries = []
+                            routed_events: List[ObjectDict] = []
+                            view_entries: List[ObjectDict] = []
                             base_id = item_id or _assistant_id(item, thread_id, turn_id)
                             for idx, (raw_spec, segment_output) in enumerate(zip(raw_specs, split_output), start=1):
-                                if not isinstance(raw_spec, dict):
-                                    split_output = None
-                                    break
                                 view_lines = _build_codex_view_lines(segment_output, raw_spec)
                                 view_id = f"{base_id}:view:{idx}"
                                 routed_events.append({
                                     "type": "view",
                                     "id": view_id,
-                                    "title": raw_spec.get("title") or _build_view_title(raw_spec.get("path") or "", raw_spec.get("view_range")),
-                                    "path": raw_spec.get("path") or "",
+                                    "title": _view_spec_title(raw_spec),
+                                    "path": _view_spec_path(raw_spec),
                                     "content": segment_output,
-                                    "view_range": raw_spec.get("view_range"),
+                                    "view_range": _view_spec_range(raw_spec),
                                     **({"lines": view_lines} if view_lines is not None else {}),
                                 })
-                                transcript_entries.append({
+                                view_entries.append({
                                     "role": "view",
                                     "id": view_id,
-                                    "title": raw_spec.get("title") or _build_view_title(raw_spec.get("path") or "", raw_spec.get("view_range")),
-                                    "path": raw_spec.get("path") or "",
+                                    "title": _view_spec_title(raw_spec),
+                                    "path": _view_spec_path(raw_spec),
                                     "content": segment_output,
-                                    "view_range": raw_spec.get("view_range"),
+                                    "view_range": _view_spec_range(raw_spec),
                                     **({"lines": view_lines} if view_lines is not None else {}),
                                     "item_id": item_id,
                                     "turn_id": turn_id,
@@ -2695,7 +2755,7 @@ class CodexEventRouter:
                                 routed = {
                                     "handled": True,
                                     "events": routed_events,
-                                    "transcript_entries": transcript_entries,
+                                    "transcript_entries": view_entries,
                                 }
                                 approval_request_id = item_state.get("approval_request_id")
                                 if approval_request_id:
@@ -2710,20 +2770,20 @@ class CodexEventRouter:
                             {
                                 "type": "view",
                                 "id": item_id or _assistant_id(item, thread_id, turn_id),
-                                "title": view_spec.get("title") or _build_view_title(view_spec.get("path") or "", view_spec.get("view_range")),
-                                "path": view_spec.get("path") or "",
+                                "title": _view_spec_title(view_spec),
+                                "path": _view_spec_path(view_spec),
                                 "content": output,
-                                "view_range": view_spec.get("view_range"),
+                                "view_range": _view_spec_range(view_spec),
                                 **({"lines": view_lines} if view_lines is not None else {}),
                             },
                             {"type": "activity", "label": "processing", "active": True},
                         ],
                         "transcript_entries": [{
                             "role": "view",
-                            "title": view_spec.get("title") or _build_view_title(view_spec.get("path") or "", view_spec.get("view_range")),
-                            "path": view_spec.get("path") or "",
+                            "title": _view_spec_title(view_spec),
+                            "path": _view_spec_path(view_spec),
                             "content": output,
-                            "view_range": view_spec.get("view_range"),
+                            "view_range": _view_spec_range(view_spec),
                             **({"lines": view_lines} if view_lines is not None else {}),
                             "item_id": item_id,
                             "turn_id": turn_id,
@@ -2820,7 +2880,7 @@ class CodexEventRouter:
                         routed["clear_live_approval_ids"] = [approval_request_id]
                         self._approval_request_map.pop(str(item_id), None)
                     return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
-                routed: Dict[str, Any] = {
+                routed: ObjectDict = {
                     "handled": True,
                     "events": [
                         {
@@ -2868,12 +2928,13 @@ class CodexEventRouter:
 
             if item_type == "filechange":
                 changes = item.get("changes") if item.get("changes") is not None else item_state.get("changes")
-                paths = _paths_from_changes(changes) or item_state.get("paths") or []
+                paths = _paths_from_changes(changes) or _string_list(item_state.get("paths"))
                 output = _normalize_output(item_state.get("output_buffer"))
                 status = str(item.get("status") or "").strip().lower()
                 duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
                 primary_path = paths[0] if paths else item_state.get("path")
-                diff_text = item_state.get("diff")
+                diff_value = item_state.get("diff")
+                diff_text = diff_value if isinstance(diff_value, str) else None
                 new_file = bool(item_state.get("new_file")) or _diff_is_new_file(diff_text)
                 is_error = status in {"failed", "declined", "error"}
                 arguments = {
@@ -2974,13 +3035,13 @@ class CodexEventRouter:
                         return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 request_payload = item_state.get("request")
                 if request_payload is None:
-                    request_payload = build_tool_card_request(server_name, tool_name, arguments)
-                response_payload = build_tool_card_response(server_name, tool_name, live_result)
+                    request_payload = cast(ObjectDict, build_tool_card_request(server_name, tool_name, arguments))
+                response_payload = cast(ObjectDict, build_tool_card_response(server_name, tool_name, live_result))
                 if item_type == "websearch":
                     query = item.get("query")
                     if not isinstance(query, str):
                         query = item_state.get("query") if isinstance(item_state.get("query"), str) else ""
-                    results_payload: Any = result_value
+                    results_payload: object = result_value
                     if isinstance(result_value, dict) and "results" in result_value:
                         results_payload = result_value.get("results")
                     search_content = ""
@@ -3047,7 +3108,7 @@ class CodexEventRouter:
                     ],
                     "transcript_entries": [],
                 }
-                routed["transcript_entries"].append({
+                _ensure_dict_list(routed, "transcript_entries").append({
                     "role": "mcp_tool",
                     "server": server_name,
                     "tool": tool_name,
@@ -3167,7 +3228,7 @@ class CodexEventRouter:
             if request_id_text and item_id:
                 self._approval_request_map[str(item_id)] = request_id_text
                 item_state["approval_request_id"] = request_id_text
-            payload_data: Dict[str, Any] = {
+            payload_data: ObjectDict = {
                 "command": payload.get("parsedCmd") or payload.get("command") or item_state.get("command"),
                 "cwd": payload.get("cwd") or item_state.get("cwd"),
                 "reason": payload.get("reason"),
@@ -3362,11 +3423,15 @@ class CodexEventRouter:
                     effective_turn_id,
                 )
                 item_state["item_type"] = "reasoning"
-                text = _extract_reasoning_text(payload, fallback=turn_state.get("reasoning_buffer"))
+                reasoning_buffer = turn_state.get("reasoning_buffer")
+                text = _extract_reasoning_text(
+                    payload,
+                    fallback=reasoning_buffer if isinstance(reasoning_buffer, str) else None,
+                )
                 scrubbed_text, thoughts = _extract_and_scrub_thoughts(text) if text else ("", [])
                 has_visible_reasoning = _has_visible_reasoning_text(scrubbed_text)
                 should_finalize_live = turn_state.get("reason_source") in {None, "codex"} and has_visible_reasoning
-                events: List[Dict[str, Any]] = []
+                events: List[ObjectDict] = []
                 if thoughts:
                     events.extend(
                         build_thought_event(text=thought, turn_id=effective_turn_id)
@@ -3378,7 +3443,7 @@ class CodexEventRouter:
                         text=scrubbed_text,
                         turn_id=effective_turn_id,
                     ))
-                transcript_entries: List[Dict[str, Any]] = []
+                transcript_entries: List[ObjectDict] = []
                 if has_visible_reasoning and self._should_record_reasoning(turn_state, effective_id):
                     transcript_entries.append(build_reasoning_transcript_entry(
                         entry_id=effective_id,
@@ -3468,12 +3533,12 @@ def route_event(
     protocol: RuntimeProtocol,
     *,
     label: Optional[str],
-    payload: Any,
+    payload: object,
     thread_id: Optional[str],
     turn_id: Optional[str],
     conversation_id: Optional[str] = None,
-    extract_item_text: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, str]]]] = None,
-) -> Dict[str, Any]:
+    extract_item_text: Optional[Callable[[ObjectDict], Optional[Dict[str, str]]]] = None,
+) -> ObjectDict:
     return CodexEventRouter().route_event(
         protocol,
         label=label,

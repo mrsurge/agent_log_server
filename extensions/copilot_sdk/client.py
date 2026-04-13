@@ -21,7 +21,7 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Callable, Awaitable, Deque, Tuple, cast, get_args
+from typing import Any, Dict, List, Optional, Callable, Awaitable, Deque, Tuple, Protocol, TypeAlias, TypedDict, cast, get_args, runtime_checkable
 from collections import deque
 from uuid import uuid4
 
@@ -46,6 +46,8 @@ from ._vendor.copilot.types import (
     MCPServerConfig,
     PostToolUseHandler,
     PreToolUseHandler,
+    PreToolUseHookInput,
+    PreToolUseHookOutput,
     _PermissionHandlerFn,
     ReasoningEffort,
     SessionHooks,
@@ -70,6 +72,25 @@ from agent_log_server.te2_mcp_config import (
 from watchfiles import awatch
 
 
+PayloadDict: TypeAlias = dict[str, object]
+SettingsDict: TypeAlias = dict[str, object]
+RequestContext: TypeAlias = dict[str, str]
+
+
+class RawBufferEntry(TypedDict):
+    ts: str
+    dir: str
+    convo: str
+    data: str
+
+
+class PlanDocState(TypedDict):
+    plan_exists: bool
+    plan_content: str
+    plan_path: str | None
+    plan_source: str
+
+
 # ── Global state ────────────────────────────────────────────────────
 
 _client: Optional[CopilotClient] = None
@@ -77,8 +98,8 @@ _client_lock: Optional[asyncio.Lock] = None
 _fws_getter: Optional[Callable] = None
 _copilot_shell_id: Optional[str] = None
 _copilot_fws_process: Optional[FrameworkShellPipeProcess] = None
-_BroadcastFn = Callable[[Dict[str, Any]], Awaitable[None]]
-_TranscriptFn = Callable[[str, Dict[str, Any]], Awaitable[None]]
+_BroadcastFn = Callable[[PayloadDict], Awaitable[None]]
+_TranscriptFn = Callable[[str, PayloadDict], Awaitable[None]]
 
 
 def _get_client_lock() -> asyncio.Lock:
@@ -89,11 +110,11 @@ def _get_client_lock() -> asyncio.Lock:
     return _client_lock
 
 
-async def _noop_broadcast(_: Dict[str, Any]) -> None:
+async def _noop_broadcast(_: PayloadDict) -> None:
     return None
 
 
-async def _noop_transcript(_: str, __: Dict[str, Any]) -> None:
+async def _noop_transcript(_: str, __: PayloadDict) -> None:
     return None
 
 
@@ -105,7 +126,7 @@ def _resolved_transcript_fn() -> _TranscriptFn:
     return _transcript_fn if _transcript_fn is not None else _noop_transcript
 
 
-async def _append_debug_transcript(conversation_id: str, transcript_entry: Dict[str, Any]) -> None:
+async def _append_debug_transcript(conversation_id: str, transcript_entry: PayloadDict) -> None:
     await _resolved_transcript_fn()(conversation_id, transcript_entry)
 
 
@@ -135,7 +156,7 @@ _todo_watch_sessions: Dict[str, str] = {}
 _todo_signatures: Dict[str, str] = {}
 _plan_doc_signatures: Dict[str, str] = {}
 # Latest known plan-document state keyed by conversation_id.
-_plan_doc_state: Dict[str, Dict[str, Any]] = {}
+_plan_doc_state: dict[str, PlanDocState] = {}
 _model_context_window_cache: Dict[str, Optional[int]] = {}
 _model_context_window_lock: Optional[asyncio.Lock] = None
 
@@ -144,7 +165,7 @@ _ready_event: Optional[asyncio.Event] = None
 _initialized: bool = False
 
 # Debug buffer (circular)
-_raw_buffer: List[Dict[str, Any]] = []
+_raw_buffer: list[RawBufferEntry] = []
 _RAW_BUFFER_MAX = 2000
 _debug_raw_entry_counters: Dict[str, int] = {}
 _RECENT_EVENT_KEY_LIMIT = 512
@@ -179,16 +200,105 @@ def _get_model_context_window_lock() -> asyncio.Lock:
     return _model_context_window_lock
 
 
-def _extract_model_context_window(model: Any) -> Optional[int]:
+@runtime_checkable
+class _SupportsToDict(Protocol):
+    def to_dict(self) -> object: ...
+
+
+class _FrameworkShellRecord(Protocol):
+    id: str
+    status: str
+    label: str | None
+    spec_id: str | None
+
+
+class _FrameworkShellManager(Protocol):
+    async def list_shells(self) -> list[_FrameworkShellRecord]: ...
+
+    async def get_shell(self, shell_id: str) -> _FrameworkShellRecord | None: ...
+
+    async def terminate_shell(self, shell_id: str, force: bool) -> None: ...
+
+class TodoStep(TypedDict):
+    step: str
+    status: str
+
+
+class TodoSnapshot(TypedDict, total=False):
+    steps: list[TodoStep]
+    signature: str
+    db_path: str | None
+    source: str
+    session_id: str
+
+class PlanDocSnapshot(PlanDocState, total=False):
+    signature: str
+    session_id: str | None
+
+
+class RuntimeOptionDescriptor(TypedDict):
+    settingKey: str
+    label: str
+    options: list[dict[str, str]]
+    current: str
+    default: str
+
+
+class QuotaInfo(TypedDict):
+    text: str
+    detail: str
+    tone: str
+
+
+class PendingRequestSpec(TypedDict, total=False):
+    type: str
+    request_method: str
+    request_params: PayloadDict
+    choices: list[str]
+
+
+class ApprovalDescriptor(TypedDict, total=False):
+    request_id: str
+    agent: str
+    kind: str
+    payload: PayloadDict
+    request_method: str
+    request_params: PayloadDict
+    thread_id: str | None
+    turn_id: str
+    runtime_signature: str
+    runtime_instance_id: str | None
+    transcript_anchor: PayloadDict
+    source: str
+    created_at: str
+    render_event: PayloadDict
+
+
+def _object_mapping(value: object) -> PayloadDict | None:
+    if isinstance(value, dict):
+        return cast(PayloadDict, value)
+    with contextlib.suppress(TypeError):
+        raw = vars(value)
+        if isinstance(raw, dict):
+            return cast(PayloadDict, raw)
+    return None
+
+
+def _extract_model_context_window(model: object) -> Optional[int]:
     if model is None:
         return None
-    capabilities = model.get("capabilities") if isinstance(model, dict) else getattr(model, "capabilities", None)
-    limits = capabilities.get("limits") if isinstance(capabilities, dict) else getattr(capabilities, "limits", None)
+    model_dict = _object_mapping(model)
+    if model_dict is None:
+        return None
+    capabilities = model_dict.get("capabilities")
+    capabilities_dict = _object_mapping(capabilities)
+    limits = capabilities_dict.get("limits") if capabilities_dict is not None else None
+    limits_dict = _object_mapping(limits)
     candidates = (
-        limits.get("max_context_window_tokens") if isinstance(limits, dict) else getattr(limits, "max_context_window_tokens", None),
-        limits.get("maxContextWindowTokens") if isinstance(limits, dict) else getattr(limits, "maxContextWindowTokens", None),
-        model.get("max_context_window_tokens") if isinstance(model, dict) else getattr(model, "max_context_window_tokens", None),
-        model.get("maxContextWindowTokens") if isinstance(model, dict) else getattr(model, "maxContextWindowTokens", None),
+        limits_dict.get("max_context_window_tokens") if limits_dict is not None else None,
+        limits_dict.get("maxContextWindowTokens") if limits_dict is not None else None,
+        model_dict.get("max_context_window_tokens"),
+        model_dict.get("maxContextWindowTokens"),
     )
     for candidate in candidates:
         if isinstance(candidate, (int, float)) and candidate > 0:
@@ -244,23 +354,23 @@ def _next_debug_raw_entry_index(conversation_id: str) -> int:
     return next_value
 
 
-def _serialize_session_event(event: SessionEvent) -> Dict[str, Any]:
-    data = getattr(event, "data", None)
+def _serialize_session_event(event: SessionEvent) -> PayloadDict:
+    data = event.data
     return {
-        "event_type": getattr(getattr(event, "type", None), "value", str(getattr(event, "type", ""))),
-        "sdk_event_id": (str(getattr(event, "id", "")).strip() or None),
-        "parent_id": (str(getattr(event, "parent_id", "")).strip() or None),
-        "data_type": type(data).__name__ if data is not None else None,
+        "event_type": event.type.value,
+        "sdk_event_id": (str(event.id).strip() or None),
+        "parent_id": (str(event.parent_id).strip() or None) if event.parent_id is not None else None,
+        "data_type": type(data).__name__,
         "data": _json_safe_sdk_value(data),
     }
 
 
 def _event_identity_key(event: SessionEvent) -> Optional[Tuple[str, str, str]]:
-    event_type = getattr(getattr(event, "type", None), "value", str(getattr(event, "type", "")))
-    event_id = str(getattr(event, "id", "") or "").strip()
+    event_type = event.type.value
+    event_id = str(event.id).strip()
     if not event_id:
         return None
-    parent_id = str(getattr(event, "parent_id", "") or "").strip()
+    parent_id = str(event.parent_id).strip() if event.parent_id is not None else ""
     return (event_type, event_id, parent_id)
 
 
@@ -341,13 +451,13 @@ def _replace_session_subscription(conversation_id: str, session: CopilotSession)
 def _add_to_raw_buffer(
     direction: str,
     conversation_id: str,
-    data: Any,
+    data: object,
     *,
-    payload: Any = None,
+    payload: object = None,
     category: Optional[str] = None,
 ) -> None:
     summary = data if isinstance(data, str) else str(data)[:500]
-    entry = {
+    entry: RawBufferEntry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "dir": direction,
         "convo": conversation_id[:8] if conversation_id else "?",
@@ -361,7 +471,7 @@ def _add_to_raw_buffer(
     if not conversation_id or not router or not router.debug_trace or not _transcript_fn:
         return
 
-    transcript_entry: Dict[str, Any] = {
+    transcript_entry: PayloadDict = {
         "role": "debug_raw",
         "type": "debug_raw",
         "internal": True,
@@ -392,7 +502,7 @@ def _add_to_raw_buffer(
         print(f"[CopilotSDK] No running loop for debug transcript append: {conversation_id[:8]}")
 
 
-def get_raw_buffer(limit: int = 50) -> List[Dict[str, Any]]:
+def get_raw_buffer(limit: int = 50) -> list[RawBufferEntry]:
     return _raw_buffer[-limit:]
 
 
@@ -404,7 +514,7 @@ def _get_session_lock(conversation_id: str) -> asyncio.Lock:
     return lock
 
 
-def _summarize_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
+def _summarize_runtime_config(config: SettingsDict) -> PayloadDict:
     mcp_servers = config.get("mcp_servers")
     te2_cfg = mcp_servers.get("te2-mcp") if isinstance(mcp_servers, dict) else None
     system_message = config.get("system_message")
@@ -425,7 +535,7 @@ def _summarize_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _log_runtime_config(stage: str, conversation_id: str, config: Dict[str, Any]) -> None:
+def _log_runtime_config(stage: str, conversation_id: str, config: SettingsDict) -> None:
     summary = _summarize_runtime_config(config)
     print(f"[CopilotSDK] {stage} config convo={conversation_id[:8]} summary={summary}")
     _add_to_raw_buffer("out", conversation_id, f"{stage}_config {summary}")
@@ -434,20 +544,20 @@ def _log_runtime_config(stage: str, conversation_id: str, config: Dict[str, Any]
 # ── Permission / Approval handler ───────────────────────────────────
 
 # Pending approval futures: request_id -> asyncio.Future
-_pending_approvals: Dict[str, asyncio.Future[Any]] = {}
-_pending_request_specs: Dict[str, Dict[str, Any]] = {}
+_pending_approvals: dict[str, asyncio.Future[object]] = {}
+_pending_request_specs: dict[str, PendingRequestSpec] = {}
 _PERMISSION_RESULT_KIND_VALUES = set(get_args(PermissionRequestResultKind))
 
 
-def _string_or_empty(value: Any) -> str:
+def _string_or_empty(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _optional_string(value: Any) -> Optional[str]:
+def _optional_string(value: object) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
-def _normalize_reasoning_effort(value: Any) -> Optional[ReasoningEffort]:
+def _normalize_reasoning_effort(value: object) -> Optional[ReasoningEffort]:
     if not isinstance(value, str):
         return None
     text = value.strip().lower()
@@ -462,13 +572,13 @@ def _normalize_reasoning_effort(value: Any) -> Optional[ReasoningEffort]:
     return None
 
 
-def _normalize_string_list(value: Any, *, field_name: str) -> List[str]:
+def _normalize_string_list(value: object, *, field_name: str) -> List[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{field_name} must be a list of strings")
     return list(value)
 
 
-def _normalize_string_dict(value: Any, *, field_name: str) -> Dict[str, str]:
+def _normalize_string_dict(value: object, *, field_name: str) -> Dict[str, str]:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a JSON object")
     normalized: Dict[str, str] = {}
@@ -479,7 +589,7 @@ def _normalize_string_dict(value: Any, *, field_name: str) -> Dict[str, str]:
     return normalized
 
 
-def _normalize_system_message_config(value: Any) -> Optional[SystemMessageConfig]:
+def _normalize_system_message_config(value: object) -> Optional[SystemMessageConfig]:
     if not isinstance(value, dict):
         return None
     content = value.get("content")
@@ -493,7 +603,7 @@ def _normalize_system_message_config(value: Any) -> Optional[SystemMessageConfig
     return None
 
 
-def _normalize_session_hooks(value: Any) -> Optional[SessionHooks]:
+def _normalize_session_hooks(value: object) -> Optional[SessionHooks]:
     if not isinstance(value, dict):
         return None
     hooks: SessionHooks = {}
@@ -524,7 +634,7 @@ def _normalize_session_hooks(value: Any) -> Optional[SessionHooks]:
     return hooks or None
 
 
-def _normalize_mcp_server_config(name: str, value: Any) -> MCPServerConfig:
+def _normalize_mcp_server_config(name: str, value: object) -> MCPServerConfig:
     if not isinstance(value, dict):
         raise ValueError(f"MCP server '{name}' must be a JSON object")
     tools = _normalize_string_list(value.get("tools"), field_name=f"MCP server '{name}'.tools")
@@ -588,7 +698,7 @@ def _normalize_mcp_server_config(name: str, value: Any) -> MCPServerConfig:
     raise ValueError(f"MCP server '{name}' must be a valid local/stdio or http/sse config")
 
 
-def _normalize_mcp_servers(value: Any) -> Optional[Dict[str, MCPServerConfig]]:
+def _normalize_mcp_servers(value: object) -> Optional[Dict[str, MCPServerConfig]]:
     if value in (None, ""):
         return None
     if not isinstance(value, dict):
@@ -603,7 +713,7 @@ def _normalize_mcp_servers(value: Any) -> Optional[Dict[str, MCPServerConfig]]:
 
 def _populate_common_session_config(
     target: SessionConfig | ResumeSessionConfig,
-    config: Dict[str, Any],
+    config: SettingsDict,
 ) -> None:
     streaming = config.get("streaming")
     if isinstance(streaming, bool):
@@ -648,20 +758,20 @@ def _populate_common_session_config(
         target["mcp_servers"] = mcp_servers
 
 
-def _build_create_session_config(config: Dict[str, Any]) -> SessionConfig:
+def _build_create_session_config(config: SettingsDict) -> SessionConfig:
     typed: SessionConfig = {}
     _populate_common_session_config(typed, config)
     return typed
 
 
-def _build_resume_session_config(config: Dict[str, Any]) -> ResumeSessionConfig:
+def _build_resume_session_config(config: SettingsDict) -> ResumeSessionConfig:
     typed: ResumeSessionConfig = {}
     _populate_common_session_config(typed, config)
     return typed
 
 
 def _coerce_permission_result_kind(
-    kind: Any,
+    kind: object,
     *,
     decision_text: str,
 ) -> PermissionRequestResultKind:
@@ -679,12 +789,13 @@ def _coerce_permission_result_kind(
     return "denied-interactively-by-user"
 
 
-def _get_conversation_settings(conversation_id: str) -> Dict[str, Any]:
+def _get_conversation_settings(conversation_id: str) -> SettingsDict:
     """Read settings from conversation meta.json."""
     if _meta_fns and "load" in _meta_fns:
         meta = _meta_fns["load"](conversation_id)
-        if meta and isinstance(meta.get("settings"), dict):
-            return meta["settings"]
+        settings = meta.get("settings") if isinstance(meta, dict) else None
+        if isinstance(settings, dict):
+            return cast(SettingsDict, settings)
     return {}
 
 
@@ -734,7 +845,7 @@ def _plan_doc_signature(plan_exists: bool, plan_content: str) -> str:
     )
 
 
-def _default_plan_doc_state(source: str = "unknown") -> Dict[str, Any]:
+def _default_plan_doc_state(source: str = "unknown") -> PlanDocState:
     return {
         "plan_exists": False,
         "plan_content": "",
@@ -743,15 +854,15 @@ def _default_plan_doc_state(source: str = "unknown") -> Dict[str, Any]:
     }
 
 
-def _get_plan_doc_state(conversation_id: str) -> Dict[str, Any]:
+def _get_plan_doc_state(conversation_id: str) -> PlanDocState:
     state = _plan_doc_state.get(conversation_id)
     if not isinstance(state, dict):
         return _default_plan_doc_state()
     return {
         "plan_exists": bool(state.get("plan_exists")),
-        "plan_content": state.get("plan_content") if isinstance(state.get("plan_content"), str) else "",
-        "plan_path": state.get("plan_path") if isinstance(state.get("plan_path"), str) and state.get("plan_path") else None,
-        "plan_source": state.get("plan_source") if isinstance(state.get("plan_source"), str) and state.get("plan_source") else "unknown",
+        "plan_content": _string_or_empty(state.get("plan_content")),
+        "plan_path": _optional_string(state.get("plan_path")),
+        "plan_source": _optional_string(state.get("plan_source")) or "unknown",
     }
 
 
@@ -762,8 +873,8 @@ def _set_plan_doc_state(
     plan_content: str,
     plan_path: Optional[str],
     plan_source: str,
-) -> Dict[str, Any]:
-    state = {
+ ) -> PlanDocState:
+    state: PlanDocState = {
         "plan_exists": bool(plan_exists),
         "plan_content": plan_content if isinstance(plan_content, str) else "",
         "plan_path": plan_path if isinstance(plan_path, str) and plan_path else None,
@@ -774,7 +885,7 @@ def _set_plan_doc_state(
     return state
 
 
-def _normalize_todo_status(status: Any) -> str:
+def _normalize_todo_status(status: object) -> str:
     if isinstance(status, str):
         normalized = status.strip().lower()
         if normalized in {"done", "completed", "complete"}:
@@ -784,7 +895,7 @@ def _normalize_todo_status(status: Any) -> str:
     return "pending"
 
 
-def _todo_step_text(todo_id: Any, title: Any, description: Any) -> str:
+def _todo_step_text(todo_id: object, title: object, description: object) -> str:
     if isinstance(title, str) and title.strip():
         return title.strip()
     if isinstance(description, str) and description.strip():
@@ -794,7 +905,7 @@ def _todo_step_text(todo_id: Any, title: Any, description: Any) -> str:
     return "Untitled todo"
 
 
-def _read_todo_snapshot_sync(sdk_session_id: str) -> Dict[str, Any]:
+def _read_todo_snapshot_sync(sdk_session_id: str) -> TodoSnapshot:
     db_path = _copilot_session_db_path(sdk_session_id)
     if not db_path.is_file():
         return {
@@ -827,8 +938,9 @@ def _read_todo_snapshot_sync(sdk_session_id: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
-    steps: List[Dict[str, str]] = []
-    signature_rows: List[Dict[str, str]] = []
+    rows = cast(list[tuple[object, object, object, object, object, object, object]], rows)
+    steps: list[TodoStep] = []
+    signature_rows: list[dict[str, str]] = []
     for rowid, todo_id, title, description, status, created_at, updated_at in rows:
         step_text = _todo_step_text(todo_id, title, description)
         normalized_status = _normalize_todo_status(status)
@@ -855,7 +967,8 @@ def _read_todo_snapshot_sync(sdk_session_id: str) -> Dict[str, Any]:
 async def _read_todo_snapshot(
     conversation_id: str,
     sdk_session_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> TodoSnapshot:
+    snapshot: TodoSnapshot
     resolved_session_id = sdk_session_id or _resolve_sdk_session_id(conversation_id)
     if not isinstance(resolved_session_id, str) or not resolved_session_id:
         return {
@@ -881,7 +994,7 @@ async def _read_todo_snapshot(
     return snapshot
 
 
-def _read_plan_doc_snapshot_sync(sdk_session_id: str) -> Dict[str, Any]:
+def _read_plan_doc_snapshot_sync(sdk_session_id: str) -> PlanDocSnapshot:
     plan_path = _copilot_plan_doc_path(sdk_session_id)
     if not plan_path.is_file():
         return {
@@ -906,7 +1019,8 @@ def _read_plan_doc_snapshot_sync(sdk_session_id: str) -> Dict[str, Any]:
 async def _read_plan_doc_snapshot(
     conversation_id: str,
     sdk_session_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> PlanDocSnapshot:
+    snapshot: PlanDocSnapshot
     resolved_session_id = sdk_session_id or _resolve_sdk_session_id(conversation_id)
     if not isinstance(resolved_session_id, str) or not resolved_session_id:
         return {
@@ -930,7 +1044,7 @@ async def _read_plan_doc_snapshot(
     return snapshot
 
 
-def _apply_plan_doc_snapshot(conversation_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def _apply_plan_doc_snapshot(conversation_id: str, snapshot: PlanDocSnapshot) -> PlanDocState:
     plan_content = _string_or_empty(snapshot.get("plan_content"))
     plan_path = _optional_string(snapshot.get("plan_path"))
     plan_source = _string_or_empty(snapshot.get("plan_source")) or "unknown"
@@ -945,8 +1059,8 @@ def _apply_plan_doc_snapshot(conversation_id: str, snapshot: Dict[str, Any]) -> 
 
 def _select_plan_doc_state_for_read(
     conversation_id: str,
-    disk_snapshot: Dict[str, Any],
-) -> Dict[str, Any]:
+    disk_snapshot: PlanDocSnapshot,
+) -> PlanDocState:
     cached_state = _get_plan_doc_state(conversation_id)
     disk_content = disk_snapshot.get("plan_content") if isinstance(disk_snapshot.get("plan_content"), str) else ""
     disk_exists = bool(disk_snapshot.get("plan_exists"))
@@ -970,12 +1084,12 @@ def _select_plan_doc_state_for_read(
 
 def _build_plan_state_payload(
     conversation_id: str,
-    todo_snapshot: Dict[str, Any],
+    todo_snapshot: TodoSnapshot,
     *,
     include_plan_content: bool,
-) -> Dict[str, Any]:
+) -> PayloadDict:
     plan_state = _get_plan_doc_state(conversation_id)
-    payload: Dict[str, Any] = {
+    payload: PayloadDict = {
         "has_plan": True,
         "has_todo": True,
         "plan_exists": bool(plan_state["plan_exists"]),
@@ -1101,8 +1215,8 @@ async def _ensure_todo_watch(conversation_id: str, sdk_session_id: str) -> None:
 
 async def _build_live_plan_state(
     conversation_id: str,
-    plan_doc_update: Dict[str, Any],
-) -> Dict[str, Any]:
+    plan_doc_update: PayloadDict,
+) -> PayloadDict:
     plan_content = _string_or_empty(plan_doc_update.get("plan_content"))
     plan_path = _optional_string(plan_doc_update.get("plan_path"))
     plan_source = _string_or_empty(plan_doc_update.get("plan_source")) or "sdk"
@@ -1132,7 +1246,7 @@ async def _build_live_plan_state(
     )
 
 
-def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -> None:
+def _upsert_pending_approval(conversation_id: str, descriptor: ApprovalDescriptor) -> None:
     if _meta_fns and "upsert_pending_approval" in _meta_fns:
         _meta_fns["upsert_pending_approval"](conversation_id, descriptor)
         return
@@ -1156,13 +1270,14 @@ def _remove_pending_approval(conversation_id: str, request_id: str) -> None:
         _meta_fns["save"](conversation_id, meta)
 
 
-def _json_safe_sdk_value(value: Any) -> Any:
+def _json_safe_sdk_value(value: object) -> object:
     if isinstance(value, Enum):
-        return value.value
-    if hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
+        return cast(object, value.value)
+    if isinstance(value, _SupportsToDict):
         return _json_safe_sdk_value(value.to_dict())
     if is_dataclass(value) and not isinstance(value, type):
-        return {key: _json_safe_sdk_value(val) for key, val in asdict(value).items() if val is not None}
+        data = cast(dict[str, object], asdict(value))
+        return {key: _json_safe_sdk_value(val) for key, val in data.items() if val is not None}
     if isinstance(value, dict):
         return {str(key): _json_safe_sdk_value(val) for key, val in value.items() if val is not None}
     if isinstance(value, (list, tuple, set)):
@@ -1170,31 +1285,30 @@ def _json_safe_sdk_value(value: Any) -> Any:
     return value
 
 
-def _normalize_permission_kind(kind: Any) -> str:
+def _normalize_permission_kind(kind: object) -> str:
     normalized = _json_safe_sdk_value(kind)
     if isinstance(normalized, str) and normalized.strip():
         return normalized.strip()
     return "unknown"
 
 
-def _extract_permission_request_fields(request: PermissionRequest) -> Dict[str, Any]:
-    fields: Dict[str, Any] = {}
-    for field_name in getattr(request, "__dataclass_fields__", {}) or {}:
-        value = getattr(request, field_name, None)
+def _extract_permission_request_fields(request: PermissionRequest) -> PayloadDict:
+    fields: PayloadDict = {}
+    for field_name, value in cast(dict[str, object], asdict(request)).items():
         if value is None:
             continue
         fields[field_name] = _json_safe_sdk_value(value)
     return fields
 
 
-def _decision_to_permission_result(decision: Any) -> PermissionRequestResult:
+def _decision_to_permission_result(decision: object) -> PermissionRequestResult:
     decision_text = str(decision or "").strip().lower()
     if decision_text == "accept":
         return PermissionRequestResult(kind="approved", rules=[])
     return PermissionRequestResult(kind="denied-interactively-by-user", rules=[])
 
 
-def _normalize_permission_resolution(resolution: Any) -> PermissionRequestResult:
+def _normalize_permission_resolution(resolution: object) -> PermissionRequestResult:
     if isinstance(resolution, PermissionRequestResult):
         return resolution
 
@@ -1239,10 +1353,10 @@ def _normalize_permission_resolution(resolution: Any) -> PermissionRequestResult
 
 def _build_permission_request_params(
     kind: str,
-    request_fields: Dict[str, Any],
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    params: Dict[str, Any] = {
+    request_fields: PayloadDict,
+    payload: PayloadDict,
+) -> PayloadDict:
+    params: PayloadDict = {
         "kind": kind,
         "availableDecisions": ["accept", "decline"],
     }
@@ -1274,7 +1388,7 @@ def _build_permission_request_params(
     return params
 
 
-def _build_user_input_request_params(request: UserInputRequest) -> Dict[str, Any]:
+def _build_user_input_request_params(request: UserInputRequest) -> PayloadDict:
     question = request.get("question")
     choices = request.get("choices")
     allow_freeform = request.get("allowFreeform")
@@ -1286,8 +1400,8 @@ def _build_user_input_request_params(request: UserInputRequest) -> Dict[str, Any
 
 
 def _normalize_user_input_resolution(
-    resolution: Any,
-    request_spec: Optional[Dict[str, Any]] = None,
+    resolution: object,
+    request_spec: Optional[PendingRequestSpec] = None,
 ) -> UserInputResponse:
     payload = resolution
     if isinstance(resolution, dict) and isinstance(resolution.get("result"), dict):
@@ -1324,10 +1438,10 @@ def _normalize_user_input_resolution(
 
 def _merge_runtime_settings(
     conversation_id: str,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[SettingsDict] = None,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> SettingsDict:
     merged = dict(_get_conversation_settings(conversation_id))
     if isinstance(settings, dict):
         merged.update(settings)
@@ -1340,7 +1454,7 @@ def _merge_runtime_settings(
 
 def _copilot_debug_trace_enabled(
     conversation_id: str,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[SettingsDict] = None,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
 ) -> bool:
@@ -1369,7 +1483,7 @@ def _copilot_shell_cwd() -> str:
     return os.path.expanduser("~")
 
 
-async def _adopt_existing_copilot_shell(mgr: Any) -> Optional[str]:
+async def _adopt_existing_copilot_shell(mgr: _FrameworkShellManager) -> Optional[str]:
     try:
         records = await mgr.list_shells()
     except Exception:
@@ -1385,7 +1499,7 @@ async def _adopt_existing_copilot_shell(mgr: Any) -> Optional[str]:
     return None
 
 
-async def _start_new_copilot_shell(mgr: Any) -> str:
+async def _start_new_copilot_shell(mgr: _FrameworkShellManager) -> str:
     spec_path = Path(__file__).parent / "shellspec" / "copilot_cli.yaml"
     orch = Orchestrator(mgr)
     cli_path = _resolve_external_copilot_cli_path() or "copilot"
@@ -1436,10 +1550,10 @@ async def _stop_copilot_shell() -> None:
 
 def _runtime_signature_payload(
     conversation_id: str,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[SettingsDict] = None,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> PayloadDict:
     merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
     payload = {
         "cwd": merged.get("cwd"),
@@ -1457,15 +1571,15 @@ def _runtime_signature_payload(
     payload["mcp_servers"] = build_copilot_mcp_servers(
         merged.get("mcp_servers"),
         te2_enabled=te2_enabled,
-        base_url=merged.get("te2_base_url"),
-        cwd=merged.get("cwd"),
+        base_url=_optional_string(merged.get("te2_base_url")),
+        cwd=_optional_string(merged.get("cwd")),
     )
     return payload
 
 
 def _runtime_signature(
     conversation_id: str,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[SettingsDict] = None,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
 ) -> str:
@@ -1475,12 +1589,12 @@ def _runtime_signature(
 
 def _build_session_runtime_config(
     conversation_id: str,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[SettingsDict] = None,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> SettingsDict:
     merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
-    config: Dict[str, Any] = {
+    config: SettingsDict = {
         "streaming": True,
         "config_dir": _copilot_config_dir(),
         "on_permission_request": _make_permission_handler(conversation_id),
@@ -1517,8 +1631,8 @@ def _build_session_runtime_config(
     mcp_servers = build_copilot_mcp_servers(
         merged.get("mcp_servers"),
         te2_enabled=te2_mcp_integration_enabled(merged),
-        base_url=merged.get("te2_base_url"),
-        cwd=merged.get("cwd"),
+        base_url=_optional_string(merged.get("te2_base_url")),
+        cwd=_optional_string(merged.get("cwd")),
         conversation_id=conversation_id,
     )
     if mcp_servers is not None:
@@ -1528,7 +1642,7 @@ def _build_session_runtime_config(
     return config
 
 
-def _normalize_mode_value(value: Any) -> Optional[str]:
+def _normalize_mode_value(value: object) -> Optional[str]:
     if not isinstance(value, str):
         return None
     text = value.strip().lower()
@@ -1539,7 +1653,7 @@ def _normalize_mode_value(value: Any) -> Optional[str]:
 
 async def _apply_session_mode(
     session: CopilotSession,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[SettingsDict] = None,
 ) -> Optional[str]:
     desired_mode = _normalize_mode_value(settings.get("mode")) if isinstance(settings, dict) else None
     if not desired_mode:
@@ -1562,8 +1676,8 @@ async def _recover_evicted_session(
     *,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[SettingsDict] = None,
+) -> PayloadDict:
     print(f"[CopilotSDK] Session evicted, attempting re-resume for {conversation_id[:8]}")
     _add_to_raw_buffer("out", conversation_id, "session_evicted, re-resuming...")
 
@@ -1596,8 +1710,8 @@ def _session_event_paths(session_id: str) -> List[Path]:
     ]
 
 
-def _sanitize_session_attachments(session_id: str) -> Dict[str, Any]:
-    result: Dict[str, Any] = {"session_id": session_id, "records_rewritten": 0, "paths": []}
+def _sanitize_session_attachments(session_id: str) -> PayloadDict:
+    result: PayloadDict = {"session_id": session_id, "records_rewritten": 0, "paths": []}
     for path in _session_event_paths(session_id):
         if not path.is_file():
             continue
@@ -1606,8 +1720,11 @@ def _sanitize_session_attachments(session_id: str) -> Dict[str, Any]:
         with path.open("r", encoding="utf-8", errors="ignore") as src, tmp.open("w", encoding="utf-8") as dst:
             for line in src:
                 try:
-                    record = json.loads(line)
+                    record = cast(object, json.loads(line))
                 except Exception:
+                    dst.write(line)
+                    continue
+                if not isinstance(record, dict):
                     dst.write(line)
                     continue
                 data = record.get("data")
@@ -1621,8 +1738,12 @@ def _sanitize_session_attachments(session_id: str) -> Dict[str, Any]:
             tmp.replace(path)
         else:
             tmp.unlink(missing_ok=True)
-        result["records_rewritten"] += rewritten
-        result["paths"].append({"path": str(path), "rewritten": rewritten})
+        current_rewritten = result.get("records_rewritten")
+        result["records_rewritten"] = (
+            current_rewritten if isinstance(current_rewritten, int) else 0
+        ) + rewritten
+        path_entries = cast(list[PayloadDict], result.setdefault("paths", []))
+        path_entries.append({"path": str(path), "rewritten": rewritten})
     return result
 
 
@@ -1632,40 +1753,44 @@ def _runtime_option_descriptor(
     options: List[Dict[str, str]],
     current: Optional[str],
     default: str,
-) -> Dict[str, Any]:
-    return {
+) -> RuntimeOptionDescriptor:
+    descriptor: RuntimeOptionDescriptor = {
         "settingKey": setting_key,
         "label": label,
         "options": [dict(item) for item in options],
         "current": current or "",
         "default": default,
     }
+    return descriptor
 
 
-def _json_safe(value: Any) -> Any:
+def _json_safe(value: object) -> object:
     if is_dataclass(value) and not isinstance(value, type):
-        return _json_safe(asdict(value))
+        return _json_safe(cast(dict[str, object], asdict(value)))
     if isinstance(value, Enum):
-        return value.value
+        return cast(object, value.value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
-    if hasattr(value, "__dict__"):
+    if isinstance(value, _SupportsToDict):
+        return _json_safe(value.to_dict())
+    value_dict = _object_mapping(value)
+    if value_dict is not None:
         return {
             k: _json_safe(v)
-            for k, v in vars(value).items()
+            for k, v in value_dict.items()
             if not str(k).startswith("_")
         }
     return str(value)
 
 
-def _load_settings_schema_template() -> Dict[str, Any]:
+def _load_settings_schema_template() -> PayloadDict:
     schema_path = Path(__file__).with_name("settings_schema.json")
     with schema_path.open("r", encoding="utf-8") as handle:
-        loaded = json.load(handle)
+        loaded = cast(object, json.load(handle))
     return loaded if isinstance(loaded, dict) else {}
 
 
@@ -1687,7 +1812,7 @@ def _quota_info_unavailable(
     *,
     tone: str = "warning",
     detail: str = "",
-) -> Dict[str, Any]:
+) -> QuotaInfo:
     return {
         "text": message,
         "detail": detail,
@@ -1705,7 +1830,7 @@ def _quota_tone_from_remaining(remaining_percentage: Optional[float]) -> str:
     return "success"
 
 
-def _format_quota_info(raw: Any) -> Dict[str, Any]:
+def _format_quota_info(raw: object) -> QuotaInfo:
     payload = raw if isinstance(raw, dict) else {}
     snapshots_raw = payload.get("quota_snapshots")
     if not isinstance(snapshots_raw, dict):
@@ -1775,7 +1900,7 @@ def _format_quota_info(raw: Any) -> Dict[str, Any]:
     }
 
 
-async def _get_quota_info() -> Dict[str, Any]:
+async def _get_quota_info() -> QuotaInfo:
     try:
         client = await _ensure_client()
         rpc = getattr(client, "_rpc", None)
@@ -1799,33 +1924,36 @@ async def _get_quota_info() -> Dict[str, Any]:
 async def get_runtime_options(
     extension_id: str,
     conversation_id: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[SettingsDict] = None,
+) -> PayloadDict:
     merged = _merge_runtime_settings(
         conversation_id or "",
         settings=settings,
     ) if conversation_id else dict(settings or {})
+    approval_policy = _optional_string(merged.get("approval_policy"))
+    sandbox_policy = _optional_string(merged.get("sandbox_policy"))
+    web_policy = _optional_string(merged.get("web_policy"))
     return {
         "agent": extension_id,
         "approval": _runtime_option_descriptor(
             "approval_policy",
             "Approval Policy",
             _APPROVAL_POLICY_OPTIONS,
-            merged.get("approval_policy") if isinstance(merged.get("approval_policy"), str) else None,
+            approval_policy,
             _DEFAULT_APPROVAL_POLICY,
         ),
         "sandbox": _runtime_option_descriptor(
             "sandbox_policy",
             "Directory Trust",
             _SANDBOX_POLICY_OPTIONS,
-            merged.get("sandbox_policy") if isinstance(merged.get("sandbox_policy"), str) else None,
+            sandbox_policy,
             _DEFAULT_SANDBOX_POLICY,
         ),
         "web": _runtime_option_descriptor(
             "web_policy",
             "Web Access",
             _WEB_POLICY_OPTIONS,
-            merged.get("web_policy") if isinstance(merged.get("web_policy"), str) else None,
+            web_policy,
             _DEFAULT_WEB_POLICY,
         ),
         "mode": _runtime_option_descriptor(
@@ -1838,7 +1966,7 @@ async def get_runtime_options(
     }
 
 
-async def get_settings_schema(extension_id: str) -> Dict[str, Any]:
+async def get_settings_schema(extension_id: str) -> PayloadDict:
     schema = _load_settings_schema_template()
     fields = schema.get("fields")
     usage_info = await _get_quota_info()
@@ -1863,7 +1991,7 @@ async def get_settings_schema(extension_id: str) -> Dict[str, Any]:
     return schema
 
 
-async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+async def read_plan(extension_id: str, conversation_id: str) -> PayloadDict:
     async with _get_session_lock(conversation_id):
         sdk_session_id = _resolve_sdk_session_id(conversation_id)
         if not isinstance(sdk_session_id, str) or not sdk_session_id:
@@ -1901,7 +2029,7 @@ async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
         return payload
 
 
-async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:
+async def get_request_card_schemas(extension_id: str) -> PayloadDict:
     return {
         _COPILOT_PERMISSION_REQUEST_METHOD: {
             "request": {
@@ -1963,7 +2091,7 @@ async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:
     }
 
 
-def resolve_approval(request_id: str, resolution: Any) -> bool:
+def resolve_approval(request_id: str, resolution: object) -> bool:
     """Called from WS handler when user responds to an approval request."""
     fut = _pending_approvals.pop(request_id, None)
     request_spec = _pending_request_specs.pop(request_id, None)
@@ -1977,7 +2105,7 @@ def resolve_approval(request_id: str, resolution: Any) -> bool:
     return False
 
 
-def validate_pending_approval(conversation_id: str, request_id: str, descriptor: Dict[str, Any]) -> bool:
+def validate_pending_approval(conversation_id: str, request_id: str, descriptor: ApprovalDescriptor) -> bool:
     if not isinstance(descriptor, dict):
         return False
     runtime_signature = descriptor.get("runtime_signature")
@@ -1994,7 +2122,9 @@ def validate_pending_approval(conversation_id: str, request_id: str, descriptor:
     if descriptor_thread_id and not current_session_id:
         return False
     return request_id in _pending_approvals
-def _make_permission_handler(conversation_id: str) -> Callable:
+
+
+def _make_permission_handler(conversation_id: str) -> _PermissionHandlerFn:
     """
     Create a permission handler for a session.
 
@@ -2005,7 +2135,7 @@ def _make_permission_handler(conversation_id: str) -> Callable:
     """
     async def handler(
         request: PermissionRequest,
-        context: Dict[str, str],
+        context: RequestContext,
     ) -> PermissionRequestResult:
         kind = _normalize_permission_kind(getattr(request, "kind", "unknown"))
         tool_call_id = getattr(request, "tool_call_id", "") or ""
@@ -2026,22 +2156,22 @@ def _make_permission_handler(conversation_id: str) -> Callable:
 
         # Look up tool context from the router if available
         router = _routers.get(conversation_id)
-        tool_info = router.tool_calls.get(tool_call_id, {}) if router else {}
+        tool_info = cast(PayloadDict, router.tool_calls.get(tool_call_id, {}) if router else {})
 
         # Build the payload the frontend expects
-        payload: Dict[str, Any] = {"kind": kind}
+        payload: PayloadDict = {"kind": kind}
         command = tool_info.get("title", "")
         if command:
-            payload["command"] = command
+            payload["command"] = str(command)
         # Include tool name and raw arguments so frontend can render diffs
         tool_name = tool_info.get("tool_name", "")
         if tool_name:
-            payload["tool_name"] = tool_name
+            payload["tool_name"] = str(tool_name)
         raw_args = tool_info.get("arguments")
-        normalized_args = raw_args
+        normalized_args: object = raw_args
         if isinstance(raw_args, str):
             try:
-                normalized_args = json.loads(raw_args)
+                normalized_args = cast(object, json.loads(raw_args))
             except Exception:
                 normalized_args = raw_args
         if normalized_args:
@@ -2064,7 +2194,7 @@ def _make_permission_handler(conversation_id: str) -> Callable:
 
         # Create a Future that the WS handler will resolve
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future[Any] = loop.create_future()
+        fut: asyncio.Future[object] = loop.create_future()
         _pending_approvals[request_id] = fut
         request_params = _build_permission_request_params(kind, request_fields, payload)
         _pending_request_specs[request_id] = {
@@ -2075,7 +2205,7 @@ def _make_permission_handler(conversation_id: str) -> Callable:
 
         runtime_signature = _runtime_signatures.get(conversation_id) or _runtime_signature(conversation_id)
         session = _sessions.get(conversation_id)
-        approval_event = {
+        approval_event: PayloadDict = {
             "type": "approval",
             "conversation_id": conversation_id,
             "id": request_id,
@@ -2091,22 +2221,25 @@ def _make_permission_handler(conversation_id: str) -> Callable:
         subagent_id = tool_info.get("subagent_id")
         if isinstance(subagent_id, str) and subagent_id:
             approval_event["subagent_id"] = subagent_id
-        descriptor = {
-            "request_id": request_id,
-            "agent": "copilot-sdk",
-            "kind": kind,
-            "payload": payload,
-            "request_method": _COPILOT_PERMISSION_REQUEST_METHOD,
-            "request_params": request_params,
-            "thread_id": getattr(session, "session_id", None),
-            "turn_id": router.current_turn_id if router else "",
-            "runtime_signature": runtime_signature,
-            "runtime_instance_id": getattr(session, "session_id", None),
-            "transcript_anchor": {"turn_id": router.current_turn_id if router else ""},
-            "source": "live",
-            "created_at": approval_event["created_at"],
-            "render_event": approval_event,
-        }
+        session_thread_id = _optional_string(getattr(session, "session_id", None))
+        turn_id = _string_or_empty(router.current_turn_id if router else "")
+        transcript_anchor: PayloadDict = {"turn_id": turn_id}
+        created_at = _string_or_empty(approval_event.get("created_at"))
+        descriptor: ApprovalDescriptor = {}
+        descriptor["request_id"] = request_id
+        descriptor["agent"] = "copilot-sdk"
+        descriptor["kind"] = kind
+        descriptor["payload"] = payload
+        descriptor["request_method"] = _COPILOT_PERMISSION_REQUEST_METHOD
+        descriptor["request_params"] = request_params
+        descriptor["thread_id"] = session_thread_id
+        descriptor["turn_id"] = turn_id
+        descriptor["runtime_signature"] = runtime_signature
+        descriptor["runtime_instance_id"] = session_thread_id
+        descriptor["transcript_anchor"] = transcript_anchor
+        descriptor["source"] = "live"
+        descriptor["created_at"] = created_at
+        descriptor["render_event"] = approval_event
         _upsert_pending_approval(conversation_id, descriptor)
 
         # Broadcast approval_request to frontend
@@ -2133,31 +2266,34 @@ def _make_permission_handler(conversation_id: str) -> Callable:
     return handler
 
 
-def _make_user_input_handler(conversation_id: str) -> Callable:
+def _make_user_input_handler(conversation_id: str) -> UserInputHandler:
     async def handler(
         request: UserInputRequest,
-        context: Dict[str, str],
+        context: RequestContext,
     ) -> UserInputResponse:
         request_params = _build_user_input_request_params(request)
+        request_choices = request_params.get("choices")
+        normalized_choices = [str(item) for item in request_choices] if isinstance(request_choices, list) else []
+        response_request_spec: PendingRequestSpec = {"choices": normalized_choices}
         request_id = f"user_input_{conversation_id[:8]}_{id(request)}"
         router = _routers.get(conversation_id)
         runtime_signature = _runtime_signatures.get(conversation_id) or _runtime_signature(conversation_id)
         session = _sessions.get(conversation_id)
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future[Any] = loop.create_future()
+        fut: asyncio.Future[object] = loop.create_future()
         _pending_approvals[request_id] = fut
         _pending_request_specs[request_id] = {
             "type": "user_input",
             "request_method": _COPILOT_USER_INPUT_REQUEST_METHOD,
             "request_params": request_params,
-            "choices": list(request_params.get("choices") or []),
+            "choices": normalized_choices,
         }
 
-        payload: Dict[str, Any] = {
+        payload: PayloadDict = {
             "kind": "user_input",
             **request_params,
         }
-        approval_event = {
+        approval_event: PayloadDict = {
             "type": "approval",
             "conversation_id": conversation_id,
             "id": request_id,
@@ -2169,29 +2305,32 @@ def _make_user_input_handler(conversation_id: str) -> Callable:
             "payload": payload,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        descriptor = {
-            "request_id": request_id,
-            "agent": "copilot-sdk",
-            "kind": "user_input",
-            "payload": payload,
-            "request_method": _COPILOT_USER_INPUT_REQUEST_METHOD,
-            "request_params": request_params,
-            "thread_id": getattr(session, "session_id", None),
-            "turn_id": router.current_turn_id if router else "",
-            "runtime_signature": runtime_signature,
-            "runtime_instance_id": getattr(session, "session_id", None),
-            "transcript_anchor": {"turn_id": router.current_turn_id if router else ""},
-            "source": "live",
-            "created_at": approval_event["created_at"],
-            "render_event": approval_event,
-        }
+        session_thread_id = _optional_string(getattr(session, "session_id", None))
+        turn_id = _string_or_empty(router.current_turn_id if router else "")
+        transcript_anchor: PayloadDict = {"turn_id": turn_id}
+        created_at = _string_or_empty(approval_event.get("created_at"))
+        descriptor: ApprovalDescriptor = {}
+        descriptor["request_id"] = request_id
+        descriptor["agent"] = "copilot-sdk"
+        descriptor["kind"] = "user_input"
+        descriptor["payload"] = payload
+        descriptor["request_method"] = _COPILOT_USER_INPUT_REQUEST_METHOD
+        descriptor["request_params"] = request_params
+        descriptor["thread_id"] = session_thread_id
+        descriptor["turn_id"] = turn_id
+        descriptor["runtime_signature"] = runtime_signature
+        descriptor["runtime_instance_id"] = session_thread_id
+        descriptor["transcript_anchor"] = transcript_anchor
+        descriptor["source"] = "live"
+        descriptor["created_at"] = created_at
+        descriptor["render_event"] = approval_event
         _upsert_pending_approval(conversation_id, descriptor)
 
         if _broadcast_fn:
             await _broadcast_fn(approval_event)
 
         result = await fut
-        return _normalize_user_input_resolution(result, request_spec=request_params)
+        return _normalize_user_input_resolution(result, request_spec=response_request_spec)
 
     return handler
 
@@ -2206,7 +2345,7 @@ _FILE_TOOLS = {"edit", "create", "write", "read_file", "write_file", "delete", "
                "bash", "shell", "exec", "run_command", "apply_patch"}
 
 
-def _make_pre_tool_use_hook(conversation_id: str) -> Callable:
+def _make_pre_tool_use_hook(conversation_id: str) -> PreToolUseHandler:
     """
     Create a pre_tool_use hook that enforces sandbox_policy and web_policy.
 
@@ -2221,18 +2360,21 @@ def _make_pre_tool_use_hook(conversation_id: str) -> Callable:
       - ask: prompt user for web tools
     """
     async def hook(
-        input: Dict[str, Any],
-        context: Dict[str, str],
-    ) -> Optional[Dict[str, Any]]:
-        tool_name = input.get("toolName", "")
+        input: PreToolUseHookInput,
+        context: RequestContext,
+    ) -> PreToolUseHookOutput | None:
+        tool_name = input.get("toolName")
         tool_args = input.get("toolArgs") or {}
         settings = _get_conversation_settings(conversation_id)
+        normalized_tool_name = str(tool_name or "")
 
         # ── Web policy check ──
         web_policy = settings.get("web_policy", _DEFAULT_WEB_POLICY)
-        if tool_name.lower() in _WEB_TOOLS or any(w in tool_name.lower() for w in ("web", "fetch", "url", "http")):
+        if normalized_tool_name.lower() in _WEB_TOOLS or any(
+            word in normalized_tool_name.lower() for word in ("web", "fetch", "url", "http")
+        ):
             if web_policy == "deny":
-                print(f"[CopilotSDK] Web tool '{tool_name}' denied by web_policy convo={conversation_id[:8]}")
+                print(f"[CopilotSDK] Web tool '{normalized_tool_name}' denied by web_policy convo={conversation_id[:8]}")
                 return {"permissionDecision": "deny", "permissionDecisionReason": "Web access denied by policy"}
             elif web_policy == "ask":
                 return {"permissionDecision": "ask"}
@@ -2240,8 +2382,8 @@ def _make_pre_tool_use_hook(conversation_id: str) -> Callable:
 
         # ── Sandbox / directory trust check ──
         sandbox_policy = settings.get("sandbox_policy", _DEFAULT_SANDBOX_POLICY)
-        if sandbox_policy != "allow-all-paths" and tool_name.lower() in _FILE_TOOLS:
-            cwd = settings.get("cwd") or os.path.expanduser("~")
+        if sandbox_policy != "allow-all-paths" and normalized_tool_name.lower() in _FILE_TOOLS:
+            cwd = _optional_string(settings.get("cwd")) or os.path.expanduser("~")
             cwd = os.path.realpath(os.path.expanduser(cwd))
             # Check path arguments
             target_path = None
@@ -2409,8 +2551,8 @@ async def init_session(
     conversation_id: str,
     extension_id: str,
     cwd: Optional[str],
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[SettingsDict] = None,
+) -> PayloadDict:
     async with _get_session_lock(conversation_id):
         return await _init_session_unlocked(conversation_id, extension_id, cwd, settings=settings)
 
@@ -2419,8 +2561,8 @@ async def _init_session_unlocked(
     conversation_id: str,
     extension_id: str,
     cwd: Optional[str],
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[SettingsDict] = None,
+) -> PayloadDict:
     """
     Create a new Copilot session for a conversation.
     
@@ -2453,7 +2595,7 @@ async def _init_session_unlocked(
                 cwd=cwd,
             ),
             plan_state_provider=_build_live_plan_state,
-            initial_model=_merge_runtime_settings(conversation_id, settings=settings, cwd=cwd).get("model"),
+            initial_model=_optional_string(_merge_runtime_settings(conversation_id, settings=settings, cwd=cwd).get("model")),
             model_context_window_resolver=_context_window_for_model,
         )
         _routers[conversation_id] = router
@@ -2507,8 +2649,8 @@ async def resume_session(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[SettingsDict] = None,
+) -> PayloadDict:
     async with _get_session_lock(conversation_id):
         return await _resume_session_unlocked(
             conversation_id,
@@ -2522,8 +2664,8 @@ async def _resume_session_unlocked(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[SettingsDict] = None,
+) -> PayloadDict:
     """
     Resume an existing Copilot session (survives server restarts).
     
@@ -2551,7 +2693,7 @@ async def _resume_session_unlocked(
     try:
         client = await _ensure_client()
         sanitize_result = _sanitize_session_attachments(str(sdk_session_id))
-        if sanitize_result.get("records_rewritten"):
+        if isinstance(sanitize_result.get("records_rewritten"), int) and sanitize_result.get("records_rewritten"):
             _add_to_raw_buffer("out", conversation_id, f"sanitize_session_attachments {sanitize_result}")
         runtime_signature = _runtime_signature(
             conversation_id,
@@ -2572,7 +2714,7 @@ async def _resume_session_unlocked(
                 model=model,
             ),
             plan_state_provider=_build_live_plan_state,
-            initial_model=_merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model).get("model"),
+            initial_model=_optional_string(_merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model).get("model")),
             model_context_window_resolver=_context_window_for_model,
         )
         _routers[conversation_id] = router
@@ -2660,8 +2802,8 @@ async def handle_message(
     conversation_id: str,
     text: str,
     agent_type: str,
-    settings: Dict[str, Any],
-) -> Dict[str, Any]:
+    settings: SettingsDict,
+) -> PayloadDict:
     """
     Handle a user message for a Copilot SDK conversation.
     
@@ -2672,18 +2814,19 @@ async def handle_message(
         if not _broadcast_fn or not _transcript_fn:
             return {"ok": False, "error": "Manager not initialized"}
 
-        cwd = settings.get("cwd") or os.path.expanduser("~")
+        cwd = _optional_string(settings.get("cwd")) or os.path.expanduser("~")
+        model = _optional_string(settings.get("model"))
         desired_signature = _runtime_signature(
             conversation_id,
             settings=settings,
             cwd=cwd,
-            model=settings.get("model"),
+            model=model,
         )
         config = _build_session_runtime_config(
             conversation_id,
             settings=settings,
             cwd=cwd,
-            model=settings.get("model"),
+            model=model,
         )
         resume_config = _build_resume_session_config(config)
 
@@ -2691,7 +2834,7 @@ async def handle_message(
         if conversation_id not in _sessions:
             # Check if this conversation already has a thread_id.
             thread_id = None
-            result: Dict[str, Any] = {"ok": True}
+            result: PayloadDict = {"ok": True}
             if _meta_fns and "load" in _meta_fns:
                 meta = _meta_fns["load"](conversation_id)
                 if meta:
@@ -2709,7 +2852,7 @@ async def handle_message(
                         conversation_id,
                         settings=settings,
                         cwd=cwd,
-                        model=settings.get("model"),
+                        model=model,
                     ),
                 )
                 await _ensure_todo_watch(conversation_id, str(thread_id))
@@ -2730,7 +2873,7 @@ async def handle_message(
             result = await _resume_session_unlocked(
                 conversation_id,
                 cwd=cwd,
-                model=settings.get("model"),
+                model=model,
                 settings=settings,
             )
             if not result.get("ok"):
@@ -2748,7 +2891,7 @@ async def handle_message(
                 conversation_id,
                 settings=settings,
                 cwd=cwd,
-                model=settings.get("model"),
+                model=model,
             )
         )
         try:
@@ -2762,7 +2905,7 @@ async def handle_message(
             result = await _recover_evicted_session(
                 conversation_id,
                 cwd=cwd,
-                model=settings.get("model"),
+                model=model,
                 settings=settings,
             )
             if not result.get("ok"):
@@ -2804,7 +2947,7 @@ async def handle_message(
                 result = await _recover_evicted_session(
                     conversation_id,
                     cwd=cwd,
-                    model=settings.get("model"),
+                    model=model,
                     settings=settings,
                 )
                 if not result.get("ok"):
@@ -2837,7 +2980,7 @@ async def handle_message(
 
 # ── Model listing ───────────────────────────────────────────────────
 
-async def list_models() -> List[Dict[str, Any]]:
+async def list_models() -> list[PayloadDict]:
     """List available models from the Copilot CLI."""
     try:
         client = await _ensure_client()
@@ -2861,7 +3004,7 @@ async def list_models() -> List[Dict[str, Any]]:
 
 # ── Session listing ─────────────────────────────────────────────────
 
-async def list_sessions(cwd: Optional[str] = None) -> List[Dict[str, Any]]:
+async def list_sessions(cwd: Optional[str] = None) -> list[PayloadDict]:
     """
     List all known sessions from the Copilot CLI.
     
@@ -2871,23 +3014,23 @@ async def list_sessions(cwd: Optional[str] = None) -> List[Dict[str, Any]]:
         client = await _ensure_client()
         sessions = await client.list_sessions()
         
-        result = []
+        result: list[PayloadDict] = []
         for s in sessions:
-            entry: Dict[str, Any] = {
+            entry: PayloadDict = {
                 "session_id": s.sessionId,
-                "start_time": getattr(s, "startTime", None),
-                "modified_time": getattr(s, "modifiedTime", None),
-                "is_remote": getattr(s, "isRemote", False),
-                "summary": getattr(s, "summary", None),
+                "start_time": s.startTime,
+                "modified_time": s.modifiedTime,
+                "is_remote": s.isRemote,
+                "summary": s.summary,
             }
             # Check if session has context (newer SDK versions)
-            ctx = getattr(s, "context", None)
+            ctx = s.context
             if ctx:
                 entry["context"] = {
-                    "cwd": getattr(ctx, "cwd", None),
-                    "git_root": getattr(ctx, "gitRoot", None),
-                    "repository": getattr(ctx, "repository", None),
-                    "branch": getattr(ctx, "branch", None),
+                    "cwd": ctx.cwd,
+                    "git_root": ctx.gitRoot,
+                    "repository": ctx.repository,
+                    "branch": ctx.branch,
                 }
             # Check if this session is currently active in our server
             entry["active"] = s.sessionId in _sessions
@@ -2951,9 +3094,9 @@ async def resume_session_with_history(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[SettingsDict] = None,
     extension_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> PayloadDict:
     """
     Bind a Copilot SDK session to a conversation.
 
@@ -3016,8 +3159,8 @@ async def hydrate_transcript(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+    settings: Optional[SettingsDict] = None,
+) -> list[PayloadDict]:
     """
     Build flat transcript entries from an existing SDK session's history.
 
@@ -3050,7 +3193,7 @@ async def hydrate_transcript(
 
     print(f"[CopilotSDK] hydrate_transcript: got {len(events)} events for {conversation_id[:8]}")
 
-    items: List[Dict[str, Any]] = []
+    items: list[PayloadDict] = []
     ts_now = datetime.now(timezone.utc).isoformat()
 
     for ev in events:
@@ -3078,9 +3221,10 @@ async def hydrate_transcript(
                 result_obj = getattr(data, "result", None)
                 content = ""
                 detailed = ""
-                if result_obj and hasattr(result_obj, "content"):
-                    content = getattr(result_obj, "content", "") or ""
-                    detailed = getattr(result_obj, "detailed_content", "") or ""
+                result_mapping = _object_mapping(cast(object, result_obj)) if result_obj is not None else None
+                if result_mapping is not None:
+                    content = _string_or_empty(result_mapping.get("content"))
+                    detailed = _string_or_empty(result_mapping.get("detailed_content"))
                 elif isinstance(result_obj, str):
                     content = result_obj
                 else:
@@ -3202,7 +3346,7 @@ async def abort_session(conversation_id: str) -> bool:
 
 # ── Compact ─────────────────────────────────────────────────────────
 
-async def compact_session(conversation_id: str) -> Dict[str, Any]:
+async def compact_session(conversation_id: str) -> PayloadDict:
     """Compact/condense the context window for a copilot-sdk session."""
     session = _sessions.get(conversation_id)
     if not session:

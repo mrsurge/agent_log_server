@@ -3,7 +3,8 @@ import json
 import shutil
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import cast
 
 import socketio
 import extensions as ext_loader
@@ -11,89 +12,94 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 from agent_log_server import conversation_todos as _conv_todos
+from agent_log_server.typing_helpers import (
+    AsyncObjectCallable,
+    ObjectEntriesWriter,
+    ObjectMap,
+    coerce_object_list,
+    coerce_object_map,
+)
 
 APPSERVER_NAMESPACE = "/appserver"
 CONVERSATIONS_RPC_NAMESPACE = "/rpc/conversations"
-
-_AsyncAnyCallable = Callable[..., Awaitable[Any]]
 
 
 @dataclass(frozen=True)
 class AppserverSocketioDeps:
     make_appserver_message_in: Callable[[str, str], object]
-    api_appserver_message: _AsyncAnyCallable
-    api_appserver_shell_exec: _AsyncAnyCallable
-    api_appserver_rpc: _AsyncAnyCallable
-    api_conversations_rpc: _AsyncAnyCallable
-    api_appserver_interrupt: _AsyncAnyCallable
-    api_appserver_compact: _AsyncAnyCallable
-    api_appserver_conversation: _AsyncAnyCallable
-    api_appserver_conversation_meta: _AsyncAnyCallable
-    api_appserver_conversation_update: _AsyncAnyCallable
-    api_appserver_conversation_draft: _AsyncAnyCallable
-    api_appserver_conversations: _AsyncAnyCallable
-    api_appserver_conversation_create: _AsyncAnyCallable
-    api_appserver_conversation_select: _AsyncAnyCallable
-    api_appserver_conversation_delete: _AsyncAnyCallable
-    api_appserver_conversation_pins: _AsyncAnyCallable
-    api_appserver_set_view: _AsyncAnyCallable
-    api_appserver_config: _AsyncAnyCallable
-    api_appserver_config_update: _AsyncAnyCallable
-    api_appserver_models: _AsyncAnyCallable
-    api_appserver_runtime_options: _AsyncAnyCallable
-    api_appserver_status: _AsyncAnyCallable
-    api_appserver_start: _AsyncAnyCallable
-    api_appserver_stop: _AsyncAnyCallable
-    api_appserver_initialize: _AsyncAnyCallable
-    api_appserver_approval_record: _AsyncAnyCallable
-    api_appserver_approval_response: _AsyncAnyCallable
-    api_appserver_transcript: _AsyncAnyCallable
-    api_appserver_transcript_range: _AsyncAnyCallable
-    api_extensions_list: _AsyncAnyCallable
-    api_extension_enabled: _AsyncAnyCallable
-    api_extension_install: _AsyncAnyCallable
-    api_extensions_validate: _AsyncAnyCallable
-    api_extensions_install_package: _AsyncAnyCallable
-    api_extension_update_package: _AsyncAnyCallable
-    api_extension_remove_package: _AsyncAnyCallable
-    api_extensions_reload: _AsyncAnyCallable
-    api_extension_settings_schema: _AsyncAnyCallable
-    api_extension_splash_schema: _AsyncAnyCallable
-    api_extension_splash_action: _AsyncAnyCallable
-    api_extension_request_cards: _AsyncAnyCallable
-    api_extension_plan: _AsyncAnyCallable
-    api_fs_list: _AsyncAnyCallable
-    api_fs_search: _AsyncAnyCallable
-    api_host_ui_get: _AsyncAnyCallable
-    api_shutdown: _AsyncAnyCallable
-    append_record: _AsyncAnyCallable
-    coerce_query_bool: Callable[[Any], bool]
-    emit_sidebar_agent_open: _AsyncAnyCallable
+    api_appserver_message: AsyncObjectCallable
+    api_appserver_shell_exec: AsyncObjectCallable
+    api_appserver_rpc: AsyncObjectCallable
+    api_conversations_rpc: AsyncObjectCallable
+    api_appserver_interrupt: AsyncObjectCallable
+    api_appserver_compact: AsyncObjectCallable
+    api_appserver_conversation: AsyncObjectCallable
+    api_appserver_conversation_meta: AsyncObjectCallable
+    api_appserver_conversation_update: AsyncObjectCallable
+    api_appserver_conversation_draft: AsyncObjectCallable
+    api_appserver_conversations: AsyncObjectCallable
+    api_appserver_conversation_create: AsyncObjectCallable
+    api_appserver_conversation_select: AsyncObjectCallable
+    api_appserver_conversation_delete: AsyncObjectCallable
+    api_appserver_conversation_pins: AsyncObjectCallable
+    api_appserver_set_view: AsyncObjectCallable
+    api_appserver_config: AsyncObjectCallable
+    api_appserver_config_update: AsyncObjectCallable
+    api_appserver_models: AsyncObjectCallable
+    api_appserver_runtime_options: AsyncObjectCallable
+    api_appserver_status: AsyncObjectCallable
+    api_appserver_start: AsyncObjectCallable
+    api_appserver_stop: AsyncObjectCallable
+    api_appserver_initialize: AsyncObjectCallable
+    api_appserver_approval_record: AsyncObjectCallable
+    api_appserver_approval_response: AsyncObjectCallable
+    api_appserver_transcript: AsyncObjectCallable
+    api_appserver_transcript_range: AsyncObjectCallable
+    api_extensions_list: AsyncObjectCallable
+    api_extension_enabled: AsyncObjectCallable
+    api_extension_install: AsyncObjectCallable
+    api_extensions_validate: AsyncObjectCallable
+    api_extensions_install_package: AsyncObjectCallable
+    api_extension_update_package: AsyncObjectCallable
+    api_extension_remove_package: AsyncObjectCallable
+    api_extensions_reload: AsyncObjectCallable
+    api_extension_settings_schema: AsyncObjectCallable
+    api_extension_splash_schema: AsyncObjectCallable
+    api_extension_splash_action: AsyncObjectCallable
+    api_extension_request_cards: AsyncObjectCallable
+    api_extension_plan: AsyncObjectCallable
+    api_fs_list: AsyncObjectCallable
+    api_fs_search: AsyncObjectCallable
+    api_host_ui_get: AsyncObjectCallable
+    api_shutdown: AsyncObjectCallable
+    append_record: AsyncObjectCallable
+    coerce_query_bool: Callable[[object], bool]
+    emit_sidebar_agent_open: AsyncObjectCallable
     ensure_conversation: Callable[[], Awaitable[str]]
-    merge_extension_bind_settings: Callable[..., dict[str, Any]]
-    read_records: Callable[..., Any]
-    sidebar_recheck_status: _AsyncAnyCallable
+    merge_extension_bind_settings: Callable[..., ObjectMap]
+    read_records: Callable[..., object]
+    sidebar_recheck_status: AsyncObjectCallable
     utc_ts: Callable[[], str]
-    write_transcript_entries: Callable[[str, list[dict[str, Any]]], Awaitable[Any]]
+    write_transcript_entries: ObjectEntriesWriter
 
 
 def register_appserver_socketio_handlers(
     socketio_server: socketio.AsyncServer,
     deps: AppserverSocketioDeps,
 ) -> None:
-    def _sio_error(msg: object) -> dict[str, str]:
+    def _sio_error(msg: object) -> ObjectMap:
         return {"__error": str(msg)}
 
-    def _payload(data: object) -> dict[str, Any]:
-        return data if isinstance(data, dict) else {}
+    def _payload(data: object) -> ObjectMap:
+        return coerce_object_map(data)
 
-    def _unwrap_json_response(result: JSONResponse, fallback: str) -> dict[str, Any]:
+    def _unwrap_json_response(result: JSONResponse, fallback: str) -> ObjectMap:
         try:
-            body = json.loads(bytes(result.body).decode("utf-8"))
+            body = cast(object, json.loads(bytes(result.body).decode("utf-8")))
         except Exception:
             return _sio_error(fallback)
         if isinstance(body, dict):
-            return {"ok": False, **body}
+            return {"ok": False, **coerce_object_map(body)}
         return _sio_error(fallback)
 
     def _resolve_conversation_id(data: object) -> str | None:
@@ -131,13 +137,13 @@ def register_appserver_socketio_handlers(
         message = stderr.decode("utf-8", errors="replace").strip() if isinstance(stderr, (bytes, bytearray)) else ""
         return False, message or f"xdg-open exited with {proc.returncode}"
 
-    async def _appserver_connect(sid: str, environ: dict[str, Any]) -> None:
+    async def _appserver_connect(sid: str, environ: ObjectMap) -> object:
         return None
 
-    async def _appserver_disconnect(sid: str) -> None:
+    async def _appserver_disconnect(sid: str) -> object:
         return None
 
-    async def _sio_send_message(sid: str, data: object) -> Any:
+    async def _sio_send_message(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             return await deps.api_appserver_message(
@@ -151,7 +157,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_shell_exec(sid: str, data: object) -> Any:
+    async def _sio_shell_exec(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_shell_exec(_payload(data))
         except HTTPException as exc:
@@ -159,7 +165,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_rpc(sid: str, data: object) -> Any:
+    async def _sio_rpc(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_rpc(_payload(data))
         except HTTPException as exc:
@@ -167,7 +173,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversations_rpc(sid: str, data: object) -> Any:
+    async def _sio_conversations_rpc(sid: str, data: object) -> object:
         try:
             return await deps.api_conversations_rpc(_payload(data))
         except HTTPException as exc:
@@ -175,7 +181,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_interrupt(sid: str, data: object) -> Any:
+    async def _sio_interrupt(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_interrupt(_payload(data))
         except HTTPException as exc:
@@ -183,7 +189,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_compact(sid: str, data: object) -> Any:
+    async def _sio_compact(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_compact(_payload(data))
         except HTTPException as exc:
@@ -191,7 +197,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversation_get(sid: str, data: object) -> Any:
+    async def _sio_conversation_get(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             cid = payload.get("conversation_id")
@@ -203,7 +209,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversation_meta(sid: str, data: object) -> Any:
+    async def _sio_conversation_meta(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_conversation_meta(_payload(data).get("conversation_id", ""))
         except HTTPException as exc:
@@ -211,7 +217,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversation_update(sid: str, data: object) -> Any:
+    async def _sio_conversation_update(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_conversation_update(_payload(data))
         except HTTPException as exc:
@@ -219,7 +225,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversation_draft(sid: str, data: object) -> Any:
+    async def _sio_conversation_draft(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_conversation_draft(_payload(data))
         except HTTPException as exc:
@@ -227,13 +233,13 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversations_list(sid: str, data: object) -> Any:
+    async def _sio_conversations_list(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_conversations()
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversation_create(sid: str, data: object) -> Any:
+    async def _sio_conversation_create(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_conversation_create(_payload(data))
         except HTTPException as exc:
@@ -241,7 +247,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversation_select(sid: str, data: object) -> Any:
+    async def _sio_conversation_select(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_conversation_select(_payload(data))
         except HTTPException as exc:
@@ -249,7 +255,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversation_delete(sid: str, data: object) -> Any:
+    async def _sio_conversation_delete(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_conversation_delete(_payload(data).get("conversation_id", ""))
         except HTTPException as exc:
@@ -257,7 +263,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_conversation_pins_update(sid: str, data: object) -> Any:
+    async def _sio_conversation_pins_update(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_conversation_pins(_payload(data))
         except HTTPException as exc:
@@ -265,7 +271,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_set_view(sid: str, data: object) -> Any:
+    async def _sio_set_view(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_set_view(_payload(data))
         except HTTPException as exc:
@@ -273,13 +279,13 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_config(sid: str, data: object) -> Any:
+    async def _sio_get_config(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_config()
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_update_config(sid: str, data: object) -> Any:
+    async def _sio_update_config(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_config_update(_payload(data))
         except HTTPException as exc:
@@ -287,7 +293,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_models(sid: str, data: object) -> Any:
+    async def _sio_get_models(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_models()
         except HTTPException as exc:
@@ -295,7 +301,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_runtime_options(sid: str, data: object) -> Any:
+    async def _sio_get_runtime_options(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             return await deps.api_appserver_runtime_options(
@@ -307,13 +313,13 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_extensions(sid: str, data: object) -> Any:
+    async def _sio_get_extensions(sid: str, data: object) -> object:
         try:
             return await deps.api_extensions_list()
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_extension_set_enabled(sid: str, data: object) -> Any:
+    async def _sio_extension_set_enabled(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             extension_id = str(payload.get("extension_id") or "").strip()
@@ -323,7 +329,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_extension_install(sid: str, data: object) -> Any:
+    async def _sio_extension_install(sid: str, data: object) -> object:
         try:
             extension_id = str(_payload(data).get("extension_id") or "").strip()
             return await deps.api_extension_install(extension_id)
@@ -332,7 +338,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_extension_validate_package(sid: str, data: object) -> Any:
+    async def _sio_extension_validate_package(sid: str, data: object) -> object:
         try:
             return await deps.api_extensions_validate(_payload(data))
         except HTTPException as exc:
@@ -340,7 +346,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_extension_install_package(sid: str, data: object) -> Any:
+    async def _sio_extension_install_package(sid: str, data: object) -> object:
         try:
             return await deps.api_extensions_install_package(_payload(data))
         except HTTPException as exc:
@@ -348,7 +354,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_extension_update_package(sid: str, data: object) -> Any:
+    async def _sio_extension_update_package(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             extension_id = str(payload.get("extension_id") or "").strip()
@@ -358,7 +364,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_extension_remove_package(sid: str, data: object) -> Any:
+    async def _sio_extension_remove_package(sid: str, data: object) -> object:
         try:
             extension_id = str(_payload(data).get("extension_id") or "").strip()
             return await deps.api_extension_remove_package(extension_id)
@@ -367,7 +373,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_extensions_reload(sid: str, data: object) -> Any:
+    async def _sio_extensions_reload(sid: str, data: object) -> object:
         try:
             return await deps.api_extensions_reload(_payload(data))
         except HTTPException as exc:
@@ -375,7 +381,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_extension_settings_schema(sid: str, data: object) -> Any:
+    async def _sio_get_extension_settings_schema(sid: str, data: object) -> object:
         try:
             result = await deps.api_extension_settings_schema(_payload(data).get("extension_id", ""))
             if isinstance(result, JSONResponse):
@@ -384,7 +390,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_extension_splash_schema(sid: str, data: object) -> Any:
+    async def _sio_get_extension_splash_schema(sid: str, data: object) -> object:
         try:
             result = await deps.api_extension_splash_schema(_payload(data).get("extension_id", ""))
             if isinstance(result, JSONResponse):
@@ -393,7 +399,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_run_extension_splash_action(sid: str, data: object) -> Any:
+    async def _sio_run_extension_splash_action(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             result = await deps.api_extension_splash_action(payload.get("extension_id", ""), payload)
@@ -405,7 +411,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_extension_request_cards(sid: str, data: object) -> Any:
+    async def _sio_get_extension_request_cards(sid: str, data: object) -> object:
         try:
             result = await deps.api_extension_request_cards(_payload(data).get("extension_id", ""))
             if isinstance(result, JSONResponse):
@@ -414,7 +420,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_extension_ui_features(sid: str, data: object) -> Any:
+    async def _sio_get_extension_ui_features(sid: str, data: object) -> object:
         try:
             extension_id = str(_payload(data).get("extension_id") or "").strip()
             if not extension_id:
@@ -430,7 +436,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_extension_plan(sid: str, data: object) -> Any:
+    async def _sio_get_extension_plan(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             result = await deps.api_extension_plan(
@@ -445,49 +451,74 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_sessions(sid: str, data: object) -> Any:
+    async def _sio_get_sessions(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
-            ext_id = payload.get("extension_id", "")
+            ext_id_value = payload.get("extension_id")
+            ext_id = ext_id_value.strip() if isinstance(ext_id_value, str) and ext_id_value.strip() else ""
             if not ext_id or not ext_loader.has_extension(ext_id):
                 return _sio_error(f"Unknown extension: {ext_id}")
-            return await ext_loader.list_sessions(ext_id, cwd=payload.get("cwd"))
+            cwd_value = payload.get("cwd")
+            cwd = cwd_value if isinstance(cwd_value, str) else None
+            return cast(object, await ext_loader.list_sessions(ext_id, cwd=cwd))
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_session_resume(sid: str, data: object) -> Any:
+    async def _sio_session_resume(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
-            ext_id = payload.get("extension_id", "")
+            ext_id_value = payload.get("extension_id")
+            ext_id = ext_id_value.strip() if isinstance(ext_id_value, str) and ext_id_value.strip() else ""
             if not ext_id or not ext_loader.has_extension(ext_id):
                 return _sio_error(f"Unknown extension: {ext_id}")
-            session_id = payload.get("session_id")
+            session_id_value = payload.get("session_id")
+            session_id = (
+                session_id_value.strip()
+                if isinstance(session_id_value, str) and session_id_value.strip()
+                else ""
+            )
             if not session_id:
                 return _sio_error("Missing session_id")
-            conversation_id = payload.get("conversation_id") or await deps.ensure_conversation()
+            conversation_value = payload.get("conversation_id")
+            conversation_id = (
+                conversation_value.strip()
+                if isinstance(conversation_value, str) and conversation_value.strip()
+                else await deps.ensure_conversation()
+            )
+            if not conversation_id:
+                return _sio_error("Failed to create conversation")
+            cwd_value = payload.get("cwd")
+            cwd = cwd_value if isinstance(cwd_value, str) else None
+            model_value = payload.get("model")
+            model = model_value if isinstance(model_value, str) else None
+            settings = coerce_object_map(payload.get("settings")) or None
             bind_settings = deps.merge_extension_bind_settings(
                 conversation_id,
-                cwd=payload.get("cwd"),
-                model=payload.get("model"),
-                settings=payload.get("settings"),
+                cwd=cwd,
+                model=model,
+                settings=settings,
             )
-            result = await ext_loader.resume_session_with_history(
-                ext_id,
-                session_id=session_id,
-                conversation_id=conversation_id,
-                cwd=payload.get("cwd"),
-                model=payload.get("model"),
-                settings=bind_settings,
+            result = coerce_object_map(
+                await ext_loader.resume_session_with_history(
+                    ext_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    cwd=cwd,
+                    model=model,
+                    settings=bind_settings,
+                )
             )
             if not result.get("ok"):
                 return result
-            items = await ext_loader.hydrate_transcript(
-                ext_id,
-                session_id=session_id,
-                conversation_id=conversation_id,
-                cwd=payload.get("cwd"),
-                model=payload.get("model"),
-                settings=bind_settings,
+            items = coerce_object_list(
+                await ext_loader.hydrate_transcript(
+                    ext_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    cwd=cwd,
+                    model=model,
+                    settings=bind_settings,
+                )
             )
             if items:
                 await deps.write_transcript_entries(conversation_id, items)
@@ -496,7 +527,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_status(sid: str, data: object) -> Any:
+    async def _sio_get_status(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_status()
         except HTTPException as exc:
@@ -504,7 +535,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_host_ui(sid: str, data: object) -> Any:
+    async def _sio_get_host_ui(sid: str, data: object) -> object:
         try:
             return await deps.api_host_ui_get()
         except HTTPException as exc:
@@ -512,13 +543,13 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_sidebar_recheck(sid: str, data: object) -> Any:
+    async def _sio_sidebar_recheck(sid: str, data: object) -> object:
         try:
             return await deps.sidebar_recheck_status()
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_app_start(sid: str, data: object) -> Any:
+    async def _sio_app_start(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_start()
         except HTTPException as exc:
@@ -526,13 +557,13 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_app_stop(sid: str, data: object) -> Any:
+    async def _sio_app_stop(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_stop()
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_app_initialize(sid: str, data: object) -> Any:
+    async def _sio_app_initialize(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_initialize()
         except HTTPException as exc:
@@ -540,7 +571,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_approval_record(sid: str, data: object) -> Any:
+    async def _sio_approval_record(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_approval_record(_payload(data))
         except HTTPException as exc:
@@ -548,13 +579,13 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_approval_response(sid: str, data: object) -> Any:
+    async def _sio_approval_response(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_approval_response(_payload(data))
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_fs_list(sid: str, data: object) -> Any:
+    async def _sio_fs_list(sid: str, data: object) -> object:
         try:
             return await deps.api_fs_list(path=_payload(data).get("path"))
         except HTTPException as exc:
@@ -562,16 +593,24 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_fs_search(sid: str, data: object) -> Any:
+    async def _sio_fs_search(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
-            try:
-                limit = int(payload.get("limit", 200) or 200)
-            except Exception:
+            limit_value = payload.get("limit")
+            if limit_value in (None, ""):
+                limit = 200
+            elif isinstance(limit_value, (int, float, str)):
+                try:
+                    limit = int(limit_value)
+                except Exception:
+                    return _sio_error("limit must be an integer")
+            else:
                 return _sio_error("limit must be an integer")
+            root_value = payload.get("root")
+            root = root_value if isinstance(root_value, str) else None
             return await deps.api_fs_search(
                 query=str(payload.get("query") or ""),
-                root=payload.get("root"),
+                root=root,
                 limit=min(max(limit, 1), 200),
             )
         except HTTPException as exc:
@@ -579,17 +618,24 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_transcript(sid: str, data: object) -> Any:
+    async def _sio_get_transcript(sid: str, data: object) -> object:
         try:
             return await deps.api_appserver_transcript(conversation_id=_payload(data).get("conversation_id"))
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_transcript_range(sid: str, data: object) -> Any:
+    async def _sio_get_transcript_range(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
-            offset = payload.get("offset", 0)
-            limit = payload.get("limit", 120)
+            offset_raw = payload.get("offset", 0)
+            limit_raw = payload.get("limit", 120)
+            if not isinstance(offset_raw, (int, float, str)) or not isinstance(limit_raw, (int, float, str)):
+                return _sio_error("offset and limit must be integers")
+            try:
+                offset = int(offset_raw)
+                limit = int(limit_raw)
+            except Exception:
+                return _sio_error("offset and limit must be integers")
             include_internal = deps.coerce_query_bool(payload.get("include_internal", False))
             return await deps.api_appserver_transcript_range(
                 conversation_id=payload.get("conversation_id"),
@@ -600,16 +646,17 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_extension_models(sid: str, data: object) -> Any:
+    async def _sio_get_extension_models(sid: str, data: object) -> object:
         try:
-            ext_id = _payload(data).get("extension_id", "")
+            ext_id_value = _payload(data).get("extension_id")
+            ext_id = ext_id_value.strip() if isinstance(ext_id_value, str) and ext_id_value.strip() else ""
             if not ext_id or not ext_loader.has_extension(ext_id):
                 return _sio_error(f"Unknown extension: {ext_id}")
-            return await ext_loader.list_models(ext_id)
+            return cast(object, await ext_loader.list_models(ext_id))
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_te2_agent_open(sid: str, data: object) -> Any:
+    async def _sio_te2_agent_open(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             print(f"[Sidebar] te2_agent_open received: {payload}")
@@ -619,7 +666,7 @@ def register_appserver_socketio_handlers(
             print(f"[Sidebar] te2_agent_open error: {exc}")
             return _sio_error(exc)
 
-    async def _sio_open_external_url(sid: str, data: object) -> Any:
+    async def _sio_open_external_url(sid: str, data: object) -> object:
         try:
             url = _payload(data).get("url")
             ok, error = await _open_external_http_url(str(url or ""))
@@ -629,47 +676,52 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_get_log_messages(sid: str, data: object) -> Any:
+    async def _sio_get_log_messages(sid: str, data: object) -> object:
         try:
-            limit = _payload(data).get("limit")
-            if limit is not None:
+            limit_value = _payload(data).get("limit")
+            limit: int | None = None
+            if limit_value is not None:
+                if not isinstance(limit_value, (int, float, str)):
+                    return _sio_error("limit must be an integer")
                 try:
-                    limit = int(limit)
+                    limit = int(limit_value)
                 except Exception:
                     return _sio_error("limit must be an integer")
             return deps.read_records(limit=limit)
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_post_log_message(sid: str, data: object) -> Any:
+    async def _sio_post_log_message(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             who = str(payload.get("who") or "").strip()
             text = str(payload.get("message") or "").strip()
             if not who or not text:
                 return _sio_error("Both 'who' and 'message' are required")
-            record = {"ts": deps.utc_ts(), "who": who, "message": text}
+            record: ObjectMap = {"ts": deps.utc_ts(), "who": who, "message": text}
             await deps.append_record(record)
             return record
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_shutdown_request(sid: str, data: object) -> Any:
+    async def _sio_shutdown_request(sid: str, data: object) -> object:
         try:
             return await deps.api_shutdown()
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_todo_list(sid: str, data: object) -> Any:
+    async def _sio_todo_list(sid: str, data: object) -> object:
         try:
             cid = _resolve_conversation_id(data)
             if not cid:
                 return _sio_error("no conversation")
-            return {"ok": True, "todos": _conv_todos.list_todos(cid, status=_payload(data).get("status"))}
+            status_value = _payload(data).get("status")
+            status = status_value if isinstance(status_value, str) else None
+            return {"ok": True, "todos": _conv_todos.list_todos(cid, status=status)}
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_todo_add(sid: str, data: object) -> Any:
+    async def _sio_todo_add(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             cid = _resolve_conversation_id(payload)
@@ -681,14 +733,14 @@ def register_appserver_socketio_handlers(
             todo = _conv_todos.add_todo(
                 cid,
                 title,
-                description=payload.get("description", ""),
-                status=payload.get("status", "pending"),
+                description=str(payload.get("description") or ""),
+                status=str(payload.get("status") or "pending"),
             )
             return {"ok": True, "todo": todo}
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_todo_update(sid: str, data: object) -> Any:
+    async def _sio_todo_update(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             cid = _resolve_conversation_id(payload)
@@ -696,13 +748,25 @@ def register_appserver_socketio_handlers(
                 return _sio_error("no conversation")
             if "id" not in payload:
                 return _sio_error("id required")
-            todo_id = int(payload["id"])
+            try:
+                todo_id_value = payload["id"]
+                if not isinstance(todo_id_value, (int, float, str)):
+                    return _sio_error("id must be an integer")
+                todo_id = int(todo_id_value)
+            except Exception:
+                return _sio_error("id must be an integer")
+            title_value = payload.get("title")
+            title = title_value if isinstance(title_value, str) else None
+            description_value = payload.get("description")
+            description = description_value if isinstance(description_value, str) else None
+            status_value = payload.get("status")
+            status = status_value if isinstance(status_value, str) else None
             result = _conv_todos.update_todo(
                 cid,
                 todo_id,
-                title=payload.get("title"),
-                description=payload.get("description"),
-                status=payload.get("status"),
+                title=title,
+                description=description,
+                status=status,
             )
             if result is None:
                 return _sio_error("todo not found")
@@ -710,7 +774,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_todo_remove(sid: str, data: object) -> Any:
+    async def _sio_todo_remove(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             cid = _resolve_conversation_id(payload)
@@ -718,12 +782,19 @@ def register_appserver_socketio_handlers(
                 return _sio_error("no conversation")
             if "id" not in payload:
                 return _sio_error("id required")
-            removed = _conv_todos.remove_todo(cid, int(payload["id"]))
+            try:
+                todo_id_value = payload["id"]
+                if not isinstance(todo_id_value, (int, float, str)):
+                    return _sio_error("id must be an integer")
+                todo_id = int(todo_id_value)
+            except Exception:
+                return _sio_error("id must be an integer")
+            removed = _conv_todos.remove_todo(cid, todo_id)
             return {"ok": True, "removed": removed}
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_todo_toggle(sid: str, data: object) -> Any:
+    async def _sio_todo_toggle(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
             cid = _resolve_conversation_id(payload)
@@ -731,14 +802,21 @@ def register_appserver_socketio_handlers(
                 return _sio_error("no conversation")
             if "id" not in payload:
                 return _sio_error("id required")
-            result = _conv_todos.toggle_todo(cid, int(payload["id"]))
+            try:
+                todo_id_value = payload["id"]
+                if not isinstance(todo_id_value, (int, float, str)):
+                    return _sio_error("id must be an integer")
+                todo_id = int(todo_id_value)
+            except Exception:
+                return _sio_error("id must be an integer")
+            result = _conv_todos.toggle_todo(cid, todo_id)
             if result is None:
                 return _sio_error("todo not found")
             return {"ok": True, "todo": result}
         except Exception as exc:
             return _sio_error(exc)
 
-    async def _sio_todo_ready(sid: str, data: object) -> Any:
+    async def _sio_todo_ready(sid: str, data: object) -> object:
         try:
             cid = _resolve_conversation_id(data)
             if not cid:
@@ -747,7 +825,7 @@ def register_appserver_socketio_handlers(
         except Exception as exc:
             return _sio_error(exc)
 
-    registrations: list[tuple[str, Callable[..., Awaitable[Any]]]] = [
+    registrations: list[tuple[str, Callable[..., Awaitable[object]]]] = [
         ("connect", _appserver_connect),
         ("disconnect", _appserver_disconnect),
         ("send_message", _sio_send_message),
@@ -813,7 +891,7 @@ def register_appserver_socketio_handlers(
     for event, handler in registrations:
         socketio_server.on(event, handler, namespace=APPSERVER_NAMESPACE)
 
-    conversations_rpc_registrations: list[tuple[str, Callable[..., Awaitable[Any]]]] = [
+    conversations_rpc_registrations: list[tuple[str, Callable[..., Awaitable[object]]]] = [
         ("connect", _appserver_connect),
         ("disconnect", _appserver_disconnect),
         ("rpc", _sio_conversations_rpc),

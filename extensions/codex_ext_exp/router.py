@@ -5,7 +5,7 @@ import os
 import re
 import shlex
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TypedDict, cast
 
 from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD,
@@ -28,6 +28,107 @@ from .plan_utils import normalize_plan_steps, plan_signature, render_plan_markdo
 from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
 from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
 
+JSONDict = Dict[str, object]
+JSONList = List[object]
+PlanStep = Dict[str, str]
+TextExtractor = Callable[[JSONDict], Optional[Dict[str, str]]]
+
+
+class TodoRow(TypedDict):
+    id: int
+    title: str
+    status: str
+
+
+class TurnState(TypedDict, total=False):
+    thread_id: Optional[str]
+    turn_id: Optional[str]
+    diff_hashes: set[str]
+    plan_steps: List[PlanStep]
+    plan_signature: Optional[str]
+    plan_explanation: Optional[str]
+    reason_source: str
+    reasoning_id: Optional[str]
+    reasoning_started: bool
+    reasoning_buffer: str
+    thought_buffer: str
+    reasoning_pending_prefix: str
+    reasoning_live_visible: bool
+    reasoning_transcript_ids: set[str]
+
+
+class ItemState(TypedDict, total=False):
+    item_id: str
+    thread_id: Optional[str]
+    turn_id: Optional[str]
+    turn_key: str
+    output_buffer: str
+    subagent_id: str
+    item_type: str
+    approval_request_id: str
+    ask_user_descriptor_emitted: bool
+    arguments: JSONDict
+    query: str
+    command: object
+    cwd: str
+    new_file_spec: Optional[JSONDict]
+    view_sequence: Optional[JSONDict]
+    view_spec: Optional[JSONDict]
+    search_spec: Optional[JSONDict]
+    changes: object
+    diff: Optional[str]
+    path: Optional[str]
+    paths: List[str]
+    new_file: bool
+    tool: str
+    server: str
+    request: object
+
+
+class SubagentState(TypedDict, total=False):
+    id: str
+    name: str
+    intent: str
+    parent_thread_id: Optional[str]
+    thread_ids: set[str]
+    started: bool
+    ended: bool
+    active: bool
+
+
+def _json_loads(value: str) -> object:
+    return cast(object, json.loads(value))
+
+
+def _tool_card_request_payload(server_name: str, tool_name: str, arguments: object) -> object:
+    return cast(object, build_tool_card_request(server_name, tool_name, arguments))
+
+
+def _tool_card_response_payload(server_name: str, tool_name: str, response: object) -> object:
+    return cast(object, build_tool_card_response(server_name, tool_name, response))
+
+
+def _todo_rows(conversation_id: str) -> List[TodoRow]:
+    return cast(List[TodoRow], _conv_todos.list_todos(conversation_id))
+
+
+def _result_events(result: JSONDict) -> List[JSONDict]:
+    events = result.get("events")
+    if isinstance(events, list):
+        return cast(List[JSONDict], events)
+    normalized: List[JSONDict] = []
+    result["events"] = normalized
+    return normalized
+
+
+def _result_transcript_entries(result: JSONDict) -> List[JSONDict]:
+    entries = result.get("transcript_entries")
+    if isinstance(entries, list):
+        return cast(List[JSONDict], entries)
+    normalized: List[JSONDict] = []
+    result["transcript_entries"] = normalized
+    return normalized
+
 
 def utc_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -42,14 +143,14 @@ _PLAN_STATUS_MAP = {
 }
 
 
-def _sync_plan_steps_to_db(conversation_id: str, steps: List[Dict[str, Any]]) -> None:
+def _sync_plan_steps_to_db(conversation_id: str, steps: List[PlanStep]) -> None:
     """Replace all todos in the conversation DB with the current plan steps."""
     if not conversation_id or not _conv_todos.CONVERSATIONS_DIR:
         return
     try:
-        existing = _conv_todos.list_todos(conversation_id)
+        existing = _todo_rows(conversation_id)
         existing_by_title = {t["title"]: t for t in existing}
-        seen_titles: set = set()
+        seen_titles: set[str] = set()
         for step in steps:
             title = step.get("step", "").strip()
             if not title:
@@ -75,10 +176,10 @@ def _event_type_from_label(label_lower: str) -> Optional[str]:
     return None
 
 
-def _extract_known_fields(spec: Optional[ProtocolSemanticSpec], payload: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_known_fields(spec: Optional[ProtocolSemanticSpec], payload: JSONDict) -> JSONDict:
     if spec is None:
         return {}
-    fields: Dict[str, Any] = {}
+    fields: JSONDict = {}
     for key in spec.properties:
         value = payload.get(key)
         if value is not None:
@@ -86,17 +187,17 @@ def _extract_known_fields(spec: Optional[ProtocolSemanticSpec], payload: Dict[st
     return fields
 
 
-def _dict_payload(value: Any) -> Dict[str, Any]:
+def _dict_payload(value: object) -> JSONDict:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _string_value(value: Any, default: str = "") -> str:
+def _string_value(value: object, default: str = "") -> str:
     if isinstance(value, str) and value:
         return value
     return default
 
 
-def _subagent_display_name(fields: Dict[str, Any], call_id: str) -> str:
+def _subagent_display_name(fields: JSONDict, call_id: str) -> str:
     nickname = fields.get("receiver_agent_nickname") or fields.get("new_agent_nickname")
     role = fields.get("receiver_agent_role") or fields.get("new_agent_role")
     if not nickname and not role:
@@ -117,8 +218,8 @@ def _subagent_display_name(fields: Dict[str, Any], call_id: str) -> str:
     return "subagent"
 
 
-def _collab_agent_records(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
-    records: List[Dict[str, Any]] = []
+def _collab_agent_records(fields: JSONDict) -> List[JSONDict]:
+    records: List[JSONDict] = []
     for key in ("receiver_agents", "agent_statuses"):
         value = fields.get(key)
         if not isinstance(value, list):
@@ -129,10 +230,10 @@ def _collab_agent_records(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
     return records
 
 
-def _collab_thread_ids(fields: Dict[str, Any]) -> List[str]:
+def _collab_thread_ids(fields: JSONDict) -> List[str]:
     thread_ids: List[str] = []
 
-    def add(value: Any) -> None:
+    def add(value: object) -> None:
         if isinstance(value, str) and value and value not in thread_ids:
             thread_ids.append(value)
 
@@ -155,7 +256,7 @@ def _collab_thread_ids(fields: Dict[str, Any]) -> List[str]:
     return thread_ids
 
 
-def _collab_status_for_thread(fields: Dict[str, Any], thread_id: str) -> Any:
+def _collab_status_for_thread(fields: JSONDict, thread_id: str) -> object:
     for record in _collab_agent_records(fields):
         if record.get("thread_id") == thread_id and record.get("status") is not None:
             return record.get("status")
@@ -169,7 +270,7 @@ def _collab_status_for_thread(fields: Dict[str, Any], thread_id: str) -> Any:
     return fields.get("status")
 
 
-def _subagent_terminal_summary(name: str, status: Any, *, success_text: str, failure_text: str) -> str:
+def _subagent_terminal_summary(name: str, status: object, *, success_text: str, failure_text: str) -> str:
     if isinstance(status, dict):
         errored = status.get("errored")
         if isinstance(errored, str) and errored.strip():
@@ -181,19 +282,19 @@ def _subagent_terminal_summary(name: str, status: Any, *, success_text: str, fai
     return success_text if _agent_status_success(status) else failure_text
 
 
-def _agent_status_is_terminal(status: Any) -> bool:
+def _agent_status_is_terminal(status: object) -> bool:
     if isinstance(status, dict):
         return "completed" in status or "errored" in status
     return status in {"shutdown", "not_found"}
 
 
-def _agent_status_success(status: Any) -> bool:
+def _agent_status_success(status: object) -> bool:
     if isinstance(status, dict):
         return "completed" in status
     return False
 
 
-def _agent_status_summary(status: Any, default: str) -> str:
+def _agent_status_summary(status: object, default: str) -> str:
     if isinstance(status, dict):
         completed = status.get("completed")
         if isinstance(completed, str) and completed.strip():
@@ -208,7 +309,7 @@ def _agent_status_summary(status: Any, default: str) -> str:
     return default
 
 
-def _direct_event_text(payload: Dict[str, Any]) -> Optional[str]:
+def _direct_event_text(payload: JSONDict) -> Optional[str]:
     text = payload.get("message")
     if not isinstance(text, str):
         text = payload.get("text")
@@ -222,7 +323,7 @@ def _direct_event_text(payload: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _notification_text(payload: Dict[str, Any]) -> Optional[str]:
+def _notification_text(payload: JSONDict) -> Optional[str]:
     error_value = payload.get("error")
     if isinstance(error_value, str) and error_value.strip():
         return error_value.strip()
@@ -248,7 +349,7 @@ def _notification_severity(
     label_lower: str,
     notification_spec: Optional[ProtocolSemanticSpec],
     event_spec: Optional[ProtocolSemanticSpec],
-    payload: Dict[str, Any],
+    payload: JSONDict,
 ) -> Optional[str]:
     label_text = label_lower.lower()
     if "interrupt" in label_text:
@@ -289,7 +390,7 @@ def _notification_severity(
     return None
 
 
-def _append_text_parts(parts: List[str], value: Any) -> None:
+def _append_text_parts(parts: List[str], value: object) -> None:
     if isinstance(value, str):
         text = _normalize_output(value).strip()
         if text:
@@ -310,7 +411,7 @@ def _append_text_parts(parts: List[str], value: Any) -> None:
                 return
 
 
-def _extract_reasoning_text(item: Dict[str, Any], fallback: Optional[str] = None) -> Optional[str]:
+def _extract_reasoning_text(item: JSONDict, fallback: Optional[str] = None) -> Optional[str]:
     parts: List[str] = []
     for key in ("summary", "summary_text", "summaryText", "text", "raw_content", "rawContent", "content"):
         _append_text_parts(parts, item.get(key))
@@ -322,7 +423,7 @@ def _extract_reasoning_text(item: Dict[str, Any], fallback: Optional[str] = None
     return text or None
 
 
-def _reasoning_event_id(payload: Dict[str, Any], turn_state: Dict[str, Any]) -> str:
+def _reasoning_event_id(payload: JSONDict, turn_state: TurnState) -> str:
     for key in ("item_id", "itemId", "id"):
         value = payload.get(key)
         if isinstance(value, str) and value:
@@ -333,9 +434,11 @@ def _reasoning_event_id(payload: Dict[str, Any], turn_state: Dict[str, Any]) -> 
     return "reasoning"
 
 
-def _assistant_id(payload: Dict[str, Any], thread_id: Optional[str], turn_id: Optional[str]) -> str:
-    if isinstance(payload.get("item"), dict) and isinstance(payload["item"].get("id"), str):
-        return payload["item"]["id"]
+def _assistant_id(payload: JSONDict, thread_id: Optional[str], turn_id: Optional[str]) -> str:
+    item = _dict_payload(payload.get("item"))
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id:
+        return item_id
     for key in ("item_id", "itemId", "id", "callId", "call_id"):
         value = payload.get(key)
         if isinstance(value, str) and value:
@@ -347,8 +450,8 @@ def _assistant_id(payload: Dict[str, Any], thread_id: Optional[str], turn_id: Op
     return "assistant"
 
 
-def _payload_string(payload: Dict[str, Any], *keys: str) -> Optional[str]:
-    sources: List[Dict[str, Any]] = [payload]
+def _payload_string(payload: JSONDict, *keys: str) -> Optional[str]:
+    sources: List[JSONDict] = [payload]
     item = payload.get("item")
     if isinstance(item, dict):
         sources.append(item)
@@ -360,15 +463,15 @@ def _payload_string(payload: Dict[str, Any], *keys: str) -> Optional[str]:
     return None
 
 
-def _payload_thread_id(payload: Dict[str, Any], fallback: Optional[str]) -> Optional[str]:
+def _payload_thread_id(payload: JSONDict, fallback: Optional[str]) -> Optional[str]:
     return _payload_string(payload, "thread_id", "threadId") or fallback
 
 
-def _payload_turn_id(payload: Dict[str, Any], fallback: Optional[str]) -> Optional[str]:
+def _payload_turn_id(payload: JSONDict, fallback: Optional[str]) -> Optional[str]:
     return _payload_string(payload, "turn_id", "turnId") or fallback
 
 
-def _normalize_turn_status(payload: Dict[str, Any]) -> tuple[str, Optional[str]]:
+def _normalize_turn_status(payload: JSONDict) -> tuple[str, Optional[str]]:
     turn_obj = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
     status = turn_obj.get("status") if isinstance(turn_obj, dict) else None
     if isinstance(status, dict):
@@ -383,17 +486,17 @@ def _normalize_turn_status(payload: Dict[str, Any]) -> tuple[str, Optional[str]]
     return turn_status, turn_error
 
 
-def _item_type(item: Dict[str, Any]) -> str:
+def _item_type(item: JSONDict) -> str:
     return str(item.get("type") or "").strip().lower()
 
 
-def _normalize_output(value: Any) -> str:
+def _normalize_output(value: object) -> str:
     if not isinstance(value, str):
         return ""
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _stringify_value(value: Any) -> str:
+def _stringify_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
@@ -404,7 +507,7 @@ def _stringify_value(value: Any) -> str:
         return str(value)
 
 
-def _duration_ms(value: Any) -> Optional[int]:
+def _duration_ms(value: object) -> Optional[int]:
     if isinstance(value, dict):
         secs = value.get("secs")
         nanos = value.get("nanos")
@@ -416,7 +519,7 @@ def _duration_ms(value: Any) -> Optional[int]:
     return None
 
 
-def _extract_tool_result(value: Any, *, status: str, error: Any = None) -> Tuple[Any, bool]:
+def _extract_tool_result(value: object, *, status: str, error: object = None) -> Tuple[object, bool]:
     is_error = bool(error) or status in {"failed", "error"}
     if error is not None:
         return {"error": error}, True
@@ -441,7 +544,7 @@ def _extract_tool_result(value: Any, *, status: str, error: Any = None) -> Tuple
     return value, is_error
 
 
-def _command_text(value: Any) -> str:
+def _command_text(value: object) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, list):
@@ -472,13 +575,13 @@ _CODEX_VIEW_LINE_RE = re.compile(r"^\s*(\d+):(.*)$")
 _CODEX_NL_VIEW_LINE_RE = re.compile(r"^\s*(\d+)\t(.*)$")
 
 
-def _parse_codex_view_lines(content: str) -> Optional[List[Dict[str, Any]]]:
+def _parse_codex_view_lines(content: str) -> Optional[List[JSONDict]]:
     if not isinstance(content, str):
         return None
     if not content:
         return []
 
-    parsed: List[Dict[str, Any]] = []
+    parsed: List[JSONDict] = []
     for raw_line in content.splitlines():
         match = _CODEX_VIEW_LINE_RE.match(raw_line)
         if match:
@@ -501,7 +604,7 @@ def _parse_codex_view_lines(content: str) -> Optional[List[Dict[str, Any]]]:
     return parsed
 
 
-def _build_codex_view_lines(content: str, view_spec: Optional[Dict[str, Any]] = None) -> Optional[List[Dict[str, Any]]]:
+def _build_codex_view_lines(content: str, view_spec: Optional[JSONDict] = None) -> Optional[List[JSONDict]]:
     parsed = _parse_codex_view_lines(content)
     if parsed is not None:
         return parsed
@@ -553,7 +656,7 @@ def _last_non_flag_token(tokens: List[str], start: int = 1) -> Optional[str]:
     return candidate
 
 
-def _parse_sed_view_range(range_token: Any) -> Optional[List[int]]:
+def _parse_sed_view_range(range_token: object) -> Optional[List[int]]:
     text = str(range_token or "").strip()
     if not text:
         return None
@@ -566,7 +669,7 @@ def _parse_sed_view_range(range_token: Any) -> Optional[List[int]]:
     return None
 
 
-def _shell_pipeline_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_pipeline_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[JSONDict]:
     if tokens.count("|") != 1:
         return None
     pipe_index = tokens.index("|")
@@ -600,7 +703,7 @@ def _shell_pipeline_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[D
     }
 
 
-def _command_tokens_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[Dict[str, Any]]:
+def _command_tokens_to_view_spec(tokens: List[str], cwd: str = "") -> Optional[JSONDict]:
     if not tokens:
         return None
     if any(token in {"&&", "||", ";", ">", "<"} for token in tokens):
@@ -684,7 +787,7 @@ def _separator_tokens_to_text(tokens: List[str]) -> Optional[str]:
     return divider or None
 
 
-def _shell_command_to_view_sequence(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_command_to_view_sequence(command: object, cwd: str = "") -> Optional[JSONDict]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner or "\n" in inner:
         return None
@@ -698,7 +801,7 @@ def _shell_command_to_view_sequence(command: Any, cwd: str = "") -> Optional[Dic
     if not segments or len(segments) < 3 or len(segments) % 2 == 0:
         return None
 
-    specs: List[Dict[str, Any]] = []
+    specs: List[JSONDict] = []
     divider_text: Optional[str] = None
     for idx, segment in enumerate(segments):
         if idx % 2 == 0:
@@ -742,7 +845,7 @@ def _split_view_output_by_divider(output: str, divider: str, expected_parts: int
     return parts
 
 
-def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_command_to_view_spec(command: object, cwd: str = "") -> Optional[JSONDict]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner or any(marker in inner for marker in ("\n", "&&", "||", ";")):
         return None
@@ -753,7 +856,7 @@ def _shell_command_to_view_spec(command: Any, cwd: str = "") -> Optional[Dict[st
     return _command_tokens_to_view_spec(tokens, cwd)
 
 
-def _normalized_new_file_text(value: Any) -> str:
+def _normalized_new_file_text(value: object) -> str:
     text = str(value or "")
     if not text.endswith("\n"):
         text += "\n"
@@ -825,8 +928,8 @@ def _parse_new_file_command_preamble(lines: List[str], cwd: str = "") -> Optiona
     return None
 
 
-def _new_file_arguments(spec: Dict[str, Any]) -> Dict[str, Any]:
-    arguments: Dict[str, Any] = {}
+def _new_file_arguments(spec: JSONDict) -> JSONDict:
+    arguments: JSONDict = {}
     path = spec.get("path")
     if isinstance(path, str) and path:
         arguments["path"] = path
@@ -844,7 +947,7 @@ def _new_file_arguments(spec: Dict[str, Any]) -> Dict[str, Any]:
     return arguments
 
 
-def _shell_command_to_new_file_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_command_to_new_file_spec(command: object, cwd: str = "") -> Optional[JSONDict]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner or "\n" not in inner:
         return None
@@ -880,7 +983,7 @@ def _shell_command_to_new_file_spec(command: Any, cwd: str = "") -> Optional[Dic
     return spec
 
 
-def _shell_command_to_search_spec(command: Any, cwd: str = "") -> Optional[Dict[str, Any]]:
+def _shell_command_to_search_spec(command: object, cwd: str = "") -> Optional[JSONDict]:
     inner = _unwrap_single_shell_command(_command_text(command))
     if not inner or "\n" in inner:
         return None
@@ -924,7 +1027,7 @@ def _shell_command_to_search_spec(command: Any, cwd: str = "") -> Optional[Dict[
         "--max-count": "head_limit",
     }
 
-    args: Dict[str, Any] = {}
+    args: JSONDict = {}
     positional: List[str] = []
     idx = 1
     while idx < len(tokens):
@@ -994,7 +1097,7 @@ def _shell_command_to_search_spec(command: Any, cwd: str = "") -> Optional[Dict[
     }
 
 
-def _normalize_search_output(output: str, search_spec: Optional[Dict[str, Any]]) -> str:
+def _normalize_search_output(output: str, search_spec: Optional[JSONDict]) -> str:
     text = _normalize_output(output)
     if not text or not isinstance(search_spec, dict):
         return text
@@ -1048,7 +1151,7 @@ def _extract_path_from_diff(diff_text: str) -> Optional[str]:
     return None
 
 
-def _extract_diff_with_path(payload: Any) -> Tuple[Optional[str], Optional[str]]:
+def _extract_diff_with_path(payload: object) -> Tuple[Optional[str], Optional[str]]:
     if not isinstance(payload, dict):
         return None, None
     path = payload.get("path") if isinstance(payload.get("path"), str) else None
@@ -1142,7 +1245,7 @@ def _split_unified_diff_by_file(diff_text: str) -> List[Tuple[Optional[str], str
     return sections
 
 
-def _paths_from_changes(changes: Any) -> List[str]:
+def _paths_from_changes(changes: object) -> List[str]:
     paths: List[str] = []
     if isinstance(changes, list):
         for change in changes:
@@ -1171,7 +1274,7 @@ def _summarize_paths(paths: List[str]) -> Optional[str]:
     return f"{paths[0]} (+{len(paths) - 1} more)"
 
 
-def _result_error_status(status: str, exit_code: Optional[int], error: Any = None) -> bool:
+def _result_error_status(status: str, exit_code: Optional[int], error: object = None) -> bool:
     return bool(error) or status in {"failed", "declined", "error"} or exit_code not in (None, 0)
 
 
@@ -1182,7 +1285,7 @@ def _has_visible_reasoning_text(text: str) -> bool:
     return isinstance(text, str) and bool(text.strip())
 
 
-def _extract_and_scrub_thoughts_stream(delta: str, state: Dict[str, Any]) -> Tuple[str, List[str]]:
+def _extract_and_scrub_thoughts_stream(delta: str, state: TurnState) -> Tuple[str, List[str]]:
     if not isinstance(delta, str) or not delta:
         return delta, []
     buffer = state.get("thought_buffer", "")
@@ -1221,7 +1324,7 @@ def _extract_and_scrub_thoughts(text: str) -> Tuple[str, List[str]]:
     return scrubbed, thoughts
 
 
-def _consume_live_reasoning_delta(delta: str, state: Dict[str, Any]) -> Optional[str]:
+def _consume_live_reasoning_delta(delta: str, state: TurnState) -> Optional[str]:
     if not isinstance(delta, str) or not delta:
         return None
     if state.get("reasoning_live_visible"):
@@ -1238,10 +1341,10 @@ def _consume_live_reasoning_delta(delta: str, state: Dict[str, Any]) -> Optional
 
 class CodexEventRouter:
     def __init__(self) -> None:
-        self._turn_states: Dict[str, Dict[str, Any]] = {}
-        self._item_states: Dict[str, Dict[str, Any]] = {}
+        self._turn_states: Dict[str, TurnState] = {}
+        self._item_states: Dict[str, ItemState] = {}
         self._approval_request_map: Dict[str, str] = {}
-        self._subagent_states: Dict[str, Dict[str, Any]] = {}
+        self._subagent_states: Dict[str, SubagentState] = {}
         self._thread_subagent_ids: Dict[str, str] = {}
 
     def reset(self) -> None:
@@ -1254,34 +1357,34 @@ class CodexEventRouter:
     def _turn_key(self, thread_id: Optional[str], turn_id: Optional[str]) -> str:
         return f"{thread_id or 'unknown'}:{turn_id or 'unknown'}"
 
-    def _get_turn_state(self, thread_id: Optional[str], turn_id: Optional[str]) -> Dict[str, Any]:
+    def _get_turn_state(self, thread_id: Optional[str], turn_id: Optional[str]) -> TurnState:
         key = self._turn_key(thread_id, turn_id)
         state = self._turn_states.get(key)
         if state is None:
-            state = {
+            state = cast(TurnState, {
                 "thread_id": thread_id,
                 "turn_id": turn_id,
                 "diff_hashes": set(),
                 "plan_steps": [],
                 "plan_signature": None,
                 "plan_explanation": None,
-            }
+            })
             self._turn_states[key] = state
         return state
 
-    def _get_item_state(self, item_id: Optional[str], thread_id: Optional[str], turn_id: Optional[str]) -> Dict[str, Any]:
+    def _get_item_state(self, item_id: Optional[str], thread_id: Optional[str], turn_id: Optional[str]) -> ItemState:
         turn_state = self._get_turn_state(thread_id, turn_id)
         if not item_id:
-            return turn_state
+            return cast(ItemState, turn_state)
         state = self._item_states.get(item_id)
         if state is None:
-            state = {
+            state = cast(ItemState, {
                 "item_id": item_id,
                 "thread_id": thread_id,
                 "turn_id": turn_id,
                 "turn_key": self._turn_key(thread_id, turn_id),
                 "output_buffer": "",
-            }
+            })
             self._item_states[item_id] = state
         else:
             state["thread_id"] = thread_id or state.get("thread_id")
@@ -1292,10 +1395,10 @@ class CodexEventRouter:
             state["subagent_id"] = subagent_id
         return state
 
-    def _clear_item_state(self, item_id: Optional[str]) -> Dict[str, Any]:
+    def _clear_item_state(self, item_id: Optional[str]) -> ItemState:
         if not item_id:
-            return {}
-        return self._item_states.pop(item_id, {})
+            return cast(ItemState, {})
+        return cast(ItemState, self._item_states.pop(item_id, {}))
 
     def _ensure_subagent_state(
         self,
@@ -1304,10 +1407,10 @@ class CodexEventRouter:
         name: Optional[str] = None,
         intent: Optional[str] = None,
         parent_thread_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> SubagentState:
         state = self._subagent_states.get(subagent_id)
         if state is None:
-            state = {
+            state = cast(SubagentState, {
                 "id": subagent_id,
                 "name": name or "subagent",
                 "intent": intent or "",
@@ -1316,7 +1419,7 @@ class CodexEventRouter:
                 "started": False,
                 "ended": False,
                 "active": False,
-            }
+            })
             self._subagent_states[subagent_id] = state
         if isinstance(name, str) and name.strip():
             state["name"] = name.strip()
@@ -1330,9 +1433,11 @@ class CodexEventRouter:
         if not isinstance(thread_id, str) or not thread_id:
             return
         state = self._ensure_subagent_state(subagent_id)
-        thread_ids = state.setdefault("thread_ids", set())
-        if isinstance(thread_ids, set):
-            thread_ids.add(thread_id)
+        thread_ids = state.get("thread_ids")
+        if not isinstance(thread_ids, set):
+            thread_ids = set()
+            state["thread_ids"] = thread_ids
+        thread_ids.add(thread_id)
         self._thread_subagent_ids[thread_id] = subagent_id
 
     def _subagent_id_for_context(self, thread_id: Optional[str]) -> Optional[str]:
@@ -1340,7 +1445,7 @@ class CodexEventRouter:
             return None
         return self._thread_subagent_ids.get(thread_id)
 
-    def _claim_reasoning_source(self, turn_state: Dict[str, Any], source: str) -> bool:
+    def _claim_reasoning_source(self, turn_state: TurnState, source: str) -> bool:
         current = turn_state.get("reason_source")
         if current not in {None, source}:
             return False
@@ -1352,10 +1457,10 @@ class CodexEventRouter:
         self,
         *,
         source: str,
-        payload: Dict[str, Any],
+        payload: JSONDict,
         thread_id: Optional[str],
         turn_id: Optional[str],
-    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], str]]:
+    ) -> Optional[Tuple[TurnState, ItemState, str]]:
         turn_state = self._get_turn_state(thread_id, turn_id)
         if not self._claim_reasoning_source(turn_state, source):
             return None
@@ -1366,20 +1471,17 @@ class CodexEventRouter:
         item_state["item_type"] = "reasoning"
         return turn_state, item_state, item_id
 
-    def _should_record_reasoning(self, turn_state: Dict[str, Any], item_id: str) -> bool:
-        recorded = turn_state.setdefault("reasoning_transcript_ids", set())
+    def _should_record_reasoning(self, turn_state: TurnState, item_id: str) -> bool:
+        recorded = turn_state.get("reasoning_transcript_ids")
         if not isinstance(recorded, set):
-            if isinstance(recorded, (list, tuple)):
-                recorded = set(recorded)
-            else:
-                recorded = set()
+            recorded = set(recorded) if isinstance(recorded, (list, tuple)) else set()
             turn_state["reasoning_transcript_ids"] = recorded
         if item_id in recorded:
             return False
         recorded.add(item_id)
         return True
 
-    def _reset_reasoning_stream(self, turn_state: Dict[str, Any]) -> None:
+    def _reset_reasoning_stream(self, turn_state: TurnState) -> None:
         turn_state["reasoning_started"] = False
         turn_state["reasoning_buffer"] = ""
         turn_state["reasoning_id"] = None
@@ -1391,11 +1493,11 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: JSONDict,
         thread_id: Optional[str],
         turn_id: Optional[str],
         conversation_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> JSONDict:
         turn_state = self._get_turn_state(thread_id, turn_id)
         steps = normalize_plan_steps(payload.get("plan"))
         explanation_raw = payload.get("explanation")
@@ -1411,7 +1513,7 @@ class CodexEventRouter:
         if conversation_id:
             _sync_plan_steps_to_db(conversation_id, steps)
 
-        events: List[Dict[str, Any]] = []
+        events: List[JSONDict] = []
         if steps:
             plan_content = render_plan_markdown(steps, explanation)
             events.append({
@@ -1422,7 +1524,7 @@ class CodexEventRouter:
                 "plan_content": plan_content,
                 "plan_steps": steps,
             })
-            plan_event: Dict[str, Any] = {
+            plan_event: JSONDict = {
                 "type": "plan_update",
                 "steps": steps,
             }
@@ -1446,23 +1548,23 @@ class CodexEventRouter:
             "transcript_entries": [],
         }
 
-    def _decorate_event(self, entry: Dict[str, Any], subagent_id: Optional[str]) -> Dict[str, Any]:
+    def _decorate_event(self, entry: JSONDict, subagent_id: Optional[str]) -> JSONDict:
         if subagent_id:
             entry["subagent_id"] = subagent_id
         return entry
 
-    def _decorate_transcript_entry(self, entry: Dict[str, Any], subagent_id: Optional[str]) -> Dict[str, Any]:
+    def _decorate_transcript_entry(self, entry: JSONDict, subagent_id: Optional[str]) -> JSONDict:
         if subagent_id:
             entry["subagent_id"] = subagent_id
         return entry
 
     def _decorate_routed_result(
         self,
-        routed: Dict[str, Any],
+        routed: JSONDict,
         *,
         thread_id: Optional[str],
-        item_state: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        item_state: Optional[ItemState] = None,
+    ) -> JSONDict:
         subagent_id = None
         if isinstance(item_state, dict):
             candidate = item_state.get("subagent_id")
@@ -1491,14 +1593,14 @@ class CodexEventRouter:
         }
         transcript_roles = {"assistant", "user", "command", "diff", "reasoning", "mcp_tool", "tool", "view", "search", "web_search"}
 
-        for event in routed.get("events", []):
-            if not isinstance(event, dict) or event.get("subagent_id"):
+        for event in _result_events(routed):
+            if event.get("subagent_id"):
                 continue
             if event.get("type") in event_types:
                 event["subagent_id"] = subagent_id
 
-        for entry in routed.get("transcript_entries", []):
-            if not isinstance(entry, dict) or entry.get("subagent_id"):
+        for entry in _result_transcript_entries(routed):
+            if entry.get("subagent_id"):
                 continue
             if entry.get("role") in transcript_roles:
                 entry["subagent_id"] = subagent_id
@@ -1517,10 +1619,10 @@ class CodexEventRouter:
         self,
         protocol: RuntimeProtocol,
         event_type: str,
-        payload: Dict[str, Any],
+        payload: JSONDict,
         thread_id: Optional[str],
         turn_id: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[JSONDict]:
         event_spec = protocol.event_spec(event_type)
         if event_spec is None or event_spec.category != "collab":
             return None
@@ -1557,10 +1659,10 @@ class CodexEventRouter:
                 bind_thread_ids.append(candidate)
 
         ts = utc_ts()
-        events: List[Dict[str, Any]] = []
-        transcript_entries: List[Dict[str, Any]] = []
+        events: List[JSONDict] = []
+        transcript_entries: List[JSONDict] = []
 
-        def emit_start(target_id: str, target_state: Dict[str, Any]) -> None:
+        def emit_start(target_id: str, target_state: SubagentState) -> None:
             if target_state.get("started") and not target_state.get("ended"):
                 return
             target_state["started"] = True
@@ -1585,7 +1687,7 @@ class CodexEventRouter:
                 "timestamp": ts,
             })
 
-        def emit_end(target_id: str, target_state: Dict[str, Any], success: bool, summary: str) -> None:
+        def emit_end(target_id: str, target_state: SubagentState, success: bool, summary: str) -> None:
             if target_state.get("ended"):
                 return
             target_state["active"] = False
@@ -1688,9 +1790,9 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: JSONDict,
         turn_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> JSONDict:
         error_value = payload.get("error")
         if isinstance(error_value, dict):
             error_obj = error_value
@@ -1709,12 +1811,12 @@ class CodexEventRouter:
         if not message:
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        error_event: Dict[str, Any] = {
+        error_event: JSONDict = {
             "type": "error",
             "message": message,
             "source": label_lower,
         }
-        error_entry: Dict[str, Any] = {
+        error_entry: JSONDict = {
             "role": "error",
             "message": message,
             "turn_id": turn_id,
@@ -1765,7 +1867,7 @@ class CodexEventRouter:
             "transcript_entries": [error_entry],
         }
 
-    def _warning_result(self, *, message: str) -> Dict[str, Any]:
+    def _warning_result(self, *, message: str) -> JSONDict:
         text = message.strip()
         if not text:
             return {"handled": True, "events": [], "transcript_entries": []}
@@ -1782,11 +1884,11 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: JSONDict,
         notification_spec: Optional[ProtocolSemanticSpec],
         event_spec: Optional[ProtocolSemanticSpec],
         turn_id: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[JSONDict]:
         severity = _notification_severity(label_lower, notification_spec, event_spec, payload)
         if severity is None:
             return None
@@ -1807,16 +1909,16 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: JSONDict,
         turn_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> JSONDict:
         total = None
         input_tokens = None
         cached_input_tokens = None
         context_window = None
 
-        if isinstance(payload.get("info"), dict):
-            info = payload["info"]
+        info = _dict_payload(payload.get("info"))
+        if info:
             usage = info.get("last_token_usage") or {}
             if isinstance(usage, dict):
                 total = usage.get("input_tokens")
@@ -1824,8 +1926,8 @@ class CodexEventRouter:
                 cached_input_tokens = usage.get("cached_input_tokens")
             context_window = info.get("model_context_window")
 
-        if total is None and isinstance(payload.get("tokenUsage"), dict):
-            token_usage = payload["tokenUsage"]
+        token_usage = _dict_payload(payload.get("tokenUsage"))
+        if total is None and token_usage:
             last_breakdown = token_usage.get("last") or {}
             if isinstance(last_breakdown, dict):
                 total = last_breakdown.get("inputTokens") or last_breakdown.get("input_tokens")
@@ -1842,8 +1944,8 @@ class CodexEventRouter:
             return {"handled": True, "events": [], "transcript_entries": []}
 
         total_int = int(total)
-        event: Dict[str, Any] = {"type": "token_count", "total": total_int}
-        transcript_entry: Dict[str, Any] = {
+        event: JSONDict = {"type": "token_count", "total": total_int}
+        transcript_entry: JSONDict = {
             "role": "token_usage",
             "total": total_int,
             "event": label_lower,
@@ -1873,18 +1975,18 @@ class CodexEventRouter:
         self,
         *,
         label_lower: str,
-        payload: Dict[str, Any],
+        payload: JSONDict,
         turn_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> JSONDict:
         raw_kind = payload.get("collaboration_mode_kind") or payload.get("collaborationModeKind")
         if not isinstance(raw_kind, str) or not raw_kind.strip():
             return {"handled": True, "events": [], "transcript_entries": []}
         kind = raw_kind.strip()
-        event: Dict[str, Any] = {
+        event: JSONDict = {
             "type": "mode",
             "kind": kind,
         }
-        transcript_entry: Dict[str, Any] = {
+        transcript_entry: JSONDict = {
             "role": "mode",
             "kind": kind,
             "turn_id": turn_id,
@@ -1902,7 +2004,7 @@ class CodexEventRouter:
 
     def _emit_diff_entries(
         self,
-        result: Dict[str, Any],
+        result: JSONDict,
         *,
         diff_text: str,
         path: Optional[str],
@@ -1912,8 +2014,13 @@ class CodexEventRouter:
         event_name: str,
     ) -> None:
         turn_state = self._get_turn_state(thread_id, turn_id)
-        diff_hashes = turn_state.setdefault("diff_hashes", set())
+        diff_hashes = turn_state.get("diff_hashes")
+        if not isinstance(diff_hashes, set):
+            diff_hashes = set()
+            turn_state["diff_hashes"] = diff_hashes
         subagent_id = self._subagent_id_for_context(thread_id)
+        result_events = _result_events(result)
+        result_entries = _result_transcript_entries(result)
         for section_path, section_text in _split_unified_diff_by_file(diff_text):
             if not section_text:
                 continue
@@ -1928,13 +2035,13 @@ class CodexEventRouter:
                 diff_id = f"item:{item_id}:{diff_hash[:12]}"
             else:
                 diff_id = f"diff:{diff_hash[:12]}"
-            result["events"].append(self._decorate_event({
+            result_events.append(self._decorate_event({
                 "type": "diff",
                 "id": diff_id,
                 "text": section_text,
                 "path": effective_path,
             }, subagent_id))
-            result["transcript_entries"].append(self._decorate_transcript_entry({
+            result_entries.append(self._decorate_transcript_entry({
                 "role": "diff",
                 "text": section_text,
                 "path": effective_path,
@@ -1948,13 +2055,13 @@ class CodexEventRouter:
         *,
         request_id: str,
         kind: str,
-        payload: Dict[str, Any],
+        payload: JSONDict,
         thread_id: Optional[str],
         turn_id: Optional[str],
         request_method: Optional[str] = None,
-        request_params: Optional[Dict[str, Any]] = None,
+        request_params: Optional[JSONDict] = None,
         activity_label: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> JSONDict:
         subagent_id = self._subagent_id_for_context(thread_id)
         approval_event = {
             "type": "approval",
@@ -1996,19 +2103,19 @@ class CodexEventRouter:
         *,
         tool_id: str,
         request_id: str,
-        arguments: Any,
-        item_state: Dict[str, Any],
+        arguments: object,
+        item_state: ItemState,
         thread_id: Optional[str],
         turn_id: Optional[str],
-    ) -> Dict[str, Any]:
-        normalized_arguments = arguments if isinstance(arguments, dict) else {}
+    ) -> JSONDict:
+        normalized_arguments = _dict_payload(arguments)
         question = str(normalized_arguments.get("question") or "").strip()
         raw_choices = normalized_arguments.get("choices")
         if isinstance(raw_choices, list):
             choices = raw_choices
         elif isinstance(raw_choices, str):
             try:
-                parsed = __import__("json").loads(raw_choices)
+                parsed = _json_loads(raw_choices)
                 choices = parsed if isinstance(parsed, list) else []
             except Exception:
                 choices = []
@@ -2060,20 +2167,24 @@ class CodexEventRouter:
                 render_event = descriptor.get("render_event") if isinstance(descriptor.get("render_event"), dict) else None
                 if isinstance(render_event, dict):
                     render_event["card_id"] = card_id
-        return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
+        return self._decorate_routed_result(
+            routed,
+            thread_id=thread_id,
+            item_state=cast(ItemState, item_state),
+        )
 
     def route_event(
         self,
         protocol: RuntimeProtocol,
         *,
         label: Optional[str],
-        payload: Any,
+        payload: object,
         thread_id: Optional[str],
         turn_id: Optional[str],
         conversation_id: Optional[str] = None,
-        extract_item_text: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, str]]]] = None,
-    ) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
+        extract_item_text: Optional[Callable[[JSONDict], Optional[Dict[str, str]]]] = None,
+    ) -> JSONDict:
+        result: JSONDict = {
             "handled": False,
             "events": [],
             "transcript_entries": [],
@@ -2171,11 +2282,11 @@ class CodexEventRouter:
                     "plan_content": plan_content,
                     "plan_steps": plan_steps,
                 })
-                plan_event: Dict[str, Any] = {
+                plan_event: JSONDict = {
                     "type": "plan",
                     "steps": plan_steps,
                 }
-                plan_entry: Dict[str, Any] = {
+                plan_entry: JSONDict = {
                     "role": "plan",
                     "steps": plan_steps,
                     "turn_id": turn_id,
@@ -2362,7 +2473,7 @@ class CodexEventRouter:
                     "new_file": new_file,
                     "output_buffer": "",
                 })
-                arguments: Dict[str, Any] = {}
+                arguments: JSONDict = {}
                 if paths:
                     arguments["paths"] = paths
                     arguments["change_count"] = len(paths)
@@ -2393,7 +2504,7 @@ class CodexEventRouter:
                 elif item_type == "imageview":
                     tool_name = "view_image"
                     arguments = {"path": item.get("path")}
-                request_payload = build_tool_card_request(server_name or "", tool_name or item_type, arguments)
+                request_payload = _tool_card_request_payload(server_name or "", tool_name or item_type, arguments)
                 item_state.update({
                     "item_type": item_type,
                     "tool": tool_name or item_type,
@@ -2414,19 +2525,22 @@ class CodexEventRouter:
                                 "handled": True,
                                 "events": [],
                                 "transcript_entries": [],
-                            }, thread_id=thread_id, item_state=item_state)
+                            }, thread_id=thread_id, item_state=cast(ItemState, item_state))
                         return self._ask_user_request_result(
                             tool_id=str(item_id or _assistant_id(item, thread_id, turn_id)),
                             request_id=request_id,
                             arguments=arguments,
-                            item_state=item_state,
+                            item_state=cast(ItemState, item_state),
                             thread_id=thread_id,
                             turn_id=turn_id,
                         )
                 if item_type == "websearch":
-                    query = item.get("query")
-                    if not isinstance(query, str):
-                        query = arguments.get("query") if isinstance(arguments.get("query"), str) else ""
+                    raw_query = item.get("query")
+                    if isinstance(raw_query, str):
+                        query = raw_query
+                    else:
+                        arg_query = arguments.get("query")
+                        query = arg_query if isinstance(arg_query, str) else ""
                     item_state["query"] = query
                     activity_label = f"web_search: {query}" if query else "web_search"
                     return self._decorate_routed_result({
@@ -2689,31 +2803,39 @@ class CodexEventRouter:
                     if isinstance(raw_specs, list) and isinstance(divider, str) and divider:
                         split_output = _split_view_output_by_divider(output, divider, len(raw_specs))
                         if split_output is not None:
-                            routed_events: List[Dict[str, Any]] = []
+                            routed_events: List[JSONDict] = []
                             transcript_entries = []
                             base_id = item_id or _assistant_id(item, thread_id, turn_id)
                             for idx, (raw_spec, segment_output) in enumerate(zip(raw_specs, split_output), start=1):
                                 if not isinstance(raw_spec, dict):
                                     split_output = None
                                     break
-                                view_lines = _build_codex_view_lines(segment_output, raw_spec)
+                                spec = _dict_payload(raw_spec)
+                                raw_view_range = spec.get("view_range")
+                                view_range = cast(Optional[List[int]], raw_view_range) if isinstance(raw_view_range, list) else None
+                                title = _string_value(
+                                    spec.get("title"),
+                                    _build_view_title(_string_value(spec.get("path")), view_range),
+                                )
+                                path_text = _string_value(spec.get("path"))
+                                view_lines = _build_codex_view_lines(segment_output, spec)
                                 view_id = f"{base_id}:view:{idx}"
                                 routed_events.append({
                                     "type": "view",
                                     "id": view_id,
-                                    "title": raw_spec.get("title") or _build_view_title(raw_spec.get("path") or "", raw_spec.get("view_range")),
-                                    "path": raw_spec.get("path") or "",
+                                    "title": title,
+                                    "path": path_text,
                                     "content": segment_output,
-                                    "view_range": raw_spec.get("view_range"),
+                                    "view_range": view_range,
                                     **({"lines": view_lines} if view_lines is not None else {}),
                                 })
                                 transcript_entries.append({
                                     "role": "view",
                                     "id": view_id,
-                                    "title": raw_spec.get("title") or _build_view_title(raw_spec.get("path") or "", raw_spec.get("view_range")),
-                                    "path": raw_spec.get("path") or "",
+                                    "title": title,
+                                    "path": path_text,
                                     "content": segment_output,
-                                    "view_range": raw_spec.get("view_range"),
+                                    "view_range": view_range,
                                     **({"lines": view_lines} if view_lines is not None else {}),
                                     "item_id": item_id,
                                     "turn_id": turn_id,
@@ -2733,26 +2855,30 @@ class CodexEventRouter:
                                 return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 if view_spec and not is_error:
                     view_lines = _build_codex_view_lines(output, view_spec)
+                    view_path = _string_value(view_spec.get("path"))
+                    raw_view_range = view_spec.get("view_range")
+                    view_range = raw_view_range if isinstance(raw_view_range, list) else None
+                    view_title = _string_value(view_spec.get("title")) or _build_view_title(view_path, view_range)
                     routed = {
                         "handled": True,
                         "events": [
                             {
                                 "type": "view",
                                 "id": item_id or _assistant_id(item, thread_id, turn_id),
-                                "title": view_spec.get("title") or _build_view_title(view_spec.get("path") or "", view_spec.get("view_range")),
-                                "path": view_spec.get("path") or "",
+                                "title": view_title,
+                                "path": view_path,
                                 "content": output,
-                                "view_range": view_spec.get("view_range"),
+                                "view_range": view_range,
                                 **({"lines": view_lines} if view_lines is not None else {}),
                             },
                             {"type": "activity", "label": "processing", "active": True},
                         ],
                         "transcript_entries": [{
                             "role": "view",
-                            "title": view_spec.get("title") or _build_view_title(view_spec.get("path") or "", view_spec.get("view_range")),
-                            "path": view_spec.get("path") or "",
+                            "title": view_title,
+                            "path": view_path,
                             "content": output,
-                            "view_range": view_spec.get("view_range"),
+                            "view_range": view_range,
                             **({"lines": view_lines} if view_lines is not None else {}),
                             "item_id": item_id,
                             "turn_id": turn_id,
@@ -2849,7 +2975,7 @@ class CodexEventRouter:
                         routed["clear_live_approval_ids"] = [approval_request_id]
                         self._approval_request_map.pop(str(item_id), None)
                     return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
-                routed: Dict[str, Any] = {
+                routed: JSONDict = {
                     "handled": True,
                     "events": [
                         {
@@ -3003,13 +3129,13 @@ class CodexEventRouter:
                         return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 request_payload = item_state.get("request")
                 if request_payload is None:
-                    request_payload = build_tool_card_request(server_name, tool_name, arguments)
-                response_payload = build_tool_card_response(server_name, tool_name, live_result)
+                    request_payload = _tool_card_request_payload(server_name, tool_name, arguments)
+                response_payload = _tool_card_response_payload(server_name, tool_name, live_result)
                 if item_type == "websearch":
                     query = item.get("query")
                     if not isinstance(query, str):
                         query = item_state.get("query") if isinstance(item_state.get("query"), str) else ""
-                    results_payload: Any = result_value
+                    results_payload: object = result_value
                     if isinstance(result_value, dict) and "results" in result_value:
                         results_payload = result_value.get("results")
                     search_content = ""
@@ -3076,7 +3202,7 @@ class CodexEventRouter:
                     ],
                     "transcript_entries": [],
                 }
-                routed["transcript_entries"].append({
+                _result_transcript_entries(routed).append({
                     "role": "mcp_tool",
                     "server": server_name,
                     "tool": tool_name,
@@ -3133,13 +3259,13 @@ class CodexEventRouter:
                         "handled": True,
                         "events": [],
                         "transcript_entries": [],
-                    }, thread_id=thread_id, item_state=item_state)
+                    }, thread_id=thread_id, item_state=cast(ItemState, item_state))
                 if request_id:
                     return self._ask_user_request_result(
                         tool_id=str(tool_id or ""),
                         request_id=request_id,
                         arguments=arguments,
-                        item_state=item_state,
+                        item_state=cast(ItemState, item_state),
                         thread_id=thread_id,
                         turn_id=turn_id,
                     )
@@ -3196,7 +3322,7 @@ class CodexEventRouter:
             if request_id_text and item_id:
                 self._approval_request_map[str(item_id)] = request_id_text
                 item_state["approval_request_id"] = request_id_text
-            payload_data: Dict[str, Any] = {
+            payload_data: JSONDict = {
                 "command": payload.get("parsedCmd") or payload.get("command") or item_state.get("command"),
                 "cwd": payload.get("cwd") or item_state.get("cwd"),
                 "reason": payload.get("reason"),
@@ -3395,7 +3521,7 @@ class CodexEventRouter:
                 scrubbed_text, thoughts = _extract_and_scrub_thoughts(text) if text else ("", [])
                 has_visible_reasoning = _has_visible_reasoning_text(scrubbed_text)
                 should_finalize_live = turn_state.get("reason_source") in {None, "codex"} and has_visible_reasoning
-                events: List[Dict[str, Any]] = []
+                events: List[JSONDict] = []
                 if thoughts:
                     events.extend(
                         build_thought_event(text=thought, turn_id=effective_turn_id)
@@ -3407,7 +3533,7 @@ class CodexEventRouter:
                         text=scrubbed_text,
                         turn_id=effective_turn_id,
                     ))
-                transcript_entries: List[Dict[str, Any]] = []
+                transcript_entries: List[JSONDict] = []
                 if has_visible_reasoning and self._should_record_reasoning(turn_state, effective_id):
                     transcript_entries.append(build_reasoning_transcript_entry(
                         entry_id=effective_id,
@@ -3497,12 +3623,12 @@ def route_event(
     protocol: RuntimeProtocol,
     *,
     label: Optional[str],
-    payload: Any,
+    payload: object,
     thread_id: Optional[str],
     turn_id: Optional[str],
     conversation_id: Optional[str] = None,
-    extract_item_text: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, str]]]] = None,
-) -> Dict[str, Any]:
+    extract_item_text: Optional[Callable[[JSONDict], Optional[Dict[str, str]]]] = None,
+) -> JSONDict:
     return CodexEventRouter().route_event(
         protocol,
         label=label,

@@ -9,7 +9,7 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, cast
 
 from agent_log_server.prompt_context import build_effective_prompt_context
 from agent_log_server.te2_mcp_config import (
@@ -19,6 +19,9 @@ from agent_log_server.te2_mcp_config import (
 from .dependencies import is_android_termux as _is_android_termux
 from .dependencies import recommended_codex_install_command as _recommended_codex_install_command
 from .dependencies import recommended_codex_package as _recommended_codex_package
+
+JSONDict = Dict[str, object]
+JSONList = List[object]
 
 _server_root: Optional[Path] = None
 _extensions_dir: Optional[Path] = None
@@ -108,22 +111,22 @@ class RuntimeProtocol:
     version_key: str
     cache_dir: Path
     schema_path: Path
-    definitions: Dict[str, Any]
-    request_params: Dict[str, Dict[str, Any]]
-    responses: Dict[str, Dict[str, Any]]
-    server_requests: Dict[str, Dict[str, Any]]
-    server_request_responses: Dict[str, Dict[str, Any]]
-    notifications: Dict[str, Dict[str, Any]]
-    events: Dict[str, Dict[str, Any]]
+    definitions: JSONDict
+    request_params: Dict[str, JSONDict]
+    responses: Dict[str, JSONDict]
+    server_requests: Dict[str, JSONDict]
+    server_request_responses: Dict[str, JSONDict]
+    notifications: Dict[str, JSONDict]
+    events: Dict[str, JSONDict]
     server_request_semantics: Dict[str, ProtocolSemanticSpec]
     notification_semantics: Dict[str, ProtocolSemanticSpec]
     event_semantics: Dict[str, ProtocolSemanticSpec]
-    settings_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    settings_cache: Dict[str, JSONDict] = field(default_factory=dict)
 
-    def request_schema(self, method: str) -> Optional[Dict[str, Any]]:
+    def request_schema(self, method: str) -> Optional[JSONDict]:
         return self.request_params.get(method.lower())
 
-    def response_schema(self, method: str) -> Optional[Dict[str, Any]]:
+    def response_schema(self, method: str) -> Optional[JSONDict]:
         normalized = method.lower()
         schema = self.responses.get(normalized)
         if isinstance(schema, dict):
@@ -143,13 +146,13 @@ class RuntimeProtocol:
                 return schema
         return None
 
-    def notification_schema(self, method: str) -> Optional[Dict[str, Any]]:
+    def notification_schema(self, method: str) -> Optional[JSONDict]:
         return self.notifications.get(method.lower())
 
-    def server_request_schema(self, method: str) -> Optional[Dict[str, Any]]:
+    def server_request_schema(self, method: str) -> Optional[JSONDict]:
         return self.server_requests.get(method.lower())
 
-    def server_request_response_schema(self, method: str) -> Optional[Dict[str, Any]]:
+    def server_request_response_schema(self, method: str) -> Optional[JSONDict]:
         return self.server_request_responses.get(method.lower())
 
     def server_request_spec(self, method: str) -> Optional[ProtocolSemanticSpec]:
@@ -167,7 +170,7 @@ class RuntimeProtocol:
     def has_event_type(self, event_type: str) -> bool:
         return event_type in self.events
 
-    def event_schema(self, event_type: str) -> Optional[Dict[str, Any]]:
+    def event_schema(self, event_type: str) -> Optional[JSONDict]:
         return self.events.get(event_type)
 
     def event_spec(self, event_type: str) -> Optional[ProtocolSemanticSpec]:
@@ -239,7 +242,7 @@ def _schema_options(values: List[str]) -> List[Dict[str, str]]:
     return [{"value": value, "label": _display_label(value)} for value in values]
 
 
-def _expand_path(raw: Any) -> Optional[str]:
+def _expand_path(raw: object) -> Optional[str]:
     if not isinstance(raw, str):
         return None
     text = raw.strip()
@@ -260,6 +263,10 @@ def _generated_schema_files(root: Path, limit: int = 24) -> List[str]:
         return files
     overflow = len(files) - limit
     return files[:limit] + [f"... (+{overflow} more)"]
+
+def _json_dict_loads(text: str) -> JSONDict:
+    return _dict_value(cast(object, json.loads(text)))
+
 
 
 def _codex_runtime_context() -> str:
@@ -401,42 +408,49 @@ async def _ensure_schema_bundle() -> tuple[str, str, Path]:
     return version_raw, version_key, schema_path
 
 
-def _resolve_schema(spec: Any, definitions: Dict[str, Any]) -> Dict[str, Any]:
+def _resolve_schema(spec: object, definitions: JSONDict) -> JSONDict:
     if not isinstance(spec, dict):
         return {}
-    if "$ref" in spec:
-        ref = spec["$ref"]
+    spec_dict = _dict_value(spec)
+    if "$ref" in spec_dict:
+        ref = spec_dict["$ref"]
         if isinstance(ref, str) and ref.startswith("#/definitions/"):
             return _resolve_schema(definitions.get(ref.rsplit("/", 1)[-1], {}), definitions)
         return {}
-    if isinstance(spec.get("allOf"), list):
-        merged: Dict[str, Any] = {k: v for k, v in spec.items() if k != "allOf"}
-        merged_props: Dict[str, Any] = {}
+    all_of = spec_dict.get("allOf")
+    if isinstance(all_of, list):
+        merged: JSONDict = {k: v for k, v in spec_dict.items() if k != "allOf"}
+        merged_props: JSONDict = {}
         merged_required: List[str] = []
-        for part in spec["allOf"]:
+        for part in all_of:
             resolved = _resolve_schema(part, definitions)
-            if isinstance(resolved.get("properties"), dict):
-                merged_props.update(resolved["properties"])
-            if isinstance(resolved.get("required"), list):
-                merged_required.extend(str(item) for item in resolved["required"])
+            resolved_props = _dict_value(resolved.get("properties"))
+            if resolved_props:
+                merged_props.update(resolved_props)
+            resolved_required = resolved.get("required")
+            if isinstance(resolved_required, list):
+                merged_required.extend(str(item) for item in resolved_required)
             for key, value in resolved.items():
                 if key in {"properties", "required"}:
                     continue
                 merged.setdefault(key, value)
-        if isinstance(merged.get("properties"), dict):
-            merged_props.update(merged["properties"])
+        merged_existing_props = _dict_value(merged.get("properties"))
+        if merged_existing_props:
+            merged_props.update(merged_existing_props)
         if merged_props:
             merged["properties"] = merged_props
-        if merged_required or isinstance(merged.get("required"), list):
-            merged["required"] = list(dict.fromkeys(merged_required + list(merged.get("required") or [])))
+        merged_existing_required = merged.get("required")
+        if merged_required or isinstance(merged_existing_required, list):
+            existing_required_items = [str(item) for item in merged_existing_required] if isinstance(merged_existing_required, list) else []
+            merged["required"] = list(dict.fromkeys(merged_required + existing_required_items))
         return merged
-    return spec
+    return spec_dict
 
 
-def _schema_string_enums(spec: Any, definitions: Dict[str, Any]) -> List[str]:
+def _schema_string_enums(spec: object, definitions: JSONDict) -> List[str]:
     values: List[str] = []
 
-    def collect(node: Any) -> None:
+    def collect(node: object) -> None:
         resolved = _resolve_schema(node, definitions)
         if not isinstance(resolved, dict):
             return
@@ -455,10 +469,10 @@ def _schema_string_enums(spec: Any, definitions: Dict[str, Any]) -> List[str]:
     return values
 
 
-def _schema_tagged_union_variants(spec: Any, definitions: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    variants: Dict[str, Dict[str, Any]] = {}
+def _schema_tagged_union_variants(spec: object, definitions: JSONDict) -> Dict[str, JSONDict]:
+    variants: Dict[str, JSONDict] = {}
 
-    def collect(node: Any) -> None:
+    def collect(node: object) -> None:
         resolved = _resolve_schema(node, definitions)
         if not isinstance(resolved, dict):
             return
@@ -488,7 +502,7 @@ def _semantic_tokens(name: str, separator: str) -> List[str]:
     return tokens
 
 
-def _build_semantic_spec(name: str, schema: Dict[str, Any], *, separator: str) -> ProtocolSemanticSpec:
+def _build_semantic_spec(name: str, schema: JSONDict, *, separator: str) -> ProtocolSemanticSpec:
     props = _schema_properties(schema)
     properties = tuple(key for key in props if key not in {"type", "method"})
     property_set = set(properties)
@@ -522,21 +536,21 @@ def _build_semantic_spec(name: str, schema: Dict[str, Any], *, separator: str) -
     )
 
 
-def _build_notification_semantics(notifications: Dict[str, Dict[str, Any]]) -> Dict[str, ProtocolSemanticSpec]:
+def _build_notification_semantics(notifications: Dict[str, JSONDict]) -> Dict[str, ProtocolSemanticSpec]:
     return {
         name.lower(): _build_semantic_spec(name.lower(), schema, separator="/")
         for name, schema in notifications.items()
     }
 
 
-def _build_server_request_semantics(server_requests: Dict[str, Dict[str, Any]]) -> Dict[str, ProtocolSemanticSpec]:
+def _build_server_request_semantics(server_requests: Dict[str, JSONDict]) -> Dict[str, ProtocolSemanticSpec]:
     return {
         name.lower(): _build_semantic_spec(name.lower(), schema, separator="/")
         for name, schema in server_requests.items()
     }
 
 
-def _build_event_semantics(events: Dict[str, Dict[str, Any]]) -> Dict[str, ProtocolSemanticSpec]:
+def _build_event_semantics(events: Dict[str, JSONDict]) -> Dict[str, ProtocolSemanticSpec]:
     return {
         name: _build_semantic_spec(name, schema, separator="_")
         for name, schema in events.items()
@@ -544,7 +558,7 @@ def _build_event_semantics(events: Dict[str, Dict[str, Any]]) -> Dict[str, Proto
 
 
 def _relax_initialize_response_for_patched_app_server(
-    responses: Dict[str, Dict[str, Any]],
+    responses: Dict[str, JSONDict],
 ) -> None:
     schema = responses.get("initialize")
     if not isinstance(schema, dict):
@@ -559,10 +573,11 @@ def _relax_initialize_response_for_patched_app_server(
     schema["required"] = [item for item in required if item != "codexHome"]
 
 
-def _build_request_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    registry: Dict[str, Dict[str, Any]] = {}
-    union = definitions.get("ClientRequest", {})
-    for variant in union.get("oneOf") or []:
+def _build_request_registry(definitions: JSONDict) -> Dict[str, JSONDict]:
+    registry: Dict[str, JSONDict] = {}
+    union = _dict_value(definitions.get("ClientRequest"))
+    one_of = union.get("oneOf")
+    for variant in one_of if isinstance(one_of, list) else []:
         if not isinstance(variant, dict):
             continue
         props = variant.get("properties")
@@ -584,14 +599,14 @@ def _request_params_sidecar_path(cache_dir: Path, method: str) -> Path:
     return cache_dir / "v2" / f'{"".join(parts)}Params.json'
 
 
-def _load_request_sidecar_definitions(cache_dir: Path) -> Dict[str, Any]:
-    definitions: Dict[str, Any] = {}
+def _load_request_sidecar_definitions(cache_dir: Path) -> JSONDict:
+    definitions: JSONDict = {}
     sidecar_dir = cache_dir / "v2"
     if not sidecar_dir.exists():
         return definitions
     for path in sidecar_dir.glob("*Params.json"):
         try:
-            schema = json.loads(path.read_text(encoding="utf-8"))
+            schema = _json_dict_loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
         sidecar_definitions = schema.get("definitions")
@@ -602,10 +617,10 @@ def _load_request_sidecar_definitions(cache_dir: Path) -> Dict[str, Any]:
 
 def _load_request_sidecar_registry(
     cache_dir: Path,
-    definitions: Dict[str, Any],
+    definitions: JSONDict,
     methods: Iterable[str],
-) -> Dict[str, Dict[str, Any]]:
-    registry: Dict[str, Dict[str, Any]] = {}
+) -> Dict[str, JSONDict]:
+    registry: Dict[str, JSONDict] = {}
     for method in methods:
         if not isinstance(method, str):
             continue
@@ -613,7 +628,7 @@ def _load_request_sidecar_registry(
         if not path.exists():
             continue
         try:
-            schema = json.loads(path.read_text(encoding="utf-8"))
+            schema = _json_dict_loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
         registry[method.lower()] = _resolve_schema(schema, definitions)
@@ -645,7 +660,7 @@ def _method_lookup_tokens(value: str) -> List[str]:
 
 def _infer_response_definition_name(
     method: str,
-    definitions: Dict[str, Any],
+    definitions: JSONDict,
 ) -> Optional[str]:
     normalized = method.lower().strip()
     if not normalized:
@@ -689,8 +704,8 @@ def _infer_response_definition_name(
 
 def _resolve_response_schema_from_definitions(
     method: str,
-    definitions: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
+    definitions: JSONDict,
+) -> Optional[JSONDict]:
     raw_method = str(method or "").strip()
     normalized = raw_method.lower()
     candidates: List[str] = []
@@ -708,10 +723,10 @@ def _resolve_response_schema_from_definitions(
 
 
 def _build_response_registry(
-    definitions: Dict[str, Any],
+    definitions: JSONDict,
     methods: Iterable[str],
-) -> Dict[str, Dict[str, Any]]:
-    registry: Dict[str, Dict[str, Any]] = {}
+) -> Dict[str, JSONDict]:
+    registry: Dict[str, JSONDict] = {}
     missing: List[str] = []
     normalized_methods = sorted({
         method.lower()
@@ -741,20 +756,20 @@ def _build_runtime_protocol_from_schema(
     version_key: str,
     schema_path: Path,
 ) -> RuntimeProtocol:
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema = _json_dict_loads(schema_path.read_text(encoding="utf-8"))
     server_request_path = schema_path.parent / "ServerRequest.json"
     server_request_schema = (
-        json.loads(server_request_path.read_text(encoding="utf-8"))
+        _json_dict_loads(server_request_path.read_text(encoding="utf-8"))
         if server_request_path.exists()
         else {"oneOf": [], "definitions": schema.get("definitions") if isinstance(schema.get("definitions"), dict) else {}}
     )
     definitions = schema.get("definitions")
     if not isinstance(definitions, dict):
         raise RuntimeError(f"runtime schema missing definitions: {schema_path}")
-    merged_definitions: Dict[str, Any] = {}
+    merged_definitions: JSONDict = {}
     legacy_schema_path = _legacy_schema_bundle_path(schema_path.parent)
     if legacy_schema_path.exists():
-        legacy_schema = json.loads(legacy_schema_path.read_text(encoding="utf-8"))
+        legacy_schema = _json_dict_loads(legacy_schema_path.read_text(encoding="utf-8"))
         legacy_definitions = legacy_schema.get("definitions")
         if isinstance(legacy_definitions, dict):
             merged_definitions.update(legacy_definitions)
@@ -815,10 +830,10 @@ def _refresh_runtime_protocol_from_disk(protocol: RuntimeProtocol) -> None:
 
 
 def _build_server_request_response_registry(
-    definitions: Dict[str, Any],
+    definitions: JSONDict,
     methods: Iterable[str],
-) -> Dict[str, Dict[str, Any]]:
-    registry: Dict[str, Dict[str, Any]] = {}
+) -> Dict[str, JSONDict]:
+    registry: Dict[str, JSONDict] = {}
     missing: List[str] = []
     normalized_methods = sorted({
         method.lower()
@@ -843,11 +858,12 @@ def _build_server_request_response_registry(
     return registry
 
 
-def _build_server_request_registry(schema: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    registry: Dict[str, Dict[str, Any]] = {}
-    definitions: Dict[str, Any] = _dict_value(schema.get("definitions"))
+def _build_server_request_registry(schema: JSONDict) -> Dict[str, JSONDict]:
+    registry: Dict[str, JSONDict] = {}
+    definitions: JSONDict = _dict_value(schema.get("definitions"))
     union = schema
-    for variant in union.get("oneOf") or []:
+    one_of = union.get("oneOf")
+    for variant in one_of if isinstance(one_of, list) else []:
         if not isinstance(variant, dict):
             continue
         props = variant.get("properties")
@@ -864,10 +880,11 @@ def _build_server_request_registry(schema: Dict[str, Any]) -> Dict[str, Dict[str
     return registry
 
 
-def _build_notification_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    registry: Dict[str, Dict[str, Any]] = {}
-    union = definitions.get("ServerNotification", {})
-    for variant in union.get("oneOf") or []:
+def _build_notification_registry(definitions: JSONDict) -> Dict[str, JSONDict]:
+    registry: Dict[str, JSONDict] = {}
+    union = _dict_value(definitions.get("ServerNotification"))
+    one_of = union.get("oneOf")
+    for variant in one_of if isinstance(one_of, list) else []:
         if not isinstance(variant, dict):
             continue
         props = variant.get("properties")
@@ -884,10 +901,11 @@ def _build_notification_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[
     return registry
 
 
-def _build_event_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    registry: Dict[str, Dict[str, Any]] = {}
-    union = definitions.get("EventMsg", {})
-    for variant in union.get("oneOf") or []:
+def _build_event_registry(definitions: JSONDict) -> Dict[str, JSONDict]:
+    registry: Dict[str, JSONDict] = {}
+    union = _dict_value(definitions.get("EventMsg"))
+    one_of = union.get("oneOf")
+    for variant in one_of if isinstance(one_of, list) else []:
         if not isinstance(variant, dict):
             continue
         props = variant.get("properties")
@@ -904,11 +922,11 @@ def _build_event_registry(definitions: Dict[str, Any]) -> Dict[str, Dict[str, An
 
 
 def _decode_schema_value(
-    value: Any,
-    schema: Dict[str, Any],
-    definitions: Dict[str, Any],
+    value: object,
+    schema: JSONDict,
+    definitions: JSONDict,
     path: str,
-) -> Any:
+) -> object:
     resolved = _resolve_schema(schema, definitions)
     if not isinstance(resolved, dict):
         return value
@@ -951,7 +969,8 @@ def _decode_schema_value(
             return None
         raise _SchemaDecodeError(f"{path}: expected {type_decl or 'value'}, got null")
 
-    props = resolved.get("properties") if isinstance(resolved.get("properties"), dict) else None
+    props_dict = _dict_value(resolved.get("properties"))
+    props = props_dict if props_dict else None
     additional = resolved.get("additionalProperties", True)
     if type_decl == "object" or props is not None or additional is not True:
         if not isinstance(value, dict):
@@ -961,8 +980,9 @@ def _decode_schema_value(
         for key in required_fields:
             if key not in value:
                 raise _SchemaDecodeError(f"{path}.{key}: missing required property")
-        output: Dict[str, Any] = {}
-        for key, item in value.items():
+        output: JSONDict = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
             next_path = f"{path}.{key}"
             prop_schema = props.get(key) if props else None
             if isinstance(prop_schema, dict):
@@ -1011,8 +1031,8 @@ def _decode_schema_value(
 def decode_response_result(
     protocol: RuntimeProtocol,
     method: str,
-    result: Any,
-) -> Any:
+    result: object,
+) -> object:
     schema = protocol.response_schema(method)
     if not isinstance(schema, dict):
         raise RuntimeError(f"runtime protocol missing response schema for {method}")
@@ -1030,8 +1050,8 @@ def decode_response_result(
 def encode_server_request_result(
     protocol: RuntimeProtocol,
     method: str,
-    result: Any,
-) -> Any:
+    result: object,
+) -> object:
     schema = protocol.server_request_response_schema(method)
     if not isinstance(schema, dict):
         raise RuntimeError(f"runtime protocol missing server-request response schema for {method}")
@@ -1057,11 +1077,11 @@ def _match_allowed_string(value: str, allowed: List[str]) -> Optional[str]:
 
 
 def _coerce_schema_value(
-    value: Any,
-    schema: Dict[str, Any],
-    definitions: Dict[str, Any],
-    settings: Dict[str, Any],
-) -> Any:
+    value: object,
+    schema: JSONDict,
+    definitions: JSONDict,
+    settings: JSONDict,
+) -> object:
     if value is None or value == "":
         return None
 
@@ -1096,7 +1116,7 @@ def _coerce_schema_value(
             for tag, variant in tagged_variants.items():
                 if _normalize_identifier(value) != _normalize_identifier(tag):
                     continue
-                out: Dict[str, Any] = {"type": tag}
+                out: JSONDict = {"type": tag}
                 props = _schema_properties(variant)
                 if tag == "workspaceWrite" and "writableRoots" in props:
                     cwd = _expand_path(settings.get("cwd"))
@@ -1117,7 +1137,7 @@ def _coerce_schema_value(
     return None
 
 
-def _first_setting(settings: Dict[str, Any], keys: List[str]) -> Any:
+def _first_setting(settings: JSONDict, keys: List[str]) -> object:
     for key in keys:
         value = settings.get(key)
         if value is None or value == "":
@@ -1127,10 +1147,10 @@ def _first_setting(settings: Dict[str, Any], keys: List[str]) -> Any:
 
 
 def _apply_setting_binding(
-    params: Dict[str, Any],
-    props: Dict[str, Any],
-    definitions: Dict[str, Any],
-    settings: Dict[str, Any],
+    params: JSONDict,
+    props: JSONDict,
+    definitions: JSONDict,
+    settings: JSONDict,
     source_keys: List[str],
     target_candidates: List[str],
 ) -> None:
@@ -1147,7 +1167,7 @@ def _apply_setting_binding(
         return
 
 
-def _resolve_object_schema(spec: Any, definitions: Dict[str, Any]) -> Dict[str, Any]:
+def _resolve_object_schema(spec: object, definitions: JSONDict) -> JSONDict:
     resolved = _resolve_schema(spec, definitions)
     if isinstance(resolved.get("properties"), dict) or resolved.get("type") == "object":
         return resolved
@@ -1162,21 +1182,21 @@ def _resolve_object_schema(spec: Any, definitions: Dict[str, Any]) -> Dict[str, 
     return resolved
 
 
-def _dict_value(value: Any) -> Dict[str, Any]:
+def _dict_value(value: object) -> JSONDict:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _schema_properties(spec: Any) -> Dict[str, Any]:
+def _schema_properties(spec: object) -> JSONDict:
     if isinstance(spec, dict):
         return _dict_value(spec.get("properties"))
     return {}
 
 
 def _build_collaboration_mode_setting(
-    props: Dict[str, Any],
-    definitions: Dict[str, Any],
-    settings: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
+    props: JSONDict,
+    definitions: JSONDict,
+    settings: JSONDict,
+) -> Optional[JSONDict]:
     schema = props.get("collaborationMode")
     if not isinstance(schema, dict) and isinstance(definitions.get("CollaborationMode"), dict):
         schema = {"$ref": "#/definitions/CollaborationMode"}
@@ -1205,7 +1225,7 @@ def _build_collaboration_mode_setting(
     if not isinstance(model_value, str) or not model_value.strip():
         return None
 
-    nested_settings: Dict[str, Any] = {}
+    nested_settings: JSONDict = {}
     model_schema = nested_props.get("model")
     if isinstance(model_schema, dict):
         coerced_model = _coerce_schema_value(model_value, model_schema, definitions, settings)
@@ -1235,7 +1255,7 @@ def _build_collaboration_mode_setting(
     }
 
 
-def build_initialize_params(protocol: RuntimeProtocol) -> Dict[str, Any]:
+def build_initialize_params(protocol: RuntimeProtocol) -> JSONDict:
     schema = protocol.request_schema("initialize")
     if not isinstance(schema, dict):
         raise RuntimeError("runtime protocol missing request schema for initialize")
@@ -1246,7 +1266,7 @@ def build_initialize_params(protocol: RuntimeProtocol) -> Dict[str, Any]:
     if not client_info_props:
         raise RuntimeError("runtime protocol missing initialize.clientInfo schema")
 
-    client_info: Dict[str, Any] = {}
+    client_info: JSONDict = {}
     for key, value in (
         ("name", "agent_log_server"),
         ("title", "Agent Log Server"),
@@ -1261,7 +1281,7 @@ def build_initialize_params(protocol: RuntimeProtocol) -> Dict[str, Any]:
     if not client_info.get("name") or not client_info.get("version"):
         raise RuntimeError("runtime protocol requires initialize.clientInfo.name and version")
 
-    params: Dict[str, Any] = {"clientInfo": client_info}
+    params: JSONDict = {"clientInfo": client_info}
 
     capabilities_schema = _resolve_object_schema(props.get("capabilities"), protocol.definitions)
     capability_props = _schema_properties(capabilities_schema)
@@ -1287,16 +1307,16 @@ def _agent_pty_mcp_server_script_path() -> Path:
 
 def _build_agent_pty_blocks_mcp_server(
     *,
-    cwd: Any,
-    existing_server: Any = None,
-    conversation_id: Any = None,
-) -> Optional[Dict[str, Any]]:
+    cwd: object,
+    existing_server: object = None,
+    conversation_id: object = None,
+) -> Optional[JSONDict]:
     launch_cwd = _expand_path(cwd)
     if not launch_cwd:
         return None
 
     command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
-    merged: Dict[str, Any] = dict(existing_server) if isinstance(existing_server, dict) else {}
+    merged: JSONDict = dict(existing_server) if isinstance(existing_server, dict) else {}
     env = _dict_value(merged.get("env"))
     env["PWD"] = launch_cwd
     if isinstance(conversation_id, str) and conversation_id.strip():
@@ -1312,25 +1332,25 @@ def _build_agent_pty_blocks_mcp_server(
 
 
 def _build_codex_ext_thread_config(
-    existing_config: Any,
+    existing_config: object,
     *,
     te2_enabled: bool,
     base_url: Optional[str],
-    cwd: Any,
+    cwd: object,
     force_te2_mcp_entry: bool = False,
-    conversation_id: Any = None,
-) -> Optional[Dict[str, Any]]:
+    conversation_id: object = None,
+) -> Optional[JSONDict]:
     merged = build_codex_thread_config(
         existing_config,
         te2_enabled=te2_enabled,
         base_url=base_url,
         force_te2_mcp_entry=force_te2_mcp_entry,
     )
-    config: Dict[str, Any] = dict(merged) if isinstance(merged, dict) else {}
+    config: JSONDict = dict(merged) if isinstance(merged, dict) else {}
 
     existing_mcp = config.get("mcp_servers")
     if existing_mcp in (None, ""):
-        mcp_servers: Dict[str, Any] = {}
+        mcp_servers: JSONDict = {}
     elif isinstance(existing_mcp, dict):
         mcp_servers = dict(existing_mcp)
     else:
@@ -1355,18 +1375,18 @@ def _build_codex_ext_thread_config(
 def build_request_params(
     protocol: RuntimeProtocol,
     method: str,
-    settings: Dict[str, Any],
+    settings: JSONDict,
     *,
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     text: Optional[str] = None,
     force_te2_config: bool = False,
-) -> Dict[str, Any]:
+) -> JSONDict:
     schema = protocol.request_schema(method)
     if not isinstance(schema, dict):
         raise RuntimeError(f"runtime protocol missing request schema for {method}")
     props = _schema_properties(schema)
-    params: Dict[str, Any] = {}
+    params: JSONDict = {}
 
     if "threadId" in props:
         if not thread_id:
@@ -1397,10 +1417,11 @@ def build_request_params(
         params["collaborationMode"] = collaboration_mode
 
     if "config" in props:
+        te2_base_url = normalized_settings.get("te2_base_url")
         config = _build_codex_ext_thread_config(
             normalized_settings.get("config"),
             te2_enabled=te2_mcp_integration_enabled(normalized_settings),
-            base_url=normalized_settings.get("te2_base_url"),
+            base_url=te2_base_url if isinstance(te2_base_url, str) else None,
             cwd=normalized_settings.get("cwd"),
             force_te2_mcp_entry=force_te2_config,
             conversation_id=normalized_settings.get("conversation_id"),
@@ -1423,8 +1444,8 @@ def build_request_params(
 
 def build_thread_runtime_signature_payload(
     protocol: RuntimeProtocol,
-    settings: Dict[str, Any],
-) -> Dict[str, Any]:
+    settings: JSONDict,
+) -> JSONDict:
     return build_request_params(
         protocol,
         "thread/start",
@@ -1433,7 +1454,7 @@ def build_thread_runtime_signature_payload(
     )
 
 
-def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Dict[str, Any]:
+def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> JSONDict:
     cached = protocol.settings_cache.get(extension_id)
     if cached is not None:
         return cached

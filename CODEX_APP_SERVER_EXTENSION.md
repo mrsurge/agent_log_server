@@ -114,8 +114,12 @@ When loading a rollout, the `thread_id` is extracted and set immediately, so rol
 ```
 Frontend                    Python Server                 codex-app-server
    │                              │                              │
-   │ SIO/HTTP: send_message       │                              │
-   │ {conversation_id, text}      │                              │
+   │ Socket.IO runtime send       │                              │
+   │ `/rpc/conversations`         │                              │
+   │ `conversation.send`          │                              │
+   │ (legacy `/appserver`         │                              │
+   │  `send_message` shim also    │                              │
+   │  reaches the same backend)   │                              │
    │─────────────────────────────>│                              │
    │                              │                              │
    │                              │ Load meta.json               │
@@ -126,24 +130,34 @@ Frontend                    Python Server                 codex-app-server
    │                              │ stdout: turn/started         │
    │                              │<─────────────────────────────│
    │                              │                              │
-   │ WS: turn/started             │                              │
+   │ WS: `rpc.notify`             │                              │
+   │ `conversation.status`        │                              │
+   │ (legacy `appserver_event`)   │                              │
    │<─────────────────────────────│                              │
    │                              │                              │
    │                              │ stdout: item/started         │
    │                              │ (reasoning, message, etc)    │
    │                              │<─────────────────────────────│
    │                              │                              │
-   │ WS: codex_event (deltas)     │                              │
+   │ WS: `rpc.notify` deltas      │                              │
+   │ `conversation.message.*`     │                              │
+   │ / `conversation.reasoning.*` │                              │
+   │ / tool + command events      │                              │
+   │ (legacy `appserver_event`)   │                              │
    │<─────────────────────────────│                              │
    │                              │                              │
    │                              │ stdout: turn/completed       │
    │                              │<─────────────────────────────│
    │                              │                              │
-   │ WS: turn/completed           │                              │
+   │ WS: `rpc.notify` final       │                              │
+   │ status/message events        │                              │
+   │ (legacy `appserver_event`)   │                              │
    │<─────────────────────────────│                              │
 ```
 
-The frontend only knows `conversation_id` on the normal send path. Thread lifecycle is negotiated by the Python runtime.
+The frontend only knows `conversation_id` on the normal send path. During rollout that request
+can travel as `conversation.send` on `/rpc/conversations` or legacy `send_message` on
+`/appserver`; thread lifecycle is still negotiated by the Python runtime.
 
 ### B. File Change Approval Flow
 
@@ -159,8 +173,10 @@ codex-app-server              Python Server                    Frontend
       │                              │ Persist pending approval     │
       │                              │ into meta.json               │
       │                              │                              │
-      │                              │ WS: appserver_event          │
-      │                              │ {type: "approval", ...}      │
+      │                              │ WS: `rpc.notify`             │
+      │                              │ `conversation.approval.`     │
+      │                              │ `request`                    │
+      │                              │ (legacy `appserver_event`)   │
       │                              │─────────────────────────────>│
       │                              │                              │
       │                              │      [User clicks Accept]    │
@@ -460,16 +476,20 @@ Legacy appserver debug mode can mirror raw appserver events to `~/.cache/agent_l
 
 | Event | Data | Description |
 |-------|------|-------------|
-| `appserver_event` | `{type, ...}` | Generic live event stream |
+| `rpc.notify` on `/rpc/conversations` | `{jsonrpc: "2.0", method, params}` | Canonical lane for migrated conversation-scoped live events |
+| `appserver_event` on `/appserver` | `{type, ...}` | Compatibility shim for legacy frontend modules during rollout |
 | `server_status` | `{status}` | Server state change |
-| `appserver_event` approval payload | `{type: "approval", request_id, payload}` | Needs user approval |
+| legacy `appserver_event` approval payload | `{type: "approval", request_id, payload}` | Legacy compatibility approval event during rollout |
 | `plan` | `{steps: [{step, status}]}` | Completed plan from turn |
 | `error` | `{message}` | Error from codex-app-server |
 | `warning` | `{message}` | Warning from codex-app-server |
 
 ### Client → Server
 
-Live/runtime UI actions use Socket.IO. HTTP endpoints remain for conversation data loading, admin, and debug surfaces; they are not the runtime fallback contract for shared UI/backend behavior.
+Live/runtime UI actions use Socket.IO. Conversation replay/send/interrupt/compact now ride
+`/rpc/conversations` in RPC mode, while `/appserver` remains the compatibility shim during
+rollout. HTTP endpoints remain for conversation data loading, admin, and debug surfaces; they
+are not the runtime fallback contract for shared UI/backend behavior.
 
 ## Diff Rendering
 
@@ -708,7 +728,9 @@ Different RPC methods accept different parameters (per codex-app-server schema):
 **Problem:** the frontend should not decide whether a thread is or is not loaded in app-server memory.
 
 **Solution:**
-- frontend sends a generic `send_message` against `conversation_id`
+- frontend sends a generic conversation-scoped request against `conversation_id`
+  (`conversation.send` on `/rpc/conversations`; legacy `send_message` on `/appserver`
+  remains the compatibility shim)
 - backend checks `meta.json.thread_id`
 - if there is no thread yet, backend performs `thread/start` and then `turn/start`
 - if there is a thread and the transport has not resumed it yet, or thread-level runtime settings changed, backend performs `thread/resume` and then `turn/start`
@@ -719,6 +741,8 @@ Different RPC methods accept different parameters (per codex-app-server schema):
 - frontend stays `conversation_id`-only
 - backend owns thread lifecycle
 - backend also owns the split between thread-level settings and turn-only overrides
+- interrupt and compaction follow the same ownership model via `conversation.interrupt` /
+  `conversation.compact` (or the legacy shim equivalents)
 - the same ownership model matches extension backends that use session IDs instead of thread IDs
 
 ### Generic Runtime Options (Implemented)

@@ -8,7 +8,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, NoReturn, Optional, Tuple
+from typing import Annotated, Dict, List, NoReturn, Optional, Tuple
 from contextlib import suppress, asynccontextmanager, redirect_stdout
 import hashlib
 import re
@@ -62,6 +62,7 @@ from agent_log_server.te2_mcp_config import (
     te2_mcp_integration_enabled,
 )
 from agent_log_server import pending_context as _pending_ctx
+from agent_log_server.typing_helpers import ObjectMap, RequestId
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -122,8 +123,13 @@ async def _lifespan(app: FastAPI):
             await warmup_task
     # Cleanup extensions
     for ext_id in ext_loader.list_extensions():
+        if not isinstance(ext_id, dict):
+            continue
+        extension_id = ext_id.get("id")
+        if not isinstance(extension_id, str) or not extension_id:
+            continue
         with suppress(Exception):
-            await ext_loader.shutdown_extension(ext_id.get("id", ""))
+            await ext_loader.shutdown_extension(extension_id)
     with suppress(Exception):
         _pending_ctx.stop_watcher()
 
@@ -180,20 +186,20 @@ _CONVERSATIONS_RPC_NOTIFICATION_METHODS: dict[str, str] = {
 }
 
 
-def _ipc_error(msg: object) -> Dict[str, Any]:
+def _ipc_error(msg: object) -> ObjectMap:
     return {"ok": False, "error": str(msg)}
 
 
-async def _ipc_emit(event_name: str, payload: Dict[str, Any], sid: Optional[str] = None) -> None:
+async def _ipc_emit(event_name: str, payload: ObjectMap, sid: Optional[str] = None) -> None:
     if sid:
         await socketio_server.emit(event_name, payload, namespace=_IPC_NAMESPACE, to=sid)
         return
     await socketio_server.emit(event_name, payload, namespace=_IPC_NAMESPACE)
 
 
-def _pending_approval_turn_id(descriptor: Dict[str, Any]) -> str:
+def _pending_approval_turn_id(descriptor: ObjectMap) -> str:
     render_event_raw = descriptor.get("render_event")
-    render_event: Dict[str, Any] = render_event_raw if isinstance(render_event_raw, dict) else {}
+    render_event = _coerce_json_object(render_event_raw)
     return str(descriptor.get("turn_id") or render_event.get("turn_id") or "").strip()
 
 
@@ -212,11 +218,11 @@ def _conversation_rpc_notification_method(evt_type: object) -> str | None:
 
 def _iter_pending_approvals(
     *,
-    request_method: Any = None,
-    conversation_id: Any = None,
-    turn_id: Any = None,
-    request_id: Any = None,
-) -> List[Tuple[str, str, Dict[str, Any]]]:
+    request_method: str | None = None,
+    conversation_id: str | None = None,
+    turn_id: str | None = None,
+    request_id: RequestId = None,
+) -> list[tuple[str, str, ObjectMap]]:
     request_method_text = str(request_method or "").strip().lower()
     request_id_text = str(request_id or "").strip()
     turn_id_text = str(turn_id or "").strip()
@@ -225,7 +231,7 @@ def _iter_pending_approvals(
         conversation_id_text = _sanitize_conversation_id(conversation_id_text)
     conversation_ids = [conversation_id_text] if conversation_id_text else _conversation_ids_from_disk()
 
-    matches: List[Tuple[str, str, Dict[str, Any]]] = []
+    matches: list[tuple[str, str, ObjectMap]] = []
     seen_conversations: set[str] = set()
     for candidate_conversation_id in conversation_ids:
         conversation_id_value = _sanitize_conversation_id(str(candidate_conversation_id or "").strip())
@@ -253,7 +259,7 @@ def _iter_pending_approvals(
     return matches
 
 
-def _find_pending_approval(request_id: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+def _find_pending_approval(request_id: RequestId) -> tuple[str, ObjectMap] | None:
     request_id_text = str(request_id or "").strip()
     if not request_id_text:
         return None
@@ -266,9 +272,9 @@ def _find_pending_approval(request_id: Any) -> Optional[Tuple[str, Dict[str, Any
 
 def _record_pending_approval_submission(
     conversation_id: str,
-    request_id: Any,
-    resolution: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
+    request_id: RequestId,
+    resolution: ObjectMap,
+) -> ObjectMap | None:
     conversation_id_text = _sanitize_conversation_id(str(conversation_id or "").strip())
     request_id_text = str(request_id or "").strip()
     if not conversation_id_text or not request_id_text or not _conversation_meta_path(conversation_id_text).exists():
@@ -351,7 +357,7 @@ async def _ipc_conversation_todo_changed(sid: str, data: object):
 
     meta = _load_conversation_meta(conversation_id)
     settings_raw = meta.get("settings") if isinstance(meta, dict) else None
-    settings: Dict[str, Any] = settings_raw if isinstance(settings_raw, dict) else {}
+    settings = _coerce_json_object(settings_raw)
     extension_id = str(data.get("extension_id") or settings.get("agent") or "").strip()
     if extension_id != "codex-ext-exp":
         return {"ok": True, "ignored": True, "reason": "not experimental codex", "conversation_id": conversation_id}
@@ -621,7 +627,7 @@ def _safe_b64decode(s: str) -> str:
             return raw.decode("utf-8", errors="replace")
         except Exception:
             return ""
-def _coerce_json_object(value: object) -> Dict[str, Any]:
+def _coerce_json_object(value: object) -> ObjectMap:
     if not isinstance(value, dict):
         return {}
     return {str(key): item for key, item in value.items()}
@@ -689,19 +695,19 @@ def _rg_list_files(root: Path) -> List[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
-def _meta_settings(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _meta_settings(meta: ObjectMap | None) -> ObjectMap:
     if not isinstance(meta, dict):
         return {}
     return _coerce_json_object(meta.get("settings"))
 
 
-def _ensure_pending_approvals(meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+def _ensure_pending_approvals(meta: ObjectMap) -> dict[str, ObjectMap]:
     pending = meta.get("pending_approvals")
     if not isinstance(pending, dict):
         pending = {}
         meta["pending_approvals"] = pending
         return pending
-    normalized: Dict[str, Dict[str, Any]] = {}
+    normalized: dict[str, ObjectMap] = {}
     changed = False
     for raw_request_id, descriptor in pending.items():
         request_id = str(raw_request_id or "").strip()
@@ -715,7 +721,7 @@ def _ensure_pending_approvals(meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]
     return pending
 
 
-def _codex_runtime_instance_id(meta: Optional[Dict[str, Any]] = None) -> Optional[str]:
+def _codex_runtime_instance_id(meta: ObjectMap | None = None) -> Optional[str]:
     settings = _meta_settings(meta)
     value = settings.get("appserver_shell_id")
     if isinstance(value, str) and value.strip():
@@ -725,23 +731,23 @@ def _codex_runtime_instance_id(meta: Optional[Dict[str, Any]] = None) -> Optiona
 
 def _build_pending_approval_descriptor(
     conversation_id: str,
-    request_id: Any,
+    request_id: RequestId,
     *,
     agent: Optional[str] = None,
     kind: Optional[str] = None,
     request_method: Optional[str] = None,
-    request_params: Optional[Dict[str, Any]] = None,
-    payload: Optional[Dict[str, Any]] = None,
+    request_params: ObjectMap | None = None,
+    payload: ObjectMap | None = None,
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     runtime_signature: Optional[str] = None,
     runtime_instance_id: Optional[str] = None,
-    transcript_anchor: Optional[Dict[str, Any]] = None,
+    transcript_anchor: ObjectMap | None = None,
     source: str = "live",
     created_at: Optional[str] = None,
-    render_event: Optional[Dict[str, Any]] = None,
-    meta: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
+    render_event: ObjectMap | None = None,
+    meta: ObjectMap | None = None,
+) -> ObjectMap | None:
     request_id_text = str(request_id or "").strip()
     if not request_id_text:
         return None
@@ -766,7 +772,7 @@ def _build_pending_approval_descriptor(
     resolved_request_method = str(request_method or "").strip() or None
     resolved_request_params = _coerce_json_object(request_params)
     resolved_payload = _coerce_json_object(payload)
-    normalized_render_event: Dict[str, Any]
+    normalized_render_event: ObjectMap
     if isinstance(render_event, dict):
         normalized_render_event = _coerce_json_object(render_event)
     else:
@@ -819,7 +825,7 @@ def _build_pending_approval_descriptor(
     }
 
 
-def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _upsert_pending_approval(conversation_id: str, descriptor: ObjectMap) -> ObjectMap | None:
     if not isinstance(descriptor, dict):
         return None
     request_id = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
@@ -845,21 +851,49 @@ def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -
     descriptor_transcript_anchor = descriptor.get("transcript_anchor")
     descriptor_render_event = descriptor.get("render_event")
     existing_render_event = existing.get("render_event")
+    agent_value = descriptor.get("agent")
+    agent = agent_value if isinstance(agent_value, str) and agent_value.strip() else None
+    kind_value = descriptor.get("kind")
+    kind = kind_value if isinstance(kind_value, str) and kind_value.strip() else None
+    request_method_value = descriptor.get("request_method") or existing.get("request_method")
+    request_method = (
+        request_method_value
+        if isinstance(request_method_value, str) and request_method_value.strip()
+        else None
+    )
+    thread_id_value = descriptor.get("thread_id")
+    thread_id = thread_id_value if isinstance(thread_id_value, str) and thread_id_value.strip() else None
+    turn_id_value = descriptor.get("turn_id")
+    turn_id = turn_id_value if isinstance(turn_id_value, str) and turn_id_value.strip() else None
+    runtime_signature_value = descriptor.get("runtime_signature")
+    runtime_signature = (
+        runtime_signature_value
+        if isinstance(runtime_signature_value, str) and runtime_signature_value.strip()
+        else None
+    )
+    runtime_instance_id_value = descriptor.get("runtime_instance_id")
+    runtime_instance_id = (
+        runtime_instance_id_value
+        if isinstance(runtime_instance_id_value, str) and runtime_instance_id_value.strip()
+        else None
+    )
+    created_at_value = descriptor.get("created_at") or existing.get("created_at")
+    created_at = created_at_value if isinstance(created_at_value, str) and created_at_value.strip() else None
     normalized = _build_pending_approval_descriptor(
         conversation_id,
         request_id,
-        agent=descriptor.get("agent"),
-        kind=descriptor.get("kind"),
-        request_method=descriptor.get("request_method") or existing.get("request_method"),
+        agent=agent,
+        kind=kind,
+        request_method=request_method,
         request_params=request_params,
         payload=payload,
-        thread_id=descriptor.get("thread_id"),
-        turn_id=descriptor.get("turn_id"),
-        runtime_signature=descriptor.get("runtime_signature"),
-        runtime_instance_id=descriptor.get("runtime_instance_id"),
+        thread_id=thread_id,
+        turn_id=turn_id,
+        runtime_signature=runtime_signature,
+        runtime_instance_id=runtime_instance_id,
         transcript_anchor=_coerce_json_object(descriptor_transcript_anchor),
         source=str(descriptor.get("source") or existing.get("source") or "live"),
-        created_at=descriptor.get("created_at") or existing.get("created_at"),
+        created_at=created_at,
         render_event=(
             _coerce_json_object(descriptor_render_event)
             if isinstance(descriptor_render_event, dict)
@@ -878,7 +912,7 @@ def _upsert_pending_approval(conversation_id: str, descriptor: Dict[str, Any]) -
     return normalized
 
 
-def _approval_status_from_resolution(resolution: Any) -> str:
+def _approval_status_from_resolution(resolution: object) -> str:
     result = resolution if isinstance(resolution, dict) else {}
     decision = str(result.get("decision") or "").strip().lower()
     if decision == "decline":
@@ -905,9 +939,9 @@ def _next_ask_user_msg_id(conversation_id: str) -> int:
 
 def _build_approval_handoff_event(
     conversation_id: str,
-    descriptor: Dict[str, Any],
-    resolution: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
+    descriptor: ObjectMap,
+    resolution: ObjectMap,
+) -> ObjectMap | None:
     if not isinstance(descriptor, dict):
         return None
     request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
@@ -958,7 +992,7 @@ def _build_approval_handoff_event(
 
 async def _append_approval_handoff_transcript_entry(
     conversation_id: str,
-    handoff_event: Dict[str, Any],
+    handoff_event: ObjectMap,
 ) -> None:
     payload = _coerce_json_object(handoff_event.get("payload"))
     card_id = str(handoff_event.get("card_id") or "").strip() or None
@@ -982,7 +1016,7 @@ async def _append_approval_handoff_transcript_entry(
     })
 
 
-def _remove_pending_approval(conversation_id: str, request_id: Any) -> bool:
+def _remove_pending_approval(conversation_id: str, request_id: RequestId) -> bool:
     request_id_text = str(request_id or "").strip()
     if not request_id_text or not _conversation_meta_path(conversation_id).exists():
         return False
@@ -1003,8 +1037,8 @@ def _legacy_builtin_codex_disabled_detail() -> str:
     )
 
 
-def _legacy_builtin_codex_disabled_result(**extra: Any) -> Dict[str, Any]:
-    result: Dict[str, Any] = {
+def _legacy_builtin_codex_disabled_result(**extra: object) -> ObjectMap:
+    result: ObjectMap = {
         "ok": False,
         "legacy_disabled": True,
         "error": _legacy_builtin_codex_disabled_detail(),
@@ -1016,9 +1050,9 @@ def _legacy_builtin_codex_disabled_result(**extra: Any) -> Dict[str, Any]:
 async def _validate_pending_approval_descriptor(
     conversation_id: str,
     request_id: str,
-    descriptor: Dict[str, Any],
+    descriptor: ObjectMap,
     *,
-    meta: Optional[Dict[str, Any]] = None,
+    meta: ObjectMap | None = None,
 ) -> bool:
     if not isinstance(descriptor, dict):
         return False
@@ -1047,8 +1081,8 @@ async def _validate_pending_approval_descriptor(
 
 async def _validate_conversation_pending_approvals(
     conversation_id: str,
-    meta: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    meta: ObjectMap | None = None,
+) -> ObjectMap:
     if meta is None:
         meta = _load_conversation_meta(conversation_id)
     if not isinstance(meta, dict):
@@ -1057,7 +1091,7 @@ async def _validate_conversation_pending_approvals(
     if not pending:
         meta["pending_approvals"] = {}
         return meta
-    valid: Dict[str, Dict[str, Any]] = {}
+    valid: dict[str, ObjectMap] = {}
     changed = False
     for raw_request_id, descriptor in list(pending.items()):
         request_id = str(raw_request_id or "").strip()
@@ -1087,7 +1121,7 @@ async def _validate_conversation_pending_approvals(
 _PREVIEW_TEXT_MAX = 160
 
 
-def _normalize_preview_text(text: Any, max_len: int = _PREVIEW_TEXT_MAX) -> str:
+def _normalize_preview_text(text: object, max_len: int = _PREVIEW_TEXT_MAX) -> str:
     if text is None:
         return ""
     if not isinstance(text, str):
@@ -1099,7 +1133,7 @@ def _normalize_preview_text(text: Any, max_len: int = _PREVIEW_TEXT_MAX) -> str:
     return text
 
 
-def _preview_tool_label(event: Dict[str, Any]) -> str:
+def _preview_tool_label(event: ObjectMap) -> str:
     server = _normalize_preview_text(event.get("server"), 64)
     tool = _normalize_preview_text(event.get("tool"), 64)
     if server and tool:
@@ -1107,7 +1141,7 @@ def _preview_tool_label(event: Dict[str, Any]) -> str:
     return tool or server or "tool"
 
 
-def _preview_from_event(event: Dict[str, Any]) -> Optional[Dict[str, str]]:
+def _preview_from_event(event: ObjectMap) -> dict[str, str] | None:
     if not isinstance(event, dict):
         return None
     evt_type = str(event.get("type") or "").strip().lower()
@@ -1154,7 +1188,7 @@ def _preview_from_event(event: Dict[str, Any]) -> Optional[Dict[str, str]]:
     return None
 
 
-def _store_conversation_preview_from_event(event: Dict[str, Any]) -> None:
+def _store_conversation_preview_from_event(event: ObjectMap) -> None:
     if not isinstance(event, dict):
         return
     if _is_internal_transcript_item(event):
@@ -1199,7 +1233,7 @@ def _encode_draft_mention_token(
     path_text = str(path or "").strip()
     if not path_text:
         return ""
-    payload: Dict[str, Any] = {"path": path_text}
+    payload: ObjectMap = {"path": path_text}
     if line_no is not None:
         payload["line"] = int(line_no)
     if end_line_no is not None:
@@ -1214,7 +1248,7 @@ def _encode_draft_mention_token(
     return f"{_DRAFT_MENTION_ENVELOPE_START}{encoded}{_DRAFT_MENTION_ENVELOPE_END}"
 
 
-def _is_internal_transcript_item(item: Any) -> bool:
+def _is_internal_transcript_item(item: object) -> bool:
     if not isinstance(item, dict):
         return False
     internal = item.get("internal")
@@ -1226,7 +1260,7 @@ def _is_internal_transcript_item(item: Any) -> bool:
     return isinstance(visibility, str) and visibility.strip().lower() == "internal"
 
 
-def _coerce_query_bool(value: Any) -> bool:
+def _coerce_query_bool(value: object) -> bool:
     candidate = getattr(value, "default", value)
     if isinstance(candidate, str):
         return candidate.strip().lower() in {"1", "true", "yes", "on"}
@@ -1236,7 +1270,8 @@ def _coerce_query_bool(value: Any) -> bool:
 async def _ensure_conversation(create_if_missing: bool = True) -> Optional[str]:
     async with _config_lock:
         cfg = _load_appserver_config()
-        convo_id = cfg.get("conversation_id")
+        convo_id_value = cfg.get("conversation_id")
+        convo_id = convo_id_value if isinstance(convo_id_value, str) and convo_id_value else None
 
     if convo_id and _conversation_meta_path(convo_id).exists():
         return convo_id
@@ -1269,14 +1304,14 @@ async def _ensure_conversation(create_if_missing: bool = True) -> Optional[str]:
     return convo_id
 
 
-async def _get_conversation_meta() -> Optional[Dict[str, Any]]:
+async def _get_conversation_meta() -> ObjectMap | None:
     convo_id = await _ensure_conversation(create_if_missing=False)
     if not convo_id:
         return None
     return _load_conversation_meta(convo_id)
 
 
-async def _update_conversation_meta(patch: Dict[str, Any]) -> Dict[str, Any]:
+async def _update_conversation_meta(patch: ObjectMap) -> ObjectMap:
     convo_id = await _ensure_conversation()
     if not convo_id:
         raise RuntimeError("Conversation not initialized")
@@ -1286,7 +1321,7 @@ async def _update_conversation_meta(patch: Dict[str, Any]) -> Dict[str, Any]:
     return meta
 
 
-def _apply_conversation_meta_patch(conversation_id: str, patch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _apply_conversation_meta_patch(conversation_id: str, patch: ObjectMap) -> ObjectMap | None:
     if not isinstance(conversation_id, str) or not conversation_id:
         return None
     if not isinstance(patch, dict):
@@ -1366,7 +1401,7 @@ def _transcript_path(conversation_id: str) -> Path:
     return _conversation_transcript_path(conversation_id)
 
 
-async def _write_transcript_entries(conversation_id: str, items: List[Dict[str, Any]]) -> None:
+async def _write_transcript_entries(conversation_id: str, items: list[ObjectMap]) -> None:
     if not conversation_id:
         return
     path = _transcript_path(conversation_id)
@@ -1380,7 +1415,7 @@ async def _write_transcript_entries(conversation_id: str, items: List[Dict[str, 
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-async def _append_transcript_entry(conversation_id: str, entry: Dict[str, Any]) -> None:
+async def _append_transcript_entry(conversation_id: str, entry: ObjectMap) -> None:
     if not conversation_id:
         return
     path = _transcript_path(conversation_id)
@@ -1433,7 +1468,7 @@ async def _get_fws_manager():
     return await get_framework_shell_manager(run_id=os.environ.get("FRAMEWORK_SHELLS_RUN_ID", "app-server"))
 
 
-async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
+async def _broadcast_appserver_ui(event: ObjectMap) -> None:
     """Broadcast an event to all connected frontends via Socket.IO."""
     if not isinstance(event, dict):
         return
@@ -1500,12 +1535,12 @@ async def _emit_command_result_mirror(
     cwd: Optional[str] = None,
     prompt: Optional[str] = None,
     agent_block_id: Optional[str] = None,
-    shared_fields: Optional[Dict[str, Any]] = None,
+    shared_fields: ObjectMap | None = None,
 ) -> None:
     if not conversation_id:
         return
     shared = dict(shared_fields or {})
-    transcript_entry: Dict[str, Any] = {
+    transcript_entry: ObjectMap = {
         "role": "command",
         "command": command,
         "output": output,
@@ -1527,7 +1562,7 @@ async def _emit_command_result_mirror(
         transcript_entry["event"] = event
     await _append_transcript_entry(conversation_id, transcript_entry)
 
-    live_event: Dict[str, Any] = {
+    live_event: ObjectMap = {
         "type": "command_result",
         "conversation_id": conversation_id,
         "command": command,
@@ -1564,7 +1599,7 @@ def _extract_line_from_diff(diff_text: str) -> int:
 # Dynamic extension loading.
 
 
-def _materialize_extension_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _materialize_extension_runtime_settings(settings: ObjectMap | None) -> ObjectMap:
     if not isinstance(settings, dict):
         return {}
     merged = dict(settings)
@@ -1581,9 +1616,9 @@ def _merge_extension_bind_settings(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    merged: Dict[str, Any] = {}
+    settings: ObjectMap | None = None,
+) -> ObjectMap:
+    merged: ObjectMap = {}
     meta = _load_conversation_meta(conversation_id)
     if meta and isinstance(meta.get("settings"), dict):
         merged.update(meta.get("settings") or {})
@@ -1790,16 +1825,27 @@ def main():
     global DEBUG_MODE
     global DEBUG_RAW_LOG_PATH
     args = parse_args()
-    if getattr(args, "command", None) == "extension":
+    command = getattr(args, "command", None)
+    if command == "extension":
         if not ext_loader.is_initialized():
             with redirect_stdout(sys.stderr):
                 _extension_api.init_extensions()
         raise SystemExit(_run_extension_command(args))
-    DEBUG_MODE = bool(args.debug)
-    if args.broadcast_all:
-        args.host = "0.0.0.0"
+    debug_raw = getattr(args, "debug", False)
+    DEBUG_MODE = bool(debug_raw)
+    broadcast_all_raw = getattr(args, "broadcast_all", False)
+    broadcast_all = bool(broadcast_all_raw)
+    host_raw = getattr(args, "host", "127.0.0.1")
+    host = host_raw if isinstance(host_raw, str) and host_raw else "127.0.0.1"
+    if broadcast_all:
+        host = "0.0.0.0"
 
-    _agent_log.initialize_log_path(args.log)
+    log_raw = getattr(args, "log", "agent_chat.log.jsonl")
+    log_path = log_raw if isinstance(log_raw, str) and log_raw else "agent_chat.log.jsonl"
+    port_raw = getattr(args, "port", 12359)
+    port = port_raw if isinstance(port_raw, int) else 12359
+
+    _agent_log.initialize_log_path(log_path)
 
     # Set up debug raw log in .cache directory
     if DEBUG_MODE:
@@ -1809,7 +1855,7 @@ def main():
         # Clear previous debug log on startup
         DEBUG_RAW_LOG_PATH.write_text("")
 
-    uvicorn.run(socketio_app, host=args.host, port=args.port)
+    uvicorn.run(socketio_app, host=host, port=port)
 
 if __name__ == "__main__":
     main()

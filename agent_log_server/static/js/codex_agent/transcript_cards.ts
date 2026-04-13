@@ -1,3 +1,5 @@
+type AnyRecord = Record<string, any>;
+
 export function bindTranscriptCards(ctx) {
   const {
     getConversationSettings,
@@ -30,7 +32,7 @@ export function bindTranscriptCards(ctx) {
     return settings?.commandOutputLines || 20;
   }
 
-  function mountRow(row, parentEl = null, evt = null) {
+  function mountRow(row, parentEl: HTMLElement | null = null, evt: AnyRecord | null = null) {
     const targetEl = parentEl || (evt ? getLiveEventParent(evt) : null);
     clearPlaceholder();
     if (targetEl) {
@@ -128,7 +130,7 @@ export function bindTranscriptCards(ctx) {
     return html;
   }
 
-  function renderCommandResult(evt, parentEl = null, options: Record<string, any> = {}) {
+  function renderCommandResult(evt: AnyRecord, parentEl: HTMLElement | null = null, options: AnyRecord = {}) {
     const {
       linkPathFromRibbon = false,
       updateLiveState = true,
@@ -248,7 +250,7 @@ export function bindTranscriptCards(ctx) {
     }
   }
 
-  function renderViewCard(evt, parentEl = null) {
+  function renderViewCard(evt: AnyRecord, parentEl: HTMLElement | null = null) {
     const content = evt.content ?? evt.output ?? '';
     const path = typeof evt.path === 'string' ? evt.path : '';
     const viewRange = Array.isArray(evt.view_range) ? evt.view_range : (Array.isArray(evt.viewRange) ? evt.viewRange : null);
@@ -417,7 +419,7 @@ export function bindTranscriptCards(ctx) {
     };
   }
 
-  function renderSearchCard(evt, parentEl = null) {
+  function renderSearchCard(evt: AnyRecord, parentEl: HTMLElement | null = null) {
     const mode = evt.mode || evt.tool || 'search';
     const pattern = typeof evt.pattern === 'string' ? evt.pattern : '';
     const rootPath = typeof evt.path === 'string' ? evt.path : '';

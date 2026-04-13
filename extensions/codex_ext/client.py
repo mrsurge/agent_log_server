@@ -14,7 +14,7 @@ import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Protocol, cast
 
 from .plan_utils import normalize_plan_steps, render_plan_markdown
 from .rollout_import import find_rollout_path, preview_entries
@@ -26,20 +26,42 @@ from .runtime_protocol import (
     configure_runtime_protocol,
     get_runtime_protocol,
 )
-from .transport import CodexAppServerTransport
+from .transport import CodexAppServerTransport, _MetaFns
 from agent_log_server.te2_mcp_config import te2_mcp_integration_enabled
+
+
+class _ServerModule(Protocol):
+    def _te2_base_url(self) -> object: ...
+
+    async def _refresh_extension_runtime_state(self, extension_ids: List[str]) -> None: ...
+
+    def _conversation_transcript_path(self, conversation_id: str) -> object: ...
+
+    def _extension_unavailable_detail(self, extension_id: str) -> object: ...
+
+    async def _emit_extension_unavailable_warning(
+        self,
+        conversation_id: str,
+        extension_id: str,
+        *,
+        detail: str,
+    ) -> None: ...
+
+
+class _ExtensionsModule(Protocol):
+    def get_extension_info(self, extension_id: str) -> object: ...
 
 # Stored references to server callbacks
 _broadcast_fn: Optional[Callable] = None
 _transcript_fn: Optional[Callable] = None
-_meta_fns: Optional[Dict[str, Callable]] = None
+_meta_fns: Optional[_MetaFns] = None
 _registered_extension_ids: set[str] = set()
 _ready_extensions: set[str] = set()
 _transport: Optional[CodexAppServerTransport] = None
-_auth_flow_state: Dict[str, Dict[str, Any]] = {}
+_auth_flow_state: Dict[str, Dict[str, object]] = {}
 
 # Debug buffer (circular)
-_raw_buffer: List[Dict[str, Any]] = []
+_raw_buffer: List[Dict[str, object]] = []
 _RAW_BUFFER_MAX = 1000
 
 
@@ -47,8 +69,8 @@ def _utc_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _add_to_raw_buffer(direction: str, conversation_id: str, data: Any) -> None:
-    entry = {
+def _add_to_raw_buffer(direction: str, conversation_id: str, data: object) -> None:
+    entry: Dict[str, object] = {
         "ts": _utc_ts(),
         "dir": direction,
         "convo": conversation_id[:8] if conversation_id else "?",
@@ -59,34 +81,39 @@ def _add_to_raw_buffer(direction: str, conversation_id: str, data: Any) -> None:
         _raw_buffer.pop(0)
 
 
-def get_raw_buffer(limit: int = 50) -> List[Dict[str, Any]]:
+def get_raw_buffer(limit: int = 50) -> List[Dict[str, object]]:
     return _raw_buffer[-limit:]
 
 
-def _server_module():
-    return importlib.import_module("agent_log_server.server")
+def _server_module() -> _ServerModule:
+    return cast(_ServerModule, importlib.import_module("agent_log_server.server"))
 
 
-def _object_dict(value: Any) -> Dict[str, Any]:
+def _extensions_module() -> _ExtensionsModule:
+    return cast(_ExtensionsModule, importlib.import_module("extensions"))
+
+
+def _object_dict(value: object) -> Dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _save_meta(conversation_id: str, meta: Dict[str, Any]) -> None:
+def _save_meta(conversation_id: str, meta: Dict[str, object]) -> None:
     if _meta_fns and "save" in _meta_fns:
         _save_meta(conversation_id, meta)
 
 
 def _merge_runtime_settings(
     conversation_id: str,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[Dict[str, object]] = None,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-) -> Dict[str, Any]:
-    merged: Dict[str, Any] = {}
+) -> Dict[str, object]:
+    merged: Dict[str, object] = {}
     if _meta_fns and "load" in _meta_fns:
-        meta = _meta_fns["load"](conversation_id)
-        if meta and isinstance(meta.get("settings"), dict):
-            merged.update(meta["settings"])
+        meta = _object_dict(_meta_fns["load"](conversation_id))
+        settings_value = meta.get("settings")
+        if isinstance(settings_value, dict):
+            merged.update(_object_dict(settings_value))
     if isinstance(settings, dict):
         for key, value in settings.items():
             if value is None or value == "":
@@ -100,12 +127,12 @@ def _merge_runtime_settings(
     return _materialize_runtime_settings(merged)
 
 
-def _thread_runtime_signature(protocol: RuntimeProtocol, settings: Dict[str, Any]) -> str:
+def _thread_runtime_signature(protocol: RuntimeProtocol, settings: Dict[str, object]) -> str:
     payload = build_thread_runtime_signature_payload(protocol, settings)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _materialize_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _materialize_runtime_settings(settings: Optional[Dict[str, object]]) -> Dict[str, object]:
     if not isinstance(settings, dict):
         return {}
     merged = dict(settings)
@@ -114,8 +141,7 @@ def _materialize_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[st
         agent_value = merged.get("agent")
         extension_id = agent_value if isinstance(agent_value, str) and agent_value.strip() else "codex"
         try:
-            ext_loader = importlib.import_module("extensions")
-            ext_info = ext_loader.get_extension_info(extension_id)
+            ext_info = _extensions_module().get_extension_info(extension_id)
         except Exception:
             ext_info = None
         manifest = _object_dict(ext_info.get("manifest")) if isinstance(ext_info, dict) else {}
@@ -124,11 +150,13 @@ def _materialize_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[st
         if isinstance(model_name, str) and model_name.strip():
             merged["model"] = model_name.strip()
     if te2_mcp_integration_enabled(merged):
-        merged["te2_base_url"] = _server_module()._te2_base_url()
+        te2_base_url = _server_module()._te2_base_url()
+        if isinstance(te2_base_url, str) and te2_base_url.strip():
+            merged["te2_base_url"] = te2_base_url
     return merged
 
 
-def _extract_thread_id_from_result(payload: Any) -> Optional[str]:
+def _extract_thread_id_from_result(payload: object) -> Optional[str]:
     if isinstance(payload, dict):
         thread = payload.get("thread")
         if isinstance(thread, dict) and thread.get("id"):
@@ -154,7 +182,7 @@ async def _ensure_transport_ready() -> CodexAppServerTransport:
     return transport
 
 
-def _auth_state_bucket(extension_id: str) -> Dict[str, Any]:
+def _auth_state_bucket(extension_id: str) -> Dict[str, object]:
     key = str(extension_id or "").strip() or "codex-ext"
     bucket = _auth_flow_state.get(key)
     if not isinstance(bucket, dict):
@@ -191,19 +219,19 @@ async def _refresh_extension_auth_state(*extension_ids: str) -> None:
 async def _handle_auth_transport_event(
     *,
     label: str,
-    payload: Any,
+    payload: object,
     conversation_id: Optional[str] = None,
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     request_id: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+) -> List[Dict[str, object]]:
     del thread_id, turn_id, request_id
     label_lower = str(label or "").strip().lower()
     if label_lower not in {"account/login/completed", "account/updated"}:
         return []
 
     extension_ids = _auth_extension_ids()
-    events: List[Dict[str, Any]] = []
+    events: List[Dict[str, object]] = []
 
     if label_lower == "account/login/completed" and isinstance(payload, dict):
         login_id = payload.get("loginId")
@@ -226,7 +254,7 @@ async def _handle_auth_transport_event(
         await _refresh_extension_auth_state(*extension_ids)
         events.append({"type": "extensions_updated"})
         if not success and error_message:
-            warning_event: Dict[str, Any] = {
+            warning_event: Dict[str, object] = {
                 "type": "warning",
                 "message": f"Codex login failed: {error_message}",
             }
@@ -276,7 +304,7 @@ def _plan_label(plan_type: Optional[str]) -> str:
     return plan_type.replace("_", " ").replace("-", " ").title()
 
 
-def _auth_status_detail(status: Dict[str, Any]) -> str:
+def _auth_status_detail(status: Dict[str, object]) -> str:
     parts: List[str] = []
     email = status.get("account_email")
     if isinstance(email, str) and email.strip():
@@ -284,7 +312,8 @@ def _auth_status_detail(status: Dict[str, Any]) -> str:
     account_type = status.get("account_type")
     if account_type == "apiKey":
         parts.append("API key")
-    plan_type = _plan_label(status.get("plan_type"))
+    plan_value = status.get("plan_type")
+    plan_type = _plan_label(plan_value if isinstance(plan_value, str) else None)
     if plan_type:
         parts.append(f"{plan_type} plan")
     return "  •  ".join(parts)
@@ -316,7 +345,7 @@ def _build_auth_status_message(
     return "OpenAI auth required. Sign in with ChatGPT from splash settings."
 
 
-def _settings_info_tone_from_auth(auth_status: Dict[str, Any]) -> str:
+def _settings_info_tone_from_auth(auth_status: Dict[str, object]) -> str:
     status = str(auth_status.get("status") or "").strip().lower()
     if auth_status.get("ok") is False or status == "error":
         return "error"
@@ -335,7 +364,7 @@ def _settings_info_tone_from_remaining(remaining_percent: Optional[float]) -> st
     return "success"
 
 
-def _format_settings_timestamp(value: Any) -> str:
+def _format_settings_timestamp(value: object) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return ""
     with contextlib.suppress(Exception):
@@ -348,7 +377,7 @@ def _usage_info_unavailable(
     *,
     tone: str = "warning",
     detail: str = "",
-) -> Dict[str, Any]:
+) -> Dict[str, object]:
     return {
         "text": message,
         "detail": detail,
@@ -356,7 +385,7 @@ def _usage_info_unavailable(
     }
 
 
-def _rate_limit_window_detail(label: str, raw_window: Any) -> tuple[Optional[float], Optional[str]]:
+def _rate_limit_window_detail(label: str, raw_window: object) -> tuple[Optional[float], Optional[str]]:
     if not isinstance(raw_window, dict):
         return None, None
     used_percent = raw_window.get("usedPercent")
@@ -373,12 +402,19 @@ def _rate_limit_window_detail(label: str, raw_window: Any) -> tuple[Optional[flo
     return remaining_percent, "  •  ".join(parts)
 
 
-def _build_rate_limit_lines(snapshot: Dict[str, Any]) -> tuple[List[str], List[float]]:
+def _build_rate_limit_lines(snapshot: Dict[str, object]) -> tuple[List[str], List[float]]:
     lines: List[str] = []
     remaining_values: List[float] = []
     limit_name = snapshot.get("limitName") if isinstance(snapshot.get("limitName"), str) else None
     limit_id = snapshot.get("limitId") if isinstance(snapshot.get("limitId"), str) else None
-    snapshot_prefix = (limit_name or limit_id or "").strip()
+    snapshot_prefix = next(
+        (
+            value.strip()
+            for value in (limit_name, limit_id)
+            if isinstance(value, str) and value.strip()
+        ),
+        "",
+    )
     for label, key in (("Primary", "primary"), ("Secondary", "secondary")):
         remaining_percent, detail = _rate_limit_window_detail(label, snapshot.get(key))
         if detail:
@@ -406,12 +442,13 @@ def _build_rate_limit_lines(snapshot: Dict[str, Any]) -> tuple[List[str], List[f
 async def get_usage_info(
     extension_id: str,
     *,
-    auth_status: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    auth_status: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
     resolved_auth_status = auth_status or await get_auth_status(extension_id, refresh=False)
     if resolved_auth_status.get("ok") is False:
+        message = resolved_auth_status.get("message")
         return _usage_info_unavailable(
-            resolved_auth_status.get("message") or "Failed to read Codex auth status.",
+            message if isinstance(message, str) and message else "Failed to read Codex auth status.",
             tone="error",
         )
     status = str(resolved_auth_status.get("status") or "").strip().lower()
@@ -451,7 +488,7 @@ async def get_usage_info(
         )
 
     payload = raw if isinstance(raw, dict) else {}
-    snapshots: List[Dict[str, Any]] = []
+    snapshots: List[Dict[str, object]] = []
     rate_limits_by_id = payload.get("rateLimitsByLimitId")
     if isinstance(rate_limits_by_id, dict):
         for limit_id, value in sorted(rate_limits_by_id.items()):
@@ -498,9 +535,9 @@ async def get_usage_info(
 
 
 def _build_information_section_fields(
-    auth_status: Dict[str, Any],
-    usage_info: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+    auth_status: Dict[str, object],
+    usage_info: Dict[str, object],
+) -> List[Dict[str, object]]:
     return [
         {
             "id": "information_section",
@@ -528,11 +565,11 @@ def _build_information_section_fields(
 
 
 def _normalize_auth_status(
-    raw: Any,
+    raw: object,
     *,
     extension_id: str,
-    pending: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    pending: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
     payload = raw if isinstance(raw, dict) else {}
     account = payload.get("account") if isinstance(payload.get("account"), dict) else None
     requires_openai_auth = bool(payload.get("requiresOpenaiAuth"))
@@ -576,7 +613,7 @@ def _normalize_auth_status(
     }
 
 
-def _looks_like_auth_required_error(message: Any) -> bool:
+def _looks_like_auth_required_error(message: object) -> bool:
     text = str(message or "").strip().lower()
     if not text:
         return False
@@ -593,7 +630,7 @@ def _looks_like_auth_required_error(message: Any) -> bool:
     )
 
 
-def _looks_like_mcp_startup_error(message: Any) -> bool:
+def _looks_like_mcp_startup_error(message: object) -> bool:
     text = str(message or "").strip().lower()
     if not text:
         return False
@@ -604,7 +641,7 @@ def _looks_like_mcp_startup_error(message: Any) -> bool:
     )
 
 
-def _looks_like_thread_not_loaded_error(message: Any) -> bool:
+def _looks_like_thread_not_loaded_error(message: object) -> bool:
     text = str(message or "").strip().lower()
     if not text:
         return False
@@ -620,7 +657,7 @@ def _looks_like_thread_not_loaded_error(message: Any) -> bool:
     )
 
 
-def _build_send_failure_result(error_message: Any) -> Dict[str, Any]:
+def _build_send_failure_result(error_message: object) -> Dict[str, object]:
     message = str(error_message or "").strip() or "Message send failed"
     failure_kind = "send_failed"
     if _looks_like_mcp_startup_error(message):
@@ -646,10 +683,11 @@ async def _handle_auth_failure(conversation_id: str, extension_id: str, error_me
     with contextlib.suppress(Exception):
         detail = server._extension_unavailable_detail(extension_id)
     with contextlib.suppress(Exception):
+        detail_text = detail if isinstance(detail, str) and detail else error_message
         await server._emit_extension_unavailable_warning(
             conversation_id,
             extension_id,
-            detail=detail or error_message,
+            detail=detail_text,
         )
 
 
@@ -664,8 +702,8 @@ async def _resume_thread_for_rpc_server(
     thread_id: str,
     transport: CodexAppServerTransport,
     protocol: RuntimeProtocol,
-    merged_settings: Dict[str, Any],
-    meta: Dict[str, Any],
+    merged_settings: Dict[str, object],
+    meta: Dict[str, object],
 ) -> None:
     resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
     await transport.rpc_request(
@@ -681,7 +719,7 @@ async def _resume_thread_for_rpc_server(
     _save_meta(conversation_id, meta)
 
 
-async def get_auth_status(extension_id: str, refresh: bool = False) -> Dict[str, Any]:
+async def get_auth_status(extension_id: str, refresh: bool = False) -> Dict[str, object]:
     pending = dict(_auth_state_bucket(extension_id))
     if pending.get("login_id") and not refresh:
         return _normalize_auth_status(
@@ -722,7 +760,7 @@ async def get_auth_status(extension_id: str, refresh: bool = False) -> Dict[str,
     return normalized
 
 
-async def get_splash_schema(extension_id: str) -> Dict[str, Any]:
+async def get_splash_schema(extension_id: str) -> Dict[str, object]:
     auth_status = await get_auth_status(extension_id, refresh=False)
     tone = "success"
     if auth_status.get("status") in {"auth_required", "login_pending"}:
@@ -730,7 +768,7 @@ async def get_splash_schema(extension_id: str) -> Dict[str, Any]:
     if auth_status.get("status") == "error" or auth_status.get("ok") is False:
         tone = "error"
 
-    fields: List[Dict[str, Any]] = [
+    fields: List[Dict[str, object]] = [
         {
             "id": "auth_status",
             "type": "status",
@@ -800,8 +838,8 @@ async def get_splash_schema(extension_id: str) -> Dict[str, Any]:
 async def run_splash_action(
     extension_id: str,
     action_id: str,
-    payload: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    payload: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
     action = str(action_id or "").strip().lower()
     params = payload if isinstance(payload, dict) else {}
     auth_state = _auth_state_bucket(extension_id)
@@ -871,14 +909,15 @@ async def run_splash_action(
         return {"ok": False, "error": str(exc)}
 
 
-def _sort_session_entries(entries: List[Dict[str, Any]], cwd: Optional[str]) -> List[Dict[str, Any]]:
+def _sort_session_entries(entries: List[Dict[str, object]], cwd: Optional[str]) -> List[Dict[str, object]]:
     if not cwd:
         return entries
     resolved_cwd = os.path.realpath(os.path.expanduser(cwd))
 
-    def relevance(entry: Dict[str, Any]) -> int:
-        ctx = entry.get("context") or {}
-        session_cwd = ctx.get("cwd") or ""
+    def relevance(entry: Dict[str, object]) -> int:
+        ctx = _object_dict(entry.get("context"))
+        session_cwd_value = ctx.get("cwd")
+        session_cwd = session_cwd_value if isinstance(session_cwd_value, str) else ""
         if not session_cwd:
             return 9
         resolved_session_cwd = os.path.realpath(session_cwd)
@@ -896,7 +935,7 @@ def _build_plan_state(
     *,
     explanation: Optional[str] = None,
     source: str,
-) -> Dict[str, Any]:
+) -> Dict[str, object]:
     normalized_steps = normalize_plan_steps(steps)
     return {
         "has_plan": False,
@@ -908,7 +947,7 @@ def _build_plan_state(
     }
 
 
-def _latest_transcript_plan(conversation_id: str) -> Optional[Dict[str, Any]]:
+def _latest_transcript_plan(conversation_id: str) -> Optional[Dict[str, object]]:
     transcript_path = _server_module()._conversation_transcript_path(conversation_id)
     if not isinstance(transcript_path, Path) or not transcript_path.is_file():
         return None
@@ -918,11 +957,11 @@ def _latest_transcript_plan(conversation_id: str) -> Optional[Dict[str, Any]]:
         return None
     for line in reversed(lines):
         try:
-            entry = json.loads(line)
+            entry = cast(object, json.loads(line))
         except Exception:
             continue
         if isinstance(entry, dict) and entry.get("role") == "plan":
-            return entry
+            return _object_dict(entry)
     return None
 
 
@@ -932,7 +971,7 @@ def init_codex_app_server_manager(
     fws_getter: Callable,
     broadcast_fn: Callable,
     transcript_fn: Callable,
-    meta_fns: Optional[Dict[str, Callable]] = None,
+    meta_fns: Optional[_MetaFns] = None,
     registered_extension_ids: Optional[List[str]] = None,
 ) -> None:
     global _broadcast_fn, _transcript_fn, _meta_fns
@@ -966,7 +1005,7 @@ def init_codex_ext_manager(
     fws_getter: Callable,
     broadcast_fn: Callable,
     transcript_fn: Callable,
-    meta_fns: Optional[Dict[str, Callable]] = None,
+    meta_fns: Optional[_MetaFns] = None,
     registered_extension_ids: Optional[List[str]] = None,
 ) -> None:
     init_codex_app_server_manager(
@@ -1009,7 +1048,7 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
     return True
 
 
-async def get_settings_schema(extension_id: str) -> Dict[str, Any]:
+async def get_settings_schema(extension_id: str) -> Dict[str, object]:
     protocol = await get_runtime_protocol()
     schema = copy.deepcopy(build_settings_schema(protocol, extension_id))
     auth_status = await get_auth_status(extension_id, refresh=False)
@@ -1022,7 +1061,7 @@ async def get_settings_schema(extension_id: str) -> Dict[str, Any]:
     return schema
 
 
-async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:
+async def get_request_card_schemas(extension_id: str) -> Dict[str, object]:
     protocol = await get_runtime_protocol()
     methods = (
         "item/commandExecution/requestApproval",
@@ -1031,7 +1070,7 @@ async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:
         "item/tool/call",
         "mcpServer/elicitation/request",
     )
-    schemas: Dict[str, Any] = {}
+    schemas: Dict[str, object] = {}
     for method in methods:
         request_schema = protocol.server_request_schema(method)
         response_schema = protocol.server_request_response_schema(method)
@@ -1043,11 +1082,13 @@ async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:
     return schemas
 
 
-async def list_models() -> List[Dict[str, Any]]:
+async def list_models() -> List[Dict[str, object]]:
     transport = await _ensure_transport_ready()
     result = await transport.rpc_request("model/list", params={}, timeout=15.0)
     items = result.get("data", []) if isinstance(result, dict) else []
-    models: List[Dict[str, Any]] = []
+    models: List[Dict[str, object]] = []
+    if not isinstance(items, list):
+        return models
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -1066,18 +1107,20 @@ async def list_models() -> List[Dict[str, Any]]:
     return models
 
 
-async def list_sessions(cwd: Optional[str] = None) -> List[Dict[str, Any]]:
+async def list_sessions(cwd: Optional[str] = None) -> List[Dict[str, object]]:
     transport = await _ensure_transport_ready()
     result = await transport.rpc_request("thread/list", params={"limit": 200}, timeout=15.0)
     items_raw = result.get("data", []) if isinstance(result, dict) else []
-    sessions: List[Dict[str, Any]] = []
+    sessions: List[Dict[str, object]] = []
+    if not isinstance(items_raw, list):
+        return sessions
     for item in items_raw:
         if not isinstance(item, dict):
             continue
         session_id = item.get("id")
         if not isinstance(session_id, str) or not session_id:
             continue
-        entry: Dict[str, Any] = {
+        entry: Dict[str, object] = {
             "session_id": session_id,
             "summary": item.get("preview") or "",
             "active": False,
@@ -1092,12 +1135,12 @@ async def list_sessions(cwd: Optional[str] = None) -> List[Dict[str, Any]]:
 async def route_event(
     extension_id: str,
     label: Optional[str],
-    payload: Any,
+    payload: object,
     conversation_id: Optional[str] = None,
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     request_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> Dict[str, object]:
     transport = _ensure_transport()
     return await transport.route_event(
         label=label or "",
@@ -1109,7 +1152,7 @@ async def route_event(
     )
 
 
-async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, object]:
     if not _meta_fns or "load" not in _meta_fns:
         return {
             "has_plan": False,
@@ -1157,12 +1200,12 @@ async def resume_session(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
     if not _meta_fns or "load" not in _meta_fns or "save" not in _meta_fns:
         return {"ok": False, "error": "Manager not initialized"}
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _object_dict(_meta_fns["load"](conversation_id))
+    if not meta:
         return {"ok": False, "error": f"Conversation not found: {conversation_id[:8]}"}
     thread_id = meta.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id:
@@ -1189,7 +1232,10 @@ async def resume_session(
         return {"ok": True, "session_id": thread_id}
     except Exception as exc:
         if _looks_like_auth_required_error(exc):
-            await _handle_auth_failure(conversation_id, meta.get("settings", {}).get("agent") or "codex-ext", str(exc))
+            settings_dict = _object_dict(meta.get("settings"))
+            agent_value = settings_dict.get("agent")
+            agent_name = agent_value if isinstance(agent_value, str) and agent_value else "codex-ext"
+            await _handle_auth_failure(conversation_id, agent_name, str(exc))
         _add_to_raw_buffer("err", conversation_id, f"resume_failed {exc}")
         return {"ok": False, "error": f"Thread resume failed: {exc}"}
 
@@ -1198,26 +1244,29 @@ async def handle_message(
     conversation_id: str,
     text: str,
     agent_type: str,
-    settings: Dict[str, Any],
-) -> Dict[str, Any]:
+    settings: Dict[str, object],
+) -> Dict[str, object]:
     if not _meta_fns or "load" not in _meta_fns or "save" not in _meta_fns:
         return {"ok": False, "error": "Manager not initialized"}
     if not conversation_id or not text:
         return {"ok": False, "error": "conversation_id and text required"}
 
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _object_dict(_meta_fns["load"](conversation_id))
+    if not meta:
         return {"ok": False, "error": f"Conversation not found: {conversation_id[:8]}"}
 
     transport = await _ensure_transport_ready()
     protocol = await get_runtime_protocol()
+    cwd_value = settings.get("cwd")
+    model_value = settings.get("model")
     merged_settings = _merge_runtime_settings(
         conversation_id,
         settings=settings,
-        cwd=settings.get("cwd") if isinstance(settings, dict) else None,
-        model=settings.get("model") if isinstance(settings, dict) else None,
+        cwd=cwd_value if isinstance(cwd_value, str) and cwd_value.strip() else None,
+        model=model_value if isinstance(model_value, str) and model_value.strip() else None,
     )
-    thread_id = meta.get("thread_id")
+    thread_id_value = meta.get("thread_id")
+    thread_id = thread_id_value if isinstance(thread_id_value, str) and thread_id_value else None
     current_signature = _thread_runtime_signature(protocol, merged_settings)
 
     try:
@@ -1284,8 +1333,9 @@ async def handle_message(
             thread_id = _extract_thread_id_from_result(start_result)
 
             if not thread_id:
-                meta = _meta_fns["load"](conversation_id)
-                thread_id = meta.get("thread_id") if isinstance(meta, dict) else None
+                meta = _object_dict(_meta_fns["load"](conversation_id))
+                thread_id_value = meta.get("thread_id")
+                thread_id = thread_id_value if isinstance(thread_id_value, str) and thread_id_value else None
 
             if not thread_id:
                 return {"ok": False, "error": "Failed to start thread - no thread_id received"}
@@ -1313,6 +1363,8 @@ async def handle_message(
                 timeout=15.0,
             )
 
+        if not isinstance(thread_id, str) or not thread_id:
+            return {"ok": False, "error": "Failed to resolve thread_id after message send"}
         _add_to_raw_buffer("out", conversation_id, f"turn_start thread={thread_id[:8]} text={text[:120]}")
         return {"ok": True, "thread_id": thread_id, "conversation_id": conversation_id}
     except Exception as exc:
@@ -1327,17 +1379,17 @@ async def resume_session_with_history(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[Dict[str, object]] = None,
     extension_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> Dict[str, object]:
     if not _meta_fns or "load" not in _meta_fns or "save" not in _meta_fns:
         return {"ok": False, "error": "Manager not initialized"}
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _object_dict(_meta_fns["load"](conversation_id))
+    if not meta:
         return {"ok": False, "error": f"Conversation not found: {conversation_id[:8]}"}
 
     existing = meta.get("thread_id")
-    if existing and existing != session_id:
+    if isinstance(existing, str) and existing and existing != session_id:
         return {"ok": False, "error": f"Conversation already bound to thread {existing[:8]}"}
 
     merged_settings = _merge_runtime_settings(
@@ -1370,8 +1422,9 @@ async def hydrate_transcript(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+    settings: Optional[Dict[str, object]] = None,
+) -> List[Dict[str, object]]:
+    del cwd, model, settings
     path = find_rollout_path(session_id)
     if not path:
         _add_to_raw_buffer("err", conversation_id, f"hydrate_transcript rollout_not_found session={session_id[:8]}")
@@ -1382,14 +1435,14 @@ async def hydrate_transcript(
     return items if isinstance(items, list) else []
 
 
-def resolve_approval(request_id: str, resolution: Any) -> bool:
+def resolve_approval(request_id: str, resolution: object) -> bool:
     transport = _transport
     if transport is None:
         return False
     return transport.resolve_approval(request_id, resolution)
 
 
-def validate_pending_approval(conversation_id: str, request_id: str, descriptor: Dict[str, Any]) -> bool:
+def validate_pending_approval(conversation_id: str, request_id: str, descriptor: Dict[str, object]) -> bool:
     if not isinstance(descriptor, dict):
         return False
     transport = _transport
@@ -1449,7 +1502,7 @@ async def abort_session(conversation_id: str) -> bool:
         return False
 
 
-async def compact_session(conversation_id: str) -> Dict[str, Any]:
+async def compact_session(conversation_id: str) -> Dict[str, object]:
     """Send thread/compact/start to the extension-owned app-server transport.
 
     Try compact directly first, then resume and retry only for the canonical
@@ -1457,8 +1510,8 @@ async def compact_session(conversation_id: str) -> Dict[str, Any]:
     """
     if not _meta_fns or "load" not in _meta_fns:
         return {"ok": False, "error": "meta_fns not available"}
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _object_dict(_meta_fns["load"](conversation_id))
+    if not meta:
         return {"ok": False, "error": "conversation not found"}
     thread_id = meta.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id:
@@ -1467,11 +1520,14 @@ async def compact_session(conversation_id: str) -> Dict[str, Any]:
     try:
         transport = await _ensure_transport_ready()
         protocol = await get_runtime_protocol()
+        existing_settings = _object_dict(meta.get("settings"))
+        existing_cwd = existing_settings.get("cwd")
+        existing_model = existing_settings.get("model")
         merged_settings = _merge_runtime_settings(
             conversation_id,
-            settings=meta.get("settings") or {},
-            cwd=(meta.get("settings") or {}).get("cwd"),
-            model=(meta.get("settings") or {}).get("model"),
+            settings=existing_settings,
+            cwd=existing_cwd if isinstance(existing_cwd, str) and existing_cwd else None,
+            model=existing_model if isinstance(existing_model, str) and existing_model else None,
         )
         params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)
         try:

@@ -11,7 +11,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Optional, cast
 
 import extensions as ext_loader
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -24,27 +24,32 @@ from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD,
 )
 from agent_log_server.prompt_context import load_repo_memory_snapshot
-
-_AsyncAnyCallable = Callable[..., Awaitable[Any]]
+from agent_log_server.typing_helpers import (
+    AsyncObjectCallable,
+    ObjectEntriesWriter,
+    ObjectList,
+    ObjectMap,
+    RequestId,
+)
 
 
 @dataclass
 class AppserverRoutesState:
     draft_hash_cache: dict[str, str] = field(default_factory=dict)
-    user_message_buffer: dict[str, dict[str, Any]] = field(default_factory=dict)
+    user_message_buffer: dict[str, ObjectMap] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class AppserverRoutesDeps:
     config_lock: asyncio.Lock
-    load_appserver_config: Callable[[], dict[str, Any]]
-    save_appserver_config: Callable[[dict[str, Any]], None]
-    sync_conversation_index: Callable[[dict[str, Any]], list[str]]
+    load_appserver_config: Callable[[], ObjectMap]
+    save_appserver_config: Callable[[ObjectMap], None]
+    sync_conversation_index: Callable[[ObjectMap], list[str]]
     normalize_pinned_conversation_list: Callable[..., list[str]]
-    conversation_display_order: Callable[[dict[str, Any]], list[str]]
-    add_conversation_to_config: Callable[[str, dict[str, Any]], bool]
-    remove_conversation_from_config: Callable[[str, dict[str, Any]], None]
-    default_conversation_meta: Callable[[str], dict[str, Any]]
+    conversation_display_order: Callable[[ObjectMap], list[str]]
+    add_conversation_to_config: Callable[[str, ObjectMap], bool]
+    remove_conversation_from_config: Callable[[str, ObjectMap], None]
+    default_conversation_meta: Callable[[str], ObjectMap]
     latest_legacy_transcript: Callable[[], Optional[Path]]
     require_conversation_id: Callable[[], Awaitable[str]]
     ensure_conversation: Callable[[], Awaitable[str | None]]
@@ -52,29 +57,29 @@ class AppserverRoutesDeps:
     conversation_meta_path: Callable[[str], Path]
     conversation_dir: Callable[[str], Path]
     transcript_path: Callable[[str], Path]
-    meta_settings: Callable[[dict[str, Any]], dict[str, Any]]
-    load_conversation_meta: Callable[[str], dict[str, Any]]
-    save_conversation_meta: Callable[[str, dict[str, Any]], None]
-    coerce_json_object: Callable[[object], dict[str, Any]]
-    validate_conversation_pending_approvals: _AsyncAnyCallable
-    ensure_pending_approvals: Callable[[dict[str, Any]], dict[str, dict[str, Any]]]
-    find_pending_approval: Callable[[Any], Any]
-    remove_pending_approval: Callable[[str, Any], bool]
-    build_approval_handoff_event: Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any] | None]
-    append_approval_handoff_transcript_entry: _AsyncAnyCallable
-    append_transcript_entry: _AsyncAnyCallable
-    write_transcript_entries: Callable[[str, list[dict[str, Any]]], Awaitable[Any]]
-    is_internal_transcript_item: Callable[[Any], bool]
-    conversation_agent: Callable[[dict[str, Any] | None], str]
+    meta_settings: Callable[[ObjectMap], ObjectMap]
+    load_conversation_meta: Callable[[str], ObjectMap]
+    save_conversation_meta: Callable[[str, ObjectMap], None]
+    coerce_json_object: Callable[[object], ObjectMap]
+    validate_conversation_pending_approvals: AsyncObjectCallable
+    ensure_pending_approvals: Callable[[ObjectMap], dict[str, ObjectMap]]
+    find_pending_approval: Callable[[RequestId], tuple[str, ObjectMap] | None]
+    remove_pending_approval: Callable[[str, RequestId], bool]
+    build_approval_handoff_event: Callable[[str, ObjectMap, ObjectMap], ObjectMap | None]
+    append_approval_handoff_transcript_entry: AsyncObjectCallable
+    append_transcript_entry: AsyncObjectCallable
+    write_transcript_entries: ObjectEntriesWriter
+    is_internal_transcript_item: Callable[[object], bool]
+    conversation_agent: Callable[[ObjectMap | None], str]
     extension_unavailable_detail: Callable[[str], str | None]
-    emit_extension_unavailable_warning: _AsyncAnyCallable
+    emit_extension_unavailable_warning: AsyncObjectCallable
     default_active_extension_id: Callable[[], str | None]
-    materialize_extension_runtime_settings: Callable[[dict[str, Any] | None], dict[str, Any]]
-    merge_extension_bind_settings: Callable[..., dict[str, Any]]
-    legacy_builtin_codex_disabled_result: Callable[..., dict[str, Any]]
+    materialize_extension_runtime_settings: Callable[[ObjectMap | None], ObjectMap]
+    merge_extension_bind_settings: Callable[..., ObjectMap]
+    legacy_builtin_codex_disabled_result: Callable[..., ObjectMap]
     legacy_builtin_codex_disabled_detail: Callable[[], str]
-    emit_command_result_mirror: _AsyncAnyCallable
-    broadcast_appserver_ui: _AsyncAnyCallable
+    emit_command_result_mirror: AsyncObjectCallable
+    broadcast_appserver_ui: AsyncObjectCallable
     logical_absolute_path: Callable[[str | None, str], Path]
     resolved_existing_path: Callable[[Path, Optional[Path]], Path]
     logical_alias_for_resolved_ancestor: Callable[[Path, Path, Path], Optional[Path]]
@@ -135,20 +140,20 @@ class AppserverRoutes:
         self,
         conversation_id: str,
         *,
-        message: Any,
+        message: object,
         source: Optional[str] = None,
         error_type: Optional[str] = None,
-        status_code: Any = None,
+        status_code: int | float | None = None,
         provider_call_id: Optional[str] = None,
         details: Optional[str] = None,
         stack: Optional[str] = None,
-        code: Any = None,
+        code: object = None,
         turn_id: Optional[str] = None,
     ) -> None:
         if not conversation_id:
             return
         message_text = str(message or "").strip() or "Message send failed"
-        transcript_entry: dict[str, Any] = {
+        transcript_entry: ObjectMap = {
             "role": "error",
             "message": message_text,
             "text": message_text,
@@ -172,7 +177,7 @@ class AppserverRoutes:
             transcript_entry["turn_id"] = turn_id.strip()
         await self._deps.append_transcript_entry(conversation_id, transcript_entry)
 
-        event: dict[str, Any] = {
+        event: ObjectMap = {
             "type": "error",
             "conversation_id": conversation_id,
             "message": message_text,
@@ -207,9 +212,9 @@ class AppserverRoutes:
         self,
         conversation_id: str,
         agent_type: str,
-        result: Any,
-    ) -> dict[str, Any]:
-        normalized = dict(result) if isinstance(result, dict) else {
+        result: object,
+    ) -> ObjectMap:
+        normalized = self._deps.coerce_json_object(result) if isinstance(result, dict) else {
             "ok": False,
             "error": "Invalid send result from agent handler",
         }
@@ -224,23 +229,55 @@ class AppserverRoutes:
 
         surface_error = normalized.get("surface_error")
         if surface_error is True or (restore_draft and surface_error is not False):
+            error_source = normalized.get("error_source")
+            source = error_source if isinstance(error_source, str) and error_source.strip() else agent_type
+            error_type_value = normalized.get("error_type")
+            failure_kind = normalized.get("failure_kind")
+            resolved_error_type = (
+                error_type_value
+                if isinstance(error_type_value, str) and error_type_value.strip()
+                else failure_kind if isinstance(failure_kind, str) and failure_kind.strip() else None
+            )
+            status_code_value = normalized.get("status_code")
+            resolved_status_code = (
+                status_code_value
+                if isinstance(status_code_value, (int, float))
+                else None
+            )
+            provider_call_id_value = normalized.get("provider_call_id")
+            provider_call_id = (
+                provider_call_id_value
+                if isinstance(provider_call_id_value, str) and provider_call_id_value.strip()
+                else None
+            )
+            details_value = normalized.get("details")
+            details = details_value if isinstance(details_value, str) else None
+            stack_value = normalized.get("stack")
+            stack = stack_value if isinstance(stack_value, str) else None
+            turn_id_value = normalized.get("turn_id")
+            turn_id = turn_id_value if isinstance(turn_id_value, str) and turn_id_value.strip() else None
             await self._emit_conversation_error_event(
                 conversation_id,
                 message=normalized.get("error") or "Message send failed",
-                source=normalized.get("error_source") or agent_type,
-                error_type=normalized.get("error_type") or normalized.get("failure_kind"),
-                status_code=normalized.get("status_code"),
-                provider_call_id=normalized.get("provider_call_id"),
-                details=normalized.get("details"),
-                stack=normalized.get("stack"),
+                source=source,
+                error_type=resolved_error_type,
+                status_code=resolved_status_code,
+                provider_call_id=provider_call_id,
+                details=details,
+                stack=stack,
                 code=normalized.get("code"),
-                turn_id=normalized.get("turn_id"),
+                turn_id=turn_id,
             )
 
         self._clear_user_message_buffer(conversation_id)
         return normalized
 
-    async def process_mention(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def process_mention(self, payload: ObjectMap) -> ObjectMap:
+        def _maybe_int(value: object) -> int | None:
+            if value is None or not isinstance(value, (int, float, str)):
+                return None
+            return int(value)
+
         path = payload.get("path")
         if not isinstance(path, str) or not path.strip():
             raise ValueError("Missing or invalid 'path'")
@@ -259,8 +296,10 @@ class AppserverRoutes:
         if not conversation_id:
             conversation_id = active_conversation_id
 
-        if not conversation_id:
+        if not isinstance(conversation_id, str) or not conversation_id:
             raise ValueError("No active conversation selected")
+
+        conversation_id = conversation_id.strip()
 
         if not self._deps.conversation_meta_path(conversation_id).exists():
             raise FileNotFoundError("Conversation not found")
@@ -276,19 +315,24 @@ class AppserverRoutes:
             if len(lines) > 20:
                 content = "\n".join(lines[:20]) + f"\n... (truncated, {len(lines)} total lines)"
 
-        mention_evt: dict[str, Any] = {
+        line_no_int = _maybe_int(line_no)
+        end_line_no_int = _maybe_int(end_line_no)
+        col_int = _maybe_int(col)
+        end_col_int = _maybe_int(end_col)
+
+        mention_evt: ObjectMap = {
             "type": "mention_insert",
             "path": path,
             "conversation_id": conversation_id,
         }
-        if line_no is not None:
-            mention_evt["lineNo"] = int(line_no)
-        if end_line_no is not None:
-            mention_evt["endLineNo"] = int(end_line_no)
-        if col is not None:
-            mention_evt["col"] = int(col)
-        if end_col is not None:
-            mention_evt["endCol"] = int(end_col)
+        if line_no_int is not None:
+            mention_evt["lineNo"] = line_no_int
+        if end_line_no_int is not None:
+            mention_evt["endLineNo"] = end_line_no_int
+        if col_int is not None:
+            mention_evt["col"] = col_int
+        if end_col_int is not None:
+            mention_evt["endCol"] = end_col_int
         if content:
             mention_evt["content"] = str(content)
 
@@ -302,10 +346,10 @@ class AppserverRoutes:
                 draft = ""
             token = self._encode_draft_mention_token(
                 path,
-                line_no=int(line_no) if line_no is not None else None,
-                end_line_no=int(end_line_no) if end_line_no is not None else None,
-                col=int(col) if col is not None else None,
-                end_col=int(end_col) if end_col is not None else None,
+                line_no=line_no_int,
+                end_line_no=end_line_no_int,
+                col=col_int,
+                end_col=end_col_int,
                 content=str(content) if isinstance(content, str) and content else None,
             )
             if not token:
@@ -351,10 +395,10 @@ class AppserverRoutes:
             token += f"\n```\n{content}\n```"
         return token
 
-    async def api_health(self) -> dict[str, Any]:
+    async def api_health(self) -> ObjectMap:
         return {"ok": True, "ts": self._deps.utc_ts()}
 
-    async def api_appserver_config(self) -> dict[str, Any]:
+    async def api_appserver_config(self) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             ids = self._deps.sync_conversation_index(cfg)
@@ -362,11 +406,11 @@ class AppserverRoutes:
             self._deps.save_appserver_config(cfg)
             return cfg
 
-    async def api_appserver_conversation(self) -> dict[str, Any]:
+    async def api_appserver_conversation(self) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
         convo_id = cfg.get("conversation_id")
-        meta: dict[str, Any] | None = None
+        meta: ObjectMap | None = None
         if isinstance(convo_id, str) and convo_id and self._deps.conversation_meta_path(convo_id).exists():
             validated = await self._deps.validate_conversation_pending_approvals(
                 convo_id,
@@ -384,7 +428,7 @@ class AppserverRoutes:
         meta["active_view"] = cfg.get("active_view", "splash")
         return meta
 
-    async def api_appserver_conversation_meta(self, conversation_id: str) -> dict[str, Any]:
+    async def api_appserver_conversation_meta(self, conversation_id: str) -> ObjectMap:
         convo_id = self._deps.sanitize_conversation_id(conversation_id)
         if not convo_id or not self._deps.conversation_meta_path(convo_id).exists():
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -396,8 +440,8 @@ class AppserverRoutes:
 
     async def api_appserver_conversation_update(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         raw_conversation_id = payload.get("conversation_id")
@@ -447,7 +491,8 @@ class AppserverRoutes:
         if picked_session and agent_type and ext_loader.has_extension(agent_type):
             saved_cwd = final_settings.get("cwd")
             cwd = saved_cwd if isinstance(saved_cwd, str) and saved_cwd.strip() else "~"
-            model = final_settings.get("model")
+            model_value = final_settings.get("model")
+            model = model_value if isinstance(model_value, str) and model_value.strip() else None
             bind_settings = self._deps.merge_extension_bind_settings(
                 convo_id,
                 cwd=cwd,
@@ -484,8 +529,8 @@ class AppserverRoutes:
 
     async def api_appserver_conversation_draft(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         draft = payload.get("draft", "")
         if not isinstance(draft, str):
             draft = ""
@@ -523,7 +568,7 @@ class AppserverRoutes:
     async def api_appserver_repo_memory(
         self,
         conversation_id: Optional[str] = Query(None),
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
 
@@ -553,7 +598,7 @@ class AppserverRoutes:
         )
         return {"ok": True, **snapshot}
 
-    async def api_appserver_conversations(self) -> dict[str, Any]:
+    async def api_appserver_conversations(self) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             ids = self._deps.conversation_display_order(cfg)
@@ -566,7 +611,7 @@ class AppserverRoutes:
                 self._deps.save_appserver_config(cfg)
         pinned_ids = self._deps.normalize_pinned_conversation_list(cfg)
         pinned_set = set(pinned_ids)
-        items: list[dict[str, Any]] = []
+        items: ObjectList = []
         for convo_id in ids:
             if not convo_id:
                 continue
@@ -596,8 +641,8 @@ class AppserverRoutes:
 
     async def api_appserver_conversation_create(
         self,
-        payload: Annotated[Optional[dict[str, Any]], Body()] = None,
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap | None, Body()] = None,
+    ) -> ObjectMap:
         convo_id = uuid.uuid4().hex
         meta = self._deps.default_conversation_meta(convo_id)
         if isinstance(payload, dict) and isinstance(payload.get("settings"), dict):
@@ -618,8 +663,8 @@ class AppserverRoutes:
 
     async def api_appserver_conversation_select(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         convo_id = payload.get("conversation_id") or payload.get("id")
@@ -681,8 +726,8 @@ class AppserverRoutes:
 
     async def api_appserver_conversation_pins(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         requested = payload.get("pinned_conversations")
@@ -704,7 +749,7 @@ class AppserverRoutes:
             self._deps.save_appserver_config(cfg)
         return {"ok": True, "pinned_conversations": pinned}
 
-    async def api_appserver_conversation_delete(self, conversation_id: str) -> dict[str, Any]:
+    async def api_appserver_conversation_delete(self, conversation_id: str) -> ObjectMap:
         if not conversation_id:
             raise HTTPException(status_code=400, detail="Missing conversation_id")
         convo_id = self._deps.sanitize_conversation_id(conversation_id)
@@ -735,8 +780,8 @@ class AppserverRoutes:
 
     async def api_appserver_set_view(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         view = payload.get("view")
@@ -748,14 +793,14 @@ class AppserverRoutes:
             self._deps.save_appserver_config(cfg)
             return cfg
 
-    async def api_fs_list(self, path: Optional[str] = Query(None)) -> dict[str, Any]:
+    async def api_fs_list(self, path: Optional[str] = Query(None)) -> ObjectMap:
         logical = self._deps.logical_absolute_path(path, "~")
         resolved = self._deps.resolved_existing_path(logical, self._deps.logical_absolute_path("~", "~"))
         if not resolved.exists():
             raise HTTPException(status_code=404, detail="Path not found")
         if not resolved.is_dir():
             raise HTTPException(status_code=400, detail="Path is not a directory")
-        items: list[dict[str, Any]] = []
+        items: ObjectList = []
         try:
             with os.scandir(resolved) as it:
                 for entry in it:
@@ -786,7 +831,12 @@ class AppserverRoutes:
         except Exception as exc:
             raise HTTPException(status_code=500, detail="Failed to list directory") from exc
 
-        items.sort(key=lambda item: (0 if item["type"] == "directory" else 1, item["name"].lower()))
+        items.sort(
+            key=lambda item: (
+                0 if item.get("type") == "directory" else 1,
+                str(item.get("name") or "").lower(),
+            )
+        )
         parent = str(logical.parent) if logical.parent != logical else None
         return {"path": str(logical), "parent": parent, "items": items}
 
@@ -795,7 +845,7 @@ class AppserverRoutes:
         query: str = Query(...),
         root: Optional[str] = Query(None),
         limit: int = Query(200, gt=0),
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         if not query.strip():
             return {"root": None, "items": []}
         try:
@@ -804,7 +854,8 @@ class AppserverRoutes:
             raise HTTPException(status_code=400, detail="Invalid regex") from exc
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
-        base = root or cfg.get("cwd") or os.getcwd()
+        cfg_cwd = cfg.get("cwd")
+        base = root or (cfg_cwd if isinstance(cfg_cwd, str) else None) or os.getcwd()
         logical_base = self._deps.logical_absolute_path(base, os.getcwd())
         resolved = self._deps.resolved_existing_path(
             logical_base,
@@ -823,7 +874,7 @@ class AppserverRoutes:
             files = self._deps.rg_list_files(repo_root)
         except Exception as exc:
             raise HTTPException(status_code=500, detail="Failed to search repo") from exc
-        items: list[dict[str, Any]] = []
+        items: ObjectList = []
         seen: set[str] = set()
         for rel in files:
             full_path = repo_root / rel
@@ -851,7 +902,12 @@ class AppserverRoutes:
                         break
             if len(items) >= limit:
                 break
-        items.sort(key=lambda item: (0 if item["type"] == "directory" else 1, item["name"].lower()))
+        items.sort(
+            key=lambda item: (
+                0 if item.get("type") == "directory" else 1,
+                str(item.get("name") or "").lower(),
+            )
+        )
         return {"root": str(logical_repo_root), "items": items}
 
     def _read_transcript_range_data(
@@ -861,26 +917,27 @@ class AppserverRoutes:
         offset: int,
         limit: int,
         include_internal: bool,
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         path = self._deps.transcript_path(str(conversation_id))
         if not path.exists():
             return {"conversation_id": str(conversation_id), "total": 0, "offset": 0, "items": []}
 
         total = 0
-        items: list[dict[str, Any]] = []
+        items: ObjectList = []
         if offset < 0:
-            buf: deque[dict[str, Any]] = deque(maxlen=limit)
+            buf: deque[ObjectMap] = deque(maxlen=limit)
             with path.open("r", encoding="utf-8") as handle:
                 for line in handle:
                     line = line.strip()
                     if not line:
                         continue
                     try:
-                        record = json.loads(line)
+                        record_raw = cast(object, json.loads(line))
                     except json.JSONDecodeError:
                         continue
-                    if not isinstance(record, dict):
+                    if not isinstance(record_raw, dict):
                         continue
+                    record = self._deps.coerce_json_object(record_raw)
                     if not include_internal and self._deps.is_internal_transcript_item(record):
                         continue
                     total += 1
@@ -896,11 +953,12 @@ class AppserverRoutes:
                     if not line:
                         continue
                     try:
-                        record = json.loads(line)
+                        record_raw = cast(object, json.loads(line))
                     except json.JSONDecodeError:
                         continue
-                    if not isinstance(record, dict):
+                    if not isinstance(record_raw, dict):
                         continue
+                    record = self._deps.coerce_json_object(record_raw)
                     if not include_internal and self._deps.is_internal_transcript_item(record):
                         continue
                     if start <= total < end:
@@ -918,7 +976,7 @@ class AppserverRoutes:
     async def api_appserver_transcript(
         self,
         conversation_id: Optional[str] = Query(None),
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             convo_id = conversation_id or cfg.get("conversation_id")
@@ -927,7 +985,7 @@ class AppserverRoutes:
         path = self._deps.transcript_path(str(convo_id))
         if not path.exists():
             return {"conversation_id": str(convo_id), "items": []}
-        items: list[dict[str, Any]] = []
+        items: ObjectList = []
         try:
             with path.open("r", encoding="utf-8") as handle:
                 for line in handle:
@@ -935,10 +993,11 @@ class AppserverRoutes:
                     if not line:
                         continue
                     try:
-                        record = json.loads(line)
+                        record_raw = cast(object, json.loads(line))
                     except json.JSONDecodeError:
                         continue
-                    if isinstance(record, dict):
+                    if isinstance(record_raw, dict):
+                        record = self._deps.coerce_json_object(record_raw)
                         items.append(record)
         except Exception:
             return {"conversation_id": str(convo_id), "items": []}
@@ -950,7 +1009,7 @@ class AppserverRoutes:
         offset: int = Query(0),
         limit: int = Query(120, gt=0, le=500),
         include_internal: bool = Query(False),
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             convo_id = conversation_id or cfg.get("conversation_id")
@@ -965,8 +1024,8 @@ class AppserverRoutes:
 
     async def api_appserver_config_update(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Config payload must be a JSON object")
         if "user_name" in payload:
@@ -989,8 +1048,8 @@ class AppserverRoutes:
 
     async def api_appserver_set_cwd(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         cwd = payload.get("cwd")
@@ -1011,8 +1070,8 @@ class AppserverRoutes:
 
     async def api_appserver_thread_start(
         self,
-        payload: Annotated[Optional[dict[str, Any]], Body()] = None,
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap | None, Body()] = None,
+    ) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             thread_id = None
@@ -1023,7 +1082,7 @@ class AppserverRoutes:
                 self._deps.save_appserver_config(cfg)
             return {"ok": True, "thread_id": cfg.get("thread_id"), "note": "stub"}
 
-    async def api_appserver_thread_kill(self) -> dict[str, Any]:
+    async def api_appserver_thread_kill(self) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             cfg["thread_id"] = None
@@ -1031,16 +1090,16 @@ class AppserverRoutes:
             self._deps.save_appserver_config(cfg)
             return {"ok": True}
 
-    async def api_appserver_stop(self) -> dict[str, Any]:
+    async def api_appserver_stop(self) -> ObjectMap:
         return self._deps.legacy_builtin_codex_disabled_result(ok=True)
 
-    async def api_appserver_start(self) -> dict[str, Any]:
+    async def api_appserver_start(self) -> ObjectMap:
         return self._deps.legacy_builtin_codex_disabled_result(ok=True, running=False)
 
-    async def api_appserver_status(self) -> dict[str, Any]:
+    async def api_appserver_status(self) -> ObjectMap:
         return self._deps.legacy_builtin_codex_disabled_result(ok=True, running=False, shell_id=None)
 
-    async def api_appserver_message(self, payload: AppserverMessageIn) -> dict[str, Any]:
+    async def api_appserver_message(self, payload: AppserverMessageIn) -> ObjectMap:
         convo_id = payload.conversation_id
         text = payload.text
         if not convo_id or not text:
@@ -1095,8 +1154,8 @@ class AppserverRoutes:
 
     async def _rpc_conversation_send(
         self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
+        params: ObjectMap,
+    ) -> ObjectMap:
         conversation_id_raw = params.get("conversation_id")
         text_raw = params.get("text")
         conversation_id = (
@@ -1121,25 +1180,25 @@ class AppserverRoutes:
 
     async def _rpc_conversation_interrupt(
         self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
+        params: ObjectMap,
+    ) -> ObjectMap:
         result = await self.api_appserver_interrupt(params)
-        return dict(result) if isinstance(result, dict) else {
+        return self._deps.coerce_json_object(result) if isinstance(result, dict) else {
             "ok": False,
             "error": "Invalid interrupt result",
         }
 
     async def _rpc_conversation_compact(
         self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
+        params: ObjectMap,
+    ) -> ObjectMap:
         result = await self.api_appserver_compact(params)
-        return dict(result) if isinstance(result, dict) else {
+        return self._deps.coerce_json_object(result) if isinstance(result, dict) else {
             "ok": False,
             "error": "Invalid compact result",
         }
 
-    def _jsonrpc_success(self, request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
+    def _jsonrpc_success(self, request_id: RequestId, result: ObjectMap) -> ObjectMap:
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -1148,13 +1207,13 @@ class AppserverRoutes:
 
     def _jsonrpc_error(
         self,
-        request_id: Any,
+        request_id: RequestId,
         *,
         code: int,
         message: str,
-        data: Optional[dict[str, Any]] = None,
-    ) -> dict[str, Any]:
-        error: dict[str, Any] = {
+        data: ObjectMap | None = None,
+    ) -> ObjectMap:
+        error: ObjectMap = {
             "code": code,
             "message": message,
         }
@@ -1168,11 +1227,11 @@ class AppserverRoutes:
 
     def _jsonrpc_error_from_http_exception(
         self,
-        request_id: Any,
+        request_id: RequestId,
         *,
         method: str,
         exc: HTTPException,
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         status_code = int(getattr(exc, "status_code", 500) or 500)
         detail = exc.detail
         message = detail if isinstance(detail, str) and detail.strip() else "Request failed"
@@ -1201,8 +1260,21 @@ class AppserverRoutes:
 
     async def _rpc_conversation_replay_get_chunk(
         self,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
+        params: ObjectMap,
+    ) -> ObjectMap:
+        def _parse_int(value: object, *, detail: str, default: int | None = None) -> int:
+            candidate = default if value is None else value
+            if isinstance(candidate, bool):
+                raise HTTPException(status_code=400, detail=detail)
+            if isinstance(candidate, int):
+                return candidate
+            if isinstance(candidate, str):
+                try:
+                    return int(candidate)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=detail) from exc
+            raise HTTPException(status_code=400, detail=detail)
+
         conversation_id_raw = params.get("conversation_id")
         conversation_id = str(conversation_id_raw or "").strip()
         if conversation_id:
@@ -1219,22 +1291,11 @@ class AppserverRoutes:
             cursor = {}
         if not isinstance(cursor, dict):
             raise HTTPException(status_code=400, detail="cursor must be an object")
-
-        try:
-            offset = int(cursor.get("offset", 0))
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="cursor.offset must be an integer") from exc
-
-        try:
-            max_entries = int(params.get("max_entries", 500))
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="max_entries must be an integer") from exc
+        cursor_map = self._deps.coerce_json_object(cursor)
+        offset = _parse_int(cursor_map.get("offset", 0), detail="cursor.offset must be an integer")
+        max_entries = _parse_int(params.get("max_entries", 500), detail="max_entries must be an integer")
         max_entries = min(max(max_entries, 1), 500)
-
-        try:
-            max_bytes = int(params.get("max_bytes", 524288))
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="max_bytes must be an integer") from exc
+        max_bytes = _parse_int(params.get("max_bytes", 524288), detail="max_bytes must be an integer")
         max_bytes = max(max_bytes, 1)
 
         format_name = str(params.get("format", "jsonl") or "jsonl").strip().lower()
@@ -1264,9 +1325,12 @@ class AppserverRoutes:
             limit=max_entries,
             include_internal=include_internal,
         )
-        items = range_data["items"]
-        actual_offset = int(range_data["offset"])
-        total_count = int(range_data["total"])
+        items_value = range_data.get("items")
+        items: ObjectList = []
+        if isinstance(items_value, list):
+            items = [self._deps.coerce_json_object(item) for item in items_value if isinstance(item, dict)]
+        actual_offset = _parse_int(range_data.get("offset"), detail="Invalid replay offset", default=0)
+        total_count = _parse_int(range_data.get("total"), detail="Invalid replay total", default=0)
 
         jsonl_parts: list[str] = []
         kept_item_count = 0
@@ -1303,17 +1367,18 @@ class AppserverRoutes:
 
     async def api_appserver_rpc(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         return self._deps.legacy_builtin_codex_disabled_result()
 
     async def api_conversations_rpc(
         self,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        request_id = payload.get("id") if isinstance(payload, dict) else None
+        payload: ObjectMap,
+    ) -> ObjectMap:
+        request_id_raw = payload.get("id") if isinstance(payload, dict) else None
+        request_id: RequestId = request_id_raw if isinstance(request_id_raw, (str, int)) else None
         if not isinstance(payload, dict):
             return self._jsonrpc_error(
                 request_id,
@@ -1350,7 +1415,7 @@ class AppserverRoutes:
                 data={"code": "INVALID_REQUEST", "reason": "params must be an object"},
             )
 
-        handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
+        handlers: dict[str, Callable[[ObjectMap], Awaitable[ObjectMap]]] = {
             "conversation.send": self._rpc_conversation_send,
             "conversation.interrupt": self._rpc_conversation_interrupt,
             "conversation.compact": self._rpc_conversation_compact,
@@ -1384,8 +1449,8 @@ class AppserverRoutes:
 
     async def api_appserver_approval_record(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         status = payload.get("status")
@@ -1438,8 +1503,8 @@ class AppserverRoutes:
 
     async def api_appserver_approval_response(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         request_id_raw = payload.get("request_id", payload.get("requestId", payload.get("id")))
@@ -1451,8 +1516,8 @@ class AppserverRoutes:
             if key in payload and key not in resolution:
                 resolution[key] = payload.get(key)
         conversation_id = payload.get("conversation_id")
-        descriptor: Optional[dict[str, Any]] = None
-        meta: Optional[dict[str, Any]] = None
+        descriptor: ObjectMap | None = None
+        meta: ObjectMap | None = None
         print(
             f"[ask_user server] approval_response request_id={request_id} conversation_id={conversation_id or '-'} payload_keys={sorted(payload.keys())}",
             flush=True,
@@ -1569,8 +1634,8 @@ class AppserverRoutes:
 
     async def api_appserver_interrupt(
         self,
-        payload: Annotated[Optional[dict[str, Any]], Body()] = None,
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap | None, Body()] = None,
+    ) -> ObjectMap:
         convo_id = payload.get("conversation_id") if isinstance(payload, dict) else None
         if not isinstance(convo_id, str) or not convo_id:
             raise HTTPException(status_code=400, detail="Missing required field: conversation_id")
@@ -1583,15 +1648,17 @@ class AppserverRoutes:
         if unavailable_detail and agent_type != "codex":
             raise HTTPException(status_code=409, detail=unavailable_detail)
         if ext_loader.has_extension(agent_type):
-            result = await ext_loader.interrupt_session(agent_type, convo_id)
+            result = self._deps.coerce_json_object(await ext_loader.interrupt_session(agent_type, convo_id))
             if not result.get("ok"):
-                raise HTTPException(status_code=409, detail=result.get("error", "Interrupt failed"))
+                error_value = result.get("error", "Interrupt failed")
+                error_detail = error_value if isinstance(error_value, str) and error_value else "Interrupt failed"
+                raise HTTPException(status_code=409, detail=error_detail)
             await ask_user_interactions.cancel_interactions(
                 conversation_id=convo_id,
                 turn_id=meta.get("turn_id"),
                 resolution={"status": "interrupted"},
             )
-            return result if isinstance(result, dict) else {"ok": False, "error": "Invalid interrupt result"}
+            return result
 
         return self._deps.legacy_builtin_codex_disabled_result(
             conversation_id=convo_id,
@@ -1601,8 +1668,8 @@ class AppserverRoutes:
 
     async def api_appserver_shell_exec(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap, Body(...)],
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         command = payload.get("command", "")
@@ -1618,8 +1685,8 @@ class AppserverRoutes:
 
     async def api_appserver_compact(
         self,
-        payload: Annotated[Optional[dict[str, Any]], Body()] = None,
-    ) -> dict[str, Any]:
+        payload: Annotated[ObjectMap | None, Body()] = None,
+    ) -> ObjectMap:
         convo_id = payload.get("conversation_id") if isinstance(payload, dict) else None
         if not isinstance(convo_id, str) or not convo_id:
             raise HTTPException(status_code=400, detail="Missing required field: conversation_id")
@@ -1644,9 +1711,10 @@ class AppserverRoutes:
                 source="system",
                 shared_fields={"thread_id": thread_id, "phase": "request"},
             )
-            result = await ext_loader.compact_session(agent_type, convo_id)
+            result = self._deps.coerce_json_object(await ext_loader.compact_session(agent_type, convo_id))
             if not result.get("ok"):
-                error_detail = result.get("error", "compact failed")
+                error_value = result.get("error", "compact failed")
+                error_detail = error_value if isinstance(error_value, str) and error_value else "compact failed"
                 await self._deps.emit_command_result_mirror(
                     convo_id,
                     command="context compact",
@@ -1674,7 +1742,7 @@ class AppserverRoutes:
 
     async def api_appserver_mention(
         self,
-        payload: Annotated[dict[str, Any], Body(...)],
+        payload: Annotated[ObjectMap, Body(...)],
     ) -> JSONResponse:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
@@ -1700,20 +1768,20 @@ class AppserverRoutes:
             },
         )
 
-    async def api_appserver_initialize(self) -> dict[str, Any]:
+    async def api_appserver_initialize(self) -> ObjectMap:
         return self._deps.legacy_builtin_codex_disabled_result(ok=True)
 
-    async def api_appserver_models(self) -> dict[str, Any]:
+    async def api_appserver_models(self) -> ObjectMap:
         return self._deps.legacy_builtin_codex_disabled_result(ok=True, data=[])
 
     async def api_appserver_runtime_options(
         self,
         conversation_id: Optional[str] = Query(None),
         agent: Optional[str] = Query(None),
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         resolved_agent = str(agent or "").strip()
         resolved_conversation_id = str(conversation_id or "").strip()
-        meta: dict[str, Any] | None = None
+        meta: ObjectMap | None = None
 
         if resolved_conversation_id:
             safe_id = self._deps.sanitize_conversation_id(resolved_conversation_id)
@@ -1764,11 +1832,11 @@ class AppserverRoutes:
     async def api_appserver_debug_raw(
         self,
         limit: int = Query(200, gt=0, le=500),
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         _ = limit
         return {"items": []}
 
-    async def api_appserver_debug_state(self) -> dict[str, Any]:
+    async def api_appserver_debug_state(self) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
         convo_id = cfg.get("conversation_id")
@@ -1785,7 +1853,7 @@ class AppserverRoutes:
     async def api_appserver_debug_toggle(
         self,
         enabled: Annotated[bool, Body(..., embed=True)],
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         debug_raw_log_path = self._deps.set_debug_mode(enabled)
         return {
             "debug_mode": self._deps.get_debug_mode(),
@@ -1794,7 +1862,7 @@ class AppserverRoutes:
 
 
 def register_appserver_routes(app: FastAPI, routes: AppserverRoutes) -> None:
-    def _add(path: str, endpoint: Callable[..., Any], methods: list[str]) -> None:
+    def _add(path: str, endpoint: Callable[..., object], methods: list[str]) -> None:
         app.add_api_route(path, endpoint, methods=methods, response_model=None)
 
     _add("/api/health", routes.api_health, ["GET"])

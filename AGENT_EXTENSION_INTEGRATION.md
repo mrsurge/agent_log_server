@@ -256,15 +256,27 @@ These are the generic places where extensions plug into the backend:
 
 ### Send path
 
+Conversation-scoped runtime sends are transport-neutral at this backend seam.
+During rollout, the frontend may reach it through either:
+
+- legacy `/appserver` `send_message`
+- `/rpc/conversations` `conversation.send`
+
 For non-legacy agents:
 
 ```text
-send_message / api_appserver_message
-    └─ load meta.settings.agent
-       └─ ext_loader.get_handler(agent).handle_message(...)
+send_message | conversation.send
+    └─ api_appserver_message / conversations RPC adapter
+       └─ load meta.settings.agent
+          └─ ext_loader.get_handler(agent).handle_message(...)
 ```
 
-If `agent == "codex"`, the legacy built-in send path still handles the request for compatibility.
+The frontend stays `conversation_id`-only on the normal send path; the backend still owns
+thread/session lifecycle and extension dispatch.
+
+If `agent == "codex"`, the compatibility lane returns the explicit legacy-disabled result.
+Supported Codex traffic should use `codex-ext`, `codex-ext-exp`, or compatibility aliases
+that resolve to those extensions.
 
 ### Generic extension endpoints
 
@@ -296,13 +308,30 @@ await ext_loader.route_event(
 )
 ```
 
-For the built-in `codex` agent, legacy server-side handling still remains as a fallback for non-collab events. `codex-ext` and `codex-ext-exp` use the extension-owned route directly, and `codex-ext-testing` simply resolves to the `codex-ext` handler.
+For conversation-scoped runtime traffic, migrated event families are mirrored onto both live
+lanes during rollout:
+
+- legacy `/appserver` `appserver_event`
+- `/rpc/conversations` `rpc.notify`
+
+When the splash RPC toggle is enabled, the frontend suppresses duplicate legacy
+`appserver_event` handling after the conversations RPC lane is connected.
+
+For the built-in `codex` agent, the legacy compatibility surface remains disabled rather than
+acting as a real provider fallback. `codex-ext` and `codex-ext-exp` use the extension-owned
+route directly, and `codex-ext-testing` simply resolves to the `codex-ext` handler.
 
 ### Approval and interrupt plumbing
 
 - approvals: `ext_loader.resolve_approval(...)`
 - approval validation: `ext_loader.validate_pending_approval(...)`
 - interrupts: `ext_loader.interrupt_session(...)`
+- compaction: `ext_loader.compact_session(...)`
+
+During rollout, the generic runtime controls can arrive through either transport:
+
+- legacy `/appserver` shim calls: `interrupt`, `compact`
+- `/rpc/conversations`: `conversation.interrupt`, `conversation.compact`
 
 ## Settings schema model
 
@@ -741,6 +770,9 @@ Recommended checklist:
 - session picker works if implemented
 - new session from port-in works if implemented
 - transcript replay still works locally
+- with the splash RPC toggle enabled, replay/send/interrupt/compact and migrated live
+  notifications work over `/rpc/conversations` without duplicate rows
+- with the splash RPC toggle disabled, the legacy `/appserver` compatibility lane still works
 - ordinary existing-conversation reload with a bound session stays transcript-first and cold, and the first-send retry path does not absorb delayed replay updates into the live turn
 - approvals/interrupts work if the backend supports them
 - stderr/log observability works if the extension owns a custom transport wrapper

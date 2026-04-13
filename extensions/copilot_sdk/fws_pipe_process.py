@@ -3,7 +3,46 @@ import contextlib
 import queue
 import threading
 import time
-from typing import Any, Awaitable, Callable, Optional, cast
+from collections.abc import Awaitable
+from typing import Optional, Protocol, TypeAlias, cast
+
+
+class _PipeProcess(Protocol):
+    stdin: object | None
+    returncode: int | None
+
+
+class _PipeState(Protocol):
+    process: _PipeProcess
+
+
+_SubscriptionChunk: TypeAlias = bytes | str | None
+_OutputSubscription: TypeAlias = "asyncio.Queue[_SubscriptionChunk]"
+
+
+class _PipeShellManager(Protocol):
+    def get_pipe_state(self, shell_id: str) -> _PipeState | None: ...
+
+    async def subscribe_output_bytes(self, shell_id: str) -> _OutputSubscription: ...
+
+    async def unsubscribe_output_bytes(
+        self,
+        shell_id: str,
+        subscription: _OutputSubscription,
+    ) -> None: ...
+
+    async def write_to_pipe(self, shell_id: str, text: str) -> None: ...
+
+    async def terminate_shell(self, shell_id: str, force: bool) -> None: ...
+
+
+class _SupportsWriteToShell(Protocol):
+    async def write_to_shell(
+        self,
+        shell_id: str,
+        text: str,
+        append_newline: bool = True,
+    ) -> object: ...
 
 
 class _BlockingBytesReader:
@@ -103,11 +142,11 @@ class _AsyncPipeWriter:
 
 
 class FrameworkShellPipeProcess:
-    def __init__(self, mgr: Any, shell_id: str, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, mgr: _PipeShellManager, shell_id: str, loop: asyncio.AbstractEventLoop) -> None:
         self._mgr = mgr
         self._shell_id = shell_id
         self._loop = loop
-        self._subscription: Any = None
+        self._subscription: _OutputSubscription | None = None
         self._pump_task: Optional[asyncio.Task[None]] = None
         self._closed = False
         self.returncode: Optional[int] = None
@@ -118,7 +157,7 @@ class FrameworkShellPipeProcess:
     @classmethod
     async def create(
         cls,
-        mgr: Any,
+        mgr: _PipeShellManager,
         shell_id: str,
         loop: asyncio.AbstractEventLoop,
     ) -> "FrameworkShellPipeProcess":
@@ -138,22 +177,24 @@ class FrameworkShellPipeProcess:
 
     async def write_bytes(self, data: bytes) -> None:
         text = data.decode("utf-8")
-        writer = getattr(self._mgr, "write_to_shell", None)
-        write_to_shell = cast(Optional[Callable[..., Awaitable[Any]]], writer if callable(writer) else None)
-        if write_to_shell is not None:
+        writer = cast(_SupportsWriteToShell | None, self._mgr if hasattr(self._mgr, "write_to_shell") else None)
+        if writer is not None:
             try:
-                await write_to_shell(self._shell_id, text, append_newline=False)
+                await writer.write_to_shell(self._shell_id, text, append_newline=False)
                 return
             except TypeError:
-                await write_to_shell(self._shell_id, text)
+                await writer.write_to_shell(self._shell_id, text)
                 return
         await self._mgr.write_to_pipe(self._shell_id, text)
 
     async def _pump_output(self) -> None:
         try:
+            subscription = self._subscription
+            if subscription is None:
+                return
             while True:
                 try:
-                    chunk = await asyncio.wait_for(self._subscription.get(), timeout=1.0)
+                    chunk = await asyncio.wait_for(subscription.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     state = self._mgr.get_pipe_state(self._shell_id)
                     if not state or state.process.returncode is not None:

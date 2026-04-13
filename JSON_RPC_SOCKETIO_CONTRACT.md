@@ -1,6 +1,8 @@
 # JSON-RPC 2.0 Socket.IO Contract
 
-Status: proposed public runtime contract for the harness frontend/backend transport.
+Status: partially implemented public runtime contract. `/rpc/conversations` replay, send,
+interrupt, compact, and mirrored live notifications are implemented and verified; `/appserver`
+remains the compatibility shim while the remaining namespaces are migrated incrementally.
 
 This document defines the intended replacement for the current overloaded `/appserver`
 flat-event Socket.IO contract. The goal is not to change the transcript model or
@@ -53,6 +55,27 @@ Rules:
 - keep TE2 relay and legacy frontend modules working through `/appserver` until they explicitly learn the new RPC transport
 - do not treat `/api/appserver/rpc` as a historical source-of-truth contract; the real compatibility surface is the flat `/appserver` event model
 - treat `/appserver` as an adapter/shim layer once the JSON-RPC transport becomes canonical
+
+## Current implementation snapshot
+
+Live today:
+
+- `/rpc/conversations` request methods:
+  - `conversation.replay.getChunk`
+  - `conversation.send`
+  - `conversation.interrupt`
+  - `conversation.compact`
+- conversation-scoped live events are mirrored from `_broadcast_appserver_ui(...)` onto
+  `/rpc/conversations` `rpc.notify`
+- when the splash RPC toggle is enabled, the frontend suppresses duplicate legacy
+  `appserver_event` handling after the conversations RPC lane is connected
+
+Still planned / migrating:
+
+- the remaining conversation lifecycle CRUD methods listed below
+- `/rpc/settings`
+- `/rpc/ui`
+- eventual removal of the flat `/appserver` runtime contract once legacy consumers are gone
 
 ## Why not dynamic per-conversation namespaces
 
@@ -253,6 +276,10 @@ transcript replay, preview/summary updates, and live-only toast notifications.
 | `conversation.interrupt` | interrupt the active turn |
 | `conversation.compact` | request compaction |
 | `conversation.replay.getChunk` | fetch a chunk-framed replay payload from transcript history |
+
+Implemented today: `conversation.replay.getChunk`, `conversation.send`,
+`conversation.interrupt`, and `conversation.compact`. The rest of the methods in this table
+remain target methods for the namespace as the migration continues.
 
 ### `conversation.send`
 
@@ -642,6 +669,10 @@ be implemented deliberately for each namespace.
 
 Legacy broadcast `appserver_event.type` mappings:
 
+These mapped event families are now mirrored onto `/rpc/conversations` `rpc.notify` during
+rollout. The legacy `appserver_event` broadcast remains live as the compatibility shim, and
+the frontend suppresses duplicate legacy handling once the RPC lane is enabled and connected.
+
 | Current `type` | New namespace | New notification |
 |----------------|---------------|------------------|
 | `assistant_delta` | `/rpc/conversations` | `conversation.message.delta` |
@@ -657,18 +688,19 @@ Legacy broadcast `appserver_event.type` mappings:
 | `toast` | `/rpc/conversations` | `conversation.toast` |
 | `host_ui` | `/rpc/ui` | `hostUi.updated` |
 
-## Implementation order
+## Implementation status
 
-Recommended rollout:
+Current rollout status:
 
-1. create the TypeScript frontend placeholder modules and reserve their ownership boundaries from the current JS modules
-2. add the three new namespaces beside compatibility `/appserver`
-3. add a thin adapter that maps current server handlers/events into JSON-RPC method form
-4. migrate the frontend transport helpers to namespace-aware JSON-RPC calls
-5. migrate replay onto `conversation.replay.getChunk`
-6. migrate summary/preview notifications and toast runtime
-7. add toast quick reply on top of `conversation.send` with `toast_context`
-8. remove the old flat `/appserver` request contract once TE2 relay and frontend consumers are fully migrated
+1. ✅ create the TypeScript frontend placeholder modules and reserve their ownership boundaries from the current JS modules
+2. ✅ add the conversations RPC namespace beside compatibility `/appserver`
+3. ✅ add the adapter layer that maps current send/control handlers and conversation-scoped live events into JSON-RPC method form
+4. ✅ migrate the frontend transport helpers to namespace-aware JSON-RPC calls
+5. ✅ migrate replay onto `conversation.replay.getChunk`
+6. ✅ migrate send / interrupt / compact plus mirrored live conversation notifications onto `/rpc/conversations`
+7. ⏳ migrate the remaining conversation lifecycle CRUD methods listed above
+8. ⏳ bring `/rpc/settings` and `/rpc/ui` to parity
+9. ⏳ remove the old flat `/appserver` request contract once TE2 relay and frontend consumers are fully migrated
 
 ## Summary
 

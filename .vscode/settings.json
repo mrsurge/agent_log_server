@@ -5,5 +5,6 @@
     "extensions/copilot_sdk/_vendor"
   ],
   "basedpyright.analysis.diagnosticMode": "workspace",
-  "typescript.enablePromptUseWorkspaceTsdk": true
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "basedpyright.analysis.typeCheckingMode": "strict"
 }

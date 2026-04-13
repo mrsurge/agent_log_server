@@ -25,53 +25,94 @@ import sys
 import tempfile
 import types
 import zipfile
+from collections.abc import Awaitable
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, List, Optional, cast
+from typing import Callable, Optional, cast
+
+from agent_log_server.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
+
+HandlerModule = types.ModuleType
+ObjectCallable = Callable[..., object]
+ExtensionInfoList = list[ObjectMap]
+ExtensionRegistry = dict[str, ObjectMap]
+HandlerBuckets = dict[str, ExtensionInfoList]
+RuntimeDescriptorMap = dict[str, ObjectMap]
 
 # Extension type -> handler module
-_extension_handlers: Dict[str, Any] = {}
+_extension_handlers: dict[str, HandlerModule] = {}
 # extension_id -> registry info (id, name, type, path, manifest)
-_extensions_registry: Dict[str, Dict[str, Any]] = {}
-_extension_source_roots: Dict[str, Path] = {}
-_extension_module_packages: Dict[str, str] = {}
+_extensions_registry: ExtensionRegistry = {}
+_extension_source_roots: dict[str, Path] = {}
+_extension_module_packages: dict[str, str] = {}
 _initialized: bool = False
 
 # Callbacks stored for lazy init of discovered extensions
-_init_args: Dict[str, Any] = {}
+_init_args: ObjectMap = {}
 _DYNAMIC_EXTENSION_NAMESPACE = "_app_server_user_extensions"
 _EXTENSION_MANIFEST_SCHEMA_VERSION = 1
 _SUPPORTED_EXTENSION_MANIFEST_SCHEMA_VERSIONS = {_EXTENSION_MANIFEST_SCHEMA_VERSION}
 _INSTALLER_METADATA_SCHEMA_VERSION = 1
 
 
-def _dict_or_empty(value: object) -> dict[str, object]:
-    return cast(dict[str, object], value) if isinstance(value, dict) else {}
+def _dict_or_empty(value: object) -> ObjectMap:
+    return coerce_object_map(value)
 
 
-def _deep_merge_manifest(base: Any, override: Any) -> Any:
+def _callable_attr(value: object, attr: str) -> ObjectCallable | None:
+    candidate = getattr(value, attr, None)
+    if callable(candidate):
+        return cast(ObjectCallable, candidate)
+    return None
+
+
+async def _invoke_maybe_async(func: ObjectCallable, /, *args: object, **kwargs: object) -> object:
+    result = func(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await cast(Awaitable[object], result)
+    return result
+
+
+def _normalized_meta_fns(value: object) -> dict[str, Callable[..., object]] | None:
+    if not isinstance(value, dict):
+        return None
+    meta_fns: dict[str, Callable[..., object]] = {}
+    for key, item in value.items():
+        if isinstance(key, str) and callable(item):
+            meta_fns[key] = cast(Callable[..., object], item)
+    return meta_fns
+
+
+def _load_json_file(path: Path) -> object:
+    return cast(object, json.loads(path.read_text(encoding="utf-8")))
+
+
+def _deep_merge_manifest(base: object, override: object) -> object:
     if isinstance(base, dict) and isinstance(override, dict):
-        merged = dict(base)
+        merged = coerce_object_map(base)
         for key, value in override.items():
-            merged[key] = _deep_merge_manifest(merged.get(key), value)
+            key_text = str(key)
+            merged[key_text] = _deep_merge_manifest(merged.get(key_text), value)
         return merged
     return override
 
 
-def _manifest_capability_flag(manifest: Any, *names: str) -> bool:
-    if not isinstance(manifest, dict):
+def _manifest_capability_flag(manifest: object, *names: str) -> bool:
+    manifest_map = _dict_or_empty(manifest)
+    if not manifest_map:
         return False
-    capabilities = manifest.get("capabilities")
-    if not isinstance(capabilities, dict):
+    capabilities = _dict_or_empty(manifest_map.get("capabilities"))
+    if not capabilities:
         return False
     return any(bool(capabilities.get(name)) for name in names)
 
 
-def _manifest_ui_quote_parsing_enabled(manifest: Any) -> bool:
-    if not isinstance(manifest, dict):
+def _manifest_ui_quote_parsing_enabled(manifest: object) -> bool:
+    manifest_map = _dict_or_empty(manifest)
+    if not manifest_map:
         return False
-    ui = manifest.get("ui")
-    if not isinstance(ui, dict):
+    ui = _dict_or_empty(manifest_map.get("ui"))
+    if not ui:
         return False
     semantic_shell = None
     for key in ("semanticShellRibbon", "semantic_shell_ribbon"):
@@ -81,10 +122,11 @@ def _manifest_ui_quote_parsing_enabled(manifest: Any) -> bool:
             break
     if not isinstance(semantic_shell, dict):
         return False
-    return bool(semantic_shell.get("quoteParsing") or semantic_shell.get("quote_parsing"))
+    semantic_shell_map = _dict_or_empty(semantic_shell)
+    return bool(semantic_shell_map.get("quoteParsing") or semantic_shell_map.get("quote_parsing"))
 
 
-def _normalize_tool_render_spec(spec_raw: Any) -> Optional[Dict[str, Any]]:
+def _normalize_tool_render_spec(spec_raw: object) -> ObjectMap | None:
     if isinstance(spec_raw, str):
         text = spec_raw.strip()
         if not text:
@@ -105,14 +147,14 @@ def _normalize_tool_render_spec(spec_raw: Any) -> Optional[Dict[str, Any]]:
         if language:
             return {"kind": "hljs", "language": language}
         return None
-    spec: Dict[str, Any] = {"kind": kind}
+    spec: ObjectMap = {"kind": kind}
     if kind == "hljs" and language:
         spec["language"] = language
     return spec
 
 
-def _normalize_tool_render_field_map(fields_raw: Any) -> Dict[str, Dict[str, Any]]:
-    normalized: Dict[str, Dict[str, Any]] = {}
+def _normalize_tool_render_field_map(fields_raw: object) -> dict[str, ObjectMap]:
+    normalized: dict[str, ObjectMap] = {}
     if not isinstance(fields_raw, dict):
         return normalized
     for key, value in fields_raw.items():
@@ -125,10 +167,10 @@ def _normalize_tool_render_field_map(fields_raw: Any) -> Dict[str, Dict[str, Any
     return normalized
 
 
-def _normalize_tool_render_rule(rule_raw: Any) -> Optional[Dict[str, Any]]:
+def _normalize_tool_render_rule(rule_raw: object) -> ObjectMap | None:
     if not isinstance(rule_raw, dict):
         return None
-    rule: Dict[str, Any] = {}
+    rule: ObjectMap = {}
     for field in ("server", "tool", "serverPrefix", "toolPrefix"):
         value = rule_raw.get(field)
         if isinstance(value, str) and value.strip():
@@ -168,25 +210,26 @@ def _normalize_tool_render_rule(rule_raw: Any) -> Optional[Dict[str, Any]]:
     return rule
 
 
-def _manifest_tool_render_policy(manifest: Any) -> Dict[str, Any]:
-    default_policy: Dict[str, Any] = {
+def _manifest_tool_render_policy(manifest: object) -> ObjectMap:
+    default_policy: ObjectMap = {
         "default": {
             "request": {"kind": "plain"},
             "response": {"kind": "plain"},
         },
         "rules": [],
     }
-    if not isinstance(manifest, dict):
+    manifest_map = _dict_or_empty(manifest)
+    if not manifest_map:
         return default_policy
-    ui = manifest.get("ui")
-    if not isinstance(ui, dict):
+    ui = _dict_or_empty(manifest_map.get("ui"))
+    if not ui:
         return default_policy
     policy_raw = ui.get("toolRenderPolicy")
     if not isinstance(policy_raw, dict):
         return default_policy
     default_raw = policy_raw.get("default")
     if isinstance(default_raw, dict):
-        normalized_default: Dict[str, Any] = {}
+        normalized_default: ObjectMap = {}
         request_spec = _normalize_tool_render_spec(
             default_raw.get("request") or default_raw.get("args") or default_raw.get("arguments")
         )
@@ -206,8 +249,9 @@ def _manifest_tool_render_policy(manifest: Any) -> Dict[str, Any]:
         if response_fields:
             normalized_default["responseFields"] = response_fields
         if normalized_default:
+            existing_default = _dict_or_empty(default_policy.get("default"))
             default_policy["default"] = {
-                **default_policy["default"],
+                **existing_default,
                 **normalized_default,
             }
     rules_raw = policy_raw.get("rules")
@@ -220,8 +264,8 @@ def _manifest_tool_render_policy(manifest: Any) -> Dict[str, Any]:
     return default_policy
 
 
-def _normalize_runtime_options_list(options_raw: Any) -> List[Dict[str, Any]]:
-    options: List[Dict[str, Any]] = []
+def _normalize_runtime_options_list(options_raw: object) -> ObjectList:
+    options: ObjectList = []
     if not isinstance(options_raw, list):
         return options
     for item in options_raw:
@@ -238,7 +282,7 @@ def _normalize_runtime_options_list(options_raw: Any) -> List[Dict[str, Any]]:
         label = item.get("label")
         if not isinstance(label, str) or not label.strip():
             label = value
-        option: Dict[str, Any] = {
+        option: ObjectMap = {
             "value": value.strip(),
             "label": label.strip(),
         }
@@ -248,8 +292,8 @@ def _normalize_runtime_options_list(options_raw: Any) -> List[Dict[str, Any]]:
     return options
 
 
-def _schema_runtime_option_meta(field: Dict[str, Any]) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {}
+def _schema_runtime_option_meta(field: ObjectMap) -> ObjectMap:
+    meta: ObjectMap = {}
     runtime_option = field.get("runtime_option")
     if isinstance(runtime_option, str):
         text = runtime_option.strip()
@@ -266,7 +310,7 @@ def _schema_runtime_option_meta(field: Dict[str, Any]) -> Dict[str, Any]:
             meta["footerLabel"] = footer_label.strip()
         accents_raw = runtime_option.get("accents")
         if isinstance(accents_raw, dict):
-            accents: Dict[str, str] = {}
+            accents: dict[str, str] = {}
             for key, value in accents_raw.items():
                 if not isinstance(key, str) or not key.strip():
                     continue
@@ -281,7 +325,7 @@ def _schema_runtime_option_meta(field: Dict[str, Any]) -> Dict[str, Any]:
     return meta
 
 
-def _runtime_option_runtime_key(field: Dict[str, Any]) -> Optional[str]:
+def _runtime_option_runtime_key(field: ObjectMap) -> Optional[str]:
     meta = _schema_runtime_option_meta(field)
     kind = meta.get("kind")
     if isinstance(kind, str) and kind.strip():
@@ -295,8 +339,8 @@ def _runtime_option_runtime_key(field: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _normalize_extension_roots(extension_roots: Any) -> List[Path]:
-    roots: List[Path] = []
+def _normalize_extension_roots(extension_roots: object) -> list[Path]:
+    roots: list[Path] = []
     raw_roots = extension_roots if isinstance(extension_roots, (list, tuple, set)) else [extension_roots]
     for raw_root in raw_roots:
         if isinstance(raw_root, Path):
@@ -357,12 +401,12 @@ def _ensure_dynamic_extension_package(module_package: str, extension_root: Path)
         package.__path__ = existing_paths
 
 
-def _import_extension_submodule(module_package: str, extension_root: Path, submodule: str) -> Any:
+def _import_extension_submodule(module_package: str, extension_root: Path, submodule: str) -> HandlerModule:
     if not module_package.startswith(f"{_DYNAMIC_EXTENSION_NAMESPACE}."):
-        return importlib.import_module(f"{module_package}.{submodule}")
+        return cast(HandlerModule, importlib.import_module(f"{module_package}.{submodule}"))
     _ensure_dynamic_extension_package(module_package, extension_root)
     importlib.invalidate_caches()
-    return importlib.import_module(f"{module_package}.{submodule}")
+    return cast(HandlerModule, importlib.import_module(f"{module_package}.{submodule}"))
 
 
 def _abs_path(path: Path) -> Path:
@@ -387,7 +431,7 @@ def _sanitize_install_folder(value: str) -> str:
     return folder or "extension"
 
 
-def _coerce_schema_version(value: Any) -> Optional[int]:
+def _coerce_schema_version(value: object) -> Optional[int]:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -398,10 +442,11 @@ def _coerce_schema_version(value: Any) -> Optional[int]:
     return None
 
 
-def _manifest_version_text(manifest: Any) -> str:
-    if not isinstance(manifest, dict):
+def _manifest_version_text(manifest: object) -> str:
+    manifest_map = _dict_or_empty(manifest)
+    if not manifest_map:
         return ""
-    raw_value = manifest.get("version")
+    raw_value = manifest_map.get("version")
     return raw_value.strip() if isinstance(raw_value, str) and raw_value.strip() else ""
 
 
@@ -417,7 +462,7 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _extension_roots_from_state() -> List[Path]:
+def _extension_roots_from_state() -> list[Path]:
     raw_roots = _init_args.get("extension_roots")
     return [root for root in raw_roots if isinstance(root, Path)] if isinstance(raw_roots, list) else []
 
@@ -434,21 +479,24 @@ def _user_extension_root() -> Optional[Path]:
     return None
 
 
-def _read_extensions_registry(root: Path) -> Dict[str, Any]:
+def _read_extensions_registry(root: Path) -> ObjectMap:
     registry_path = root / "extensions.json"
     if not registry_path.exists():
         return {"version": "1.0", "extensions": []}
-    data = json.loads(registry_path.read_text(encoding="utf-8"))
+    data = _load_json_file(registry_path)
     if not isinstance(data, dict):
         raise ValueError(f"Invalid extensions.json at {registry_path}")
-    entries = data.get("extensions")
+    registry = coerce_object_map(data)
+    entries = registry.get("extensions")
     if not isinstance(entries, list):
-        data["extensions"] = []
-    data.setdefault("version", "1.0")
-    return data
+        registry["extensions"] = []
+    version = registry.get("version")
+    if not isinstance(version, str) or not version.strip():
+        registry["version"] = "1.0"
+    return registry
 
 
-def _write_extensions_registry(root: Path, registry: Dict[str, Any]) -> None:
+def _write_extensions_registry(root: Path, registry: ObjectMap) -> None:
     root.mkdir(parents=True, exist_ok=True)
     registry_path = root / "extensions.json"
     tmp_path = registry_path.with_name(f"{registry_path.name}.tmp")
@@ -457,25 +505,19 @@ def _write_extensions_registry(root: Path, registry: Dict[str, Any]) -> None:
     tmp_path.replace(registry_path)
 
 
-def _registry_install_source(entry: Any) -> Dict[str, Any]:
-    if not isinstance(entry, dict):
+def _registry_install_source(entry: object) -> ObjectMap:
+    entry_map = _dict_or_empty(entry)
+    if not entry_map:
         return {}
-    install_source = entry.get("install_source")
-    if isinstance(install_source, dict):
-        return dict(install_source)
-    installer_meta = entry.get("installer_meta")
-    if not isinstance(installer_meta, dict):
-        return {}
-    current = installer_meta.get("current")
-    if not isinstance(current, dict):
-        return {}
-    current_source = current.get("install_source")
-    if isinstance(current_source, dict):
-        return dict(current_source)
-    return {}
+    install_source = _dict_or_empty(entry_map.get("install_source"))
+    if install_source:
+        return install_source
+    installer_meta = _dict_or_empty(entry_map.get("installer_meta"))
+    current = _dict_or_empty(installer_meta.get("current"))
+    return _dict_or_empty(current.get("install_source"))
 
 
-def _upsert_registry_entry(root: Path, entry: Dict[str, Any]) -> None:
+def _upsert_registry_entry(root: Path, entry: ObjectMap) -> None:
     registry = _read_extensions_registry(root)
     entries = registry.get("extensions")
     if not isinstance(entries, list):
@@ -512,7 +554,7 @@ def _remove_registry_entry(root: Path, extension_id: str) -> bool:
     return True
 
 
-def _clear_extension_module_cache(module_packages: List[str]) -> None:
+def _clear_extension_module_cache(module_packages: list[str]) -> None:
     package_names = sorted(
         {
             package
@@ -529,7 +571,7 @@ def _clear_extension_module_cache(module_packages: List[str]) -> None:
     importlib.invalidate_caches()
 
 
-def _extension_runtime_signature(info: Dict[str, Any]) -> str:
+def _extension_runtime_signature(info: ObjectMap) -> str:
     payload = {
         "id": info.get("id"),
         "name": info.get("name"),
@@ -546,18 +588,24 @@ def _extension_runtime_signature(info: Dict[str, Any]) -> str:
 
 
 def _build_extension_state(
-    discovered: List[Dict[str, Any]],
+    discovered: ExtensionInfoList,
     builtin_root: Optional[Path],
-) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Path], Dict[str, str], Dict[str, List[Dict[str, Any]]]]:
-    registry: Dict[str, Dict[str, Any]] = {}
-    source_roots: Dict[str, Path] = {}
-    module_packages: Dict[str, str] = {}
-    enabled_by_type: Dict[str, List[Dict[str, Any]]] = {}
+) -> tuple[ExtensionRegistry, dict[str, Path], dict[str, str], HandlerBuckets]:
+    registry: ExtensionRegistry = {}
+    source_roots: dict[str, Path] = {}
+    module_packages: dict[str, str] = {}
+    enabled_by_type: HandlerBuckets = {}
 
     for ext_info in discovered:
-        ext_id = ext_info["id"]
-        ext_type = ext_info["type"]
-        folder = ext_info["folder"]
+        ext_id = ext_info.get("id")
+        ext_type = ext_info.get("type")
+        folder = ext_info.get("folder")
+        if not isinstance(ext_id, str) or not ext_id:
+            continue
+        if not isinstance(ext_type, str) or not ext_type:
+            continue
+        if not isinstance(folder, str) or not folder:
+            continue
         manifest = _dict_or_empty(ext_info.get("manifest"))
         dependencies = _dict_or_empty(manifest.get("dependencies"))
         default_enabled = bool(ext_info.get("enabled", True))
@@ -591,8 +639,8 @@ def _build_extension_state(
             "type": ext_type,
             "path": folder,
             "manifest": manifest,
-            "capabilities": manifest.get("capabilities", {}) if isinstance(manifest, dict) else {},
-            "ui": manifest.get("ui", {}) if isinstance(manifest, dict) else {},
+            "capabilities": _dict_or_empty(manifest.get("capabilities")),
+            "ui": _dict_or_empty(manifest.get("ui")),
             "has_plan": _manifest_capability_flag(manifest, "hasPlan", "has_plan"),
             "has_todo": _manifest_capability_flag(manifest, "hasTodo", "has_todo"),
             "has_plan_modes": _manifest_capability_flag(manifest, "hasPlanModes", "has_plan_modes"),
@@ -622,12 +670,12 @@ def _build_extension_state(
 
 
 def load_extensions(
-    extensions_dir: Any,
+    extensions_dir: object,
     server_root: Path,
     fws_getter: Callable[..., object],
     broadcast_fn: Callable[..., object],
     transcript_fn: Callable[..., object],
-    meta_fns: Optional[Dict[str, Callable[..., object]]] = None,
+    meta_fns: Optional[dict[str, Callable[..., object]]] = None,
 ) -> None:
     """
     Discover and load extensions.
@@ -666,8 +714,9 @@ def load_extensions(
     for ext_info in discovered:
         if not ext_info.get("enabled", True):
             continue
-        ext_type = ext_info["type"]
-        folder = ext_info["folder"]
+        ext_type = ext_info.get("type")
+        if not isinstance(ext_type, str) or not ext_type:
+            continue
 
         if ext_type not in _extension_handlers:
             handler = _load_handler(
@@ -687,9 +736,9 @@ def load_extensions(
           f"{list(_extensions_registry.keys())}")
 
 
-def _discover_extensions_in_root(extensions_dir: Path, builtin_root: Optional[Path]) -> List[Dict[str, Any]]:
+def _discover_extensions_in_root(extensions_dir: Path, builtin_root: Optional[Path]) -> ExtensionInfoList:
     """Return list of extension info dicts from manifests."""
-    result: List[Dict[str, Any]] = []
+    result: ExtensionInfoList = []
     if not extensions_dir.exists() or not extensions_dir.is_dir():
         return result
 
@@ -697,18 +746,27 @@ def _discover_extensions_in_root(extensions_dir: Path, builtin_root: Optional[Pa
     extensions_json = extensions_dir / "extensions.json"
     if extensions_json.exists():
         try:
-            data = json.loads(extensions_json.read_text())
-            for entry in data.get("extensions", []):
-                folder = entry.get("path", entry.get("id", ""))
+            data_raw = _load_json_file(extensions_json)
+            data = _dict_or_empty(data_raw)
+            entries = data.get("extensions")
+            for raw_entry in entries if isinstance(entries, list) else []:
+                entry = _dict_or_empty(raw_entry)
+                folder_raw = entry.get("path")
+                if not isinstance(folder_raw, str) or not folder_raw.strip():
+                    fallback_id = entry.get("id")
+                    folder_raw = fallback_id if isinstance(fallback_id, str) else ""
+                folder = folder_raw.strip()
                 manifest_path = extensions_dir / folder / "manifest.json"
-                manifest = {}
+                manifest: ObjectMap = {}
                 if manifest_path.exists():
                     try:
-                        manifest = json.loads(manifest_path.read_text())
+                        manifest_data = _load_json_file(manifest_path)
+                        manifest = _dict_or_empty(manifest_data)
                     except Exception:
                         pass
-                if isinstance(entry.get("manifest_overrides"), dict):
-                    manifest = _deep_merge_manifest(manifest, entry["manifest_overrides"])
+                overrides = entry.get("manifest_overrides")
+                if isinstance(overrides, dict):
+                    manifest = _dict_or_empty(_deep_merge_manifest(manifest, overrides))
                 result.append({
                     "id": entry.get("id") or manifest.get("id", folder),
                     "name": entry.get("name") or manifest.get("name", folder),
@@ -732,7 +790,8 @@ def _discover_extensions_in_root(extensions_dir: Path, builtin_root: Optional[Pa
         if not manifest_path.exists():
             continue
         try:
-            manifest = json.loads(manifest_path.read_text())
+            discovered_manifest = _load_json_file(manifest_path)
+            manifest = _dict_or_empty(discovered_manifest)
             result.append({
                 "id": manifest.get("id", sub.name),
                 "name": manifest.get("name", sub.name),
@@ -750,8 +809,8 @@ def _discover_extensions_in_root(extensions_dir: Path, builtin_root: Optional[Pa
     return result
 
 
-def _discover_extensions(extension_roots: List[Path]) -> List[Dict[str, Any]]:
-    merged: Dict[str, Dict[str, Any]] = {}
+def _discover_extensions(extension_roots: list[Path]) -> ExtensionInfoList:
+    merged: ExtensionRegistry = {}
     builtin_root = extension_roots[0] if extension_roots else None
     for root in extension_roots:
         for ext_info in _discover_extensions_in_root(root, builtin_root):
@@ -766,10 +825,10 @@ def _discover_extensions(extension_roots: List[Path]) -> List[Dict[str, Any]]:
 
 
 def reload_extensions(
-    changed_extension_ids: Optional[List[str]] = None,
+    changed_extension_ids: Optional[list[str]] = None,
     *,
     force: bool = False,
-) -> List[Dict[str, Any]]:
+) -> ExtensionInfoList:
     global _extension_handlers, _extensions_registry, _extension_source_roots
     global _extension_module_packages
 
@@ -831,7 +890,7 @@ def reload_extensions(
             module_packages_to_clear.add(module_package)
     _clear_extension_module_cache(list(module_packages_to_clear))
 
-    preserved_handlers: Dict[str, Any] = {}
+    preserved_handlers: dict[str, HandlerModule] = {}
     new_types = {
         ext_type
         for ext_type in (
@@ -853,17 +912,28 @@ def reload_extensions(
     for ext_info in discovered:
         if not ext_info.get("enabled", True):
             continue
-        ext_type = ext_info["type"]
+        ext_type = ext_info.get("type")
+        if not isinstance(ext_type, str) or not ext_type:
+            continue
         if ext_type in _extension_handlers:
+            continue
+        server_root = _init_args.get("server_root")
+        fws_getter = _init_args.get("fws_getter")
+        broadcast_fn = _init_args.get("broadcast_fn")
+        transcript_fn = _init_args.get("transcript_fn")
+        meta_fns = _normalized_meta_fns(_init_args.get("meta_fns"))
+        if not isinstance(server_root, Path):
+            continue
+        if not callable(fws_getter) or not callable(broadcast_fn) or not callable(transcript_fn):
             continue
         handler = _load_handler(
             ext_info,
             handler_extensions=enabled_by_type.get(ext_type, []),
-            server_root=_init_args["server_root"],
-            fws_getter=_init_args["fws_getter"],
-            broadcast_fn=_init_args["broadcast_fn"],
-            transcript_fn=_init_args["transcript_fn"],
-            meta_fns=_init_args.get("meta_fns"),
+            server_root=server_root,
+            fws_getter=cast(Callable[..., object], fws_getter),
+            broadcast_fn=cast(Callable[..., object], broadcast_fn),
+            transcript_fn=cast(Callable[..., object], transcript_fn),
+            meta_fns=meta_fns,
         )
         if handler:
             _extension_handlers[ext_type] = handler
@@ -876,14 +946,14 @@ def reload_extensions(
 
 
 def _load_handler(
-    ext_info: Dict[str, Any],
+    ext_info: ObjectMap,
     server_root: Path,
     fws_getter: Callable[..., object],
     broadcast_fn: Callable[..., object],
     transcript_fn: Callable[..., object],
-    meta_fns: Optional[Dict[str, Callable[..., object]]],
-    handler_extensions: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[Any]:
+    meta_fns: Optional[dict[str, Callable[..., object]]],
+    handler_extensions: Optional[ExtensionInfoList] = None,
+) -> Optional[HandlerModule]:
     """Dynamically import the extension client module and call its init function."""
     folder = ext_info.get("folder")
     ext_type = ext_info.get("type")
@@ -909,24 +979,25 @@ def _load_handler(
 
     # Convention: init function is init_<type>_manager(...)
     init_fn_name = f"init_{ext_type}_manager"
-    init_fn = getattr(mod, init_fn_name, None)
+    init_fn = _callable_attr(mod, init_fn_name)
     if init_fn is None:
         # Fallback: try init_<folder>_manager (folder may differ from type)
-        init_fn = getattr(mod, f"init_{folder}_manager", None)
+        init_fn = _callable_attr(mod, f"init_{folder}_manager")
     if init_fn is None:
         # Fallback: scan for any init_*_manager function
         for attr in dir(mod):
-            if attr.startswith("init_") and attr.endswith("_manager") and callable(getattr(mod, attr)):
-                init_fn = getattr(mod, attr)
+            candidate = _callable_attr(mod, attr)
+            if attr.startswith("init_") and attr.endswith("_manager") and candidate is not None:
+                init_fn = candidate
                 break
     if init_fn is None:
         # Last resort: try generic init_manager
-        init_fn = getattr(mod, "init_manager", None)
+        init_fn = _callable_attr(mod, "init_manager")
     if init_fn is None:
         print(f"[Extensions] {module_path} has no {init_fn_name}() or init_manager()")
         return mod  # still return module — may work without init
 
-    init_kwargs: Dict[str, Any] = {}
+    init_kwargs: ObjectMap = {}
     try:
         init_signature = inspect.signature(init_fn)
     except (TypeError, ValueError):
@@ -960,12 +1031,15 @@ def _load_handler(
     return mod
 
 
-def get_handler(extension_id: str) -> Optional[Any]:
+def get_handler(extension_id: str) -> HandlerModule | None:
     """Get the handler module for an extension by its ID."""
     ext_info = _extensions_registry.get(extension_id)
     if not ext_info:
         return None
-    return _extension_handlers.get(ext_info["type"])
+    ext_type = ext_info.get("type")
+    if not isinstance(ext_type, str) or not ext_type:
+        return None
+    return _extension_handlers.get(ext_type)
 
 
 def has_extension(extension_id: str) -> bool:
@@ -974,12 +1048,12 @@ def has_extension(extension_id: str) -> bool:
     return bool(info and info.get("active"))
 
 
-def list_extensions() -> List[Dict[str, Any]]:
+def list_extensions() -> ExtensionInfoList:
     """List all registered extensions."""
     return [dict(info) for info in _extensions_registry.values()]
 
 
-def get_extension_info(extension_id: str) -> Optional[Dict[str, Any]]:
+def get_extension_info(extension_id: str) -> ObjectMap | None:
     """Return registry metadata for one extension."""
     info = _extensions_registry.get(extension_id)
     if not isinstance(info, dict):
@@ -987,7 +1061,7 @@ def get_extension_info(extension_id: str) -> Optional[Dict[str, Any]]:
     return dict(info)
 
 
-def get_extension_ui_features(extension_id: str) -> Dict[str, Any]:
+def get_extension_ui_features(extension_id: str) -> ObjectMap:
     """Return manifest-driven frontend behavior flags for one extension."""
     info = _extensions_registry.get(extension_id)
     manifest = info.get("manifest") if isinstance(info, dict) and isinstance(info.get("manifest"), dict) else {}
@@ -1011,7 +1085,7 @@ def _recompute_extension_active_state(extension_id: str) -> bool:
     return bool(info.get("active"))
 
 
-def _active_extensions_for_type(ext_type: str) -> List[Dict[str, Any]]:
+def _active_extensions_for_type(ext_type: str) -> ExtensionInfoList:
     return [
         info
         for info in _extensions_registry.values()
@@ -1039,7 +1113,7 @@ def _ensure_handler_loaded_for_extension(extension_id: str) -> bool:
     fws_getter = _init_args.get("fws_getter")
     broadcast_fn = _init_args.get("broadcast_fn")
     transcript_fn = _init_args.get("transcript_fn")
-    meta_fns = _init_args.get("meta_fns")
+    meta_fns = _normalized_meta_fns(_init_args.get("meta_fns"))
     if not isinstance(server_root, Path):
         return False
     if not callable(fws_getter) or not callable(broadcast_fn) or not callable(transcript_fn):
@@ -1076,7 +1150,7 @@ def set_extension_enabled(extension_id: str, enabled: bool) -> bool:
     return True
 
 
-def set_extension_dependency_result(extension_id: str, result: Optional[Dict[str, Any]]) -> bool:
+def set_extension_dependency_result(extension_id: str, result: ObjectMap | None) -> bool:
     info = _extensions_registry.get(extension_id)
     if not isinstance(info, dict):
         return False
@@ -1112,7 +1186,7 @@ def supports_dependency_install(extension_id: str) -> bool:
     return bool(isinstance(info, dict) and info.get("has_dependency_install"))
 
 
-def _dependency_module_for_extension(extension_id: str) -> Optional[Any]:
+def _dependency_module_for_extension(extension_id: str) -> Optional[HandlerModule]:
     info = _extensions_registry.get(extension_id)
     module_package = _extension_module_packages.get(extension_id)
     extension_root = _extension_root(extension_id)
@@ -1123,16 +1197,18 @@ def _dependency_module_for_extension(extension_id: str) -> Optional[Any]:
     return _import_extension_submodule(module_package, extension_root, "dependencies")
 
 
-async def _call_dependency_fn(func: Callable[..., Any], extension_id: str) -> Dict[str, Any]:
-    result = func(extension_id=extension_id, extension_info=get_extension_info(extension_id))
-    if inspect.isawaitable(result):
-        result = await result
+async def _call_dependency_fn(func: Callable[..., object], extension_id: str) -> ObjectMap:
+    result = await _invoke_maybe_async(
+        cast(ObjectCallable, func),
+        extension_id=extension_id,
+        extension_info=get_extension_info(extension_id),
+    )
     if isinstance(result, dict):
-        return result
+        return coerce_object_map(result)
     return {"ok": False, "status": "error", "message": "Invalid dependency result"}
 
 
-async def check_extension_dependencies(extension_id: str) -> Dict[str, Any]:
+async def check_extension_dependencies(extension_id: str) -> ObjectMap:
     if not supports_dependency_check(extension_id):
         return {"ok": True, "status": "met", "message": "No dependency check required"}
     try:
@@ -1145,7 +1221,7 @@ async def check_extension_dependencies(extension_id: str) -> Dict[str, Any]:
         return {"ok": False, "status": "error", "message": str(e)}
 
 
-async def install_extension_dependencies(extension_id: str) -> Dict[str, Any]:
+async def install_extension_dependencies(extension_id: str) -> ObjectMap:
     if not supports_dependency_install(extension_id):
         return {"ok": False, "status": "failed", "message": "Dependency install not supported"}
     try:
@@ -1180,7 +1256,7 @@ def _extension_root(extension_id: str) -> Optional[Path]:
     return candidate
 
 
-def get_static_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
+def get_static_settings_schema(extension_id: str) -> ObjectMap | None:
     """Load settings_schema.json through loader-owned extension metadata."""
     extension_root = _extension_root(extension_id)
     if extension_root is None:
@@ -1188,7 +1264,8 @@ def get_static_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
     schema_file = extension_root / "settings_schema.json"
     if not schema_file.is_file():
         return None
-    return json.loads(schema_file.read_text(encoding="utf-8"))
+    schema = _load_json_file(schema_file)
+    return _dict_or_empty(schema) if isinstance(schema, dict) else None
 
 
 def get_extension_asset_path(extension_id: str, asset_path: str) -> Optional[Path]:
@@ -1225,8 +1302,8 @@ def _normalize_staged_extension_root(staging_root: Path) -> Path:
     )
 
 
-def _scan_for_symlinks(root: Path) -> List[str]:
-    issues: List[str] = []
+def _scan_for_symlinks(root: Path) -> list[str]:
+    issues: list[str] = []
     for current, dirnames, filenames in os.walk(root, followlinks=False):
         current_path = Path(current)
         for name in dirnames:
@@ -1242,10 +1319,10 @@ def _scan_for_symlinks(root: Path) -> List[str]:
 
 def _validate_manifest_file_reference(
     root: Path,
-    raw_path: Any,
+    raw_path: object,
     *,
     field_label: str,
-    errors: List[str],
+    errors: list[str],
 ) -> None:
     if not isinstance(raw_path, str) or not raw_path.strip():
         errors.append(f"{field_label} must be a non-empty relative file path")
@@ -1270,11 +1347,11 @@ def _validate_staged_extension_root(
     staged_root: Path,
     *,
     expected_extension_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    errors: List[str] = []
-    warnings: List[str] = []
+) -> dict[str, object]:
+    errors: list[str] = []
+    warnings: list[str] = []
     manifest_path = staged_root / "manifest.json"
-    manifest: Dict[str, Any] = {}
+    manifest: dict[str, object] = {}
     if not manifest_path.is_file():
         return {
             "ok": False,
@@ -1283,7 +1360,7 @@ def _validate_staged_extension_root(
             "warnings": warnings,
         }
     try:
-        manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_raw = _load_json_file(manifest_path)
     except Exception as exc:
         return {
             "ok": False,
@@ -1316,7 +1393,7 @@ def _validate_staged_extension_root(
             f"manifest.schema_version missing; assuming {_EXTENSION_MANIFEST_SCHEMA_VERSION} for compatibility"
         )
 
-    normalized_fields: Dict[str, str] = {}
+    normalized_fields: dict[str, str] = {}
     for field_name in ("id", "name", "type", "version"):
         raw_value = manifest.get(field_name)
         if not isinstance(raw_value, str) or not raw_value.strip():
@@ -1335,7 +1412,7 @@ def _validate_staged_extension_root(
 
     compat_present = "compat" in manifest
     compat_raw = manifest.get("compat")
-    compat: Dict[str, Any] = {}
+    compat: dict[str, object] = {}
     if compat_present:
         if compat_raw is None:
             compat = {}
@@ -1423,7 +1500,7 @@ def _validate_staged_extension_root(
     }
 
 
-def _stage_extension_from_path(source_path: str, workspace_root: Path) -> tuple[Path, Dict[str, Any]]:
+def _stage_extension_from_path(source_path: str, workspace_root: Path) -> tuple[Path, dict[str, object]]:
     source = Path(str(source_path or "")).expanduser()
     source_abs = _abs_path(source)
     if not source_abs.exists() or not source_abs.is_dir():
@@ -1436,7 +1513,7 @@ def _stage_extension_from_path(source_path: str, workspace_root: Path) -> tuple[
     }
 
 
-def _stage_extension_from_zip(zip_path: str, workspace_root: Path) -> tuple[Path, Dict[str, Any]]:
+def _stage_extension_from_zip(zip_path: str, workspace_root: Path) -> tuple[Path, dict[str, object]]:
     archive = Path(str(zip_path or "")).expanduser()
     archive_abs = _abs_path(archive)
     if not archive_abs.exists() or not archive_abs.is_file():
@@ -1464,7 +1541,7 @@ def _stage_extension_from_zip(zip_path: str, workspace_root: Path) -> tuple[Path
     }
 
 
-def _run_git_command(args: List[str], cwd: Optional[Path] = None) -> str:
+def _run_git_command(args: list[str], cwd: Optional[Path] = None) -> str:
     if shutil.which("git") is None:
         raise ValueError("git is not available on PATH")
     result = subprocess.run(
@@ -1481,7 +1558,7 @@ def _run_git_command(args: List[str], cwd: Optional[Path] = None) -> str:
     return result.stdout.strip()
 
 
-def _git_submodule_paths(repo_root: Path) -> List[str]:
+def _git_submodule_paths(repo_root: Path) -> list[str]:
     if not (repo_root / ".gitmodules").is_file():
         return []
     try:
@@ -1491,7 +1568,7 @@ def _git_submodule_paths(repo_root: Path) -> List[str]:
         )
     except Exception:
         return []
-    paths: List[str] = []
+    paths: list[str] = []
     for line in output.splitlines():
         _, _, value = line.partition(" ")
         rel_path = value.strip()
@@ -1500,8 +1577,8 @@ def _git_submodule_paths(repo_root: Path) -> List[str]:
     return paths
 
 
-def _copy_local_submodule_worktrees(source_repo: Path, clone_root: Path) -> List[str]:
-    copied: List[str] = []
+def _copy_local_submodule_worktrees(source_repo: Path, clone_root: Path) -> list[str]:
+    copied: list[str] = []
     for rel_path in _git_submodule_paths(source_repo):
         source_path = source_repo / rel_path
         if not source_path.exists():
@@ -1519,7 +1596,7 @@ def _stage_extension_from_git(
     repo_url: str,
     ref: Optional[str],
     workspace_root: Path,
-) -> tuple[Path, Dict[str, Any]]:
+) -> tuple[Path, dict[str, object]]:
     repo_text = str(repo_url or "").strip()
     if not repo_text:
         raise ValueError("repo_url is required for git installs")
@@ -1531,7 +1608,7 @@ def _stage_extension_from_git(
     if ref_text:
         _run_git_command(["checkout", ref_text], cwd=clone_root)
     submodule_paths = _git_submodule_paths(clone_root)
-    materialized_from_local: List[str] = []
+    materialized_from_local: list[str] = []
     materialization_method = "none"
     if repo_candidate.exists() and repo_candidate.is_dir() and submodule_paths:
         materialized_from_local = _copy_local_submodule_worktrees(repo_candidate, clone_root)
@@ -1561,7 +1638,7 @@ def _stage_extension_from_git(
     }
 
 
-def _user_registry_entry(extension_id: str) -> Optional[Dict[str, Any]]:
+def _user_registry_entry(extension_id: str) -> Optional[dict[str, object]]:
     user_root = _user_extension_root()
     if user_root is None:
         return None
@@ -1575,7 +1652,7 @@ def _user_registry_entry(extension_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _registry_path_owner(root: Path, folder: str, *, excluding_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _registry_path_owner(root: Path, folder: str, *, excluding_id: Optional[str] = None) -> Optional[dict[str, object]]:
     registry = _read_extensions_registry(root)
     entries = registry.get("extensions")
     if not isinstance(entries, list):
@@ -1593,8 +1670,8 @@ def _registry_path_owner(root: Path, folder: str, *, excluding_id: Optional[str]
 
 def _resolve_install_target_folder(
     extension_id: str,
-    validation: Dict[str, Any],
-    existing_user_entry: Optional[Dict[str, Any]],
+    validation: dict[str, object],
+    existing_user_entry: Optional[dict[str, object]],
 ) -> tuple[str, str]:
     existing_path = existing_user_entry.get("path") if isinstance(existing_user_entry, dict) else None
     if isinstance(existing_path, str) and existing_path.strip():
@@ -1605,13 +1682,13 @@ def _resolve_install_target_folder(
 
 def _build_installer_metadata(
     *,
-    existing_user_entry: Optional[Dict[str, Any]],
-    source_meta: Dict[str, Any],
-    validation: Dict[str, Any],
+    existing_user_entry: Optional[dict[str, object]],
+    source_meta: dict[str, object],
+    validation: dict[str, object],
     target_folder: str,
     path_authority: str,
     action: str,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     now = _now_utc_iso()
     existing_meta = _dict_or_empty(
         existing_user_entry.get("installer_meta") if isinstance(existing_user_entry, dict) else None
@@ -1625,7 +1702,7 @@ def _build_installer_metadata(
     if not installed_at:
         installed_at = now
 
-    meta: Dict[str, Any] = {
+    meta: dict[str, object] = {
         "schema_version": _INSTALLER_METADATA_SCHEMA_VERSION,
         "identity_authority": "manifest.id",
         "path_authority": path_authority,
@@ -1639,12 +1716,12 @@ def _build_installer_metadata(
             "version": validation.get("version"),
             "schema_version": validation.get("schema_version"),
             "install_source": dict(source_meta),
-            "compat": dict(validation.get("compat") or {}),
+            "compat": _dict_or_empty(validation.get("compat")),
         },
     }
     if isinstance(existing_user_entry, dict):
         previous_source = _registry_install_source(existing_user_entry)
-        previous_snapshot: Dict[str, Any] = {
+        previous_snapshot: dict[str, object] = {
             "path": existing_user_entry.get("path"),
             "version": existing_user_entry.get("version"),
             "schema_version": existing_user_entry.get("schema_version"),
@@ -1660,12 +1737,12 @@ def _build_installer_metadata(
 
 def _install_staged_extension(
     staged_root: Path,
-    validation: Dict[str, Any],
+    validation: dict[str, object],
     *,
-    source_meta: Dict[str, Any],
+    source_meta: dict[str, object],
     allow_override: bool = False,
     expect_existing: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     if not validation.get("ok"):
         return dict(validation)
     user_root = _user_extension_root()
@@ -1737,7 +1814,8 @@ def _install_staged_extension(
             backup_target.rename(live_target)
         raise
 
-    enabled_default = bool(validation.get("manifest", {}).get("enabled", True))
+    manifest_info = _dict_or_empty(validation.get("manifest"))
+    enabled_default = bool(manifest_info.get("enabled", True))
     if isinstance(existing_user_entry, dict) and "enabled" in existing_user_entry:
         enabled_default = existing_user_entry.get("enabled") is True
     installer_meta = _build_installer_metadata(
@@ -1773,13 +1851,17 @@ def _install_staged_extension(
         "path": target_folder,
         "path_authority": path_authority,
         "target_dir": os.fspath(live_target),
-        "warnings": list(validation.get("warnings") or []),
+        "warnings": (
+            list(warnings_value)
+            if isinstance((warnings_value := validation.get("warnings")), list)
+            else []
+        ),
         "install_source": dict(source_meta),
         "installer_meta": installer_meta,
     }
 
 
-def validate_extension_from_path(source_path: str, extension_id: Optional[str] = None) -> Dict[str, Any]:
+def validate_extension_from_path(source_path: str, extension_id: Optional[str] = None) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="app_server_ext_validate_") as tmp:
         staged_root, source_meta = _stage_extension_from_path(source_path, Path(tmp))
         result = _validate_staged_extension_root(
@@ -1790,7 +1872,7 @@ def validate_extension_from_path(source_path: str, extension_id: Optional[str] =
         return result
 
 
-def validate_extension_from_zip(zip_path: str, extension_id: Optional[str] = None) -> Dict[str, Any]:
+def validate_extension_from_zip(zip_path: str, extension_id: Optional[str] = None) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="app_server_ext_validate_") as tmp:
         staged_root, source_meta = _stage_extension_from_zip(zip_path, Path(tmp))
         result = _validate_staged_extension_root(
@@ -1805,7 +1887,7 @@ def validate_extension_from_git(
     repo_url: str,
     ref: Optional[str] = None,
     extension_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="app_server_ext_validate_") as tmp:
         staged_root, source_meta = _stage_extension_from_git(repo_url, ref, Path(tmp))
         result = _validate_staged_extension_root(
@@ -1823,7 +1905,7 @@ def validate_extension_source(
     repo_url: Optional[str] = None,
     ref: Optional[str] = None,
     extension_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     source_kind = str(source_type or "").strip().lower()
     if source_kind == "path":
         return validate_extension_from_path(source_path or "", extension_id=extension_id)
@@ -1844,7 +1926,7 @@ def install_extension_from_path(
     extension_id: Optional[str] = None,
     *,
     allow_override: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="app_server_ext_install_") as tmp:
         staged_root, source_meta = _stage_extension_from_path(source_path, Path(tmp))
         validation = _validate_staged_extension_root(
@@ -1865,7 +1947,7 @@ def install_extension_from_zip(
     extension_id: Optional[str] = None,
     *,
     allow_override: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="app_server_ext_install_") as tmp:
         staged_root, source_meta = _stage_extension_from_zip(zip_path, Path(tmp))
         validation = _validate_staged_extension_root(
@@ -1887,7 +1969,7 @@ def install_extension_from_git(
     extension_id: Optional[str] = None,
     *,
     allow_override: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="app_server_ext_install_") as tmp:
         staged_root, source_meta = _stage_extension_from_git(repo_url, ref, Path(tmp))
         validation = _validate_staged_extension_root(
@@ -1911,7 +1993,7 @@ def install_extension_source(
     ref: Optional[str] = None,
     extension_id: Optional[str] = None,
     allow_override: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     source_kind = str(source_type or "").strip().lower()
     if source_kind == "path":
         return install_extension_from_path(
@@ -1942,7 +2024,7 @@ def install_extension_source(
 def update_extension_from_path(
     extension_id: str,
     source_path: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     current_entry = _user_registry_entry(extension_id)
     current_source = _registry_install_source(current_entry)
     path_value = str(source_path or current_source.get("path") or "").strip()
@@ -1970,7 +2052,7 @@ def update_extension_from_path(
 def update_extension_from_zip(
     extension_id: str,
     zip_path: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     current_entry = _user_registry_entry(extension_id)
     current_source = _registry_install_source(current_entry)
     path_value = str(zip_path or current_source.get("path") or "").strip()
@@ -1999,7 +2081,7 @@ def update_extension_from_git(
     extension_id: str,
     repo_url: Optional[str] = None,
     ref: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     current_entry = _user_registry_entry(extension_id)
     current_source = _registry_install_source(current_entry)
     repo_value = str(repo_url or current_source.get("repo_url") or "").strip()
@@ -2032,7 +2114,7 @@ def update_extension_source(
     source_path: Optional[str] = None,
     repo_url: Optional[str] = None,
     ref: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     current_entry = _user_registry_entry(extension_id)
     current_source = _registry_install_source(current_entry)
     source_kind = str(source_type or current_source.get("type") or "").strip().lower()
@@ -2049,7 +2131,7 @@ def update_extension_source(
     }
 
 
-def remove_user_extension(extension_id: str) -> Dict[str, Any]:
+def remove_user_extension(extension_id: str) -> dict[str, object]:
     user_root = _user_extension_root()
     if user_root is None:
         return {
@@ -2103,13 +2185,13 @@ def is_initialized() -> bool:
     return _initialized
 
 
-async def warm_up_extensions(timeout: float = 60.0) -> Dict[str, bool]:
+async def warm_up_extensions(timeout: float = 60.0) -> dict[str, bool]:
     """
     Warm up all extensions that support it.
     Returns dict of extension_id -> success.
     """
-    results: Dict[str, bool] = {}
-    active_by_type: Dict[str, List[str]] = {}
+    results: dict[str, bool] = {}
+    active_by_type: dict[str, list[str]] = {}
     for ext_id, info in _extensions_registry.items():
         if not isinstance(info, dict) or not info.get("active"):
             continue
@@ -2120,11 +2202,13 @@ async def warm_up_extensions(timeout: float = 60.0) -> Dict[str, bool]:
         active_ids = active_by_type.get(handler_type, [])
         if not active_ids:
             continue
-        if hasattr(handler, "warm_up_all_extensions"):
+        warm_up_fn = _callable_attr(handler, "warm_up_all_extensions")
+        if warm_up_fn is not None:
             try:
-                type_results = await handler.warm_up_all_extensions(timeout=timeout)
-                if isinstance(type_results, dict) and type_results:
-                    results.update(type_results)
+                type_results = _dict_or_empty(await _invoke_maybe_async(warm_up_fn, timeout=timeout))
+                if type_results:
+                    for ext_id, ready_value in type_results.items():
+                        results[ext_id] = bool(ready_value)
                     ready = all(bool(type_results.get(ext_id, False)) for ext_id in active_ids)
                 else:
                     ready = True
@@ -2145,9 +2229,13 @@ def is_extension_ready(extension_id: str) -> bool:
     if not ext_info.get("active"):
         return False
     
-    handler = _extension_handlers.get(ext_info["type"])
-    if handler and hasattr(handler, "is_extension_ready"):
-        return handler.is_extension_ready(extension_id)
+    ext_type = ext_info.get("type")
+    if not isinstance(ext_type, str) or not ext_type:
+        return False
+    handler = _extension_handlers.get(ext_type)
+    is_ready_fn = _callable_attr(handler, "is_extension_ready")
+    if is_ready_fn is not None:
+        return bool(is_ready_fn(extension_id))
     
     return True  # Extensions without a readiness hook are treated as ready
 
@@ -2160,9 +2248,13 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
     if not ext_info.get("active"):
         return False
     
-    handler = _extension_handlers.get(ext_info["type"])
-    if handler and hasattr(handler, "wait_extension_ready"):
-        return await handler.wait_extension_ready(extension_id, timeout=timeout)
+    ext_type = ext_info.get("type")
+    if not isinstance(ext_type, str) or not ext_type:
+        return False
+    handler = _extension_handlers.get(ext_type)
+    wait_ready_fn = _callable_attr(handler, "wait_extension_ready")
+    if wait_ready_fn is not None:
+        return bool(await _invoke_maybe_async(wait_ready_fn, extension_id, timeout=timeout))
     
     return True  # Extensions without a readiness hook are treated as ready
 
@@ -2172,49 +2264,54 @@ def requires_eager_session_init(extension_id: str) -> bool:
     return False
 
 
-async def list_models(extension_id: str) -> Any:
+async def list_models(extension_id: str) -> object:
     """List models for an extension. Handler must implement list_models()."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "list_models"):
-        return await handler.list_models()
+    list_models_fn = _callable_attr(get_handler(extension_id), "list_models")
+    if list_models_fn is not None:
+        return await _invoke_maybe_async(list_models_fn)
     return {"models": []}
 
 
-async def get_settings_schema(extension_id: str) -> Optional[Dict[str, Any]]:
+async def get_settings_schema(extension_id: str) -> Optional[dict[str, object]]:
     """Get a dynamic settings schema for an extension when supported."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "get_settings_schema"):
-        return await handler.get_settings_schema(extension_id=extension_id)
+    get_schema_fn = _callable_attr(get_handler(extension_id), "get_settings_schema")
+    if get_schema_fn is not None:
+        result = await _invoke_maybe_async(get_schema_fn, extension_id=extension_id)
+        if isinstance(result, dict):
+            return _dict_or_empty(result)
     return None
 
 
-async def get_splash_schema(extension_id: str) -> Optional[Dict[str, Any]]:
+async def get_splash_schema(extension_id: str) -> Optional[dict[str, object]]:
     """Get a splash-settings schema for an extension when supported."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "get_splash_schema"):
-        return await handler.get_splash_schema(extension_id=extension_id)
+    get_schema_fn = _callable_attr(get_handler(extension_id), "get_splash_schema")
+    if get_schema_fn is not None:
+        result = await _invoke_maybe_async(get_schema_fn, extension_id=extension_id)
+        if isinstance(result, dict):
+            return _dict_or_empty(result)
     return None
 
 
 async def run_splash_action(
     extension_id: str,
     action_id: str,
-    payload: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    payload: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
     """Run a splash-settings action for an extension when supported."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "run_splash_action"):
-        result = await handler.run_splash_action(
+    run_action_fn = _callable_attr(get_handler(extension_id), "run_splash_action")
+    if run_action_fn is not None:
+        result = await _invoke_maybe_async(
+            run_action_fn,
             extension_id=extension_id,
             action_id=action_id,
             payload=payload if isinstance(payload, dict) else None,
         )
         if isinstance(result, dict):
-            return result
+            return _dict_or_empty(result)
     return {"ok": False, "error": f"Extension {extension_id} does not support splash actions"}
 
 
-def _normalize_request_card_entries(manifest: Any) -> List[Dict[str, Any]]:
+def _normalize_request_card_entries(manifest: object) -> list[dict[str, object]]:
     if not isinstance(manifest, dict):
         return []
     ui = _dict_or_empty(manifest.get("ui"))
@@ -2228,7 +2325,7 @@ def _normalize_request_card_entries(manifest: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw_entries, list):
         return []
 
-    entries: List[Dict[str, Any]] = []
+    entries: list[dict[str, object]] = []
     for index, raw_entry in enumerate(raw_entries):
         if not isinstance(raw_entry, dict):
             continue
@@ -2238,12 +2335,12 @@ def _normalize_request_card_entries(manifest: Any) -> List[Dict[str, Any]]:
         raw_matches = raw_entry.get("matches")
         if not isinstance(raw_matches, list) and isinstance(raw_entry.get("match"), dict):
             raw_matches = [raw_entry["match"]]
-        matches: List[Dict[str, Any]] = []
+        matches: list[dict[str, object]] = []
         if isinstance(raw_matches, list):
             for raw_match in raw_matches:
                 if not isinstance(raw_match, dict):
                     continue
-                match: Dict[str, Any] = {}
+                match: dict[str, object] = {}
                 request_method = raw_match.get("requestMethod") or raw_match.get("request_method")
                 if isinstance(request_method, str) and request_method.strip():
                     match["request_method"] = request_method.strip().lower()
@@ -2261,16 +2358,16 @@ def _normalize_request_card_entries(manifest: Any) -> List[Dict[str, Any]]:
     return entries
 
 
-async def get_request_cards(extension_id: str) -> Dict[str, Any]:
+async def get_request_cards(extension_id: str) -> dict[str, object]:
     info = get_extension_info(extension_id) or {}
     manifest = info.get("manifest") if isinstance(info.get("manifest"), dict) else {}
     cards = _normalize_request_card_entries(manifest)
-    schemas: Dict[str, Any] = {}
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "get_request_card_schemas"):
-        result = await handler.get_request_card_schemas(extension_id=extension_id)
+    schemas: dict[str, object] = {}
+    get_schemas_fn = _callable_attr(get_handler(extension_id), "get_request_card_schemas")
+    if get_schemas_fn is not None:
+        result = await _invoke_maybe_async(get_schemas_fn, extension_id=extension_id)
         if isinstance(result, dict):
-            schemas = result
+            schemas = _dict_or_empty(result)
     return {
         "cards": cards,
         "schemas": schemas,
@@ -2278,15 +2375,15 @@ async def get_request_cards(extension_id: str) -> Dict[str, Any]:
 
 
 def _runtime_option_from_schema_field(
-    field: Optional[Dict[str, Any]],
-    settings: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
+    field: Optional[dict[str, object]],
+    settings: Optional[dict[str, object]] = None,
+) -> Optional[dict[str, object]]:
     if not isinstance(field, dict):
         return None
     setting_key = field.get("id")
     if not isinstance(setting_key, str) or not setting_key.strip():
         return None
-    descriptor: Dict[str, Any] = {
+    descriptor: dict[str, object] = {
         "settingKey": setting_key.strip(),
         "runtimeKey": _runtime_option_runtime_key(field) or setting_key.strip(),
         "label": field.get("label") or setting_key.strip(),
@@ -2308,7 +2405,7 @@ def _runtime_option_from_schema_field(
     return descriptor
 
 
-def _merge_runtime_option_descriptor(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_runtime_option_descriptor(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
     merged = dict(base)
     for key in ("settingKey", "runtimeKey", "label", "type", "default", "current", "dynamicOptionsKey", "footerLabel"):
         if key not in override:
@@ -2327,7 +2424,7 @@ def _merge_runtime_option_descriptor(base: Dict[str, Any], override: Dict[str, A
         merged["options"] = options
     accents_raw = override.get("accents")
     if isinstance(accents_raw, dict):
-        accents: Dict[str, str] = {}
+        accents: dict[str, str] = {}
         for key, value in accents_raw.items():
             if not isinstance(key, str) or not key.strip():
                 continue
@@ -2340,12 +2437,12 @@ def _merge_runtime_option_descriptor(base: Dict[str, Any], override: Dict[str, A
 
 
 def _runtime_descriptors_from_schema(
-    fields: List[Any],
-    settings: Optional[Dict[str, Any]],
-) -> tuple[Dict[str, Dict[str, Any]], Dict[str, str], List[str]]:
-    descriptors: Dict[str, Dict[str, Any]] = {}
-    aliases: Dict[str, str] = {}
-    quick_controls: List[str] = []
+    fields: list[object],
+    settings: Optional[dict[str, object]],
+) -> tuple[dict[str, dict[str, object]], dict[str, str], list[str]]:
+    descriptors: dict[str, dict[str, object]] = {}
+    aliases: dict[str, str] = {}
+    quick_controls: list[str] = []
     for raw_field in fields:
         if not isinstance(raw_field, dict):
             continue
@@ -2367,8 +2464,8 @@ def _runtime_descriptors_from_schema(
 async def get_runtime_options(
     extension_id: str,
     conversation_id: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
     """Get generic runtime-option descriptors for shared frontend controls."""
     ext_info = _extensions_registry.get(extension_id) or {}
     schema = await get_settings_schema(extension_id)
@@ -2378,23 +2475,24 @@ async def get_runtime_options(
         schema_fields,
         settings,
     )
-    handler = get_handler(extension_id)
-    result: Dict[str, Any] = {}
-    if handler and hasattr(handler, "get_runtime_options"):
-        raw_result = await handler.get_runtime_options(
+    result: dict[str, object] = {}
+    get_runtime_options_fn = _callable_attr(get_handler(extension_id), "get_runtime_options")
+    if get_runtime_options_fn is not None:
+        raw_result = await _invoke_maybe_async(
+            get_runtime_options_fn,
             extension_id=extension_id,
             conversation_id=conversation_id,
             settings=settings,
         )
         if isinstance(raw_result, dict):
-            result = dict(raw_result)
+            result = _dict_or_empty(raw_result)
 
     result.setdefault("agent", extension_id)
     result.setdefault("has_plan", bool(ext_info.get("has_plan")))
     result.setdefault("has_todo", bool(ext_info.get("has_todo")))
     result.setdefault("has_plan_modes", bool(ext_info.get("has_plan_modes")))
 
-    merged_fields: Dict[str, Dict[str, Any]] = {}
+    merged_fields: dict[str, dict[str, object]] = {}
     existing_fields = result.get("fields")
     if isinstance(existing_fields, dict):
         for key, value in existing_fields.items():
@@ -2432,7 +2530,7 @@ async def get_runtime_options(
         else:
             result[runtime_key] = dict(descriptor)
 
-    quick_controls: List[str] = []
+    quick_controls: list[str] = []
     existing_quick_controls = result.get("quickControls")
     if isinstance(existing_quick_controls, list):
         for item in existing_quick_controls:
@@ -2460,16 +2558,17 @@ async def get_runtime_options(
 async def route_event(
     extension_id: str,
     label: Optional[str],
-    payload: Any,
+    payload: object,
     conversation_id: Optional[str] = None,
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     request_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, object]:
     """Route a live backend event through an extension-owned router when supported."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "route_event"):
-        return await handler.route_event(
+    route_event_fn = _callable_attr(get_handler(extension_id), "route_event")
+    if route_event_fn is not None:
+        result = await _invoke_maybe_async(
+            route_event_fn,
             extension_id=extension_id,
             label=label,
             payload=payload,
@@ -2478,22 +2577,26 @@ async def route_event(
             turn_id=turn_id,
             request_id=request_id,
         )
+        if isinstance(result, dict):
+            return _dict_or_empty(result)
     return {"handled": False}
 
 
-async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+async def read_plan(extension_id: str, conversation_id: str) -> dict[str, object]:
     """Read current plan state for an extension conversation when supported."""
     ext_info = _extensions_registry.get(extension_id) or {}
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "read_plan"):
-        result = await handler.read_plan(
+    read_plan_fn = _callable_attr(get_handler(extension_id), "read_plan")
+    if read_plan_fn is not None:
+        result = await _invoke_maybe_async(
+            read_plan_fn,
             extension_id=extension_id,
             conversation_id=conversation_id,
         )
         if isinstance(result, dict):
-            result.setdefault("has_plan", bool(ext_info.get("has_plan")))
-            result.setdefault("has_todo", bool(ext_info.get("has_todo")))
-            return result
+            plan_info = _dict_or_empty(result)
+            plan_info.setdefault("has_plan", bool(ext_info.get("has_plan")))
+            plan_info.setdefault("has_todo", bool(ext_info.get("has_todo")))
+            return plan_info
     return {
         "has_plan": bool(ext_info.get("has_plan")),
         "has_todo": bool(ext_info.get("has_todo")),
@@ -2503,11 +2606,11 @@ async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
     }
 
 
-async def list_sessions(extension_id: str, cwd: Optional[str] = None) -> Any:
+async def list_sessions(extension_id: str, cwd: Optional[str] = None) -> object:
     """List sessions for an extension. Handler must implement list_sessions()."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "list_sessions"):
-        return await handler.list_sessions(cwd=cwd)
+    list_sessions_fn = _callable_attr(get_handler(extension_id), "list_sessions")
+    if list_sessions_fn is not None:
+        return await _invoke_maybe_async(list_sessions_fn, cwd=cwd)
     return []
 
 
@@ -2517,8 +2620,8 @@ async def resume_session_with_history(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
     """Bind/import a remote session/thread into a local conversation.
 
     Handler must implement resume_session_with_history().
@@ -2529,9 +2632,10 @@ async def resume_session_with_history(
 
     See acp/AGENT_EXTENSION_INTEGRATION.md and CODEX_APP_SERVER_EXTENSION.md.
     """
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "resume_session_with_history"):
-        return await handler.resume_session_with_history(
+    resume_fn = _callable_attr(get_handler(extension_id), "resume_session_with_history")
+    if resume_fn is not None:
+        result = await _invoke_maybe_async(
+            resume_fn,
             extension_id=extension_id,
             session_id=session_id,
             conversation_id=conversation_id,
@@ -2539,6 +2643,8 @@ async def resume_session_with_history(
             model=model,
             settings=settings,
         )
+        if isinstance(result, dict):
+            return _dict_or_empty(result)
     return {"ok": False, "error": f"Extension {extension_id} does not support session resume"}
 
 
@@ -2548,8 +2654,8 @@ async def hydrate_transcript(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+    settings: Optional[dict[str, object]] = None,
+) -> list[dict[str, object]]:
     """Get flat transcript entries for a new local conversation from port-in/import.
 
     Handler must implement hydrate_transcript(session_id, conversation_id, ...).
@@ -2562,15 +2668,18 @@ async def hydrate_transcript(
       {role: "user"|"assistant"|"reasoning"|"command"|"diff", text: "...", ...}
     Server writes these via _write_transcript_entries during port-in/import.
     """
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "hydrate_transcript"):
-        return await handler.hydrate_transcript(
+    hydrate_fn = _callable_attr(get_handler(extension_id), "hydrate_transcript")
+    if hydrate_fn is not None:
+        result = await _invoke_maybe_async(
+            hydrate_fn,
             session_id=session_id,
             conversation_id=conversation_id,
             cwd=cwd,
             model=model,
             settings=settings,
         )
+        if isinstance(result, list):
+            return coerce_object_list(result)
     return []
 
 
@@ -2578,25 +2687,28 @@ async def handle_message(
     extension_id: str,
     conversation_id: str,
     text: str,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
     """Send a message through an extension handler when supported."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "handle_message"):
-        return await handler.handle_message(
+    handle_message_fn = _callable_attr(get_handler(extension_id), "handle_message")
+    if handle_message_fn is not None:
+        result = await _invoke_maybe_async(
+            handle_message_fn,
             conversation_id,
             text,
             extension_id,
             settings or {},
         )
+        if isinstance(result, dict):
+            return _dict_or_empty(result)
     return {"ok": False, "error": f"Extension {extension_id} does not support message sending"}
 
 
-def resolve_approval(extension_id: str, request_id: str, resolution: Any) -> bool:
+def resolve_approval(extension_id: str, request_id: str, resolution: object) -> bool:
     """Resolve an approval request. Handler must implement resolve_approval()."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "resolve_approval"):
-        return bool(handler.resolve_approval(request_id, resolution))
+    resolve_fn = _callable_attr(get_handler(extension_id), "resolve_approval")
+    if resolve_fn is not None:
+        return bool(resolve_fn(request_id, resolution))
     return False
 
 
@@ -2604,42 +2716,44 @@ def validate_pending_approval(
     extension_id: str,
     conversation_id: str,
     request_id: str,
-    descriptor: Dict[str, Any],
+    descriptor: dict[str, object],
 ) -> bool:
     """Validate whether a persisted approval is still actionable for an extension."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "validate_pending_approval"):
-        return bool(handler.validate_pending_approval(conversation_id, request_id, descriptor))
+    validate_fn = _callable_attr(get_handler(extension_id), "validate_pending_approval")
+    if validate_fn is not None:
+        return bool(validate_fn(conversation_id, request_id, descriptor))
     return False
 
 
 async def shutdown_extension(extension_id: str) -> None:
     """Shutdown an extension. Handler must implement shutdown_client()."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "shutdown_client"):
-        await handler.shutdown_client()
+    shutdown_fn = _callable_attr(get_handler(extension_id), "shutdown_client")
+    if shutdown_fn is not None:
+        await _invoke_maybe_async(shutdown_fn)
 
 
-async def interrupt_session(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+async def interrupt_session(extension_id: str, conversation_id: str) -> dict[str, object]:
     """Interrupt/abort the active turn for an extension session."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "abort_session"):
-        ok = await handler.abort_session(conversation_id)
+    abort_fn = _callable_attr(get_handler(extension_id), "abort_session")
+    if abort_fn is not None:
+        ok = await _invoke_maybe_async(abort_fn, conversation_id)
         return {"ok": ok, "conversation_id": conversation_id}
     return {"ok": False, "error": f"Extension {extension_id} does not support interrupt"}
 
 
-async def compact_session(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+async def compact_session(extension_id: str, conversation_id: str) -> dict[str, object]:
     """Compact/condense the context window for an extension session."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "compact_session"):
-        return await handler.compact_session(conversation_id)
+    compact_fn = _callable_attr(get_handler(extension_id), "compact_session")
+    if compact_fn is not None:
+        result = await _invoke_maybe_async(compact_fn, conversation_id)
+        if isinstance(result, dict):
+            return _dict_or_empty(result)
     return {"ok": False, "error": f"Extension {extension_id} does not support compact"}
 
 
-def get_raw_buffer(extension_id: str, limit: int = 50) -> Any:
+def get_raw_buffer(extension_id: str, limit: int = 50) -> object:
     """Get raw debug buffer. Handler must implement get_raw_buffer()."""
-    handler = get_handler(extension_id)
-    if handler and hasattr(handler, "get_raw_buffer"):
-        return handler.get_raw_buffer(limit)
+    get_buffer_fn = _callable_attr(get_handler(extension_id), "get_raw_buffer")
+    if get_buffer_fn is not None:
+        return get_buffer_fn(limit)
     return []

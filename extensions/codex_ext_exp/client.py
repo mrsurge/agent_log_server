@@ -16,7 +16,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Protocol, cast
 
 from .plan_utils import normalize_plan_steps, render_plan_markdown
 from .rollout_import import find_rollout_path, preview_entries
@@ -29,22 +29,46 @@ from .runtime_protocol import (
     configure_runtime_protocol,
     get_runtime_protocol,
 )
-from .transport import CodexAppServerTransport
+from .transport import CodexAppServerTransport, FrameworkShellManagerProtocol
 from agent_log_server.prompt_context import build_effective_prompt_context
 from agent_log_server.pending_context import pop_pending
 from agent_log_server.te2_mcp_config import te2_mcp_integration_enabled
 
+JSONDict = Dict[str, object]
+MetaFns = Dict[str, Callable[..., object]]
+
+
+class _ServerModule(Protocol):
+    def _te2_base_url(self) -> object: ...
+
+    async def _refresh_extension_runtime_state(self, extension_ids: List[str]) -> None: ...
+
+    def _extension_unavailable_detail(self, extension_id: str) -> object: ...
+
+    async def _emit_extension_unavailable_warning(
+        self,
+        conversation_id: str,
+        extension_id: str,
+        *,
+        detail: str,
+    ) -> None: ...
+
+
+class _ExtensionsModule(Protocol):
+    def get_extension_info(self, extension_id: str) -> object: ...
+
+
 # Stored references to server callbacks
 _broadcast_fn: Optional[Callable] = None
 _transcript_fn: Optional[Callable] = None
-_meta_fns: Optional[Dict[str, Callable]] = None
+_meta_fns: Optional[MetaFns] = None
 _registered_extension_ids: set[str] = set()
 _ready_extensions: set[str] = set()
 _transport: Optional[CodexAppServerTransport] = None
-_auth_flow_state: Dict[str, Dict[str, Any]] = {}
+_auth_flow_state: Dict[str, JSONDict] = {}
 
 # Debug buffer (circular)
-_raw_buffer: List[Dict[str, Any]] = []
+_raw_buffer: List[JSONDict] = []
 _RAW_BUFFER_MAX = 1000
 
 
@@ -52,8 +76,8 @@ def _utc_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _add_to_raw_buffer(direction: str, conversation_id: str, data: Any) -> None:
-    entry = {
+def _add_to_raw_buffer(direction: str, conversation_id: str, data: object) -> None:
+    entry: JSONDict = {
         "ts": _utc_ts(),
         "dir": direction,
         "convo": conversation_id[:8] if conversation_id else "?",
@@ -64,7 +88,7 @@ def _add_to_raw_buffer(direction: str, conversation_id: str, data: Any) -> None:
         _raw_buffer.pop(0)
 
 
-def _debug_text_hash(text: Any) -> str:
+def _debug_text_hash(text: object) -> str:
     if not isinstance(text, str) or not text:
         return "-"
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
@@ -74,7 +98,7 @@ def _debug_log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def _build_prompt_context_from_settings(settings: Dict[str, Any]) -> Optional[str]:
+def _build_prompt_context_from_settings(settings: JSONDict) -> Optional[str]:
     return build_effective_prompt_context(
         settings.get("developer_instructions"),
         te2_enabled=te2_mcp_integration_enabled(settings),
@@ -82,34 +106,53 @@ def _build_prompt_context_from_settings(settings: Dict[str, Any]) -> Optional[st
     )
 
 
-def get_raw_buffer(limit: int = 50) -> List[Dict[str, Any]]:
+def get_raw_buffer(limit: int = 50) -> List[JSONDict]:
     return _raw_buffer[-limit:]
 
 
-def _server_module():
-    return importlib.import_module("agent_log_server.server")
+def _server_module() -> _ServerModule:
+    return cast(_ServerModule, importlib.import_module("agent_log_server.server"))
 
 
-def _object_dict(value: Any) -> Dict[str, Any]:
+def _extensions_module() -> _ExtensionsModule:
+    return cast(_ExtensionsModule, importlib.import_module("extensions"))
+
+
+def _object_dict(value: object) -> JSONDict:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _save_meta(conversation_id: str, meta: Dict[str, Any]) -> None:
+def _save_meta(conversation_id: str, meta: JSONDict) -> None:
     if _meta_fns and "save" in _meta_fns:
-        _save_meta(conversation_id, meta)
+        _meta_fns["save"](conversation_id, meta)
+
+
+def _load_meta(conversation_id: str) -> Optional[JSONDict]:
+    if _meta_fns and "load" in _meta_fns:
+        meta = _meta_fns["load"](conversation_id)
+        if isinstance(meta, dict):
+            return cast(JSONDict, meta)
+    return None
+
+
+def _string_value(value: object, default: str = "") -> str:
+    if isinstance(value, str) and value:
+        return value
+    return default
 
 
 def _merge_runtime_settings(
     conversation_id: str,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[JSONDict] = None,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-) -> Dict[str, Any]:
-    merged: Dict[str, Any] = {}
-    if _meta_fns and "load" in _meta_fns:
-        meta = _meta_fns["load"](conversation_id)
-        if meta and isinstance(meta.get("settings"), dict):
-            merged.update(meta["settings"])
+) -> JSONDict:
+    merged: JSONDict = {}
+    meta = _load_meta(conversation_id)
+    if meta is not None:
+        meta_settings = _object_dict(meta.get("settings"))
+        if meta_settings:
+            merged.update(meta_settings)
     if isinstance(settings, dict):
         for key, value in settings.items():
             if value is None or value == "":
@@ -123,12 +166,12 @@ def _merge_runtime_settings(
     return _materialize_runtime_settings(merged)
 
 
-def _thread_runtime_signature(protocol: RuntimeProtocol, settings: Dict[str, Any]) -> str:
+def _thread_runtime_signature(protocol: RuntimeProtocol, settings: JSONDict) -> str:
     payload = build_thread_runtime_signature_payload(protocol, settings)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _materialize_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _materialize_runtime_settings(settings: Optional[JSONDict]) -> JSONDict:
     if not isinstance(settings, dict):
         return {}
     merged = dict(settings)
@@ -137,7 +180,7 @@ def _materialize_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[st
         agent_value = merged.get("agent")
         extension_id = agent_value if isinstance(agent_value, str) and agent_value.strip() else "codex"
         try:
-            ext_loader = importlib.import_module("extensions")
+            ext_loader = _extensions_module()
             ext_info = ext_loader.get_extension_info(extension_id)
         except Exception:
             ext_info = None
@@ -147,11 +190,13 @@ def _materialize_runtime_settings(settings: Optional[Dict[str, Any]]) -> Dict[st
         if isinstance(model_name, str) and model_name.strip():
             merged["model"] = model_name.strip()
     if te2_mcp_integration_enabled(merged):
-        merged["te2_base_url"] = _server_module()._te2_base_url()
+        te2_base_url = _server_module()._te2_base_url()
+        if isinstance(te2_base_url, str) and te2_base_url.strip():
+            merged["te2_base_url"] = te2_base_url.strip()
     return merged
 
 
-def _extract_thread_id_from_result(payload: Any) -> Optional[str]:
+def _extract_thread_id_from_result(payload: object) -> Optional[str]:
     if isinstance(payload, dict):
         thread = payload.get("thread")
         if isinstance(thread, dict) and thread.get("id"):
@@ -177,7 +222,7 @@ async def _ensure_transport_ready() -> CodexAppServerTransport:
     return transport
 
 
-def _auth_state_bucket(extension_id: str) -> Dict[str, Any]:
+def _auth_state_bucket(extension_id: str) -> JSONDict:
     key = str(extension_id or "").strip() or "codex-ext-exp"
     bucket = _auth_flow_state.get(key)
     if not isinstance(bucket, dict):
@@ -214,19 +259,19 @@ async def _refresh_extension_auth_state(*extension_ids: str) -> None:
 async def _handle_auth_transport_event(
     *,
     label: str,
-    payload: Any,
+    payload: object,
     conversation_id: Optional[str] = None,
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     request_id: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+) -> List[JSONDict]:
     del thread_id, turn_id, request_id
     label_lower = str(label or "").strip().lower()
     if label_lower not in {"account/login/completed", "account/updated"}:
         return []
 
     extension_ids = _auth_extension_ids()
-    events: List[Dict[str, Any]] = []
+    events: List[JSONDict] = []
 
     if label_lower == "account/login/completed" and isinstance(payload, dict):
         login_id = payload.get("loginId")
@@ -249,7 +294,7 @@ async def _handle_auth_transport_event(
         await _refresh_extension_auth_state(*extension_ids)
         events.append({"type": "extensions_updated"})
         if not success and error_message:
-            warning_event: Dict[str, Any] = {
+            warning_event: JSONDict = {
                 "type": "warning",
                 "message": f"Codex login failed: {error_message}",
             }
@@ -299,7 +344,7 @@ def _plan_label(plan_type: Optional[str]) -> str:
     return plan_type.replace("_", " ").replace("-", " ").title()
 
 
-def _auth_status_detail(status: Dict[str, Any]) -> str:
+def _auth_status_detail(status: JSONDict) -> str:
     parts: List[str] = []
     email = status.get("account_email")
     if isinstance(email, str) and email.strip():
@@ -307,7 +352,8 @@ def _auth_status_detail(status: Dict[str, Any]) -> str:
     account_type = status.get("account_type")
     if account_type == "apiKey":
         parts.append("API key")
-    plan_type = _plan_label(status.get("plan_type"))
+    raw_plan_type = status.get("plan_type")
+    plan_type = _plan_label(raw_plan_type if isinstance(raw_plan_type, str) else None)
     if plan_type:
         parts.append(f"{plan_type} plan")
     return "  •  ".join(parts)
@@ -339,7 +385,7 @@ def _build_auth_status_message(
     return "OpenAI auth required. Sign in with ChatGPT from splash settings."
 
 
-def _settings_info_tone_from_auth(auth_status: Dict[str, Any]) -> str:
+def _settings_info_tone_from_auth(auth_status: JSONDict) -> str:
     status = str(auth_status.get("status") or "").strip().lower()
     if auth_status.get("ok") is False or status == "error":
         return "error"
@@ -358,7 +404,7 @@ def _settings_info_tone_from_remaining(remaining_percent: Optional[float]) -> st
     return "success"
 
 
-def _format_settings_timestamp(value: Any) -> str:
+def _format_settings_timestamp(value: object) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return ""
     with contextlib.suppress(Exception):
@@ -371,7 +417,7 @@ def _usage_info_unavailable(
     *,
     tone: str = "warning",
     detail: str = "",
-) -> Dict[str, Any]:
+) -> JSONDict:
     return {
         "text": message,
         "detail": detail,
@@ -379,7 +425,7 @@ def _usage_info_unavailable(
     }
 
 
-def _rate_limit_window_detail(label: str, raw_window: Any) -> tuple[Optional[float], Optional[str]]:
+def _rate_limit_window_detail(label: str, raw_window: object) -> tuple[Optional[float], Optional[str]]:
     if not isinstance(raw_window, dict):
         return None, None
     used_percent = raw_window.get("usedPercent")
@@ -396,11 +442,13 @@ def _rate_limit_window_detail(label: str, raw_window: Any) -> tuple[Optional[flo
     return remaining_percent, "  •  ".join(parts)
 
 
-def _build_rate_limit_lines(snapshot: Dict[str, Any]) -> tuple[List[str], List[float]]:
+def _build_rate_limit_lines(snapshot: JSONDict) -> tuple[List[str], List[float]]:
     lines: List[str] = []
     remaining_values: List[float] = []
-    limit_name = snapshot.get("limitName") if isinstance(snapshot.get("limitName"), str) else None
-    limit_id = snapshot.get("limitId") if isinstance(snapshot.get("limitId"), str) else None
+    limit_name_value = snapshot.get("limitName")
+    limit_name = limit_name_value if isinstance(limit_name_value, str) else None
+    limit_id_value = snapshot.get("limitId")
+    limit_id = limit_id_value if isinstance(limit_id_value, str) else None
     snapshot_prefix = (limit_name or limit_id or "").strip()
     for label, key in (("Primary", "primary"), ("Secondary", "secondary")):
         remaining_percent, detail = _rate_limit_window_detail(label, snapshot.get(key))
@@ -429,12 +477,12 @@ def _build_rate_limit_lines(snapshot: Dict[str, Any]) -> tuple[List[str], List[f
 async def get_usage_info(
     extension_id: str,
     *,
-    auth_status: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    auth_status: Optional[JSONDict] = None,
+) -> JSONDict:
     resolved_auth_status = auth_status or await get_auth_status(extension_id, refresh=False)
     if resolved_auth_status.get("ok") is False:
         return _usage_info_unavailable(
-            resolved_auth_status.get("message") or "Failed to read Codex auth status.",
+            _string_value(resolved_auth_status.get("message"), "Failed to read Codex auth status."),
             tone="error",
         )
     status = str(resolved_auth_status.get("status") or "").strip().lower()
@@ -474,7 +522,7 @@ async def get_usage_info(
         )
 
     payload = raw if isinstance(raw, dict) else {}
-    snapshots: List[Dict[str, Any]] = []
+    snapshots: List[JSONDict] = []
     rate_limits_by_id = payload.get("rateLimitsByLimitId")
     if isinstance(rate_limits_by_id, dict):
         for limit_id, value in sorted(rate_limits_by_id.items()):
@@ -521,9 +569,9 @@ async def get_usage_info(
 
 
 def _build_information_section_fields(
-    auth_status: Dict[str, Any],
-    usage_info: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+    auth_status: JSONDict,
+    usage_info: JSONDict,
+) -> List[JSONDict]:
     return [
         {
             "id": "information_section",
@@ -551,11 +599,11 @@ def _build_information_section_fields(
 
 
 def _normalize_auth_status(
-    raw: Any,
+    raw: object,
     *,
     extension_id: str,
-    pending: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    pending: Optional[JSONDict] = None,
+) -> JSONDict:
     payload = raw if isinstance(raw, dict) else {}
     account = payload.get("account") if isinstance(payload.get("account"), dict) else None
     requires_openai_auth = bool(payload.get("requiresOpenaiAuth"))
@@ -599,7 +647,7 @@ def _normalize_auth_status(
     }
 
 
-def _looks_like_auth_required_error(message: Any) -> bool:
+def _looks_like_auth_required_error(message: object) -> bool:
     text = str(message or "").strip().lower()
     if not text:
         return False
@@ -616,7 +664,7 @@ def _looks_like_auth_required_error(message: Any) -> bool:
     )
 
 
-def _looks_like_mcp_startup_error(message: Any) -> bool:
+def _looks_like_mcp_startup_error(message: object) -> bool:
     text = str(message or "").strip().lower()
     if not text:
         return False
@@ -627,7 +675,7 @@ def _looks_like_mcp_startup_error(message: Any) -> bool:
     )
 
 
-def _looks_like_thread_not_loaded_error(message: Any) -> bool:
+def _looks_like_thread_not_loaded_error(message: object) -> bool:
     text = str(message or "").strip().lower()
     if not text:
         return False
@@ -643,7 +691,7 @@ def _looks_like_thread_not_loaded_error(message: Any) -> bool:
     )
 
 
-def _build_send_failure_result(error_message: Any) -> Dict[str, Any]:
+def _build_send_failure_result(error_message: object) -> JSONDict:
     message = str(error_message or "").strip() or "Message send failed"
     failure_kind = "send_failed"
     if _looks_like_mcp_startup_error(message):
@@ -664,7 +712,7 @@ def _build_send_failure_result(error_message: Any) -> Dict[str, Any]:
 _PENDING_REPO_MEMORY_QUEUE_KEY = "pending_repo_memory_queue"
 
 
-def _normalize_repo_memory_update(update: Any) -> Optional[Dict[str, Any]]:
+def _normalize_repo_memory_update(update: object) -> Optional[JSONDict]:
     if not isinstance(update, dict):
         return None
     update_type = str(update.get("type") or "").strip().lower()
@@ -699,7 +747,7 @@ def _normalize_repo_memory_update(update: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def _queued_repo_memory_update(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _queued_repo_memory_update(meta: JSONDict) -> Optional[JSONDict]:
     raw = meta.get(_PENDING_REPO_MEMORY_QUEUE_KEY)
     if isinstance(raw, dict):
         candidates = [raw]
@@ -716,8 +764,8 @@ def _queued_repo_memory_update(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
 def _stage_repo_memory_update_for_turn(
     conversation_id: str,
-    meta: Dict[str, Any],
-) -> tuple[Optional[Dict[str, Any]], bool]:
+    meta: JSONDict,
+) -> tuple[Optional[JSONDict], bool]:
     live_update = pop_pending(conversation_id, update_type="repo_memory")
     if live_update is None:
         return _queued_repo_memory_update(meta), False
@@ -728,11 +776,11 @@ def _stage_repo_memory_update_for_turn(
     return normalized, True
 
 
-def _clear_queued_repo_memory_updates(meta: Dict[str, Any]) -> bool:
+def _clear_queued_repo_memory_updates(meta: JSONDict) -> bool:
     return meta.pop(_PENDING_REPO_MEMORY_QUEUE_KEY, None) is not None
 
 
-def _clear_repo_memory_resume_state(conversation_id: str, meta: Dict[str, Any]) -> None:
+def _clear_repo_memory_resume_state(conversation_id: str, meta: JSONDict) -> None:
     cleared_live = pop_pending(conversation_id, update_type="repo_memory")
     cleared_meta = _clear_queued_repo_memory_updates(meta)
     if cleared_live or cleared_meta:
@@ -746,9 +794,9 @@ def _apply_repo_memory_turn_update(
     *,
     conversation_id: str,
     thread_id: str,
-    turn_params: Dict[str, Any],
-    merged_settings: Dict[str, Any],
-    pending_update: Optional[Dict[str, Any]],
+    turn_params: JSONDict,
+    merged_settings: JSONDict,
+    pending_update: Optional[JSONDict],
 ) -> bool:
     _debug_log(
         f"[codex-ext-exp] turn/start pending convo={conversation_id[:8]} "
@@ -792,7 +840,7 @@ def _log_turn_start_payload(
     *,
     conversation_id: str,
     thread_id: str,
-    turn_params: Dict[str, Any],
+    turn_params: JSONDict,
     prefix: str = "[codex-ext-exp] turn/start payload",
 ) -> None:
     instr_value = turn_params.get("developerInstructions")
@@ -813,11 +861,12 @@ async def _handle_auth_failure(conversation_id: str, extension_id: str, error_me
     detail = None
     with contextlib.suppress(Exception):
         detail = server._extension_unavailable_detail(extension_id)
+    detail_text = detail if isinstance(detail, str) and detail else error_message
     with contextlib.suppress(Exception):
         await server._emit_extension_unavailable_warning(
             conversation_id,
             extension_id,
-            detail=detail or error_message,
+            detail=detail_text,
         )
 
 
@@ -832,8 +881,8 @@ async def _resume_thread_for_rpc_server(
     thread_id: str,
     transport: CodexAppServerTransport,
     protocol: RuntimeProtocol,
-    merged_settings: Dict[str, Any],
-    meta: Dict[str, Any],
+    merged_settings: JSONDict,
+    meta: JSONDict,
 ) -> None:
     resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
     await transport.rpc_request(
@@ -850,7 +899,7 @@ async def _resume_thread_for_rpc_server(
     _save_meta(conversation_id, meta)
 
 
-async def get_auth_status(extension_id: str, refresh: bool = False) -> Dict[str, Any]:
+async def get_auth_status(extension_id: str, refresh: bool = False) -> JSONDict:
     pending = dict(_auth_state_bucket(extension_id))
     if pending.get("login_id") and not refresh:
         return _normalize_auth_status(
@@ -891,7 +940,7 @@ async def get_auth_status(extension_id: str, refresh: bool = False) -> Dict[str,
     return normalized
 
 
-async def get_splash_schema(extension_id: str) -> Dict[str, Any]:
+async def get_splash_schema(extension_id: str) -> JSONDict:
     auth_status = await get_auth_status(extension_id, refresh=False)
     tone = "success"
     if auth_status.get("status") in {"auth_required", "login_pending"}:
@@ -899,7 +948,7 @@ async def get_splash_schema(extension_id: str) -> Dict[str, Any]:
     if auth_status.get("status") == "error" or auth_status.get("ok") is False:
         tone = "error"
 
-    fields: List[Dict[str, Any]] = [
+    fields: List[JSONDict] = [
         {
             "id": "auth_status",
             "type": "status",
@@ -969,8 +1018,8 @@ async def get_splash_schema(extension_id: str) -> Dict[str, Any]:
 async def run_splash_action(
     extension_id: str,
     action_id: str,
-    payload: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    payload: Optional[JSONDict] = None,
+) -> JSONDict:
     action = str(action_id or "").strip().lower()
     params = payload if isinstance(payload, dict) else {}
     auth_state = _auth_state_bucket(extension_id)
@@ -1040,14 +1089,15 @@ async def run_splash_action(
         return {"ok": False, "error": str(exc)}
 
 
-def _sort_session_entries(entries: List[Dict[str, Any]], cwd: Optional[str]) -> List[Dict[str, Any]]:
+def _sort_session_entries(entries: List[JSONDict], cwd: Optional[str]) -> List[JSONDict]:
     if not cwd:
         return entries
     resolved_cwd = os.path.realpath(os.path.expanduser(cwd))
 
-    def relevance(entry: Dict[str, Any]) -> int:
-        ctx = entry.get("context") or {}
-        session_cwd = ctx.get("cwd") or ""
+    def relevance(entry: JSONDict) -> int:
+        ctx = _object_dict(entry.get("context"))
+        session_cwd_value = ctx.get("cwd")
+        session_cwd = session_cwd_value if isinstance(session_cwd_value, str) else ""
         if not session_cwd:
             return 9
         resolved_session_cwd = os.path.realpath(session_cwd)
@@ -1065,7 +1115,7 @@ def _build_plan_state(
     *,
     explanation: Optional[str] = None,
     source: str,
-) -> Dict[str, Any]:
+) -> JSONDict:
     normalized_steps = normalize_plan_steps(steps)
     return {
         "has_plan": False,
@@ -1160,7 +1210,7 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
     return True
 
 
-async def get_settings_schema(extension_id: str) -> Dict[str, Any]:
+async def get_settings_schema(extension_id: str) -> JSONDict:
     protocol = await get_runtime_protocol()
     schema = copy.deepcopy(build_settings_schema(protocol, extension_id))
     auth_status = await get_auth_status(extension_id, refresh=False)
@@ -1173,7 +1223,7 @@ async def get_settings_schema(extension_id: str) -> Dict[str, Any]:
     return schema
 
 
-async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:
+async def get_request_card_schemas(extension_id: str) -> JSONDict:
     protocol = await get_runtime_protocol()
     methods = (
         "item/commandExecution/requestApproval",
@@ -1182,7 +1232,7 @@ async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:
         "item/tool/call",
         "mcpServer/elicitation/request",
     )
-    schemas: Dict[str, Any] = {}
+    schemas: JSONDict = {}
     for method in methods:
         request_schema = protocol.server_request_schema(method)
         response_schema = protocol.server_request_response_schema(method)
@@ -1194,11 +1244,11 @@ async def get_request_card_schemas(extension_id: str) -> Dict[str, Any]:
     return schemas
 
 
-async def list_models() -> List[Dict[str, Any]]:
+async def list_models() -> List[JSONDict]:
     transport = await _ensure_transport_ready()
     result = await transport.rpc_request("model/list", params={}, timeout=15.0)
     items = result.get("data", []) if isinstance(result, dict) else []
-    models: List[Dict[str, Any]] = []
+    models: List[JSONDict] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -1217,18 +1267,18 @@ async def list_models() -> List[Dict[str, Any]]:
     return models
 
 
-async def list_sessions(cwd: Optional[str] = None) -> List[Dict[str, Any]]:
+async def list_sessions(cwd: Optional[str] = None) -> List[JSONDict]:
     transport = await _ensure_transport_ready()
     result = await transport.rpc_request("thread/list", params={"limit": 200}, timeout=15.0)
     items_raw = result.get("data", []) if isinstance(result, dict) else []
-    sessions: List[Dict[str, Any]] = []
+    sessions: List[JSONDict] = []
     for item in items_raw:
         if not isinstance(item, dict):
             continue
         session_id = item.get("id")
         if not isinstance(session_id, str) or not session_id:
             continue
-        entry: Dict[str, Any] = {
+        entry: JSONDict = {
             "session_id": session_id,
             "summary": item.get("preview") or "",
             "active": False,
@@ -1243,12 +1293,12 @@ async def list_sessions(cwd: Optional[str] = None) -> List[Dict[str, Any]]:
 async def route_event(
     extension_id: str,
     label: Optional[str],
-    payload: Any,
+    payload: object,
     conversation_id: Optional[str] = None,
     thread_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     request_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> JSONDict:
     transport = _ensure_transport()
     return await transport.route_event(
         label=label or "",
@@ -1260,7 +1310,7 @@ async def route_event(
     )
 
 
-async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
+async def read_plan(extension_id: str, conversation_id: str) -> JSONDict:
     try:
         db_todos = _conv_todos.list_todos(conversation_id)
         db_status_map = {
@@ -1269,10 +1319,14 @@ async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, Any]:
             "done": "completed",
             "blocked": "pending",
         }
-        steps = [
-            {"step": t["title"], "status": db_status_map.get(t["status"], "pending")}
-            for t in db_todos
-        ]
+        steps: List[Dict[str, str]] = []
+        for item in db_todos:
+            todo = _object_dict(item)
+            title = _string_value(todo.get("title")).strip()
+            if not title:
+                continue
+            raw_status = _string_value(todo.get("status")).strip()
+            steps.append({"step": title, "status": db_status_map.get(raw_status, "pending")})
         if steps:
             return _build_plan_state(steps, source="todos_db")
     except Exception:
@@ -1299,12 +1353,12 @@ async def resume_session(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    settings: Optional[JSONDict] = None,
+) -> JSONDict:
     if not _meta_fns or "load" not in _meta_fns or "save" not in _meta_fns:
         return {"ok": False, "error": "Manager not initialized"}
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _load_meta(conversation_id)
+    if meta is None:
         return {"ok": False, "error": f"Conversation not found: {conversation_id[:8]}"}
     thread_id = meta.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id:
@@ -1331,7 +1385,10 @@ async def resume_session(
         return {"ok": True, "session_id": thread_id}
     except Exception as exc:
         if _looks_like_auth_required_error(exc):
-            await _handle_auth_failure(conversation_id, meta.get("settings", {}).get("agent") or "codex-ext-exp", str(exc))
+            meta_settings = _object_dict(meta.get("settings"))
+            agent_value = meta_settings.get("agent")
+            extension_id = agent_value if isinstance(agent_value, str) and agent_value else "codex-ext-exp"
+            await _handle_auth_failure(conversation_id, extension_id, str(exc))
         _add_to_raw_buffer("err", conversation_id, f"resume_failed {exc}")
         return {"ok": False, "error": f"Thread resume failed: {exc}"}
 
@@ -1340,15 +1397,15 @@ async def handle_message(
     conversation_id: str,
     text: str,
     agent_type: str,
-    settings: Dict[str, Any],
-) -> Dict[str, Any]:
+    settings: JSONDict,
+) -> JSONDict:
     if not _meta_fns or "load" not in _meta_fns or "save" not in _meta_fns:
         return {"ok": False, "error": "Manager not initialized"}
     if not conversation_id or not text:
         return {"ok": False, "error": "conversation_id and text required"}
 
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _load_meta(conversation_id)
+    if meta is None:
         return {"ok": False, "error": f"Conversation not found: {conversation_id[:8]}"}
 
     transport = await _ensure_transport_ready()
@@ -1356,10 +1413,11 @@ async def handle_message(
     merged_settings = _merge_runtime_settings(
         conversation_id,
         settings=settings,
-        cwd=settings.get("cwd") if isinstance(settings, dict) else None,
-        model=settings.get("model") if isinstance(settings, dict) else None,
+        cwd=(lambda value: value if isinstance(value, str) else None)(settings.get("cwd")),
+        model=(lambda value: value if isinstance(value, str) else None)(settings.get("model")),
     )
-    thread_id = meta.get("thread_id")
+    raw_thread_id = meta.get("thread_id")
+    thread_id = raw_thread_id if isinstance(raw_thread_id, str) and raw_thread_id else None
     current_signature = _thread_runtime_signature(protocol, merged_settings)
 
     try:
@@ -1446,11 +1504,19 @@ async def handle_message(
             thread_id = _extract_thread_id_from_result(start_result)
 
             if not thread_id:
-                meta = _meta_fns["load"](conversation_id)
-                thread_id = meta.get("thread_id") if isinstance(meta, dict) else None
+                reloaded_meta = _load_meta(conversation_id)
+                if reloaded_meta is not None:
+                    meta = reloaded_meta
+                    reloaded_thread_id = meta.get("thread_id")
+                    thread_id = (
+                        reloaded_thread_id
+                        if isinstance(reloaded_thread_id, str) and reloaded_thread_id
+                        else None
+                    )
 
             if not thread_id:
                 return {"ok": False, "error": "Failed to start thread - no thread_id received"}
+            thread_id = cast(str, thread_id)
 
             transport.mark_thread_ready(thread_id)
             meta["thread_id"] = thread_id
@@ -1469,13 +1535,14 @@ async def handle_message(
             )
             # New thread — baseline instructions already sent via thread/start.
             # Clear any pending so it doesn't re-fire on the next turn.
-            pending_update = pop_pending(conversation_id, update_type="repo_memory")
+            pending_update = _object_dict(pop_pending(conversation_id, update_type="repo_memory"))
+            pending_hash = pending_update.get("content_hash", "-")
             turn_params.pop("developerInstructions", None)
             turn_params.pop("baseInstructions", None)
             _debug_log(
                 f"[codex-ext-exp] new-thread pending-clear convo={conversation_id[:8]} "
                 f"thread={thread_id[:8]} had_pending={bool(pending_update)} "
-                f"pending_hash={(pending_update or {}).get('content_hash', '-')} "
+                f"pending_hash={pending_hash} "
                 f"queued_cleared={cleared_meta_queue}"
             )
             _log_turn_start_payload(
@@ -1492,8 +1559,9 @@ async def handle_message(
                 timeout=15.0,
             )
 
-        _add_to_raw_buffer("out", conversation_id, f"turn_start thread={thread_id[:8]} text={text[:120]}")
-        return {"ok": True, "thread_id": thread_id, "conversation_id": conversation_id}
+        active_thread_id = cast(str, thread_id)
+        _add_to_raw_buffer("out", conversation_id, f"turn_start thread={active_thread_id[:8]} text={text[:120]}")
+        return {"ok": True, "thread_id": active_thread_id, "conversation_id": conversation_id}
     except Exception as exc:
         if _looks_like_auth_required_error(exc):
             await _handle_auth_failure(conversation_id, agent_type or "codex-ext-exp", str(exc))
@@ -1506,18 +1574,19 @@ async def resume_session_with_history(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[JSONDict] = None,
     extension_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> JSONDict:
     if not _meta_fns or "load" not in _meta_fns or "save" not in _meta_fns:
         return {"ok": False, "error": "Manager not initialized"}
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _load_meta(conversation_id)
+    if meta is None:
         return {"ok": False, "error": f"Conversation not found: {conversation_id[:8]}"}
 
     existing = meta.get("thread_id")
     if existing and existing != session_id:
-        return {"ok": False, "error": f"Conversation already bound to thread {existing[:8]}"}
+        existing_text = existing if isinstance(existing, str) else str(existing)
+        return {"ok": False, "error": f"Conversation already bound to thread {existing_text[:8]}"}
 
     merged_settings = _merge_runtime_settings(
         conversation_id,
@@ -1549,8 +1618,8 @@ async def hydrate_transcript(
     conversation_id: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+    settings: Optional[JSONDict] = None,
+) -> List[JSONDict]:
     path = find_rollout_path(session_id)
     if not path:
         _add_to_raw_buffer("err", conversation_id, f"hydrate_transcript rollout_not_found session={session_id[:8]}")
@@ -1561,20 +1630,20 @@ async def hydrate_transcript(
     return items if isinstance(items, list) else []
 
 
-def resolve_approval(request_id: str, resolution: Any) -> bool:
+def resolve_approval(request_id: str, resolution: object) -> bool:
     transport = _transport
     if transport is None:
         return False
     return transport.resolve_approval(request_id, resolution)
 
 
-def validate_pending_approval(conversation_id: str, request_id: str, descriptor: Dict[str, Any]) -> bool:
+def validate_pending_approval(conversation_id: str, request_id: str, descriptor: JSONDict) -> bool:
     if not isinstance(descriptor, dict):
         return False
     transport = _transport
     if transport is None:
         return False
-    meta = _meta_fns["load"](conversation_id) if _meta_fns and "load" in _meta_fns else {}
+    meta = _load_meta(conversation_id) or {}
     if descriptor.get("conversation_id") and descriptor.get("conversation_id") != conversation_id:
         return False
     pending_thread_id = descriptor.get("thread_id")
@@ -1601,8 +1670,8 @@ def validate_pending_approval(conversation_id: str, request_id: str, descriptor:
 async def abort_session(conversation_id: str) -> bool:
     if not _meta_fns or "load" not in _meta_fns:
         return False
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _load_meta(conversation_id)
+    if meta is None:
         return False
     thread_id = meta.get("thread_id")
     turn_id = meta.get("turn_id")
@@ -1628,7 +1697,7 @@ async def abort_session(conversation_id: str) -> bool:
         return False
 
 
-async def compact_session(conversation_id: str) -> Dict[str, Any]:
+async def compact_session(conversation_id: str) -> JSONDict:
     """Send thread/compact/start to the extension-owned app-server transport.
 
     Try compact directly first, then resume and retry only for the canonical
@@ -1636,8 +1705,8 @@ async def compact_session(conversation_id: str) -> Dict[str, Any]:
     """
     if not _meta_fns or "load" not in _meta_fns:
         return {"ok": False, "error": "meta_fns not available"}
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _load_meta(conversation_id)
+    if meta is None:
         return {"ok": False, "error": "conversation not found"}
     thread_id = meta.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id:
@@ -1646,11 +1715,14 @@ async def compact_session(conversation_id: str) -> Dict[str, Any]:
     try:
         transport = await _ensure_transport_ready()
         protocol = await get_runtime_protocol()
+        meta_settings = _object_dict(meta.get("settings"))
+        meta_cwd = meta_settings.get("cwd")
+        meta_model = meta_settings.get("model")
         merged_settings = _merge_runtime_settings(
             conversation_id,
-            settings=meta.get("settings") or {},
-            cwd=(meta.get("settings") or {}).get("cwd"),
-            model=(meta.get("settings") or {}).get("model"),
+            settings=meta_settings,
+            cwd=meta_cwd if isinstance(meta_cwd, str) else None,
+            model=meta_model if isinstance(meta_model, str) else None,
         )
         params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)
         try:

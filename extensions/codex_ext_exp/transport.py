@@ -1,14 +1,14 @@
 import asyncio
 import contextlib
+import importlib
 import json
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Protocol, TypedDict, cast
 
 from agent_log_server import ask_user_interactions
-from framework_shells.orchestrator import Orchestrator
 
 from .router import CodexEventRouter
 from .runtime_protocol import (
@@ -25,6 +25,100 @@ _CONVERSATION_DIR = _CONFIG_ROOT / "conversations"
 _META_ENVELOPE_START = "\x1eCODEX_META "
 _META_ENVELOPE_END = "\x1f"
 
+JSONDict = Dict[str, object]
+MetaFns = Dict[str, Callable[..., object]]
+
+
+class ShellRecordProtocol(Protocol):
+    id: str
+    status: str
+    label: Optional[str]
+    spec_id: str
+
+
+class PipeWriterProtocol(Protocol):
+    def write(self, data: bytes) -> object: ...
+
+    async def drain(self) -> None: ...
+
+
+class PipeProcessProtocol(Protocol):
+    stdin: Optional[PipeWriterProtocol]
+    returncode: Optional[int]
+
+
+class PipeStateProtocol(Protocol):
+    process: PipeProcessProtocol
+
+
+class OutputBytesSubscriptionProtocol(Protocol):
+    async def get(self) -> bytes: ...
+
+
+class FrameworkShellManagerProtocol(Protocol):
+    async def get_shell(self, shell_id: str) -> Optional[ShellRecordProtocol]: ...
+
+    async def list_shells(self) -> List[ShellRecordProtocol]: ...
+
+    async def terminate_shell(self, shell_id: str, force: bool = False) -> object: ...
+
+    def get_pipe_state(self, shell_id: str) -> Optional[PipeStateProtocol]: ...
+
+    async def subscribe_output_bytes(self, shell_id: str) -> OutputBytesSubscriptionProtocol: ...
+
+    async def unsubscribe_output_bytes(
+        self,
+        shell_id: str,
+        subscription: OutputBytesSubscriptionProtocol,
+    ) -> object: ...
+
+    async def write_to_pipe(self, shell_id: str, data: str) -> object: ...
+
+
+class ShellLaunchProtocol(Protocol):
+    id: str
+
+
+class OrchestratorProtocol(Protocol):
+    def __init__(self, manager: FrameworkShellManagerProtocol) -> None: ...
+
+    async def start_from_ref(
+        self,
+        ref: str,
+        *,
+        base_dir: Path,
+        ctx: JSONDict,
+        label: str,
+        wait_ready: bool,
+    ) -> ShellLaunchProtocol: ...
+
+
+class ResumeStartupBarrier(TypedDict):
+    thread_id: str
+    saw_startup: bool
+    future: asyncio.Future[Optional[JSONDict]]
+
+
+def _dict_value(value: object) -> JSONDict:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _json_value_loads(text: str) -> object:
+    return cast(object, json.loads(text))
+
+
+def _json_dict_loads(text: str) -> JSONDict:
+    return _dict_value(_json_value_loads(text))
+
+
+def _orchestrator_cls() -> type[OrchestratorProtocol]:
+    module = importlib.import_module("framework_shells.orchestrator")
+    orchestrator = getattr(module, "Orchestrator", None)
+    if not callable(orchestrator):
+        raise RuntimeError("framework_shells.orchestrator.Orchestrator unavailable")
+    return cast(type[OrchestratorProtocol], orchestrator)
+
+
 
 def _strip_meta_envelope(text: str) -> str:
     if text.startswith(_META_ENVELOPE_START):
@@ -34,7 +128,7 @@ def _strip_meta_envelope(text: str) -> str:
     return text
 
 
-def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
+def _extract_item_text(item: JSONDict) -> Optional[Dict[str, str]]:
     raw_type = str(item.get("type") or "")
     item_type = raw_type.lower()
 
@@ -48,8 +142,9 @@ def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
                     text = part.get("text")
                     if isinstance(text, str):
                         text_parts.append(text)
-        if not text_parts and isinstance(item.get("text"), str):
-            text_parts.append(item["text"])
+        raw_text = item.get("text")
+        if not text_parts and isinstance(raw_text, str):
+            text_parts.append(raw_text)
         text = "\n".join(text_parts)
 
         if role == "user":
@@ -71,10 +166,12 @@ def _extract_item_text(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
                     text = part.get("text")
                     if isinstance(text, str):
                         user_text_parts.append(text)
-        if not user_text_parts and isinstance(item.get("text"), str):
-            user_text_parts.append(item["text"])
-        if not user_text_parts and isinstance(item.get("message"), str):
-            user_text_parts.append(item["message"])
+        raw_text = item.get("text")
+        if not user_text_parts and isinstance(raw_text, str):
+            user_text_parts.append(raw_text)
+        raw_message = item.get("message")
+        if not user_text_parts and isinstance(raw_message, str):
+            user_text_parts.append(raw_message)
         text = _strip_meta_envelope("\n".join(user_text_parts)).strip()
         if text:
             return {"role": "user", "text": text}
@@ -94,12 +191,12 @@ class CodexAppServerTransport:
         self,
         *,
         server_root: Path,
-        fws_getter: Callable[[], Awaitable[Any]],
-        broadcast_fn: Callable[[Dict[str, Any]], Awaitable[None]],
-        transcript_fn: Callable[[str, Dict[str, Any]], Awaitable[None]],
-        meta_fns: Optional[Dict[str, Callable]],
-        raw_log_fn: Callable[[str, str, Any], None],
-        auth_event_handler: Optional[Callable[..., Awaitable[List[Dict[str, Any]]]]] = None,
+        fws_getter: Callable[[], Awaitable[FrameworkShellManagerProtocol]],
+        broadcast_fn: Callable[[JSONDict], Awaitable[None]],
+        transcript_fn: Callable[[str, JSONDict], Awaitable[None]],
+        meta_fns: Optional[MetaFns],
+        raw_log_fn: Callable[[str, str, object], None],
+        auth_event_handler: Optional[Callable[..., Awaitable[List[JSONDict]]]] = None,
     ) -> None:
         self._server_root = server_root
         self._fws_getter = fws_getter
@@ -111,18 +208,18 @@ class CodexAppServerTransport:
 
         self._lock = asyncio.Lock()
         self._shell_id: Optional[str] = None
-        self._reader_task: Optional[asyncio.Task] = None
+        self._reader_task: Optional[asyncio.Task[None]] = None
         self._initialized = False
-        self._rpc_waiters: Dict[str, asyncio.Future] = {}
+        self._rpc_waiters: Dict[str, asyncio.Future[JSONDict]] = {}
         self._request_conversations: Dict[str, Optional[str]] = {}
         self._resumed_threads: set[str] = set()
         self._thread_conversations: Dict[str, str] = {}
         self._turn_conversations: Dict[str, str] = {}
-        self._pending_approval_requests: Dict[str, Dict[str, Any]] = {}
-        self._resume_startup_barriers: Dict[str, Dict[str, Any]] = {}
+        self._pending_approval_requests: Dict[str, JSONDict] = {}
+        self._resume_startup_barriers: Dict[str, ResumeStartupBarrier] = {}
         self._request_counter = int(time.time() * 1000)
-        self._stdin: Optional[Any] = None
-        self._stdout_subscription: Optional[Any] = None
+        self._stdin: Optional[PipeWriterProtocol] = None
+        self._stdout_subscription: Optional[OutputBytesSubscriptionProtocol] = None
         self._router = CodexEventRouter()
 
     def is_ready(self) -> bool:
@@ -179,7 +276,7 @@ class CodexAppServerTransport:
         request_id_text = str(request_id or "").strip()
         return bool(request_id_text and request_id_text in self._pending_approval_requests)
 
-    def resolve_approval(self, request_id: str, resolution: Any) -> bool:
+    def resolve_approval(self, request_id: str, resolution: object) -> bool:
         request_id_text = str(request_id or "").strip()
         if not request_id_text:
             return False
@@ -191,7 +288,7 @@ class CodexAppServerTransport:
             self._pending_approval_requests[request_id_text] = pending
             return False
 
-        result_value: Dict[str, Any] = {}
+        result_value: JSONDict = {}
         if isinstance(resolution, dict) and isinstance(resolution.get("result"), dict):
             result_value = dict(resolution["result"])
         elif isinstance(resolution, dict):
@@ -221,15 +318,21 @@ class CodexAppServerTransport:
                 "decision": "accept" if str(result_value.get("decision")).strip().lower() == "accept" else "decline",
             }
 
-        response_id: Any = int(request_id_text) if request_id_text.isdigit() else request_id_text
-        response_payload: Dict[str, Any] = {
+        response_id: object = int(request_id_text) if request_id_text.isdigit() else request_id_text
+        response_payload: JSONDict = {
             "jsonrpc": "2.0",
             "id": response_id,
             "result": encoded_result,
         }
         line = json.dumps(response_payload, ensure_ascii=False)
         try:
-            self._raw_log_fn("out", pending.get("conversation_id") or self.get_raw_label(), line)
+            pending_conversation_id = pending.get("conversation_id")
+            raw_conversation_id = (
+                pending_conversation_id
+                if isinstance(pending_conversation_id, str) and pending_conversation_id
+                else self.get_raw_label()
+            )
+            self._raw_log_fn("out", raw_conversation_id, line)
             writer.write((line + "\n").encode("utf-8"))
             try:
                 loop = asyncio.get_running_loop()
@@ -242,7 +345,7 @@ class CodexAppServerTransport:
             self._pending_approval_requests[request_id_text] = pending
             return False
 
-    def _approval_request_method(self, pending: Dict[str, Any]) -> Optional[str]:
+    def _approval_request_method(self, pending: JSONDict) -> Optional[str]:
         method = pending.get("method")
         if isinstance(method, str) and method.strip():
             return method.strip().lower()
@@ -257,10 +360,10 @@ class CodexAppServerTransport:
         self,
         method: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[JSONDict] = None,
         conversation_id: Optional[str] = None,
         timeout: float = 6.0,
-    ) -> Dict[str, Any]:
+    ) -> object:
         await self.ensure_ready()
         return await self._rpc_request_unchecked(
             method,
@@ -273,19 +376,19 @@ class CodexAppServerTransport:
         self,
         method: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[JSONDict] = None,
         conversation_id: Optional[str] = None,
         timeout: float = 6.0,
-    ) -> Dict[str, Any]:
+    ) -> object:
         method_name = str(method or "").strip().lower()
         resume_thread_id = self._extract_resume_thread_id(params) if method_name == "thread/resume" else None
         if conversation_id and resume_thread_id:
             self._begin_resume_startup_barrier(conversation_id, resume_thread_id)
         req_id = self._next_request_id()
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[JSONDict] = asyncio.get_running_loop().create_future()
         self._rpc_waiters[req_id] = future
         self._request_conversations[req_id] = conversation_id
-        payload: Dict[str, Any] = {"id": int(req_id), "method": method}
+        payload: JSONDict = {"id": int(req_id), "method": method}
         if params is not None:
             payload["params"] = params
         await self._write_payload(payload, conversation_id=conversation_id)
@@ -339,7 +442,7 @@ class CodexAppServerTransport:
         self,
         method: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[JSONDict] = None,
         conversation_id: Optional[str] = None,
     ) -> None:
         await self.ensure_ready()
@@ -349,10 +452,10 @@ class CodexAppServerTransport:
         self,
         method: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[JSONDict] = None,
         conversation_id: Optional[str] = None,
     ) -> None:
-        payload: Dict[str, Any] = {"method": method}
+        payload: JSONDict = {"method": method}
         if params is not None:
             payload["params"] = params
         await self._write_payload(payload, conversation_id=conversation_id)
@@ -375,7 +478,7 @@ class CodexAppServerTransport:
         self._set_shell(shell_id)
         return shell_id
 
-    async def _adopt_existing_shell(self, mgr: Any) -> Optional[str]:
+    async def _adopt_existing_shell(self, mgr: FrameworkShellManagerProtocol) -> Optional[str]:
         try:
             records = await mgr.list_shells()
         except Exception:
@@ -390,9 +493,9 @@ class CodexAppServerTransport:
             return rec.id
         return None
 
-    async def _start_new_shell(self, mgr: Any) -> str:
+    async def _start_new_shell(self, mgr: FrameworkShellManagerProtocol) -> str:
         spec_path = Path(__file__).parent / "shellspec" / "app_server_exp.yaml"
-        orch = Orchestrator(mgr)
+        orch = _orchestrator_cls()(mgr)
         shell = await orch.start_from_ref(
             f"{spec_path}#app_server_exp_observed",
             base_dir=spec_path.parent,
@@ -475,7 +578,7 @@ class CodexAppServerTransport:
 
     async def _write_payload(
         self,
-        payload: Dict[str, Any],
+        payload: JSONDict,
         *,
         conversation_id: Optional[str] = None,
     ) -> None:
@@ -496,7 +599,7 @@ class CodexAppServerTransport:
             self._stdin = None
             raise RuntimeError("codex extension transport pipe not available") from exc
 
-    async def _reader_loop(self, shell_id: str, subscription: Any) -> None:
+    async def _reader_loop(self, shell_id: str, subscription: OutputBytesSubscriptionProtocol) -> None:
         pending_label: Optional[str] = None
         buffer = b""
         max_buffer = 4_000_000
@@ -515,7 +618,7 @@ class CodexAppServerTransport:
                     text = "{" + rest
 
             try:
-                parsed = json.loads(text)
+                parsed = _json_value_loads(text)
             except Exception:
                 self._raw_log_fn("in", self.get_raw_label(), text)
                 if "/" in text or text.endswith("started") or text.endswith("completed"):
@@ -532,7 +635,7 @@ class CodexAppServerTransport:
                 return
 
             label = None
-            payload: Any = parsed
+            payload: object = parsed
             raw_conversation_id: Optional[str] = None
             request_id: Optional[str] = None
 
@@ -666,25 +769,28 @@ class CodexAppServerTransport:
     async def route_event(
         self,
         label: str,
-        payload: Any,
+        payload: object,
         *,
         conversation_id: Optional[str],
         thread_id: Optional[str],
         turn_id: Optional[str],
         request_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> JSONDict:
         protocol = await get_runtime_protocol()
         routed_payload = dict(payload) if isinstance(payload, dict) else payload
         if request_id is not None and isinstance(routed_payload, dict) and routed_payload.get("_request_id") is None:
             routed_payload["_request_id"] = str(request_id)
-        routed = self._router.route_event(
-            protocol,
-            label=label,
-            payload=routed_payload,
-            thread_id=thread_id,
-            turn_id=turn_id,
-            conversation_id=conversation_id,
-            extract_item_text=_extract_item_text,
+        routed = cast(
+            JSONDict,
+            self._router.route_event(
+                protocol,
+                label=label,
+                payload=routed_payload,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                conversation_id=conversation_id,
+                extract_item_text=_extract_item_text,
+            ),
         )
         if conversation_id and isinstance(routed, dict):
             descriptors = routed.get("approval_descriptors")
@@ -709,7 +815,7 @@ class CodexAppServerTransport:
     async def _route_transport_event(
         self,
         label: str,
-        payload: Any,
+        payload: object,
         *,
         conversation_id: Optional[str],
         thread_id: Optional[str],
@@ -725,7 +831,7 @@ class CodexAppServerTransport:
             request_id=request_id,
         )
 
-        extra_events: List[Dict[str, Any]] = []
+        extra_events: List[JSONDict] = []
         if self._auth_event_handler is not None:
             handled_events = await self._auth_event_handler(
                 label=label,
@@ -742,8 +848,13 @@ class CodexAppServerTransport:
             return
 
         routed_result = routed if isinstance(routed, dict) else {}
-        resolved_conversation_id = routed_result.get("conversation_id") or conversation_id
-        descriptors_by_request: Dict[str, Dict[str, Any]] = {}
+        routed_conversation = routed_result.get("conversation_id")
+        resolved_conversation_id = (
+            routed_conversation
+            if isinstance(routed_conversation, str) and routed_conversation
+            else conversation_id
+        )
+        descriptors_by_request: Dict[str, JSONDict] = {}
         routed_descriptors = routed_result.get("approval_descriptors")
         if isinstance(routed_descriptors, list):
             for descriptor in routed_descriptors:
@@ -769,13 +880,14 @@ class CodexAppServerTransport:
                 if isinstance(entry, dict):
                     await self._transcript_fn(resolved_conversation_id, entry)
 
-        next_turn_id = routed_result.get("set_turn_id")
+        raw_next_turn_id = routed_result.get("set_turn_id")
+        next_turn_id = raw_next_turn_id if isinstance(raw_next_turn_id, str) and raw_next_turn_id else None
         if resolved_conversation_id and next_turn_id is not None:
             self._persist_turn_id(resolved_conversation_id, next_turn_id)
         elif resolved_conversation_id and routed_result.get("clear_turn_id"):
             self._persist_turn_id(resolved_conversation_id, None)
 
-        events: List[Dict[str, Any]] = []
+        events: List[JSONDict] = []
         routed_events = routed_result.get("events")
         if isinstance(routed_events, list):
             events.extend(event for event in routed_events if isinstance(event, dict))
@@ -788,15 +900,15 @@ class CodexAppServerTransport:
                 outbound["request_id"] = request_id
             await self._broadcast_fn(outbound)
 
-    def _persist_pending_approval(self, conversation_id: str, descriptor: Dict[str, Any]) -> None:
+    def _persist_pending_approval(self, conversation_id: str, descriptor: JSONDict) -> None:
         request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
         if not request_id_text:
             return
-        meta_dict: Dict[str, Any] = self._load_meta(conversation_id) or {}
+        meta_dict: JSONDict = self._load_meta(conversation_id) or {}
         raw_settings = meta_dict.get("settings")
-        settings: Dict[str, Any] = raw_settings if isinstance(raw_settings, dict) else {}
+        settings: JSONDict = raw_settings if isinstance(raw_settings, dict) else {}
         created_at = str(descriptor.get("created_at") or datetime.now(timezone.utc).isoformat())
-        render_event = dict(descriptor.get("render_event") or {})
+        render_event = _dict_value(descriptor.get("render_event"))
         render_event["type"] = "approval"
         render_event["conversation_id"] = render_event.get("conversation_id") or conversation_id
         render_event["id"] = render_event.get("id") or request_id_text
@@ -811,13 +923,13 @@ class CodexAppServerTransport:
             "agent": settings.get("agent") or "codex",
             "kind": descriptor.get("kind") or "unknown",
             "request_method": descriptor.get("request_method"),
-            "request_params": dict(descriptor.get("request_params") or {}),
-            "payload": dict(descriptor.get("payload") or {}),
+            "request_params": _dict_value(descriptor.get("request_params")),
+            "payload": _dict_value(descriptor.get("payload")),
             "thread_id": descriptor.get("thread_id") or meta_dict.get("thread_id"),
             "turn_id": descriptor.get("turn_id"),
             "runtime_signature": descriptor.get("runtime_signature") or meta_dict.get("thread_runtime_signature"),
             "runtime_instance_id": descriptor.get("runtime_instance_id") or self.runtime_instance_id(),
-            "transcript_anchor": dict(descriptor.get("transcript_anchor") or {"turn_id": descriptor.get("turn_id")}),
+            "transcript_anchor": _dict_value(descriptor.get("transcript_anchor")) or {"turn_id": descriptor.get("turn_id")},
             "source": descriptor.get("source") or "live",
             "created_at": created_at,
             "render_event": render_event,
@@ -828,7 +940,7 @@ class CodexAppServerTransport:
             upsert(conversation_id, persisted)
         else:
             raw_pending = meta_dict.get("pending_approvals")
-            pending_dict: Dict[str, Any] = raw_pending if isinstance(raw_pending, dict) else {}
+            pending_dict: JSONDict = raw_pending if isinstance(raw_pending, dict) else {}
             pending_dict[request_id_text] = persisted
             meta_dict["pending_approvals"] = pending_dict
             self._save_meta(conversation_id, meta_dict)
@@ -843,7 +955,7 @@ class CodexAppServerTransport:
     def _resolve_conversation_id(
         self,
         raw_conversation_id: Optional[str],
-        payload: Any,
+        payload: object,
     ) -> Optional[str]:
         if isinstance(raw_conversation_id, str) and self._conversation_exists(raw_conversation_id):
             return raw_conversation_id
@@ -868,7 +980,7 @@ class CodexAppServerTransport:
             return self._find_conversation_by_turn_id(turn_id)
         return None
 
-    def _extract_resume_thread_id(self, params: Optional[Dict[str, Any]]) -> Optional[str]:
+    def _extract_resume_thread_id(self, params: Optional[JSONDict]) -> Optional[str]:
         if not isinstance(params, dict):
             return None
         for key in ("threadId", "thread_id"):
@@ -877,17 +989,16 @@ class CodexAppServerTransport:
                 return value
         return None
 
-    def _begin_resume_startup_barrier(self, conversation_id: str, thread_id: str) -> Dict[str, Any]:
+    def _begin_resume_startup_barrier(self, conversation_id: str, thread_id: str) -> ResumeStartupBarrier:
         existing = self._resume_startup_barriers.get(conversation_id)
         if (
-            isinstance(existing, dict)
-            and existing.get("thread_id") == thread_id
-            and isinstance(existing.get("future"), asyncio.Future)
+            existing is not None
+            and existing["thread_id"] == thread_id
             and not existing["future"].done()
         ):
             return existing
-        future = asyncio.get_running_loop().create_future()
-        barrier = {
+        future: asyncio.Future[Optional[JSONDict]] = asyncio.get_running_loop().create_future()
+        barrier: ResumeStartupBarrier = {
             "thread_id": thread_id,
             "saw_startup": False,
             "future": future,
@@ -899,24 +1010,24 @@ class CodexAppServerTransport:
 
     def _clear_resume_startup_barriers(self, reason: str) -> None:
         for barrier in self._resume_startup_barriers.values():
-            future = barrier.get("future") if isinstance(barrier, dict) else None
-            if isinstance(future, asyncio.Future) and not future.done():
+            future = barrier["future"]
+            if not future.done():
                 future.cancel()
         self._resume_startup_barriers.clear()
 
     def _discard_resume_startup_barrier(self, conversation_id: str, *, reason: Optional[str] = None) -> None:
         barrier = self._resume_startup_barriers.pop(conversation_id, None)
-        if not isinstance(barrier, dict):
+        if barrier is None:
             return
-        future = barrier.get("future")
-        if not isinstance(future, asyncio.Future) or future.done():
+        future = barrier["future"]
+        if future.done():
             return
         if reason:
             future.cancel()
         else:
             future.set_result(None)
 
-    def _transport_event_type(self, label: str, payload: Any) -> Optional[str]:
+    def _transport_event_type(self, label: str, payload: object) -> Optional[str]:
         special_types = {
             "thread/status/changed",
             "mcp_startup_update",
@@ -951,29 +1062,28 @@ class CodexAppServerTransport:
         conversation_id: Optional[str],
         thread_id: Optional[str],
         label: str,
-        payload: Any,
+        payload: object,
     ) -> None:
         if not conversation_id:
             return
         barrier = self._resume_startup_barriers.get(conversation_id)
-        if not isinstance(barrier, dict):
+        if barrier is None:
             return
-        barrier_dict: Dict[str, Any] = barrier
-        barrier_thread_id = barrier_dict.get("thread_id")
+        barrier_thread_id = barrier["thread_id"]
         if isinstance(barrier_thread_id, str) and barrier_thread_id and thread_id and barrier_thread_id != thread_id:
             return
         event_type = self._transport_event_type(label, payload)
         if event_type == "mcp_startup_update":
-            barrier_dict["saw_startup"] = True
-            payload_dict: Dict[str, Any] = payload if isinstance(payload, dict) else {}
+            barrier["saw_startup"] = True
+            payload_dict: JSONDict = payload if isinstance(payload, dict) else {}
             raw_msg = payload_dict.get("msg")
-            msg_dict: Dict[str, Any] = raw_msg if isinstance(raw_msg, dict) else payload_dict
+            msg_dict: JSONDict = raw_msg if isinstance(raw_msg, dict) else payload_dict
             raw_status = msg_dict.get("status")
-            status_dict: Dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
+            status_dict: JSONDict = raw_status if isinstance(raw_status, dict) else {}
             state = str(status_dict.get("state") or "").strip().lower()
             if state == "failed":
-                future = barrier_dict.get("future")
-                if isinstance(future, asyncio.Future) and not future.done():
+                future = barrier["future"]
+                if not future.done():
                     server_name = str(msg_dict.get("server") or "").strip()
                     error_text = str(status_dict.get("error") or "").strip()
                     message = error_text or "MCP startup failed during thread resume"
@@ -986,13 +1096,13 @@ class CodexAppServerTransport:
                         f"source=mcp_startup_update state=failed{server_suffix}",
                     )
             return
-        future = barrier_dict.get("future")
-        if not isinstance(future, asyncio.Future) or future.done():
+        future = barrier["future"]
+        if future.done():
             return
         if event_type == "thread/status/changed":
             payload_dict = payload if isinstance(payload, dict) else {}
             raw_status = payload_dict.get("status")
-            thread_status_dict: Dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
+            thread_status_dict: JSONDict = raw_status if isinstance(raw_status, dict) else {}
             status_type = str(thread_status_dict.get("type") or "").strip().lower()
             if status_type == "idle":
                 future.set_result({
@@ -1022,29 +1132,23 @@ class CodexAppServerTransport:
         self,
         *,
         req_id: str,
-        response_future: asyncio.Future,
+        response_future: asyncio.Future[JSONDict],
         conversation_id: str,
         thread_id: str,
         timeout: float,
-    ) -> Dict[str, Any]:
+    ) -> JSONDict:
         barrier = self._resume_startup_barriers.get(conversation_id)
-        if not isinstance(barrier, dict):
+        if barrier is None:
             try:
                 return await asyncio.wait_for(response_future, timeout=timeout)
             except asyncio.TimeoutError as exc:
                 raise RuntimeError("thread/resume request timed out") from exc
-        if barrier.get("thread_id") != thread_id:
+        if barrier["thread_id"] != thread_id:
             try:
                 return await asyncio.wait_for(response_future, timeout=timeout)
             except asyncio.TimeoutError as exc:
                 raise RuntimeError("thread/resume request timed out") from exc
-        barrier_future = barrier.get("future")
-        if not isinstance(barrier_future, asyncio.Future):
-            self._discard_resume_startup_barrier(conversation_id)
-            try:
-                return await asyncio.wait_for(response_future, timeout=timeout)
-            except asyncio.TimeoutError as exc:
-                raise RuntimeError("thread/resume request timed out") from exc
+        barrier_future = barrier["future"]
         self._raw_log_fn(
             "out",
             conversation_id,
@@ -1123,7 +1227,7 @@ class CodexAppServerTransport:
             if not meta_path.exists():
                 continue
             try:
-                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                data = _json_dict_loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
             if isinstance(data, dict) and data.get("thread_id") == thread_id:
@@ -1140,7 +1244,7 @@ class CodexAppServerTransport:
             if not meta_path.exists():
                 continue
             try:
-                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                data = _json_dict_loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
             if isinstance(data, dict) and data.get("turn_id") == turn_id:
@@ -1151,7 +1255,7 @@ class CodexAppServerTransport:
         config_path = _CONFIG_ROOT / "config.json"
         try:
             if config_path.exists():
-                data = json.loads(config_path.read_text(encoding="utf-8"))
+                data = _json_dict_loads(config_path.read_text(encoding="utf-8"))
                 cwd = data.get("cwd")
                 if isinstance(cwd, str) and cwd.strip():
                     return cwd
@@ -1159,7 +1263,7 @@ class CodexAppServerTransport:
             pass
         return str(Path.cwd())
 
-    def _load_meta(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+    def _load_meta(self, conversation_id: str) -> Optional[JSONDict]:
         load = self._meta_fns.get("load")
         if callable(load):
             meta = load(conversation_id)
@@ -1168,12 +1272,12 @@ class CodexAppServerTransport:
         if not path.exists():
             return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = _json_dict_loads(path.read_text(encoding="utf-8"))
         except Exception:
             return None
         return data if isinstance(data, dict) else None
 
-    def _save_meta(self, conversation_id: str, meta: Dict[str, Any]) -> None:
+    def _save_meta(self, conversation_id: str, meta: JSONDict) -> None:
         save = self._meta_fns.get("save")
         if callable(save):
             save(conversation_id, meta)
@@ -1237,7 +1341,7 @@ class CodexAppServerTransport:
         self,
         *,
         conversation_id: Optional[str],
-        result: Any,
+        result: object,
     ) -> None:
         if not conversation_id or not isinstance(result, dict):
             return
@@ -1260,7 +1364,7 @@ class CodexAppServerTransport:
                 turn_id=turn_id,
             )
 
-    def _get_thread_id(self, payload: Any, fallback: Optional[str]) -> Optional[str]:
+    def _get_thread_id(self, payload: object, fallback: Optional[str]) -> Optional[str]:
         if isinstance(payload, dict):
             thread = payload.get("thread")
             if isinstance(thread, dict) and isinstance(thread.get("id"), str) and thread.get("id"):
@@ -1273,7 +1377,7 @@ class CodexAppServerTransport:
             return fallback
         return None
 
-    def _get_turn_id(self, payload: Any) -> Optional[str]:
+    def _get_turn_id(self, payload: object) -> Optional[str]:
         if not isinstance(payload, dict):
             return None
         for key in ("turnId", "turn_id"):

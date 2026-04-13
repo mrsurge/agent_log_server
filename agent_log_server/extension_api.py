@@ -7,13 +7,44 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TypedDict, cast
 
 import extensions as ext_loader
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
+from agent_log_server.typing_helpers import (
+    AsyncObjectCallable,
+    ObjectEntriesWriter,
+    ObjectList,
+    ObjectMap,
+    RequestId,
+    coerce_object_list,
+    coerce_object_map,
+)
 
-_AsyncAnyCallable = Callable[..., Awaitable[Any]]
+ExtensionConfigEntry = dict[str, bool]
+
+
+class NormalizedExtensionPackagePayload(TypedDict):
+    source_type: str
+    source_path: str | None
+    repo_url: str | None
+    ref: str | None
+    extension_id: str | None
+    allow_override: bool
+    install_dependencies: bool
+    force_reload: bool
+
+
+def _extension_info_map(extension_id: str) -> ObjectMap | None:
+    info = ext_loader.get_extension_info(extension_id)
+    if not isinstance(info, dict):
+        return None
+    return coerce_object_map(info)
+
+
+def _list_extension_maps() -> ObjectList:
+    return coerce_object_list(ext_loader.list_extensions())
 
 
 @dataclass(frozen=True)
@@ -21,23 +52,23 @@ class ExtensionApiDeps:
     package_root: Path
     user_extensions_dir: Path
     config_lock: asyncio.Lock
-    broadcast_appserver_ui: _AsyncAnyCallable
-    get_fws_manager: Callable[..., Any]
-    append_transcript_entry: _AsyncAnyCallable
-    load_conversation_meta: Callable[[str], dict[str, Any]]
-    save_conversation_meta: Callable[[str, dict[str, Any]], None]
-    upsert_pending_approval: Callable[..., Any]
-    remove_pending_approval: Callable[[str, Any], bool]
+    broadcast_appserver_ui: AsyncObjectCallable
+    get_fws_manager: Callable[..., object]
+    append_transcript_entry: AsyncObjectCallable
+    load_conversation_meta: Callable[[str], ObjectMap]
+    save_conversation_meta: Callable[[str, ObjectMap], None]
+    upsert_pending_approval: Callable[..., object]
+    remove_pending_approval: Callable[[str, RequestId], bool]
     sanitize_conversation_id: Callable[[str], str]
     conversation_meta_path: Callable[[str], Path]
-    load_appserver_config: Callable[[], dict[str, Any]]
-    save_appserver_config: Callable[[dict[str, Any]], None]
+    load_appserver_config: Callable[[], ObjectMap]
+    save_appserver_config: Callable[[ObjectMap], None]
     ensure_conversation: Callable[..., Awaitable[str | None]]
     merge_extension_bind_settings: Callable[
-        [str, str | None, str | None, dict[str, Any] | None],
-        dict[str, Any],
+        [str, str | None, str | None, ObjectMap | None],
+        ObjectMap,
     ]
-    write_transcript_entries: Callable[[str, list[dict[str, Any]]], Awaitable[Any]]
+    write_transcript_entries: ObjectEntriesWriter
 
 
 class ExtensionApi:
@@ -55,7 +86,10 @@ class ExtensionApi:
         return self._deps.user_extensions_dir
 
     @staticmethod
-    def normalize_extension_config_entry(raw: Any, default_enabled: bool) -> dict[str, Any]:
+    def normalize_extension_config_entry(
+        raw: object,
+        default_enabled: bool,
+    ) -> ExtensionConfigEntry:
         if isinstance(raw, dict):
             enabled = raw.get("enabled")
             return {"enabled": default_enabled if enabled is None else enabled is True}
@@ -63,37 +97,35 @@ class ExtensionApi:
             return {"enabled": raw}
         return {"enabled": default_enabled}
 
-    def normalize_extensions_config(self, raw: Any) -> dict[str, dict[str, Any]]:
+    def normalize_extensions_config(self, raw: object) -> dict[str, ExtensionConfigEntry]:
         if not isinstance(raw, dict):
             return {}
-        normalized: dict[str, dict[str, Any]] = {}
+        normalized: dict[str, ExtensionConfigEntry] = {}
         for ext_id, value in raw.items():
             if not isinstance(ext_id, str) or not ext_id.strip():
                 continue
             normalized[ext_id.strip()] = self.normalize_extension_config_entry(value, True)
         return normalized
 
-    def seed_extension_config(self, cfg: dict[str, Any]) -> bool:
+    def seed_extension_config(self, cfg: ObjectMap) -> bool:
         extensions_cfg = self.normalize_extensions_config(cfg.get("extensions"))
         changed = extensions_cfg != cfg.get("extensions")
         cfg["extensions"] = extensions_cfg
-        for info in ext_loader.list_extensions():
-            if not isinstance(info, dict):
-                continue
+        for info in _list_extension_maps():
             ext_id = info.get("id")
             if not isinstance(ext_id, str) or not ext_id:
                 continue
             default_enabled = bool(info.get("default_enabled", True))
-            current = cfg["extensions"].get(ext_id)
+            current = extensions_cfg.get(ext_id)
             normalized = self.normalize_extension_config_entry(current, default_enabled)
-            if cfg["extensions"].get(ext_id) != normalized:
-                cfg["extensions"][ext_id] = normalized
+            if extensions_cfg.get(ext_id) != normalized:
+                extensions_cfg[ext_id] = normalized
                 changed = True
         return changed
 
     def get_configured_extension_enabled(
         self,
-        cfg: dict[str, Any],
+        cfg: ObjectMap,
         extension_id: str,
         default_enabled: bool = True,
     ) -> bool:
@@ -106,9 +138,7 @@ class ExtensionApi:
         return normalized.get("enabled") is True
 
     def default_active_extension_id(self) -> str | None:
-        for info in ext_loader.list_extensions():
-            if not isinstance(info, dict):
-                continue
+        for info in _list_extension_maps():
             ext_id = info.get("id")
             if not isinstance(ext_id, str) or not ext_id.strip():
                 continue
@@ -117,15 +147,15 @@ class ExtensionApi:
                 return ext_id
         return None
 
-    def conversation_agent(self, meta: dict[str, Any] | None) -> str:
+    def conversation_agent(self, meta: ObjectMap | None) -> str:
         settings_raw = meta.get("settings") if isinstance(meta, dict) else None
-        settings: dict[str, Any] = settings_raw if isinstance(settings_raw, dict) else {}
+        settings = coerce_object_map(settings_raw)
         agent = settings.get("agent")
         if isinstance(agent, str) and agent.strip():
             return agent.strip()
         return self.default_active_extension_id() or ""
 
-    def clear_active_conversation_if_extension_inactive(self, cfg: dict[str, Any]) -> bool:
+    def clear_active_conversation_if_extension_inactive(self, cfg: ObjectMap) -> bool:
         conversation_id = cfg.get("conversation_id")
         if not isinstance(conversation_id, str) or not conversation_id.strip():
             return False
@@ -136,7 +166,7 @@ class ExtensionApi:
         agent = self.conversation_agent(meta)
         if not agent:
             return False
-        info = ext_loader.get_extension_info(agent)
+        info = _extension_info_map(agent)
         if not info:
             cfg["conversation_id"] = None
             cfg["thread_id"] = None
@@ -157,8 +187,8 @@ class ExtensionApi:
             return "No active extension available"
         if extension_id == "codex":
             return "Legacy builtin Codex is disabled"
-        info = ext_loader.get_extension_info(extension_id)
-        if not isinstance(info, dict):
+        info = _extension_info_map(extension_id)
+        if not info:
             return f"Extension unavailable: {extension_id}"
         if info.get("enabled") is not True:
             return f"Extension disabled: {extension_id}"
@@ -172,12 +202,12 @@ class ExtensionApi:
             return f"Extension unavailable: {extension_id}"
         return None
 
-    def extension_unavailable_action(self, extension_id: str) -> dict[str, Any] | None:
-        info = ext_loader.get_extension_info(extension_id)
-        if not isinstance(info, dict):
+    def extension_unavailable_action(self, extension_id: str) -> ObjectMap | None:
+        info = _extension_info_map(extension_id)
+        if not info:
             return None
         details_raw = info.get("dependency_details")
-        details: dict[str, Any] = details_raw if isinstance(details_raw, dict) else {}
+        details = coerce_object_map(details_raw)
         if details.get("auth_required") and not details.get("authenticated"):
             return {
                 "id": "open_splash_settings",
@@ -190,7 +220,7 @@ class ExtensionApi:
         self,
         extension_id: str,
         detail: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> ObjectMap:
         message = (
             detail.strip()
             if isinstance(detail, str) and detail.strip()
@@ -199,7 +229,7 @@ class ExtensionApi:
         action = self.extension_unavailable_action(extension_id)
         if action and "splash settings" not in message.lower():
             message = f"{message} Open splash settings to configure."
-        event: dict[str, Any] = {
+        event: ObjectMap = {
             "type": "warning",
             "message": message,
         }
@@ -222,17 +252,15 @@ class ExtensionApi:
     async def refresh_extension_runtime_state(
         self,
         extension_ids: list[str] | None = None,
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, ObjectMap]:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             changed = self.seed_extension_config(cfg)
-            target_ids = [
-                info["id"]
-                for info in ext_loader.list_extensions()
-                if isinstance(info, dict)
-                and isinstance(info.get("id"), str)
-                and info.get("id")
-            ]
+            target_ids: list[str] = []
+            for info in _list_extension_maps():
+                ext_id = info.get("id")
+                if isinstance(ext_id, str) and ext_id:
+                    target_ids.append(ext_id)
             if extension_ids:
                 wanted = {
                     str(ext_id).strip()
@@ -242,7 +270,7 @@ class ExtensionApi:
                 target_ids = [ext_id for ext_id in target_ids if ext_id in wanted]
             enabled_map: dict[str, bool] = {}
             for ext_id in target_ids:
-                info = ext_loader.get_extension_info(ext_id) or {}
+                info = _extension_info_map(ext_id) or {}
                 enabled_map[ext_id] = self.get_configured_extension_enabled(
                     cfg,
                     ext_id,
@@ -251,20 +279,20 @@ class ExtensionApi:
             if changed:
                 self._deps.save_appserver_config(cfg)
 
-        results: dict[str, dict[str, Any]] = {}
+        results: dict[str, ObjectMap] = {}
         for ext_id in target_ids:
             ext_loader.set_extension_enabled(ext_id, enabled_map.get(ext_id, True))
             if ext_loader.supports_dependency_check(ext_id):
                 result = await ext_loader.check_extension_dependencies(ext_id)
             else:
-                result = {
+                result: ObjectMap = {
                     "ok": True,
                     "status": "met",
                     "message": "No dependency check required",
                 }
             ext_loader.set_extension_dependency_result(ext_id, result)
-            info = ext_loader.get_extension_info(ext_id)
-            if isinstance(info, dict):
+            info = _extension_info_map(ext_id)
+            if info:
                 results[ext_id] = info
 
         async with self._deps.config_lock:
@@ -279,10 +307,10 @@ class ExtensionApi:
 
     def normalize_extension_package_payload(
         self,
-        payload: Any,
+        payload: object,
         *,
         allow_missing_source_type: bool = False,
-    ) -> dict[str, Any]:
+    ) -> NormalizedExtensionPackagePayload:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         source_type = str(payload.get("source_type") or "").strip().lower()
@@ -296,7 +324,7 @@ class ExtensionApi:
             repo_url = payload.get("url")
         ref = payload.get("ref")
         extension_id = payload.get("extension_id")
-        normalized = {
+        normalized: NormalizedExtensionPackagePayload = {
             "source_type": source_type,
             "source_path": (
                 str(source_path).strip()
@@ -328,7 +356,7 @@ class ExtensionApi:
         return normalized
 
     @staticmethod
-    def extension_package_error_detail(result: dict[str, Any]) -> str:
+    def extension_package_error_detail(result: ObjectMap) -> str:
         message = result.get("message")
         if isinstance(message, str) and message.strip():
             return message.strip()
@@ -339,7 +367,7 @@ class ExtensionApi:
                 return "; ".join(texts)
         return "Extension package operation failed"
 
-    def raise_extension_package_http_error(self, result: dict[str, Any]) -> None:
+    def raise_extension_package_http_error(self, result: ObjectMap) -> None:
         status = str(result.get("status") or "").strip().lower()
         detail = self.extension_package_error_detail(result)
         status_code = 400
@@ -356,7 +384,7 @@ class ExtensionApi:
         extension_ids: list[str] | None = None,
         *,
         force: bool = False,
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, ObjectMap]:
         await asyncio.to_thread(
             ext_loader.reload_extensions,
             changed_extension_ids=extension_ids,
@@ -398,18 +426,18 @@ class ExtensionApi:
             },
         )
 
-    async def api_extensions_list(self) -> dict[str, Any]:
-        return {"extensions": ext_loader.list_extensions()}
+    async def api_extensions_list(self) -> ObjectMap:
+        return {"extensions": _list_extension_maps()}
 
     async def api_extension_enabled(
         self,
         extension_id: str,
-        payload: dict[str, Any] = Body(...),
-    ) -> dict[str, Any]:
+        payload: ObjectMap = Body(...),
+    ) -> ObjectMap:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
-        info = ext_loader.get_extension_info(extension_id)
-        if not isinstance(info, dict):
+        info = _extension_info_map(extension_id)
+        if not info:
             raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
         if "enabled" not in payload:
             raise HTTPException(status_code=400, detail="Missing required field: enabled")
@@ -417,11 +445,13 @@ class ExtensionApi:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             self.seed_extension_config(cfg)
-            cfg["extensions"][extension_id] = self.normalize_extension_config_entry(
-                cfg["extensions"].get(extension_id),
+            extensions_cfg = self.normalize_extensions_config(cfg.get("extensions"))
+            cfg["extensions"] = extensions_cfg
+            extensions_cfg[extension_id] = self.normalize_extension_config_entry(
+                extensions_cfg.get(extension_id),
                 bool(info.get("default_enabled", True)),
             )
-            cfg["extensions"][extension_id]["enabled"] = enabled
+            extensions_cfg[extension_id]["enabled"] = enabled
             self._deps.save_appserver_config(cfg)
         states = await self.refresh_extension_runtime_state([extension_id])
         if enabled:
@@ -433,60 +463,66 @@ class ExtensionApi:
             or ext_loader.get_extension_info(extension_id),
         }
 
-    async def api_extension_install(self, extension_id: str) -> dict[str, Any]:
-        info = ext_loader.get_extension_info(extension_id)
-        if not isinstance(info, dict):
+    async def api_extension_install(self, extension_id: str) -> ObjectMap:
+        info = _extension_info_map(extension_id)
+        if not info:
             raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
         if not ext_loader.supports_dependency_install(extension_id):
             raise HTTPException(
                 status_code=409,
                 detail=f"Extension does not support dependency install: {extension_id}",
             )
-        result = await ext_loader.install_extension_dependencies(extension_id)
+        result = coerce_object_map(await ext_loader.install_extension_dependencies(extension_id))
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             self.seed_extension_config(cfg)
-            cfg["extensions"][extension_id] = self.normalize_extension_config_entry(
-                cfg["extensions"].get(extension_id),
+            extensions_cfg = self.normalize_extensions_config(cfg.get("extensions"))
+            cfg["extensions"] = extensions_cfg
+            extensions_cfg[extension_id] = self.normalize_extension_config_entry(
+                extensions_cfg.get(extension_id),
                 bool(info.get("default_enabled", True)),
             )
             if result.get("ok"):
-                cfg["extensions"][extension_id]["enabled"] = True
+                extensions_cfg[extension_id]["enabled"] = True
             self._deps.save_appserver_config(cfg)
         states = await self.refresh_extension_runtime_state([extension_id])
         if result.get("ok"):
             with suppress(Exception):
                 await ext_loader.wait_extension_ready(extension_id, timeout=60.0)
-        refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
+        refreshed = states.get(extension_id) or _extension_info_map(extension_id)
         return {"ok": bool(result.get("ok")), "result": result, "extension": refreshed}
 
     async def api_extensions_validate(
         self,
-        payload: dict[str, Any] = Body(...),
-    ) -> dict[str, Any]:
+        payload: ObjectMap = Body(...),
+    ) -> ObjectMap:
         normalized = self.normalize_extension_package_payload(payload)
-        return await asyncio.to_thread(
-            ext_loader.validate_extension_source,
-            source_type=normalized["source_type"],
-            source_path=normalized["source_path"],
-            repo_url=normalized["repo_url"],
-            ref=normalized["ref"],
-            extension_id=normalized["extension_id"],
+        return coerce_object_map(
+            await asyncio.to_thread(
+                ext_loader.validate_extension_source,
+                source_type=normalized["source_type"],
+                source_path=normalized["source_path"],
+                repo_url=normalized["repo_url"],
+                ref=normalized["ref"],
+                extension_id=normalized["extension_id"],
+            )
         )
 
     async def api_extensions_install_package(
         self,
-        payload: dict[str, Any] = Body(...),
-    ) -> dict[str, Any]:
+        payload: ObjectMap = Body(...),
+    ) -> ObjectMap:
         normalized = self.normalize_extension_package_payload(payload)
-        result = await asyncio.to_thread(
-            ext_loader.install_extension_source,
-            source_type=normalized["source_type"],
-            source_path=normalized["source_path"],
-            repo_url=normalized["repo_url"],
-            ref=normalized["ref"],
-            extension_id=normalized["extension_id"],
-            allow_override=normalized["allow_override"],
+        result = coerce_object_map(
+            await asyncio.to_thread(
+                ext_loader.install_extension_source,
+                source_type=normalized["source_type"],
+                source_path=normalized["source_path"],
+                repo_url=normalized["repo_url"],
+                ref=normalized["ref"],
+                extension_id=normalized["extension_id"],
+                allow_override=normalized["allow_override"],
+            )
         )
         if not result.get("ok"):
             self.raise_extension_package_http_error(result)
@@ -497,17 +533,19 @@ class ExtensionApi:
             [extension_id] if extension_id else None,
             force=normalized["force_reload"],
         )
-        dependency_result = None
+        dependency_result: ObjectMap | None = None
         if (
             normalized["install_dependencies"]
             and extension_id
             and ext_loader.supports_dependency_install(extension_id)
         ):
-            dependency_result = await ext_loader.install_extension_dependencies(extension_id)
+            dependency_result = coerce_object_map(
+                await ext_loader.install_extension_dependencies(extension_id)
+            )
             states = await self.refresh_extension_runtime_state()
         if extension_id:
             await self.wait_for_extension_ready_if_active(extension_id)
-        refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
+        refreshed = states.get(extension_id) or _extension_info_map(extension_id)
         ok = bool(result.get("ok")) and (
             dependency_result is None or bool(dependency_result.get("ok"))
         )
@@ -521,8 +559,8 @@ class ExtensionApi:
     async def api_extension_update_package(
         self,
         extension_id: str,
-        payload: dict[str, Any] = Body(...),
-    ) -> dict[str, Any]:
+        payload: ObjectMap = Body(...),
+    ) -> ObjectMap:
         normalized = self.normalize_extension_package_payload(
             payload,
             allow_missing_source_type=True,
@@ -532,13 +570,15 @@ class ExtensionApi:
                 status_code=400,
                 detail="Payload extension_id does not match route extension_id",
             )
-        result = await asyncio.to_thread(
-            ext_loader.update_extension_source,
-            extension_id,
-            source_type=normalized["source_type"] or None,
-            source_path=normalized["source_path"],
-            repo_url=normalized["repo_url"],
-            ref=normalized["ref"],
+        result = coerce_object_map(
+            await asyncio.to_thread(
+                ext_loader.update_extension_source,
+                extension_id,
+                source_type=normalized["source_type"] or None,
+                source_path=normalized["source_path"],
+                repo_url=normalized["repo_url"],
+                ref=normalized["ref"],
+            )
         )
         if not result.get("ok"):
             self.raise_extension_package_http_error(result)
@@ -546,14 +586,16 @@ class ExtensionApi:
             [extension_id],
             force=normalized["force_reload"],
         )
-        dependency_result = None
+        dependency_result: ObjectMap | None = None
         if normalized["install_dependencies"] and ext_loader.supports_dependency_install(
             extension_id
         ):
-            dependency_result = await ext_loader.install_extension_dependencies(extension_id)
+            dependency_result = coerce_object_map(
+                await ext_loader.install_extension_dependencies(extension_id)
+            )
             states = await self.refresh_extension_runtime_state()
         await self.wait_for_extension_ready_if_active(extension_id)
-        refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
+        refreshed = states.get(extension_id) or _extension_info_map(extension_id)
         ok = bool(result.get("ok")) and (
             dependency_result is None or bool(dependency_result.get("ok"))
         )
@@ -564,8 +606,10 @@ class ExtensionApi:
             "extension": refreshed,
         }
 
-    async def api_extension_remove_package(self, extension_id: str) -> dict[str, Any]:
-        result = await asyncio.to_thread(ext_loader.remove_user_extension, extension_id)
+    async def api_extension_remove_package(self, extension_id: str) -> ObjectMap:
+        result = coerce_object_map(
+            await asyncio.to_thread(ext_loader.remove_user_extension, extension_id)
+        )
         if not result.get("ok"):
             self.raise_extension_package_http_error(result)
         await self.reload_extension_registry_runtime([extension_id], force=False)
@@ -581,14 +625,14 @@ class ExtensionApi:
         return {
             "ok": True,
             "result": result,
-            "extensions": ext_loader.list_extensions(),
+            "extensions": _list_extension_maps(),
         }
 
     async def api_extensions_reload(
         self,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any]:
-        raw_payload = payload if isinstance(payload, dict) else {}
+        payload: ObjectMap | None = Body(default=None),
+    ) -> ObjectMap:
+        raw_payload = payload or {}
         normalized = self.normalize_extension_package_payload(
             raw_payload,
             allow_missing_source_type=True,
@@ -607,18 +651,18 @@ class ExtensionApi:
         )
         return {
             "ok": True,
-            "extensions": ext_loader.list_extensions(),
+            "extensions": _list_extension_maps(),
             "states": states,
         }
 
-    async def api_extension_get(self, extension_id: str) -> dict[str, Any] | JSONResponse:
+    async def api_extension_get(self, extension_id: str) -> ObjectMap | JSONResponse:
         if not ext_loader.has_extension(extension_id):
             return JSONResponse(
                 {"error": f"Extension not found: {extension_id}"},
                 status_code=404,
             )
-        ext = ext_loader.get_extension_info(extension_id)
-        if isinstance(ext, dict):
+        ext = _extension_info_map(extension_id)
+        if ext:
             return ext
         return JSONResponse(
             {"error": f"Extension not found: {extension_id}"},
@@ -628,41 +672,41 @@ class ExtensionApi:
     async def api_extension_settings_schema(
         self,
         extension_id: str,
-    ) -> dict[str, Any] | JSONResponse:
+    ) -> ObjectMap | JSONResponse:
         if not ext_loader.has_extension(extension_id):
             return JSONResponse(
                 {"error": f"Extension not found: {extension_id}"},
                 status_code=404,
             )
         try:
-            dynamic_schema = await ext_loader.get_settings_schema(extension_id)
+            dynamic_schema = coerce_object_map(await ext_loader.get_settings_schema(extension_id))
         except Exception as exc:
             return JSONResponse({"error": f"Failed to build schema: {exc}"}, status_code=500)
-        if isinstance(dynamic_schema, dict):
+        if dynamic_schema:
             return dynamic_schema
         try:
-            static_schema = ext_loader.get_static_settings_schema(extension_id)
+            static_schema = coerce_object_map(ext_loader.get_static_settings_schema(extension_id))
         except Exception as exc:
             return JSONResponse({"error": f"Failed to load schema: {exc}"}, status_code=500)
-        if isinstance(static_schema, dict):
+        if static_schema:
             return static_schema
         return {"version": "1", "fields": []}
 
     async def api_extension_splash_schema(
         self,
         extension_id: str,
-    ) -> dict[str, Any] | JSONResponse:
-        info = ext_loader.get_extension_info(extension_id)
-        if not isinstance(info, dict):
+    ) -> ObjectMap | JSONResponse:
+        info = _extension_info_map(extension_id)
+        if not info:
             return JSONResponse(
                 {"error": f"Extension not found: {extension_id}"},
                 status_code=404,
             )
         try:
-            schema = await ext_loader.get_splash_schema(extension_id)
+            schema = coerce_object_map(await ext_loader.get_splash_schema(extension_id))
         except Exception as exc:
             return JSONResponse({"error": f"Failed to build splash schema: {exc}"}, status_code=500)
-        if isinstance(schema, dict):
+        if schema:
             schema.setdefault("extension_id", extension_id)
             return schema
         return {"version": "1", "extension_id": extension_id, "fields": []}
@@ -670,10 +714,10 @@ class ExtensionApi:
     async def api_extension_splash_action(
         self,
         extension_id: str,
-        payload: dict[str, Any] = Body(...),
-    ) -> dict[str, Any] | JSONResponse:
-        info = ext_loader.get_extension_info(extension_id)
-        if not isinstance(info, dict):
+        payload: ObjectMap = Body(...),
+    ) -> ObjectMap | JSONResponse:
+        info = _extension_info_map(extension_id)
+        if not info:
             raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
@@ -681,31 +725,21 @@ class ExtensionApi:
         if not action_id:
             raise HTTPException(status_code=400, detail="Missing action_id")
         try:
-            result = await ext_loader.run_splash_action(
-                extension_id,
-                action_id=action_id,
-                payload=(
-                    payload.get("payload")
-                    if isinstance(payload.get("payload"), dict)
-                    else {}
-                ),
+            result = coerce_object_map(
+                await ext_loader.run_splash_action(
+                    extension_id,
+                    action_id=action_id,
+                    payload=coerce_object_map(payload.get("payload")),
+                )
             )
             states = await self.refresh_extension_runtime_state([extension_id])
-            refreshed = states.get(extension_id) or ext_loader.get_extension_info(extension_id)
-            schema = await ext_loader.get_splash_schema(extension_id)
+            refreshed = states.get(extension_id) or _extension_info_map(extension_id)
+            schema = coerce_object_map(await ext_loader.get_splash_schema(extension_id))
             return {
-                "ok": bool(isinstance(result, dict) and result.get("ok")),
-                "result": (
-                    result
-                    if isinstance(result, dict)
-                    else {"ok": False, "error": "Invalid splash action result"}
-                ),
+                "ok": bool(result.get("ok")),
+                "result": result or {"ok": False, "error": "Invalid splash action result"},
                 "extension": refreshed,
-                "schema": (
-                    schema
-                    if isinstance(schema, dict)
-                    else {"version": "1", "extension_id": extension_id, "fields": []}
-                ),
+                "schema": schema or {"version": "1", "extension_id": extension_id, "fields": []},
             }
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
@@ -713,29 +747,29 @@ class ExtensionApi:
     async def api_extension_request_cards(
         self,
         extension_id: str,
-    ) -> dict[str, Any] | JSONResponse:
+    ) -> ObjectMap | JSONResponse:
         if not ext_loader.has_extension(extension_id):
             return JSONResponse(
                 {"error": f"Extension not found: {extension_id}"},
                 status_code=404,
             )
         try:
-            config = await ext_loader.get_request_cards(extension_id)
+            config = coerce_object_map(await ext_loader.get_request_cards(extension_id))
         except Exception as exc:
             return JSONResponse(
                 {"error": f"Failed to build request-card config: {exc}"},
                 status_code=500,
             )
-        cards: list[dict[str, Any]] = []
-        raw_cards = config.get("cards") if isinstance(config, dict) else None
+        cards: ObjectList = []
+        raw_cards = config.get("cards")
         if isinstance(raw_cards, list):
             for raw_entry in raw_cards:
                 if not isinstance(raw_entry, dict):
                     continue
-                module_path = str(raw_entry.get("module") or "").strip().lstrip("/")
+                entry = coerce_object_map(raw_entry)
+                module_path = str(entry.get("module") or "").strip().lstrip("/")
                 if not module_path:
                     continue
-                entry = dict(raw_entry)
                 entry["module"] = module_path
                 entry["module_url"] = f"/api/extensions/{extension_id}/assets/{module_path}"
                 entry["export"] = (
@@ -743,11 +777,7 @@ class ExtensionApi:
                     or "renderRequestCard"
                 )
                 cards.append(entry)
-        schemas = (
-            config.get("schemas")
-            if isinstance(config, dict) and isinstance(config.get("schemas"), dict)
-            else {}
-        )
+        schemas = coerce_object_map(config.get("schemas"))
         return {
             "extension_id": extension_id,
             "cards": cards,
@@ -763,17 +793,17 @@ class ExtensionApi:
     async def api_extension_models(
         self,
         extension_id: str,
-    ) -> dict[str, Any] | JSONResponse:
+    ) -> ObjectMap | JSONResponse:
         if not ext_loader.has_extension(extension_id):
             return JSONResponse(
                 {"error": f"Extension not found: {extension_id}"},
                 status_code=404,
             )
         try:
-            result = await ext_loader.list_models(extension_id)
+            result = cast(object, await ext_loader.list_models(extension_id))
             if isinstance(result, list):
                 return {"models": result}
-            return result if isinstance(result, dict) else {"models": result}
+            return coerce_object_map(result) if isinstance(result, dict) else {"models": result}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
@@ -781,7 +811,7 @@ class ExtensionApi:
         self,
         extension_id: str,
         conversation_id: str | None = Query(None),
-    ) -> dict[str, Any] | JSONResponse:
+    ) -> ObjectMap | JSONResponse:
         if not ext_loader.has_extension(extension_id):
             return JSONResponse(
                 {"error": f"Extension not found: {extension_id}"},
@@ -793,8 +823,8 @@ class ExtensionApi:
         if not convo_id:
             raise HTTPException(status_code=400, detail="Missing conversation_id")
         try:
-            result = await ext_loader.read_plan(extension_id, convo_id)
-            if isinstance(result, dict):
+            result = coerce_object_map(await ext_loader.read_plan(extension_id, convo_id))
+            if result:
                 result.setdefault("conversation_id", convo_id)
                 result.setdefault("extension_id", extension_id)
                 return result
@@ -813,14 +843,14 @@ class ExtensionApi:
         self,
         extension_id: str,
         cwd: str | None = Query(None),
-    ) -> dict[str, Any] | JSONResponse:
+    ) -> ObjectMap | JSONResponse:
         if not ext_loader.has_extension(extension_id):
             return JSONResponse(
                 {"error": f"Extension not found: {extension_id}"},
                 status_code=404,
             )
         try:
-            sessions = await ext_loader.list_sessions(extension_id, cwd=cwd)
+            sessions = cast(object, await ext_loader.list_sessions(extension_id, cwd=cwd))
             return {"sessions": sessions}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
@@ -828,14 +858,19 @@ class ExtensionApi:
     async def api_extension_session_resume(
         self,
         extension_id: str,
-        payload: dict[str, Any] = Body(...),
-    ) -> dict[str, Any] | JSONResponse:
+        payload: ObjectMap = Body(...),
+    ) -> ObjectMap | JSONResponse:
         if not ext_loader.has_extension(extension_id):
             return JSONResponse(
                 {"error": f"Extension not found: {extension_id}"},
                 status_code=404,
             )
-        session_id = payload.get("session_id")
+        session_id_value = payload.get("session_id")
+        session_id = (
+            session_id_value.strip()
+            if isinstance(session_id_value, str) and session_id_value.strip()
+            else None
+        )
         if not session_id:
             raise HTTPException(status_code=400, detail="Missing session_id")
 
@@ -851,22 +886,26 @@ class ExtensionApi:
             raise HTTPException(status_code=500, detail="Failed to create conversation")
 
         try:
-            cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
-            model = payload.get("model") if isinstance(payload.get("model"), str) else None
-            settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else None
+            cwd_value = payload.get("cwd")
+            cwd = cwd_value if isinstance(cwd_value, str) else None
+            model_value = payload.get("model")
+            model = model_value if isinstance(model_value, str) else None
+            settings = coerce_object_map(payload.get("settings")) or None
             bind_settings = self._deps.merge_extension_bind_settings(
                 conversation_id,
                 cwd,
                 model,
                 settings,
             )
-            result = await ext_loader.resume_session_with_history(
-                extension_id,
-                session_id=session_id,
-                conversation_id=conversation_id,
-                cwd=cwd,
-                model=model,
-                settings=bind_settings,
+            result = coerce_object_map(
+                await ext_loader.resume_session_with_history(
+                    extension_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    cwd=cwd,
+                    model=model,
+                    settings=bind_settings,
+                )
             )
             if not result.get("ok"):
                 return JSONResponse(
@@ -874,13 +913,15 @@ class ExtensionApi:
                     status_code=500,
                 )
 
-            items = await ext_loader.hydrate_transcript(
-                extension_id,
-                session_id=session_id,
-                conversation_id=conversation_id,
-                cwd=cwd,
-                model=model,
-                settings=bind_settings,
+            items = coerce_object_list(
+                await ext_loader.hydrate_transcript(
+                    extension_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    cwd=cwd,
+                    model=model,
+                    settings=bind_settings,
+                )
             )
             if items:
                 await self._deps.write_transcript_entries(conversation_id, items)
@@ -906,21 +947,21 @@ class ExtensionApi:
         self,
         extension_id: str,
         limit: int = Query(50, gt=0, le=200),
-    ) -> dict[str, Any] | JSONResponse:
+    ) -> ObjectMap | JSONResponse:
         if not ext_loader.has_extension(extension_id):
             return JSONResponse(
                 {"error": f"Extension not found: {extension_id}"},
                 status_code=404,
             )
         try:
-            items = ext_loader.get_raw_buffer(extension_id, limit)
+            items = cast(object, ext_loader.get_raw_buffer(extension_id, limit))
             return {"items": items}
         except Exception as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 def register_extension_api_routes(app: FastAPI, api: ExtensionApi) -> None:
-    def _add(path: str, endpoint: Callable[..., Any], methods: list[str]) -> None:
+    def _add(path: str, endpoint: Callable[..., object], methods: list[str]) -> None:
         app.add_api_route(path, endpoint, methods=methods, response_model=None)
 
     _add("/api/extensions", api.api_extensions_list, ["GET"])

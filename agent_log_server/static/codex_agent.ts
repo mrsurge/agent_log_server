@@ -52,8 +52,8 @@ type AnyRecord = Record<string, any>;
 document.addEventListener('DOMContentLoaded', () => {
   const getById = document.getElementById.bind(document);
   const queryOne = document.querySelector.bind(document);
-  const byId = (id) => getById(id) as any;
-  const query = (selector) => queryOne(selector) as any;
+  const byId = (id: string) => getById(id) as any;
+  const query = (selector: string) => queryOne(selector) as any;
 
   const statusEl = byId('agent-status');
   const wsStatusEl = byId('agent-ws');
@@ -163,28 +163,28 @@ document.addEventListener('DOMContentLoaded', () => {
   document.body.classList.toggle('mobile-scale', enableMobileScale);
 
   let conversationMeta: AnyRecord = {};
-		  let conversationSettings: AnyRecord = {};
-		  let conversationList: any[] = [];
+  let conversationSettings: AnyRecord = {};
+  let conversationList: AnyRecord[] = [];
   let conversationPreviewCache: AnyRecord = {};
   let appConfig: AnyRecord = {};
   let activeView = 'splash';
 		  // Client-local selection (do not treat SSOT active conversation as an authority after boot).
-		  let clientConversationId = null;
-		  let clientActiveView = null;
+		  let clientConversationId: string | null = null;
+		  let clientActiveView: string | null = null;
       let miniConversationDrawerOpen = false;
 		  let hostUi: AnyRecord = { showClose: false, parentOrigin: null };
   const SPLASH_TAB_STORAGE_KEY = 'codex_splash_tab';
-  function normalizeSplashTab(value) {
+  function normalizeSplashTab(value: unknown): 'all' | 'project' {
     return value === 'project' ? 'project' : 'all';
   }
-  function readSplashTabPreference() {
+  function readSplashTabPreference(): 'all' | 'project' {
     try {
       return normalizeSplashTab(localStorage.getItem(SPLASH_TAB_STORAGE_KEY));
     } catch {
       return 'all';
     }
   }
-  function writeSplashTabPreference(value) {
+  function writeSplashTabPreference(value: unknown): void {
     try {
       localStorage.setItem(SPLASH_TAB_STORAGE_KEY, normalizeSplashTab(value));
     } catch {
@@ -194,20 +194,20 @@ document.addEventListener('DOMContentLoaded', () => {
 		  let splashTab = readSplashTabPreference(); // 'all' | 'project'
   let rpcTransportEnabled = readRpcTransportEnabledPreference(window);
   let pendingNewConversation = false;
-  let pendingRollout = null;
-  let lastEventType = null;
-  let pickerPath = null;
+  let pendingRollout: AnyRecord | null = null;
+  let lastEventType: string | null = null;
+  let pickerPath: string | null = null;
   let pickerMode = 'cwd';
-  let pickerItems = [];
-  let filterTimer = null;
-  let openDropdownEl = null;
+  let pickerItems: AnyRecord[] = [];
+  let filterTimer: ReturnType<typeof setTimeout> | null = null;
+  let openDropdownEl: HTMLElement | null = null;
   let initialized = false;
   let wsOpen = false;
-  let wsReadyResolve: any = null;
-  let wsReadyPromise = new Promise((resolve) => { wsReadyResolve = resolve; });
+  let wsReadyResolve: ((value: boolean) => void) | null = null;
+  let wsReadyPromise: Promise<boolean> = new Promise((resolve) => { wsReadyResolve = resolve; });
   let wsReconnectDelay = 1000;
   let _socket: any = null; // Socket.IO instance (set in connectWS)
-  let modelList: any[] = []; // Cached model list with supportedReasoningEfforts
+  let modelList: AnyRecord[] = []; // Cached model list with supportedReasoningEfforts
   let runtimeOptions: AnyRecord = {};
   let activeRuntimeOptionValues: AnyRecord = {};
   let planDocState: AnyRecord = { has_plan: false, plan_exists: false, plan_content: '', plan_path: null, plan_source: null };
@@ -222,7 +222,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
   let semanticShellRibbonEnabled = false; // Tree-sitter semantic highlighting for shell command ribbons
   let semanticShellQuoteParsingEnabled = false; // Extension-gated quote segmentation for semantic shell ribbons
-  let activeToolRenderPolicy = {
+  let activeToolRenderPolicy: AnyRecord = {
     default: {
       request: { kind: 'plain' },
       response: { kind: 'plain' },
@@ -230,8 +230,8 @@ document.addEventListener('DOMContentLoaded', () => {
     rules: [],
   };
   let commandRunning = false; // Whether a PTY command is currently running
-  let activeAgentPtyBlockId = null;
-  const pending = new Map();
+  let activeAgentPtyBlockId: string | null = null;
+  const pending = new Map<string, AnyRecord>();
 
   // Detect mobile for input behavior
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
@@ -242,22 +242,22 @@ document.addEventListener('DOMContentLoaded', () => {
   const diffRows = new Map();
   const toolRows = new Map();
   const shellRows = new Map();  // Track streaming shell output rows
-  let topSpacerEl = null;
-  let bottomSpacerEl = null;
+  let topSpacerEl: HTMLElement | null = null;
+  let bottomSpacerEl: HTMLElement | null = null;
   let placeholderCleared = false;
   let messageCount = 0;
   let tokenCount = 0;
-  let contextWindow = null;
+  let contextWindow: number | null = null;
   let autoScroll = true;
   let _scrollProgrammatic = false; // Guard: prevent programmatic scroll from unpinning
-  let normalizeTimer = null;
+  let normalizeTimer: ReturnType<typeof setTimeout> | null = null;
   let isNormalizing = false;
   let tributeInstance: any = null;
   let transcriptTotal = 0;
-  let planOverlayEl = null;
-  let planListEl = null;
+  let planOverlayEl: HTMLDivElement | null = null;
+  let planListEl: HTMLDivElement | null = null;
   let planCollapsed = false;
-  let timelineStickyHeaders = null;
+  let timelineStickyHeaders: AnyRecord | null = null;
   const planItems = new Map();
   let transcriptStart = 0;
   let transcriptEnd = 0;
@@ -268,73 +268,73 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastDraftHash: string | null = null;
   let draftDirty = false;
   let applyingDraft = false;
-  let currentExtensionIdImpl = () => '';
-  let loadExtensionUiFeaturesImpl = async (_extensionId = '') => ({});
+  let currentExtensionIdImpl: () => string = () => '';
+  let loadExtensionUiFeaturesImpl: (_extensionId?: string) => Promise<AnyRecord> = async (_extensionId = '') => ({});
   let sioCallImpl: (event: string, data?: AnyRecord, options?: AnyRecord) => Promise<any> = async (
     _event: string,
     _data: AnyRecord = {},
     _options: AnyRecord = {},
   ) => ({ ok: false, error: 'Socket.IO not connected' });
-  let fetchConversationImpl = async (_conversationId: string | null = null) => {};
-  let fetchStatusImpl = async () => {};
-  let requestContextCompactImpl = async () => {};
+  let fetchConversationImpl: (_conversationId?: string | null) => Promise<void> = async (_conversationId: string | null = null) => {};
+  let fetchStatusImpl: () => Promise<void> = async () => {};
+  let requestContextCompactImpl: () => Promise<void> = async () => {};
 
-  function currentExtensionId() {
+  function currentExtensionId(): string {
     return currentExtensionIdImpl();
   }
 
-  async function loadExtensionUiFeatures(extensionId = '') {
+  async function loadExtensionUiFeatures(extensionId = ''): Promise<AnyRecord> {
     return loadExtensionUiFeaturesImpl(extensionId);
   }
 
-  async function sioCall(event, data = {}, options: AnyRecord = {}) {
+  async function sioCall(event: string, data: AnyRecord = {}, options: AnyRecord = {}): Promise<any> {
     return sioCallImpl(event, data, options);
   }
 
-  async function fetchConversation(conversationId = null) {
+  async function fetchConversation(conversationId: string | null = null): Promise<void> {
     return fetchConversationImpl(conversationId);
   }
 
-  async function fetchStatus() {
+  async function fetchStatus(): Promise<void> {
     return fetchStatusImpl();
   }
 
-  async function requestContextCompact() {
+  async function requestContextCompact(): Promise<void> {
     return requestContextCompactImpl();
   }
 
-  function isMarkdownEnabled() {
+  function isMarkdownEnabled(): boolean {
     return markdownEnabled;
   }
 
-  function setMarkdownEnabled(enabled) {
+  function setMarkdownEnabled(enabled: boolean): void {
     markdownEnabled = enabled === true;
     if (markdownToggleEl) markdownToggleEl.checked = markdownEnabled;
     if (settingsMarkdownEl) settingsMarkdownEl.checked = markdownEnabled;
   }
 
-  function setTrackEditsEnabled(enabled) {
+  function setTrackEditsEnabled(enabled: boolean): void {
     trackEditsEnabled = enabled === true;
     if (trackEditsToggleEl) trackEditsToggleEl.checked = trackEditsEnabled;
   }
 
-  function setLineNumbersEnabled(enabled) {
+  function setLineNumbersEnabled(enabled: boolean): void {
     lineNumbersEnabled = enabled === true;
     if (lineNumbersToggleEl) lineNumbersToggleEl.checked = lineNumbersEnabled;
     document.body.classList.toggle('line-numbers-enabled', lineNumbersEnabled);
   }
 
-  function setViewWrapEnabled(enabled) {
+  function setViewWrapEnabled(enabled: boolean): void {
     viewWrapEnabled = enabled === true;
     if (settingsViewWrapEl) settingsViewWrapEl.checked = viewWrapEnabled;
   }
 
 
-  function isDiffSyntaxEnabled() {
+  function isDiffSyntaxEnabled(): boolean {
     return diffSyntaxHighlight;
   }
 
-  function setDiffSyntaxEnabled(enabled) {
+  function setDiffSyntaxEnabled(enabled: boolean): void {
     diffSyntaxHighlight = enabled === true;
     if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = diffSyntaxHighlight;
   }
@@ -354,10 +354,10 @@ document.addEventListener('DOMContentLoaded', () => {
     bindWidescreenResizer,
   } = widescreenLayoutUi;
 
-  let getSubagentContainer: (...args: any[]) => AnyRecord = (_id, _name, _intent) => ({ body: null });
-  let getLiveEventParent = (_evt) => null;
-  let finalizeSubagent = (_id, _summary, _success) => {};
-  let makeCollapsible = (_row, _cardId, _startExpanded, _options: AnyRecord = {}) => {};
+  let getSubagentContainer = (_id: string, _name: string, _intent: string): AnyRecord => ({ body: null });
+  let getLiveEventParent = (_evt: AnyRecord | null | undefined): HTMLElement | null => null;
+  let finalizeSubagent = (_id: string, _summary: string, _success: boolean): void => {};
+  let makeCollapsible = (_row: HTMLElement | null, _cardId: string, _startExpanded: boolean, _options: AnyRecord = {}): void => {};
 
   // Note: underscore emphasis is handled by the markdown renderer; do not escape underscores
   // in the raw text stream, otherwise users will see literal backslashes in output.
@@ -388,27 +388,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const shellSemantic = bindShellSemantic({
     getEnabled: () => semanticShellRibbonEnabled,
-    setEnabled: (enabled) => { semanticShellRibbonEnabled = enabled === true; },
-    getQuoteParsingEnabled: () => semanticShellQuoteParsingEnabled,
-    setQuoteParsingEnabled: (enabled) => { semanticShellQuoteParsingEnabled = enabled === true; },
-    getCheckboxEl: () => byId('settings-semantic-shell-ribbon'),
-    escapeHtml,
+      setEnabled: (enabled: boolean) => { semanticShellRibbonEnabled = enabled === true; },
+      getQuoteParsingEnabled: () => semanticShellQuoteParsingEnabled,
+      setQuoteParsingEnabled: (enabled: boolean) => { semanticShellQuoteParsingEnabled = enabled === true; },
+      getCheckboxEl: () => byId('settings-semantic-shell-ribbon'),
+      escapeHtml,
   });
 
-  function isSemanticShellRibbonEnabled() {
+  function isSemanticShellRibbonEnabled(): boolean {
     return shellSemantic.isSemanticShellRibbonEnabled();
   }
 
-  function setSemanticShellRibbonEnabled(enabled) {
+  function setSemanticShellRibbonEnabled(enabled: boolean): void {
     shellSemantic.setSemanticShellRibbonEnabled(enabled);
   }
 
-  function setSemanticShellQuoteParsingEnabled(enabled) {
+  function setSemanticShellQuoteParsingEnabled(enabled: boolean): void {
     semanticShellQuoteParsingEnabled = enabled === true;
     shellSemantic.setSemanticShellQuoteParsingEnabled(enabled);
   }
 
-  function setActiveToolRenderPolicy(policy) {
+  function setActiveToolRenderPolicy(policy: AnyRecord | null | undefined): void {
     if (policy && typeof policy === 'object') {
       activeToolRenderPolicy = policy;
       return;
@@ -422,15 +422,15 @@ document.addEventListener('DOMContentLoaded', () => {
     };
   }
 
-  async function ensureTreeSitterRibbonReady() {
+  async function ensureTreeSitterRibbonReady(): Promise<unknown> {
     return shellSemantic.ensureTreeSitterRibbonReady();
   }
 
-  function renderShellCmdRibbon(el, cmd) {
+  function renderShellCmdRibbon(el: HTMLElement | null, cmd: string): unknown {
     return shellSemantic.renderShellCmdRibbon(el, cmd);
   }
 
-  function setCommandRunning(running) {
+  function setCommandRunning(running: unknown): void {
     commandRunning = Boolean(running);
   }
   const jsStatusEl = byId('js-status');
@@ -514,7 +514,7 @@ document.addEventListener('DOMContentLoaded', () => {
     getAssistantDisplayName: () => getAssistantDisplayName(),
     isMarkdownEnabled,
     renderMarkdownItBlock,
-    stripCitations,
+    stripCitations: (text: string) => stripCitations(text) || '',
     maybeAutoScroll,
   });
 
@@ -682,7 +682,7 @@ document.addEventListener('DOMContentLoaded', () => {
     windowRef: window,
   }) as any;
 
-	  function toProjectRelativePath(path) {
+  function toProjectRelativePath(path: string | null | undefined): string | null {
 	    if (!path || typeof path !== 'string') return null;
 	    if (!path.startsWith('/')) return path;
 	    const root = hostUi?.projectRoot;
@@ -693,7 +693,7 @@ document.addEventListener('DOMContentLoaded', () => {
 	    return path.slice(rootNorm.length);
 	  }
 
-	  async function ensureProjectRootLoaded() {
+  async function ensureProjectRootLoaded(): Promise<string | null> {
 	    if (hostUi?.projectRoot) return hostUi.projectRoot;
 	    if (!hostUi?.ideMode) return null;
 	    return null;
@@ -713,11 +713,11 @@ document.addEventListener('DOMContentLoaded', () => {
     },
   });
 
-  async function openSettingsModal(...args) {
+  async function openSettingsModal(...args: unknown[]) {
     return settingsUi?.openSettingsModal(...args);
   }
 
-  function closeSettingsModal(...args) {
+  function closeSettingsModal(...args: unknown[]) {
     return settingsUi?.closeSettingsModal(...args);
   }
 
@@ -729,14 +729,14 @@ document.addEventListener('DOMContentLoaded', () => {
       activeRuntimeOptionValues,
       openDropdownEl,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
       if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
       if (patch.activeRuntimeOptionValues !== undefined) activeRuntimeOptionValues = patch.activeRuntimeOptionValues || {};
     },
     footerRuntimeControlsEl,
-    closeDropdownMenu: (...args) => closeDropdownMenu(...args),
-    toggleDropdownMenu: (...args) => toggleDropdownMenu(...args),
+    closeDropdownMenu: (...args: unknown[]) => closeDropdownMenu(...args),
+    toggleDropdownMenu: (...args: unknown[]) => toggleDropdownMenu(...args),
     sioCall,
   });
 
@@ -747,87 +747,87 @@ document.addEventListener('DOMContentLoaded', () => {
     applyRuntimeMode,
   } = runtimeFooter;
 
-  function openPicker(...args) {
+  function openPicker(...args: unknown[]) {
     return settingsUi?.openPicker(...args);
   }
 
-  function closePicker(...args) {
+  function closePicker(...args: unknown[]) {
     return settingsUi?.closePicker(...args);
   }
 
-  function bindPickerFilter(...args) {
+  function bindPickerFilter(...args: unknown[]) {
     return settingsUi?.bindPickerFilter(...args);
   }
 
-  function openRolloutPicker(...args) {
+  function openRolloutPicker(...args: unknown[]) {
     return settingsUi?.openRolloutPicker(...args);
   }
 
-  function closeRolloutPicker(...args) {
+  function closeRolloutPicker(...args: unknown[]) {
     return settingsUi?.closeRolloutPicker(...args);
   }
 
-  async function loadRolloutPreview(...args) {
+  async function loadRolloutPreview(...args: unknown[]) {
     return settingsUi?.loadRolloutPreview(...args);
   }
 
-  async function fetchRollouts(...args) {
+  async function fetchRollouts(...args: unknown[]) {
     return settingsUi?.fetchRollouts(...args);
   }
 
-  function buildDropdown(...args) {
+  function buildDropdown(...args: unknown[]) {
     return settingsUi?.buildDropdown(...args);
   }
 
-  function updateDropdownOptions(...args) {
+  function updateDropdownOptions(...args: unknown[]) {
     return settingsUi?.updateDropdownOptions(...args);
   }
 
-  async function loadModelOptions(...args) {
+  async function loadModelOptions(...args: unknown[]) {
     return settingsUi?.loadModelOptions(...args);
   }
 
-  async function loadRuntimeOptions(...args) {
+  async function loadRuntimeOptions(...args: unknown[]) {
     return settingsUi?.loadRuntimeOptions(...args);
   }
 
-  async function loadAgentOptions(...args) {
+  async function loadAgentOptions(...args: unknown[]) {
     return settingsUi?.loadAgentOptions(...args);
   }
 
-  async function onAgentSelectionChange(...args) {
+  async function onAgentSelectionChange(...args: unknown[]) {
     return settingsUi?.onAgentSelectionChange(...args);
   }
 
-  function updateEffortOptionsForModel(...args) {
+  function updateEffortOptionsForModel(...args: unknown[]) {
     return settingsUi?.updateEffortOptionsForModel(...args);
   }
 
-  function openDropdownMenu(...args) {
+  function openDropdownMenu(...args: unknown[]) {
     return settingsUi?.openDropdownMenu(...args);
   }
 
-  function closeDropdownMenu(...args) {
+  function closeDropdownMenu(...args: unknown[]) {
     return settingsUi?.closeDropdownMenu(...args);
   }
 
-  function toggleDropdownMenu(...args) {
+  function toggleDropdownMenu(...args: unknown[]) {
     return settingsUi?.toggleDropdownMenu(...args);
   }
 
-  function setupDropdown(...args) {
+  function setupDropdown(...args: unknown[]) {
     return settingsUi?.setupDropdown(...args);
   }
 
-  async function fetchPicker(...args) {
+  async function fetchPicker(...args: unknown[]) {
     return settingsUi?.fetchPicker(...args);
   }
 
-  async function fetchPickerSearch(...args) {
+  async function fetchPickerSearch(...args: unknown[]) {
     return settingsUi?.fetchPickerSearch(...args);
   }
 
-  function applyPickerFilter(...args) {
+  function applyPickerFilter(...args: unknown[]) {
     return settingsUi?.applyPickerFilter(...args);
   }
 
@@ -847,7 +847,7 @@ document.addEventListener('DOMContentLoaded', () => {
       modelList,
       runtimeOptions,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
       if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
       if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
@@ -895,7 +895,7 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     sioCall,
     setActivity,
-    getRelativePath: (absolutePath, cwd) => {
+    getRelativePath: (absolutePath: string | null | undefined, cwd: string | null | undefined) => {
       if (!absolutePath || !cwd) return absolutePath;
       const cwdNorm = cwd.endsWith('/') ? cwd : `${cwd}/`;
       if (absolutePath.startsWith(cwdNorm)) {
@@ -937,7 +937,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return rect.height + marginBottom;
   }
 
-  function scrollRowToTop(row, { clearPinned = false } = {}) {
+  function scrollRowToTop(row: HTMLElement | null, { clearPinned = false }: { clearPinned?: boolean } = {}) {
     if (!row || !scrollContainer) return;
     const wrapRect = scrollContainer.getBoundingClientRect();
     const rowRect = row.getBoundingClientRect();
@@ -1042,7 +1042,7 @@ document.addEventListener('DOMContentLoaded', () => {
     getBottomSpacerEl: () => bottomSpacerEl,
     timelineEl,
     maybeAutoScroll,
-    setLastEventType: (value) => { lastEventType = value; },
+    setLastEventType: (value: string) => { lastEventType = value; },
     setStatusDot,
     renderShellCmdRibbon,
     detectLangFromCommand,
@@ -1069,7 +1069,7 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptLimit,
       estimatedRowHeight,
     }),
-    setTranscriptState: (patch) => {
+    setTranscriptState: (patch: AnyRecord) => {
       if (patch.estimatedRowHeight !== undefined) estimatedRowHeight = patch.estimatedRowHeight;
     },
   });
@@ -1080,7 +1080,7 @@ document.addEventListener('DOMContentLoaded', () => {
       lastEventType,
       activeAgentPtyBlockId,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.lastEventType !== undefined) lastEventType = patch.lastEventType || null;
       if (patch.activeAgentPtyBlockId !== undefined) activeAgentPtyBlockId = patch.activeAgentPtyBlockId || null;
     },
@@ -1107,15 +1107,15 @@ document.addEventListener('DOMContentLoaded', () => {
     streamEnd,
     highlightCode,
     incrementMessages,
-    stripCitations,
+    stripCitations: (text: string) => stripCitations(text) || '',
     escapeHtml,
     toRelativePath,
     postTe2OpenRequest,
     renderShellCmdRibbon,
     highlightCodeAlways,
-    detectLangFromPath,
-    resolveHljsLanguage,
-    detectLangFromCommand,
+    detectLangFromPath: (path: string) => detectLangFromPath(path) || '',
+    resolveHljsLanguage: (lang: string) => resolveHljsLanguage(lang) || '',
+    detectLangFromCommand: (command: string) => detectLangFromCommand(command) || '',
     isDiffSyntaxEnabled,
     sioCall,
     getConversationId: () => conversationMeta?.conversation_id || null,
@@ -1177,7 +1177,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setStatusDot,
     setActivity,
     maybeAutoScroll,
-    setLastEventType: (v) => { lastEventType = v; },
+    setLastEventType: (v: string) => { lastEventType = v; },
     _dbg,
   });
 
@@ -1200,7 +1200,7 @@ document.addEventListener('DOMContentLoaded', () => {
     escapeHtml,
     renderShellCmdRibbon,
     maybeAutoScroll,
-    setLastEventType: (value) => { lastEventType = value; },
+    setLastEventType: (value: string) => { lastEventType = value; },
     setStatusDot,
     getToolRenderPolicy: () => activeToolRenderPolicy,
     highlightCodeAlways,
@@ -1278,14 +1278,14 @@ document.addEventListener('DOMContentLoaded', () => {
     currentExtensionId,
     buildRow,
     appendErrorContent,
-    renderCommandResult,
-    renderViewCard,
-    renderSearchCard,
+    renderCommandResult: (entry: AnyRecord, parentEl: HTMLElement, options: AnyRecord = {}) => renderCommandResult(entry, parentEl, options),
+    renderViewCard: (entry: AnyRecord, parentEl: HTMLElement) => renderViewCard(entry, parentEl),
+    renderSearchCard: (entry: AnyRecord, parentEl: HTMLElement) => renderSearchCard(entry, parentEl),
     renderApproval,
     buildReplayToolRow,
     renderShellCmdRibbon,
     highlightCodeAlways,
-    detectLangFromCommand,
+    detectLangFromCommand: (command: string) => detectLangFromCommand(command) || '',
     escapeHtml,
     toRelativePath,
     postTe2OpenRequest,
@@ -1305,7 +1305,7 @@ document.addEventListener('DOMContentLoaded', () => {
   renderTranscriptEntries = timelineReplay.renderTranscriptEntries;
 
   const rpcFlow = bindRpcFlow({
-    waitForWs: (...args) => waitForWs(...args),
+    waitForWs: (...args: Parameters<typeof waitForWs>) => waitForWs(...args),
     sioCall,
     getPending: () => pending,
     getConversationId: () => conversationMeta?.conversation_id || null,
@@ -1321,7 +1321,7 @@ document.addEventListener('DOMContentLoaded', () => {
       lineNumbersEnabled,
       runtimeOptions,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
       if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
       if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
@@ -1359,18 +1359,18 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConversation,
     fetchConversations,
     resetTimeline,
-    replayTranscript: (...args: any[]) => (replayTranscript as any)(...args),
-    refreshPlanSurface: (...args) => refreshPlanSurface(...args),
+    replayTranscript: (...args: Parameters<typeof replayTranscript>) => replayTranscript(...args),
+    refreshPlanSurface: (...args: Parameters<typeof refreshPlanSurface>) => refreshPlanSurface(...args),
     restorePendingApprovals,
     setDrawerOpen,
     updateConversationHeaderLabel,
   });
 
-  async function sendRpc(method, params, options = {}) {
+  async function sendRpc(method: string, params: AnyRecord, options: AnyRecord = {}) {
     return rpcFlow.sendRpc(method, params, options);
   }
 
-  async function respondApproval(requestId, decision) {
+  async function respondApproval(requestId: string, decision: AnyRecord) {
     return respondApprovalImpl(requestId, decision);
   }
 
@@ -1381,13 +1381,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
     getWsState: () => ({ wsOpen, wsReadyResolve, wsReadyPromise, wsReconnectDelay }),
-    setWsState: (patch) => {
+    setWsState: (patch: AnyRecord) => {
       if (patch.wsOpen !== undefined) wsOpen = patch.wsOpen;
       if (patch.wsReadyResolve !== undefined) wsReadyResolve = patch.wsReadyResolve;
       if (patch.wsReadyPromise !== undefined) wsReadyPromise = patch.wsReadyPromise;
       if (patch.wsReconnectDelay !== undefined) wsReconnectDelay = patch.wsReconnectDelay;
     },
-    setSocket: (sock) => { _socket = sock; },
+    setSocket: (sock: AnyRecord) => { _socket = sock; },
     wsStatusEl,
     setPill,
     syncDraftFromServer,
@@ -1410,12 +1410,12 @@ document.addEventListener('DOMContentLoaded', () => {
       hostUi,
       planCollapsed,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
       if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
       if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
       if (patch.clientActiveView !== undefined) clientActiveView = patch.clientActiveView;
-      if (patch.activeView !== undefined) activeView = patch.activeView;
+      if (patch.activeView !== undefined) activeView = patch.activeView || activeView;
       if (patch.activeRuntimeOptionValues !== undefined) activeRuntimeOptionValues = patch.activeRuntimeOptionValues || {};
       if (patch.miniConversationDrawerOpen !== undefined) {
         miniConversationDrawerOpen = patch.miniConversationDrawerOpen === true;
@@ -1472,7 +1472,7 @@ document.addEventListener('DOMContentLoaded', () => {
       autoScroll,
       rpcTransportEnabled,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.initialized !== undefined) initialized = patch.initialized;
       if (patch.autoScroll !== undefined) autoScroll = patch.autoScroll;
     },
@@ -1501,7 +1501,7 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptLimit,
       transcriptLoading,
     }),
-    setTranscriptState: (patch) => {
+    setTranscriptState: (patch: AnyRecord) => {
       if (patch.transcriptTotal !== undefined) transcriptTotal = patch.transcriptTotal;
       if (patch.transcriptStart !== undefined) transcriptStart = patch.transcriptStart;
       if (patch.transcriptEnd !== undefined) transcriptEnd = patch.transcriptEnd;
@@ -1510,11 +1510,11 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     renderTranscriptEntries,
     scrollContainer,
-    setScrollProgrammatic: (v) => { _scrollProgrammatic = Boolean(v); },
+    setScrollProgrammatic: (v: unknown) => { _scrollProgrammatic = Boolean(v); },
     isSemanticShellRibbonEnabled,
     ensureTreeSitterRibbonReady,
     maybeAutoScroll,
-    setLastEventType: (v) => { lastEventType = v; },
+    setLastEventType: (v: string) => { lastEventType = v; },
     refreshPlanSurface,
   });
 
@@ -1530,7 +1530,7 @@ document.addEventListener('DOMContentLoaded', () => {
       lastDraftHash,
       draftDirty,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.hostUi !== undefined) hostUi = patch.hostUi;
       if (patch.conversationPreviewCache !== undefined) conversationPreviewCache = patch.conversationPreviewCache;
       if (patch.appConfig !== undefined) appConfig = patch.appConfig;
@@ -1541,7 +1541,7 @@ document.addEventListener('DOMContentLoaded', () => {
     getPending: () => pending,
     promptEl,
     debugEnabled: _dbg,
-    setLastEventType: (v) => { lastEventType = v; },
+    setLastEventType: (v: string) => { lastEventType = v; },
     setActivity,
     finalizePlanToTranscript,
     renderErrorCard,
@@ -1616,7 +1616,7 @@ document.addEventListener('DOMContentLoaded', () => {
       openDropdownEl,
       runtimeOptions,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
       if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
       if (patch.appConfig !== undefined) appConfig = patch.appConfig;
@@ -1679,7 +1679,7 @@ document.addEventListener('DOMContentLoaded', () => {
       openSettingsModal,
       closeSettingsModal,
       saveSettings,
-      onAgentChange: async (agentId) => { await loadExtensionUiFeatures(agentId); },
+      onAgentChange: async (agentId: string) => { await loadExtensionUiFeatures(agentId); },
       openSplashSettingsModal,
       closeSplashSettingsModal,
       saveSplashSettings,
@@ -1735,7 +1735,7 @@ document.addEventListener('DOMContentLoaded', () => {
       scrollProgrammatic: _scrollProgrammatic,
       autoScroll,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.draftDirty !== undefined) draftDirty = patch.draftDirty;
       if (patch.autoScroll !== undefined) autoScroll = patch.autoScroll;
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;

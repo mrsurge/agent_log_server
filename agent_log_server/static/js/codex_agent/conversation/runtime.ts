@@ -124,7 +124,7 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     return { ok: false, error: 'Socket.IO not connected' };
   }
 
-  async function loadExtensionUiFeatures(extensionId: string) {
+  async function loadExtensionUiFeatures(extensionId = ''): Promise<AnyRecord> {
     const resolvedExtensionId = typeof extensionId === 'string' && extensionId.trim()
       ? extensionId.trim()
       : currentExtensionId();
