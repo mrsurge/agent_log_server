@@ -17,8 +17,6 @@ import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.ts';
 import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.ts';
 import { bindSocketEvents } from './js/codex_agent/events/socket.ts';
 import { bindEventRouter } from './js/codex_agent/events/router.ts';
-import { bindPlanOverlay } from './js/codex_agent/plan_overlay.ts';
-import { bindPlanModal } from './js/codex_agent/plan_modal.ts';
 import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.ts';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.ts';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.ts';
@@ -32,8 +30,12 @@ import { bindTranscriptCards } from './js/codex_agent/transcript_cards.ts';
 import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.ts';
 import { bindInputFlow } from './js/codex_agent/boot/input_flow.ts';
 import { bindComposerRuntime } from './js/codex_agent/composer/runtime.ts';
+import { bindConversationRuntime } from './js/codex_agent/conversation/runtime.ts';
 import { bindHostRuntime } from './js/codex_agent/host/runtime.ts';
 import { bindWidescreenLayout } from './js/codex_agent/layout/widescreen.ts';
+import { bindPlanRuntime } from './js/codex_agent/plan/runtime.ts';
+import { bindRenderUtils } from './js/codex_agent/render/utils.ts';
+import { bindSubagentsCollapsible } from './js/codex_agent/subagents/collapsible.ts';
 import { bindTimelineRows } from './js/codex_agent/timeline/rows.ts';
 import { bindTimelineLiveItems } from './js/codex_agent/timeline/live_items.ts';
 import { bindTimelineReplay } from './js/codex_agent/timeline/replay.ts';
@@ -208,8 +210,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let modelList: any[] = []; // Cached model list with supportedReasoningEfforts
   let runtimeOptions: AnyRecord = {};
   let activeRuntimeOptionValues: AnyRecord = {};
-  let planDocState = { has_plan: false, plan_exists: false, plan_content: '', plan_path: null, plan_source: null };
-  let todoState = { has_todo: false, plan_steps: [] };
+  let planDocState: AnyRecord = { has_plan: false, plan_exists: false, plan_content: '', plan_path: null, plan_source: null };
+  let todoState: AnyRecord = { has_todo: false, plan_steps: [] };
   let planDocDirty = false;
   let planFetchSerial = 0;
   let settingsUi: any = null;
@@ -266,6 +268,40 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastDraftHash: string | null = null;
   let draftDirty = false;
   let applyingDraft = false;
+  let currentExtensionIdImpl = () => '';
+  let loadExtensionUiFeaturesImpl = async (_extensionId = '') => ({});
+  let sioCallImpl: (event: string, data?: AnyRecord, options?: AnyRecord) => Promise<any> = async (
+    _event: string,
+    _data: AnyRecord = {},
+    _options: AnyRecord = {},
+  ) => ({ ok: false, error: 'Socket.IO not connected' });
+  let fetchConversationImpl = async (_conversationId: string | null = null) => {};
+  let fetchStatusImpl = async () => {};
+  let requestContextCompactImpl = async () => {};
+
+  function currentExtensionId() {
+    return currentExtensionIdImpl();
+  }
+
+  async function loadExtensionUiFeatures(extensionId = '') {
+    return loadExtensionUiFeaturesImpl(extensionId);
+  }
+
+  async function sioCall(event, data = {}, options: AnyRecord = {}) {
+    return sioCallImpl(event, data, options);
+  }
+
+  async function fetchConversation(conversationId = null) {
+    return fetchConversationImpl(conversationId);
+  }
+
+  async function fetchStatus() {
+    return fetchStatusImpl();
+  }
+
+  async function requestContextCompact() {
+    return requestContextCompactImpl();
+  }
 
   function isMarkdownEnabled() {
     return markdownEnabled;
@@ -318,147 +354,37 @@ document.addEventListener('DOMContentLoaded', () => {
     bindWidescreenResizer,
   } = widescreenLayoutUi;
 
-  // ── Subagent containers ──────────────────────────────────────────
-  const subagentContainers = new Map(); // subagent_id -> { row, body, header, statusEl, items: [] }
-
-  function getSubagentContainer(id, name, intent) {
-    let sa = subagentContainers.get(id);
-    if (!sa) {
-      clearPlaceholder();
-      const row = document.createElement('div');
-      row.className = 'timeline-row subagent-card';
-      row.dataset.subagentId = id;
-
-      // Header is OUTSIDE body — always visible even when collapsed
-      const header = document.createElement('div');
-      header.className = 'subagent-header command-ribbon';
-      const label = document.createElement('span');
-      label.textContent = `${name || 'subagent'}: ${intent || 'working'}`;
-      const statusEl = document.createElement('span');
-      statusEl.className = 'subagent-status';
-      statusEl.textContent = '⏳ running';
-      header.append(label, statusEl);
-      row.appendChild(header);
-
-      const body = document.createElement('div');
-      body.className = 'subagent-body';
-      row.appendChild(body);
-
-      insertRow(row);
-      makeCollapsible(row, `subagent:${id}`, false, {
-        headerEl: header,
-        fullHeaderToggle: true,
-      });
-      sa = { row, body, header, statusEl, label, items: [] };
-      subagentContainers.set(id, sa);
-    }
-    return sa;
-  }
-
-  function getLiveEventParent(evt) {
-    if (!evt || !evt.subagent_id) return null;
-    return getSubagentContainer(evt.subagent_id, '', '').body;
-  }
-
-  function finalizeSubagent(id, summary, success) {
-    const sa = subagentContainers.get(id);
-    if (!sa) return;
-    sa.statusEl.textContent = success !== false ? '✓ done' : '✗ failed';
-    if (summary) {
-      const summaryEl = document.createElement('div');
-      summaryEl.className = 'subagent-summary';
-      summaryEl.style.cssText = 'padding: 4px 14px; font-size: 0.85em; opacity: 0.7; font-style: italic;';
-      summaryEl.textContent = summary;
-      sa.body.appendChild(summaryEl);
-    }
-  }
-
-  // ── Collapsible card helpers ──────────────────────────────────────
-  const _expandedCards = new Set(
-    JSON.parse(localStorage.getItem('expandedCards') || '[]')
-  );
-  function _saveExpandedCards() {
-    localStorage.setItem('expandedCards', JSON.stringify([..._expandedCards]));
-  }
-  function makeCollapsible(row, cardId, startExpanded, options: AnyRecord = {}) {
-    if (!row) return;
-    const {
-      headerEl = row.querySelector('.command-ribbon') || row.querySelector('.diff-path-label'),
-      persist = true,
-      fullHeaderToggle = false,
-      toggleZone = !fullHeaderToggle,
-      onToggle = null,
-    } = options;
-    if (!headerEl) return;
-
-    row.classList.add('collapsible');
-    const isExpanded = Boolean(startExpanded || (persist && cardId && _expandedCards.has(cardId)));
-    row.classList.toggle('expanded', isExpanded);
-
-    let twistyEl = headerEl.querySelector(':scope > .twisty') || headerEl.querySelector('.twisty');
-    if (!twistyEl) {
-      twistyEl = document.createElement('span');
-      twistyEl.className = 'twisty';
-      twistyEl.textContent = '▶';
-      headerEl.appendChild(twistyEl);
-    }
-
-    function syncExpandedState(expanded) {
-      headerEl.dataset.expanded = expanded ? 'true' : 'false';
-    }
-
-    function persistExpandedState(expanded) {
-      if (!persist || !cardId) return;
-      if (expanded) _expandedCards.add(cardId);
-      else _expandedCards.delete(cardId);
-      _saveExpandedCards();
-    }
-
-    function toggleCollapse(forceExpanded?: boolean) {
-      const expanded = typeof forceExpanded === 'boolean'
-        ? forceExpanded
-        : !row.classList.contains('expanded');
-      row.classList.toggle('expanded', expanded);
-      persistExpandedState(expanded);
-      syncExpandedState(expanded);
-      if (typeof onToggle === 'function') onToggle(expanded);
-      maybeAutoScroll();
-      return expanded;
-    }
-
-    (row as any)._toggleCollapse = toggleCollapse;
-    syncExpandedState(isExpanded);
-
-    twistyEl.style.pointerEvents = 'auto';
-    twistyEl.style.cursor = 'pointer';
-    twistyEl.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleCollapse();
-    });
-
-    if (toggleZone) {
-      let toggleZoneEl = headerEl.querySelector(':scope > .ribbon-toggle-zone') || headerEl.querySelector('.ribbon-toggle-zone');
-      if (!toggleZoneEl) {
-        toggleZoneEl = document.createElement('span');
-        toggleZoneEl.className = 'ribbon-toggle-zone';
-        headerEl.appendChild(toggleZoneEl);
-      }
-      toggleZoneEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleCollapse();
-      });
-    }
-
-    if (fullHeaderToggle) {
-      headerEl.addEventListener('click', (e) => {
-        if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
-        toggleCollapse();
-      });
-    }
-  }
+  let getSubagentContainer: (...args: any[]) => AnyRecord = (_id, _name, _intent) => ({ body: null });
+  let getLiveEventParent = (_evt) => null;
+  let finalizeSubagent = (_id, _summary, _success) => {};
+  let makeCollapsible = (_row, _cardId, _startExpanded, _options: AnyRecord = {}) => {};
 
   // Note: underscore emphasis is handled by the markdown renderer; do not escape underscores
   // in the raw text stream, otherwise users will see literal backslashes in output.
+
+  const renderUtils = bindRenderUtils({
+    getState: () => ({
+      conversationSettings,
+      conversationMeta,
+      viewWrapEnabled,
+    }),
+    documentRef: document,
+  });
+
+  const {
+    escapeHtml,
+    stripCitations,
+    detectLangFromPath,
+    resolveHljsLanguage,
+    buildViewCardTitle,
+    detectLangFromCommand,
+    highlightCodeAlways,
+    normalizeStructuredViewLines,
+    synthesizeStructuredViewLines,
+    renderStructuredViewLineTable,
+    toRelativePath,
+    setPill,
+  } = renderUtils;
 
   const shellSemantic = bindShellSemantic({
     getEnabled: () => semanticShellRibbonEnabled,
@@ -507,388 +433,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function setCommandRunning(running) {
     commandRunning = Boolean(running);
   }
-
-  // Strip OpenAI citation markers like 'citeturn1file0L11-L26'
-  function stripCitations(text) {
-    if (!text) return text;
-    // Match patterns like 'citeturn0file0' or 'citeturn1file0L11-L26'
-    return text.replace(/'citeturn\d+file\d+(?:L\d+(?:-L\d+)?)?'/g, '');
-  }
-
-  const FILE_EXT_LANG_MAP = {
-    'js': 'javascript', 'mjs': 'javascript', 'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
-    'py': 'python', 'rb': 'ruby', 'rs': 'rust', 'go': 'go',
-    'java': 'java', 'kt': 'kotlin', 'scala': 'scala',
-    'c': 'c', 'h': 'c', 'cpp': 'cpp', 'cc': 'cpp', 'hpp': 'cpp',
-    'cs': 'csharp', 'fs': 'fsharp',
-    'php': 'php', 'swift': 'swift', 'r': 'r',
-    'json': 'json', 'yaml': 'yaml', 'yml': 'yaml', 'toml': 'toml',
-    'xml': 'xml', 'html': 'html', 'htm': 'html', 'css': 'css', 'scss': 'scss',
-    'md': 'markdown', 'markdown': 'markdown',
-    'sh': 'bash', 'bash': 'bash', 'zsh': 'bash', 'fish': 'bash',
-    'sql': 'sql', 'graphql': 'graphql', 'gql': 'graphql',
-    'dockerfile': 'dockerfile', 'makefile': 'makefile',
-    'tf': 'hcl', 'hcl': 'hcl',
-    'lua': 'lua', 'vim': 'vim', 'el': 'lisp', 'clj': 'clojure',
-    'ex': 'elixir', 'exs': 'elixir', 'erl': 'erlang',
-    'hs': 'haskell', 'ml': 'ocaml', 'nim': 'nim', 'zig': 'zig',
-  };
-
-  function detectLangFromPath(file) {
-    if (!file) return null;
-    const ext = file.split('.').pop()?.toLowerCase();
-    if (ext && FILE_EXT_LANG_MAP[ext]) return FILE_EXT_LANG_MAP[ext];
-    const basename = file.split('/').pop()?.toLowerCase();
-    if (basename === 'dockerfile') return 'dockerfile';
-    if (basename === 'makefile' || basename === 'gnumakefile') return 'makefile';
-    if (basename?.endsWith('rc') || basename?.startsWith('.')) return 'bash';
-    return null;
-  }
-
-  function resolveHljsLanguage(lang) {
-    if (typeof hljs === 'undefined' || !lang) return null;
-    const requested = String(lang).trim().toLowerCase();
-    if (!requested) return null;
-    const fallbackMap = {
-      javascript: ['javascript', 'typescript'],
-      jsx: ['javascript', 'typescript'],
-      typescript: ['typescript', 'javascript'],
-      tsx: ['typescript', 'javascript'],
-      html: ['html', 'xml'],
-      htm: ['html', 'xml'],
-      xml: ['xml', 'html'],
-      markdown: ['markdown'],
-      md: ['markdown'],
-      json: ['json'],
-      css: ['css', 'scss'],
-      scss: ['scss', 'css'],
-      yaml: ['yaml'],
-      yml: ['yaml'],
-      toml: ['ini'],
-      bash: ['bash'],
-      sh: ['bash'],
-    };
-    const candidates = fallbackMap[requested] || [requested];
-    for (const candidate of candidates) {
-      if (candidate && hljs.getLanguage(candidate)) return candidate;
-    }
-    return null;
-  }
-
-  function buildViewCardTitle(path, viewRange, fallbackTitle = '') {
-    const shortPath = path ? String(path).split('/').pop() : '';
-    if (Array.isArray(viewRange) && viewRange.length >= 2 && Number.isFinite(Number(viewRange[0])) && Number.isFinite(Number(viewRange[1]))) {
-      return `${shortPath || fallbackTitle || 'view'}  Lines ${Number(viewRange[0])}–${Number(viewRange[1])}`;
-    }
-    if (Array.isArray(viewRange) && viewRange.length === 1 && Number.isFinite(Number(viewRange[0]))) {
-      return `${shortPath || fallbackTitle || 'view'}  Line ${Number(viewRange[0])}+`;
-    }
-    return shortPath || fallbackTitle || 'view';
-  }
-
-  function detectLangFromCommand(command) {
-    if (!command) return null;
-
-    const shCMatch = command.match(/sh\s+-[lc]+\s+['"](.+)['"]\s*$/);
-    const innerCmd = shCMatch ? shCMatch[1] : command;
-
-    const catMatch = innerCmd.match(/\b(?:cat|head|tail|less|more|bat)\s+['"]*([^\s'"]+)/);
-    if (catMatch) {
-      const lang = detectLangFromPath(catMatch[1]);
-      if (lang) return lang;
-    }
-
-    const sedMatch = innerCmd.match(/\bsed\s+(?:-[^\s]+\s+)*'[^']+'\s+([^\s'"]+)\s*$/);
-    if (sedMatch) {
-      const lang = detectLangFromPath(sedMatch[1]);
-      if (lang) return lang;
-    }
-
-    const awkGrepMatch = innerCmd.match(/\b(?:awk|grep)\s+(?:-[^\s]+\s+)*(?:'[^']+'|"[^"]+")\s+([^\s'"]+)\s*$/);
-    if (awkGrepMatch) {
-      const lang = detectLangFromPath(awkGrepMatch[1]);
-      if (lang) return lang;
-    }
-
-    const segments = innerCmd.split(/\s*(?:\|\||&&|\||;)\s*/g);
-    let best = null;
-    for (const seg of segments) {
-      const toks = seg.match(/(?:'[^']*'|"[^"]*"|`[^`]*`|[^\s]+)/g) || [];
-      for (const t of toks) {
-        const raw = String(t || '').trim();
-        if (!raw) continue;
-        const unq = (raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('`') && raw.endsWith('`'))
-          ? raw.slice(1, -1)
-          : raw;
-        if (unq.startsWith('-')) continue;
-        const m = unq.match(/([^\s'"]+\.\w+)$/);
-        if (m) {
-          const lang = detectLangFromPath(m[1]);
-          if (lang) best = lang;
-        }
-      }
-    }
-    if (best) return best;
-
-    const anyFileMatch = innerCmd.match(/([^\s'"]+\.\w+)\s*$/);
-    if (anyFileMatch) {
-      const lang = detectLangFromPath(anyFileMatch[1]);
-      if (lang) return lang;
-    }
-
-    if (innerCmd.includes('python') || innerCmd.includes('python3')) return 'python';
-    if (innerCmd.includes('node ') || innerCmd.includes('npx ')) return 'javascript';
-    if (innerCmd.includes('ruby ')) return 'ruby';
-    if (innerCmd.includes('go run')) return 'go';
-    if (innerCmd.includes('rustc') || innerCmd.includes('cargo')) return 'rust';
-    return null;
-  }
-
-  function highlightCodeAlways(text, lang) {
-    if (typeof hljs === 'undefined' || !text?.trim()) {
-      return escapeHtml(text || '');
-    }
-    try {
-      const resolvedLang = resolveHljsLanguage(lang);
-      if (resolvedLang) {
-        return hljs.highlight(text, { language: resolvedLang, ignoreIllegals: true }).value;
-      }
-      const result = hljs.highlightAuto(text);
-      if (result.relevance > 5) {
-        return result.value;
-      }
-    } catch (_) {
-      // fall through
-    }
-    return escapeHtml(text || '');
-  }
-
-  function normalizeStructuredViewLines(lines) {
-    if (!Array.isArray(lines) || !lines.length) return null;
-    const normalized = [];
-    for (const entry of lines) {
-      if (!entry || typeof entry !== 'object') return null;
-      const rawLineNo = entry.line_no ?? entry.lineNo;
-      const lineNo = Number(rawLineNo);
-      if (!Number.isFinite(lineNo)) return null;
-      normalized.push({
-        line_no: lineNo,
-        content: entry.content === null || entry.content === undefined ? '' : String(entry.content),
-      });
-    }
-    return normalized;
-  }
-
-  function synthesizeStructuredViewLines(content, viewRange) {
-    if (typeof content !== 'string') return null;
-    if (!Array.isArray(viewRange) || !viewRange.length) return null;
-    const startLine = Number(viewRange[0]);
-    if (!Number.isFinite(startLine)) return null;
-    if (!content) return [];
-    const normalizedContent = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    const rawLines = normalizedContent.split('\n');
-    if (rawLines.length && rawLines[rawLines.length - 1] === '') {
-      rawLines.pop();
-    }
-    return rawLines.map((rawLine, idx) => ({
-      line_no: startLine + idx,
-      content: rawLine,
-    }));
-  }
-
-  function splitHighlightedHtmlIntoLines(highlightedHtml) {
-    const html = String(highlightedHtml || '');
-    const tokens = html.split(/(<[^>]+>)/g);
-    const openTags = [];
-    const lines = [];
-    let current = '';
-
-    const closeAllTags = () => openTags.slice().reverse().map((tag) => `</${tag.name}>`).join('');
-    const reopenAllTags = () => openTags.map((tag) => tag.open).join('');
-
-    for (const token of tokens) {
-      if (!token) continue;
-      if (token.startsWith('<')) {
-        current += token;
-        if (token.startsWith('<!--') || token.startsWith('<!')) {
-          continue;
-        }
-        const match = token.match(/^<\s*(\/?)\s*([a-zA-Z0-9:-]+)/);
-        if (!match) continue;
-        const isClosing = Boolean(match[1]);
-        const tagName = String(match[2] || '').toLowerCase();
-        const selfClosing = /\/\s*>$/.test(token) || ['br', 'hr', 'img', 'input', 'meta', 'link'].includes(tagName);
-        if (isClosing) {
-          for (let idx = openTags.length - 1; idx >= 0; idx -= 1) {
-            if (openTags[idx].name === tagName) {
-              openTags.splice(idx, 1);
-              break;
-            }
-          }
-        } else if (!selfClosing) {
-          openTags.push({ name: tagName, open: token });
-        }
-        continue;
-      }
-
-      const textParts = token.split('\n');
-      for (let idx = 0; idx < textParts.length; idx += 1) {
-        current += textParts[idx];
-        if (idx < textParts.length - 1) {
-          lines.push(current + closeAllTags());
-          current = reopenAllTags();
-        }
-      }
-    }
-
-    lines.push(current);
-    return lines;
-  }
-
-  function buildHighlightedViewLineHtml(lines, lang) {
-    if (!Array.isArray(lines) || !lines.length) return [];
-    const highlighted = highlightCodeAlways(lines.map((line) => line.content).join('\n'), lang);
-    const htmlLines = splitHighlightedHtmlIntoLines(highlighted);
-    return htmlLines.length === lines.length ? htmlLines : [];
-  }
-
-  function getStructuredViewGutterDigits(lines) {
-    if (!Array.isArray(lines) || !lines.length) return 1;
-    let maxDigits = 1;
-    lines.forEach((line) => {
-      const raw = Number(line?.line_no);
-      const digits = Number.isFinite(raw) ? String(Math.abs(Math.trunc(raw))).length : 1;
-      if (digits > maxDigits) maxDigits = digits;
-    });
-    return maxDigits;
-  }
-
-  function renderStructuredViewLineTable(lines, path) {
-    const output = document.createElement('div');
-    output.className = 'command-output view-card-lines';
-    output.classList.toggle('wrap-enabled', viewWrapEnabled === true);
-
-    const table = document.createElement('table');
-    table.className = 'view-card-table';
-    const gutterDigits = getStructuredViewGutterDigits(lines);
-    table.style.setProperty('--view-card-gutter-ch', String(gutterDigits));
-    const tableBody = document.createElement('tbody');
-
-    const lang = detectLangFromPath(path);
-    const highlightedLines = typeof hljs !== 'undefined' ? buildHighlightedViewLineHtml(lines, lang) : [];
-
-    lines.forEach((line, idx) => {
-      const row = document.createElement('tr');
-      row.className = 'view-card-line';
-      row.dataset.lineNo = String(line.line_no);
-
-      const gutter = document.createElement('td');
-      gutter.className = 'view-card-line-no transcript-line-no';
-      gutter.dataset.lineNo = String(line.line_no);
-      gutter.textContent = String(line.line_no).padStart(gutterDigits, ' ');
-
-      const content = document.createElement('td');
-      content.className = 'view-card-line-content transcript-line-content';
-      content.dataset.lineNo = String(line.line_no);
-      const lineHtml = highlightedLines[idx];
-      if (typeof lineHtml === 'string') {
-        content.innerHTML = lineHtml;
-      } else {
-        content.textContent = line.content;
-      }
-
-      row.appendChild(gutter);
-      row.appendChild(content);
-      tableBody.appendChild(row);
-    });
-
-    table.appendChild(tableBody);
-    output.appendChild(table);
-    return output;
-  }
-
-  // Render text with code block highlighting
-  function renderWithHighlighting(container, text) {
-    if (!text) return;
-    text = stripCitations(text);
-    
-    // Check if text contains code blocks
-    const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
-    let lastIndex = 0;
-    let match;
-    let hasCodeBlocks = false;
-    
-    while ((match = codeBlockRegex.exec(text)) !== null) {
-      hasCodeBlocks = true;
-      // Add text before code block
-      if (match.index > lastIndex) {
-        const textBefore = text.slice(lastIndex, match.index);
-        const span = document.createElement('span');
-        span.textContent = textBefore;
-        container.appendChild(span);
-      }
-      
-      // Add code block
-      const lang = match[1] || '';
-      const code = match[2];
-      const pre = document.createElement('pre');
-      const codeEl = document.createElement('code');
-      if (lang) codeEl.className = `language-${lang}`;
-      codeEl.textContent = code;
-      pre.appendChild(codeEl);
-      container.appendChild(pre);
-      
-      // Highlight if hljs available
-      if (typeof hljs !== 'undefined') {
-        hljs.highlightElement(codeEl);
-      }
-      
-      lastIndex = match.index + match[0].length;
-    }
-    
-    // Add remaining text
-    if (hasCodeBlocks) {
-      if (lastIndex < text.length) {
-        const span = document.createElement('span');
-        span.textContent = text.slice(lastIndex);
-        container.appendChild(span);
-      }
-    } else {
-      // No code blocks, just set text content
-      container.textContent = text;
-    }
-  }
-
-  // Convert absolute path to relative path based on cwd
-  function toRelativePath(absPath) {
-    if (!absPath) return '';
-    const cwd = conversationSettings.cwd || conversationMeta.cwd || '';
-    if (cwd && absPath.startsWith(cwd)) {
-      let rel = absPath.slice(cwd.length);
-      if (rel.startsWith('/')) rel = rel.slice(1);
-      return rel || absPath;
-    }
-    // Try expanding ~ to match against home-relative cwd
-    const home = '/data/data/com.termux/files/home';
-    if (absPath.startsWith(home + '/')) {
-      const cwdExpanded = cwd.startsWith('~') ? home + cwd.slice(1) : cwd;
-      if (cwdExpanded && absPath.startsWith(cwdExpanded)) {
-        let rel = absPath.slice(cwdExpanded.length);
-        if (rel.startsWith('/')) rel = rel.slice(1);
-        return rel || absPath;
-      }
-      // Show relative to home as ~/...
-      return '~/' + absPath.slice(home.length + 1);
-    }
-    return absPath;
-  }
-
-  function setPill(el, text, cls) {
-    if (!el) return;
-    el.textContent = text;
-    el.className = `pill ${cls || ''}`.trim();
-  }
-
   const jsStatusEl = byId('js-status');
   if (jsStatusEl) setPill(jsStatusEl, 'loaded', 'ok');
 
@@ -898,12 +442,6 @@ document.addEventListener('DOMContentLoaded', () => {
         .register('/sw.js', { scope: '/' })
         .catch((err) => console.warn('Service worker registration failed', err));
     });
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[c]));
   }
 
   const composerRuntime = bindComposerRuntime({
@@ -1001,6 +539,19 @@ document.addEventListener('DOMContentLoaded', () => {
   } = timelineRows;
 
   refreshMessageCardHeaders = refreshMessageCardHeadersImpl;
+
+  const subagentsCollapsible = bindSubagentsCollapsible({
+    clearPlaceholder,
+    insertRow,
+    maybeAutoScroll,
+    documentRef: document,
+    storage: window.localStorage,
+  });
+
+  getSubagentContainer = subagentsCollapsible.getSubagentContainer;
+  getLiveEventParent = subagentsCollapsible.getLiveEventParent;
+  finalizeSubagent = subagentsCollapsible.finalizeSubagent;
+  makeCollapsible = subagentsCollapsible.makeCollapsible;
 
   const hostRuntime = bindHostRuntime({
     getState: () => ({
@@ -1418,345 +969,60 @@ document.addEventListener('DOMContentLoaded', () => {
     windowRef: window,
   });
 
-  const planOverlay = bindPlanOverlay({
-    timelineEl,
-    getState: () => ({
-      planOverlayEl,
-      planListEl,
-      planCollapsed,
-      planItems,
-      planState: currentPlanState(),
-      topSpacerEl,
-    }),
-    setState: (patch) => {
-      if (patch.planOverlayEl !== undefined) planOverlayEl = patch.planOverlayEl;
-      if (patch.planListEl !== undefined) planListEl = patch.planListEl;
-      if (patch.planCollapsed !== undefined) planCollapsed = patch.planCollapsed;
-    },
-    persistCollapsedState: (collapsed) => persistPlanCollapsedState(collapsed),
-    openPlanModal: () => openPlanModal(),
-  });
-
-  function ensurePlanOverlay() {
-    return planOverlay.ensurePlanOverlay();
-  }
-
-  function updatePlanItem(step, status) {
-    return planOverlay.updatePlanItem(step, status);
-  }
-
-  function clearPlanOverlay() {
-    return planOverlay.clearPlanOverlay();
-  }
-
-  function finalizePlanToTranscript() {
-    return planOverlay.finalizePlanToTranscript();
-  }
-
-  function syncPlanOverlayUi() {
-    return planOverlay.syncPlanOverlayUi();
-  }
-
-  function restorePlanOverlay(snapshot) {
-    return planOverlay.restorePlanOverlay(snapshot);
-  }
-
-  function createEmptyPlanDocumentState(hasPlan = Boolean(runtimeOptions?.has_plan)) {
-    return {
-      has_plan: Boolean(hasPlan),
-      plan_exists: false,
-      plan_content: '',
-      plan_path: null,
-      plan_source: null,
-    };
-  }
-
-  function createEmptyTodoState(hasTodo = Boolean(runtimeOptions?.has_todo)) {
-    return {
-      has_todo: Boolean(hasTodo),
-      plan_steps: [],
-    };
-  }
-
-  function createEmptyPlanState(
-    hasPlan = Boolean(runtimeOptions?.has_plan),
-    hasTodo = Boolean(runtimeOptions?.has_todo),
-  ) {
-    return {
-      ...createEmptyPlanDocumentState(hasPlan),
-      ...createEmptyTodoState(hasTodo),
-    };
-  }
-
-  function currentPlanState() {
-    return {
-      has_plan: Boolean(planDocState?.has_plan ?? runtimeOptions?.has_plan),
-      has_todo: Boolean(todoState?.has_todo ?? runtimeOptions?.has_todo),
-      plan_exists: Boolean(planDocState?.plan_exists),
-      plan_content: typeof planDocState?.plan_content === 'string' ? planDocState.plan_content : '',
-      plan_steps: Array.isArray(todoState?.plan_steps) ? todoState.plan_steps : [],
-      plan_path: typeof planDocState?.plan_path === 'string' ? planDocState.plan_path : null,
-      plan_source: typeof planDocState?.plan_source === 'string' ? planDocState.plan_source : null,
-    };
-  }
-
-  function normalizePlanDocumentState(nextState) {
-    const next = nextState && typeof nextState === 'object' ? nextState : {};
-    const hasPlan = next.has_plan ?? planDocState.has_plan ?? Boolean(runtimeOptions?.has_plan);
-    const planContent = typeof next.plan_content === 'string'
-      ? next.plan_content
-      : (next.plan_exists === false ? '' : (planDocState.plan_content || ''));
-    const planExists = next.plan_exists ?? (Boolean(hasPlan) && Boolean(planContent.trim()));
-    return {
-      ...planDocState,
-      has_plan: Boolean(hasPlan),
-      plan_exists: Boolean(planExists),
-      plan_content: Boolean(planExists) ? planContent : '',
-      plan_path: Boolean(planExists)
-        ? (typeof next.plan_path === 'string' ? next.plan_path : (planDocState.plan_path || null))
-        : null,
-      plan_source: typeof next.plan_source === 'string' ? next.plan_source : (planDocState.plan_source || null),
-    };
-  }
-
-  function normalizeTodoState(nextState) {
-    const next = nextState && typeof nextState === 'object' ? nextState : {};
-    const hasTodo = next.has_todo ?? todoState.has_todo ?? Boolean(runtimeOptions?.has_todo);
-    const rawSteps = Array.isArray(next.plan_steps)
-      ? next.plan_steps
-      : (Array.isArray(next.steps) ? next.steps : (todoState.plan_steps || []));
-    const steps = rawSteps
-      .map((item) => {
-        if (!item || typeof item !== 'object') return null;
-        const step = typeof item.step === 'string' ? item.step : '';
-        if (!step) return null;
-        return {
-          step,
-          status: typeof item.status === 'string' ? item.status : 'pending',
-        };
-      })
-      .filter(Boolean);
-    return {
-      has_todo: Boolean(hasTodo),
-      plan_steps: steps,
-    };
-  }
-
-  function currentExtensionId() {
-    const candidate = conversationSettings?.agent || conversationMeta?.settings?.agent || runtimeOptions?.agent || '';
-    const resolved = typeof candidate === 'string' ? candidate.trim() : '';
-    return resolved === 'codex' ? '' : resolved;
-  }
-
-  async function loadExtensionUiFeatures(extensionId) {
-    const resolvedExtensionId = typeof extensionId === 'string' && extensionId.trim()
-      ? extensionId.trim()
-      : currentExtensionId();
-    if (!resolvedExtensionId) {
-      setSemanticShellQuoteParsingEnabled(false);
-      setActiveToolRenderPolicy(null);
-      return {};
-    }
-    try {
-      const data = await sioCall('get_extension_ui_features', {
-        extension_id: resolvedExtensionId,
-      });
-      const uiFeatures = data?.ui_features && typeof data.ui_features === 'object' ? data.ui_features : {};
-      const semanticShellRibbon = uiFeatures.semanticShellRibbon;
-      setSemanticShellQuoteParsingEnabled(semanticShellRibbon?.quoteParsing === true);
-      setActiveToolRenderPolicy(uiFeatures.toolRenderPolicy);
-      return uiFeatures;
-    } catch (_) {
-      setSemanticShellQuoteParsingEnabled(false);
-      setActiveToolRenderPolicy(null);
-      return {};
-    }
-  }
-
   const requestCardRuntime = bindRequestCardRuntime({
     sioCall,
   });
 
-  function syncPlanSurface({ renderModal = false } = {}) {
-    const mergedState = currentPlanState();
-    if (mergedState.plan_exists || (mergedState.has_todo && mergedState.plan_steps.length > 0)) {
-      ensurePlanOverlay();
-    }
-    if (mergedState.has_todo && mergedState.plan_steps.length > 0) {
-      restorePlanOverlay({ steps: mergedState.plan_steps });
-    } else {
-      clearPlanOverlay();
-    }
-    syncPlanOverlayUi();
-    if (renderModal && planModal.isPlanModalOpen()) {
-      renderPlanModal();
-    }
-    return mergedState;
-  }
-
-  function applyAuthoritativePlanState(nextState) {
-    planDocState = normalizePlanDocumentState(nextState);
-    todoState = normalizeTodoState(nextState);
-    planDocDirty = false;
-    return syncPlanSurface({ renderModal: true });
-  }
-
-  function applyTodoState(nextState) {
-    todoState = normalizeTodoState(nextState);
-    return syncPlanSurface();
-  }
-
-  function updateTodoStateStep(step, status) {
-    const normalizedStep = typeof step === 'string' ? step : '';
-    if (!normalizedStep) return currentPlanState();
-    const normalizedStatus = typeof status === 'string' && status ? status : 'pending';
-    const steps = Array.isArray(todoState.plan_steps) ? [...todoState.plan_steps] : [];
-    const existingIndex = steps.findIndex((item) => item && item.step === normalizedStep);
-    const nextItem = { step: normalizedStep, status: normalizedStatus };
-    if (existingIndex >= 0) {
-      steps[existingIndex] = nextItem;
-    } else {
-      steps.push(nextItem);
-    }
-    todoState = {
-      has_todo: true,
-      plan_steps: steps,
-    };
-    return syncPlanSurface();
-  }
-
-  function handleLiveTodoUpdate(nextState) {
-    const next = nextState && typeof nextState === 'object' ? nextState : {};
-    if (Array.isArray(next.plan_steps) || Array.isArray(next.steps)) {
-      return applyTodoState(next);
-    }
-    if (typeof next.step === 'string' && next.step) {
-      return updateTodoStateStep(next.step, next.status);
-    }
-    return currentPlanState();
-  }
-
-  function handleLivePlanState(nextState) {
-    const next = nextState && typeof nextState === 'object' ? nextState : {};
-    handleLiveTodoUpdate(next);
-    const operation = typeof next.plan_operation === 'string' ? next.plan_operation.trim().toLowerCase() : '';
-    const modalOpen = planModal.isPlanModalOpen();
-    const hasPlanCapability = Boolean(next.has_plan ?? planDocState.has_plan ?? runtimeOptions?.has_plan);
-    if (operation === 'update' && !modalOpen && hasPlanCapability) {
-      planDocDirty = true;
-      return currentPlanState();
-    }
-    if (operation === 'create' || operation === 'delete' || (operation === 'update' && modalOpen)) {
-      const refreshPromise = refreshPlanSurface(true);
-      if (refreshPromise && typeof refreshPromise.catch === 'function') {
-        refreshPromise.catch((err) => console.warn('failed to refresh authoritative plan state', err));
-      }
-      return refreshPromise;
-    }
-    return currentPlanState();
-  }
-
-  async function fetchPlanState(force = false) {
-    const convoId = conversationMeta?.conversation_id || null;
-    const extensionId = currentExtensionId();
-    const hasPlanCapability = Boolean(runtimeOptions?.has_plan);
-    const hasTodoCapability = Boolean(runtimeOptions?.has_todo);
-    const hasStateCapability = hasPlanCapability || hasTodoCapability;
-    if (!convoId || !extensionId || !hasStateCapability) {
-      return applyAuthoritativePlanState(createEmptyPlanState(hasPlanCapability, hasTodoCapability));
-    }
-    const requestSerial = ++planFetchSerial;
-    try {
-      const data = await sioCall('get_extension_plan', {
-        extension_id: extensionId,
-        conversation_id: convoId,
-        force,
-      });
-      if (requestSerial !== planFetchSerial) return currentPlanState();
-      if (!data || data.ok === false) {
-        console.warn('failed to fetch plan state', data?.error || 'unknown error');
-        return currentPlanState();
-      }
-      return applyAuthoritativePlanState(data);
-    } catch (err) {
-      if (requestSerial !== planFetchSerial) return currentPlanState();
-      console.warn('failed to refresh plan state', err);
-      return currentPlanState();
-    }
-  }
-
-  async function refreshPlanSurface(force = false) {
-    return fetchPlanState(force);
-  }
-
-  const planModal = bindPlanModal({
-    elements: {
-      planModalEl,
-      planCloseBtn,
-      planDismissBtn,
-      planBodyEl,
+  const planRuntime = bindPlanRuntime({
+    getState: () => ({
+      conversationMeta,
+      conversationSettings,
+      runtimeOptions,
+      planOverlayEl,
+      planListEl,
+      planCollapsed,
+      planDocState,
+      todoState,
+      planDocDirty,
+      planFetchSerial,
+      topSpacerEl,
+    }),
+    setState: (patch) => {
+      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
+      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
+      if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
+      if (patch.planOverlayEl !== undefined) planOverlayEl = patch.planOverlayEl;
+      if (patch.planListEl !== undefined) planListEl = patch.planListEl;
+      if (patch.planCollapsed !== undefined) planCollapsed = patch.planCollapsed === true;
+      if (patch.planDocState !== undefined) planDocState = patch.planDocState || {};
+      if (patch.todoState !== undefined) todoState = patch.todoState || {};
+      if (patch.planDocDirty !== undefined) planDocDirty = patch.planDocDirty === true;
+      if (patch.planFetchSerial !== undefined) planFetchSerial = Number(patch.planFetchSerial || 0);
+      if (patch.topSpacerEl !== undefined) topSpacerEl = patch.topSpacerEl;
     },
-    getState: () => ({ planState: currentPlanState() }),
+    timelineEl,
+    planItems,
+    sioCall,
+    currentExtensionId,
+    planModalEl,
+    planCloseBtn,
+    planDismissBtn,
+    planBodyEl,
     renderMarkdownInto,
     highlightCode,
   });
 
-  async function openPlanModal() {
-    if (planDocDirty) {
-      try {
-        await refreshPlanSurface(true);
-      } catch (err) {
-        console.warn('failed to refresh stale plan state before opening modal', err);
-      }
-    }
-    return planModal.openPlanModal();
-  }
-
-  function closePlanModal() {
-    return planModal.closePlanModal();
-  }
-
-  function renderPlanModal() {
-    return planModal.renderPlanModal();
-  }
-
-  async function persistPlanCollapsedState(collapsed) {
-    planCollapsed = Boolean(collapsed);
-    conversationSettings = {
-      ...(conversationSettings || {}),
-      planOverlayCollapsed: planCollapsed,
-    };
-    if (conversationMeta && typeof conversationMeta === 'object') {
-      conversationMeta = {
-        ...conversationMeta,
-        settings: conversationSettings,
-      };
-    }
-    const convoId = conversationMeta?.conversation_id || null;
-    if (!convoId) return;
-    try {
-      await sioCall('conversation_update', {
-        conversation_id: convoId,
-        settings: {
-          planOverlayCollapsed: planCollapsed,
-        },
-      });
-    } catch (err) {
-      console.warn('failed to persist plan overlay collapse state', err);
-    }
-  }
-
-  async function requestContextCompact() {
-    try {
-      const convoId = conversationMeta?.conversation_id || null;
-      const result = await conversationsRpcClient.compactConversation({ conversationId: convoId });
-      if (result && result.ok === false) {
-        throw new Error(String(result.error || 'compact failed'));
-      }
-    } catch (err) {
-      console.warn('compact failed', err);
-    }
-  }
+  const {
+    clearPlanOverlay,
+    finalizePlanToTranscript,
+    syncPlanOverlayUi,
+    createEmptyPlanState,
+    applyAuthoritativePlanState,
+    handleLiveTodoUpdate,
+    handleLivePlanState,
+    refreshPlanSurface,
+    closePlanModal,
+  } = planRuntime;
 
   const {
     appendErrorContent,
@@ -1990,8 +1256,21 @@ document.addEventListener('DOMContentLoaded', () => {
       planOverlayEl = null;
       planListEl = null;
       planItems.clear();
-      planDocState = createEmptyPlanDocumentState(Boolean(runtimeOptions?.has_plan));
-      todoState = createEmptyTodoState(Boolean(runtimeOptions?.has_todo));
+      const emptyPlanState = createEmptyPlanState(
+        Boolean(runtimeOptions?.has_plan),
+        Boolean(runtimeOptions?.has_todo),
+      );
+      planDocState = {
+        has_plan: emptyPlanState.has_plan,
+        plan_exists: emptyPlanState.plan_exists,
+        plan_content: emptyPlanState.plan_content,
+        plan_path: emptyPlanState.plan_path,
+        plan_source: emptyPlanState.plan_source,
+      };
+      todoState = {
+        has_todo: emptyPlanState.has_todo,
+        plan_steps: emptyPlanState.plan_steps,
+      };
       closePlanModal();
     },
     syncPlanOverlayUi,
@@ -2118,114 +1397,67 @@ document.addEventListener('DOMContentLoaded', () => {
     isRpcTransportEnabled: () => rpcTransportEnabled,
   });
 
-  /**
-   * Send a Socket.IO event with ack only.
-   * @param {string} event - SIO event name (e.g. 'send_message')
-   * @param {object} data - Payload to send
-   * @param {object} [options] - { timeoutMs } where timeoutMs: null disables the ack timeout
-   * @returns {Promise<any>} Server response (ack value)
-   */
-  async function sioCall(event, data = {}, options: AnyRecord = {}): Promise<any> {
-    if (options && (Object.prototype.hasOwnProperty.call(options, 'fallbackUrl') || Object.prototype.hasOwnProperty.call(options, 'fallbackMethod'))) {
-      throw new Error(`HTTP fallbacks are disabled for Socket.IO contract: ${event}`);
-    }
-    const hasExplicitTimeout = Boolean(options) && Object.prototype.hasOwnProperty.call(options, 'timeoutMs');
-    const timeoutMs = hasExplicitTimeout
-      ? (options.timeoutMs === null ? null : (Number.isFinite(options.timeoutMs) ? options.timeoutMs : 10000))
-      : 10000;
-    if (_socket && _socket.connected) {
-      return new Promise((resolve, reject) => {
-        let timer = null;
-        if (Number.isFinite(timeoutMs)) {
-          timer = setTimeout(() => {
-            reject(new Error(`sioCall timeout: ${event}`));
-          }, timeoutMs);
-        }
-        _socket.emit(event, data, (ack) => {
-          if (timer) clearTimeout(timer);
-          if (ack && ack.__error) {
-            resolve({ ok: false, error: ack.__error });
-          } else {
-            resolve(ack);
-          }
-        });
-      });
-    }
-    const ready = await waitForWs(3000);
-    if (ready && _socket && _socket.connected) {
-      return sioCall(event, data, options);
-    }
-    return { ok: false, error: 'Socket.IO not connected' };
-  }
-	  async function fetchConversation(conversationId = null) {
-	    try {
-	      const cid = conversationId || clientConversationId;
-	      const data = await sioCall('conversation_get', {
-	        conversation_id: cid || null,
-	      });
-	      if (!data || data.ok === false) return;
-	      conversationMeta = data;
-	      conversationSettings = conversationMeta?.settings || {};
-          planCollapsed = conversationSettings?.planOverlayCollapsed === true;
-          syncPlanOverlayUi();
-	      if (!clientConversationId && conversationMeta?.conversation_id) {
-	        clientConversationId = conversationMeta.conversation_id;
-	      }
-	      if (!clientActiveView && conversationMeta?.active_view) {
-	        clientActiveView = conversationMeta.active_view;
-	      }
-	      activeView = clientActiveView || conversationMeta?.active_view || 'splash';
-        activeRuntimeOptionValues = {};
-      if (activeView !== 'conversation') {
-        miniConversationDrawerOpen = false;
+  const conversationRuntime = bindConversationRuntime({
+    getState: () => ({
+      conversationMeta,
+      conversationSettings,
+      clientConversationId,
+      clientActiveView,
+      activeView,
+      activeRuntimeOptionValues,
+      miniConversationDrawerOpen,
+      runtimeOptions,
+      hostUi,
+      planCollapsed,
+    }),
+    setState: (patch) => {
+      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
+      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
+      if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
+      if (patch.clientActiveView !== undefined) clientActiveView = patch.clientActiveView;
+      if (patch.activeView !== undefined) activeView = patch.activeView;
+      if (patch.activeRuntimeOptionValues !== undefined) activeRuntimeOptionValues = patch.activeRuntimeOptionValues || {};
+      if (patch.miniConversationDrawerOpen !== undefined) {
+        miniConversationDrawerOpen = patch.miniConversationDrawerOpen === true;
       }
-      await loadRuntimeOptions(
-        currentExtensionId() || null,
-        conversationMeta?.conversation_id,
-      );
-      await loadExtensionUiFeatures(currentExtensionId());
-      await requestCardRuntime.preload(currentExtensionId());
-      closePlanModal();
-      applyAuthoritativePlanState(createEmptyPlanState(Boolean(runtimeOptions?.has_plan), Boolean(runtimeOptions?.has_todo)));
-      setDrawerOpen(activeView === 'conversation');
-	      applyHostUi();
-	      updateActiveConversationLabel();
-      renderFooterRuntimeControls();
-      // Sync markdown toggle from settings
-      setMarkdownEnabled(conversationSettings?.markdown !== false);
-      // Sync track-edits toggle from settings
-      setTrackEditsEnabled(conversationSettings?.trackEdits === true);
-      // Sync line-number toggle from settings
-      setLineNumbersEnabled(conversationSettings?.lineNumbers === true);
-      // Sync view-card wrap toggle from settings
-      setViewWrapEnabled(conversationSettings?.viewWrap === true);
-      // Sync diff syntax toggle from settings
-      setDiffSyntaxEnabled(conversationSettings?.diffSyntax === true);
-      // Sync semantic shell ribbon toggle from settings (Tree-sitter)
-      setSemanticShellRibbonEnabled(conversationSettings?.semanticShellRibbon === true);
-      if (conversationSettings?.semanticShellRibbon === true) {
-        ensureTreeSitterRibbonReady();
-      }
-      // Restore draft from conversation meta
-	      restoreDraft();
-	    } catch {
-	      // Don't touch statusEl here - it's for server status only
-	    }
-	    updateConversationHeaderLabel();
-	  }
+      if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
+      if (patch.hostUi !== undefined) hostUi = patch.hostUi;
+      if (patch.planCollapsed !== undefined) planCollapsed = patch.planCollapsed === true;
+    },
+    getSocket: () => _socket,
+    waitForWs,
+    statusEl,
+    setPill,
+    loadRuntimeOptions,
+    requestCardRuntime,
+    closePlanModal,
+    createEmptyPlanState,
+    applyAuthoritativePlanState,
+    syncPlanOverlayUi,
+    setDrawerOpen,
+    applyHostUi,
+    updateActiveConversationLabel,
+    renderFooterRuntimeControls,
+    setMarkdownEnabled,
+    setTrackEditsEnabled,
+    setLineNumbersEnabled,
+    setViewWrapEnabled,
+    setDiffSyntaxEnabled,
+    setSemanticShellRibbonEnabled,
+    ensureTreeSitterRibbonReady,
+    restoreDraft,
+    updateConversationHeaderLabel,
+    setSemanticShellQuoteParsingEnabled,
+    setActiveToolRenderPolicy,
+    conversationsRpcClient,
+  });
 
-  async function fetchStatus() {
-    try {
-      const data = await sioCall('get_status', {});
-      if (data.running) {
-        setPill(statusEl, 'running', 'ok');
-      } else {
-        setPill(statusEl, 'idle', 'warn');
-      }
-    } catch {
-      setPill(statusEl, 'error', 'err');
-    }
-  }
+  currentExtensionIdImpl = conversationRuntime.currentExtensionId;
+  loadExtensionUiFeaturesImpl = conversationRuntime.loadExtensionUiFeatures;
+  sioCallImpl = conversationRuntime.sioCall;
+  fetchConversationImpl = conversationRuntime.fetchConversation;
+  fetchStatusImpl = conversationRuntime.fetchStatus;
+  requestContextCompactImpl = conversationRuntime.requestContextCompact;
 
   const {
     ensureInitialized,

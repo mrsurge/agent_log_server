@@ -9,10 +9,10 @@ __pycache__/
 .venv/
 venv/
 .env
-
+agent_log_server.egg-info
 .DS_Store
 worktrees/
-
+scripts
 node_modules/
 static/dist/
 .tmp/
