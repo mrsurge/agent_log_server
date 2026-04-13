@@ -394,12 +394,10 @@ def render_codex_agent_ui(package_root: Path) -> HTMLResponse:
                 Link(rel="icon", type="image/svg+xml", href=_asset(package_root, CODEX_AGENT_ICON_PATH)),
                 Link(rel="stylesheet", href=_asset(package_root, "/static/vendor/fonts/jetbrains-mono.css")),
                 Link(rel="stylesheet", href=_asset(package_root, "/static/vendor/highlight.js/github-dark.min.css")),
-                Link(rel="stylesheet", href=_asset(package_root, "/static/vendor/xterm/xterm.css")),
                 Link(rel="stylesheet", href=_asset(package_root, "/static/vendor/tribute.css")),
                 Link(rel="stylesheet", href=_asset(package_root, "/static/codex_agent.css")),
                 Script(src=_asset(package_root, "/static/vendor/highlight.js/highlight.bundle.js")),
                 Script(src=_asset(package_root, "/static/vendor/markdown-it/markdown-it.min.js")),
-                Script(src=_asset(package_root, "/static/vendor/xterm/xterm.js")),
                 Script(src=_asset(package_root, "/static/vendor/socket.io/socket.io.min.js")),
                 Script(src=_asset(package_root, "/static/vendor/tribute.min.js")),
                 Script(NotStr("window.addEventListener('load', () => console.log('socket.io', typeof io));"), defer=True),
@@ -598,11 +596,6 @@ try {{
                                 Label(
                                     Span("Render Markdown"),
                                     Input(type="checkbox", id="settings-markdown", checked=True),
-                                    cls="settings-checkbox-row"
-                                ),
-                                Label(
-                                    Span("Use xterm.js (terminal)"),
-                                    Input(type="checkbox", id="settings-xterm", checked=True),
                                     cls="settings-checkbox-row"
                                 ),
                                 Label(

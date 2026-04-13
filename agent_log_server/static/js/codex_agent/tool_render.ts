@@ -1,3 +1,5 @@
+type ToolPayload = Record<string, any>;
+
 export function bindToolRender(ctx) {
   const {
     toolRows,
@@ -199,7 +201,7 @@ export function bindToolRender(ctx) {
     return entry;
   }
 
-  function resolveToolCardPath(toolName, payload = {}) {
+  function resolveToolCardPath(toolName, payload: ToolPayload = {}) {
     if (!payload || typeof payload !== 'object') return '';
     if (typeof payload.path === 'string' && payload.path.trim()) {
       return payload.path.trim();
@@ -219,7 +221,7 @@ export function bindToolRender(ctx) {
     return '';
   }
 
-  function resolveToolCardDiff(toolName, payload = {}) {
+  function resolveToolCardDiff(toolName, payload: ToolPayload = {}) {
     if (toolName !== 'apply_patch' || !payload || typeof payload !== 'object') return '';
     if (typeof payload.diff === 'string' && payload.diff.trim()) {
       return payload.diff;
@@ -231,7 +233,7 @@ export function bindToolRender(ctx) {
     return '';
   }
 
-  function resolveToolCardOutcome(toolName, payload = {}) {
+  function resolveToolCardOutcome(toolName, payload: ToolPayload = {}) {
     if (toolName !== 'apply_patch' || !payload || typeof payload !== 'object') return '';
     const result = payload.result && typeof payload.result === 'object' ? payload.result : null;
     const status = typeof payload.status === 'string' ? payload.status.trim().toLowerCase() : '';
@@ -258,7 +260,7 @@ export function bindToolRender(ctx) {
     return '';
   }
 
-  function isApplyPatchNewFile(payload = {}) {
+  function isApplyPatchNewFile(payload: ToolPayload = {}) {
     if (!payload || typeof payload !== 'object') return false;
     const args = payload.arguments && typeof payload.arguments === 'object' ? payload.arguments : {};
     const request = payload.request && typeof payload.request === 'object' ? payload.request : {};

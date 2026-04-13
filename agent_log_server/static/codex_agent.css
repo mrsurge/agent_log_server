@@ -1349,10 +1349,6 @@ textarea {
   background: transparent;
 }
 
-.terminal-card .xterm {
-  padding: 0;
-}
-
 .diff-block {
   background: #000;
   color: #fff;
@@ -2352,7 +2348,7 @@ body.line-numbers-enabled .transcript-line-no {
   color: #f87171;
 }
 
-/* xterm output blocks (agent PTY + future user PTY) */
+/* Plain terminal output blocks (agent PTY + future user PTY) */
 .timeline-row.command-result .command-output {
   background: #000;
   color: #c9d1d9;
@@ -2362,15 +2358,6 @@ body.line-numbers-enabled .transcript-line-no {
   font-family: monospace;
   font-size: 0.85em;
   min-height: 1.5em;
-}
-/* xterm styling - let it handle its own layout */
-.timeline-row.command-result .command-output .xterm {
-  padding: 4px 8px;
-}
-.timeline-row.command-result .command-output .xterm,
-.timeline-row.command-result .command-output .xterm-viewport,
-.timeline-row.command-result .command-output .xterm-screen {
-  background-color: #000 !important;
 }
 
 .view-card-path {

@@ -1,3 +1,6 @@
+type ApprovalData = Record<string, any>;
+type ApprovalRowOptions = Record<string, any>;
+
 function normalizeDecisionLabel(decision) {
   if (typeof decision === 'string') {
     switch (decision) {
@@ -72,7 +75,7 @@ export function bindApprovalUi(ctx) {
     onAfterRender,
   } = ctx;
 
-  function approvalRowSource(options = {}, evt = {}) {
+  function approvalRowSource(options: ApprovalRowOptions = {}, evt: ApprovalData = {}) {
     if (typeof options.source === 'string' && options.source.trim()) return options.source.trim();
     if (options.readOnly) {
       if (evt.type === 'approval_handoff') return 'resolved';
@@ -82,37 +85,37 @@ export function bindApprovalUi(ctx) {
     return 'live';
   }
 
-  function approvalTurnId(evt = {}) {
+  function approvalTurnId(evt: ApprovalData = {}) {
     return typeof evt?.turn_id === 'string' ? evt.turn_id.trim() : '';
   }
 
-  function approvalRequestId(evt = {}) {
+  function approvalRequestId(evt: ApprovalData = {}) {
     const requestId = evt?.request_id ?? evt?.id;
     if (requestId === null || requestId === undefined || requestId === '') return '';
     return String(requestId);
   }
 
-  function approvalCardId(evt = {}) {
+  function approvalCardId(evt: ApprovalData = {}) {
     const cardId = evt?.card_id ?? evt?.cardId ?? evt?.item_id ?? evt?.id ?? evt?.request_id;
     if (cardId === null || cardId === undefined || cardId === '') return '';
     return String(cardId);
   }
 
-  function approvalRowKey(evt = {}) {
+  function approvalRowKey(evt: ApprovalData = {}) {
     const cardId = approvalCardId(evt);
     if (!cardId) return '';
     const turnId = approvalTurnId(evt);
     return turnId ? `${turnId}::${cardId}` : cardId;
   }
 
-  function findApprovalRow(evt = {}) {
+  function findApprovalRow(evt: ApprovalData = {}): HTMLElement | null {
     if (!timelineEl) return null;
     const wantedRequestId = approvalRequestId(evt);
     if (!wantedRequestId) return null;
     const wantedCardId = approvalCardId(evt);
     const wantedTurnId = approvalTurnId(evt);
     const wantedKey = approvalRowKey(evt);
-    const rows = Array.from(timelineEl.querySelectorAll('.timeline-row[data-approval-id]'));
+    const rows = Array.from((timelineEl as Element).querySelectorAll('.timeline-row[data-approval-id]')) as HTMLElement[];
     if (wantedKey) {
       const exact = rows.find((row) => row.dataset.approvalKey === wantedKey);
       if (exact) return exact;
@@ -133,7 +136,7 @@ export function bindApprovalUi(ctx) {
     )) || null;
   }
 
-  function ensureApprovalRow(evt, options = {}) {
+  function ensureApprovalRow(evt: ApprovalData, options: ApprovalRowOptions = {}) {
     const requestId = approvalRequestId(evt);
     const cardId = approvalCardId(evt);
     const parentEl = options.parentEl || (evt?.subagent_id
@@ -245,15 +248,15 @@ export function bindApprovalUi(ctx) {
     container.append(row);
   }
 
-  async function respondApproval(requestId, result, options = {}) {
+  async function respondApproval(requestId, result, options: ApprovalData = {}) {
     if (requestId === null || requestId === undefined) return;
     const resultPayload = typeof result === 'string'
       ? { decision: result }
       : (result && typeof result === 'object' ? result : {});
-    const payload = {
-      conversation_id: getConversationId() || null,
-      request_id: String(requestId),
-    };
+      const payload: ApprovalData = {
+        conversation_id: getConversationId() || null,
+        request_id: String(requestId),
+      };
     if (Object.keys(resultPayload).length) {
       payload.result = resultPayload;
     }
@@ -261,7 +264,7 @@ export function bindApprovalUi(ctx) {
       payload.decision = resultPayload.decision;
     }
     try {
-      const sioOptions = {};
+      const sioOptions: ApprovalData = {};
       if (Object.prototype.hasOwnProperty.call(options, 'timeoutMs')) {
         sioOptions.timeoutMs = options.timeoutMs;
       }
@@ -271,7 +274,7 @@ export function bindApprovalUi(ctx) {
     }
   }
 
-  async function submitApproval(requestId, result, meta = {}) {
+  async function submitApproval(requestId, result, meta: ApprovalData = {}) {
     const timeoutMs = meta?.requestMethod === 'agent-pty/ask-user' ? null : undefined;
     const response = await respondApproval(requestId, result, { timeoutMs });
     if (!response || response.ok === false) return { ok: false, response };
@@ -357,10 +360,11 @@ export function bindApprovalUi(ctx) {
     }
     if (payload.changes && payload.changes.constructor === Object) {
       Object.entries(payload.changes).forEach(([changePath, change]) => {
-        if (!change || typeof change !== 'object') return;
-        const changeDiff = change.diff || change.unified_diff || change.patch || '';
+        const changeRecord = change && typeof change === 'object' ? change as ApprovalData : null;
+        if (!changeRecord) return;
+        const changeDiff = changeRecord.diff || changeRecord.unified_diff || changeRecord.patch || '';
         if (!changeDiff) return;
-        const resolvedPath = change.path || change.file_path || changePath;
+        const resolvedPath = changeRecord.path || changeRecord.file_path || changePath;
         diffText = diffText || changeDiff;
         filePath = filePath || resolvedPath;
         const label = document.createElement('div');
@@ -421,7 +425,7 @@ export function bindApprovalUi(ctx) {
     body.append(actions);
   }
 
-  function renderApproval(evt, options = {}) {
+  function renderApproval(evt: ApprovalData, options: ApprovalRowOptions = {}) {
     const requestId = approvalRequestId(evt);
     if (!requestId) return null;
     const { row, body } = ensureApprovalRow(evt, options);
@@ -476,7 +480,7 @@ export function bindApprovalUi(ctx) {
     return row;
   }
 
-  function buildApprovalEventFromPending(entry) {
+  function buildApprovalEventFromPending(entry: ApprovalData) {
     const conversationId = getConversationId() || null;
     const requestId = entry?.request_id || entry?.id;
     if (!requestId) return null;
@@ -515,7 +519,7 @@ export function bindApprovalUi(ctx) {
       onAfterRender?.();
       return;
     }
-    const items = Object.values(pending)
+    const items = (Object.values(pending) as ApprovalData[])
       .filter((entry) => entry && typeof entry === 'object' && (entry.request_id || entry.id))
       .sort((a, b) => String(a?.created_at || a?.render_event?.created_at || '').localeCompare(String(b?.created_at || b?.render_event?.created_at || '')));
     items.forEach((entry) => {
@@ -526,10 +530,10 @@ export function bindApprovalUi(ctx) {
     onAfterRender?.();
   }
 
-  function handoffApproval(evt, options = {}) {
+  function handoffApproval(evt: ApprovalData, options: ApprovalRowOptions = {}) {
     const requestId = approvalRequestId(evt);
     if (!requestId) return null;
-    const activeRow = options.row instanceof HTMLElement ? options.row : findApprovalRow(evt);
+    const activeRow: HTMLElement | null = options.row instanceof HTMLElement ? options.row : findApprovalRow(evt);
     const parentEl = options.parentEl || activeRow?.parentElement || null;
     const nextSibling = activeRow?.nextSibling || null;
     if (activeRow) activeRow.remove();

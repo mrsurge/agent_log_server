@@ -11,22 +11,22 @@ import {
   streamWrite,
 } from './js/codex_agent/markdown.js';
 import { bindAssistantStream } from './js/codex_agent/assistant_stream.ts';
-import { bindShellRender } from './js/codex_agent/shell_render.js';
-import { bindToolRender } from './js/codex_agent/tool_render.js';
+import { bindShellRender } from './js/codex_agent/shell_render.ts';
+import { bindToolRender } from './js/codex_agent/tool_render.ts';
 import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.ts';
 import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.js';
 import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.ts';
-import { bindDiffRendering } from './js/codex_agent/diff/rendering.js';
+import { bindDiffRendering } from './js/codex_agent/diff/rendering.ts';
 import { bindSocketEvents } from './js/codex_agent/events/socket.js';
 import { bindEventRouter } from './js/codex_agent/events/router.js';
 import { bindPlanOverlay } from './js/codex_agent/plan_overlay.ts';
 import { bindPlanModal } from './js/codex_agent/plan_modal.ts';
 import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.ts';
-import { bindApprovalUi } from './js/codex_agent/approvals/ui.js';
+import { bindApprovalUi } from './js/codex_agent/approvals/ui.ts';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
 import { bindRequestCardRuntime } from './js/codex_agent/request_cards/runtime.ts';
-import { bindShellSemantic } from './js/codex_agent/shell_semantic.js';
+import { bindShellSemantic } from './js/codex_agent/shell_semantic.ts';
 import { formatJsonSetting, parseJsonSetting } from './js/codex_agent/settings/runtime_helpers.js';
 import { bindSettingsSaveFlow } from './js/codex_agent/settings/save_flow.js';
 import { bindSettingsUiFlow } from './js/codex_agent/settings/ui_flow.js';
@@ -90,7 +90,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsCommandLinesEl = document.getElementById('settings-command-lines');
   const settingsViewWrapEl = document.getElementById('settings-view-wrap');
   const settingsMarkdownEl = document.getElementById('settings-markdown');
-  const settingsXtermEl = document.getElementById('settings-xterm');
   const settingsDiffSyntaxEl = document.getElementById('settings-diff-syntax');
   const settingsSemanticShellRibbonEl = document.getElementById('settings-semantic-shell-ribbon');
   const settingsTe2McpIntegrationEl = document.getElementById('settings-te2-mcp-integration');
@@ -203,7 +202,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
   let lineNumbersEnabled = false; // Toggle for transcript gutter line numbers
   let viewWrapEnabled = false; // Toggle for wrapped view/read cards
-  let useXterm = true; // Toggle for xterm.js vs text box rendering
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
   let semanticShellRibbonEnabled = false; // Tree-sitter semantic highlighting for shell command ribbons
   let semanticShellQuoteParsingEnabled = false; // Extension-gated quote segmentation for semantic shell ribbons
@@ -293,14 +291,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (settingsViewWrapEl) settingsViewWrapEl.checked = viewWrapEnabled;
   }
 
-  function isXtermEnabled() {
-    return useXterm;
-  }
-
-  function setXtermEnabled(enabled) {
-    useXterm = enabled === true;
-    if (settingsXtermEl) settingsXtermEl.checked = useXterm;
-  }
 
   function isDiffSyntaxEnabled() {
     return diffSyntaxHighlight;
@@ -2301,7 +2291,6 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsCommandLinesEl,
       settingsViewWrapEl,
       settingsMarkdownEl,
-      settingsXtermEl,
       settingsDiffSyntaxEl,
       settingsSemanticShellRibbonEl,
       settingsTe2McpIntegrationEl,
@@ -3431,8 +3420,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
           row.appendChild(body);
           getTarget().appendChild(row);
-          // Don't create xterm yet - element not in DOM. Will be created in RAF callback.
-          const rec = { row, termEl, cmdRibbon, term: null, cmd, buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
+          const rec = { row, termEl, cmdRibbon, cmd, buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
           agentPtyByBlock.set(blockId, rec);
           // Also register in global map so live handlers don't duplicate
           agentBlockRows.set(blockId, rec);
@@ -3464,8 +3452,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             row.appendChild(body);
             getTarget().appendChild(row);
-            // Don't create xterm yet - element not in DOM
-            rec = { row, termEl, cmdRibbon, term: null, cmd: '', buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
+            rec = { row, termEl, cmdRibbon, cmd: '', buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
             agentPtyByBlock.set(blockId, rec);
             agentBlockRows.set(blockId, rec);
             pendingAgentPtyTerms.push(rec);
@@ -3582,30 +3569,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     syncPlanOverlayUi();
 
-    // Initialize content after rows are in DOM (xterm needs DOM presence)
+    // Initialize terminal-like content after rows are in the DOM.
     if (pendingAgentPtyTerms.length) {
       requestAnimationFrame(() => {
         pendingAgentPtyTerms.forEach((rec) => {
-          if (useXterm) {
-            try {
-              // Create xterm now that element is in DOM
-              if (!rec.term) {
-                const lineCount = (rec.buf || '').split('\n').length;
-                const rows = Math.min(Math.max(lineCount, 3), 30);
-                rec.term = createXterm(rec.termEl, rows);
-              }
-              if (rec.buf && rec.term && rec.renderMode !== 'screen') {
-                const normalized = rec.buf.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
-                rec.term.write(normalized);
-              }
-            } catch (e) {
-              // Fallback to text
-              rec.termEl.textContent = rec.buf || '';
-            }
-          } else {
-            // Text box fallback
-            rec.termEl.textContent = rec.buf || '';
-          }
+          rec.termEl.textContent = rec.buf || '';
         });
       });
     }
@@ -3694,22 +3662,6 @@ document.addEventListener('DOMContentLoaded', () => {
     return entry;
   }
 
-  function createXterm(container, rows) {
-    if (typeof Terminal === 'undefined') return null;
-    const term = new Terminal({
-      convertEol: false,
-      cursorBlink: false,
-      disableStdin: true,
-      fontFamily: 'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      fontSize: 12,
-      rows: rows || 10,
-      scrollback: 5000,
-      theme: { background: '#000000', foreground: '#c9d1d9' },
-    });
-    term.open(container);
-    return term;
-  }
-
   // --- Agent PTY block streaming (from MCP sidecar) ---
   const agentBlockRows = new Map();
 
@@ -3736,9 +3688,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       row.appendChild(body);
       insertRow(row);
-      // Only create xterm if setting enabled
-      const term = useXterm ? createXterm(termEl) : null;
-      entry = { row, cmdRibbon, term, termEl, text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
+      entry = { row, cmdRibbon, termEl, text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
       agentBlockRows.set(key, entry);
     }
     return entry;
@@ -3757,9 +3707,7 @@ document.addEventListener('DOMContentLoaded', () => {
     entry.renderMode = 'raw';
     entry.hasRawStream = false;
     activeAgentPtyBlockId = blockId;
-    if (entry.term) {
-      entry.term.reset();
-    }
+    entry.termEl.textContent = '';
     lastEventType = 'shell';
     setActivity('agent pty', true);
     setCommandRunning(true);
@@ -3773,13 +3721,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const delta = evt.delta || '';
     if (!delta) return;
     entry.text += delta;
-    if (useXterm && entry.term) {
-      const normalized = delta.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n');
-      entry.term.write(normalized);
-    } else {
-      // Fallback: append text if xterm isn't available or disabled
-      entry.termEl.textContent = entry.text;
-    }
+    entry.termEl.textContent = entry.text;
     lastEventType = 'shell';
     maybeAutoScroll();
   }
@@ -3809,17 +3751,7 @@ document.addEventListener('DOMContentLoaded', () => {
         entry.screenRows[idx] = r.text || '';
       }
     });
-    if (useXterm) {
-      if (!entry.term) {
-        entry.term = createXterm(entry.termEl, rowCount);
-      }
-      if (entry.term) {
-        const content = entry.screenRows.join('\r\n');
-        entry.term.write('\x1b[2J\x1b[H' + content);
-      }
-    } else {
-      entry.termEl.textContent = entry.screenRows.join('\n');
-    }
+    entry.termEl.textContent = entry.screenRows.join('\n');
     lastEventType = 'shell';
     maybeAutoScroll();
   }
@@ -4733,7 +4665,6 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsCommandLinesEl,
       settingsViewWrapEl,
       settingsMarkdownEl,
-      settingsXtermEl,
       settingsDiffSyntaxEl,
       settingsSemanticShellRibbonEl,
       settingsTe2McpIntegrationEl,
@@ -4750,7 +4681,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setActivity,
     setMarkdownEnabled,
     setViewWrapEnabled,
-    setXtermEnabled,
     setDiffSyntaxEnabled,
     setSemanticShellRibbonEnabled,
     ensureTreeSitterRibbonReady,
@@ -4871,8 +4801,6 @@ document.addEventListener('DOMContentLoaded', () => {
       setLineNumbersEnabled(conversationSettings?.lineNumbers === true);
       // Sync view-card wrap toggle from settings
       setViewWrapEnabled(conversationSettings?.viewWrap === true);
-      // Sync xterm toggle from settings
-      setXtermEnabled(conversationSettings?.useXterm !== false);
       // Sync diff syntax toggle from settings
       setDiffSyntaxEnabled(conversationSettings?.diffSyntax === true);
       // Sync semantic shell ribbon toggle from settings (Tree-sitter)

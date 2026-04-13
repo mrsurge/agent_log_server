@@ -7,7 +7,6 @@ export function bindSettingsSaveFlow(ctx) {
     setActivity,
     setMarkdownEnabled,
     setViewWrapEnabled,
-    setXtermEnabled,
     setDiffSyntaxEnabled,
     setSemanticShellRibbonEnabled,
     ensureTreeSitterRibbonReady,
@@ -30,7 +29,6 @@ export function bindSettingsSaveFlow(ctx) {
       settingsCwdEl,
       settingsCommandLinesEl,
       settingsMarkdownEl,
-      settingsXtermEl,
       settingsDiffSyntaxEl,
       settingsSemanticShellRibbonEl,
       settingsTe2McpIntegrationEl,
@@ -61,7 +59,6 @@ export function bindSettingsSaveFlow(ctx) {
     const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || '20', 10);
     const viewWrapEnabled = settingsViewWrapEl?.checked === true;
     const mdEnabled = settingsMarkdownEl?.checked !== false;
-    const xtermEnabled = settingsXtermEl?.checked !== false;
     const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
     const semanticRibbonEnabled = settingsSemanticShellRibbonEl?.checked === true;
 
@@ -115,11 +112,10 @@ export function bindSettingsSaveFlow(ctx) {
       'developer_instructions',
       'label',
       'alias',
-      'commandOutputLines',
-      'viewWrap',
-      'markdown',
-      'useXterm',
-      'diffSyntax',
+       'commandOutputLines',
+       'viewWrap',
+       'markdown',
+       'diffSyntax',
       'semanticShellRibbon',
       'te2_mcp_integration',
       'trackEdits',
@@ -141,7 +137,6 @@ export function bindSettingsSaveFlow(ctx) {
       commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
       viewWrap: viewWrapEnabled,
       markdown: mdEnabled,
-      useXterm: xtermEnabled,
       diffSyntax: diffSyntaxEnabled,
       semanticShellRibbon: semanticRibbonEnabled,
       te2_mcp_integration: settingsTe2McpIntegrationEl?.checked === true,
@@ -170,7 +165,6 @@ export function bindSettingsSaveFlow(ctx) {
 
     setMarkdownEnabled(mdEnabled);
     setViewWrapEnabled(viewWrapEnabled);
-    setXtermEnabled(xtermEnabled);
     setDiffSyntaxEnabled(diffSyntaxEnabled);
     setSemanticShellRibbonEnabled(semanticRibbonEnabled);
     if (semanticRibbonEnabled) {

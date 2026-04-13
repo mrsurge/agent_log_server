@@ -1,3 +1,14 @@
+declare const hljs: any;
+
+type DiffBlockState = {
+  text: string;
+  path: string;
+};
+
+type DiffBlockElement = HTMLElement & {
+  __diffRender?: DiffBlockState;
+};
+
 export function bindDiffRendering(ctx) {
   const {
     getDiffRow,
@@ -80,18 +91,19 @@ export function bindDiffRendering(ctx) {
 
   function renderDiffBlock(block, text, path) {
     if (!(block instanceof HTMLElement)) return;
-    block.__diffRender = {
+    const diffBlock = block as DiffBlockElement;
+    diffBlock.__diffRender = {
       text: typeof text === 'string' ? text : '',
       path: typeof path === 'string' ? path : '',
     };
-    block.innerHTML = formatDiff(text || '', path);
+    diffBlock.innerHTML = formatDiff(text || '', path);
   }
 
   function rerenderKnownDiffBlocks() {
     if (typeof document === 'undefined') return;
     document.querySelectorAll('.diff-block').forEach((node) => {
       if (!(node instanceof HTMLElement)) return;
-      const state = node.__diffRender;
+      const state = (node as DiffBlockElement).__diffRender;
       if (!state || typeof state !== 'object') return;
       node.innerHTML = formatDiff(state.text || '', state.path || '');
     });

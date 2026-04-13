@@ -29,7 +29,6 @@ export function bindSettingsUiFlow(ctx) {
     settingsCommandLinesEl,
     settingsViewWrapEl,
     settingsMarkdownEl,
-    settingsXtermEl,
     settingsDiffSyntaxEl,
     settingsSemanticShellRibbonEl,
     settingsTe2McpIntegrationEl,
@@ -263,7 +262,6 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsCommandLinesEl) settingsCommandLinesEl.value = state.conversationSettings?.commandOutputLines || '20';
       if (settingsViewWrapEl) settingsViewWrapEl.checked = state.conversationSettings?.viewWrap === true;
       if (settingsMarkdownEl) settingsMarkdownEl.checked = state.conversationSettings?.markdown !== false;
-      if (settingsXtermEl) settingsXtermEl.checked = state.conversationSettings?.useXterm !== false;
       if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = state.conversationSettings?.diffSyntax === true;
       if (settingsSemanticShellRibbonEl) settingsSemanticShellRibbonEl.checked = state.conversationSettings?.semanticShellRibbon === true;
       if (settingsTe2McpIntegrationEl) settingsTe2McpIntegrationEl.checked = state.conversationSettings?.te2_mcp_integration === true;

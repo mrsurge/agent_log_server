@@ -1,5 +1,7 @@
 // Shell streaming card rendering helpers extracted from static/codex_agent.js
 
+declare const hljs: any;
+
 export function bindShellRender(ctx) {
   const {
     shellRows,
@@ -36,7 +38,7 @@ export function bindShellRender(ctx) {
       cmdRibbon.textContent = '$ ...';
       body.appendChild(cmdRibbon);
 
-      // Output area - PLAIN TEXT (no xterm in cards)
+      // Output area - plain terminal text.
       const termEl = document.createElement('pre');
       termEl.className = 'command-output';
       body.appendChild(termEl);
@@ -49,8 +51,7 @@ export function bindShellRender(ctx) {
       }
       makeCollapsible(row, `shell:${id}`, false);
 
-      // No xterm for shell cards - plain text only
-      entry = { row, cmdRibbon, term: null, termEl, text: '' };
+      entry = { row, cmdRibbon, termEl, text: '' };
       shellRows.set(id, entry);
     }
     return entry;
@@ -87,7 +88,7 @@ export function bindShellRender(ctx) {
     }
 
     entry.text = '';
-    // Plain text mode - no xterm
+    // Plain text mode.
     entry.termEl.textContent = '';
     if (setLastEventType) setLastEventType('shell');
     if (!evt.subagent_id) {
@@ -129,7 +130,7 @@ export function bindShellRender(ctx) {
         entry.cmdRibbon.title = evt.path;
         entry.cmdRibbon.dataset.hasClickHandler = 'true';
         entry.cmdRibbon.addEventListener('click', (e) => {
-          if (e.target.closest('.twisty')) return;
+          if (e.target instanceof Element && e.target.closest('.twisty')) return;
           postTe2OpenRequest({ path: evt.path, line: evt.line || 1, column: 1 });
         });
       }
@@ -201,7 +202,7 @@ export function bindShellRender(ctx) {
       cmdRibbon.title = evt.path;
       cmdRibbon.dataset.hasClickHandler = 'true';
       cmdRibbon.addEventListener('click', (e) => {
-        if (e.target.closest('.twisty')) return;
+        if (e.target instanceof Element && e.target.closest('.twisty')) return;
         postTe2OpenRequest({ path: evt.path, line: evt.line || 1, column: 1 });
       });
     }

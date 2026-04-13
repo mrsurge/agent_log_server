@@ -24,7 +24,6 @@ from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD,
 )
 from agent_log_server.prompt_context import load_repo_memory_snapshot
-from agent_log_server.transcript_sanitizer import sanitize_transcript_item
 
 _AsyncAnyCallable = Callable[..., Awaitable[Any]]
 
@@ -885,7 +884,7 @@ class AppserverRoutes:
                     if not include_internal and self._deps.is_internal_transcript_item(record):
                         continue
                     total += 1
-                    buf.append(sanitize_transcript_item(record))
+                    buf.append(record)
             items = list(buf)
             offset = max(0, total - len(items))
         else:
@@ -905,7 +904,7 @@ class AppserverRoutes:
                     if not include_internal and self._deps.is_internal_transcript_item(record):
                         continue
                     if start <= total < end:
-                        items.append(sanitize_transcript_item(record))
+                        items.append(record)
                     total += 1
             offset = start
 
@@ -940,7 +939,7 @@ class AppserverRoutes:
                     except json.JSONDecodeError:
                         continue
                     if isinstance(record, dict):
-                        items.append(sanitize_transcript_item(record))
+                        items.append(record)
         except Exception:
             return {"conversation_id": str(convo_id), "items": []}
         return {"conversation_id": str(convo_id), "items": items}

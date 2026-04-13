@@ -1,3 +1,5 @@
+declare const hljs: any;
+
 export function bindShellSemantic(ctx) {
   const {
     getEnabled,
@@ -92,7 +94,8 @@ export function bindShellSemantic(ctx) {
     if (tsRibbonReady) return true;
     if (tsRibbonInitPromise) return tsRibbonInitPromise;
     tsRibbonInitPromise = (async () => {
-      const mod = await import('/static/vendor/web-tree-sitter/web-tree-sitter.js');
+      const loadTreeSitterModule = new Function("return import('/static/vendor/web-tree-sitter/web-tree-sitter.js')");
+      const mod = await loadTreeSitterModule();
       const Parser = mod?.Parser;
       const Language = mod?.Language;
       const Query = mod?.Query;

@@ -80,11 +80,6 @@ function buildJetBrainsMonoCss() {
   );
 }
 
-function copyXtermAssets() {
-  copyFile('node_modules/@xterm/xterm/css/xterm.css', join(vendorDir, 'xterm', 'xterm.css'));
-  copyFile('node_modules/@xterm/xterm/lib/xterm.js', join(vendorDir, 'xterm', 'xterm.js'));
-}
-
 function copyStreamingMarkdownAsset() {
   copyFile('node_modules/streaming-markdown/smd.min.js', join(vendorDir, 'streaming-markdown', 'smd.min.js'));
 }
@@ -156,7 +151,6 @@ window.hljs = hljs;
 async function prepareVendorAssets() {
   resetManagedVendorAssets();
   buildJetBrainsMonoCss();
-  copyXtermAssets();
   copyStreamingMarkdownAsset();
   copyMarkdownItAsset();
   await buildHighlightBundle();

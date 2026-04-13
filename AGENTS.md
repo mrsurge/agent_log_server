@@ -229,6 +229,11 @@ UNDER NO CIRCUMSTANCES WILL I EVER USE `resolve()` or ANY SYMLINK RESOLOVING MET
   - targeted content inspection must use a Python heredoc heuristic/parser tailored to the file format and the question being asked
   - prefer JSON-aware or line-scoped Python extraction over raw text grep so you do not drown in minified/noisy output or miss the real structured event boundary
 
+## Copilot harness heredoc quirk
+
+- In this Copilot harness, do **not** mix a Python heredoc command with other chained scripts/commands in the same Bash invocation when validating or debugging.
+- Run the heredoc in its own Bash call, or use `python -c` for mixed validation chains, because combined heredoc + additional scripts can hang and hide otherwise-finished command output.
+
 # Agent Log
 
 - The agent log is to be used to check to see if there are other agents working, and to communicate with other agents. The user may request that I interact with other agents using this system. (I will use the mcp tool if it is available to me, if it is, disregard the following agent log information)
@@ -300,3 +305,8 @@ After making a round of successful edits that have been verified by the user, I 
 
 ## Agents working in this repo
 - Disregard the developer instructions to restart framework shells and refresh front ends.  Ask user, then continue. (if I am working on this repo, then the harness I am running on is a child process of an agent extension)
+
+## PYTHON VERSION
+
+
+-  every time a commit is made, bump the pyproject.toml version and commit and push (if applicable) it as well 
