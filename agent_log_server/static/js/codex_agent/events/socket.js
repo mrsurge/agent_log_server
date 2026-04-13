@@ -1,10 +1,3 @@
-import { RPC_NAMESPACES } from '../rpc/namespaces.ts';
-import { describeRpcTransportPlaceholder } from '../rpc/transport.ts';
-
-const _rpcTransportPlaceholder = describeRpcTransportPlaceholder;
-void _rpcTransportPlaceholder;
-void RPC_NAMESPACES;
-
 export function bindSocketEvents(ctx) {
   const {
     getWsState,
@@ -15,7 +8,11 @@ export function bindSocketEvents(ctx) {
     syncDraftFromServer,
     getConversationId,
     getWindow,
+    conversationsRpcClient,
+    isRpcTransportEnabled,
   } = ctx;
+  let unsubscribeRpcNotifications = null;
+  let rpcNotificationsReady = false;
 
   function resetWsReady() {
     let wsReadyResolve = null;
@@ -63,6 +60,29 @@ export function bindSocketEvents(ctx) {
       setPill(wsStatusEl, 'no-io', 'err');
       return;
     }
+    if (typeof unsubscribeRpcNotifications === 'function') {
+      unsubscribeRpcNotifications();
+      unsubscribeRpcNotifications = null;
+    }
+    if (conversationsRpcClient && typeof conversationsRpcClient.subscribeLiveNotifications === 'function') {
+      try {
+        unsubscribeRpcNotifications = conversationsRpcClient.subscribeLiveNotifications({
+          enabled: () => (typeof isRpcTransportEnabled === 'function' ? Boolean(isRpcTransportEnabled()) : false),
+          onConnectionChange: (connected) => {
+            rpcNotificationsReady = connected === true;
+          },
+          onError: (error) => {
+            console.warn('conversation rpc notify error', error);
+          },
+          onEvent: (event) => {
+            if (typeof onEvent === 'function') onEvent(event);
+          },
+        });
+      } catch (error) {
+        rpcNotificationsReady = false;
+        console.warn('conversation rpc notify subscribe failed', error);
+      }
+    }
     setPill(wsStatusEl, '…', 'warn');
     const sock = io('/appserver', {
       path: socketIoPath(),
@@ -87,6 +107,16 @@ export function bindSocketEvents(ctx) {
       setPill(wsStatusEl, '👎', 'err');
     });
     sock.on('appserver_event', (data) => {
+      if (
+        typeof isRpcTransportEnabled === 'function'
+        && isRpcTransportEnabled()
+        && rpcNotificationsReady
+        && conversationsRpcClient
+        && typeof conversationsRpcClient.isRpcBackedLiveEvent === 'function'
+        && conversationsRpcClient.isRpcBackedLiveEvent(data)
+      ) {
+        return;
+      }
       if (typeof onEvent === 'function') onEvent(data);
     });
   }

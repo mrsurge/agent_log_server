@@ -50,12 +50,25 @@ export interface JsonRpcErrorEnvelope {
   };
 }
 
+export interface JsonRpcNotificationEnvelope<TParams = unknown> {
+  jsonrpc: '2.0';
+  method: string;
+  params?: TParams;
+}
+
 export interface CallRpcNamespaceOptions {
   namespace: string;
   method: string;
   params?: Record<string, unknown>;
   requestId?: string;
   timeoutMs?: number;
+  windowRef?: RpcWindowRef;
+}
+
+export interface SubscribeRpcNamespaceNotificationsOptions {
+  namespace: string;
+  onNotification: (notification: JsonRpcNotificationEnvelope, socket: SocketLike) => void;
+  onConnectionChange?: (connected: boolean, socket: SocketLike) => void;
   windowRef?: RpcWindowRef;
 }
 
@@ -278,6 +291,54 @@ export async function callRpcNamespace<TResult = unknown>(
       },
     );
   });
+}
+
+function isJsonRpcNotificationEnvelope(payload: unknown): payload is JsonRpcNotificationEnvelope {
+  return Boolean(
+    payload
+      && typeof payload === 'object'
+      && !Array.isArray(payload)
+      && (payload as JsonRpcNotificationEnvelope).jsonrpc === '2.0'
+      && typeof (payload as JsonRpcNotificationEnvelope).method === 'string'
+      && (payload as JsonRpcNotificationEnvelope).method.trim(),
+  );
+}
+
+export function subscribeRpcNamespaceNotifications(
+  options: SubscribeRpcNamespaceNotificationsOptions,
+): () => void {
+  const win = options.windowRef ?? getDefaultWindowRef();
+  const socket = getNamespaceSocket(options.namespace, win);
+
+  const onNotification = (payload: unknown) => {
+    if (!isJsonRpcNotificationEnvelope(payload)) {
+      return;
+    }
+    options.onNotification(payload, socket);
+  };
+  const onConnect = () => {
+    options.onConnectionChange?.(true, socket);
+  };
+  const onDisconnect = () => {
+    options.onConnectionChange?.(false, socket);
+  };
+
+  socket.on(RPC_NOTIFICATION_EVENT, onNotification);
+  if (options.onConnectionChange) {
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('connect_error', onDisconnect);
+    options.onConnectionChange(Boolean(socket.connected), socket);
+  }
+
+  return () => {
+    removeSocketListener(socket, RPC_NOTIFICATION_EVENT, onNotification);
+    if (options.onConnectionChange) {
+      removeSocketListener(socket, 'connect', onConnect);
+      removeSocketListener(socket, 'disconnect', onDisconnect);
+      removeSocketListener(socket, 'connect_error', onDisconnect);
+    }
+  };
 }
 
 export function describeRpcTransportPlaceholder(): RpcTransportPlaceholderDescriptor {

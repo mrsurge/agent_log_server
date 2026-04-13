@@ -34,6 +34,7 @@ from agent_log_server.extension_cli import (
 )
 from agent_log_server.appserver_socketio import (
     AppserverSocketioDeps,
+    CONVERSATIONS_RPC_NAMESPACE,
     register_appserver_socketio_handlers,
 )
 from agent_log_server.appserver_routes import (
@@ -139,6 +140,44 @@ _appserver_routes_state = AppserverRoutesState()
 _host_routes: Optional[HostRoutes] = None
 _IPC_NAMESPACE = "/ipc"
 _IPC_SIDS: set[str] = set()
+_CONVERSATIONS_RPC_NOTIFICATION_METHODS: dict[str, str] = {
+    "activity": "conversation.activity",
+    "approval": "conversation.approval.request",
+    "approval_handoff": "conversation.approval.handoff",
+    "assistant_delta": "conversation.message.delta",
+    "assistant_end": "conversation.message.final",
+    "assistant_finalize": "conversation.message.final",
+    "command_result": "conversation.command.result",
+    "context_compacted": "conversation.context.compacted",
+    "diff": "conversation.diff",
+    "diff_declined": "conversation.diff.declined",
+    "draft_update": "conversation.draft.updated",
+    "error": "conversation.error",
+    "mention_insert": "conversation.mention.inserted",
+    "message": "conversation.user.message",
+    "meta_updated": "conversation.meta.updated",
+    "mode": "conversation.mode.changed",
+    "plan": "conversation.plan",
+    "plan_state": "conversation.plan.state",
+    "plan_update": "conversation.plan.update",
+    "preview_updated": "conversation.preview.updated",
+    "reasoning_delta": "conversation.reasoning.delta",
+    "reasoning_end": "conversation.reasoning.final",
+    "reasoning_finalize": "conversation.reasoning.final",
+    "shell_begin": "conversation.command.begin",
+    "shell_delta": "conversation.command.delta",
+    "shell_end": "conversation.command.end",
+    "status": "conversation.status",
+    "subagent_end": "conversation.subagent.end",
+    "subagent_start": "conversation.subagent.start",
+    "thought": "conversation.thought",
+    "toast": "conversation.toast",
+    "token_count": "conversation.token.updated",
+    "tool_begin": "conversation.tool.begin",
+    "tool_delta": "conversation.tool.delta",
+    "tool_end": "conversation.tool.end",
+    "warning": "conversation.warning",
+}
 
 
 def _ipc_error(msg: object) -> Dict[str, Any]:
@@ -162,6 +201,13 @@ def _ipc_refuse(reason: str) -> NoReturn:
     exceptions_mod = getattr(socketio, "exceptions", None)
     exc_type = getattr(exceptions_mod, "ConnectionRefusedError", RuntimeError)
     raise exc_type(reason)
+
+
+def _conversation_rpc_notification_method(evt_type: object) -> str | None:
+    normalized = str(evt_type or "").strip().lower()
+    if not normalized:
+        return None
+    return _CONVERSATIONS_RPC_NOTIFICATION_METHODS.get(normalized)
 
 
 def _iter_pending_approvals(
@@ -1398,6 +1444,20 @@ async def _broadcast_appserver_ui(event: Dict[str, Any]) -> None:
         await socketio_server.emit("appserver_event", evt, namespace="/appserver")
     except Exception:
         pass
+    rpc_method = _conversation_rpc_notification_method(evt_type)
+    if rpc_method:
+        try:
+            await socketio_server.emit(
+                "rpc.notify",
+                {
+                    "jsonrpc": "2.0",
+                    "method": rpc_method,
+                    "params": evt,
+                },
+                namespace=CONVERSATIONS_RPC_NAMESPACE,
+            )
+        except Exception:
+            pass
 
     if evt_type == "status":
         turn_status = str(evt.get("turn_status") or "").strip().lower()

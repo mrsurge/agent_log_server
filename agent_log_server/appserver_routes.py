@@ -1045,6 +1045,8 @@ class AppserverRoutes:
         text = payload.text
         if not convo_id or not text:
             raise HTTPException(status_code=400, detail="conversation_id and text required")
+        if not self._deps.conversation_meta_path(convo_id).exists():
+            raise HTTPException(status_code=404, detail=f"Conversation not found: {convo_id}")
         meta = self._deps.load_conversation_meta(convo_id)
         if not meta:
             raise HTTPException(status_code=404, detail=f"Conversation not found: {convo_id}")
@@ -1091,6 +1093,52 @@ class AppserverRoutes:
                 ),
             )
 
+    async def _rpc_conversation_send(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        conversation_id_raw = params.get("conversation_id")
+        text_raw = params.get("text")
+        conversation_id = (
+            self._deps.sanitize_conversation_id(conversation_id_raw.strip())
+            if isinstance(conversation_id_raw, str) and conversation_id_raw.strip()
+            else ""
+        )
+        text = text_raw if isinstance(text_raw, str) else ""
+        if not conversation_id or not text:
+            raise HTTPException(status_code=400, detail="conversation_id and text required")
+
+        result = await self.api_appserver_message(
+            AppserverMessageIn(conversation_id=conversation_id, text=text),
+        )
+        normalized = dict(result) if isinstance(result, dict) else {
+            "ok": False,
+            "error": "Invalid send result",
+        }
+        normalized.setdefault("conversation_id", conversation_id)
+        normalized["accepted"] = normalized.get("ok") is True
+        return normalized
+
+    async def _rpc_conversation_interrupt(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = await self.api_appserver_interrupt(params)
+        return dict(result) if isinstance(result, dict) else {
+            "ok": False,
+            "error": "Invalid interrupt result",
+        }
+
+    async def _rpc_conversation_compact(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = await self.api_appserver_compact(params)
+        return dict(result) if isinstance(result, dict) else {
+            "ok": False,
+            "error": "Invalid compact result",
+        }
+
     def _jsonrpc_success(self, request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
         return {
             "jsonrpc": "2.0",
@@ -1117,6 +1165,39 @@ class AppserverRoutes:
             "id": request_id,
             "error": error,
         }
+
+    def _jsonrpc_error_from_http_exception(
+        self,
+        request_id: Any,
+        *,
+        method: str,
+        exc: HTTPException,
+    ) -> dict[str, Any]:
+        status_code = int(getattr(exc, "status_code", 500) or 500)
+        detail = exc.detail
+        message = detail if isinstance(detail, str) and detail.strip() else "Request failed"
+        if status_code == 400:
+            code = -32602
+            error_code = "INVALID_REQUEST"
+        elif status_code == 404:
+            code = -32004
+            error_code = "NOT_FOUND"
+        elif status_code == 409:
+            code = -32009
+            error_code = "CONFLICT"
+        else:
+            code = -32603
+            error_code = "INTERNAL_ERROR"
+        return self._jsonrpc_error(
+            request_id,
+            code=code,
+            message=message,
+            data={
+                "code": error_code,
+                "status_code": status_code,
+                "method": method,
+            },
+        )
 
     async def _rpc_conversation_replay_get_chunk(
         self,
@@ -1269,7 +1350,14 @@ class AppserverRoutes:
                 data={"code": "INVALID_REQUEST", "reason": "params must be an object"},
             )
 
-        if method != "conversation.replay.getChunk":
+        handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
+            "conversation.send": self._rpc_conversation_send,
+            "conversation.interrupt": self._rpc_conversation_interrupt,
+            "conversation.compact": self._rpc_conversation_compact,
+            "conversation.replay.getChunk": self._rpc_conversation_replay_get_chunk,
+        }
+        handler = handlers.get(method)
+        if handler is None:
             return self._jsonrpc_error(
                 request_id,
                 code=-32601,
@@ -1278,16 +1366,12 @@ class AppserverRoutes:
             )
 
         try:
-            result = await self._rpc_conversation_replay_get_chunk(params)
+            result = await handler(params)
         except HTTPException as exc:
-            return self._jsonrpc_error(
+            return self._jsonrpc_error_from_http_exception(
                 request_id,
-                code=-32602 if exc.status_code == 400 else -32603,
-                message=str(exc.detail or "Invalid params"),
-                data={
-                    "code": "INVALID_REQUEST" if exc.status_code == 400 else "INTERNAL_ERROR",
-                    "status_code": exc.status_code,
-                },
+                method=method,
+                exc=exc,
             )
         except Exception as exc:
             return self._jsonrpc_error(
@@ -1491,6 +1575,8 @@ class AppserverRoutes:
         if not isinstance(convo_id, str) or not convo_id:
             raise HTTPException(status_code=400, detail="Missing required field: conversation_id")
         convo_id = self._deps.sanitize_conversation_id(convo_id)
+        if not self._deps.conversation_meta_path(convo_id).exists():
+            raise HTTPException(status_code=404, detail=f"Conversation not found: {convo_id}")
         meta = self._deps.load_conversation_meta(convo_id)
         agent_type = self._deps.conversation_agent(meta)
         unavailable_detail = self._deps.extension_unavailable_detail(agent_type)
@@ -1538,6 +1624,8 @@ class AppserverRoutes:
         if not isinstance(convo_id, str) or not convo_id:
             raise HTTPException(status_code=400, detail="Missing required field: conversation_id")
         convo_id = self._deps.sanitize_conversation_id(convo_id)
+        if not self._deps.conversation_meta_path(convo_id).exists():
+            raise HTTPException(status_code=404, detail=f"Conversation not found: {convo_id}")
         meta = self._deps.load_conversation_meta(convo_id)
         thread_id = meta.get("thread_id")
         if not thread_id:

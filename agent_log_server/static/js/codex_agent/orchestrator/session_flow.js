@@ -1,14 +1,10 @@
-import { createConversationsRpcClientPlaceholder } from '../rpc/conversations/client.ts';
-
-const _conversationsRpcClientPlaceholder = createConversationsRpcClientPlaceholder;
-void _conversationsRpcClientPlaceholder;
-
 export function bindSessionFlow(ctx) {
   const {
     getState,
     setState,
     sioCall,
     waitForWs,
+    conversationsRpcClient,
     setActivity,
     updateScrollButton,
     maybeAutoScroll,
@@ -20,6 +16,10 @@ export function bindSessionFlow(ctx) {
   async function ensureInitialized() {
     const state = getState();
     if (state.initialized) return;
+    if (state.rpcTransportEnabled) {
+      setState({ initialized: true });
+      return;
+    }
     await waitForWs();
     setState({ initialized: true });
   }
@@ -37,11 +37,16 @@ export function bindSessionFlow(ctx) {
     maybeAutoScroll(true);
     setActivity('sending', true);
     await ensureInitialized();
-    const result = await sioCall('send_message', {
-      conversation_id: convoId,
-      text,
-    });
-    if (!result?.ok) {
+    const result = conversationsRpcClient
+      ? await conversationsRpcClient.sendMessage({
+        conversationId: convoId,
+        text,
+      })
+      : await sioCall('send_message', {
+        conversation_id: convoId,
+        text,
+      });
+    if (result?.accepted === false || result?.ok === false) {
       console.error('sendUserMessage failed:', result?.error);
       setActivity(result?.error || 'send failed', true);
     }
@@ -87,7 +92,12 @@ export function bindSessionFlow(ctx) {
       setActivity('interrupt', true);
       const state = getState();
       const convoId = state.conversationMeta?.conversation_id || null;
-      await sioCall('interrupt', convoId ? { conversation_id: convoId } : {});
+      const result = conversationsRpcClient
+        ? await conversationsRpcClient.interruptConversation({ conversationId: convoId })
+        : await sioCall('interrupt', convoId ? { conversation_id: convoId } : {});
+      if (result?.ok === false) {
+        throw new Error(String(result?.error || 'interrupt failed'));
+      }
       setActivity('interrupt sent', true);
     } catch (err) {
       console.warn('interrupt failed', err);

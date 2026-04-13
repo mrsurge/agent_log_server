@@ -32,6 +32,7 @@ import { bindSettingsSaveFlow } from './js/codex_agent/settings/save_flow.js';
 import { bindSettingsUiFlow } from './js/codex_agent/settings/ui_flow.js';
 import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.js';
 import { bindInputFlow } from './js/codex_agent/boot/input_flow.js';
+import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations/client.ts';
 import {
   readRpcTransportEnabledPreference,
   writeRpcTransportEnabledPreference,
@@ -2912,7 +2913,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function requestContextCompact() {
     try {
       const convoId = conversationMeta?.conversation_id || null;
-      const result = await sioCall('compact', convoId ? { conversation_id: convoId } : {});
+      const result = await conversationsRpcClient.compactConversation({ conversationId: convoId });
       if (result && result.ok === false) {
         throw new Error(result.error || 'compact failed');
       }
@@ -4704,6 +4705,11 @@ document.addEventListener('DOMContentLoaded', () => {
     return approvalUi.respondApproval(requestId, decision);
   }
 
+  const conversationsRpcClient = createConversationsRpcClient({
+    sioCall,
+    windowRef: window,
+  });
+
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
     getWsState: () => ({ wsOpen, wsReadyResolve, wsReadyPromise, wsReconnectDelay }),
     setWsState: (patch) => {
@@ -4718,6 +4724,8 @@ document.addEventListener('DOMContentLoaded', () => {
     syncDraftFromServer,
     getConversationId: () => conversationMeta?.conversation_id,
     getWindow: () => window,
+    conversationsRpcClient,
+    isRpcTransportEnabled: () => rpcTransportEnabled,
   });
 
   /**
@@ -4840,6 +4848,7 @@ document.addEventListener('DOMContentLoaded', () => {
       conversationSettings,
       conversationMeta,
       autoScroll,
+      rpcTransportEnabled,
     }),
     setState: (patch) => {
       if (patch.initialized !== undefined) initialized = patch.initialized;
@@ -4847,6 +4856,7 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     sioCall,
     waitForWs,
+    conversationsRpcClient,
     setActivity,
     updateScrollButton,
     maybeAutoScroll,

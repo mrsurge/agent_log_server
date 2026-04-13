@@ -2,7 +2,9 @@ import { RPC_NAMESPACES } from '../namespaces.ts';
 import { getRpcRegistryPlaceholder } from '../registry.ts';
 import {
   callRpcNamespace,
+  type JsonRpcNotificationEnvelope,
   readRpcTransportEnabledPreference,
+  subscribeRpcNamespaceNotifications,
 } from '../transport.ts';
 
 export interface ConversationsRpcClientPlaceholder {
@@ -39,10 +41,102 @@ export interface ReplayChunkResult {
   transport: 'rpc' | 'legacy';
 }
 
+export interface ConversationSendResult extends Record<string, unknown> {
+  conversation_id: string | null;
+  accepted: boolean;
+  transport: 'rpc' | 'legacy';
+}
+
+export interface ConversationControlResult extends Record<string, unknown> {
+  ok?: boolean;
+  transport: 'rpc' | 'legacy';
+}
+
+export type ConversationsLiveEvent = Record<string, unknown> & {
+  type?: string;
+  conversation_id?: string;
+};
+
 interface ConversationsRpcClientDeps {
   sioCall: (event: string, payload?: Record<string, unknown>, options?: Record<string, unknown>) => Promise<any>;
   windowRef?: any;
 }
+
+const CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE: Record<string, string> = {
+  activity: 'conversation.activity',
+  approval: 'conversation.approval.request',
+  approval_handoff: 'conversation.approval.handoff',
+  assistant_delta: 'conversation.message.delta',
+  assistant_end: 'conversation.message.final',
+  assistant_finalize: 'conversation.message.final',
+  command_result: 'conversation.command.result',
+  context_compacted: 'conversation.context.compacted',
+  diff: 'conversation.diff',
+  diff_declined: 'conversation.diff.declined',
+  draft_update: 'conversation.draft.updated',
+  error: 'conversation.error',
+  mention_insert: 'conversation.mention.inserted',
+  message: 'conversation.user.message',
+  meta_updated: 'conversation.meta.updated',
+  mode: 'conversation.mode.changed',
+  plan: 'conversation.plan',
+  plan_state: 'conversation.plan.state',
+  plan_update: 'conversation.plan.update',
+  preview_updated: 'conversation.preview.updated',
+  reasoning_delta: 'conversation.reasoning.delta',
+  reasoning_end: 'conversation.reasoning.final',
+  reasoning_finalize: 'conversation.reasoning.final',
+  shell_begin: 'conversation.command.begin',
+  shell_delta: 'conversation.command.delta',
+  shell_end: 'conversation.command.end',
+  status: 'conversation.status',
+  subagent_end: 'conversation.subagent.end',
+  subagent_start: 'conversation.subagent.start',
+  thought: 'conversation.thought',
+  toast: 'conversation.toast',
+  token_count: 'conversation.token.updated',
+  tool_begin: 'conversation.tool.begin',
+  tool_delta: 'conversation.tool.delta',
+  tool_end: 'conversation.tool.end',
+  warning: 'conversation.warning',
+};
+
+const CONVERSATIONS_RPC_CANONICAL_EVENT_TYPE_BY_METHOD: Record<string, string> = {
+  'conversation.activity': 'activity',
+  'conversation.approval.handoff': 'approval_handoff',
+  'conversation.approval.request': 'approval',
+  'conversation.command.begin': 'shell_begin',
+  'conversation.command.delta': 'shell_delta',
+  'conversation.command.end': 'shell_end',
+  'conversation.command.result': 'command_result',
+  'conversation.context.compacted': 'context_compacted',
+  'conversation.diff': 'diff',
+  'conversation.diff.declined': 'diff_declined',
+  'conversation.draft.updated': 'draft_update',
+  'conversation.error': 'error',
+  'conversation.mention.inserted': 'mention_insert',
+  'conversation.message.delta': 'assistant_delta',
+  'conversation.message.final': 'assistant_finalize',
+  'conversation.meta.updated': 'meta_updated',
+  'conversation.mode.changed': 'mode',
+  'conversation.plan': 'plan',
+  'conversation.plan.state': 'plan_state',
+  'conversation.plan.update': 'plan_update',
+  'conversation.preview.updated': 'preview_updated',
+  'conversation.reasoning.delta': 'reasoning_delta',
+  'conversation.reasoning.final': 'reasoning_finalize',
+  'conversation.status': 'status',
+  'conversation.subagent.end': 'subagent_end',
+  'conversation.subagent.start': 'subagent_start',
+  'conversation.thought': 'thought',
+  'conversation.toast': 'toast',
+  'conversation.token.updated': 'token_count',
+  'conversation.tool.begin': 'tool_begin',
+  'conversation.tool.delta': 'tool_delta',
+  'conversation.tool.end': 'tool_end',
+  'conversation.user.message': 'message',
+  'conversation.warning': 'warning',
+};
 
 export function createConversationsRpcClientPlaceholder(): ConversationsRpcClientPlaceholder {
   const registry = getRpcRegistryPlaceholder();
@@ -63,6 +157,26 @@ export function createConversationsRpcClientPlaceholder(): ConversationsRpcClien
   };
 }
 
+function asObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeEventType(eventType: unknown): string {
+  return typeof eventType === 'string' ? eventType.trim().toLowerCase() : '';
+}
+
+export function getConversationsRpcNotificationMethodForEventType(eventType: unknown): string | null {
+  const normalized = normalizeEventType(eventType);
+  return normalized ? (CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE[normalized] ?? null) : null;
+}
+
+export function isConversationsRpcBackedEventType(eventType: unknown): boolean {
+  return Boolean(getConversationsRpcNotificationMethodForEventType(eventType));
+}
+
 function parseReplayJsonl(jsonl: string): Record<string, unknown>[] {
   if (!jsonl) return [];
   return jsonl
@@ -76,6 +190,56 @@ function parseReplayJsonl(jsonl: string): Record<string, unknown>[] {
       }
       return parsed as Record<string, unknown>;
     });
+}
+
+function normalizeConversationSendResult(
+  result: unknown,
+  transport: 'rpc' | 'legacy',
+  conversationId: string | null,
+): ConversationSendResult {
+  const payload = asObject(result) ?? {};
+  return {
+    ...payload,
+    conversation_id: typeof payload.conversation_id === 'string' ? payload.conversation_id : conversationId,
+    accepted: payload.accepted === true || (payload.accepted == null && payload.ok === true),
+    transport,
+  };
+}
+
+function normalizeConversationControlResult(
+  result: unknown,
+  transport: 'rpc' | 'legacy',
+): ConversationControlResult {
+  const payload = asObject(result);
+  if (!payload) {
+    return {
+      ok: false,
+      error: 'Invalid response',
+      transport,
+    };
+  }
+  return {
+    ...payload,
+    transport,
+  };
+}
+
+function normalizeLiveNotificationEvent(
+  notification: JsonRpcNotificationEnvelope,
+): ConversationsLiveEvent | null {
+  const method = typeof notification.method === 'string' ? notification.method.trim() : '';
+  if (!method) {
+    return null;
+  }
+  const canonicalEventType = CONVERSATIONS_RPC_CANONICAL_EVENT_TYPE_BY_METHOD[method];
+  if (!canonicalEventType) {
+    return null;
+  }
+  const params = asObject(notification.params) ?? {};
+  return {
+    ...params,
+    type: canonicalEventType,
+  };
 }
 
 function toLegacyReplayResult(data: any): ReplayChunkResult {
@@ -235,6 +399,10 @@ async function fetchReplayChunkRpcAccumulated(
 export function createConversationsRpcClient(
   deps: ConversationsRpcClientDeps,
 ) {
+  function rpcEnabled(): boolean {
+    return readRpcTransportEnabledPreference(deps.windowRef ?? (typeof window !== 'undefined' ? window : null));
+  }
+
   async function fetchReplayChunk(options: {
     conversationId?: string | null;
     offset: number;
@@ -250,7 +418,7 @@ export function createConversationsRpcClient(
       timeoutMs = 10000,
     } = options;
 
-    if (!readRpcTransportEnabledPreference(deps.windowRef ?? (typeof window !== 'undefined' ? window : null))) {
+    if (!rpcEnabled()) {
       const legacy = await deps.sioCall('get_transcript_range', {
         conversation_id: conversationId,
         offset,
@@ -272,7 +440,131 @@ export function createConversationsRpcClient(
     });
   }
 
+  async function sendMessage(options: {
+    conversationId?: string | null;
+    text: string;
+    toastContext?: Record<string, unknown> | null;
+    timeoutMs?: number;
+  }): Promise<ConversationSendResult> {
+    const conversationId = typeof options.conversationId === 'string' && options.conversationId
+      ? options.conversationId
+      : null;
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    if (!rpcEnabled()) {
+      const legacy = await deps.sioCall('send_message', {
+        conversation_id: conversationId,
+        text: options.text,
+      }, { timeoutMs });
+      return normalizeConversationSendResult(legacy, 'legacy', conversationId);
+    }
+
+    const result = await callRpcNamespace({
+      namespace: RPC_NAMESPACES.conversations,
+      method: 'conversation.send',
+      params: {
+        conversation_id: conversationId,
+        text: options.text,
+        toast_context: options.toastContext ?? undefined,
+      },
+      timeoutMs,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+    });
+    return normalizeConversationSendResult(result, 'rpc', conversationId);
+  }
+
+  async function interruptConversation(options: {
+    conversationId?: string | null;
+    timeoutMs?: number;
+  }): Promise<ConversationControlResult> {
+    const conversationId = typeof options.conversationId === 'string' && options.conversationId
+      ? options.conversationId
+      : null;
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    if (!rpcEnabled()) {
+      const legacy = await deps.sioCall('interrupt', conversationId ? { conversation_id: conversationId } : {}, { timeoutMs });
+      return normalizeConversationControlResult(legacy, 'legacy');
+    }
+
+    const result = await callRpcNamespace({
+      namespace: RPC_NAMESPACES.conversations,
+      method: 'conversation.interrupt',
+      params: {
+        conversation_id: conversationId,
+      },
+      timeoutMs,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+    });
+    return normalizeConversationControlResult(result, 'rpc');
+  }
+
+  async function compactConversation(options: {
+    conversationId?: string | null;
+    timeoutMs?: number;
+  }): Promise<ConversationControlResult> {
+    const conversationId = typeof options.conversationId === 'string' && options.conversationId
+      ? options.conversationId
+      : null;
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    if (!rpcEnabled()) {
+      const legacy = await deps.sioCall('compact', conversationId ? { conversation_id: conversationId } : {}, { timeoutMs });
+      return normalizeConversationControlResult(legacy, 'legacy');
+    }
+
+    const result = await callRpcNamespace({
+      namespace: RPC_NAMESPACES.conversations,
+      method: 'conversation.compact',
+      params: {
+        conversation_id: conversationId,
+      },
+      timeoutMs,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+    });
+    return normalizeConversationControlResult(result, 'rpc');
+  }
+
+  function subscribeLiveNotifications(options: {
+    onEvent: (event: ConversationsLiveEvent, notification: JsonRpcNotificationEnvelope) => void;
+    onError?: (error: unknown) => void;
+    onConnectionChange?: (connected: boolean) => void;
+    enabled?: () => boolean;
+  }): () => void {
+    const enabled = typeof options.enabled === 'function' ? options.enabled : rpcEnabled;
+    return subscribeRpcNamespaceNotifications({
+      namespace: RPC_NAMESPACES.conversations,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      onConnectionChange: (connected) => {
+        options.onConnectionChange?.(connected);
+      },
+      onNotification: (notification) => {
+        if (!enabled()) {
+          return;
+        }
+        try {
+          const event = normalizeLiveNotificationEvent(notification);
+          if (!event) {
+            return;
+          }
+          options.onEvent(event, notification);
+        } catch (error) {
+          options.onError?.(error);
+        }
+      },
+    });
+  }
+
+  function isRpcBackedLiveEvent(eventOrType: unknown): boolean {
+    if (typeof eventOrType === 'string') {
+      return isConversationsRpcBackedEventType(eventOrType);
+    }
+    return isConversationsRpcBackedEventType(asObject(eventOrType)?.type);
+  }
+
   return {
     fetchReplayChunk,
+    sendMessage,
+    interruptConversation,
+    compactConversation,
+    subscribeLiveNotifications,
+    isRpcBackedLiveEvent,
   };
 }
