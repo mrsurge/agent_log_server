@@ -2,6 +2,15 @@
 
 All client↔server communication uses a single Socket.IO namespace: `/appserver`.
 
+## Compatibility status
+
+This document describes the current `/appserver` compatibility transport.
+
+- `/appserver` is the live compatibility shim that the current frontend and TE2 relay already speak
+- future JSON-RPC namespaces are expected to be added beside `/appserver`, not by silently rewriting this contract in place
+- do not treat `/api/appserver/rpc` as an established historical contract; the real compatibility surface is the flat `/appserver` event model documented here
+- once the frontend and TE2 relay learn the new JSON-RPC namespaces, `/appserver` should remain an adapter layer until the migration is complete
+
 ## Transport Summary
 
 | Direction | Mechanism | Notes |
