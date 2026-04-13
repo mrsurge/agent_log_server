@@ -855,6 +855,67 @@ class AppserverRoutes:
         items.sort(key=lambda item: (0 if item["type"] == "directory" else 1, item["name"].lower()))
         return {"root": str(logical_repo_root), "items": items}
 
+    def _read_transcript_range_data(
+        self,
+        conversation_id: str,
+        *,
+        offset: int,
+        limit: int,
+        include_internal: bool,
+    ) -> dict[str, Any]:
+        path = self._deps.transcript_path(str(conversation_id))
+        if not path.exists():
+            return {"conversation_id": str(conversation_id), "total": 0, "offset": 0, "items": []}
+
+        total = 0
+        items: list[dict[str, Any]] = []
+        if offset < 0:
+            buf: deque[dict[str, Any]] = deque(maxlen=limit)
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    if not include_internal and self._deps.is_internal_transcript_item(record):
+                        continue
+                    total += 1
+                    buf.append(sanitize_transcript_item(record))
+            items = list(buf)
+            offset = max(0, total - len(items))
+        else:
+            start = max(0, offset)
+            end = start + limit
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    if not include_internal and self._deps.is_internal_transcript_item(record):
+                        continue
+                    if start <= total < end:
+                        items.append(sanitize_transcript_item(record))
+                    total += 1
+            offset = start
+
+        return {
+            "conversation_id": str(conversation_id),
+            "total": total,
+            "offset": offset,
+            "items": items,
+        }
+
     async def api_appserver_transcript(
         self,
         conversation_id: Optional[str] = Query(None),
@@ -896,58 +957,12 @@ class AppserverRoutes:
             convo_id = conversation_id or cfg.get("conversation_id")
         if not convo_id:
             return {"conversation_id": None, "total": 0, "offset": 0, "items": []}
-        path = self._deps.transcript_path(str(convo_id))
-        if not path.exists():
-            return {"conversation_id": str(convo_id), "total": 0, "offset": 0, "items": []}
-        total = 0
-        items: list[dict[str, Any]] = []
-        if offset < 0:
-            buf: deque[dict[str, Any]] = deque(maxlen=limit)
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(record, dict):
-                        continue
-                    if not include_internal and self._deps.is_internal_transcript_item(record):
-                        continue
-                    total += 1
-                    buf.append(sanitize_transcript_item(record))
-            items = list(buf)
-            offset = max(0, total - len(items))
-        else:
-            start = max(0, offset)
-            end = start + limit
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(record, dict):
-                        continue
-                    if not include_internal and self._deps.is_internal_transcript_item(record):
-                        continue
-                    if total >= start and total < end:
-                        items.append(sanitize_transcript_item(record))
-                    total += 1
-                    if total >= end and total >= start and len(items) >= limit:
-                        continue
-            offset = start
-        return {
-            "conversation_id": str(convo_id),
-            "total": total,
-            "offset": offset,
-            "items": items,
-        }
+        return self._read_transcript_range_data(
+            str(convo_id),
+            offset=offset,
+            limit=limit,
+            include_internal=include_internal,
+        )
 
     async def api_appserver_config_update(
         self,
@@ -1074,8 +1089,137 @@ class AppserverRoutes:
                     if agent_type == "codex"
                     else "extension_unavailable"
                 ),
-            ),
+                ),
+            )
+
+    def _jsonrpc_success(self, request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result,
+        }
+
+    def _jsonrpc_error(
+        self,
+        request_id: Any,
+        *,
+        code: int,
+        message: str,
+        data: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        error: dict[str, Any] = {
+            "code": code,
+            "message": message,
+        }
+        if isinstance(data, dict) and data:
+            error["data"] = data
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": error,
+        }
+
+    async def _rpc_conversation_replay_get_chunk(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        conversation_id_raw = params.get("conversation_id")
+        conversation_id = str(conversation_id_raw or "").strip()
+        if conversation_id:
+            conversation_id = self._deps.sanitize_conversation_id(conversation_id)
+        else:
+            async with self._deps.config_lock:
+                cfg = self._deps.load_appserver_config()
+                active_conversation_id = cfg.get("conversation_id")
+            if isinstance(active_conversation_id, str) and active_conversation_id.strip():
+                conversation_id = active_conversation_id.strip()
+
+        cursor = params.get("cursor")
+        if cursor is None:
+            cursor = {}
+        if not isinstance(cursor, dict):
+            raise HTTPException(status_code=400, detail="cursor must be an object")
+
+        try:
+            offset = int(cursor.get("offset", 0))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="cursor.offset must be an integer") from exc
+
+        try:
+            max_entries = int(params.get("max_entries", 500))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="max_entries must be an integer") from exc
+        max_entries = min(max(max_entries, 1), 500)
+
+        try:
+            max_bytes = int(params.get("max_bytes", 524288))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="max_bytes must be an integer") from exc
+        max_bytes = max(max_bytes, 1)
+
+        format_name = str(params.get("format", "jsonl") or "jsonl").strip().lower()
+        if format_name != "jsonl":
+            raise HTTPException(status_code=400, detail="Only format=jsonl is supported")
+
+        include_internal = params.get("include_internal") is True
+        if not conversation_id:
+            return {
+                "conversation_id": None,
+                "replay_id": f"replay_{uuid.uuid4().hex[:12]}",
+                "frame": {
+                    "format": "jsonl",
+                    "offset": 0,
+                    "item_count": 0,
+                    "total_count": 0,
+                    "chunk_index": 0,
+                    "complete": True,
+                    "next_cursor": None,
+                    "jsonl": "",
+                },
+            }
+
+        range_data = self._read_transcript_range_data(
+            conversation_id,
+            offset=offset,
+            limit=max_entries,
+            include_internal=include_internal,
         )
+        items = range_data["items"]
+        actual_offset = int(range_data["offset"])
+        total_count = int(range_data["total"])
+
+        jsonl_parts: list[str] = []
+        kept_item_count = 0
+        encoded_bytes = 0
+        for item in items:
+            line = json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
+            line_size = len(line.encode("utf-8"))
+            if kept_item_count > 0 and encoded_bytes + line_size > max_bytes:
+                break
+            jsonl_parts.append(line)
+            kept_item_count += 1
+            encoded_bytes += line_size
+
+        if not jsonl_parts and items:
+            jsonl_parts.append(json.dumps(items[0], ensure_ascii=False, separators=(",", ":")) + "\n")
+            kept_item_count = 1
+
+        next_offset = actual_offset + kept_item_count
+        complete = next_offset >= total_count
+        return {
+            "conversation_id": range_data["conversation_id"],
+            "replay_id": f"replay_{uuid.uuid4().hex[:12]}",
+            "frame": {
+                "format": "jsonl",
+                "offset": actual_offset,
+                "item_count": kept_item_count,
+                "total_count": total_count,
+                "chunk_index": actual_offset // max(max_entries, 1),
+                "complete": complete,
+                "next_cursor": None if complete else {"offset": next_offset},
+                "jsonl": "".join(jsonl_parts),
+            },
+        }
 
     async def api_appserver_rpc(
         self,
@@ -1084,6 +1228,76 @@ class AppserverRoutes:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         return self._deps.legacy_builtin_codex_disabled_result()
+
+    async def api_conversations_rpc(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        request_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return self._jsonrpc_error(
+                request_id,
+                code=-32600,
+                message="Invalid request",
+                data={"code": "INVALID_REQUEST", "reason": "Payload must be an object"},
+            )
+
+        if payload.get("jsonrpc") != "2.0":
+            return self._jsonrpc_error(
+                request_id,
+                code=-32600,
+                message="Invalid request",
+                data={"code": "INVALID_REQUEST", "reason": "jsonrpc must be '2.0'"},
+            )
+
+        method = payload.get("method")
+        if not isinstance(method, str) or not method.strip():
+            return self._jsonrpc_error(
+                request_id,
+                code=-32600,
+                message="Invalid request",
+                data={"code": "INVALID_REQUEST", "reason": "method is required"},
+            )
+
+        params = payload.get("params", {})
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return self._jsonrpc_error(
+                request_id,
+                code=-32602,
+                message="Invalid params",
+                data={"code": "INVALID_REQUEST", "reason": "params must be an object"},
+            )
+
+        if method != "conversation.replay.getChunk":
+            return self._jsonrpc_error(
+                request_id,
+                code=-32601,
+                message="Method not found",
+                data={"code": "NOT_FOUND", "method": method},
+            )
+
+        try:
+            result = await self._rpc_conversation_replay_get_chunk(params)
+        except HTTPException as exc:
+            return self._jsonrpc_error(
+                request_id,
+                code=-32602 if exc.status_code == 400 else -32603,
+                message=str(exc.detail or "Invalid params"),
+                data={
+                    "code": "INVALID_REQUEST" if exc.status_code == 400 else "INTERNAL_ERROR",
+                    "status_code": exc.status_code,
+                },
+            )
+        except Exception as exc:
+            return self._jsonrpc_error(
+                request_id,
+                code=-32603,
+                message="Internal error",
+                data={"code": "INTERNAL_ERROR", "reason": str(exc)},
+            )
+        return self._jsonrpc_success(request_id, result)
 
     async def api_appserver_approval_record(
         self,

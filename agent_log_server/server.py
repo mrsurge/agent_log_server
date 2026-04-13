@@ -1657,6 +1657,7 @@ def _register_appserver_socketio() -> None:
             api_appserver_message=appserver_routes.api_appserver_message,
             api_appserver_shell_exec=appserver_routes.api_appserver_shell_exec,
             api_appserver_rpc=appserver_routes.api_appserver_rpc,
+            api_conversations_rpc=appserver_routes.api_conversations_rpc,
             api_appserver_interrupt=appserver_routes.api_appserver_interrupt,
             api_appserver_compact=appserver_routes.api_appserver_compact,
             api_appserver_conversation=appserver_routes.api_appserver_conversation,

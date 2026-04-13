@@ -1,4 +1,7 @@
-import { createConversationsRpcClientPlaceholder } from './rpc/conversations/client.ts';
+import {
+  createConversationsRpcClient,
+  createConversationsRpcClientPlaceholder,
+} from './rpc/conversations/client.ts';
 
 const _conversationsReplayRpcPlaceholder = createConversationsRpcClientPlaceholder;
 void _conversationsReplayRpcPlaceholder;
@@ -18,18 +21,21 @@ export function bindTranscriptLoader(ctx) {
     setLastEventType,
     refreshPlanSurface,
   } = ctx;
+  const conversationsRpcClient = createConversationsRpcClient({ sioCall });
 
   async function fetchTranscriptRange(offset, limit) {
     const convoId = getConversationId?.() || null;
-    const data = await sioCall('get_transcript_range', {
-      conversation_id: convoId,
+    const replay = await conversationsRpcClient.fetchReplayChunk({
+      conversationId: convoId,
       offset,
-      limit,
+      maxEntries: limit,
     });
-    if (!data || data.ok === false) {
-      throw new Error(`get_transcript_range failed: ${data?.error || 'no data'}`);
-    }
-    return data;
+    return {
+      conversation_id: replay.conversation_id,
+      total: replay.frame.total_count,
+      offset: replay.frame.offset,
+      items: replay.items,
+    };
   }
 
   async function loadOlderTranscript() {

@@ -5,7 +5,7 @@ import hashlib
 from fastapi.responses import HTMLResponse
 from fastcore.xml import (
     Html, Head, Body, Div, Section, Header, Footer, Main, H1, H2, H3, P, Button,
-    Span, Input, Textarea, Label, Small, Script, Link, Meta, Ul, Li, to_xml,
+    Span, Input, Textarea, Label, Small, Script, Link, Meta, Ul, Li, Img, to_xml,
     NotStr,
 )
 
@@ -436,6 +436,24 @@ try {{
 	                                Div(
 	                                    Button("Project", id="splash-tab-project", cls="btn tiny toggle"),
 	                                    Button("All", id="splash-tab-all", cls="btn tiny toggle active"),
+                                        Label(
+                                            Input(type="checkbox", id="splash-rpc-toggle", checked=True),
+                                            Span("Use RPC"),
+                                            cls="toggle-label splash-rpc-toggle-label",
+                                            title="Disable to keep migrated frontend slices on the legacy /appserver transport for this tab",
+                                        ),
+                                        Button(
+                                            Img(
+                                                src=_asset(package_root, "/static/images/green-right-arrow.png"),
+                                                alt="",
+                                                cls="splash-go-conversation-icon",
+                                            ),
+                                            id="splash-go-conversation",
+                                            cls="btn ghost splash-go-conversation-btn",
+                                            title="Go to active conversation",
+                                            aria_label="Go to active conversation",
+                                            disabled=True,
+                                        ),
 	                                    cls="splash-tabs",
 	                                    id="splash-tabs",
 	                                ),

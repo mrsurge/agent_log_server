@@ -10,28 +10,32 @@ import {
   streamEnd,
   streamWrite,
 } from './js/codex_agent/markdown.js';
-import { bindAssistantStream } from './js/codex_agent/assistant_stream.js';
+import { bindAssistantStream } from './js/codex_agent/assistant_stream.ts';
 import { bindShellRender } from './js/codex_agent/shell_render.js';
 import { bindToolRender } from './js/codex_agent/tool_render.js';
-import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.js';
+import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.ts';
 import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.js';
-import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.js';
+import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.ts';
 import { bindDiffRendering } from './js/codex_agent/diff/rendering.js';
 import { bindSocketEvents } from './js/codex_agent/events/socket.js';
 import { bindEventRouter } from './js/codex_agent/events/router.js';
-import { bindPlanOverlay } from './js/codex_agent/plan_overlay.js';
-import { bindPlanModal } from './js/codex_agent/plan_modal.js';
-import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.js';
+import { bindPlanOverlay } from './js/codex_agent/plan_overlay.ts';
+import { bindPlanModal } from './js/codex_agent/plan_modal.ts';
+import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.ts';
 import { bindApprovalUi } from './js/codex_agent/approvals/ui.js';
 import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
 import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
-import { bindRequestCardRuntime } from './js/codex_agent/request_cards/runtime.js';
+import { bindRequestCardRuntime } from './js/codex_agent/request_cards/runtime.ts';
 import { bindShellSemantic } from './js/codex_agent/shell_semantic.js';
 import { formatJsonSetting, parseJsonSetting } from './js/codex_agent/settings/runtime_helpers.js';
 import { bindSettingsSaveFlow } from './js/codex_agent/settings/save_flow.js';
 import { bindSettingsUiFlow } from './js/codex_agent/settings/ui_flow.js';
 import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.js';
 import { bindInputFlow } from './js/codex_agent/boot/input_flow.js';
+import {
+  readRpcTransportEnabledPreference,
+  writeRpcTransportEnabledPreference,
+} from './js/codex_agent/rpc/transport.ts';
 
 document.addEventListener('DOMContentLoaded', () => {
   const statusEl = document.getElementById('agent-status');
@@ -172,6 +176,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 		  let splashTab = readSplashTabPreference(); // 'all' | 'project'
+  let rpcTransportEnabled = readRpcTransportEnabledPreference(window);
   let pendingNewConversation = false;
   let pendingRollout = null;
   let lastEventType = null;
@@ -1737,6 +1742,7 @@ document.addEventListener('DOMContentLoaded', () => {
       draftSaveTimer,
       lastDraftHash,
       splashTab,
+      rpcTransportEnabled,
       pendingNewConversation,
       miniConversationDrawerOpen,
     }),
@@ -1754,6 +1760,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.splashTab !== undefined) {
         splashTab = normalizeSplashTab(patch.splashTab);
         writeSplashTabPreference(splashTab);
+      }
+      if (patch.rpcTransportEnabled !== undefined) {
+        rpcTransportEnabled = writeRpcTransportEnabledPreference(patch.rpcTransportEnabled, window);
       }
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
       if (patch.miniConversationDrawerOpen !== undefined) miniConversationDrawerOpen = patch.miniConversationDrawerOpen;

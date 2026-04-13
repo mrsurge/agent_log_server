@@ -153,6 +153,7 @@ body.drawer-open {
   display: none;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
   padding: 0 2px;
 }
 
@@ -160,6 +161,25 @@ body.drawer-open {
   border-color: var(--accent);
   color: #fff;
   background: rgba(124, 92, 255, 0.22);
+}
+
+.splash-tabs .toggle-label {
+  white-space: nowrap;
+}
+
+.splash-rpc-toggle-label {
+  min-height: 28px;
+}
+
+.splash-go-conversation-btn {
+  min-width: 0;
+  padding: 4px 8px;
+}
+
+.splash-go-conversation-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 .splash-body {

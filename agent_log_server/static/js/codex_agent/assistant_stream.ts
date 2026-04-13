@@ -1,6 +1,38 @@
 // Assistant streaming row helpers extracted from static/codex_agent.js
 
-export function bindAssistantStream(ctx) {
+interface AssistantRowEntry {
+  row: HTMLElement;
+  container: HTMLElement;
+  parser?: unknown;
+  pre?: HTMLPreElement;
+  useMarkdown: boolean;
+  counted: boolean;
+  rawText: string;
+}
+
+interface AssistantStreamContext {
+  assistantRows: Map<string, AssistantRowEntry>;
+  buildMessageCard(role: string, initialText: string): { row: HTMLElement; body: HTMLElement };
+  updateMessageCardHeader(row: HTMLElement, role: string, text: string): void;
+  insertRow(row: HTMLElement): void;
+  isMarkdownEnabled(): boolean;
+  createStreamingParser(target: HTMLElement): unknown;
+  renderEventMarkdownInto(target: HTMLElement, markdown: string): void;
+  streamWrite(parser: unknown, chunk: string): void;
+  streamEnd(parser: unknown): void;
+  highlightCode(target: HTMLElement): void;
+  incrementMessages(): void;
+  stripCitations(text: string): string;
+  maybeAutoScroll(): void;
+}
+
+interface AssistantStreamBinding {
+  getAssistantRow(id?: string | null, parentEl?: HTMLElement | null): AssistantRowEntry;
+  appendAssistantDelta(id: string | null | undefined, delta: string, parentEl?: HTMLElement | null): void;
+  finalizeAssistant(id: string | null | undefined, text: string, parentEl?: HTMLElement | null): void;
+}
+
+export function bindAssistantStream(ctx: AssistantStreamContext): AssistantStreamBinding {
   const {
     assistantRows,
     buildMessageCard,
@@ -17,7 +49,7 @@ export function bindAssistantStream(ctx) {
     maybeAutoScroll,
   } = ctx;
 
-  function getAssistantRow(id, parentEl) {
+  function getAssistantRow(id?: string | null, parentEl?: HTMLElement | null): AssistantRowEntry {
     const key = id || 'assistant';
     let entry = assistantRows.get(key);
     if (!entry) {
@@ -46,7 +78,7 @@ export function bindAssistantStream(ctx) {
     return entry;
   }
 
-  function appendAssistantDelta(id, delta, parentEl) {
+  function appendAssistantDelta(id: string | null | undefined, delta: string, parentEl?: HTMLElement | null): void {
     if (!delta) return;
     const entry = getAssistantRow(id, parentEl);
     const cleanDelta = stripCitations(delta);
@@ -60,7 +92,7 @@ export function bindAssistantStream(ctx) {
     maybeAutoScroll();
   }
 
-  function finalizeAssistant(id, text, parentEl) {
+  function finalizeAssistant(id: string | null | undefined, text: string, parentEl?: HTMLElement | null): void {
     const key = id || 'assistant';
     let entry = assistantRows.get(key);
     if (!entry) {

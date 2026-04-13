@@ -1,4 +1,109 @@
-export function createConversationDrawerActions(ctx) {
+type Awaitable = Promise<unknown> | unknown;
+
+interface ConversationSettings extends Record<string, unknown> {
+  agent?: string;
+}
+
+interface ConversationMeta extends Record<string, unknown> {
+  conversation_id?: string;
+  settings?: ConversationSettings;
+}
+
+interface DrawerState {
+  clientConversationId?: string | null;
+  conversationMeta?: ConversationMeta | null;
+  miniConversationDrawerOpen?: boolean;
+  activeView?: string | null;
+  draftSaveTimer?: ReturnType<typeof setTimeout> | null;
+  lastDraftHash?: string | null;
+  clientActiveView?: string | null;
+  conversationList?: ConversationMeta[];
+  extensionCatalog?: unknown[];
+  pendingNewConversation?: boolean;
+  conversationSettings?: ConversationSettings;
+  splashTab?: string;
+  rpcTransportEnabled?: boolean;
+}
+
+interface ConversationListResponse {
+  items: ConversationMeta[];
+  activeConversationId: string | null;
+  activeView: string | null;
+}
+
+interface ConversationCreateResponse extends ConversationMeta {
+  conversation_id: string | null;
+  settings: ConversationSettings;
+}
+
+interface ConversationDrawerActionsContext {
+  sioCall(event: string, payload: Record<string, unknown>): Promise<unknown>;
+  getState(): DrawerState;
+  setState(nextState: Partial<DrawerState>): void;
+  resetTimeline(): void;
+  fetchConversation(conversationId?: string | null): Awaitable;
+  replayTranscript(): Awaitable;
+  refreshPlanSurface?(): Awaitable;
+  restorePendingApprovals(): void;
+  setDrawerOpen(open: boolean): void;
+  applyHostUi(): void;
+  openSettingsModal(): void;
+  renderConversationList(list: ConversationMeta[], activeConversationId: string | null): void;
+  renderMiniConversationList(list: ConversationMeta[], activeConversationId: string | null): void;
+  renderSplashTabs(): void;
+  updateActiveConversationLabel(): void;
+  conversationTitleEl: HTMLElement | null;
+  conversationCreateBtn: HTMLElement | null;
+  conversationBackBtn: HTMLElement | null;
+  conversationSettingsBtn: HTMLElement | null;
+  conversationBodyEl: HTMLElement | null;
+  conversationMiniDrawerEl: HTMLElement | null;
+  conversationMiniCloseBtn: HTMLElement | null;
+  documentRef?: Document;
+  windowRef?: Window;
+}
+
+interface ConversationDrawerActionsBinding {
+  fetchConversations(): Promise<void>;
+  setActiveView(view: string): Promise<void>;
+  selectConversation(conversationId: string): Promise<void>;
+  selectConversationWithView(conversationId: string, view: string): Promise<void>;
+  createConversation(): Promise<void>;
+  deleteConversation(conversationId: string): Promise<void>;
+  setConversationPins(pinnedConversationIds: string[]): Promise<void>;
+  bindHeaderHandlers(): void;
+  bindSplashTabHandlers(): void;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object';
+}
+
+function normalizeConversationListResponse(data: unknown): ConversationListResponse {
+  const payload = isRecord(data) ? data : null;
+  const items = Array.isArray(payload?.items)
+    ? payload.items.filter((item): item is ConversationMeta => isRecord(item))
+    : [];
+  return {
+    items,
+    activeConversationId: typeof payload?.active_conversation_id === 'string' ? payload.active_conversation_id : null,
+    activeView: typeof payload?.active_view === 'string' ? payload.active_view : null,
+  };
+}
+
+function normalizeConversationCreateResponse(data: unknown): ConversationCreateResponse {
+  const payload = isRecord(data) ? data : {};
+  const settings = isRecord(payload.settings) ? payload.settings as ConversationSettings : {};
+  return {
+    ...payload,
+    conversation_id: typeof payload.conversation_id === 'string' ? payload.conversation_id : null,
+    settings,
+  };
+}
+
+export function createConversationDrawerActions(
+  ctx: ConversationDrawerActionsContext,
+): ConversationDrawerActionsBinding {
   const {
     sioCall,
     getState,
@@ -26,7 +131,7 @@ export function createConversationDrawerActions(ctx) {
     windowRef,
   } = ctx;
 
-  function getActiveConversationId() {
+  function getActiveConversationId(): string | null {
     const state = getState();
     return state.clientConversationId || state.conversationMeta?.conversation_id || null;
   }
@@ -47,7 +152,7 @@ export function createConversationDrawerActions(ctx) {
     renderMiniConversationList(getState().conversationList, getActiveConversationId());
   }
 
-  function setMiniDrawerOpen(open) {
+  function setMiniDrawerOpen(open: boolean): void {
     setState({ miniConversationDrawerOpen: Boolean(open) });
     syncMiniDrawerUi();
   }
@@ -63,17 +168,18 @@ export function createConversationDrawerActions(ctx) {
       let extensionCatalog = getState().extensionCatalog;
       try {
         const extData = await sioCall('get_extensions', {});
-        extensionCatalog = Array.isArray(extData?.extensions) ? extData.extensions : [];
+        const extPayload = isRecord(extData) ? extData : null;
+        extensionCatalog = Array.isArray(extPayload?.extensions) ? extPayload.extensions : [];
       } catch {
         // ignore
       }
-      const data = await sioCall('conversations_list', {});
+      const data = normalizeConversationListResponse(await sioCall('conversations_list', {}));
       const state = getState();
-      const conversationList = data?.items || [];
-      const ssotActiveId = data?.active_conversation_id || null;
+      const conversationList = data.items;
+      const ssotActiveId = data.activeConversationId;
       const highlightId = state.clientConversationId || state.conversationMeta?.conversation_id || ssotActiveId;
-      const patch = { conversationList, extensionCatalog };
-      if (!state.clientActiveView && data?.active_view) patch.clientActiveView = data.active_view;
+      const patch: Partial<DrawerState> = { conversationList, extensionCatalog };
+      if (!state.clientActiveView && data.activeView) patch.clientActiveView = data.activeView;
       setState(patch);
       renderConversationList(conversationList, highlightId);
       renderSplashTabs();
@@ -84,7 +190,7 @@ export function createConversationDrawerActions(ctx) {
     }
   }
 
-  async function setActiveView(view) {
+  async function setActiveView(view: string): Promise<void> {
     try {
       await sioCall('set_view', { view });
     } catch {
@@ -100,11 +206,11 @@ export function createConversationDrawerActions(ctx) {
     syncMiniDrawerUi();
   }
 
-  async function selectConversation(conversationId) {
+  async function selectConversation(conversationId: string): Promise<void> {
     return selectConversationWithView(conversationId, 'conversation');
   }
 
-  async function selectConversationWithView(conversationId, view) {
+  async function selectConversationWithView(conversationId: string, view: string): Promise<void> {
     if (!conversationId) return;
     const state = getState();
     // Cancel any pending draft save to avoid race condition
@@ -134,21 +240,21 @@ export function createConversationDrawerActions(ctx) {
     syncMiniDrawerUi();
   }
 
-  async function createConversation() {
+  async function createConversation(): Promise<void> {
     const state = getState();
     // Cancel any pending draft save from previous conversation
-      if (state.draftSaveTimer) {
-        clearTimeout(state.draftSaveTimer);
-        setState({ draftSaveTimer: null });
-      }
-      setState({ lastDraftHash: null });
-    const meta = await sioCall('conversation_create', {});
-    if (meta?.conversation_id) {
+    if (state.draftSaveTimer) {
+      clearTimeout(state.draftSaveTimer);
+      setState({ draftSaveTimer: null });
+    }
+    setState({ lastDraftHash: null });
+    const meta = normalizeConversationCreateResponse(await sioCall('conversation_create', {}));
+    if (meta.conversation_id) {
       setState({
         clientConversationId: meta.conversation_id,
         clientActiveView: 'conversation',
         conversationMeta: meta,
-        conversationSettings: meta?.settings || {},
+        conversationSettings: meta.settings,
       });
       try {
         await sioCall('conversation_select', { conversation_id: meta.conversation_id, view: 'conversation' });
@@ -168,7 +274,7 @@ export function createConversationDrawerActions(ctx) {
     openSettingsModal();
   }
 
-  async function deleteConversation(conversationId) {
+  async function deleteConversation(conversationId: string): Promise<void> {
     if (!conversationId) return;
     await sioCall('conversation_delete', { conversation_id: conversationId });
     const state = getState();
@@ -190,7 +296,7 @@ export function createConversationDrawerActions(ctx) {
     syncMiniDrawerUi();
   }
 
-  async function setConversationPins(pinnedConversationIds) {
+  async function setConversationPins(pinnedConversationIds: string[]): Promise<void> {
     if (!Array.isArray(pinnedConversationIds)) return;
     await sioCall('conversation_pins_update', { pinned_conversations: pinnedConversationIds });
     await fetchConversations();
@@ -269,10 +375,12 @@ export function createConversationDrawerActions(ctx) {
       renderSplashTabs();
       renderConversationList(state.conversationList, state.conversationMeta?.conversation_id || null);
     });
-    splashRpcToggleEl?.addEventListener('change', () => {
-      setState({ rpcTransportEnabled: splashRpcToggleEl.checked });
-      renderSplashTabs();
-    });
+    if (splashRpcToggleEl instanceof HTMLInputElement) {
+      splashRpcToggleEl.addEventListener('change', () => {
+        setState({ rpcTransportEnabled: splashRpcToggleEl.checked });
+        renderSplashTabs();
+      });
+    }
     splashGoConversationBtn?.addEventListener('click', async () => {
       const activeConversationId = getActiveConversationId();
       if (!activeConversationId) return;

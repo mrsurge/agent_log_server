@@ -1,4 +1,34 @@
-export function bindPlanModal(ctx) {
+interface PlanModalElements {
+  planModalEl: HTMLElement | null;
+  planCloseBtn: HTMLElement | null;
+  planDismissBtn: HTMLElement | null;
+  planBodyEl: HTMLElement | null;
+}
+
+interface PlanDocumentState {
+  plan_exists?: boolean;
+  plan_content?: string;
+}
+
+interface PlanModalState {
+  planState?: PlanDocumentState | null;
+}
+
+interface PlanModalContext {
+  elements: PlanModalElements;
+  getState(): PlanModalState | null | undefined;
+  renderMarkdownInto(target: HTMLElement, markdown: string): void;
+  highlightCode(target: HTMLElement): void;
+}
+
+interface PlanModalBinding {
+  openPlanModal(): Promise<void>;
+  closePlanModal(): void;
+  renderPlanModal(): void;
+  isPlanModalOpen(): boolean;
+}
+
+export function bindPlanModal(ctx: PlanModalContext): PlanModalBinding {
   const {
     elements,
     getState,
@@ -49,7 +79,7 @@ export function bindPlanModal(ctx) {
     return Boolean(planModalEl) && !planModalEl.classList.contains('hidden');
   }
 
-  async function openPlanModal() {
+  async function openPlanModal(): Promise<void> {
     if (!planModalEl) return;
     renderPlanModal();
     planModalEl.classList.remove('hidden');

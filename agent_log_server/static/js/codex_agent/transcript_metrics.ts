@@ -1,4 +1,29 @@
-export function bindTranscriptMetrics(ctx) {
+interface TranscriptState {
+  transcriptStart?: number;
+  transcriptTotal?: number;
+  transcriptEnd?: number;
+  transcriptLimit?: number;
+  estimatedRowHeight?: number;
+}
+
+interface TranscriptSpacerElements {
+  topSpacerEl: HTMLElement | null;
+  bottomSpacerEl: HTMLElement | null;
+}
+
+interface TranscriptMetricsContext {
+  timelineEl: HTMLElement | null;
+  getSpacerEls(): TranscriptSpacerElements;
+  getTranscriptState(): TranscriptState;
+  setTranscriptState(nextState: Partial<TranscriptState>): void;
+}
+
+interface TranscriptMetricsBinding {
+  updateSpacerHeights(): void;
+  measureRowHeight(): void;
+}
+
+export function bindTranscriptMetrics(ctx: TranscriptMetricsContext): TranscriptMetricsBinding {
   const {
     timelineEl,
     getSpacerEls,
@@ -17,8 +42,8 @@ export function bindTranscriptMetrics(ctx) {
       transcriptLimit,
       estimatedRowHeight,
     } = getTranscriptState();
-    const above = Math.max(0, transcriptStart);
-    const below = Math.max(0, transcriptTotal - transcriptEnd);
+    const above = Math.max(0, Number(transcriptStart) || 0);
+    const below = Math.max(0, (Number(transcriptTotal) || 0) - (Number(transcriptEnd) || 0));
     const rowHeight = Math.max(1, Number(estimatedRowHeight) || 0);
     const bufferRows = Math.max(1, Math.floor(Math.max(1, Number(transcriptLimit) || 0) * TRANSCRIPT_SCOPE_BUFFER_RATIO));
     topSpacerEl.style.height = `${Math.max(0, Math.min(above, bufferRows) * rowHeight)}px`;
@@ -27,7 +52,7 @@ export function bindTranscriptMetrics(ctx) {
 
   function measureRowHeight() {
     if (!timelineEl) return;
-    const rows = Array.from(timelineEl.querySelectorAll('.timeline-row'))
+    const rows = Array.from(timelineEl.querySelectorAll<HTMLElement>('.timeline-row'))
       .filter((row) => !row.classList.contains('activity') && !row.classList.contains('muted'));
     if (!rows.length) return;
     const total = rows.reduce((sum, row) => sum + row.getBoundingClientRect().height, 0);

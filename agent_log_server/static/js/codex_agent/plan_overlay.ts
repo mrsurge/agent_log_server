@@ -1,4 +1,53 @@
-export function bindPlanOverlay(ctx) {
+type AsyncResult = Promise<unknown> | void;
+
+interface PlanDocumentState {
+  has_todo?: boolean;
+  has_plan?: boolean;
+  plan_exists?: boolean;
+}
+
+interface PlanSnapshotItem {
+  step?: string;
+  status?: string;
+}
+
+interface PlanSnapshot {
+  steps?: PlanSnapshotItem[];
+}
+
+interface PlanOverlayItemElement extends HTMLDivElement {}
+
+interface PlanOverlayState {
+  planOverlayEl: HTMLDivElement | null;
+  planListEl: HTMLDivElement | null;
+  topSpacerEl: HTMLElement | null;
+  planCollapsed: boolean;
+  planItems: Map<string, PlanOverlayItemElement>;
+  planState?: PlanDocumentState | null;
+}
+
+interface PlanOverlayContext {
+  timelineEl: HTMLElement | null;
+  getState(): PlanOverlayState;
+  setState(nextState: Partial<PlanOverlayState>): void;
+  persistCollapsedState?(collapsed: boolean): AsyncResult;
+  openPlanModal?(): AsyncResult;
+}
+
+interface PlanOverlayBinding {
+  ensurePlanOverlay(): void;
+  updatePlanItem(step: string, status?: string): void;
+  restorePlanOverlay(snapshot: PlanSnapshot | null | undefined): void;
+  syncPlanOverlayUi(): void;
+  clearPlanOverlay(): void;
+  finalizePlanToTranscript(): void;
+}
+
+function isPromiseLike(value: AsyncResult): value is Promise<unknown> {
+  return Boolean(value) && typeof value === 'object' && typeof value.catch === 'function';
+}
+
+export function bindPlanOverlay(ctx: PlanOverlayContext): PlanOverlayBinding {
   const {
     timelineEl,
     getState,
@@ -27,8 +76,8 @@ export function bindPlanOverlay(ctx) {
     const state = getState();
     if (!state.planOverlayEl || !state.planListEl) return;
     anchorPlanOverlay();
-    const toggleBtn = state.planOverlayEl.querySelector('.plan-toggle');
-    const openBtn = state.planOverlayEl.querySelector('.plan-modal-open');
+    const toggleBtn = state.planOverlayEl.querySelector<HTMLSpanElement>('.plan-toggle');
+    const openBtn = state.planOverlayEl.querySelector<HTMLButtonElement>('.plan-modal-open');
     const itemCount = state.planItems?.size || 0;
     const hasTodoCapability = Boolean(state.planState?.has_todo);
     const hasPlanDoc = Boolean(state.planState?.has_plan && state.planState?.plan_exists);
@@ -65,7 +114,7 @@ export function bindPlanOverlay(ctx) {
       syncPlanOverlayUi();
       if (!nextCollapsed) scrollPlanOverlayToBottom();
       const persisted = persistCollapsedState?.(nextCollapsed);
-      if (persisted && typeof persisted.catch === 'function') {
+      if (isPromiseLike(persisted)) {
         persisted.catch((err) => console.warn('todo overlay collapse persistence failed', err));
       }
     });
@@ -83,7 +132,7 @@ export function bindPlanOverlay(ctx) {
     openBtn.textContent = 'View Plan';
     openBtn.addEventListener('click', () => {
       const maybePromise = openPlanModal?.();
-      if (maybePromise && typeof maybePromise.catch === 'function') {
+      if (isPromiseLike(maybePromise)) {
         maybePromise.catch((err) => console.warn('plan modal open failed', err));
       }
     });
@@ -102,7 +151,7 @@ export function bindPlanOverlay(ctx) {
     syncPlanOverlayUi();
   }
 
-  function updatePlanItem(step, status) {
+  function updatePlanItem(step: string, status?: string) {
     ensurePlanOverlay();
     const state = getState();
     if (!state.planListEl) return;
@@ -120,7 +169,6 @@ export function bindPlanOverlay(ctx) {
       text.textContent = step;
 
       itemEl.append(checkbox, text);
-      itemEl._checkbox = checkbox;
       state.planListEl.appendChild(itemEl);
       state.planItems.set(step, itemEl);
     }
@@ -128,7 +176,7 @@ export function bindPlanOverlay(ctx) {
     itemEl.classList.remove('pending', 'in_progress', 'completed');
     itemEl.classList.add(status || 'pending');
 
-    const checkbox = itemEl._checkbox;
+    const checkbox = itemEl.querySelector<HTMLSpanElement>('.plan-checkbox');
     if (checkbox) {
       if (status === 'completed') {
         checkbox.textContent = '☑';
@@ -142,7 +190,7 @@ export function bindPlanOverlay(ctx) {
     syncPlanOverlayUi();
   }
 
-  function restorePlanOverlay(snapshot) {
+  function restorePlanOverlay(snapshot: PlanSnapshot | null | undefined) {
     clearPlanOverlay();
     const steps = Array.isArray(snapshot?.steps) ? snapshot.steps : [];
     if (!steps.length) return;

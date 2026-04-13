@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from agent_log_server import conversation_todos as _conv_todos
 
 APPSERVER_NAMESPACE = "/appserver"
+CONVERSATIONS_RPC_NAMESPACE = "/rpc/conversations"
 
 _AsyncAnyCallable = Callable[..., Awaitable[Any]]
 
@@ -23,6 +24,7 @@ class AppserverSocketioDeps:
     api_appserver_message: _AsyncAnyCallable
     api_appserver_shell_exec: _AsyncAnyCallable
     api_appserver_rpc: _AsyncAnyCallable
+    api_conversations_rpc: _AsyncAnyCallable
     api_appserver_interrupt: _AsyncAnyCallable
     api_appserver_compact: _AsyncAnyCallable
     api_appserver_conversation: _AsyncAnyCallable
@@ -160,6 +162,14 @@ def register_appserver_socketio_handlers(
     async def _sio_rpc(sid: str, data: object) -> Any:
         try:
             return await deps.api_appserver_rpc(_payload(data))
+        except HTTPException as exc:
+            return _sio_error(exc.detail)
+        except Exception as exc:
+            return _sio_error(exc)
+
+    async def _sio_conversations_rpc(sid: str, data: object) -> Any:
+        try:
+            return await deps.api_conversations_rpc(_payload(data))
         except HTTPException as exc:
             return _sio_error(exc.detail)
         except Exception as exc:
@@ -802,3 +812,11 @@ def register_appserver_socketio_handlers(
     ]
     for event, handler in registrations:
         socketio_server.on(event, handler, namespace=APPSERVER_NAMESPACE)
+
+    conversations_rpc_registrations: list[tuple[str, Callable[..., Awaitable[Any]]]] = [
+        ("connect", _appserver_connect),
+        ("disconnect", _appserver_disconnect),
+        ("rpc", _sio_conversations_rpc),
+    ]
+    for event, handler in conversations_rpc_registrations:
+        socketio_server.on(event, handler, namespace=CONVERSATIONS_RPC_NAMESPACE)

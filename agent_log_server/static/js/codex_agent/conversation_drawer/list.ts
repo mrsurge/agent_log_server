@@ -1,26 +1,109 @@
-function conversationMatchesProject(meta, hostUi, splashTab) {
+type Awaitable = Promise<unknown> | unknown;
+
+interface ConversationSettings extends Record<string, unknown> {
+  cwd?: string;
+  label?: string;
+  alias?: string;
+  agent?: string;
+}
+
+interface ConversationMeta extends Record<string, unknown> {
+  conversation_id?: string;
+  settings?: ConversationSettings;
+  status?: string;
+  pinned?: boolean;
+  pending_approvals?: Record<string, unknown>;
+  last_preview?: unknown;
+}
+
+interface HostUiState {
+  projectRoot?: string;
+}
+
+interface ConversationDisplay {
+  conversationId: string;
+  titleText: string;
+  labelText: string;
+  statusText: string;
+  pendingCount: number;
+  previewText: string;
+  cwdText: string;
+}
+
+interface ExtensionCatalogEntry extends Record<string, unknown> {
+  id?: string;
+  active?: boolean;
+  dependency_message?: string;
+}
+
+interface DrawerListState {
+  conversationList?: ConversationMeta[];
+  clientConversationId?: string | null;
+  conversationMeta?: ConversationMeta | null;
+  extensionCatalog?: ExtensionCatalogEntry[];
+  rpcTransportEnabled?: boolean;
+}
+
+interface ConversationDrawerListContext {
+  conversationListEl: HTMLElement | null;
+  conversationMiniListEl: HTMLElement | null;
+  getState(): DrawerListState;
+  getHostUi(): HostUiState | null | undefined;
+  getSplashTab(): string;
+  getConversationPreview(conversationId: string): unknown;
+  selectConversation(conversationId: string): Awaitable;
+  selectConversationWithView(conversationId: string, view: string): Awaitable;
+  setConversationPins?(conversationIds: string[]): Awaitable;
+  openSettingsModal(): void;
+  deleteConversation(conversationId: string): Awaitable;
+  documentRef?: Document;
+  windowRef?: Window;
+}
+
+interface ConversationDrawerListBinding {
+  renderConversationList(list: ConversationMeta[], activeConversationId: string | null): void;
+  renderMiniConversationList(list: ConversationMeta[], activeConversationId: string | null): void;
+  renderSplashTabs(): void;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object';
+}
+
+function getConversationSettings(meta: ConversationMeta | null | undefined): ConversationSettings {
+  return isRecord(meta?.settings) ? (meta.settings as ConversationSettings) : {};
+}
+
+function conversationMatchesProject(
+  meta: ConversationMeta | null | undefined,
+  hostUi: HostUiState | null | undefined,
+  splashTab: string,
+): boolean {
   if (splashTab !== 'project') return true;
   const projectRoot = hostUi?.projectRoot;
   if (!projectRoot || typeof projectRoot !== 'string') return false;
-  const settings = meta?.settings || {};
+  const settings = getConversationSettings(meta);
   const cwd = typeof settings.cwd === 'string' ? settings.cwd : '';
   if (!cwd) return false;
   return cwd === projectRoot || cwd.startsWith(`${projectRoot}/`);
 }
 
-function normalizePreviewText(value) {
+function normalizePreviewText(value: unknown): string {
   if (typeof value === 'string') {
     return value.trim().replace(/\s+/g, ' ').slice(0, 220);
   }
-  if (value && typeof value === 'object' && typeof value.text === 'string') {
+  if (isRecord(value) && typeof value.text === 'string') {
     return value.text.trim().replace(/\s+/g, ' ').slice(0, 220);
   }
   return '';
 }
 
-function buildConversationDisplay(meta, getConversationPreview) {
+function buildConversationDisplay(
+  meta: ConversationMeta | null | undefined,
+  getConversationPreview: (conversationId: string) => unknown,
+): ConversationDisplay {
   const conversationId = meta?.conversation_id || '';
-  const settings = meta?.settings || {};
+  const settings = getConversationSettings(meta);
   const labelRaw = typeof settings.label === 'string' ? settings.label.trim() : '';
   const aliasRaw = typeof settings.alias === 'string' ? settings.alias.trim() : '';
   const alias = aliasRaw || conversationId;
@@ -49,11 +132,13 @@ function buildConversationDisplay(meta, getConversationPreview) {
   };
 }
 
-function getActiveConversationIdFromState(state) {
+function getActiveConversationIdFromState(state: DrawerListState | null | undefined): string | null {
   return state?.clientConversationId || state?.conversationMeta?.conversation_id || null;
 }
 
-export function createConversationDrawerList(ctx) {
+export function createConversationDrawerList(
+  ctx: ConversationDrawerListContext,
+): ConversationDrawerListBinding {
   const {
     conversationListEl,
     conversationMiniListEl,
@@ -69,38 +154,39 @@ export function createConversationDrawerList(ctx) {
     documentRef,
   } = ctx;
 
-  let draggingConversationId = null;
+  let draggingConversationId: string | null = null;
 
-  function getConversationListState() {
+  function getConversationListState(): ConversationMeta[] {
     const state = getState();
     return Array.isArray(state?.conversationList) ? state.conversationList : [];
   }
 
-  function getPinnedConversationIds() {
+  function getPinnedConversationIds(): string[] {
     return getConversationListState()
       .filter((meta) => meta?.pinned === true && typeof meta?.conversation_id === 'string' && meta.conversation_id)
       .map((meta) => meta.conversation_id);
   }
 
-  function clearPinnedDragMarkers(doc) {
-    doc?.querySelectorAll?.('.conversation-row.drag-over, .conversation-row.dragging, .conversation-mini-row.drag-over, .conversation-mini-row.dragging')
-      ?.forEach((el) => {
+  function clearPinnedDragMarkers(doc: Document | null | undefined): void {
+    if (!doc) return;
+    doc.querySelectorAll('.conversation-row.drag-over, .conversation-row.dragging, .conversation-mini-row.drag-over, .conversation-mini-row.dragging')
+      .forEach((el) => {
         el.classList.remove('drag-over');
         el.classList.remove('dragging');
       });
   }
 
-  function clearPinnedDragState(doc) {
+  function clearPinnedDragState(doc: Document | null | undefined): void {
     draggingConversationId = null;
     clearPinnedDragMarkers(doc);
   }
 
-  async function persistPinnedConversationOrder(nextPinnedIds) {
+  async function persistPinnedConversationOrder(nextPinnedIds: string[]): Promise<void> {
     if (typeof setConversationPins !== 'function' || !Array.isArray(nextPinnedIds)) return;
     await setConversationPins(nextPinnedIds);
   }
 
-  async function toggleConversationPinned(meta) {
+  async function toggleConversationPinned(meta: ConversationMeta | null | undefined): Promise<void> {
     const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
     if (!conversationId) return;
     const pinnedIds = getPinnedConversationIds();
@@ -113,7 +199,7 @@ export function createConversationDrawerList(ctx) {
     await persistPinnedConversationOrder(nextPinnedIds);
   }
 
-  function reorderPinnedConversationIds(targetConversationId) {
+  function reorderPinnedConversationIds(targetConversationId: string): string[] | null {
     const targetId = typeof targetConversationId === 'string' ? targetConversationId : '';
     const draggedId = typeof draggingConversationId === 'string' ? draggingConversationId : '';
     if (!draggedId || !targetId || draggedId === targetId) return null;
@@ -127,11 +213,16 @@ export function createConversationDrawerList(ctx) {
     return nextPinnedIds;
   }
 
-  function bindPinnedDropTarget(row, meta, doc) {
+  function bindPinnedDropTarget(
+    row: HTMLDivElement,
+    meta: ConversationMeta | null | undefined,
+    doc: Document | null | undefined,
+  ): void {
     const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
     if (!conversationId) return;
     row.addEventListener('dragover', (evt) => {
       if (!draggingConversationId || meta?.pinned !== true || draggingConversationId === conversationId) return;
+      if (!evt.dataTransfer) return;
       evt.preventDefault();
       evt.dataTransfer.dropEffect = 'move';
       row.classList.add('drag-over');
@@ -151,7 +242,11 @@ export function createConversationDrawerList(ctx) {
     });
   }
 
-  function buildConversationInfo(doc, meta, { compact = false } = {}) {
+  function buildConversationInfo(
+    doc: Document,
+    meta: ConversationMeta | null | undefined,
+    { compact = false }: { compact?: boolean } = {},
+  ): HTMLDivElement {
     const display = buildConversationDisplay(meta, getConversationPreview);
     const info = doc.createElement('div');
     info.className = 'conversation-meta';
@@ -203,7 +298,12 @@ export function createConversationDrawerList(ctx) {
     return info;
   }
 
-  function buildConversationCardControls(doc, meta, row, { compact = false } = {}) {
+  function buildConversationCardControls(
+    doc: Document,
+    meta: ConversationMeta | null | undefined,
+    row: HTMLDivElement,
+    { compact = false }: { compact?: boolean } = {},
+  ): HTMLDivElement {
     const controls = doc.createElement('div');
     controls.className = compact ? 'conversation-card-controls conversation-mini-controls' : 'conversation-card-controls';
 
@@ -240,6 +340,10 @@ export function createConversationDrawerList(ctx) {
         evt.preventDefault();
         return;
       }
+      if (!evt.dataTransfer) {
+        evt.preventDefault();
+        return;
+      }
       draggingConversationId = meta.conversation_id;
       evt.dataTransfer.effectAllowed = 'move';
       evt.dataTransfer.setData('text/plain', meta.conversation_id);
@@ -254,7 +358,7 @@ export function createConversationDrawerList(ctx) {
     return controls;
   }
 
-  function renderConversationList(list, activeConversationId) {
+  function renderConversationList(list: ConversationMeta[], activeConversationId: string | null): void {
     if (!conversationListEl) return;
     const doc = documentRef || document;
     const hostUi = getHostUi();
@@ -270,9 +374,10 @@ export function createConversationDrawerList(ctx) {
     }
 
     items.forEach((meta) => {
+      const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
       const row = doc.createElement('div');
       row.className = 'conversation-row';
-      if (meta?.conversation_id === activeConversationId) row.classList.add('active');
+      if (conversationId && conversationId === activeConversationId) row.classList.add('active');
       if (meta?.pinned === true) row.classList.add('pinned');
 
       const info = buildConversationInfo(doc, meta);
@@ -286,7 +391,8 @@ export function createConversationDrawerList(ctx) {
       openBtn.className = 'btn tiny primary';
       openBtn.textContent = 'Open';
       openBtn.addEventListener('click', () => {
-        selectConversation(meta.conversation_id);
+        if (!conversationId) return;
+        void selectConversation(conversationId);
       });
       actions.appendChild(openBtn);
 
@@ -294,7 +400,8 @@ export function createConversationDrawerList(ctx) {
       settingsBtn.className = 'btn tiny';
       settingsBtn.textContent = 'Settings';
       settingsBtn.addEventListener('click', async () => {
-        await selectConversationWithView(meta.conversation_id, 'splash');
+        if (!conversationId) return;
+        await selectConversationWithView(conversationId, 'splash');
         openSettingsModal();
       });
       actions.appendChild(settingsBtn);
@@ -303,7 +410,8 @@ export function createConversationDrawerList(ctx) {
       deleteBtn.className = 'btn tiny decline';
       deleteBtn.textContent = 'Delete';
       deleteBtn.addEventListener('click', async () => {
-        await deleteConversation(meta.conversation_id);
+        if (!conversationId) return;
+        await deleteConversation(conversationId);
       });
       actions.appendChild(deleteBtn);
 
@@ -312,7 +420,7 @@ export function createConversationDrawerList(ctx) {
     });
   }
 
-  function renderMiniConversationList(list, activeConversationId) {
+  function renderMiniConversationList(list: ConversationMeta[], activeConversationId: string | null): void {
     if (!conversationMiniListEl) return;
     const doc = documentRef || document;
     conversationMiniListEl.innerHTML = '';
@@ -326,9 +434,10 @@ export function createConversationDrawerList(ctx) {
     }
 
     items.forEach((meta) => {
+      const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
       const row = doc.createElement('div');
       row.className = 'conversation-mini-row';
-      if (meta?.conversation_id === activeConversationId) row.classList.add('active');
+      if (conversationId && conversationId === activeConversationId) row.classList.add('active');
       if (meta?.pinned === true) row.classList.add('pinned');
 
       const state = getState();
@@ -347,7 +456,8 @@ export function createConversationDrawerList(ctx) {
         mainButton.title = unavailableDetail;
       } else {
         mainButton.addEventListener('click', () => {
-          selectConversation(meta.conversation_id);
+          if (!conversationId) return;
+          void selectConversation(conversationId);
         });
       }
 
@@ -359,7 +469,7 @@ export function createConversationDrawerList(ctx) {
     });
   }
 
-  function renderSplashTabs() {
+  function renderSplashTabs(): void {
     const doc = documentRef || document;
     const state = getState();
     const splashTabAllBtn = doc.getElementById('splash-tab-all');

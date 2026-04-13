@@ -1,16 +1,45 @@
-function isElementVisibleRect(rect) {
-  return !!(rect && rect.width > 0 && rect.height > 0);
+type StickySourceRow = HTMLElement & { _timelineStickyUid?: string };
+type StickySlotElement = HTMLDivElement & { _sourceRow?: StickySourceRow | null };
+type StickyClickHandler = (sourceRow: StickySourceRow, event: MouseEvent) => void;
+
+interface TimelineStickyHeadersContext {
+  timelineWrapEl: HTMLElement | null;
+  timelineEl: HTMLElement | null;
+  getTopOffset?(): number;
+  onMessageHeaderClick?: StickyClickHandler;
+  onCollapsibleHeaderClick?: StickyClickHandler;
+  documentRef?: Document;
+  windowRef?: Window;
 }
 
-function closestTimelineRow(timelineEl, el) {
+interface TimelineStickyHeadersBinding {
+  update(): void;
+  destroy(): void;
+  getVisibleHeight(): number;
+}
+
+interface NextTimelineRowInfo {
+  row: StickySourceRow;
+  climbed: number;
+}
+
+function isTimelineRowElement(value: unknown): value is StickySourceRow {
+  return value instanceof HTMLElement && value.classList.contains('timeline-row');
+}
+
+function isElementVisibleRect(rect: DOMRect | ClientRect | null | undefined): boolean {
+  return Boolean(rect && rect.width > 0 && rect.height > 0);
+}
+
+function closestTimelineRow(timelineEl: HTMLElement | null, el: Element | null): StickySourceRow | null {
   if (!el || !el.closest) return null;
   const row = el.closest('.timeline-row');
-  if (!row) return null;
+  if (!isTimelineRowElement(row)) return null;
   if (!timelineEl || !timelineEl.contains(row)) return null;
   return row;
 }
 
-function isStickySourceRow(row) {
+function isStickySourceRow(row: Element | null | undefined): boolean {
   if (!row?.classList) return false;
   return row.classList.contains('subagent-card')
     || row.classList.contains('diff')
@@ -20,29 +49,29 @@ function isStickySourceRow(row) {
     || row.classList.contains('web-search-card');
 }
 
-function getStickyType(row) {
+function getStickyType(row: Element | null | undefined): 'message' | 'collapsible' {
   if (row?.classList?.contains('message-card')) return 'message';
   return 'collapsible';
 }
 
-function getHeaderForRow(row) {
+function getHeaderForRow(row: StickySourceRow | null): HTMLElement | null {
   if (!row) return null;
   if (row.classList.contains('message-card')) {
-    return row.querySelector(':scope > .message-header');
+    return row.querySelector<HTMLElement>(':scope > .message-header');
   }
   if (row.classList.contains('subagent-card')) {
-    return row.querySelector(':scope > .subagent-header');
+    return row.querySelector<HTMLElement>(':scope > .subagent-header');
   }
   if (row.classList.contains('diff')) {
-    return row.querySelector(':scope > .body > .diff-path-label, :scope > .body > .diff-path');
+    return row.querySelector<HTMLElement>(':scope > .body > .diff-path-label, :scope > .body > .diff-path');
   }
   if (row.classList.contains('mcp-tool-card') || row.classList.contains('search-card') || row.classList.contains('web-search-card')) {
-    return row.querySelector(':scope > .body > .command-ribbon');
+    return row.querySelector<HTMLElement>(':scope > .body > .command-ribbon');
   }
   return null;
 }
 
-function getStickyHostClasses(row) {
+function getStickyHostClasses(row: Element | null | undefined): string[] {
   const classes = ['timeline-sticky-slot-host'];
   if (!row?.classList) return classes;
   if (row.classList.contains('message-card')) classes.push('message-card');
@@ -58,13 +87,13 @@ function getStickyHostClasses(row) {
   return classes;
 }
 
-function getStickyChainFromRow(row) {
+function getStickyChainFromRow(row: StickySourceRow | null): StickySourceRow[] {
   if (!row) return [];
-  const subagents = [];
-  let cursor = row.parentElement?.closest('.subagent-card') || null;
-  while (cursor) {
+  const subagents: StickySourceRow[] = [];
+  let cursor = row.parentElement?.closest('.subagent-card');
+  while (isTimelineRowElement(cursor)) {
     subagents.push(cursor);
-    cursor = cursor.parentElement?.closest('.subagent-card') || null;
+    cursor = cursor.parentElement?.closest('.subagent-card');
   }
   subagents.reverse();
   const chain = [...subagents];
@@ -74,45 +103,46 @@ function getStickyChainFromRow(row) {
   return chain;
 }
 
-function findNextTimelineRowAfterSubtree(row) {
+function findNextTimelineRowAfterSubtree(row: StickySourceRow | null): NextTimelineRowInfo | null {
   if (!row) return null;
-  let cursor = row;
+  let cursor: StickySourceRow | null = row;
   let climbed = 0;
   while (cursor) {
     let sibling = cursor.nextElementSibling;
     while (sibling) {
-      if (sibling.classList?.contains('timeline-row')) {
+      if (isTimelineRowElement(sibling)) {
         return { row: sibling, climbed };
       }
       sibling = sibling.nextElementSibling;
     }
-    cursor = cursor.parentElement?.closest('.timeline-row') || null;
+    const parentRow = cursor.parentElement?.closest('.timeline-row');
+    cursor = isTimelineRowElement(parentRow) ? parentRow : null;
     climbed += 1;
   }
   return null;
 }
 
-function getDirectTimelineRows(containerEl) {
+function getDirectTimelineRows(containerEl: Element | null): StickySourceRow[] {
   if (!containerEl?.children) return [];
-  return Array.from(containerEl.children).filter((child) => child.classList?.contains('timeline-row'));
+  return Array.from(containerEl.children).filter((child): child is StickySourceRow => isTimelineRowElement(child));
 }
 
-function getHeaderHeight(row) {
+function getHeaderHeight(row: StickySourceRow | null): number {
   const header = getHeaderForRow(row);
   if (!header) return 0;
   const rect = header.getBoundingClientRect();
   return Math.max(0, Math.round(rect.height || header.offsetHeight || 0));
 }
 
-function rowStillSpansBoundary(row, boundaryY) {
+function rowStillSpansBoundary(row: StickySourceRow | null, boundaryY: number): boolean {
   if (!row) return false;
   const rect = row.getBoundingClientRect();
   return rect.bottom > boundaryY;
 }
 
-function findActiveSourceRow(containerEl, boundaryY) {
+function findActiveSourceRow(containerEl: Element | null, boundaryY: number): StickySourceRow | null {
   const rows = getDirectTimelineRows(containerEl);
-  let active = null;
+  let active: StickySourceRow | null = null;
   for (const row of rows) {
     if (!isStickySourceRow(row)) continue;
     const header = getHeaderForRow(row);
@@ -125,20 +155,26 @@ function findActiveSourceRow(containerEl, boundaryY) {
   return active;
 }
 
-function computeStickyChain(boundaryY, containerEl, chain = []) {
+function computeStickyChain(
+  boundaryY: number,
+  containerEl: Element | null,
+  chain: StickySourceRow[] = [],
+): StickySourceRow[] {
   const activeRow = findActiveSourceRow(containerEl, boundaryY);
   if (!activeRow) return chain;
   chain.push(activeRow);
-  if (!activeRow.classList?.contains('subagent-card')) return chain;
+  if (!activeRow.classList.contains('subagent-card')) return chain;
   if (!activeRow.classList.contains('expanded')) return chain;
-  const body = activeRow.querySelector(':scope > .subagent-body');
+  const body = activeRow.querySelector<HTMLElement>(':scope > .subagent-body');
   if (!body) return chain;
   const headerHeight = getHeaderHeight(activeRow);
   if (!headerHeight) return chain;
   return computeStickyChain(boundaryY + headerHeight, body, chain);
 }
 
-export function bindTimelineStickyHeaders(ctx) {
+export function bindTimelineStickyHeaders(
+  ctx: TimelineStickyHeadersContext,
+): TimelineStickyHeadersBinding {
   const {
     timelineWrapEl,
     timelineEl,
@@ -159,7 +195,7 @@ export function bindTimelineStickyHeaders(ctx) {
 
   const doc = documentRef || document;
   const win = windowRef || window;
-  let container = timelineWrapEl.querySelector('.timeline-sticky-overlay');
+  let container = timelineWrapEl.querySelector<HTMLDivElement>('.timeline-sticky-overlay');
   if (!container) {
     container = doc.createElement('div');
     container.className = 'timeline-sticky-overlay';
@@ -167,16 +203,16 @@ export function bindTimelineStickyHeaders(ctx) {
   }
 
   let disposed = false;
-  let rafId = null;
+  let rafId: number | null = null;
   let lastKey = '';
   let pendingKey = '';
   let pendingKeyFrames = 0;
   let stabilityResampleBudget = 0;
-  let stickySourceRows = [];
-  let stickyHeights = [];
-  let stickySlots = [];
-  let stickyRows = [];
-  let stickyUnderlays = [];
+  let stickySourceRows: StickySourceRow[] = [];
+  let stickyHeights: number[] = [];
+  let stickySlots: StickySlotElement[] = [];
+  let stickyRows: HTMLDivElement[] = [];
+  let stickyUnderlays: HTMLDivElement[] = [];
   let visibleHeight = 0;
   let rowUidCounter = 0;
 
@@ -185,7 +221,7 @@ export function bindTimelineStickyHeaders(ctx) {
   const KEY_STABILITY_FRAMES = 2;
   const BOTTOM_SHADOW_PAD_PX = 8;
 
-  function getRowUid(row) {
+  function getRowUid(row: StickySourceRow | null): string {
     if (!row) return '';
     if (!row._timelineStickyUid) {
       row._timelineStickyUid = `timeline-sticky-${rowUidCounter += 1}`;
@@ -193,22 +229,22 @@ export function bindTimelineStickyHeaders(ctx) {
     return row._timelineStickyUid;
   }
 
-  function scheduleUpdate() {
+  function scheduleUpdate(): void {
     if (disposed || rafId) return;
-    rafId = requestAnimationFrame(() => {
+    rafId = win.requestAnimationFrame(() => {
       rafId = null;
       updateNow();
     });
   }
 
-  function ensureSlotCount(count) {
+  function ensureSlotCount(count: number): void {
     while (stickySlots.length < count) {
       const underlay = doc.createElement('div');
       underlay.className = 'timeline-sticky-underlay';
       container.appendChild(underlay);
       stickyUnderlays.push(underlay);
 
-      const slot = doc.createElement('div');
+      const slot = doc.createElement('div') as StickySlotElement;
       slot.className = 'timeline-sticky-slot';
       const host = doc.createElement('div');
       host.className = 'timeline-sticky-slot-host';
@@ -239,7 +275,7 @@ export function bindTimelineStickyHeaders(ctx) {
     }
   }
 
-  function clearOverlay() {
+  function clearOverlay(): void {
     lastKey = '';
     stickySourceRows = [];
     stickyHeights = [];
@@ -249,7 +285,7 @@ export function bindTimelineStickyHeaders(ctx) {
     container.style.height = '0px';
   }
 
-  function syncSlotFromSource(srcRow, depth) {
+  function syncSlotFromSource(srcRow: StickySourceRow, depth: number): number {
     const underlay = stickyUnderlays[depth];
     const slot = stickySlots[depth];
     const host = stickyRows[depth];
@@ -278,10 +314,11 @@ export function bindTimelineStickyHeaders(ctx) {
     underlay.style.top = '0px';
 
     const clone = sourceHeader.cloneNode(true);
+    if (!(clone instanceof HTMLElement)) return DEFAULT_ROW_HEIGHT;
     clone.classList.add('timeline-sticky-header');
-    clone.querySelectorAll('.ribbon-toggle-zone').forEach((el) => el.remove());
-    clone.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
-    clone.querySelectorAll('.twisty').forEach((el) => {
+    clone.querySelectorAll<HTMLElement>('.ribbon-toggle-zone').forEach((el) => el.remove());
+    clone.querySelectorAll<HTMLElement>('[id]').forEach((el) => el.removeAttribute('id'));
+    clone.querySelectorAll<HTMLElement>('.twisty').forEach((el) => {
       el.style.pointerEvents = 'none';
     });
     clone.dataset.expanded = sourceHeader.dataset.expanded || (srcRow.classList.contains('expanded') ? 'true' : 'false');
@@ -310,7 +347,7 @@ export function bindTimelineStickyHeaders(ctx) {
     return height;
   }
 
-  function applyPushTransforms(chain, hostTop) {
+  function applyPushTransforms(chain: StickySourceRow[], hostTop: number): void {
     let cumulativePush = 0;
     let baseTop = 0;
 
@@ -344,7 +381,7 @@ export function bindTimelineStickyHeaders(ctx) {
     });
   }
 
-  function updateNow() {
+  function updateNow(): void {
     if (disposed) return;
 
     const wrapRect = timelineWrapEl.getBoundingClientRect();
@@ -422,7 +459,7 @@ export function bindTimelineStickyHeaders(ctx) {
     attributeFilter: ['class', 'data-expanded'],
   });
 
-  function onScroll() {
+  function onScroll(): void {
     scheduleUpdate();
   }
 
@@ -438,7 +475,7 @@ export function bindTimelineStickyHeaders(ctx) {
       timelineWrapEl.removeEventListener('scroll', onScroll);
       win.removeEventListener('resize', scheduleUpdate);
       if (rafId) {
-        cancelAnimationFrame(rafId);
+        win.cancelAnimationFrame(rafId);
         rafId = null;
       }
       container.remove();
