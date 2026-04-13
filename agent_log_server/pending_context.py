@@ -20,11 +20,13 @@ import struct
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from collections.abc import Callable
+from typing import TypedDict
 
 from .prompt_context import REPO_MEMORY_FILENAME, load_repo_memory_snapshot
 from .repo_memory_delta import build_repo_memory_delta
 from .te2_mcp_config import te2_mcp_integration_enabled
+from .typing_helpers import ObjectMap, coerce_object_map
 
 # -- Configuration -----------------------------------------------------
 
@@ -53,18 +55,47 @@ _EVENT_HEADER_FMT = "iIII"
 #     "content_hash": str,            # sha256 of latest file snapshot for dedup
 # }
 
+
+class PendingContextUpdate(TypedDict):
+    type: str
+    mode: str
+    content: str
+    snapshot_content: str
+    ts: float
+    source_path: str
+    content_hash: str
+
+
+class ConversationTarget(TypedDict):
+    repo_root: str
+    memory_path: str
+
+
+class ExternalQueueResult(TypedDict):
+    queued: int
+    mode: str
+    content_hash: str
+    source_path: str
+
+
+class InotifyEvent(TypedDict):
+    wd: int
+    mask: int
+    cookie: int
+    name: str
+
 # -- Module state ------------------------------------------------------
 
-_pending: Dict[str, List[Dict[str, Any]]] = {}
-_last_content_hash: Dict[str, str] = {}  # source_path -> hash of last seen snapshot
-_last_content_text: Dict[str, str] = {}  # source_path -> last seen snapshot text
-_conversation_snapshot_text: Dict[str, str] = {}  # conversation_id -> last delivered snapshot text
-_meta_loader: Optional[Callable[[str], Dict[str, Any]]] = None
-_conversation_lister: Optional[Callable[[], List[str]]] = None
-_conversation_targets: Dict[str, Dict[str, str]] = {}
-_watcher_tasks: Dict[str, asyncio.Task] = {}
-_watcher_stop_events: Dict[str, asyncio.Event] = {}
-_watcher_conversations: Dict[str, Set[str]] = {}
+_pending: dict[str, list[PendingContextUpdate]] = {}
+_last_content_hash: dict[str, str] = {}  # source_path -> hash of last seen snapshot
+_last_content_text: dict[str, str] = {}  # source_path -> last seen snapshot text
+_conversation_snapshot_text: dict[str, str] = {}  # conversation_id -> last delivered snapshot text
+_meta_loader: Callable[[str], ObjectMap] | None = None
+_conversation_lister: Callable[[], list[str]] | None = None
+_conversation_targets: dict[str, ConversationTarget] = {}
+_watcher_tasks: dict[str, asyncio.Task[None]] = {}
+_watcher_stop_events: dict[str, asyncio.Event] = {}
+_watcher_conversations: dict[str, set[str]] = {}
 
 
 def _log(message: str) -> None:
@@ -81,8 +112,8 @@ def has_pending(conversation_id: str) -> bool:
 
 def pop_pending(
     conversation_id: str,
-    update_type: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+    update_type: str | None = None,
+) -> PendingContextUpdate | None:
     """Pop the most recent pending update for a conversation.
 
     If update_type is given, only pops entries of that type.
@@ -120,7 +151,7 @@ def pop_pending(
     return None
 
 
-def queue_update(conversation_id: str, update: Dict[str, Any]) -> None:
+def queue_update(conversation_id: str, update: PendingContextUpdate) -> None:
     """Queue a pending context update for a conversation.
 
     Replaces any existing entry of the same type (latest wins).
@@ -143,8 +174,8 @@ def _build_repo_memory_update(
     current_content: str,
     content_hash: str,
     ts: float,
-    delta_override: Optional[str] = None,
-) -> Dict[str, Any]:
+    delta_override: str | None = None,
+) -> PendingContextUpdate:
     base_snapshot = _conversation_snapshot_text.get(conversation_id, "")
     existing_pending = next(
         (entry for entry in _pending.get(conversation_id, []) if entry.get("type") == "repo_memory"),
@@ -184,9 +215,9 @@ def queue_external_repo_memory_update(
     *,
     previous_content: str,
     current_content: str,
-    delta_content: Optional[str] = None,
-    ts: Optional[float] = None,
-) -> Dict[str, Any]:
+    delta_content: str | None = None,
+    ts: float | None = None,
+) -> ExternalQueueResult:
     raw_path = str(source_path or "").strip()
     if not raw_path:
         raise ValueError("source_path is required")
@@ -285,7 +316,7 @@ def _inotify_add_watch(libc, fd: int, path: bytes, mask: int) -> int:
     return wd
 
 
-def _read_inotify_events(fd: int) -> List[Dict[str, Any]]:
+def _read_inotify_events(fd: int) -> list[InotifyEvent]:
     """Read available inotify events from fd. Non-blocking."""
     buf_size = 4096
     try:
@@ -295,7 +326,7 @@ def _read_inotify_events(fd: int) -> List[Dict[str, Any]]:
     if not data:
         return []
 
-    events = []
+    events: list[InotifyEvent] = []
     offset = 0
     while offset + _EVENT_HEADER_SIZE <= len(data):
         wd, mask, cookie, name_len = struct.unpack_from(_EVENT_HEADER_FMT, data, offset)
@@ -317,7 +348,7 @@ def _content_hash(content: str) -> str:
 
 # -- Conversation targeting --------------------------------------------
 
-def _watch_target_for_conversation(conversation_id: str) -> Optional[Dict[str, str]]:
+def _watch_target_for_conversation(conversation_id: str) -> ConversationTarget | None:
     if not _meta_loader:
         return None
 
@@ -326,11 +357,7 @@ def _watch_target_for_conversation(conversation_id: str) -> Optional[Dict[str, s
     except Exception:
         return None
 
-    if not isinstance(meta, dict):
-        return None
-
-    settings_raw = meta.get("settings")
-    settings: Dict[str, Any] = settings_raw if isinstance(settings_raw, dict) else {}
+    settings = coerce_object_map(meta.get("settings"))
     agent = settings.get("agent")
     if not isinstance(agent, str) or agent.strip() not in TARGETED_AGENT_TYPES:
         return None
@@ -339,11 +366,11 @@ def _watch_target_for_conversation(conversation_id: str) -> Optional[Dict[str, s
 
     cwd = settings.get("cwd")
     snapshot = load_repo_memory_snapshot(cwd if isinstance(cwd, str) else None)
-    if not snapshot.get("exists"):
+    if not snapshot["exists"]:
         return None
 
-    repo_root = snapshot.get("repo_root")
-    memory_path = snapshot.get("path")
+    repo_root = snapshot["repo_root"]
+    memory_path = snapshot["path"]
     if not isinstance(repo_root, str) or not repo_root.strip():
         return None
     if not isinstance(memory_path, str) or not memory_path.strip():
@@ -413,7 +440,7 @@ def _unregister_conversation(conversation_id: str) -> None:
     _stop_watch(memory_path)
 
 
-def refresh_conversation(conversation_id: str) -> Optional[Dict[str, str]]:
+def refresh_conversation(conversation_id: str) -> ConversationTarget | None:
     """Refresh one conversation's watcher registration from meta.json."""
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         return None
@@ -426,17 +453,17 @@ def refresh_conversation(conversation_id: str) -> Optional[Dict[str, str]]:
 
     memory_path = target["memory_path"]
     snapshot = load_repo_memory_snapshot(target["repo_root"])
-    snapshot_content = snapshot.get("content", "") if isinstance(snapshot, dict) else ""
+    snapshot_content = snapshot["content"]
     if current == target:
         _watcher_conversations.setdefault(memory_path, set()).add(conversation_id)
-        _conversation_snapshot_text.setdefault(conversation_id, snapshot_content if isinstance(snapshot_content, str) else "")
+        _conversation_snapshot_text.setdefault(conversation_id, snapshot_content)
         _ensure_watch(memory_path)
         return target
 
     _unregister_conversation(conversation_id)
     _conversation_targets[conversation_id] = target
     _watcher_conversations.setdefault(memory_path, set()).add(conversation_id)
-    _conversation_snapshot_text[conversation_id] = snapshot_content if isinstance(snapshot_content, str) else ""
+    _conversation_snapshot_text[conversation_id] = snapshot_content
     _ensure_watch(memory_path)
     _log(f"[pending_context] tracking {conversation_id[:8]} -> {memory_path}")
     return target
@@ -585,8 +612,8 @@ async def _watcher_loop(
 # -- Public lifecycle API ----------------------------------------------
 
 async def start_watcher(
-    meta_loader: Callable[[str], Dict[str, Any]],
-    conversation_lister: Callable[[], List[str]],
+    meta_loader: Callable[[str], ObjectMap],
+    conversation_lister: Callable[[], list[str]],
 ) -> None:
     """Initialize watcher tracking for repo memory files referenced by conversations."""
     global _meta_loader, _conversation_lister

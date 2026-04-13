@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Codex Agent Server is a FastAPI + `fastcore.xml` Python server that acts as a **bridge and UI layer** between the OpenAI Codex CLI (`codex-app-server` binary) and a web-based frontend. It provides a rich conversational interface for interacting with AI coding agents.
+The Codex Agent Server is a FastAPI + `fastcore.xml` Python server that acts as a **bridge and UI layer** around the extension-owned Codex runtimes. The live Codex paths are the registered `codex-ext` and `codex-ext-exp` extensions, which own their own app-server transport/session lifecycle. Legacy builtin-Codex compatibility endpoints may still exist, but they now return explicit disabled/no-op responses instead of owning a live runtime.
 
 ### Core Architecture
 
@@ -10,34 +10,42 @@ The Codex Agent Server is a FastAPI + `fastcore.xml` Python server that acts as 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         Web Browser (Frontend)                      │
 │  ┌─────────────────────────────────────────────────────────────────┐│
-│  │                    codex_agent.js                               ││
-│  │  - Dumb renderer (displays what backend tells it)               ││
+│  │      static/codex_agent.ts → static/dist/codex_agent.js         ││
+│  │  - Generic renderer for conversation/runtime cards              ││
 │  │  - Socket.IO client for live updates and runtime actions        ││
 │  │  - HTTP endpoints for conversation data, debug, and admin flows ││
 │  └─────────────────────────────────────────────────────────────────┘│
 └──────────────────────────────┬──────────────────────────────────────┘
-                               │ Socket.IO live runtime + HTTP data/debug endpoints
+                               │ Socket.IO live runtime + generic HTTP routes
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Python Server (server.py)                        │
 │  ┌─────────────────────────────────────────────────────────────────┐│
 │  │  FastAPI + SocketIO                                             ││
-│  │  - Translates codex events → frontend-friendly format           ││
-│  │  - Manages conversation state (SSOT sidecar)                    ││
-│  │  - Stores internal transcript (richer than rollout)             ││
-│  │  - Handles approvals, settings, conversation switching          ││
+│  │  - Generic conversation/config/transcript plumbing              ││
+│  │  - Generic extension API + Socket.IO routing                    ││
+│  │  - SSOT meta + transcript persistence                           ││
+│  │  - Approvals, settings, conversation switching                  ││
 │  └─────────────────────────────────────────────────────────────────┘│
 └──────────────────────────────┬──────────────────────────────────────┘
-                               │ stdin/stdout (JSON-RPC)
+                               │ generic extension hook surface
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│          Codex extension handlers (`codex-ext` / `codex-ext-exp`)   │
+│  - Own app-server transport/session lifecycle                        │
+│  - Own runtime-schema settings/session picker hooks                  │
+│  - Own live event routing + transcript parity                        │
+│  - May use separate shellspecs / binaries                            │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ stdin/stdout JSON-RPC per extension transport
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    codex-app-server (Rust binary)                   │
 │  - Manages conversations with OpenAI API                            │
 │  - Executes tools (shell commands, file edits)                      │
-│  - Emits events via stdout (JSON-RPC notifications)                 │
-│  - Receives commands via stdin (JSON-RPC requests)                  │
+│  - Emits JSON-RPC requests/notifications                            │
 │  - Writes rollout logs to ~/.codex/sessions/                        │
-│  - Handles multiplexing (multiple conversations)                    │
+│  - May be launched by stable or experimental extension transports   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -85,26 +93,30 @@ When loading a rollout, the `thread_id` is extracted and set immediately, so rol
 - Cleaner, richer format
 - Stores: user messages, agent messages, reasoning, diffs, commands, approvals
 
-## Server Startup Flow
+## Server Startup + Extension Load Flow
 
 ```
 1. Python server starts (uvicorn)
    │
-2. @app.on_event("startup")
-   │  - Calls start_appserver_process()
+2. Extension API initialization
+   │  - Ensures `~/.local/share/app_server/extensions/` exists
+   │  - Seeds `extensions.json` for the user-installed root if missing
    │
-3. start_appserver_process()
-   │  - Spawns: codex-app-server --json-rpc
-   │  - Stores process handle in global APP_SERVER_PROC
-   │  - Starts stdout reader task (_appserver_reader)
+3. `ext_loader.load_extensions(...)`
+   │  - Merges builtin + user-installed extension registries
+   │  - Builds runtime metadata / availability state
+   │  - Initializes active handlers through generic init hooks
    │
-4. _appserver_reader() [async background task]
-   │  - Continuously reads lines from stdout
-   │  - Parses JSON-RPC messages
-   │  - Routes to appropriate handlers
-   │  - Emits SocketIO events to frontend
+4. FastAPI + Socket.IO routes register
+   │  - `/rpc/conversations` for canonical conversation runtime traffic
+   │  - `/appserver` as the compatibility shim during migration
+   │  - `/api/extensions/*` for generic extension admin/package/config flows
    │
 5. Server ready on port 12359
+   │
+6. Codex app-server transports start lazily
+   │  - `codex-ext` / `codex-ext-exp` start or resume backend state on demand
+   │  - there is no single global `APP_SERVER_PROC`-owned live Codex runtime
 ```
 
 ## Message Flows
@@ -450,14 +462,38 @@ Controls how much "thinking" the model does:
 | `/api/appserver/transcript/append` | POST | Add entry to transcript |
 | `/api/appserver/approval_record` | POST | Record approval decision |
 
-### RPC & Server
+### Shared Runtime + Extension Admin
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/appserver/rpc` | POST | Send JSON-RPC to codex |
-| `/api/appserver/status` | GET | Server status |
-| `/api/appserver/start` | POST | Start codex-app-server |
-| `/api/appserver/stop` | POST | Stop codex-app-server |
+| `/api/appserver/runtime_options` | GET | Shared runtime quick controls/current values for the active extension conversation |
+| `/api/extensions` | GET | List merged builtin + user-installed extension state |
+| `/api/extensions/validate` | POST | Validate an install/update package source (`path`, `zip`, or `git`) |
+| `/api/extensions/install` | POST | Install a third-party extension package into the user extension root |
+| `/api/extensions/reload` | POST | Reload extension discovery/runtime state |
+| `/api/extensions/{extension_id}` | GET | Get merged runtime metadata for one extension |
+| `/api/extensions/{extension_id}` | DELETE | Remove a user-installed extension |
+| `/api/extensions/{extension_id}/enabled` | POST | Toggle enabled state for one extension |
+| `/api/extensions/{extension_id}/install` | POST | Run dependency install for an extension that supports it |
+| `/api/extensions/{extension_id}/settings_schema` | GET | Get static or dynamic extension settings schema |
+| `/api/extensions/{extension_id}/splash_schema` | GET | Get the splash/settings action schema for one extension |
+| `/api/extensions/{extension_id}/splash_action` | POST | Run an extension-owned splash/settings action |
+| `/api/extensions/{extension_id}/request_cards` | GET | Get extension-owned request-card UI config |
+| `/api/extensions/{extension_id}/assets/{asset_path}` | GET | Serve extension-owned UI assets |
+| `/api/extensions/{extension_id}/models` | GET | Get extension model options |
+| `/api/extensions/{extension_id}/plan` | GET | Get extension plan-state payload for a conversation |
+| `/api/extensions/{extension_id}/sessions` | GET | List backend sessions for session-picker flows |
+| `/api/extensions/{extension_id}/sessions/resume` | POST | Bind/import a backend session into a local conversation |
+| `/api/extensions/{extension_id}/debug/raw` | GET | Get extension-owned debug buffer |
+
+### Legacy builtin-Codex compatibility (disabled / no-op)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/appserver/rpc` | POST | Legacy builtin-Codex RPC lane; now returns an explicit disabled result |
+| `/api/appserver/status` | GET | Legacy builtin-Codex status lane; now returns disabled/no-op state |
+| `/api/appserver/start` | POST | Legacy builtin-Codex start lane; now returns disabled/no-op state |
+| `/api/appserver/stop` | POST | Legacy builtin-Codex stop lane; now returns disabled/no-op state |
 
 ### Debug
 

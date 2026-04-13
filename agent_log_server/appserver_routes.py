@@ -592,7 +592,7 @@ class AppserverRoutes:
             if isinstance(host_project_root, str) and host_project_root.strip():
                 cwd = host_project_root
 
-        snapshot = load_repo_memory_snapshot(cwd)
+        snapshot: ObjectMap = dict(load_repo_memory_snapshot(cwd))
         snapshot["conversation_id"] = (
             resolved_conversation_id if isinstance(resolved_conversation_id, str) and resolved_conversation_id else None
         )

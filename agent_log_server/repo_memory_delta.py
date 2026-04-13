@@ -3,9 +3,16 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TypedDict
 
 from .markdown_sections import SectionNode, parse_markdown
+
+
+class SectionEntry(TypedDict):
+    label: str
+    title: str
+    body: str
+    line_start: int
 
 
 def _content_hash(content: str) -> str:
@@ -24,9 +31,9 @@ def _section_label(node: SectionNode) -> str:
     return node.id
 
 
-def _build_section_map(text: str) -> Dict[str, Dict[str, Any]]:
+def _build_section_map(text: str) -> dict[str, SectionEntry]:
     lines = (text or "").splitlines()
-    sections: Dict[str, Dict[str, Any]] = {}
+    sections: dict[str, SectionEntry] = {}
     for node in parse_markdown(text):
         body = _extract_line_range(lines, node.body_start, node.body_end).strip()
         if not body:
@@ -55,9 +62,9 @@ def build_repo_memory_delta(
     previous_text: str,
     current_text: str,
     *,
-    source_path: Optional[str] = None,
-    ts: Optional[float] = None,
-) -> Optional[str]:
+    source_path: str | None = None,
+    ts: float | None = None,
+) -> str | None:
     old_sections = _build_section_map(previous_text)
     new_sections = _build_section_map(current_text)
     if not old_sections and not new_sections:

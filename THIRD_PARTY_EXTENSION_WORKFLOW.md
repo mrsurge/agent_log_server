@@ -35,16 +35,25 @@ Examples:
 - `codex-agent extension validate --path /path/to/ext`
 - `codex-agent extension validate --zip /path/to/ext.zip`
 - `codex-agent extension validate --git /path/or/repo/url --ref main`
-- `codex-agent extension install --path /path/to/ext`
-- `codex-agent extension update my-ext --git /path/or/repo/url --ref main`
-- `codex-agent extension remove my-ext`
-- `codex-agent extension reload`
+- `codex-agent extension install --path /path/to/ext --install-dependencies --force-reload`
+- `codex-agent extension update my-ext --git /path/or/repo/url --ref main --install-dependencies --force-reload`
+- `codex-agent extension remove my-ext --force-reload`
+- `codex-agent extension reload my-ext --force-reload`
+- `codex-agent extension validate --path /path/to/ext --json`
 
 Source selection is explicit:
 
 - `--path`
 - `--zip`
 - `--git`
+
+The generic HTTP admin surface mirrors the same lifecycle:
+
+- `POST /api/extensions/validate`
+- `POST /api/extensions/install`
+- `POST /api/extensions/{extension_id}/update`
+- `DELETE /api/extensions/{extension_id}`
+- `POST /api/extensions/reload`
 
 ## Canonical Paths
 
@@ -126,15 +135,11 @@ The installer should be generic and should not live in `server.py`.
 
 ### Required operations
 
-- `validate(source_type, ...)`
-- `install_from_path(source_path, extension_id=None)`
-- `install_from_zip(zip_path, extension_id=None)`
-- `install_from_git(repo_url, ref=None, extension_id=None)`
-- `update_from_path(extension_id, source_path)`
-- `update_from_zip(extension_id, zip_path)`
-- `update_from_git(extension_id, repo_url=None, ref=None)`
-- `remove_extension(extension_id)`
-- `reload_extensions()`
+- `validate_extension_source(source_type, ...)`
+- `install_extension_source(source_type, ..., allow_override=False)`
+- `update_extension_source(extension_id, source_type=None, ...)`
+- `remove_user_extension(extension_id)`
+- `reload_extensions(extension_ids=None, force=False)`
 
 ### Install flow
 
@@ -149,9 +154,10 @@ The installer should be generic and should not live in `server.py`.
    - `~/.local/share/app_server/extensions/<folder>/`
 5. upsert the registry entry in:
    - `~/.local/share/app_server/extensions/extensions.json`
-6. optionally run dependency install/check hooks
-7. restart or reload extension discovery
-8. smoke test
+6. return a machine-readable package install result
+7. optionally reload extension discovery/runtime state
+8. optionally run dependency install/check hooks
+9. optionally wait for readiness / smoke test
 
 ### Source types
 
@@ -181,7 +187,10 @@ If `.gitmodules` is present, git installs now materialize submodules before vali
 3. validate required files
 4. atomically replace the installed target
 5. preserve the registry entry unless the extension identity is invalid
-6. smoke test again
+6. return a machine-readable update result
+7. optionally reload extension discovery/runtime state
+8. optionally run dependency install/check hooks
+9. optionally smoke test again
 
 ### Remove flow
 
@@ -223,8 +232,8 @@ The intended iteration loop is:
 5. run a small non-server smoke if the change affects transport/session timing or transcript shaping
 6. ensure the contributor-source manifest version is correct for the revision being shipped
 7. commit and push the contributor source if the install/update flow depends on git
-8. `install_from_git(...)`, `update_from_git(...)`, `update_from_path(...)`, or the equivalent operator CLI command
-9. restart or hot-reload extension discovery if needed
+8. `install_extension_source(...)`, `update_extension_source(...)`, or the equivalent operator CLI command
+9. reload extension discovery/runtime state if needed
 10. retest the installed extension
 11. repeat
 

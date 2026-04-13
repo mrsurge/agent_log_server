@@ -1,25 +1,80 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import asyncio
+import contextlib
+import hashlib
+import importlib
+import io
 import json
 import os
 import secrets
-import time
-import hashlib
-import contextlib
-import io
 import sys
+import time
+from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Protocol, TypeAlias, cast
 
-from fastapi import FastAPI, Body, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 import uvicorn
 
-from framework_shells import get_manager as get_framework_shell_manager
-from framework_shells.orchestrator import Orchestrator
+PayloadMap: TypeAlias = dict[str, object]
+ShellContext: TypeAlias = dict[str, str]
+EnvOverrides: TypeAlias = dict[str, str]
+
+
+class _ShellRecord(Protocol):
+    id: str
+    label: str | None
+    status: str | None
+
+
+class _FrameworkShellManager(Protocol):
+    async def find_shell_by_label(self, label: str, *, status: str | None = None) -> _ShellRecord | None: ...
+    async def resize_pty(self, shell_id: str, cols: int, rows: int) -> object: ...
+    async def terminate_shell(self, shell_id: str, *, force: bool = False) -> object: ...
+    async def list_shells(self) -> Sequence[_ShellRecord]: ...
+
+
+class _GetFrameworkShellManager(Protocol):
+    async def __call__(self, *, run_id: str) -> _FrameworkShellManager: ...
+
+
+class _OrchestratorInstance(Protocol):
+    async def start_from_ref(
+        self,
+        spec_ref: str,
+        *,
+        base_dir: Path,
+        ctx: ShellContext,
+        label: str,
+        env_overrides: EnvOverrides,
+        wait_ready: bool,
+    ) -> _ShellRecord: ...
+
+
+class _OrchestratorFactory(Protocol):
+    def __call__(self, manager: _FrameworkShellManager) -> _OrchestratorInstance: ...
+
+
+def _coerce_payload_map(value: object) -> PayloadMap:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
+def _load_get_framework_shell_manager() -> _GetFrameworkShellManager:
+    module = importlib.import_module("framework_shells")
+    return cast(_GetFrameworkShellManager, getattr(module, "get_manager"))
+
+
+def _load_orchestrator_factory() -> _OrchestratorFactory:
+    module = importlib.import_module("framework_shells.orchestrator")
+    return cast(_OrchestratorFactory, getattr(module, "Orchestrator"))
 
 
 def _runtime_root() -> Path:
-    here = Path(__file__).resolve().parent
+    here = Path(os.path.abspath(__file__)).parent
     package_root = here / "agent_log_server"
     if package_root.exists():
         return package_root
@@ -57,9 +112,9 @@ def _manager_run_id() -> str:
     return os.environ.get("FRAMEWORK_SHELLS_RUN_ID") or "app-server"
 
 
-async def _get_fws_manager():
+async def _get_fws_manager() -> _FrameworkShellManager:
     @contextlib.contextmanager
-    def _redirect_stdout_to_stderr() -> Any:
+    def _redirect_stdout_to_stderr() -> Iterator[None]:
         class _StdoutToStderr(io.TextIOBase):
             def write(self, s: str) -> int:
                 return sys.stderr.write(s)
@@ -70,8 +125,9 @@ async def _get_fws_manager():
         with contextlib.redirect_stdout(_StdoutToStderr()):
             yield
 
+    get_manager = _load_get_framework_shell_manager()
     with _redirect_stdout_to_stderr():
-        return await get_framework_shell_manager(run_id=_manager_run_id())
+        return await get_manager(run_id=_manager_run_id())
 
 
 def _agent_pty_root(conversation_id: str) -> Path:
@@ -87,8 +143,8 @@ def _marker_path(conversation_id: str) -> Path:
     return _agent_pty_root(conversation_id) / "markers.log"
 
 
-def _termux_env_overrides() -> Dict[str, str]:
-    env: Dict[str, str] = {}
+def _termux_env_overrides() -> dict[str, str]:
+    env: dict[str, str] = {}
     if os.environ.get("PREFIX"):
         env["PATH"] = f"{os.environ.get('PREFIX')}/bin:" + os.environ.get("PATH", "")
         env["TERMUX_VERSION"] = os.environ.get("TERMUX_VERSION", "1")
@@ -234,7 +290,7 @@ CONFIG_PATH = Path(os.path.expanduser("~/.cache/app_server/shell_manager.json"))
 
 def _write_registry(host: str, port: int) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: PayloadMap = {
         "url": f"http://{host}:{port}",
         "pid": os.getpid(),
         "ts": int(time.time() * 1000),
@@ -254,7 +310,7 @@ async def _startup() -> None:
 
 
 @app.get("/health")
-async def health() -> Dict[str, Any]:
+async def health() -> PayloadMap:
     return {"ok": True, "pid": os.getpid()}
 
 
@@ -263,11 +319,12 @@ def _agent_pty_label(conversation_id: str) -> str:
 
 
 @app.post("/shells/ensure")
-async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+async def shells_ensure(payload: PayloadMap = Body(...)) -> PayloadMap:
     conversation_id = str(payload.get("conversation_id") or "").strip()
     if not conversation_id:
         raise HTTPException(status_code=400, detail="conversation_id required")
-    cwd = payload.get("cwd")
+    cwd_value = payload.get("cwd")
+    cwd = cwd_value if isinstance(cwd_value, str) and cwd_value.strip() else None
     _ensure_framework_shells_secret()
     mgr = await _get_fws_manager()
     label = _agent_pty_label(conversation_id)
@@ -278,16 +335,17 @@ async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         rcfile = _rcfile_path(conversation_id)
         marker_path = _marker_path(conversation_id)
         _write_rcfile(rcfile, marker_path)
-        ctx = {
+        ctx: ShellContext = {
             "PROJECT_ROOT": str(_runtime_root()),
             "CONVERSATION_ID": conversation_id,
             "RCFILE": str(rcfile),
             "CWD": cwd or str(Path.cwd()),
         }
         # Re-enable DEBUG trap based block begin/end markers (default behavior).
-        env_overrides = {"__FWS_MANUAL": "0", **_termux_env_overrides()}
+        env_overrides: EnvOverrides = {"__FWS_MANUAL": "0", **_termux_env_overrides()}
         spec_ref = "shellspec/mcp_agent_pty.yaml#agent_pty_shell"
-        rec = await Orchestrator(mgr).start_from_ref(
+        orchestrator = _load_orchestrator_factory()(mgr)
+        rec = await orchestrator.start_from_ref(
             spec_ref,
             base_dir=_runtime_root(),
             ctx=ctx,
@@ -304,7 +362,7 @@ async def shells_ensure(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
 
 @app.post("/shells/terminate")
-async def shells_terminate(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+async def shells_terminate(payload: PayloadMap = Body(...)) -> PayloadMap:
     """Terminate the dtach-backed agent PTY shell for a conversation (best-effort)."""
     conversation_id = str(payload.get("conversation_id") or "").strip()
     if not conversation_id:
@@ -324,7 +382,7 @@ async def shells_terminate(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any
 
 
 @app.post("/shells/terminate_all")
-async def shells_terminate_all(payload: Dict[str, Any] = Body({})) -> Dict[str, Any]:
+async def shells_terminate_all(payload: PayloadMap = Body({})) -> PayloadMap:
     """Terminate all running agent PTY shells (label prefix agent-pty:)."""
     _ensure_framework_shells_secret()
     mgr = await _get_fws_manager()
@@ -335,7 +393,7 @@ async def shells_terminate_all(payload: Dict[str, Any] = Body({})) -> Dict[str, 
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"list_shells failed: {exc}")
 
-    terminated: int = 0
+    terminated = 0
     for rec in records:
         label = rec.label or ""
         if rec.status != "running":

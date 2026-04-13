@@ -1,8 +1,9 @@
 import asyncio
 import shutil
 import sys
-from typing import Any, Dict, Optional
+from typing import Optional, TypeAlias
 
+PayloadMap: TypeAlias = dict[str, object]
 
 WRAPPER_REPO_URL = "git+https://github.com/XrSurge/copilot_runtime_manager.git"
 
@@ -15,7 +16,7 @@ def _manager_binary_path() -> Optional[str]:
     return shutil.which("copilot-runtime-manager")
 
 
-async def _run(*args: str) -> Dict[str, Any]:
+async def _run(*args: str) -> PayloadMap:
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
@@ -30,7 +31,7 @@ async def _run(*args: str) -> Dict[str, Any]:
     }
 
 
-async def check_dependencies(*, extension_id: str, extension_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def check_dependencies(*, extension_id: str, extension_info: Optional[PayloadMap] = None) -> PayloadMap:
     binary = _copilot_binary_path()
     if binary:
         return {
@@ -55,7 +56,7 @@ async def check_dependencies(*, extension_id: str, extension_info: Optional[Dict
     }
 
 
-async def install_dependencies(*, extension_id: str, extension_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def install_dependencies(*, extension_id: str, extension_info: Optional[PayloadMap] = None) -> PayloadMap:
     manager = _manager_binary_path()
     if not manager:
         pip_result = await _run(sys.executable, "-m", "pip", "install", "--upgrade", WRAPPER_REPO_URL)
@@ -90,16 +91,18 @@ async def install_dependencies(*, extension_id: str, extension_info: Optional[Di
         }
 
     checked = await check_dependencies(extension_id=extension_id, extension_info=extension_info)
+    details = checked.get("details")
+    detail_map = details if isinstance(details, dict) else {}
     if checked.get("ok"):
         return {
             "ok": True,
             "status": "succeeded",
             "message": checked.get("message") or "Copilot installed",
-            "details": checked.get("details") if isinstance(checked.get("details"), dict) else {},
+            "details": detail_map,
         }
     return {
         "ok": False,
         "status": "failed",
         "message": checked.get("message") or "Copilot install verification failed",
-        "details": checked.get("details") if isinstance(checked.get("details"), dict) else {},
+        "details": detail_map,
     }

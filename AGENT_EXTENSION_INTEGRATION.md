@@ -5,7 +5,7 @@ This document describes the current pluggable agent-extension architecture in `a
 - `copilot-sdk` — the more complete, production-style example
 - `codex-ext` — the stable Codex app-server extension example
 - `codex-ext-exp` — the experimental Codex fork for dynamic developer-instruction / pending-context work
-- `codex-ext-testing` — a compatibility registry alias that resolves to `codex-ext`; legacy `codex` is still a separate built-in compatibility path in `server.py`, not a normal registered extension
+- `codex-ext-testing` — an optional compatibility registry alias that resolves to `codex-ext` and is disabled by default in the builtin registry
 
 The goal is to explain how to build a new agent extension without hardcoding backend-specific logic into `server.py`, `static/codex_agent.ts`, or `static/modals/settings_schema.js`.
 
@@ -171,7 +171,7 @@ At startup, the server ensures the user root exists and seeds its `extensions.js
       "name": "Codex Extension Testing (compat shim → codex-ext)",
       "type": "codex_ext",
       "path": "codex_ext",
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "codex-ext-exp",
@@ -213,6 +213,57 @@ For each extension, `extensions_dir` is the root that owns that extension:
 - user-installed extension → `~/.local/share/app_server/extensions/`
 
 This is what keeps `server.py` from importing extension modules directly while still allowing non-builtin roots.
+
+### Availability and dependency gating
+
+The merged extension registry stores more than install metadata. Loader/runtime state also tracks:
+
+- `enabled`
+- `dependency_status`
+- `dependency_ok`
+- `dependency_message`
+- `active`
+- `source_kind`
+- `source_root`
+- `install_source`
+- `installer_meta`
+- `version`
+- `schema_version`
+
+`active` is computed from the live runtime state:
+
+```text
+active = enabled && manifest_ok && dependency_ok
+```
+
+Practical consequences:
+
+- only active extensions are handler-loadable and agent-selectable
+- disabled or dependency-unmet extensions still appear in extension-management surfaces
+- splash/settings UI surfaces `dependency_message` so the operator can see why an extension is unavailable
+- dependency install/check hooks can move an extension from inactive to active without adding extension-specific code to the shared frontend
+
+### Operator/admin package surfaces
+
+The install/update/remove lifecycle is available through both the local operator CLI and the generic HTTP admin surface.
+
+CLI:
+
+- `codex-agent extension validate ...`
+- `codex-agent extension install ...`
+- `codex-agent extension update <id> ...`
+- `codex-agent extension remove <id>`
+- `codex-agent extension reload [extension_ids...]`
+
+HTTP:
+
+- `POST /api/extensions/validate`
+- `POST /api/extensions/install`
+- `POST /api/extensions/{extension_id}/update`
+- `DELETE /api/extensions/{extension_id}`
+- `POST /api/extensions/reload`
+
+Both paths use the same loader/installer helpers. Package install/update is local filesystem + registry work first; reload, dependency install, and readiness are separate follow-up operations.
 
 Important import note for cross-root extensions:
 
@@ -377,7 +428,7 @@ Dynamic schemas may also wrap a static template. Current examples:
 
 Dynamic-source fields are resolved over the shared Socket.IO contract. If a TE2 relay/proxy sits in front of the appserver, it must explicitly forward the matching events (for example `get_extension_models` or `get_runtime_options`) instead of adding HTTP fallback logic.
 
-Special case: legacy `codex` still returns `{useBuiltin: true}` from `/api/extensions/codex/settings_schema`.
+There is no live builtin-Codex settings-schema lane. Extension-owned settings payloads are SSOT; legacy builtin-Codex compatibility endpoints, where they still exist, return explicit disabled/no-op results rather than an alternate settings flow.
 
 ## Reference implementation 1: Copilot SDK
 
@@ -449,17 +500,17 @@ It demonstrates almost the entire generic surface:
 
 ## Reference implementation 2: Codex app-server extensions
 
-`extensions/codex_ext` is the stable runtime-schema-driven example. `extensions/codex_ext_exp` is the experimental fork that layers dynamic developer-instruction / pending-context work on top of the same architecture. `codex-ext-testing` in the registry is only a compatibility alias that resolves to `codex-ext`.
+`extensions/codex_ext` is the stable runtime-schema-driven example. `extensions/codex_ext_exp` is the experimental fork that layers dynamic developer-instruction / pending-context work on top of the same architecture. `codex-ext-testing` in the registry is only a compatibility alias that resolves to `codex-ext`, and it is disabled by default in the builtin registry.
 
 ### Registered extension IDs
 
 The currently registered Codex extension IDs are:
 
 - `codex-ext` — stable extension-owned Codex path
-- `codex-ext-testing` — compatibility shim → `codex-ext`
+- `codex-ext-testing` — optional compatibility shim → `codex-ext` (disabled by default)
 - `codex-ext-exp` — experimental fork with its own shellspec and transport label
 
-Legacy `codex` is not loaded from the extension registry. It remains a built-in compatibility path in `server.py` with its own server-owned transport/orchestration.
+Legacy builtin-Codex routes may still exist as compatibility shims, but they are not a live runtime path. They return explicit disabled/no-op results that direct callers to `codex-ext` or `codex-ext-exp` through the generic extension surface.
 
 `codex-ext`:
 
@@ -636,7 +687,7 @@ Existing conversation hydration is already handled through the local transcript 
 
 Use the Copilot SDK and Codex app-server implementations as the two reference patterns.
 
-Legacy `codex` in `server.py` is the hard-coded compatibility template, but new extensions do **not** get their own special server/frontend branches. A real extension must plug into the same generic `server.py` / `ext_loader` hook surface as `copilot-sdk` and `codex-ext`, so it also works when loaded from non-builtin extension roots.
+Do **not** copy the disabled builtin-Codex compatibility shims. A real extension must plug into the same generic `server.py` / `ext_loader` hook surface as `copilot-sdk`, `codex-ext`, and `codex-ext-exp`, so it also works when loaded from non-builtin extension roots.
 
 ### 1. Add a registry entry
 

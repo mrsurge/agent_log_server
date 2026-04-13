@@ -3,25 +3,26 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from agent_log_server.te2_runtime import TE2_MCP_SERVER_NAME, build_te2_mcp_streamable_http_url
+from agent_log_server.typing_helpers import ObjectMap, coerce_object_map
 
 AGENT_PTY_BLOCKS_MCP_SERVER_NAME = "agent-pty-blocks"
 _REPO_ROOT = Path(os.path.abspath(__file__)).parents[2]
 _AGENT_PTY_MCP_SERVER_PATH = _REPO_ROOT / "mcp_agent_pty_server.py"
 
 
-def build_agent_pty_blocks_local_mcp_server(cwd: Optional[str] = None, conversation_id: Optional[str] = None) -> Dict[str, Any]:
+def build_agent_pty_blocks_local_mcp_server(cwd: Optional[str] = None, conversation_id: Optional[str] = None) -> ObjectMap:
     command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
-    server: Dict[str, Any] = {
+    server: ObjectMap = {
         "type": "local",
         "command": command,
         "args": [str(_AGENT_PTY_MCP_SERVER_PATH)],
         "tools": ["*"],
     }
     if isinstance(cwd, str) and cwd.strip():
-        env: Dict[str, str] = {"PWD": cwd}
+        env: dict[str, str] = {"PWD": cwd}
         if isinstance(conversation_id, str) and conversation_id.strip():
             env["CONVERSATION_ID"] = conversation_id.strip()
         server["cwd"] = cwd
@@ -30,17 +31,17 @@ def build_agent_pty_blocks_local_mcp_server(cwd: Optional[str] = None, conversat
 
 
 def build_copilot_mcp_servers(
-    existing_servers: Any,
+    existing_servers: object,
     *,
     te2_enabled: bool,
     base_url: Optional[str],
     cwd: Optional[str] = None,
     conversation_id: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+) -> Optional[ObjectMap]:
     if existing_servers in (None, ""):
-        merged: Dict[str, Any] = {}
+        merged: ObjectMap = {}
     elif isinstance(existing_servers, dict):
-        merged = dict(existing_servers)
+        merged = coerce_object_map(existing_servers)
     else:
         raise ValueError("MCP Servers must be a JSON object")
 

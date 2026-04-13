@@ -1,13 +1,45 @@
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
 import sys
-from typing import Any
+from collections.abc import Sequence
 
 import extensions as ext_loader
 
+from agent_log_server.typing_helpers import ObjectMap, coerce_object_map
 
-def register_extension_subcommands(subparsers: Any) -> None:
+
+def _coerce_text_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            items.append(item)
+    return items
+
+
+def _required_str_attr(args: argparse.Namespace, attr_name: str) -> str:
+    value = getattr(args, attr_name, None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    raise ValueError(f"{attr_name} is required")
+
+
+def _string_sequence_attr(args: argparse.Namespace, attr_name: str) -> list[str]:
+    raw_value = getattr(args, attr_name, None)
+    if not isinstance(raw_value, Sequence) or isinstance(raw_value, (str, bytes, bytearray)):
+        return []
+    values: list[str] = []
+    for item in raw_value:
+        if isinstance(item, str) and item.strip():
+            values.append(item.strip())
+    return values
+
+
+def register_extension_subcommands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser(
         "extension",
         help="Manage extension packages from the CLI",
@@ -89,27 +121,31 @@ def run_extension_command(args: argparse.Namespace) -> int:
     return 0 if _response_ok(body) else 1
 
 
-def _run_extension_command_inner(args: argparse.Namespace) -> dict[str, Any]:
+def _run_extension_command_inner(args: argparse.Namespace) -> ObjectMap:
     command = str(getattr(args, "extension_command", "") or "").strip().lower()
     if command == "validate":
         payload = _source_payload_from_args(args, allow_missing_source=False)
-        return ext_loader.validate_extension_source(
-            source_type=str(payload["source_type"]),
-            source_path=_optional_str(payload.get("source_path")),
-            repo_url=_optional_str(payload.get("repo_url")),
-            ref=_optional_str(payload.get("ref")),
-            extension_id=_optional_str(payload.get("extension_id")),
+        return coerce_object_map(
+            ext_loader.validate_extension_source(
+                source_type=str(payload["source_type"]),
+                source_path=_optional_str(payload.get("source_path")),
+                repo_url=_optional_str(payload.get("repo_url")),
+                ref=_optional_str(payload.get("ref")),
+                extension_id=_optional_str(payload.get("extension_id")),
+            )
         )
 
     if command == "install":
         payload = _source_payload_from_args(args, allow_missing_source=False)
-        result = ext_loader.install_extension_source(
-            source_type=str(payload["source_type"]),
-            source_path=_optional_str(payload.get("source_path")),
-            repo_url=_optional_str(payload.get("repo_url")),
-            ref=_optional_str(payload.get("ref")),
-            extension_id=_optional_str(payload.get("extension_id")),
-            allow_override=bool(getattr(args, "allow_override", False)),
+        result = coerce_object_map(
+            ext_loader.install_extension_source(
+                source_type=str(payload["source_type"]),
+                source_path=_optional_str(payload.get("source_path")),
+                repo_url=_optional_str(payload.get("repo_url")),
+                ref=_optional_str(payload.get("ref")),
+                extension_id=_optional_str(payload.get("extension_id")),
+                allow_override=bool(getattr(args, "allow_override", False)),
+            )
         )
         return _finalize_mutating_result(
             result=result,
@@ -120,24 +156,28 @@ def _run_extension_command_inner(args: argparse.Namespace) -> dict[str, Any]:
 
     if command == "update":
         payload = _source_payload_from_args(args, allow_missing_source=True)
-        result = ext_loader.update_extension_source(
-            args.extension_id,
-            source_type=_optional_str(payload.get("source_type")),
-            source_path=_optional_str(payload.get("source_path")),
-            repo_url=_optional_str(payload.get("repo_url")),
-            ref=_optional_str(payload.get("ref")),
+        extension_id = _required_str_attr(args, "extension_id")
+        result = coerce_object_map(
+            ext_loader.update_extension_source(
+                extension_id,
+                source_type=_optional_str(payload.get("source_type")),
+                source_path=_optional_str(payload.get("source_path")),
+                repo_url=_optional_str(payload.get("repo_url")),
+                ref=_optional_str(payload.get("ref")),
+            )
         )
         return _finalize_mutating_result(
             result=result,
-            extension_id=str(args.extension_id),
+            extension_id=extension_id,
             install_dependencies=bool(getattr(args, "install_dependencies", False)),
             force_reload=bool(getattr(args, "force_reload", False)),
         )
 
     if command == "remove":
-        result = ext_loader.remove_user_extension(str(args.extension_id))
+        extension_id = _required_str_attr(args, "extension_id")
+        result = coerce_object_map(ext_loader.remove_user_extension(extension_id))
         if result.get("ok"):
-            ext_loader.reload_extensions([str(args.extension_id)], force=bool(getattr(args, "force_reload", False)))
+            ext_loader.reload_extensions([extension_id], force=bool(getattr(args, "force_reload", False)))
         return {
             "ok": bool(result.get("ok")),
             "result": result,
@@ -145,11 +185,7 @@ def _run_extension_command_inner(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     if command == "reload":
-        extension_ids = [
-            ext_id.strip()
-            for ext_id in getattr(args, "extension_ids", [])
-            if isinstance(ext_id, str) and ext_id.strip()
-        ]
+        extension_ids = _string_sequence_attr(args, "extension_ids")
         ext_loader.reload_extensions(extension_ids or None, force=bool(getattr(args, "force_reload", False)))
         return {
             "ok": True,
@@ -161,20 +197,20 @@ def _run_extension_command_inner(args: argparse.Namespace) -> dict[str, Any]:
 
 def _finalize_mutating_result(
     *,
-    result: dict[str, Any],
+    result: ObjectMap,
     extension_id: str,
     install_dependencies: bool,
     force_reload: bool,
-) -> dict[str, Any]:
+) -> ObjectMap:
     if not result.get("ok"):
         return {"ok": False, "result": result}
 
     changed_ids = [extension_id] if extension_id else None
     ext_loader.reload_extensions(changed_ids, force=force_reload)
 
-    dependency_result = None
+    dependency_result: ObjectMap | None = None
     if install_dependencies and extension_id and ext_loader.supports_dependency_install(extension_id):
-        dependency_result = asyncio.run(ext_loader.install_extension_dependencies(extension_id))
+        dependency_result = coerce_object_map(asyncio.run(ext_loader.install_extension_dependencies(extension_id)))
     ok = bool(result.get("ok")) and (
         dependency_result is None or bool(dependency_result.get("ok"))
     )
@@ -187,7 +223,7 @@ def _finalize_mutating_result(
     }
 
 
-def _result_extension_id(result: dict[str, Any], payload: dict[str, object]) -> str:
+def _result_extension_id(result: ObjectMap, payload: ObjectMap) -> str:
     result_id = result.get("extension_id")
     if isinstance(result_id, str) and result_id.strip():
         return result_id.strip()
@@ -222,8 +258,8 @@ def _source_payload_from_args(
     args: argparse.Namespace,
     *,
     allow_missing_source: bool,
-) -> dict[str, object]:
-    payload: dict[str, object] = {}
+) -> ObjectMap:
+    payload: ObjectMap = {}
     source_path = getattr(args, "source_path", None)
     zip_path = getattr(args, "zip_path", None)
     repo_url = getattr(args, "repo_url", None)
@@ -247,12 +283,12 @@ def _source_payload_from_args(
     return payload
 
 
-def _response_ok(body: dict[str, Any]) -> bool:
+def _response_ok(body: ObjectMap) -> bool:
     value = body.get("ok")
     return value is True
 
 
-def _print_error(json_output: bool, body: dict[str, Any]) -> None:
+def _print_error(json_output: bool, body: ObjectMap) -> None:
     if json_output:
         print(json.dumps(body, indent=2, sort_keys=True))
         return
@@ -263,40 +299,41 @@ def _print_error(json_output: bool, body: dict[str, Any]) -> None:
     print("Extension command failed", file=sys.stderr)
 
 
-def _print_human_result(command: str, body: dict[str, Any]) -> None:
-    result = body.get("result") if isinstance(body.get("result"), dict) else body
-    extension = body.get("extension") if isinstance(body.get("extension"), dict) else None
-    status = result.get("status") if isinstance(result, dict) else None
+def _print_human_result(command: str, body: ObjectMap) -> None:
+    result_value = body.get("result")
+    result = coerce_object_map(result_value) if isinstance(result_value, dict) else body
+    extension = coerce_object_map(body.get("extension"))
+    status = result.get("status")
     if isinstance(status, str) and status.strip():
         print(f"status: {status.strip()}")
     else:
         print(f"command: {command}")
 
     for key in ("extension_id", "name", "type", "version", "path", "target_dir"):
-        value = result.get(key) if isinstance(result, dict) else None
-        if value in (None, "") and isinstance(extension, dict):
+        value = result.get(key)
+        if value in (None, "") and extension:
             value = extension.get(key)
         if value not in (None, ""):
             print(f"{key}: {value}")
 
-    message = result.get("message") if isinstance(result, dict) else None
+    message = result.get("message")
     if isinstance(message, str) and message.strip():
         print(f"message: {message.strip()}")
 
-    warnings = result.get("warnings") if isinstance(result, dict) else None
-    if isinstance(warnings, list) and warnings:
+    warnings = _coerce_text_list(result.get("warnings"))
+    if warnings:
         print("warnings:")
         for item in warnings:
             print(f"  - {item}")
 
-    errors = result.get("errors") if isinstance(result, dict) else None
-    if isinstance(errors, list) and errors:
+    errors = _coerce_text_list(result.get("errors"))
+    if errors:
         print("errors:")
         for item in errors:
             print(f"  - {item}")
 
-    dependency_install = body.get("dependency_install")
-    if isinstance(dependency_install, dict):
+    dependency_install = coerce_object_map(body.get("dependency_install"))
+    if dependency_install:
         dep_status = (
             dependency_install.get("status")
             or dependency_install.get("message")

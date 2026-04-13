@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from .typing_helpers import ObjectMap, coerce_object_map
 
 TE2_MCP_SERVER_NAME = "te2-mcp"
 TE2_APP_ROUTE_PREFIX = ""
@@ -8,7 +8,7 @@ TE2_MCP_ROUTE = "/te2_mcp"
 TE2_MCP_STREAMABLE_HTTP_ROUTE = "/te2_mcp_http"
 
 
-def te2_mcp_integration_enabled(settings: Optional[Dict[str, Any]]) -> bool:
+def te2_mcp_integration_enabled(settings: object) -> bool:
     return isinstance(settings, dict) and settings.get("te2_mcp_integration") is True
 
 
@@ -25,24 +25,24 @@ def build_te2_mcp_streamable_http_url(base_url: str) -> str:
 
 
 def build_codex_thread_config(
-    existing_config: Any,
+    existing_config: object,
     *,
     te2_enabled: bool,
-    base_url: Optional[str],
+    base_url: str | None,
     force_te2_mcp_entry: bool = False,
-) -> Optional[Dict[str, Any]]:
+) -> ObjectMap | None:
     if existing_config in (None, ""):
-        merged: Dict[str, Any] = {}
+        merged: ObjectMap = {}
     elif isinstance(existing_config, dict):
-        merged = dict(existing_config)
+        merged = coerce_object_map(existing_config)
     else:
         raise ValueError("Codex config must be a JSON object")
 
     existing_mcp = merged.get("mcp_servers")
     if existing_mcp in (None, ""):
-        mcp_servers: Dict[str, Any] = {}
+        mcp_servers: ObjectMap = {}
     elif isinstance(existing_mcp, dict):
-        mcp_servers = dict(existing_mcp)
+        mcp_servers = coerce_object_map(existing_mcp)
     else:
         raise ValueError("Codex config.mcp_servers must be a JSON object")
 

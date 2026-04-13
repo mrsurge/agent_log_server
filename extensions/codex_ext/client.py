@@ -1430,9 +1430,14 @@ async def hydrate_transcript(
         _add_to_raw_buffer("err", conversation_id, f"hydrate_transcript rollout_not_found session={session_id[:8]}")
         return []
     preview = await asyncio.to_thread(preview_entries, path, 200000)
-    items = preview.get("items", []) if isinstance(preview, dict) else []
+    items_value = preview.get("items") if isinstance(preview, dict) else None
+    items: List[Dict[str, object]] = []
+    if isinstance(items_value, list):
+        for item in items_value:
+            if isinstance(item, dict):
+                items.append({str(key): value for key, value in item.items()})
     _add_to_raw_buffer("out", conversation_id, f"hydrate_transcript imported={len(items)} session={session_id[:8]}")
-    return items if isinstance(items, list) else []
+    return items
 
 
 def resolve_approval(request_id: str, resolution: object) -> bool:

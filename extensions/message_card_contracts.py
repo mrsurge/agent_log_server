@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Optional, TypeAlias
+
+EntryMap: TypeAlias = dict[str, object]
 
 
-def _clean_str(value: Any) -> Optional[str]:
+def _clean_str(value: object) -> Optional[str]:
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -11,13 +13,13 @@ def _clean_str(value: Any) -> Optional[str]:
 
 
 def _apply_common_fields(
-    entry: Dict[str, Any],
+    entry: EntryMap,
     *,
     entry_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     subagent_id: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> EntryMap:
     if entry_id:
         entry["id"] = entry_id
     if conversation_id:
@@ -37,8 +39,8 @@ def build_message_event(
     conversation_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     subagent_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    event = {
+) -> EntryMap:
+    event: EntryMap = {
         "type": "message",
         "role": role,
         "text": text,
@@ -62,8 +64,8 @@ def build_message_transcript_entry(
     turn_id: Optional[str] = None,
     subagent_id: Optional[str] = None,
     event: Optional[str] = None,
-) -> Dict[str, Any]:
-    record = {
+) -> EntryMap:
+    record: EntryMap = {
         "role": role,
         "text": text,
     }
@@ -93,8 +95,8 @@ def build_assistant_delta_event(
     conversation_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     subagent_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    event = {
+) -> EntryMap:
+    event: EntryMap = {
         "type": "assistant_delta",
         "delta": delta,
     }
@@ -114,8 +116,8 @@ def build_assistant_finalize_event(
     conversation_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     subagent_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    event = {
+) -> EntryMap:
+    event: EntryMap = {
         "type": "assistant_finalize",
         "text": text,
     }
@@ -135,8 +137,8 @@ def build_reasoning_delta_event(
     conversation_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     subagent_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    event = {
+) -> EntryMap:
+    event: EntryMap = {
         "type": "reasoning_delta",
         "delta": delta,
     }
@@ -156,8 +158,8 @@ def build_reasoning_finalize_event(
     conversation_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     subagent_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    event = {
+) -> EntryMap:
+    event: EntryMap = {
         "type": "reasoning_finalize",
         "text": text,
     }
@@ -179,7 +181,7 @@ def build_reasoning_transcript_entry(
     turn_id: Optional[str] = None,
     subagent_id: Optional[str] = None,
     event: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> EntryMap:
     return build_message_transcript_entry(
         role="reasoning",
         text=text,
@@ -198,8 +200,8 @@ def build_thought_event(
     conversation_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     subagent_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    event = {
+) -> EntryMap:
+    event: EntryMap = {
         "type": "thought",
         "text": text,
     }

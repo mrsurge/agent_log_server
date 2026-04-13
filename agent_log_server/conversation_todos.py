@@ -15,7 +15,9 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import cast
+
+from .typing_helpers import ObjectMap
 
 CONVERSATIONS_DIR: Path | None = None
 
@@ -69,8 +71,26 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
 
 
-def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return dict(row)
+def _coerce_row(value: object) -> sqlite3.Row | None:
+    return value if isinstance(value, sqlite3.Row) else None
+
+
+def _coerce_rows(value: object) -> list[sqlite3.Row]:
+    if not isinstance(value, list):
+        return []
+    rows: list[sqlite3.Row] = []
+    for row in value:
+        if isinstance(row, sqlite3.Row):
+            rows.append(row)
+    return rows
+
+
+def _row_to_dict(row: sqlite3.Row) -> ObjectMap:
+    data: ObjectMap = {}
+    for key in row.keys():
+        value = cast(object, row[key])
+        data[str(key)] = value
+    return data
 
 
 # ── public CRUD ──────────────────────────────────────────────────────
@@ -79,16 +99,17 @@ def list_todos(
     conversation_id: str,
     *,
     status: str | None = None,
-) -> list[dict[str, Any]]:
+) -> list[ObjectMap]:
     """Return all todos, optionally filtered by *status*."""
     conn = _connect(conversation_id)
     try:
         if status:
-            rows = conn.execute(
+            rows_obj: object = conn.execute(
                 "SELECT * FROM todos WHERE status = ? ORDER BY id", (status,)
             ).fetchall()
         else:
-            rows = conn.execute("SELECT * FROM todos ORDER BY id").fetchall()
+            rows_obj = conn.execute("SELECT * FROM todos ORDER BY id").fetchall()
+        rows = _coerce_rows(rows_obj)
         return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()
@@ -99,7 +120,7 @@ def add_todo(
     title: str,
     description: str = "",
     status: str = "pending",
-) -> dict[str, Any]:
+) -> ObjectMap:
     """Insert a new todo and return it."""
     now = _now()
     conn = _connect(conversation_id)
@@ -110,7 +131,10 @@ def add_todo(
             (title, description, status, now, now),
         )
         conn.commit()
-        row = conn.execute("SELECT * FROM todos WHERE id = ?", (cur.lastrowid,)).fetchone()
+        row_obj = cast(object, conn.execute("SELECT * FROM todos WHERE id = ?", (cur.lastrowid,)).fetchone())
+        row = _coerce_row(row_obj)
+        if row is None:
+            raise RuntimeError("Inserted todo row missing")
         return _row_to_dict(row)
     finally:
         conn.close()
@@ -123,10 +147,10 @@ def update_todo(
     title: str | None = None,
     description: str | None = None,
     status: str | None = None,
-) -> dict[str, Any] | None:
+) -> ObjectMap | None:
     """Update fields on an existing todo.  Returns the updated row or None."""
     parts: list[str] = []
-    params: list[Any] = []
+    params: list[object] = []
     if title is not None:
         parts.append("title = ?")
         params.append(title)
@@ -145,17 +169,19 @@ def update_todo(
     try:
         conn.execute(f"UPDATE todos SET {', '.join(parts)} WHERE id = ?", params)
         conn.commit()
-        row = conn.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+        row_obj = cast(object, conn.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone())
+        row = _coerce_row(row_obj)
         return _row_to_dict(row) if row else None
     finally:
         conn.close()
 
 
-def get_todo(conversation_id: str, todo_id: int) -> dict[str, Any] | None:
+def get_todo(conversation_id: str, todo_id: int) -> ObjectMap | None:
     """Fetch a single todo by id."""
     conn = _connect(conversation_id)
     try:
-        row = conn.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+        row_obj = cast(object, conn.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone())
+        row = _coerce_row(row_obj)
         return _row_to_dict(row) if row else None
     finally:
         conn.close()
@@ -172,7 +198,7 @@ def remove_todo(conversation_id: str, todo_id: int) -> bool:
         conn.close()
 
 
-def toggle_todo(conversation_id: str, todo_id: int) -> dict[str, Any] | None:
+def toggle_todo(conversation_id: str, todo_id: int) -> ObjectMap | None:
     """Toggle between 'pending' and 'done'.  Returns updated row."""
     row = get_todo(conversation_id, todo_id)
     if row is None:
@@ -211,11 +237,11 @@ def remove_dep(conversation_id: str, todo_id: int, depends_on: int) -> bool:
         conn.close()
 
 
-def list_ready(conversation_id: str) -> list[dict[str, Any]]:
+def list_ready(conversation_id: str) -> list[ObjectMap]:
     """Return pending todos whose dependencies are all done."""
     conn = _connect(conversation_id)
     try:
-        rows = conn.execute(
+        rows_obj: object = conn.execute(
             """
             SELECT t.* FROM todos t
             WHERE t.status = 'pending'
@@ -227,6 +253,7 @@ def list_ready(conversation_id: str) -> list[dict[str, Any]]:
             ORDER BY t.id
             """
         ).fetchall()
+        rows = _coerce_rows(rows_obj)
         return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()

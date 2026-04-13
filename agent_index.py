@@ -1,31 +1,46 @@
+from __future__ import annotations
+
 import json
 import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Iterable, Optional, TypeAlias, TypeVar, cast
 
+ManifestMap: TypeAlias = dict[str, object]
+
+T = TypeVar("T")
 
 AGENT_CACHE_DIRNAME = "agent_messaging"
 AGENT_INDEX_DIRNAME = "agent_index"
 MANIFEST_FILENAME = "manifest.json"
 
 
+def _coerce_manifest_map(value: object) -> ManifestMap:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
+def _type_name(expected_type: type[object]) -> str:
+    return getattr(expected_type, "__name__", str(expected_type))
+
+
 @dataclass
 class AgentRecord:
     agent_id: str
     path: Path
-    manifest: Dict[str, Any]
+    manifest: ManifestMap
 
     @property
     def enabled(self) -> bool:
         return bool(self.manifest.get("enabled", False))
 
     @property
-    def profiles(self) -> List[str]:
-        profiles = self.manifest.get("profiles", {})
+    def profiles(self) -> list[str]:
+        profiles = self.manifest.get("profiles")
         if isinstance(profiles, dict):
-            return list(profiles.keys())
+            return [str(key) for key in profiles.keys()]
         return []
 
 
@@ -54,12 +69,12 @@ def ensure_agent_index_dirs() -> None:
     get_agent_index_dir().mkdir(parents=True, exist_ok=True)
 
 
-def install_templates_to_cache(repo_root: Optional[Path] = None, overwrite: bool = False) -> List[Path]:
+def install_templates_to_cache(repo_root: Optional[Path] = None, overwrite: bool = False) -> list[Path]:
     src_root = get_repo_agent_index_dir(repo_root)
     dst_root = get_agent_index_dir()
     ensure_agent_index_dirs()
 
-    installed: List[Path] = []
+    installed: list[Path] = []
     if not src_root.exists():
         return installed
 
@@ -89,21 +104,21 @@ def iter_manifest_paths(root: Optional[Path] = None) -> Iterable[Path]:
             yield manifest_path
 
 
-def _require_key(obj: Dict[str, Any], key: str, expected_type: Any, ctx: str) -> Any:
+def _require_key(obj: ManifestMap, key: str, expected_type: type[T], ctx: str) -> T:
     if key not in obj:
         raise ValueError(f"{ctx}: missing required key '{key}'")
-    val = obj[key]
-    if not isinstance(val, expected_type):
-        raise ValueError(f"{ctx}: key '{key}' must be {expected_type.__name__}")
-    return val
+    value = obj[key]
+    if not isinstance(value, expected_type):
+        raise ValueError(f"{ctx}: key '{key}' must be {_type_name(cast(type[object], expected_type))}")
+    return value
 
 
-def _optional_key(obj: Dict[str, Any], key: str, expected_type: Any, ctx: str) -> None:
+def _optional_key(obj: ManifestMap, key: str, expected_type: type[object], ctx: str) -> None:
     if key in obj and not isinstance(obj[key], expected_type):
-        raise ValueError(f"{ctx}: key '{key}' must be {expected_type.__name__}")
+        raise ValueError(f"{ctx}: key '{key}' must be {_type_name(expected_type)}")
 
 
-def validate_manifest(manifest: Dict[str, Any], path: Path) -> Dict[str, Any]:
+def validate_manifest(manifest: ManifestMap, path: Path) -> ManifestMap:
     ctx = str(path)
     _require_key(manifest, "schema_version", int, ctx)
     _require_key(manifest, "agent_id", str, ctx)
@@ -119,12 +134,13 @@ def validate_manifest(manifest: Dict[str, Any], path: Path) -> Dict[str, Any]:
             raise ValueError(f"{ctx}: profile names must be strings")
         if not isinstance(profile, dict):
             raise ValueError(f"{ctx}: profile '{profile_name}' must be an object")
-        _optional_key(profile, "enabled", bool, ctx)
-        _require_key(profile, "backend", str, ctx)
-        _require_key(profile, "shellspec_ref", str, ctx)
-        _require_key(profile, "mode", str, ctx)
-        _optional_key(profile, "execution", dict, ctx)
-        _optional_key(profile, "env", dict, ctx)
+        profile_map = _coerce_manifest_map(profile)
+        _optional_key(profile_map, "enabled", bool, ctx)
+        _require_key(profile_map, "backend", str, ctx)
+        _require_key(profile_map, "shellspec_ref", str, ctx)
+        _require_key(profile_map, "mode", str, ctx)
+        _optional_key(profile_map, "execution", dict, ctx)
+        _optional_key(profile_map, "env", dict, ctx)
 
     _optional_key(manifest, "tags", list, ctx)
     _optional_key(manifest, "permissions", dict, ctx)
@@ -132,23 +148,22 @@ def validate_manifest(manifest: Dict[str, Any], path: Path) -> Dict[str, Any]:
     return manifest
 
 
-def load_manifest(path: Path) -> Dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+def load_manifest(path: Path) -> ManifestMap:
+    data = cast(object, json.loads(path.read_text(encoding="utf-8")))
     if not isinstance(data, dict):
         raise ValueError(f"{path}: manifest must be a JSON object")
-    return validate_manifest(data, path)
+    return validate_manifest(_coerce_manifest_map(data), path)
 
 
-def load_agent_registry(root: Optional[Path] = None) -> List[AgentRecord]:
-    records: List[AgentRecord] = []
+def load_agent_registry(root: Optional[Path] = None) -> list[AgentRecord]:
+    records: list[AgentRecord] = []
     for manifest_path in iter_manifest_paths(root):
         manifest = load_manifest(manifest_path)
         records.append(
             AgentRecord(
-                agent_id=manifest["agent_id"],
+                agent_id=_require_key(manifest, "agent_id", str, str(manifest_path)),
                 path=manifest_path.parent,
                 manifest=manifest,
             )
         )
     return records
-

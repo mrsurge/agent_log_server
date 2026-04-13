@@ -12,10 +12,11 @@ import contextlib
 import io
 import re
 import tomllib
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional, Protocol, cast, runtime_checkable
 
 import socketio
 
@@ -24,6 +25,7 @@ from agent_log_server.ipc_auth import load_or_create_ipc_secret
 from agent_log_server.prompt_context import REPO_MEMORY_FILENAME
 from agent_log_server.repo_memory_delta import build_repo_memory_delta
 from agent_log_server import conversation_todos as _conv_todos
+from agent_log_server.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
 
 
 def _ensure_framework_shells_secret() -> None:
@@ -56,6 +58,56 @@ def _ensure_framework_shells_secret() -> None:
 _ensure_framework_shells_secret()
 
 from mcp.server.fastmcp import Context, FastMCP
+
+
+@runtime_checkable
+class _ModelDumpable(Protocol):
+    def model_dump(self) -> object: ...
+
+
+@runtime_checkable
+class _DictDumpable(Protocol):
+    def dict(self) -> object: ...
+
+
+@runtime_checkable
+class _UrlopenResponse(Protocol):
+    status: int
+
+    def read(self) -> bytes: ...
+
+    def __enter__(self) -> "_UrlopenResponse": ...
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> object: ...
+
+
+def _json_loads_object(text: str) -> object:
+    return cast(object, json.loads(text))
+
+
+def _json_loads_object_map(text: str) -> ObjectMap:
+    return coerce_object_map(_json_loads_object(text))
+
+
+def _json_loads_object_list(text: str) -> ObjectList:
+    return coerce_object_list(_json_loads_object(text))
+
+
+def _read_urlopen_response_body(response: _UrlopenResponse) -> str:
+    return response.read().decode("utf-8")
+
+
+def _coerce_optional_int(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        with contextlib.suppress(ValueError):
+            return int(value.strip())
+    return None
 
 
 def _logical_abspath(path: Path | str) -> Path:
@@ -140,7 +192,7 @@ _APPSERVER_ORIGIN = os.environ.get("AGENT_LOG_SERVER_ORIGIN", "http://127.0.0.1:
 _APPSERVER_IPC_NAMESPACE = "/ipc"
 _appserver_ipc_sio: Optional[socketio.AsyncClient] = None
 _appserver_ipc_lock = asyncio.Lock()
-_ask_user_pending_requests: dict[str, asyncio.Future] = {}
+_ask_user_pending_requests: dict[str, asyncio.Future[ObjectMap]] = {}
 
 
 async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
@@ -155,13 +207,14 @@ async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
 
         client = socketio.AsyncClient(reconnection=True, reconnection_attempts=3)
 
-        async def _on_ask_user_response(data):
-            if not isinstance(data, dict):
+        async def _on_ask_user_response(data: object) -> None:
+            data_map = coerce_object_map(data)
+            if not data_map:
                 return
             request_id = str(
-                data.get("request_id")
-                or data.get("requestId")
-                or data.get("id")
+                data_map.get("request_id")
+                or data_map.get("requestId")
+                or data_map.get("id")
                 or ""
             ).strip()
             if not request_id:
@@ -173,28 +226,29 @@ async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
                 flush=True,
             )
             if waiter and not waiter.done():
-                waiter.set_result(dict(data))
+                waiter.set_result(data_map)
 
-        async def _on_ask_user_terminal(data):
-            if not isinstance(data, dict):
+        async def _on_ask_user_terminal(data: object) -> None:
+            data_map = coerce_object_map(data)
+            if not data_map:
                 return
             request_id = str(
-                data.get("request_id")
-                or data.get("requestId")
-                or data.get("interaction_id")
-                or data.get("id")
+                data_map.get("request_id")
+                or data_map.get("requestId")
+                or data_map.get("interaction_id")
+                or data_map.get("id")
                 or ""
             ).strip()
             if not request_id:
                 return
             waiter = _ask_user_pending_requests.get(request_id)
             print(
-                f"[ask_user mcp] recv_terminal request_id={request_id} waiter={'yes' if waiter and not waiter.done() else 'no'} status={data.get('status')!r}",
+                f"[ask_user mcp] recv_terminal request_id={request_id} waiter={'yes' if waiter and not waiter.done() else 'no'} status={data_map.get('status')!r}",
                 file=sys.stderr,
                 flush=True,
             )
             if waiter and not waiter.done():
-                waiter.set_result(dict(data))
+                waiter.set_result(data_map)
 
         async def _on_ipc_disconnect():
             for request_id, pending in list(_ask_user_pending_requests.items()):
@@ -343,7 +397,7 @@ _ASK_USER_ANSWER_FIELD = "answer"
 print(f"MCP SERVER STARTED pid={os.getpid()}", file=sys.stderr)
 
 @mcp.tool(name="ping", description="Return MCP server pid (diagnostic).")
-async def ping() -> Dict[str, Any]:
+async def ping() -> ObjectMap:
     return {"ok": True, "pid": os.getpid()}
 
 
@@ -368,7 +422,7 @@ def _build_ask_user_requested_schema(
     question: str,
     choices: list[str],
     allow_freeform: bool,
-) -> Dict[str, Any]:
+) -> ObjectMap:
     return {
         "type": "object",
         "title": "User Input",
@@ -388,8 +442,8 @@ def _build_ask_user_requested_schema(
     }
 
 
-def _extract_ask_user_answers(content: Any) -> list[str]:
-    payload = content if isinstance(content, dict) else {}
+def _extract_ask_user_answers(content: object) -> list[str]:
+    payload = coerce_object_map(content)
     raw_answers = payload.get(_ASK_USER_ANSWER_FIELD)
     if isinstance(raw_answers, str):
         value = raw_answers.strip()
@@ -406,12 +460,12 @@ def _extract_ask_user_answers(content: Any) -> list[str]:
     return answers
 
 
-async def _wait_for_ask_user_event(request_id: str) -> Dict[str, Any]:
+async def _wait_for_ask_user_event(request_id: str) -> ObjectMap:
     request_id_text = str(request_id or "").strip()
     if not request_id_text:
         raise RuntimeError("request_id is required")
     future = _ask_user_pending_requests.get(request_id_text)
-    if not isinstance(future, asyncio.Future):
+    if future is None:
         future = asyncio.get_running_loop().create_future()
         _ask_user_pending_requests[request_id_text] = future
     try:
@@ -422,8 +476,8 @@ async def _wait_for_ask_user_event(request_id: str) -> Dict[str, Any]:
             _ask_user_pending_requests.pop(request_id_text, None)
 
 
-def _extract_ask_user_answers_from_resolution(resolution: Any) -> list[str]:
-    payload = resolution if isinstance(resolution, dict) else {}
+def _extract_ask_user_answers_from_resolution(resolution: object) -> list[str]:
+    payload = coerce_object_map(resolution)
     answers = payload.get("answers")
     if isinstance(answers, str):
         value = answers.strip()
@@ -450,30 +504,28 @@ def _extract_ask_user_answers_from_resolution(resolution: Any) -> list[str]:
     return []
 
 
-def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
+def _coerce_mapping(value: object) -> Optional[ObjectMap]:
     if isinstance(value, dict):
-        return value
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
+        return coerce_object_map(value)
+    if isinstance(value, _ModelDumpable):
         with contextlib.suppress(Exception):
-            dumped = model_dump()
+            dumped = value.model_dump()
             if isinstance(dumped, dict):
-                return dumped
-    to_dict = getattr(value, "dict", None)
-    if callable(to_dict):
+                return coerce_object_map(dumped)
+    if isinstance(value, _DictDumpable):
         with contextlib.suppress(Exception):
-            dumped = to_dict()
+            dumped = value.dict()
             if isinstance(dumped, dict):
-                return dumped
+                return coerce_object_map(dumped)
     return None
 
 
 def _normalize_ask_user_resolution(
-    resolution: Any,
+    resolution: object,
     *,
     choices: list[str],
-) -> Dict[str, Any]:
-    payload = resolution if isinstance(resolution, dict) else {}
+) -> ObjectMap:
+    payload = coerce_object_map(resolution)
     action = str(payload.get("action") or payload.get("status") or "accept").strip().lower() or "accept"
     if action not in {"accept", "decline", "cancel"}:
         action = "accept"
@@ -505,11 +557,11 @@ def _normalize_ask_user_resolution(
 
 
 def _normalize_ask_user_terminal(
-    event: Any,
+    event: object,
     *,
     choices: list[str],
-) -> Dict[str, Any]:
-    payload = event if isinstance(event, dict) else {}
+) -> ObjectMap:
+    payload = coerce_object_map(event)
     if isinstance(payload.get("response"), dict):
         return _normalize_ask_user_resolution(payload["response"], choices=choices)
     if isinstance(payload.get("result"), dict):
@@ -540,7 +592,7 @@ async def ask_user(
     choices: Optional[list[str]] = None,
     allow_freeform: bool = True,
     ctx: Context | None = None,
-) -> Dict[str, Any]:
+) -> ObjectMap:
     question_text = str(question or "").strip()
     if not question_text:
         return {"ok": False, "error": "question is required"}
@@ -620,7 +672,7 @@ async def ask_user(
 
 
 @mcp.tool(name="conv_id", description="Return the conversation ID for this MCP session.")
-async def conv_id() -> Dict[str, Any]:
+async def conv_id() -> ObjectMap:
     cid = os.environ.get("CONVERSATION_ID", "")
     return {"ok": bool(cid), "conversation_id": cid}
 
@@ -636,7 +688,7 @@ def _todo_cid() -> str:
 
 
 @mcp.tool(name="todo_list", description="List todos for this conversation. Optionally filter by status.")
-async def todo_list(status: Optional[str] = None) -> Dict[str, Any]:
+async def todo_list(status: Optional[str] = None) -> ObjectMap:
     """
     List all todos for this conversation.
 
@@ -654,7 +706,7 @@ async def todo_list(status: Optional[str] = None) -> Dict[str, Any]:
 
 
 @mcp.tool(name="todo_add", description="Add a todo to this conversation.")
-async def todo_add(title: str, description: str = "", status: str = "pending") -> Dict[str, Any]:
+async def todo_add(title: str, description: str = "", status: str = "pending") -> ObjectMap:
     """
     Add a new todo.
 
@@ -683,7 +735,7 @@ async def todo_update(
     title: Optional[str] = None,
     description: Optional[str] = None,
     status: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> ObjectMap:
     """
     Update fields on an existing todo.
 
@@ -708,7 +760,7 @@ async def todo_update(
 
 
 @mcp.tool(name="todo_remove", description="Remove a todo by ID.")
-async def todo_remove(id: int) -> Dict[str, Any]:
+async def todo_remove(id: int) -> ObjectMap:
     """
     Delete a todo.
 
@@ -729,7 +781,7 @@ async def todo_remove(id: int) -> Dict[str, Any]:
 
 
 @mcp.tool(name="todo_toggle", description="Toggle a todo between 'pending' and 'done'.")
-async def todo_toggle(id: int) -> Dict[str, Any]:
+async def todo_toggle(id: int) -> ObjectMap:
     """
     Toggle a todo's status between 'pending' and 'done'.
 
@@ -751,7 +803,7 @@ async def todo_toggle(id: int) -> Dict[str, Any]:
 
 
 @mcp.tool(name="todo_ready", description="List todos with all dependencies satisfied (ready to work on).")
-async def todo_ready() -> Dict[str, Any]:
+async def todo_ready() -> ObjectMap:
     """
     List pending todos whose dependencies are all 'done'.
 
@@ -774,69 +826,69 @@ async def todo_ready() -> Dict[str, Any]:
 _AGENT_LOG_URL = "http://127.0.0.1:12359/api/messages"
 
 
-async def _agent_log_fetch(limit: int = 10) -> list:
+async def _agent_log_fetch(limit: int = 10) -> ObjectList:
     """Fetch messages from agent log server."""
     import urllib.request
     url = f"{_AGENT_LOG_URL}?limit={limit}"
     try:
-        def _get():
+        def _get() -> ObjectList:
             req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            with cast(_UrlopenResponse, urllib.request.urlopen(req, timeout=5)) as resp:
+                return _json_loads_object_list(_read_urlopen_response_body(resp))
         messages = await asyncio.to_thread(_get)
         return messages
     except Exception:
         return []
 
 
-async def _agent_log_fetch_by_num(msg_num: int) -> Optional[dict]:
+async def _agent_log_fetch_by_num(msg_num: int) -> Optional[ObjectMap]:
     """Fetch a specific message by msg_num from agent log server."""
     import urllib.request
     url = f"{_AGENT_LOG_URL}/{msg_num}"
     try:
-        def _get():
+        def _get() -> ObjectMap:
             req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            with cast(_UrlopenResponse, urllib.request.urlopen(req, timeout=5)) as resp:
+                return _json_loads_object_map(_read_urlopen_response_body(resp))
         return await asyncio.to_thread(_get)
     except Exception:
         return None
 
 
-async def _agent_log_post_internal(who: str, message: str) -> dict:
+async def _agent_log_post_internal(who: str, message: str) -> ObjectMap:
     """Post a message to agent log server."""
     import urllib.request
     payload = json.dumps({"who": who, "message": message}, ensure_ascii=False).encode("utf-8")
     try:
-        def _post():
+        def _post() -> ObjectMap:
             req = urllib.request.Request(
                 _AGENT_LOG_URL,
                 data=payload,
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            with cast(_UrlopenResponse, urllib.request.urlopen(req, timeout=5)) as resp:
+                return _json_loads_object_map(_read_urlopen_response_body(resp))
         return await asyncio.to_thread(_post)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
-async def _agent_log_delete_by_num(msg_num: int) -> dict:
+async def _agent_log_delete_by_num(msg_num: int) -> ObjectMap:
     """Delete a message by msg_num from agent log server."""
     import urllib.request
     url = f"{_AGENT_LOG_URL}/{msg_num}"
     try:
-        def _delete():
+        def _delete() -> ObjectMap:
             req = urllib.request.Request(url, method="DELETE")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            with cast(_UrlopenResponse, urllib.request.urlopen(req, timeout=5)) as resp:
+                return _json_loads_object_map(_read_urlopen_response_body(resp))
         return await asyncio.to_thread(_delete)
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
-async def _agent_log_await(after_msg_num: int, from_who: Optional[str] = None, timeout_ms: int = 180000) -> dict:
+async def _agent_log_await(after_msg_num: int, from_who: Optional[str] = None, timeout_ms: int = 180000) -> ObjectMap:
     """Wait for the next message after a given msg_num."""
     import urllib.request
     url = f"{_AGENT_LOG_URL}/await"
@@ -850,16 +902,16 @@ async def _agent_log_await(after_msg_num: int, from_who: Optional[str] = None, t
     socket_timeout = (timeout_ms / 1000.0) + 10
     
     try:
-        def _post():
+        def _post() -> ObjectMap:
             req = urllib.request.Request(
                 url,
                 data=payload,
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=socket_timeout) as resp:
-                status = resp.status
-                body = json.loads(resp.read().decode("utf-8"))
+            with cast(_UrlopenResponse, urllib.request.urlopen(req, timeout=socket_timeout)) as resp:
+                status = int(resp.status)
+                body = _json_loads_object_map(_read_urlopen_response_body(resp))
                 if status == 408:
                     return {"ok": False, "error": "timeout"}
                 return body
@@ -872,7 +924,7 @@ async def _agent_log_await(after_msg_num: int, from_who: Optional[str] = None, t
 
 
 @mcp.tool(name="agent_log_post", description="Post a message to the agent log. Plain text, no escaping needed.")
-async def agent_log_post(who: str, message: str) -> Dict[str, Any]:
+async def agent_log_post(who: str, message: str) -> ObjectMap:
     """
     Post a message to the shared agent log.
     
@@ -892,7 +944,7 @@ async def agent_log_post(who: str, message: str) -> Dict[str, Any]:
 
 
 @mcp.tool(name="agent_log_inbox", description="Get a preview inbox of recent agent log messages.")
-async def agent_log_inbox(limit: int = 10, preview_chars: int = 60) -> Dict[str, Any]:
+async def agent_log_inbox(limit: int = 10, preview_chars: int = 60) -> ObjectMap:
     """
     Fetch a preview inbox of recent messages.
     
@@ -918,7 +970,7 @@ async def agent_log_inbox(limit: int = 10, preview_chars: int = 60) -> Dict[str,
         who = msg.get("who", "")
         full_message = msg.get("message", "")
         # Preview: first line, truncated
-        first_line = full_message.split("\n")[0] if full_message else ""
+        first_line = full_message.split("\n")[0] if isinstance(full_message, str) and full_message else ""
         if len(first_line) > preview_chars:
             preview = first_line[:preview_chars - 3] + "..."
         else:
@@ -1036,7 +1088,7 @@ async def agent_log_read(limit: int = 10) -> str:
 
 
 @mcp.tool(name="agent_log_delete", description="Delete a message from the agent log by its message number.")
-async def agent_log_delete(msg_num: int) -> Dict[str, Any]:
+async def agent_log_delete(msg_num: int) -> ObjectMap:
     """
     Delete a specific message from the agent log.
     
@@ -1085,7 +1137,7 @@ async def agent_log_post_await(
     message: str, 
     await_from: Optional[str] = None, 
     timeout_ms: int = 180000
-) -> Dict[str, Any]:
+) -> ObjectMap:
     """
     Post a message to the agent log, then block waiting for a reply.
     
@@ -1113,7 +1165,7 @@ async def agent_log_post_await(
     if "msg_num" not in post_result:
         return {"ok": False, "error": post_result.get("error", "failed to post")}
     
-    posted_num = post_result["msg_num"]
+    posted_num = _coerce_optional_int(post_result["msg_num"]) or 0
     
     # Wait for reply
     await_result = await _agent_log_await(posted_num, await_from, timeout_ms)
@@ -1144,13 +1196,13 @@ async def agent_log_post_await(
 # Knowledge Base (KB) MCP Tools
 # =============================================================================
 
-def _kb_error(error: str, detail: str, **extra: Any) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"error": error, "detail": detail}
+def _kb_error(error: str, detail: str, **extra: object) -> ObjectMap:
+    payload: ObjectMap = {"error": error, "detail": detail}
     payload.update(extra)
     return payload
 
 
-def _kb_error_text(error: str, detail: str, **extra: Any) -> str:
+def _kb_error_text(error: str, detail: str, **extra: object) -> str:
     """Format a KB error as clean plain text."""
     parts = [f"[ERROR: {error}] {detail}"]
     for k, v in extra.items():
@@ -1158,15 +1210,17 @@ def _kb_error_text(error: str, detail: str, **extra: Any) -> str:
     return "\n".join(parts)
 
 
-def _kb_dict_to_error_text(d: Dict[str, Any]) -> str:
+def _kb_dict_to_error_text(d: Mapping[str, object]) -> str:
     """Convert an error dict from _kb_error() to plain text."""
-    error = d.get("error", "Unknown")
-    detail = d.get("detail", "")
+    error_value = d.get("error", "Unknown")
+    detail_value = d.get("detail", "")
+    error = error_value if isinstance(error_value, str) else str(error_value)
+    detail = detail_value if isinstance(detail_value, str) else str(detail_value)
     extra = {k: v for k, v in d.items() if k not in ("error", "detail")}
     return _kb_error_text(error, detail, **extra)
 
 
-def _kb_resolve_file(file: Optional[str] = None) -> Path | Dict[str, Any]:
+def _kb_resolve_file(file: Optional[str] = None) -> Path | ObjectMap:
     """Resolve a knowledge file path. Returns absolute Path or error dict."""
     root = _current_project_root()
     files = _kb_configured_files(root)
@@ -1264,7 +1318,7 @@ def _kb_root_section(total_lines: int) -> SectionNode:
     )
 
 
-def _kb_ambiguous_section_error(section_id: str, matches: list[SectionNode]) -> Dict[str, Any]:
+def _kb_ambiguous_section_error(section_id: str, matches: list[SectionNode]) -> ObjectMap:
     candidates = [{"id_disambiguated": n.id_disambiguated, "line_start": n.line_start} for n in matches]
     return _kb_error(
         "AmbiguousSection",
@@ -1292,7 +1346,7 @@ def _resolve_section_or_error(
     *,
     total_lines: int = 0,
     allow_root: bool = False,
-) -> SectionNode | Dict[str, Any]:
+) -> SectionNode | ObjectMap:
     raw_id = (section_id or "").strip()
     normalized_id = _normalize_heading(raw_id)
     if allow_root and not raw_id:
@@ -1333,7 +1387,7 @@ def _resolve_section_or_error(
     return _kb_error("SectionNotFound", f"Section '{raw_id}' not found", id=raw_id)
 
 
-def _read_text_or_error(path: Path) -> str | Dict[str, Any]:
+def _read_text_or_error(path: Path) -> str | ObjectMap:
     if not path.exists():
         return _kb_error("FileNotAllowed", f"Knowledge file does not exist: {path}")
     return path.read_text(encoding="utf-8")
@@ -1886,7 +1940,7 @@ async def _send_agent_user_message(
     subject: str,
     message: str,
     reply_to: Optional[str] = None,
-) -> dict:
+) -> ObjectMap:
     """Send a user message to codex-app-server via unified message endpoint.
     
     Uses /api/appserver/message which handles all thread resolution:
@@ -1909,15 +1963,15 @@ async def _send_agent_user_message(
     payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     
     try:
-        def _post():
+        def _post() -> ObjectMap:
             req = urllib.request.Request(
                 _APPSERVER_MESSAGE_URL,
                 data=payload_bytes,
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            with cast(_UrlopenResponse, urllib.request.urlopen(req, timeout=15)) as resp:
+                return _json_loads_object_map(_read_urlopen_response_body(resp))
         result = await asyncio.to_thread(_post)
         return result
     except Exception as e:
@@ -1933,7 +1987,7 @@ async def agent_send_message(
     subject: str,
     message: str,
     reply_to: str,
-) -> Dict[str, Any]:
+) -> ObjectMap:
     """
     Send a user message to another codex agent via codex-app-server.
     
@@ -1974,7 +2028,7 @@ async def agent_send_message_await(
     reply_to: str,
     await_from: Optional[str] = None,
     timeout_ms: int = 300000,
-) -> Dict[str, Any]:
+) -> ObjectMap:
     """
     Send a user message to another codex agent and wait for their response on the agent log.
     
@@ -1998,8 +2052,8 @@ async def agent_send_message_await(
     # Get current highest msg_num before sending
     messages = await _agent_log_fetch(1)
     after_msg_num = 0
-    if messages and messages[0].get("msg_num"):
-        after_msg_num = messages[0]["msg_num"]
+    if messages:
+        after_msg_num = _coerce_optional_int(messages[0].get("msg_num")) or 0
     
     # Send the message
     send_result = await _send_agent_user_message(

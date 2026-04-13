@@ -1,33 +1,81 @@
 from __future__ import annotations
 
 import sys
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import TypedDict
+
+from .typing_helpers import ObjectMap, RequestId, coerce_object_map
 
 AGENT_PTY_ASK_USER_REQUEST_METHOD = "agent-pty/ask-user"
 AGENT_PTY_ASK_USER_SERVER = "agent-pty-blocks"
 AGENT_PTY_ASK_USER_TOOL = "ask_user"
 
-EmitIpcFn = Callable[[str, Dict[str, Any], Optional[str]], Awaitable[None]]
-FindPendingApprovalFn = Callable[[str], Optional[Tuple[str, Dict[str, Any]]]]
-ListPendingApprovalsFn = Callable[..., List[Tuple[str, str, Dict[str, Any]]]]
-RecordSubmittedResolutionFn = Callable[[str, str, Dict[str, Any]], Optional[Dict[str, Any]]]
-RemovePendingApprovalFn = Callable[[str, Any], bool]
-BuildHandoffEventFn = Callable[[str, Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]
-AppendHandoffFn = Callable[[str, Dict[str, Any]], Awaitable[None]]
-BroadcastUiFn = Callable[[Dict[str, Any]], Awaitable[None]]
+from collections.abc import Awaitable, Callable
 
-_emit_ipc_fn: Optional[EmitIpcFn] = None
-_find_pending_approval_fn: Optional[FindPendingApprovalFn] = None
-_list_pending_approvals_fn: Optional[ListPendingApprovalsFn] = None
-_record_submitted_resolution_fn: Optional[RecordSubmittedResolutionFn] = None
-_remove_pending_approval_fn: Optional[RemovePendingApprovalFn] = None
-_build_handoff_event_fn: Optional[BuildHandoffEventFn] = None
-_append_handoff_fn: Optional[AppendHandoffFn] = None
-_broadcast_ui_fn: Optional[BroadcastUiFn] = None
+
+class NormalizedRequest(TypedDict):
+    question: str
+    choices: list[str]
+    allow_freeform: bool
+
+
+PendingApprovalMatch = tuple[str, ObjectMap]
+PendingApprovalItem = tuple[str, str, ObjectMap]
+
+EmitIpcFn = Callable[[str, ObjectMap, str | None], Awaitable[None]]
+FindPendingApprovalFn = Callable[[str], object]
+ListPendingApprovalsFn = Callable[..., object]
+RecordSubmittedResolutionFn = Callable[[str, str, ObjectMap], object]
+RemovePendingApprovalFn = Callable[[str, RequestId], bool]
+BuildHandoffEventFn = Callable[[str, ObjectMap, ObjectMap], object]
+AppendHandoffFn = Callable[[str, ObjectMap], Awaitable[None]]
+BroadcastUiFn = Callable[[ObjectMap], Awaitable[None]]
+
+_emit_ipc_fn: EmitIpcFn | None = None
+_find_pending_approval_fn: FindPendingApprovalFn | None = None
+_list_pending_approvals_fn: ListPendingApprovalsFn | None = None
+_record_submitted_resolution_fn: RecordSubmittedResolutionFn | None = None
+_remove_pending_approval_fn: RemovePendingApprovalFn | None = None
+_build_handoff_event_fn: BuildHandoffEventFn | None = None
+_append_handoff_fn: AppendHandoffFn | None = None
+_broadcast_ui_fn: BroadcastUiFn | None = None
 
 
 def _ask_user_log(message: str) -> None:
     print(f"[ask_user_interactions] {message}", file=sys.stderr, flush=True)
+
+
+def _coerce_pending_match(value: object) -> PendingApprovalMatch | None:
+    if not isinstance(value, tuple) or len(value) != 2:
+        return None
+    conversation_id_obj, descriptor_obj = value
+    conversation_id = str(conversation_id_obj or "").strip()
+    if not conversation_id or not isinstance(descriptor_obj, dict):
+        return None
+    return conversation_id, coerce_object_map(descriptor_obj)
+
+
+def _coerce_pending_approval_list(value: object) -> list[PendingApprovalItem]:
+    if not isinstance(value, list):
+        return []
+    approvals: list[PendingApprovalItem] = []
+    for item in value:
+        if not isinstance(item, tuple) or len(item) != 3:
+            continue
+        conversation_id_obj, request_id_obj, descriptor_obj = item
+        conversation_id = str(conversation_id_obj or "").strip()
+        request_id = str(request_id_obj or "").strip()
+        if not conversation_id or not request_id or not isinstance(descriptor_obj, dict):
+            continue
+        approvals.append((conversation_id, request_id, coerce_object_map(descriptor_obj)))
+    return approvals
+
+
+def _submitted_resolution(descriptor: ObjectMap) -> ObjectMap | None:
+    submitted_obj = descriptor.get("submitted_resolution")
+    if not isinstance(submitted_obj, dict):
+        return None
+    submitted = coerce_object_map(submitted_obj)
+    return submitted if submitted else None
 
 def configure(
     *,
@@ -58,7 +106,7 @@ def configure(
     _broadcast_ui_fn = broadcast_ui_fn
 
 
-def normalize_choices(value: Any) -> list[str]:
+def normalize_choices(value: object) -> list[str]:
     if isinstance(value, str):
         value = [value]
     if not isinstance(value, list):
@@ -76,7 +124,7 @@ def normalize_choices(value: Any) -> list[str]:
     return normalized
 
 
-def normalize_request(question: Any, choices: Any, allow_freeform: Any) -> Dict[str, Any]:
+def normalize_request(question: object, choices: object, allow_freeform: object) -> NormalizedRequest:
     return {
         "question": str(question or "").strip(),
         "choices": normalize_choices(choices),
@@ -85,55 +133,55 @@ def normalize_request(question: Any, choices: Any, allow_freeform: Any) -> Dict[
 
 
 
-def is_agent_pty_ask_user_tool(server_name: Any, tool_name: Any) -> bool:
+def is_agent_pty_ask_user_tool(server_name: object, tool_name: object) -> bool:
     return (
         str(server_name or "").strip() == AGENT_PTY_ASK_USER_SERVER
         and str(tool_name or "").strip() == AGENT_PTY_ASK_USER_TOOL
     )
 
 
-def is_agent_pty_ask_user_request(tool_name: Any, arguments: Any) -> bool:
+def is_agent_pty_ask_user_request(tool_name: object, arguments: object) -> bool:
     if str(tool_name or "").strip() != AGENT_PTY_ASK_USER_TOOL:
         return False
     if not isinstance(arguments, dict):
         return False
+    arguments_map = coerce_object_map(arguments)
     normalized = normalize_request(
-        arguments.get("question"),
-        arguments.get("choices"),
-        arguments.get("allow_freeform", arguments.get("allowFreeform", True)),
+        arguments_map.get("question"),
+        arguments_map.get("choices"),
+        arguments_map.get("allow_freeform", arguments_map.get("allowFreeform", True)),
     )
     return bool(normalized["question"] and (normalized["choices"] or normalized["allow_freeform"]))
 
 
-def has_request(request_id: Any) -> bool:
+def has_request(request_id: object) -> bool:
     request_id_text = str(request_id or "").strip()
-    return bool(
-        request_id_text
-        and _find_pending_approval_fn is not None
-        and _find_pending_approval_fn(request_id_text)
-    )
+    if not request_id_text or _find_pending_approval_fn is None:
+        return False
+    return _coerce_pending_match(_find_pending_approval_fn(request_id_text)) is not None
 
 
-def conversation_id_for_request(request_id: Any) -> Optional[str]:
+def conversation_id_for_request(request_id: object) -> str | None:
     request_id_text = str(request_id or "").strip()
     if not request_id_text or _find_pending_approval_fn is None:
         return None
-    found = _find_pending_approval_fn(request_id_text)
-    if not isinstance(found, tuple) or len(found) != 2:
+    found = _coerce_pending_match(_find_pending_approval_fn(request_id_text))
+    if found is None:
         return None
-    conversation_id = str(found[0] or "").strip()
+    conversation_id, _descriptor = found
     return conversation_id or None
 
 
-def _normalize_resolution(resolution: Any) -> Dict[str, Any]:
+def _normalize_resolution(resolution: object) -> ObjectMap:
     if isinstance(resolution, dict):
-        if isinstance(resolution.get("result"), dict):
-            return dict(resolution["result"])
-        return dict(resolution)
+        result = resolution.get("result")
+        if isinstance(result, dict):
+            return coerce_object_map(result)
+        return coerce_object_map(resolution)
     return {}
 
 
-def _resolution_prefers_terminal_state(resolution: Dict[str, Any]) -> bool:
+def _resolution_prefers_terminal_state(resolution: ObjectMap) -> bool:
     action = str(resolution.get("action") or resolution.get("status") or "").strip().lower()
     if action in {"cancel", "cancelled", "decline", "declined", "failed", "error", "interrupted"}:
         return True
@@ -146,14 +194,14 @@ def _resolution_prefers_terminal_state(resolution: Dict[str, Any]) -> bool:
     return False
 
 
-def _terminal_resolution(resolution: Any) -> Dict[str, Any]:
+def _terminal_resolution(resolution: object) -> ObjectMap:
     normalized = _normalize_resolution(resolution)
     if normalized:
         return normalized
     return {"action": "cancel"}
 
 
-def _ipc_terminal_status(resolution: Dict[str, Any]) -> str:
+def _ipc_terminal_status(resolution: ObjectMap) -> str:
     status = str(resolution.get("status") or resolution.get("action") or "").strip().lower()
     if status == "interrupted":
         return "interrupted"
@@ -166,7 +214,7 @@ def _ipc_terminal_status(resolution: Dict[str, Any]) -> str:
     return "cancel"
 
 
-async def emit_response(request_id: Any, resolution: Any, *, sid: Optional[str] = None) -> bool:
+async def emit_response(request_id: object, resolution: object, *, sid: str | None = None) -> bool:
     request_id_text = str(request_id or "").strip()
     if not request_id_text or _emit_ipc_fn is None:
         _ask_user_log(
@@ -188,11 +236,11 @@ async def emit_response(request_id: Any, resolution: Any, *, sid: Optional[str] 
 
 
 async def emit_terminal(
-    request_id: Any,
-    status: Any,
+    request_id: object,
+    status: object,
     *,
-    error: Any = None,
-    sid: Optional[str] = None,
+    error: object = None,
+    sid: str | None = None,
 ) -> bool:
     request_id_text = str(request_id or "").strip()
     status_text = str(status or "").strip().lower()
@@ -201,7 +249,7 @@ async def emit_terminal(
             f"emit_terminal skipped request_id={request_id_text or '-'} status={status_text or '-'} has_emit={_emit_ipc_fn is not None}"
         )
         return False
-    payload: Dict[str, Any] = {
+    payload: ObjectMap = {
         "request_id": request_id_text,
         "status": status_text,
     }
@@ -214,7 +262,7 @@ async def emit_terminal(
     return True
 
 
-async def acknowledge_interaction(request_id: Any) -> bool:
+async def acknowledge_interaction(request_id: object) -> bool:
     request_id_text = str(request_id or "").strip()
     _ask_user_log(f"acknowledge request_id={request_id_text or '-'}")
     if (
@@ -226,30 +274,29 @@ async def acknowledge_interaction(request_id: Any) -> bool:
             f"acknowledge unavailable request_id={request_id_text or '-'} configured={_find_pending_approval_fn is not None and _remove_pending_approval_fn is not None}"
         )
         return False
-    found = _find_pending_approval_fn(request_id_text)
-    if not isinstance(found, tuple) or len(found) != 2:
+    found = _coerce_pending_match(_find_pending_approval_fn(request_id_text))
+    if found is None:
         _ask_user_log(f"acknowledge missing_pending request_id={request_id_text}")
         return False
     conversation_id, descriptor = found
-    if not isinstance(descriptor, dict):
-        return False
-    submitted = descriptor.get("submitted_resolution") if isinstance(descriptor.get("submitted_resolution"), dict) else {}
+    submitted = _submitted_resolution(descriptor)
     _remove_pending_approval_fn(conversation_id, request_id_text)
     if (
-        submitted
+        submitted is not None
         and _build_handoff_event_fn is not None
         and _append_handoff_fn is not None
         and _broadcast_ui_fn is not None
     ):
-        handoff_event = _build_handoff_event_fn(conversation_id, descriptor, dict(submitted))
-        if isinstance(handoff_event, dict):
+        handoff_event_obj = _build_handoff_event_fn(conversation_id, descriptor, submitted)
+        if isinstance(handoff_event_obj, dict):
+            handoff_event = coerce_object_map(handoff_event_obj)
             await _append_handoff_fn(conversation_id, handoff_event)
             await _broadcast_ui_fn(handoff_event)
     _ask_user_log(f"acknowledge cleared request_id={request_id_text} conversation_id={conversation_id}")
     return True
 
 
-async def submit_user_response(request_id: Any, resolution: Any) -> Dict[str, Any]:
+async def submit_user_response(request_id: object, resolution: object) -> ObjectMap:
     request_id_text = str(request_id or "").strip()
     if not request_id_text:
         _ask_user_log("submit missing request_id")
@@ -259,8 +306,8 @@ async def submit_user_response(request_id: Any, resolution: Any) -> Dict[str, An
             f"submit unavailable request_id={request_id_text} configured={_find_pending_approval_fn is not None and _record_submitted_resolution_fn is not None}"
         )
         return {"ok": False, "error": "ask_user interactions are not configured"}
-    found = _find_pending_approval_fn(request_id_text)
-    if not isinstance(found, tuple) or len(found) != 2:
+    found = _coerce_pending_match(_find_pending_approval_fn(request_id_text))
+    if found is None:
         _ask_user_log(f"submit missing_pending request_id={request_id_text}")
         return {"ok": False, "error": "interaction is no longer pending"}
     conversation_id, _descriptor = found
@@ -281,7 +328,7 @@ async def submit_user_response(request_id: Any, resolution: Any) -> Dict[str, An
     }
 
 
-async def finalize_interaction(request_id: Any, resolution: Any = None) -> bool:
+async def finalize_interaction(request_id: object, resolution: object = None) -> bool:
     request_id_text = str(request_id or "").strip()
     if (
         not request_id_text
@@ -289,16 +336,14 @@ async def finalize_interaction(request_id: Any, resolution: Any = None) -> bool:
         or _remove_pending_approval_fn is None
     ):
         return False
-    found = _find_pending_approval_fn(request_id_text)
-    if not isinstance(found, tuple) or len(found) != 2:
+    found = _coerce_pending_match(_find_pending_approval_fn(request_id_text))
+    if found is None:
         return False
     conversation_id, descriptor = found
-    if not isinstance(descriptor, dict):
-        return False
 
     terminal = _terminal_resolution(resolution)
-    submitted = descriptor.get("submitted_resolution") if isinstance(descriptor.get("submitted_resolution"), dict) else None
-    final_resolution: Dict[str, Any]
+    submitted = _submitted_resolution(descriptor)
+    final_resolution: ObjectMap
     if _resolution_prefers_terminal_state(terminal):
         await emit_terminal(
             request_id_text,
@@ -317,8 +362,9 @@ async def finalize_interaction(request_id: Any, resolution: Any = None) -> bool:
         and _append_handoff_fn is not None
         and _broadcast_ui_fn is not None
     ):
-        handoff_event = _build_handoff_event_fn(conversation_id, descriptor, final_resolution)
-        if isinstance(handoff_event, dict):
+        handoff_event_obj = _build_handoff_event_fn(conversation_id, descriptor, final_resolution)
+        if isinstance(handoff_event_obj, dict):
+            handoff_event = coerce_object_map(handoff_event_obj)
             await _append_handoff_fn(conversation_id, handoff_event)
             await _broadcast_ui_fn(handoff_event)
     return True
@@ -326,24 +372,25 @@ async def finalize_interaction(request_id: Any, resolution: Any = None) -> bool:
 
 async def cancel_interactions(
     *,
-    conversation_id: Any = None,
-    turn_id: Any = None,
-    request_id: Any = None,
-    resolution: Any = None,
-) -> Dict[str, int]:
+    conversation_id: object = None,
+    turn_id: object = None,
+    request_id: object = None,
+    resolution: object = None,
+) -> dict[str, int]:
     if _list_pending_approvals_fn is None:
         return {"cancelled": 0}
     terminal = _terminal_resolution(resolution)
-    matching = _list_pending_approvals_fn(
-        request_method=AGENT_PTY_ASK_USER_REQUEST_METHOD,
-        conversation_id=conversation_id,
-        turn_id=turn_id,
-        request_id=request_id,
+    matching = _coerce_pending_approval_list(
+        _list_pending_approvals_fn(
+            request_method=AGENT_PTY_ASK_USER_REQUEST_METHOD,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            request_id=request_id,
+        )
     )
     finalized = 0
     seen: set[str] = set()
     for _conversation_id, candidate_request_id, _descriptor in matching:
-        candidate_request_id = str(candidate_request_id or "").strip()
         if not candidate_request_id or candidate_request_id in seen:
             continue
         seen.add(candidate_request_id)

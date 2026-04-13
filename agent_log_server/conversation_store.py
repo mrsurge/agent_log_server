@@ -8,12 +8,24 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 from agent_log_server import conversation_todos as _conv_todos
+from .typing_helpers import ObjectMap, coerce_object_map
 
-_NormalizeExtensionsConfig = Callable[[Any], dict[str, dict[str, Any]]]
-_MetaSaveCallback = Callable[[str], Any]
+ExtensionsConfig = dict[str, ObjectMap]
+_NormalizeExtensionsConfig = Callable[[object], ExtensionsConfig]
+_MetaSaveCallback = Callable[[str], object]
+
+
+def _coerce_extensions_config(value: object) -> ExtensionsConfig:
+    if not isinstance(value, dict):
+        return {}
+    normalized: ExtensionsConfig = {}
+    for key, item in value.items():
+        if isinstance(key, str) and isinstance(item, dict):
+            normalized[key] = coerce_object_map(item)
+    return normalized
 
 
 def utc_ts() -> str:
@@ -67,14 +79,14 @@ class ConversationStore:
     def set_meta_save_callback(self, callback: _MetaSaveCallback | None) -> None:
         self._meta_save_callback = callback
 
-    def normalize_extensions_config(self, raw: Any) -> dict[str, dict[str, Any]]:
+    def normalize_extensions_config(self, raw: object) -> ExtensionsConfig:
         callback = self._extensions_config_normalizer
         if callback is None:
-            return raw if isinstance(raw, dict) else {}
+            return _coerce_extensions_config(raw)
         normalized = callback(raw)
-        return normalized if isinstance(normalized, dict) else {}
+        return _coerce_extensions_config(normalized)
 
-    def default_appserver_config(self) -> dict[str, Any]:
+    def default_appserver_config(self) -> ObjectMap:
         return {
             "cwd": None,
             "thread_id": None,
@@ -90,12 +102,13 @@ class ConversationStore:
             "extensions": {},
         }
 
-    def load_appserver_config(self) -> dict[str, Any]:
+    def load_appserver_config(self) -> ObjectMap:
         cfg = self.default_appserver_config()
         try:
             if self.config_path.exists():
-                data = json.loads(self.config_path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
+                data_obj = cast(object, json.loads(self.config_path.read_text(encoding="utf-8")))
+                if isinstance(data_obj, dict):
+                    data = coerce_object_map(data_obj)
                     cfg.update(data)
                     cfg["extensions"] = self.normalize_extensions_config(cfg.get("extensions"))
             else:
@@ -108,11 +121,11 @@ class ConversationStore:
             return cfg
         return cfg
 
-    def save_appserver_config(self, cfg: dict[str, Any]) -> None:
+    def save_appserver_config(self, cfg: ObjectMap) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    def normalize_conversation_list(self, cfg: dict[str, Any]) -> list[str]:
+    def normalize_conversation_list(self, cfg: ObjectMap) -> list[str]:
         conversations = cfg.get("conversations")
         if not isinstance(conversations, list):
             conversations = []
@@ -122,7 +135,7 @@ class ConversationStore:
                 out.append(item)
         return out
 
-    def add_conversation_to_config(self, conversation_id: str, cfg: dict[str, Any]) -> bool:
+    def add_conversation_to_config(self, conversation_id: str, cfg: ObjectMap) -> bool:
         conversations = self.normalize_conversation_list(cfg)
         if conversation_id in conversations:
             cfg["conversations"] = conversations
@@ -131,7 +144,7 @@ class ConversationStore:
         cfg["conversations"] = conversations
         return True
 
-    def remove_conversation_from_config(self, conversation_id: str, cfg: dict[str, Any]) -> None:
+    def remove_conversation_from_config(self, conversation_id: str, cfg: ObjectMap) -> None:
         conversations = self.normalize_conversation_list(cfg)
         if conversation_id in conversations:
             conversations = [item for item in conversations if item != conversation_id]
@@ -142,7 +155,7 @@ class ConversationStore:
 
     def normalize_pinned_conversation_list(
         self,
-        cfg: dict[str, Any],
+        cfg: ObjectMap,
         valid_ids: list[str] | None = None,
     ) -> list[str]:
         pinned = cfg.get("pinned_conversations")
@@ -171,7 +184,7 @@ class ConversationStore:
                 ids.append(child.name)
         return ids
 
-    def sync_conversation_index(self, cfg: dict[str, Any]) -> list[str]:
+    def sync_conversation_index(self, cfg: ObjectMap) -> list[str]:
         ids = self.normalize_conversation_list(cfg)
         for conversation_id in self.conversation_ids_from_disk():
             if conversation_id not in ids:
@@ -179,7 +192,7 @@ class ConversationStore:
         cfg["conversations"] = ids
         return ids
 
-    def conversation_display_order(self, cfg: dict[str, Any]) -> list[str]:
+    def conversation_display_order(self, cfg: ObjectMap) -> list[str]:
         ids = self.sync_conversation_index(cfg)
         pinned = self.normalize_pinned_conversation_list(cfg, ids)
         pinned_set = set(pinned)
@@ -195,9 +208,10 @@ class ConversationStore:
             if not meta_path.exists():
                 continue
             try:
-                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                data_obj = cast(object, json.loads(meta_path.read_text(encoding="utf-8")))
             except Exception:
                 continue
+            data = coerce_object_map(data_obj)
             if isinstance(data, dict) and data.get("thread_id") == thread_id:
                 return child.name
         return None
@@ -216,7 +230,7 @@ class ConversationStore:
     def conversation_transcript_path(self, conversation_id: str) -> Path:
         return self.conversation_dir(conversation_id) / "transcript.jsonl"
 
-    def default_conversation_meta(self, conversation_id: str) -> dict[str, Any]:
+    def default_conversation_meta(self, conversation_id: str) -> ObjectMap:
         return {
             "conversation_id": conversation_id,
             "created_at": utc_ts(),
@@ -228,13 +242,13 @@ class ConversationStore:
             "status": "draft",
         }
 
-    def load_conversation_meta(self, conversation_id: str) -> dict[str, Any]:
+    def load_conversation_meta(self, conversation_id: str) -> ObjectMap:
         path = self.conversation_meta_path(conversation_id)
         if path.exists():
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
+                data_obj = cast(object, json.loads(path.read_text(encoding="utf-8")))
+                if isinstance(data_obj, dict):
+                    return coerce_object_map(data_obj)
             except Exception:
                 pass
         meta = self.default_conversation_meta(conversation_id)
@@ -242,7 +256,7 @@ class ConversationStore:
         path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         return meta
 
-    def save_conversation_meta(self, conversation_id: str, meta: dict[str, Any]) -> None:
+    def save_conversation_meta(self, conversation_id: str, meta: ObjectMap) -> None:
         path = self.conversation_meta_path(conversation_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")

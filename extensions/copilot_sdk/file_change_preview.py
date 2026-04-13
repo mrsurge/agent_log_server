@@ -1,39 +1,51 @@
 """Shared preview helpers for file-changing Copilot tools."""
 
-from typing import Any, Dict
+from __future__ import annotations
+
 import difflib
+from typing import TypeAlias
+
+PreviewMap: TypeAlias = dict[str, object]
 
 
-def _normalized_text(value: Any) -> str:
+def _coerce_preview_map(value: object) -> PreviewMap:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
+def _normalized_text(value: object) -> str:
     text = str(value)
     if not text.endswith("\n"):
         text += "\n"
     return text
 
 
-def build_file_change_preview(args: Dict[str, Any]) -> Dict[str, Any]:
+def build_file_change_preview(args: object) -> PreviewMap:
     """
     Return preview metadata for file-changing tool arguments.
 
     Supports edit-style replacements (`old_str`/`new_str`) and create/write-style
     full-file writes (`file_text`/`content`).
     """
-    if not isinstance(args, dict):
+    args_map = _coerce_preview_map(args)
+    if not args_map:
         return {}
 
-    preview: Dict[str, Any] = {}
-    file_path = args.get("path") or args.get("file_path") or args.get("file") or ""
+    preview: PreviewMap = {}
+    file_path = args_map.get("path") or args_map.get("file_path") or args_map.get("file") or ""
+    file_label = str(file_path) if file_path else ""
 
-    old_str = args.get("old_str")
+    old_str = args_map.get("old_str")
     if old_str is None:
-        old_str = args.get("oldString") or args.get("old_text") or args.get("oldText")
+        old_str = args_map.get("oldString") or args_map.get("old_text") or args_map.get("oldText")
 
-    new_str = args.get("new_str")
+    new_str = args_map.get("new_str")
     if new_str is None:
-        new_str = args.get("newString") or args.get("new_text") or args.get("newText")
+        new_str = args_map.get("newString") or args_map.get("new_text") or args_map.get("newText")
 
-    file_text = args.get("file_text") or args.get("content") or args.get("new_content") or args.get("fileText")
-    command = args.get("command") or args.get("cmd")
+    file_text = args_map.get("file_text") or args_map.get("content") or args_map.get("new_content") or args_map.get("fileText")
+    command = args_map.get("command") or args_map.get("cmd")
 
     if old_str is not None and new_str is not None:
         old_lines = _normalized_text(old_str).splitlines(keepends=True)
@@ -41,8 +53,8 @@ def build_file_change_preview(args: Dict[str, Any]) -> Dict[str, Any]:
         diff = difflib.unified_diff(
             old_lines,
             new_lines,
-            fromfile=file_path or "a",
-            tofile=file_path or "b",
+            fromfile=file_label or "a",
+            tofile=file_label or "b",
         )
         preview["diff"] = "".join(diff)
         if file_path:
@@ -55,7 +67,7 @@ def build_file_change_preview(args: Dict[str, Any]) -> Dict[str, Any]:
             [],
             new_lines,
             fromfile="/dev/null",
-            tofile=file_path,
+            tofile=file_label,
         )
         preview["diff"] = "".join(diff)
         preview["path"] = file_path

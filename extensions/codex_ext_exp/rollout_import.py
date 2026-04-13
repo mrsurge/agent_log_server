@@ -5,11 +5,21 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TypeAlias, cast
+
+PayloadMap: TypeAlias = dict[str, object]
+PreviewEntry: TypeAlias = dict[str, object]
+PreviewResult: TypeAlias = dict[str, object]
 
 _ROLLOUT_SESSIONS_DIR = Path(os.path.expanduser("~/.codex/sessions"))
 _META_ENVELOPE_START = "\x1eCODEX_META "
 _META_ENVELOPE_END = "\x1f"
+
+
+def _coerce_payload_map(value: object) -> PayloadMap:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
 
 
 def _sanitize_rollout_id(value: str) -> str:
@@ -44,47 +54,56 @@ def _parse_rollout_timestamp(ts: str | None) -> int | None:
         return None
 
 
-def _rollout_content_text(payload: dict[str, Any]) -> str | None:
+def _rollout_content_text(payload: PayloadMap) -> str | None:
     content = payload.get("content")
     parts: list[str] = []
     if isinstance(content, list):
         for item in content:
-            if not isinstance(item, dict):
+            item_map = _coerce_payload_map(item)
+            if not item_map:
                 continue
-            text = item.get("text")
+            text = item_map.get("text")
             if isinstance(text, str):
                 parts.append(text)
-    if not parts and isinstance(payload.get("text"), str):
-        parts.append(payload["text"])
-    if not parts and isinstance(payload.get("message"), str):
-        parts.append(payload["message"])
+    text_value = payload.get("text")
+    if not parts and isinstance(text_value, str):
+        parts.append(text_value)
+    message_value = payload.get("message")
+    if not parts and isinstance(message_value, str):
+        parts.append(message_value)
     text = "\n".join(parts).strip()
     return text or None
 
 
-def _rollout_reasoning_text(payload: dict[str, Any]) -> str | None:
+def _rollout_reasoning_text(payload: PayloadMap) -> str | None:
     summary = payload.get("summary")
     parts: list[str] = []
     if isinstance(summary, list):
         for item in summary:
-            if not isinstance(item, dict):
+            item_map = _coerce_payload_map(item)
+            if not item_map:
                 continue
-            text = item.get("text") or item.get("summary_text")
-            if isinstance(text, str):
-                parts.append(text)
-    if not parts and isinstance(payload.get("text"), str):
-        parts.append(payload["text"])
+            text_value = item_map.get("text")
+            summary_text_value = item_map.get("summary_text")
+            if isinstance(text_value, str):
+                parts.append(text_value)
+            elif isinstance(summary_text_value, str):
+                parts.append(summary_text_value)
+    text_value = payload.get("text")
+    if not parts and isinstance(text_value, str):
+        parts.append(text_value)
     text = "\n".join(parts).strip()
     return text or None
 
 
-def _rollout_extract_diff(payload: Any) -> str | None:
-    if isinstance(payload, dict):
+def _rollout_extract_diff(payload: object) -> str | None:
+    payload_map = _coerce_payload_map(payload)
+    if payload_map:
         for key in ("diff", "unified_diff", "patch"):
-            value = payload.get(key)
+            value = payload_map.get(key)
             if isinstance(value, str) and value.strip():
                 return value
-        for value in payload.values():
+        for value in payload_map.values():
             diff = _rollout_extract_diff(value)
             if diff:
                 return diff
@@ -96,8 +115,8 @@ def _rollout_extract_diff(payload: Any) -> str | None:
     return None
 
 
-def preview_entries(path: Path, limit: int = 400) -> dict[str, Any]:
-    items: list[dict[str, Any]] = []
+def preview_entries(path: Path, limit: int = 400) -> PreviewResult:
+    items: list[PreviewEntry] = []
     seen: set[tuple[str, str, int | None]] = set()
     token_total: int | None = None
     try:
@@ -109,71 +128,77 @@ def preview_entries(path: Path, limit: int = 400) -> dict[str, Any]:
                 if not line:
                     continue
                 try:
-                    rec = json.loads(line)
+                    loaded = cast(object, json.loads(line))
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(rec, dict):
+                rec = _coerce_payload_map(loaded)
+                if not rec:
                     continue
-                ts_bucket = _parse_rollout_timestamp(rec.get("timestamp"))
+                timestamp = rec.get("timestamp")
+                ts_bucket = _parse_rollout_timestamp(timestamp if isinstance(timestamp, str) else None)
                 rtype = rec.get("type")
                 payload = rec.get("payload")
-                if rtype == "response_item" and isinstance(payload, dict):
-                    ptype = payload.get("type")
+                payload_map = _coerce_payload_map(payload)
+                if rtype == "response_item" and payload_map:
+                    ptype = payload_map.get("type")
                     if ptype == "message":
-                        role = payload.get("role")
-                        if role in {"user", "assistant"}:
-                            text = _rollout_content_text(payload)
+                        role = payload_map.get("role")
+                        if isinstance(role, str) and role in {"user", "assistant"}:
+                            text = _rollout_content_text(payload_map)
                             if text:
                                 key = (role, text, ts_bucket)
                                 if key not in seen:
                                     seen.add(key)
-                                    items.append({"role": role, "text": text, "ts": rec.get("timestamp")})
+                                    items.append({"role": role, "text": text, "ts": timestamp})
                     elif ptype == "reasoning":
-                        text = _rollout_reasoning_text(payload)
+                        text = _rollout_reasoning_text(payload_map)
                         if text:
                             key = ("reasoning", text, ts_bucket)
                             if key not in seen:
                                 seen.add(key)
-                                items.append({"role": "reasoning", "text": text, "ts": rec.get("timestamp")})
-                elif rtype == "event_msg" and isinstance(payload, dict):
-                    ptype = payload.get("type")
+                                items.append({"role": "reasoning", "text": text, "ts": timestamp})
+                elif rtype == "event_msg" and payload_map:
+                    ptype = payload_map.get("type")
                     if ptype == "user_message":
-                        text = payload.get("message")
+                        text = payload_map.get("message")
                         if isinstance(text, str):
-                            text = _strip_meta_envelope(text).strip()
-                            if text:
-                                key = ("user", text, ts_bucket)
+                            stripped = _strip_meta_envelope(text).strip()
+                            if stripped:
+                                key = ("user", stripped, ts_bucket)
                                 if key not in seen:
                                     seen.add(key)
-                                    items.append({"role": "user", "text": text, "ts": rec.get("timestamp")})
+                                    items.append({"role": "user", "text": stripped, "ts": timestamp})
                     elif ptype == "agent_message":
-                        text = payload.get("message")
+                        text = payload_map.get("message")
                         if isinstance(text, str) and text.strip():
                             stripped = text.strip()
                             key = ("assistant", stripped, ts_bucket)
                             if key not in seen:
                                 seen.add(key)
-                                items.append({"role": "assistant", "text": stripped, "ts": rec.get("timestamp")})
+                                items.append({"role": "assistant", "text": stripped, "ts": timestamp})
                     elif ptype == "agent_reasoning":
-                        text = payload.get("text")
+                        text = payload_map.get("text")
                         if isinstance(text, str) and text.strip():
                             stripped = text.strip()
                             key = ("reasoning", stripped, ts_bucket)
                             if key not in seen:
                                 seen.add(key)
-                                items.append({"role": "reasoning", "text": stripped, "ts": rec.get("timestamp")})
+                                items.append({"role": "reasoning", "text": stripped, "ts": timestamp})
                     elif ptype == "token_count":
-                        info = payload.get("info")
-                        if isinstance(info, dict):
-                            usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
-                            if isinstance(usage, dict) and isinstance(usage.get("total_tokens"), (int, float)):
-                                token_total = int(usage["total_tokens"])
+                        info = _coerce_payload_map(payload_map.get("info"))
+                        usage_value = info.get("total_token_usage")
+                        if not isinstance(usage_value, dict):
+                            usage_value = info.get("last_token_usage")
+                        usage = _coerce_payload_map(usage_value)
+                        total_tokens = usage.get("total_tokens")
+                        if isinstance(total_tokens, (int, float)):
+                            token_total = int(total_tokens)
                 diff = _rollout_extract_diff(payload)
                 if diff:
                     key = ("diff", diff, ts_bucket)
                     if key not in seen:
                         seen.add(key)
-                        items.append({"role": "diff", "text": diff, "ts": rec.get("timestamp")})
+                        items.append({"role": "diff", "text": diff, "ts": timestamp})
     except (OSError, UnicodeDecodeError):
         return {"items": [], "token_total": None}
     return {"items": items, "token_total": token_total}

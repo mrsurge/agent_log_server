@@ -5,15 +5,15 @@ import json
 import re
 import urllib.error
 import urllib.request
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Optional
+from typing import Annotated, Protocol, cast
 
 import socketio
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-_AsyncAnyCallable = Callable[..., Awaitable[Any]]
+from .typing_helpers import AsyncObjectCallable, ObjectMap, coerce_object_map
 
 
 def _extract_line_from_diff(diff_text: str) -> int:
@@ -21,16 +21,58 @@ def _extract_line_from_diff(diff_text: str) -> int:
     return int(match.group(1)) if match else 1
 
 
+def _safe_getattr(value: object, name: str) -> object | None:
+    try:
+        return cast(object, object.__getattribute__(value, name))
+    except AttributeError:
+        return None
+
+
+def _coerce_headers(value: object) -> dict[str, str]:
+    items_obj = _safe_getattr(value, "items")
+    if not callable(items_obj):
+        return {}
+    raw_items = cast(object, items_obj())
+    if not isinstance(raw_items, Iterable):
+        return {}
+    headers: dict[str, str] = {}
+    for entry in raw_items:
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            continue
+        key_obj, value_obj = entry
+        headers[str(key_obj)] = str(value_obj)
+    return headers
+
+
+def _read_response_body(value: object) -> bytes:
+    read_obj = _safe_getattr(value, "read")
+    if not callable(read_obj):
+        return b""
+    body = cast(object, read_obj())
+    return body if isinstance(body, bytes) else b""
+
+
+def _response_status(value: object, *, default: int, attr_name: str) -> int:
+    status_obj = _safe_getattr(value, attr_name)
+    return status_obj if isinstance(status_obj, int) else default
+
+
+class _ResponseContextManager(Protocol):
+    def __enter__(self) -> object: ...
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> object: ...
+
+
 @dataclass
 class HostRoutesState:
     show_close: bool = False
-    parent_origin: Optional[str] = None
+    parent_origin: str | None = None
     ide_mode: bool = False
-    project_root: Optional[str] = None
-    sidebar_sio: Optional[socketio.AsyncClient] = None
+    project_root: str | None = None
+    sidebar_sio: socketio.AsyncClient | None = None
     sidebar_sio_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self) -> ObjectMap:
         return {
             "show_close": self.show_close,
             "parent_origin": self.parent_origin,
@@ -47,11 +89,11 @@ class HostRoutesState:
 @dataclass(frozen=True)
 class HostRoutesDeps:
     config_lock: asyncio.Lock
-    load_appserver_config: Callable[[], dict[str, Any]]
-    broadcast_appserver_ui: _AsyncAnyCallable
-    process_mention: _AsyncAnyCallable
-    load_conversation_meta: Callable[[str], dict[str, Any]]
-    meta_settings: Callable[[dict[str, Any]], dict[str, Any]]
+    load_appserver_config: Callable[[], ObjectMap]
+    broadcast_appserver_ui: AsyncObjectCallable
+    process_mention: AsyncObjectCallable
+    load_conversation_meta: Callable[[str], ObjectMap]
+    meta_settings: Callable[[ObjectMap], ObjectMap]
 
 
 class HostRoutes:
@@ -65,7 +107,7 @@ class HostRoutes:
     async def _http_post_json(
         self,
         url: str,
-        payload: dict[str, Any],
+        payload: ObjectMap,
         timeout_s: float = 6.0,
     ) -> tuple[int, bytes, dict[str, str]]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -74,19 +116,20 @@ class HostRoutes:
         def _do() -> tuple[int, bytes, dict[str, str]]:
             req = urllib.request.Request(url, data=body, headers=headers, method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-                    resp_body = resp.read() or b""
-                    resp_headers = {k: v for k, v in resp.headers.items()}
-                    return int(getattr(resp, "status", 200)), resp_body, resp_headers
+                response_handle = cast(_ResponseContextManager, urllib.request.urlopen(req, timeout=timeout_s))
+                with response_handle as response:
+                    resp_body = _read_response_body(response)
+                    resp_headers = _coerce_headers(_safe_getattr(response, "headers"))
+                    return _response_status(response, default=200, attr_name="status"), resp_body, resp_headers
             except urllib.error.HTTPError as exc:
-                err_body = exc.read() or b""
-                resp_headers = {k: v for k, v in getattr(exc, "headers", {}).items()}
-                return int(getattr(exc, "code", 502)), err_body, resp_headers
+                err_body = _read_response_body(exc)
+                resp_headers = _coerce_headers(_safe_getattr(exc, "headers"))
+                return _response_status(exc, default=502, attr_name="code"), err_body, resp_headers
 
         return await asyncio.to_thread(_do)
 
     @staticmethod
-    def cors_headers_for_origin(origin: Optional[str]) -> dict[str, str]:
+    def cors_headers_for_origin(origin: str | None) -> dict[str, str]:
         if not origin:
             return {"Access-Control-Allow-Origin": "*"}
         return {
@@ -97,11 +140,11 @@ class HostRoutes:
     async def set_host_ui_state(
         self,
         *,
-        show_close: Optional[bool] = None,
-        parent_origin: Optional[Optional[str]] = None,
-        ide_mode: Optional[bool] = None,
-        project_root: Optional[Optional[str]] = None,
-    ) -> dict[str, Any]:
+        show_close: bool | None = None,
+        parent_origin: str | None = None,
+        ide_mode: bool | None = None,
+        project_root: str | None = None,
+    ) -> ObjectMap:
         if show_close is not None:
             self._state.show_close = bool(show_close)
         if parent_origin is not None:
@@ -128,7 +171,7 @@ class HostRoutes:
             pass
         self._state.sidebar_sio = None
 
-    async def get_sidebar_sio(self) -> Optional[socketio.AsyncClient]:
+    async def get_sidebar_sio(self) -> socketio.AsyncClient | None:
         async with self._state.sidebar_sio_lock:
             current = self._state.sidebar_sio
             if current and current.connected:
@@ -149,22 +192,22 @@ class HostRoutes:
                 client = socketio.AsyncClient()
                 self._state.sidebar_sio = client
 
-                async def _on_sidebar_cwd_set(data: Any) -> None:
-                    cwd = data.get("cwd") if isinstance(data, dict) else None
+                async def _on_sidebar_cwd_set(data: object) -> None:
+                    data_map = coerce_object_map(data)
+                    cwd = data_map.get("cwd")
                     if isinstance(cwd, str) and cwd.strip():
                         print(f"[Sidebar] CWD push from TE2: {cwd}")
                         await self.set_host_ui_state(project_root=cwd, ide_mode=True)
 
-                async def _on_sidebar_mention(data: Any) -> None:
-                    if not isinstance(data, dict):
-                        return
-                    path = data.get("path")
+                async def _on_sidebar_mention(data: object) -> None:
+                    data_map = coerce_object_map(data)
+                    path = data_map.get("path")
                     if not isinstance(path, str) or not path.strip():
                         print("[Sidebar] mention ignored: missing path")
                         return
                     print(f"[Sidebar] mention from TE2: path={path}")
                     try:
-                        await self._deps.process_mention(data)
+                        await self._deps.process_mention(data_map)
                     except Exception as exc:
                         print(f"[Sidebar] mention processing failed: {exc}")
 
@@ -180,14 +223,14 @@ class HostRoutes:
                 print(f"[Sidebar] Connected OK (connected={client.connected})")
 
                 try:
-                    resp = await client.call(
+                    resp_obj = await client.call(
                         "sidebar:cwd_get",
                         {"source": "codex_agent"},
                         namespace="/sidebar_ipc",
                         timeout=5,
                     )
-                    data_payload = resp.get("data") if isinstance(resp, dict) else None
-                    data = data_payload if isinstance(data_payload, dict) else {}
+                    resp = coerce_object_map(resp_obj)
+                    data = coerce_object_map(resp.get("data"))
                     cwd = data.get("cwd")
                     if isinstance(cwd, str) and cwd.strip():
                         print(f"[Sidebar] Initial CWD from TE2: {cwd}")
@@ -201,14 +244,14 @@ class HostRoutes:
                 self._state.sidebar_sio = None
                 return None
 
-    async def sidebar_recheck_status(self) -> dict[str, Any]:
+    async def sidebar_recheck_status(self) -> ObjectMap:
         sio = await self.get_sidebar_sio()
         return {
             "ok": True,
             "connected": bool(sio and getattr(sio, "connected", False)),
         }
 
-    async def emit_sidebar_agent_edit(self, payload: dict[str, Any]) -> None:
+    async def emit_sidebar_agent_edit(self, payload: ObjectMap) -> None:
         try:
             sio = await self.get_sidebar_sio()
             if sio:
@@ -220,7 +263,7 @@ class HostRoutes:
             print(f"[Sidebar] Failed to emit agent_edit: {exc}")
             await self._disconnect_sidebar_client()
 
-    async def emit_sidebar_agent_open(self, payload: dict[str, Any]) -> None:
+    async def emit_sidebar_agent_open(self, payload: ObjectMap) -> None:
         try:
             sio = await self.get_sidebar_sio()
             if sio:
@@ -232,7 +275,7 @@ class HostRoutes:
             print(f"[Sidebar] Failed to emit agent_open: {exc}")
             await self._disconnect_sidebar_client()
 
-    async def maybe_emit_sidebar_edit(self, event: dict[str, Any]) -> None:
+    async def maybe_emit_sidebar_edit(self, event: ObjectMap) -> None:
         if event.get("type") != "diff" or not self._state.ide_mode:
             return
         conversation_id = event.get("conversation_id")
@@ -260,7 +303,7 @@ class HostRoutes:
     async def api_te2_agent_open(
         self,
         request: Request,
-        payload: Annotated[dict[str, Any], Body(...)],
+        payload: Annotated[ObjectMap, Body(...)],
     ) -> Response:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
@@ -281,7 +324,7 @@ class HostRoutes:
         }
         return Response(status_code=204, headers=headers)
 
-    async def api_host_ui_get(self) -> dict[str, Any]:
+    async def api_host_ui_get(self) -> ObjectMap:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             return {
@@ -291,7 +334,7 @@ class HostRoutes:
                 "conversation_id": cfg.get("conversation_id"),
             }
 
-    async def api_host_ui_set(self, payload: Annotated[dict[str, Any], Body(...)]) -> JSONResponse:
+    async def api_host_ui_set(self, payload: Annotated[ObjectMap, Body(...)]) -> JSONResponse:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         show_close = payload.get("show_close")
@@ -306,17 +349,19 @@ class HostRoutes:
             raise HTTPException(status_code=400, detail="Invalid 'ide_mode'")
         if project_root is not None and project_root != "" and not isinstance(project_root, str):
             raise HTTPException(status_code=400, detail="Invalid 'project_root'")
+        parent_origin_text = parent_origin if isinstance(parent_origin, str) and parent_origin != "" else None
+        project_root_text = project_root if isinstance(project_root, str) and project_root != "" else None
         event = await self.set_host_ui_state(
             show_close=bool(show_close) if show_close is not None else None,
-            parent_origin=(parent_origin or None) if parent_origin is not None else None,
+            parent_origin=parent_origin_text,
             ide_mode=bool(ide_mode) if ide_mode is not None else None,
-            project_root=(project_root or None) if project_root is not None else None,
+            project_root=project_root_text,
         )
         return JSONResponse({"ok": True, **event}, headers={"Access-Control-Allow-Origin": "*"})
 
     async def api_host_drawer_open(
         self,
-        payload: Annotated[Optional[dict[str, Any]], Body()] = None,
+        payload: Annotated[ObjectMap | None, Body()] = None,
     ) -> JSONResponse:
         payload = payload or {}
         if not isinstance(payload, dict):
@@ -327,11 +372,13 @@ class HostRoutes:
         project_root = payload.get("project_root")
         if project_root is not None and project_root != "" and not isinstance(project_root, str):
             raise HTTPException(status_code=400, detail="Invalid 'project_root'")
+        parent_origin_text = parent_origin if isinstance(parent_origin, str) and parent_origin != "" else None
+        project_root_text = project_root if isinstance(project_root, str) and project_root != "" else None
         event = await self.set_host_ui_state(
             show_close=True,
             ide_mode=True,
-            parent_origin=(parent_origin or None) if parent_origin is not None else None,
-            project_root=(project_root or None) if project_root is not None else None,
+            parent_origin=parent_origin_text,
+            project_root=project_root_text,
         )
         return JSONResponse({"ok": True, **event}, headers={"Access-Control-Allow-Origin": "*"})
 
@@ -348,7 +395,7 @@ class HostRoutes:
 
     async def api_host_drawer_close(
         self,
-        payload: Annotated[Optional[dict[str, Any]], Body()] = None,
+        payload: Annotated[ObjectMap | None, Body()] = None,
     ) -> JSONResponse:
         payload = payload or {}
         if not isinstance(payload, dict):
@@ -356,10 +403,11 @@ class HostRoutes:
         parent_origin = payload.get("parent_origin")
         if parent_origin is not None and parent_origin != "" and not isinstance(parent_origin, str):
             raise HTTPException(status_code=400, detail="Invalid 'parent_origin'")
+        parent_origin_text = parent_origin if isinstance(parent_origin, str) and parent_origin != "" else None
         event = await self.set_host_ui_state(
             show_close=False,
             ide_mode=False,
-            parent_origin=(parent_origin or None) if parent_origin is not None else None,
+            parent_origin=parent_origin_text,
         )
         return JSONResponse({"ok": True, **event}, headers={"Access-Control-Allow-Origin": "*"})
 
@@ -374,7 +422,7 @@ class HostRoutes:
             },
         )
 
-    async def api_host_project_cwd(self, payload: Annotated[dict[str, Any], Body(...)]) -> JSONResponse:
+    async def api_host_project_cwd(self, payload: Annotated[ObjectMap, Body(...)]) -> JSONResponse:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be a JSON object")
         cwd = payload.get("cwd")

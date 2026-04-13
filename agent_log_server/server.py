@@ -931,7 +931,16 @@ def _approval_status_from_resolution(resolution: object) -> str:
 
 def _next_ask_user_msg_id(conversation_id: str) -> int:
     meta = _load_conversation_meta(conversation_id)
-    counter = int(meta.get("ask_user_msg_counter") or 0)
+    counter_value = meta.get("ask_user_msg_counter")
+    if isinstance(counter_value, int):
+        counter = counter_value
+    elif isinstance(counter_value, str):
+        try:
+            counter = int(counter_value)
+        except ValueError:
+            counter = 0
+    else:
+        counter = 0
     meta["ask_user_msg_counter"] = counter + 1
     _save_conversation_meta(conversation_id, meta)
     return counter
@@ -1438,7 +1447,8 @@ def _ensure_framework_shells_secret() -> None:
     if os.environ.get("FRAMEWORK_SHELLS_SECRET"):
         return
     cfg = _load_appserver_config()
-    repo_root = cfg.get("cwd") or str(Path.cwd())
+    repo_root_value = cfg.get("cwd")
+    repo_root = repo_root_value if isinstance(repo_root_value, str) and repo_root_value.strip() else str(Path.cwd())
     try:
         repo_root = str(Path(repo_root).resolve())
     except Exception:
@@ -1620,8 +1630,9 @@ def _merge_extension_bind_settings(
 ) -> ObjectMap:
     merged: ObjectMap = {}
     meta = _load_conversation_meta(conversation_id)
-    if meta and isinstance(meta.get("settings"), dict):
-        merged.update(meta.get("settings") or {})
+    meta_settings = meta.get("settings") if isinstance(meta, dict) else None
+    if isinstance(meta_settings, dict):
+        merged.update(_coerce_json_object(meta_settings))
     if isinstance(settings, dict):
         merged.update(settings)
     if isinstance(cwd, str) and cwd.strip():
@@ -1652,7 +1663,17 @@ _extension_api = ExtensionApi(
         write_transcript_entries=_write_transcript_entries,
     )
 )
-conversation_store.set_extensions_config_normalizer(_extension_api.normalize_extensions_config)
+
+
+def _normalize_extensions_config_for_store(raw: object) -> dict[str, ObjectMap]:
+    normalized = _extension_api.normalize_extensions_config(raw)
+    return {
+        ext_id: {key: value for key, value in entry.items()}
+        for ext_id, entry in normalized.items()
+    }
+
+
+conversation_store.set_extensions_config_normalizer(_normalize_extensions_config_for_store)
 
 _extension_unavailable_detail = _extension_api.extension_unavailable_detail
 _emit_extension_unavailable_warning = _extension_api.emit_extension_unavailable_warning

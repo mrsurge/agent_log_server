@@ -4,13 +4,22 @@ import os
 import subprocess
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TypedDict
 
 REPO_MEMORY_FILENAME = ".repo_memory.md"
 _DEFAULT_TEMPLATE_PATH = Path(os.path.abspath(__file__)).parent.parent / "DEVELOPER_MESSAGE_TEMPLATE.md"
 
 
-def _template_path(template_path: Optional[str] = None) -> Path:
+class RepoMemorySnapshot(TypedDict):
+    cwd: str | None
+    repo_root: str | None
+    path: str | None
+    exists: bool
+    truncated: bool
+    content: str
+
+
+def _template_path(template_path: str | None = None) -> Path:
     raw = template_path
     if not raw:
         raw = os.environ.get("TE2_DEVELOPER_MESSAGE_TEMPLATE_PATH")
@@ -20,7 +29,7 @@ def _template_path(template_path: Optional[str] = None) -> Path:
 
 
 @lru_cache(maxsize=8)
-def load_te2_developer_message_template(template_path: Optional[str] = None) -> str:
+def load_te2_developer_message_template(template_path: str | None = None) -> str:
     path = _template_path(template_path)
     if not path.exists():
         raise FileNotFoundError(f"TE2 developer message template not found: {path}")
@@ -30,7 +39,7 @@ def load_te2_developer_message_template(template_path: Optional[str] = None) -> 
     return text
 
 
-def _logical_cwd_path(cwd: Any) -> Optional[Path]:
+def _logical_cwd_path(cwd: object) -> Path | None:
     if not isinstance(cwd, str) or not cwd.strip():
         return None
     path = Path(os.path.abspath(os.path.expanduser(cwd.strip())))
@@ -67,12 +76,12 @@ def _detect_repo_memory_root(start: Path) -> Path:
 
 
 def load_repo_memory_snapshot(
-    cwd: Any,
+    cwd: object,
     *,
     max_chars: int = 0,
-) -> Dict[str, Any]:
+) -> RepoMemorySnapshot:
     logical_cwd = _logical_cwd_path(cwd)
-    snapshot: Dict[str, Any] = {
+    snapshot: RepoMemorySnapshot = {
         "cwd": str(logical_cwd) if isinstance(logical_cwd, Path) else None,
         "repo_root": None,
         "path": None,
@@ -103,11 +112,11 @@ def load_repo_memory_snapshot(
 
 
 def build_effective_developer_instructions(
-    user_instructions: Any,
+    user_instructions: object,
     *,
     te2_enabled: bool,
-    template_path: Optional[str] = None,
-) -> Optional[str]:
+    template_path: str | None = None,
+) -> str | None:
     user_text = user_instructions.strip() if isinstance(user_instructions, str) else ""
     if not te2_enabled:
         return user_text or None
@@ -120,19 +129,19 @@ def build_effective_developer_instructions(
 
 
 def build_effective_prompt_context(
-    user_instructions: Any,
+    user_instructions: object,
     *,
     te2_enabled: bool,
-    cwd: Any = None,
-    template_path: Optional[str] = None,
-) -> Optional[str]:
+    cwd: object = None,
+    template_path: str | None = None,
+) -> str | None:
     developer_text = build_effective_developer_instructions(
         user_instructions,
         te2_enabled=te2_enabled,
         template_path=template_path,
     )
     snapshot = load_repo_memory_snapshot(cwd)
-    repo_memory_text = snapshot.get("content", "").strip() if isinstance(snapshot, dict) else ""
+    repo_memory_text = snapshot["content"].strip()
     if not repo_memory_text:
         return developer_text
     if not developer_text:

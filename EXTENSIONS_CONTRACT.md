@@ -269,6 +269,33 @@ Registry writes must be idempotent:
 - append if missing
 - never duplicate the same `id`
 
+### Loader-computed runtime state
+
+The registry file is not the only extension metadata surface. The loader/runtime also computes merged per-extension state used by `/api/extensions`, including:
+
+- `enabled`
+- `dependency_status`
+- `dependency_ok`
+- `dependency_message`
+- `active`
+- `source_kind`
+- `source_root`
+- `install_source`
+- `installer_meta`
+- `version`
+- `schema_version`
+
+Important distinction:
+
+- `extensions.json` stores install/discovery metadata
+- loader/runtime state augments that with computed availability and dependency results
+
+Current activation rule:
+
+```text
+active = enabled && manifest_ok && dependency_ok
+```
+
 ## Archive / zip contract
 
 ### Accepted layouts
@@ -329,9 +356,15 @@ Installer should:
 2. normalize layout
 3. validate manifest and file layout
 4. install into `~/.local/share/app_server/extensions/<folder>/`
-5. upsert registry entry
-6. reload extension discovery
-7. run dependency checks and warm-up
+5. upsert registry entry and installer metadata
+6. return a machine-readable result describing the installed package
+
+Package install itself does **not** imply runtime activation. The caller then decides whether to:
+
+- reload extension discovery/runtime state
+- run dependency install or dependency checks
+- wait for readiness/warm-up
+- surface the resulting availability state in `/api/extensions`
 
 For git sources, staging means a temp checkout rather than archive extraction.
 
@@ -343,7 +376,8 @@ Updater should:
 - preserve identity unless explicitly performing a rename/migration flow
 - compare installed version vs incoming version
 - compare git source metadata when the source type is `git`
-- support rollback if reload or warm-up fails
+- keep reload/readiness/dependency-install as explicit follow-up operations rather than assuming update alone activates the runtime
+- support rollback if a later reload/readiness flow fails
 
 Current metadata authority for updater/rollback bookkeeping:
 

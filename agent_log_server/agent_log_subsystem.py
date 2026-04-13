@@ -7,12 +7,37 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, cast
 
 import socketio
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from .typing_helpers import ObjectMap, coerce_object_map
+
+
+def _coerce_record(value: object) -> ObjectMap | None:
+    if not isinstance(value, dict):
+        return None
+    return coerce_object_map(value)
+
+
+def _load_records_from_path(log_path: Path) -> list[ObjectMap]:
+    records: list[ObjectMap] = []
+    with log_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record_obj = cast(object, json.loads(line))
+            except json.JSONDecodeError:
+                continue
+            record = _coerce_record(record_obj)
+            if record is not None:
+                records.append(record)
+    return records
 
 
 @dataclass
@@ -27,7 +52,7 @@ class ConnectionManager:
         with contextlib.suppress(ValueError):
             self.active_connections.remove(websocket)
 
-    async def broadcast(self, message: dict[str, Any]) -> None:
+    async def broadcast(self, message: ObjectMap) -> None:
         data = json.dumps(message)
         for connection in list(self.active_connections):
             try:
@@ -103,18 +128,7 @@ class AgentLogSubsystem:
             self._next_msg_num = 1
             return
 
-        records: list[dict[str, Any]] = []
-        with log_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(record, dict):
-                    records.append(record)
+        records = _load_records_from_path(log_path)
 
         if not records:
             self._next_msg_num = 1
@@ -130,52 +144,44 @@ class AgentLogSubsystem:
             self._next_msg_num = len(records) + 1
             return
 
-        max_num = max(
-            record.get("msg_num", 0)
-            for record in records
-            if isinstance(record.get("msg_num", 0), int)
-        )
-        self._next_msg_num = int(max_num) + 1
+        max_num = 0
+        for record in records:
+            record_msg_num = record.get("msg_num")
+            if isinstance(record_msg_num, int) and record_msg_num > max_num:
+                max_num = record_msg_num
+        self._next_msg_num = max_num + 1
 
     def _delete_record_by_msg_num(self, msg_num: int) -> bool:
         log_path = self._log_path
         if log_path is None or not log_path.exists():
             return False
 
-        records: list[dict[str, Any]] = []
+        records = _load_records_from_path(log_path)
         found = False
-        with log_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                if record.get("msg_num") == msg_num:
-                    found = True
-                    continue
-                records.append(record)
+        filtered_records: list[ObjectMap] = []
+        for record in records:
+            if record.get("msg_num") == msg_num:
+                found = True
+                continue
+            filtered_records.append(record)
 
         if found:
             with log_path.open("w", encoding="utf-8") as f:
-                for record in records:
+                for record in filtered_records:
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
         return found
 
-    async def append_record(self, record: dict[str, Any]) -> None:
+    async def append_record(self, record: ObjectMap) -> None:
         log_path = self._log_path
         if log_path is None:
             raise RuntimeError("Agent log not initialized")
         async with self._lock:
+            record_msg_num = record.get("msg_num")
             if "msg_num" not in record:
                 record["msg_num"] = self._next_msg_num
                 self._next_msg_num += 1
-            elif isinstance(record.get("msg_num"), int) and int(record["msg_num"]) >= self._next_msg_num:
-                self._next_msg_num = int(record["msg_num"]) + 1
+            elif isinstance(record_msg_num, int) and record_msg_num >= self._next_msg_num:
+                self._next_msg_num = record_msg_num + 1
             line = json.dumps(record, ensure_ascii=False)
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
@@ -184,75 +190,56 @@ class AgentLogSubsystem:
         with contextlib.suppress(Exception):
             await self._socketio_server.emit("agent_log_message", record, namespace=self._namespace)
 
-    def read_records(self, limit: int | None = None) -> list[dict[str, Any]]:
+    def read_records(self, limit: int | None = None) -> list[ObjectMap]:
         log_path = self._log_path
         if log_path is None or not log_path.exists():
             return []
 
-        records: list[dict[str, Any]] = []
-        with log_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(record, dict):
-                    records.append(record)
+        records = _load_records_from_path(log_path)
 
         if limit is not None and limit > 0:
             return records[-limit:]
         return records
 
-    def get_record_by_msg_num(self, msg_num: int) -> dict[str, Any] | None:
+    def get_record_by_msg_num(self, msg_num: int) -> ObjectMap | None:
         log_path = self._log_path
         if log_path is None or not log_path.exists():
             return None
-        with log_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(record, dict) and record.get("msg_num") == msg_num:
-                    return record
+        for record in _load_records_from_path(log_path):
+            if record.get("msg_num") == msg_num:
+                return record
         return None
 
     async def api_get_messages(
         self,
         limit: Annotated[int | None, Query(gt=0)] = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[ObjectMap]:
         return self.read_records(limit=limit)
 
-    async def api_get_message_by_num(self, msg_num: int) -> dict[str, Any] | JSONResponse:
+    async def api_get_message_by_num(self, msg_num: int) -> ObjectMap | JSONResponse:
         record = self.get_record_by_msg_num(msg_num)
         if record is None:
             return JSONResponse({"error": f"Message {msg_num} not found"}, status_code=404)
         return record
 
-    async def api_delete_message_by_num(self, msg_num: int) -> dict[str, Any] | JSONResponse:
+    async def api_delete_message_by_num(self, msg_num: int) -> ObjectMap | JSONResponse:
         async with self._lock:
             deleted = self._delete_record_by_msg_num(msg_num)
         if not deleted:
             return JSONResponse({"error": f"Message {msg_num} not found"}, status_code=404)
         return {"ok": True, "deleted": msg_num}
 
-    async def api_post_message(self, msg: MessageIn) -> dict[str, Any] | JSONResponse:
+    async def api_post_message(self, msg: MessageIn) -> ObjectMap | JSONResponse:
         who = msg.who.strip()
         text = msg.message.strip()
         if not who or not text:
             return JSONResponse({"error": "Both 'who' and 'message' are required"}, status_code=400)
 
-        record = {"ts": self._utc_ts(), "who": who, "message": text}
+        record: ObjectMap = {"ts": self._utc_ts(), "who": who, "message": text}
         await self.append_record(record)
         return record
 
-    async def api_await_message(self, req: AwaitIn) -> dict[str, Any] | JSONResponse:
+    async def api_await_message(self, req: AwaitIn) -> ObjectMap | JSONResponse:
         after_num = req.after_msg_num
         from_who = req.from_who.strip() if req.from_who else None
         timeout_s = max(1, min(req.timeout_ms, 600000)) / 1000.0
@@ -262,7 +249,7 @@ class AgentLogSubsystem:
         while elapsed < timeout_s:
             for record in self.read_records():
                 rec_num = record.get("msg_num")
-                if rec_num is None or rec_num <= after_num:
+                if not isinstance(rec_num, int) or rec_num <= after_num:
                     continue
                 if from_who and record.get("who") != from_who:
                     continue

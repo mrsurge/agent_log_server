@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional, TypedDict
 
 
 @dataclass
@@ -33,6 +33,14 @@ _UNICODE_NORMALIZE_MAP = str.maketrans(
 )
 
 
+class _HeadingEntry(TypedDict):
+    id: str
+    depth: int
+    title: str
+    normalized_title: str
+    line_start: int
+
+
 def normalize_heading(text: str) -> str:
     normalized = (text or "").translate(_UNICODE_NORMALIZE_MAP)
     normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -41,8 +49,8 @@ def normalize_heading(text: str) -> str:
 
 def parse_markdown(text: str) -> list[SectionNode]:
     lines = (text or "").splitlines()
-    headings: list[dict[str, Any]] = []
-    stack: list[dict[str, Any]] = []
+    headings: list[_HeadingEntry] = []
+    stack: list[_HeadingEntry] = []
     in_fence = False
 
     for idx, line in enumerate(lines, start=1):
@@ -59,20 +67,20 @@ def parse_markdown(text: str) -> list[SectionNode]:
         title = match.group(2)
         normalized_title = normalize_heading(title)
 
-        while stack and int(stack[-1]["depth"]) >= depth:
+        while stack and stack[-1]["depth"] >= depth:
             stack.pop()
-        path_parts = [str(node["normalized_title"]) for node in stack] + [normalized_title]
+        path_parts = [node["normalized_title"] for node in stack] + [normalized_title]
         section_id = " > ".join(path_parts)
 
-        node = {
+        heading_entry: _HeadingEntry = {
             "id": section_id,
             "depth": depth,
             "title": title,
             "normalized_title": normalized_title,
             "line_start": idx,
         }
-        headings.append(node)
-        stack.append(node)
+        headings.append(heading_entry)
+        stack.append(heading_entry)
 
     if not headings:
         return []
@@ -80,22 +88,22 @@ def parse_markdown(text: str) -> list[SectionNode]:
     total_lines = len(lines)
     nodes: list[SectionNode] = []
     for i, heading in enumerate(headings):
-        depth = int(heading["depth"])
-        line_start = int(heading["line_start"])
+        depth = heading["depth"]
+        line_start = heading["line_start"]
         body_start = min(line_start + 1, total_lines + 1)
 
         subtree_end = total_lines
         for j in range(i + 1, len(headings)):
             nxt = headings[j]
-            if int(nxt["depth"]) <= depth:
-                subtree_end = int(nxt["line_start"]) - 1
+            if nxt["depth"] <= depth:
+                subtree_end = nxt["line_start"] - 1
                 break
 
         first_child_start: Optional[int] = None
         for j in range(i + 1, len(headings)):
             nxt = headings[j]
-            nxt_depth = int(nxt["depth"])
-            nxt_start = int(nxt["line_start"])
+            nxt_depth = nxt["depth"]
+            nxt_start = nxt["line_start"]
             if nxt_depth <= depth:
                 break
             if nxt_depth == depth + 1:
@@ -109,10 +117,10 @@ def parse_markdown(text: str) -> list[SectionNode]:
 
         nodes.append(
             SectionNode(
-                id=str(heading["id"]),
-                id_disambiguated=str(heading["id"]),
+                id=heading["id"],
+                id_disambiguated=heading["id"],
                 depth=depth,
-                title=str(heading["title"]),
+                title=heading["title"],
                 line_start=line_start,
                 body_start=body_start,
                 body_end=body_end,
@@ -121,11 +129,11 @@ def parse_markdown(text: str) -> list[SectionNode]:
         )
 
     counts: dict[str, int] = {}
-    for node in nodes:
-        counts[node.id] = counts.get(node.id, 0) + 1
-    for node in nodes:
-        if counts.get(node.id, 0) > 1:
-            node.id_disambiguated = f"{node.id}@L{node.line_start}"
+    for section_node in nodes:
+        counts[section_node.id] = counts.get(section_node.id, 0) + 1
+    for section_node in nodes:
+        if counts.get(section_node.id, 0) > 1:
+            section_node.id_disambiguated = f"{section_node.id}@L{section_node.line_start}"
 
     return nodes
 

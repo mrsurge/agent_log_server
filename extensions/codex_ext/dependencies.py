@@ -3,7 +3,28 @@ import importlib
 import os
 import platform
 import shutil
-from typing import Any, Dict, Optional
+from collections.abc import Awaitable
+from typing import Optional, Protocol, TypeAlias, cast
+
+PayloadMap: TypeAlias = dict[str, object]
+
+
+class _ExtensionLoader(Protocol):
+    def get_handler(self, extension_id: str) -> object | None: ...
+
+
+class _AuthStatusReader(Protocol):
+    def __call__(self, *, extension_id: str, refresh: bool = False) -> object | Awaitable[object]: ...
+
+
+def _coerce_payload_map(value: object) -> PayloadMap:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
+def _load_extensions() -> _ExtensionLoader:
+    return cast(_ExtensionLoader, importlib.import_module("extensions"))
 
 
 def _codex_binary_path() -> Optional[str]:
@@ -33,7 +54,7 @@ def recommended_codex_install_command() -> str:
     return f"npm install -g {recommended_codex_package()}"
 
 
-async def _run_install(package_name: str) -> Dict[str, Any]:
+async def _run_install(package_name: str) -> PayloadMap:
     npm = shutil.which("npm")
     if not npm:
         return {"ok": False, "status": "failed", "message": "npm not found on PATH"}
@@ -56,7 +77,7 @@ async def _run_install(package_name: str) -> Dict[str, Any]:
     return {"ok": True, "status": "succeeded", "message": output or "Codex CLI installed"}
 
 
-async def check_dependencies(*, extension_id: str, extension_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def check_dependencies(*, extension_id: str, extension_info: Optional[PayloadMap] = None) -> PayloadMap:
     binary = _codex_binary_path()
     if not binary:
         return {
@@ -66,10 +87,9 @@ async def check_dependencies(*, extension_id: str, extension_info: Optional[Dict
             "details": {"install_command": recommended_codex_install_command()},
         }
 
-    ext_loader = importlib.import_module("extensions")
-    handler = ext_loader.get_handler(extension_id)
-    auth_reader = getattr(handler, "get_auth_status", None) if handler else None
-    if not callable(auth_reader):
+    handler = _load_extensions().get_handler(extension_id)
+    auth_reader_obj = getattr(handler, "get_auth_status", None) if handler is not None else None
+    if not callable(auth_reader_obj):
         return {
             "ok": False,
             "status": "error",
@@ -77,11 +97,12 @@ async def check_dependencies(*, extension_id: str, extension_info: Optional[Dict
             "details": {"binary": binary},
         }
 
+    auth_reader = cast(_AuthStatusReader, auth_reader_obj)
     auth_status = auth_reader(extension_id=extension_id, refresh=False)
     if asyncio.iscoroutine(auth_status):
-        auth_status = await auth_status
-    auth_payload = auth_status if isinstance(auth_status, dict) else {}
-    details = {
+        auth_status = await cast(Awaitable[object], auth_status)
+    auth_payload = _coerce_payload_map(auth_status)
+    details: PayloadMap = {
         "binary": binary,
         "auth_required": bool(auth_payload.get("requires_openai_auth")),
         "authenticated": bool(auth_payload.get("authenticated")),
@@ -115,7 +136,7 @@ async def check_dependencies(*, extension_id: str, extension_info: Optional[Dict
     }
 
 
-async def install_dependencies(*, extension_id: str, extension_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def install_dependencies(*, extension_id: str, extension_info: Optional[PayloadMap] = None) -> PayloadMap:
     result = await _run_install(recommended_codex_package())
     if not result.get("ok"):
         return result
