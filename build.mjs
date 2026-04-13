@@ -158,7 +158,7 @@ async function prepareVendorAssets() {
 
 const codexAgent = {
   ...common,
-  entryPoints: ['agent_log_server/static/codex_agent.js'],
+  entryPoints: ['agent_log_server/static/codex_agent.ts'],
   outfile: 'agent_log_server/static/dist/codex_agent.js',
   format: 'esm',
 };

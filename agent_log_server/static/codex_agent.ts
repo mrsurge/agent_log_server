@@ -9,130 +9,142 @@ import {
   setMarkdownLinkHandlers,
   streamEnd,
   streamWrite,
-} from './js/codex_agent/markdown.js';
+} from './js/codex_agent/markdown.ts';
 import { bindAssistantStream } from './js/codex_agent/assistant_stream.ts';
 import { bindShellRender } from './js/codex_agent/shell_render.ts';
 import { bindToolRender } from './js/codex_agent/tool_render.ts';
 import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.ts';
-import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.js';
+import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.ts';
 import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.ts';
 import { bindDiffRendering } from './js/codex_agent/diff/rendering.ts';
-import { bindSocketEvents } from './js/codex_agent/events/socket.js';
-import { bindEventRouter } from './js/codex_agent/events/router.js';
+import { bindSocketEvents } from './js/codex_agent/events/socket.ts';
+import { bindEventRouter } from './js/codex_agent/events/router.ts';
 import { bindPlanOverlay } from './js/codex_agent/plan_overlay.ts';
 import { bindPlanModal } from './js/codex_agent/plan_modal.ts';
 import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.ts';
 import { bindApprovalUi } from './js/codex_agent/approvals/ui.ts';
-import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.js';
-import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.js';
+import { bindSessionFlow } from './js/codex_agent/orchestrator/session_flow.ts';
+import { bindRpcFlow } from './js/codex_agent/orchestrator/rpc_flow.ts';
 import { bindRequestCardRuntime } from './js/codex_agent/request_cards/runtime.ts';
 import { bindShellSemantic } from './js/codex_agent/shell_semantic.ts';
-import { formatJsonSetting, parseJsonSetting } from './js/codex_agent/settings/runtime_helpers.js';
-import { bindSettingsSaveFlow } from './js/codex_agent/settings/save_flow.js';
-import { bindSettingsUiFlow } from './js/codex_agent/settings/ui_flow.js';
-import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.js';
-import { bindInputFlow } from './js/codex_agent/boot/input_flow.js';
+import { formatJsonSetting, parseJsonSetting } from './js/codex_agent/settings/runtime_helpers.ts';
+import { bindSettingsSaveFlow } from './js/codex_agent/settings/save_flow.ts';
+import { bindSettingsUiFlow } from './js/codex_agent/settings/ui_flow.ts';
+import { bindRuntimeFooter } from './js/codex_agent/runtime_footer.ts';
+import { bindTranscriptCards } from './js/codex_agent/transcript_cards.ts';
+import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.ts';
+import { bindInputFlow } from './js/codex_agent/boot/input_flow.ts';
 import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations/client.ts';
 import {
   readRpcTransportEnabledPreference,
   writeRpcTransportEnabledPreference,
 } from './js/codex_agent/rpc/transport.ts';
 
+declare const hljs: any;
+declare const Tribute: any;
+
+type AnyRecord = Record<string, any>;
+
 document.addEventListener('DOMContentLoaded', () => {
-  const statusEl = document.getElementById('agent-status');
-  const wsStatusEl = document.getElementById('agent-ws');
-  const timelineEl = document.getElementById('agent-timeline');
+  const getById = document.getElementById.bind(document);
+  const queryOne = document.querySelector.bind(document);
+  const byId = (id) => getById(id) as any;
+  const query = (selector) => queryOne(selector) as any;
+
+  const statusEl = byId('agent-status');
+  const wsStatusEl = byId('agent-ws');
+  const timelineEl = byId('agent-timeline');
   const timelineWrapEl = timelineEl?.closest('.timeline-wrap');
   const scrollContainer = timelineWrapEl || timelineEl;
-  const statusRibbonEl = document.getElementById('status-ribbon');
-  const statusLabelEl = document.getElementById('status-label');
-  const statusReasoningEl = document.getElementById('status-reasoning');
-  const statusDotEl = document.getElementById('status-dot');
-  const startBtn = document.getElementById('agent-start');
-  const stopBtn = document.getElementById('agent-stop');
-  const promptEl = document.getElementById('agent-prompt');
-  const footerEl = document.querySelector('.composer');
-  const footerRuntimeControlsEl = document.getElementById('footer-runtime-controls');
-  const sendBtn = document.getElementById('agent-send');
-  const interruptBtn = document.getElementById('turn-interrupt');
-  const counterMessagesEl = document.getElementById('counter-messages');
-  const counterTokensEl = document.getElementById('counter-tokens');
-  const contextRemainingEl = document.getElementById('context-remaining');
-  const scrollBtn = document.getElementById('scroll-pin');
-  const activeConversationEl = document.getElementById('active-conversation');
-  const conversationTitleEl = document.getElementById('conversation-title');
-  const splashViewEl = document.getElementById('splash-view');
-  const widescreenResizerEl = document.getElementById('widescreen-resizer');
-  const drawerEl = document.getElementById('conversation-drawer');
-  const conversationBodyEl = document.getElementById('conversation-body');
-  const conversationListEl = document.getElementById('conversation-list');
-  const conversationMiniDrawerEl = document.getElementById('conversation-mini-drawer');
-  const conversationMiniListEl = document.getElementById('conversation-mini-list');
-  const conversationMiniCloseBtn = document.getElementById('conversation-mini-close');
-  const conversationCreateBtn = document.getElementById('conversation-create');
-  const conversationBackBtn = document.getElementById('conversation-back');
-  const conversationSettingsBtn = document.getElementById('conversation-settings');
-  const splashSettingsModalEl = document.getElementById('splash-settings-modal');
-  const splashSettingsUserNameEl = document.getElementById('splash-settings-user-name');
-  const splashSettingsTe2McpIntegrationEl = document.getElementById('splash-settings-te2-mcp-integration');
-  const settingsModalEl = document.getElementById('settings-modal');
-  const settingsCloseBtn = document.getElementById('settings-close');
-  const settingsCancelBtn = document.getElementById('settings-cancel');
-  const settingsSaveBtn = document.getElementById('settings-save');
-  const settingsCwdEl = document.getElementById('settings-cwd');
-  const settingsApprovalEl = document.getElementById('settings-approval');
-  const settingsSandboxEl = document.getElementById('settings-sandbox');
-  const settingsModelEl = document.getElementById('settings-model');
-  const settingsEffortEl = document.getElementById('settings-effort');
-  const settingsSummaryEl = document.getElementById('settings-summary');
-  const settingsDeveloperInstructionsEl = document.getElementById('settings-developer-instructions');
-  const settingsLabelEl = document.getElementById('settings-label');
-  const settingsAliasEl = document.getElementById('settings-alias');
-  const settingsCommandLinesEl = document.getElementById('settings-command-lines');
-  const settingsViewWrapEl = document.getElementById('settings-view-wrap');
-  const settingsMarkdownEl = document.getElementById('settings-markdown');
-  const settingsDiffSyntaxEl = document.getElementById('settings-diff-syntax');
-  const settingsSemanticShellRibbonEl = document.getElementById('settings-semantic-shell-ribbon');
-  const settingsTe2McpIntegrationEl = document.getElementById('settings-te2-mcp-integration');
-  const markdownToggleEl = document.getElementById('markdown-toggle');
-  const trackEditsToggleEl = document.getElementById('track-edits-toggle');
-  const lineNumbersToggleEl = document.getElementById('line-numbers-toggle');
-  const settingsAgentEl = document.getElementById('settings-agent');
-  const settingsAgentToggle = document.getElementById('settings-agent-toggle');
-  const settingsAgentOptions = document.getElementById('settings-agent-options');
-  const settingsAgentRowEl = document.getElementById('settings-agent-row');
-  const settingsRolloutEl = document.getElementById('settings-rollout');
-  const settingsRolloutRowEl = document.getElementById('settings-rollout-row');
-  const settingsApprovalToggle = document.getElementById('settings-approval-toggle');
-  const settingsSandboxToggle = document.getElementById('settings-sandbox-toggle');
-  const settingsModelToggle = document.getElementById('settings-model-toggle');
-  const settingsEffortToggle = document.getElementById('settings-effort-toggle');
-  const settingsSummaryToggle = document.getElementById('settings-summary-toggle');
-  const settingsApprovalOptions = document.getElementById('settings-approval-options');
-  const settingsSandboxOptions = document.getElementById('settings-sandbox-options');
-  const settingsModelOptions = document.getElementById('settings-model-options');
-  const settingsEffortOptions = document.getElementById('settings-effort-options');
-  const settingsSummaryOptions = document.getElementById('settings-summary-options');
-  const settingsCwdBrowseBtn = document.getElementById('settings-cwd-browse');
-  const settingsRolloutBrowseBtn = document.getElementById('settings-rollout-browse');
-  const pickerOverlayEl = document.getElementById('cwd-picker');
-  const pickerCloseBtn = document.getElementById('picker-close');
-  const pickerPathEl = document.getElementById('picker-path');
-  const pickerListEl = document.getElementById('picker-list');
-  const pickerUpBtn = document.getElementById('picker-up');
-  const pickerSelectBtn = document.getElementById('picker-select');
-  const pickerTitleEl = document.getElementById('picker-title');
-  const pickerFilterEl = document.getElementById('picker-filter');
-  const rolloutOverlayEl = document.getElementById('rollout-picker');
-	  const rolloutCloseBtn = document.getElementById('rollout-close');
-	  const rolloutListEl = document.getElementById('rollout-list');
-  const mentionPillEl = document.getElementById('mention-pill');
-  const hostCloseTopEl = document.getElementById('host-close-top');
-  const hostCloseDrawerEl = document.getElementById('host-close-drawer');
-  const planModalEl = document.getElementById('plan-modal');
-  const planCloseBtn = document.getElementById('plan-close');
-  const planDismissBtn = document.getElementById('plan-dismiss');
-  const planBodyEl = document.getElementById('plan-body');
+  const statusRibbonEl = byId('status-ribbon');
+  const statusLabelEl = byId('status-label');
+  const statusReasoningEl = byId('status-reasoning');
+  const statusDotEl = byId('status-dot');
+  const startBtn = byId('agent-start');
+  const stopBtn = byId('agent-stop');
+  const promptEl = byId('agent-prompt');
+  const footerEl = query('.composer');
+  const footerRuntimeControlsEl = byId('footer-runtime-controls');
+  const sendBtn = byId('agent-send');
+  const interruptBtn = byId('turn-interrupt');
+  const counterMessagesEl = byId('counter-messages');
+  const counterTokensEl = byId('counter-tokens');
+  const contextRemainingEl = byId('context-remaining');
+  const scrollBtn = byId('scroll-pin');
+  const activeConversationEl = byId('active-conversation');
+  const conversationTitleEl = byId('conversation-title');
+  const splashViewEl = byId('splash-view');
+  const widescreenResizerEl = byId('widescreen-resizer');
+  const drawerEl = byId('conversation-drawer');
+  const conversationBodyEl = byId('conversation-body');
+  const conversationListEl = byId('conversation-list');
+  const conversationMiniDrawerEl = byId('conversation-mini-drawer');
+  const conversationMiniListEl = byId('conversation-mini-list');
+  const conversationMiniCloseBtn = byId('conversation-mini-close');
+  const conversationCreateBtn = byId('conversation-create');
+  const conversationBackBtn = byId('conversation-back');
+  const conversationSettingsBtn = byId('conversation-settings');
+  const splashSettingsModalEl = byId('splash-settings-modal');
+  const splashSettingsUserNameEl = byId('splash-settings-user-name');
+  const splashSettingsTe2McpIntegrationEl = byId('splash-settings-te2-mcp-integration');
+  const settingsModalEl = byId('settings-modal');
+  const settingsCloseBtn = byId('settings-close');
+  const settingsCancelBtn = byId('settings-cancel');
+  const settingsSaveBtn = byId('settings-save');
+  const settingsCwdEl = byId('settings-cwd');
+  const settingsApprovalEl = byId('settings-approval');
+  const settingsSandboxEl = byId('settings-sandbox');
+  const settingsModelEl = byId('settings-model');
+  const settingsEffortEl = byId('settings-effort');
+  const settingsSummaryEl = byId('settings-summary');
+  const settingsDeveloperInstructionsEl = byId('settings-developer-instructions');
+  const settingsLabelEl = byId('settings-label');
+  const settingsAliasEl = byId('settings-alias');
+  const settingsCommandLinesEl = byId('settings-command-lines');
+  const settingsViewWrapEl = byId('settings-view-wrap');
+  const settingsMarkdownEl = byId('settings-markdown');
+  const settingsDiffSyntaxEl = byId('settings-diff-syntax');
+  const settingsSemanticShellRibbonEl = byId('settings-semantic-shell-ribbon');
+  const settingsTe2McpIntegrationEl = byId('settings-te2-mcp-integration');
+  const markdownToggleEl = byId('markdown-toggle');
+  const trackEditsToggleEl = byId('track-edits-toggle');
+  const lineNumbersToggleEl = byId('line-numbers-toggle');
+  const settingsAgentEl = byId('settings-agent');
+  const settingsAgentToggle = byId('settings-agent-toggle');
+  const settingsAgentOptions = byId('settings-agent-options');
+  const settingsAgentRowEl = byId('settings-agent-row');
+  const settingsRolloutEl = byId('settings-rollout');
+  const settingsRolloutRowEl = byId('settings-rollout-row');
+  const settingsApprovalToggle = byId('settings-approval-toggle');
+  const settingsSandboxToggle = byId('settings-sandbox-toggle');
+  const settingsModelToggle = byId('settings-model-toggle');
+  const settingsEffortToggle = byId('settings-effort-toggle');
+  const settingsSummaryToggle = byId('settings-summary-toggle');
+  const settingsApprovalOptions = byId('settings-approval-options');
+  const settingsSandboxOptions = byId('settings-sandbox-options');
+  const settingsModelOptions = byId('settings-model-options');
+  const settingsEffortOptions = byId('settings-effort-options');
+  const settingsSummaryOptions = byId('settings-summary-options');
+  const settingsCwdBrowseBtn = byId('settings-cwd-browse');
+  const settingsRolloutBrowseBtn = byId('settings-rollout-browse');
+  const pickerOverlayEl = byId('cwd-picker');
+  const pickerCloseBtn = byId('picker-close');
+  const pickerPathEl = byId('picker-path');
+  const pickerListEl = byId('picker-list');
+  const pickerUpBtn = byId('picker-up');
+  const pickerSelectBtn = byId('picker-select');
+  const pickerTitleEl = byId('picker-title');
+  const pickerFilterEl = byId('picker-filter');
+  const rolloutOverlayEl = byId('rollout-picker');
+	  const rolloutCloseBtn = byId('rollout-close');
+	  const rolloutListEl = byId('rollout-list');
+  const mentionPillEl = byId('mention-pill');
+  const hostCloseTopEl = byId('host-close-top');
+  const hostCloseDrawerEl = byId('host-close-drawer');
+  const planModalEl = byId('plan-modal');
+  const planCloseBtn = byId('plan-close');
+  const planDismissBtn = byId('plan-dismiss');
+  const planBodyEl = byId('plan-body');
 
   localStorage.setItem('last_tab', 'codex-agent');
   const mobileParam = new URLSearchParams(window.location.search).get('mobile');
@@ -146,17 +158,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const enableMobileScale = storedMobile === '1';
   document.body.classList.toggle('mobile-scale', enableMobileScale);
 
-	  let conversationMeta = {};
-		  let conversationSettings = {};
-		  let conversationList = [];
-  let conversationPreviewCache = {};
-  let appConfig = {};
+  let conversationMeta: AnyRecord = {};
+		  let conversationSettings: AnyRecord = {};
+		  let conversationList: any[] = [];
+  let conversationPreviewCache: AnyRecord = {};
+  let appConfig: AnyRecord = {};
   let activeView = 'splash';
 		  // Client-local selection (do not treat SSOT active conversation as an authority after boot).
 		  let clientConversationId = null;
 		  let clientActiveView = null;
       let miniConversationDrawerOpen = false;
-		  let hostUi = { showClose: false, parentOrigin: null };
+		  let hostUi: AnyRecord = { showClose: false, parentOrigin: null };
   const SPLASH_TAB_STORAGE_KEY = 'codex_splash_tab';
   function normalizeSplashTab(value) {
     return value === 'project' ? 'project' : 'all';
@@ -187,18 +199,18 @@ document.addEventListener('DOMContentLoaded', () => {
   let openDropdownEl = null;
   let initialized = false;
   let wsOpen = false;
-  let wsReadyResolve = null;
+  let wsReadyResolve: any = null;
   let wsReadyPromise = new Promise((resolve) => { wsReadyResolve = resolve; });
   let wsReconnectDelay = 1000;
-  let _socket = null; // Socket.IO instance (set in connectWS)
-  let modelList = []; // Cached model list with supportedReasoningEfforts
-  let runtimeOptions = {};
-  let activeRuntimeOptionValues = {};
+  let _socket: any = null; // Socket.IO instance (set in connectWS)
+  let modelList: any[] = []; // Cached model list with supportedReasoningEfforts
+  let runtimeOptions: AnyRecord = {};
+  let activeRuntimeOptionValues: AnyRecord = {};
   let planDocState = { has_plan: false, plan_exists: false, plan_content: '', plan_path: null, plan_source: null };
   let todoState = { has_todo: false, plan_steps: [] };
   let planDocDirty = false;
   let planFetchSerial = 0;
-  let settingsUi = null;
+  let settingsUi: any = null;
   let markdownEnabled = true; // Toggle for markdown rendering
   let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
   let lineNumbersEnabled = false; // Toggle for transcript gutter line numbers
@@ -246,7 +258,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let _scrollProgrammatic = false; // Guard: prevent programmatic scroll from unpinning
   let normalizeTimer = null;
   let isNormalizing = false;
-  let tributeInstance = null;
+  let tributeInstance: any = null;
   let transcriptTotal = 0;
   let planOverlayEl = null;
   let planListEl = null;
@@ -364,7 +376,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function _saveExpandedCards() {
     localStorage.setItem('expandedCards', JSON.stringify([..._expandedCards]));
   }
-  function makeCollapsible(row, cardId, startExpanded, options = {}) {
+  function makeCollapsible(row, cardId, startExpanded, options: AnyRecord = {}) {
     if (!row) return;
     const {
       headerEl = row.querySelector('.command-ribbon') || row.querySelector('.diff-path-label'),
@@ -398,7 +410,7 @@ document.addEventListener('DOMContentLoaded', () => {
       _saveExpandedCards();
     }
 
-    function toggleCollapse(forceExpanded) {
+    function toggleCollapse(forceExpanded?: boolean) {
       const expanded = typeof forceExpanded === 'boolean'
         ? forceExpanded
         : !row.classList.contains('expanded');
@@ -410,7 +422,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return expanded;
     }
 
-    row._toggleCollapse = toggleCollapse;
+    (row as any)._toggleCollapse = toggleCollapse;
     syncExpandedState(isExpanded);
 
     twistyEl.style.pointerEvents = 'auto';
@@ -649,7 +661,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setEnabled: (enabled) => { semanticShellRibbonEnabled = enabled === true; },
     getQuoteParsingEnabled: () => semanticShellQuoteParsingEnabled,
     setQuoteParsingEnabled: (enabled) => { semanticShellQuoteParsingEnabled = enabled === true; },
-    getCheckboxEl: () => document.getElementById('settings-semantic-shell-ribbon'),
+    getCheckboxEl: () => byId('settings-semantic-shell-ribbon'),
     escapeHtml,
   });
 
@@ -1073,7 +1085,7 @@ document.addEventListener('DOMContentLoaded', () => {
     el.className = `pill ${cls || ''}`.trim();
   }
 
-  const jsStatusEl = document.getElementById('js-status');
+  const jsStatusEl = byId('js-status');
   if (jsStatusEl) setPill(jsStatusEl, 'loaded', 'ok');
 
   if ('serviceWorker' in navigator) {
@@ -1113,7 +1125,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const DRAFT_MENTION_ENVELOPE_START = '\x1eCODEX_MENTION ';
   const DRAFT_MENTION_ENVELOPE_END = '\x1f';
 
-  function buildDraftMentionPayload(rawPath, opts) {
+  function buildDraftMentionPayload(rawPath, opts: AnyRecord = {}) {
     opts = opts || {};
     let pathOnly = String(rawPath || '').trim();
     let line = opts.line ?? opts.lineNo ?? null;
@@ -1128,7 +1140,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (endLine == null) endLine = lineMatch[3] || null;
     }
     if (!pathOnly) return null;
-    const payload = { path: pathOnly };
+    const payload: AnyRecord = { path: pathOnly };
     if (line != null && String(line).trim()) payload.line = String(line);
     if (endLine != null && String(endLine).trim()) payload.endLine = String(endLine);
     if (col != null && String(col).trim()) payload.col = String(col);
@@ -1145,11 +1157,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function decodeDraftMentionPayload(payloadText) {
     try {
-      const parsed = JSON.parse(payloadText);
+      const parsed: AnyRecord = JSON.parse(payloadText);
       if (!parsed || typeof parsed !== 'object') return null;
       const path = typeof parsed.path === 'string' ? parsed.path.trim() : '';
       if (!path) return null;
-      const payload = { path };
+      const payload: AnyRecord = { path };
       if (parsed.line != null && String(parsed.line).trim()) payload.line = String(parsed.line);
       if (parsed.endLine != null && String(parsed.endLine).trim()) payload.endLine = String(parsed.endLine);
       if (parsed.col != null && String(parsed.col).trim()) payload.col = String(parsed.col);
@@ -1168,8 +1180,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return { absPath, bestPath, cwd };
   }
 
-  function createMentionToken(rawPath, opts) {
-    opts = opts || {};
+  function createMentionToken(rawPath, opts: AnyRecord = {}) {
     let pathOnly = String(rawPath || '');
     let parsedLine, parsedEndLine;
     // Parse line info from path string like "path:42-50"
@@ -1429,7 +1440,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Add separator between directories and files after menu renders
     promptEl.addEventListener('tribute-active-true', () => {
       setTimeout(() => {
-        const menu = document.querySelector('.tribute-container ul');
+        const menu = query('.tribute-container ul');
         if (!menu) return;
         const items = menu.querySelectorAll('li');
         let lastWasDir = false;
@@ -1455,7 +1466,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Strip formatting on paste — keep only plain text (mention tokens are inserted programmatically)
     promptEl.addEventListener('paste', (e) => {
       e.preventDefault();
-      const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+      const clipboardData = e.clipboardData || (window as any).clipboardData;
+      const text = clipboardData.getData('text/plain');
       if (text) {
         const sel = window.getSelection();
         if (sel && sel.rangeCount) {
@@ -1504,7 +1516,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function clearPlaceholder() {
     if (placeholderCleared) return;
-    const placeholder = document.getElementById('timeline-placeholder') ||
+    const placeholder = byId('timeline-placeholder') ||
       timelineEl.querySelector('.timeline-row.muted');
     if (placeholder) placeholder.remove();
     placeholderCleared = true;
@@ -1645,7 +1657,7 @@ document.addEventListener('DOMContentLoaded', () => {
 	    if (hostCloseDrawerEl) {
 	      hostCloseDrawerEl.style.display = (show && activeView === 'conversation') ? 'inline-flex' : 'none';
 	    }
-	    const tabsEl = document.getElementById('splash-tabs');
+	    const tabsEl = byId('splash-tabs');
 	    if (tabsEl) {
 	      const ideMode = Boolean(hostUi?.ideMode);
 	      tabsEl.style.display = ideMode ? 'flex' : 'none';
@@ -1737,7 +1749,7 @@ document.addEventListener('DOMContentLoaded', () => {
       pendingNewConversation,
       miniConversationDrawerOpen,
     }),
-    setState: (patch) => {
+    setState: (patch: AnyRecord) => {
       if (patch.conversationList !== undefined) conversationList = patch.conversationList;
       if (patch.conversationPreviewCache !== undefined) conversationPreviewCache = patch.conversationPreviewCache;
       if (patch.appConfig !== undefined) appConfig = patch.appConfig;
@@ -1769,7 +1781,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateActiveConversationLabel,
     documentRef: document,
     windowRef: window,
-  });
+  }) as any;
 
 	  function toProjectRelativePath(path) {
 	    if (!path || typeof path !== 'string') return null;
@@ -1789,7 +1801,7 @@ document.addEventListener('DOMContentLoaded', () => {
 	  }
 
 		  async function postTe2OpenRequest({ path, line, column }) {
-		    const payload = {
+		    const payload: AnyRecord = {
 		      source: 'codex-agent',
 		      conversation_id: conversationMeta?.conversation_id || null,
 		    };
@@ -1837,7 +1849,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setMarkdownLinkHandlers({
     openFilePath: (target) => {
-      const next = target && typeof target === 'object' ? target : { path: target };
+      const next: AnyRecord = target && typeof target === 'object' ? target : { path: target };
       postTe2OpenRequest({
         path: next.path,
         line: Number.isFinite(next.line) ? next.line : 1,
@@ -1873,7 +1885,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (conversationTitleEl) {
       conversationTitleEl.textContent = getConversationHeaderTitle();
     }
-    const el = document.getElementById('conversation-label');
+    const el = byId('conversation-label');
     if (!el) return;
     const label = conversationSettings?.label || '—';
     el.textContent = label;
@@ -1940,232 +1952,31 @@ document.addEventListener('DOMContentLoaded', () => {
     return settingsUi?.closeSettingsModal(...args);
   }
 
-  function normalizeApprovalValue(value) {
-    if (!value) return value;
-    if (value === 'unlessTrusted') return 'untrusted';
-    return value;
-  }
+  const runtimeFooter = bindRuntimeFooter({
+    getState: () => ({
+      conversationMeta,
+      conversationSettings,
+      runtimeOptions,
+      activeRuntimeOptionValues,
+      openDropdownEl,
+    }),
+    setState: (patch) => {
+      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
+      if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
+      if (patch.activeRuntimeOptionValues !== undefined) activeRuntimeOptionValues = patch.activeRuntimeOptionValues || {};
+    },
+    footerRuntimeControlsEl,
+    closeDropdownMenu: (...args) => closeDropdownMenu(...args),
+    toggleDropdownMenu: (...args) => toggleDropdownMenu(...args),
+    sioCall,
+  });
 
-  function normalizeRuntimeOptionDescriptor(kind) {
-    const raw = runtimeOptions?.[kind];
-    if (!raw || typeof raw !== 'object') return null;
-    const settingKey = typeof raw.settingKey === 'string' ? raw.settingKey.trim() : '';
-    const options = Array.isArray(raw.options)
-      ? raw.options
-          .map((item) => {
-            if (typeof item === 'string') {
-              const text = item.trim();
-              return text ? { value: text, label: text } : null;
-            }
-            if (!item || typeof item !== 'object') return null;
-            const value = typeof item.value === 'string' ? item.value.trim() : '';
-            if (!value) return null;
-            const label = typeof item.label === 'string' && item.label.trim() ? item.label.trim() : value;
-            return { value, label };
-          })
-          .filter(Boolean)
-      : [];
-    return {
-      settingKey,
-      label: typeof raw.label === 'string' ? raw.label.trim() : '',
-      footerLabel: typeof raw.footerLabel === 'string' ? raw.footerLabel.trim() : '',
-      options,
-      current: typeof raw.current === 'string' ? raw.current.trim() : '',
-      default: typeof raw.default === 'string' ? raw.default.trim() : '',
-      accents: raw.accents && typeof raw.accents === 'object' ? { ...raw.accents } : {},
-    };
-  }
-
-  function getQuickControlKinds() {
-    const configured = Array.isArray(runtimeOptions?.quickControls)
-      ? runtimeOptions.quickControls
-          .map((item) => (typeof item === 'string' ? item.trim() : ''))
-          .filter(Boolean)
-      : [];
-    if (configured.length) return configured;
-    return normalizeRuntimeOptionDescriptor('approval') ? ['approval'] : [];
-  }
-
-  function getFooterSlotKinds() {
-    const configured = new Set(getQuickControlKinds());
-    const kinds = [];
-    const approvalDescriptor = normalizeRuntimeOptionDescriptor('approval');
-    if (configured.has('approval') || approvalDescriptor?.options?.length) {
-      kinds.push('approval');
-    }
-    kinds.push('mode');
-    return kinds;
-  }
-
-  function getFooterRuntimeLabel(kind, descriptor) {
-    if (kind === 'mode') {
-      return descriptor?.label || descriptor?.footerLabel || 'Mode';
-    }
-    return descriptor?.footerLabel || descriptor?.label || kind;
-  }
-
-  function getRuntimeSettingKey(kind, fallbackKey) {
-    return normalizeRuntimeOptionDescriptor(kind)?.settingKey || fallbackKey;
-  }
-
-  function getConversationSettingByRuntimeKey(kind, fallbackKey) {
-    const key = getRuntimeSettingKey(kind, fallbackKey);
-    if (!key || !conversationSettings || typeof conversationSettings !== 'object') return '';
-    const value = conversationSettings[key];
-    return typeof value === 'string' ? value : '';
-  }
-
-  function getRuntimeOptionLabel(kind, value) {
-    if (!value) return '';
-    const descriptor = normalizeRuntimeOptionDescriptor(kind);
-    const match = descriptor?.options?.find((option) => option.value === value);
-    return match?.label || value;
-  }
-
-  function getRuntimeQuickValue(kind, fallbackKey) {
-    const activeValue = activeRuntimeOptionValues?.[kind];
-    if (typeof activeValue === 'string' && activeValue.trim()) {
-      return activeValue.trim();
-    }
-    const descriptor = normalizeRuntimeOptionDescriptor(kind);
-    return getConversationSettingByRuntimeKey(kind, fallbackKey)
-      || descriptor?.current
-      || descriptor?.default
-      || '';
-  }
-
-  function renderFooterRuntimeControls() {
-    if (!footerRuntimeControlsEl) return;
-    if (openDropdownEl && footerRuntimeControlsEl.contains(openDropdownEl)) {
-      closeDropdownMenu(openDropdownEl);
-    }
-    footerRuntimeControlsEl.innerHTML = '';
-    const hasRuntimeOptions = runtimeOptions && Object.keys(runtimeOptions).length > 0;
-    if (!hasRuntimeOptions) {
-      footerRuntimeControlsEl.style.display = 'none';
-      return;
-    }
-    const kinds = getFooterSlotKinds();
-    footerRuntimeControlsEl.style.display = kinds.length ? '' : 'none';
-    kinds.forEach((kind) => {
-      const descriptor = normalizeRuntimeOptionDescriptor(kind);
-      if (!descriptor || !descriptor.options.length) {
-        if (kind === 'mode') {
-          const placeholder = document.createElement('div');
-          placeholder.className = 'status-pill footer-cell footer-runtime-cell footer-runtime-empty';
-          placeholder.dataset.runtimeKind = kind;
-          placeholder.setAttribute('aria-hidden', 'true');
-          footerRuntimeControlsEl.appendChild(placeholder);
-        }
-        return;
-      }
-      const fallbackKey = descriptor.settingKey || kind;
-      const currentValue = getRuntimeQuickValue(kind, fallbackKey);
-      const cell = document.createElement('div');
-      cell.className = 'status-pill footer-cell footer-runtime-cell';
-      cell.dataset.runtimeKind = kind;
-
-      const labelEl = document.createElement('span');
-      labelEl.textContent = getFooterRuntimeLabel(kind, descriptor);
-      cell.appendChild(labelEl);
-
-      const dropdownEl = document.createElement('div');
-      dropdownEl.className = 'footer-dropdown';
-
-      const valueBtn = document.createElement('button');
-      valueBtn.type = 'button';
-      valueBtn.className = 'pill dropdown-toggle footer-runtime-toggle';
-      valueBtn.dataset.runtimeKind = kind;
-      const accentClass = typeof descriptor.accents?.[currentValue] === 'string'
-        ? descriptor.accents[currentValue]
-        : '';
-      valueBtn.classList.toggle('ok', accentClass === 'ok');
-      valueBtn.classList.toggle('warn', accentClass === 'warn');
-      valueBtn.classList.toggle('err', accentClass === 'err');
-      valueBtn.textContent = getRuntimeOptionLabel(kind, currentValue) || currentValue || 'default';
-      valueBtn.addEventListener('click', (evt) => {
-        evt.preventDefault();
-        toggleDropdownMenu(optionsEl);
-      });
-      dropdownEl.appendChild(valueBtn);
-
-      const optionsEl = document.createElement('div');
-      optionsEl.className = 'dropdown-list';
-      descriptor.options.forEach((option) => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'dropdown-item';
-        btn.dataset.value = option.value;
-        btn.textContent = option.label;
-        btn.addEventListener('click', async () => {
-          closeDropdownMenu(optionsEl);
-          await saveRuntimeOptionQuick(kind, option.value, fallbackKey);
-        });
-        optionsEl.appendChild(btn);
-      });
-      dropdownEl.appendChild(optionsEl);
-      cell.appendChild(dropdownEl);
-      footerRuntimeControlsEl.appendChild(cell);
-    });
-  }
-
-  async function saveRuntimeOptionQuick(kind, value, fallbackKey) {
-    let nextValue = value?.trim();
-    if (kind === 'approval') {
-      nextValue = normalizeApprovalValue(nextValue);
-    }
-    if (!nextValue) return;
-    const settingKey = getRuntimeSettingKey(kind, fallbackKey || kind);
-    await sioCall('conversation_update', {
-      conversation_id: conversationMeta?.conversation_id,
-      settings: { [settingKey]: nextValue },
-    });
-    conversationSettings = {
-      ...(conversationSettings || {}),
-      [settingKey]: nextValue,
-    };
-    if (runtimeOptions?.[kind] && typeof runtimeOptions[kind] === 'object') {
-      runtimeOptions = {
-        ...runtimeOptions,
-        [kind]: {
-          ...runtimeOptions[kind],
-          current: nextValue,
-        },
-      };
-    }
-    if (runtimeOptions?.fields && typeof runtimeOptions.fields === 'object' && runtimeOptions.fields[settingKey]) {
-      runtimeOptions = {
-        ...runtimeOptions,
-        fields: {
-          ...runtimeOptions.fields,
-          [settingKey]: {
-            ...runtimeOptions.fields[settingKey],
-            current: nextValue,
-          },
-        },
-      };
-    }
-    renderFooterRuntimeControls();
-  }
-
-  async function saveApprovalQuick(value) {
-    await saveRuntimeOptionQuick('approval', value, 'approvalPolicy');
-  }
-
-  function applyRuntimeMode(kind) {
-    const normalizedKind = typeof kind === 'string' ? kind.trim() : '';
-    if (normalizedKind) {
-      activeRuntimeOptionValues = {
-        ...(activeRuntimeOptionValues || {}),
-        mode: normalizedKind,
-      };
-    } else if (activeRuntimeOptionValues?.mode) {
-      const next = { ...(activeRuntimeOptionValues || {}) };
-      delete next.mode;
-      activeRuntimeOptionValues = next;
-    }
-    renderFooterRuntimeControls();
-  }
+  const {
+    normalizeApprovalValue,
+    renderFooterRuntimeControls,
+    saveApprovalQuick,
+    applyRuntimeMode,
+  } = runtimeFooter;
 
   function openPicker(...args) {
     return settingsUi?.openPicker(...args);
@@ -2326,7 +2137,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return distance <= 24;
   }
 
-  function maybeAutoScroll(force) {
+  function maybeAutoScroll(force = false) {
     if (!scrollContainer) return;
     if (autoScroll || force) {
       _scrollProgrammatic = true;
@@ -2376,7 +2187,7 @@ document.addEventListener('DOMContentLoaded', () => {
       scrollRowToTop(row, { clearPinned: true });
     },
     onCollapsibleHeaderClick: (row) => {
-      row?._toggleCollapse?.();
+      (row as any)?._toggleCollapse?.();
     },
     documentRef: document,
     windowRef: window,
@@ -2387,7 +2198,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Kept as no-op for compatibility
   }
 
-  function insertRow(row, beforeEl) {
+  function insertRow(row, beforeEl = null) {
     clearPlaceholder();
     if (beforeEl && beforeEl.parentElement === timelineEl) {
       timelineEl.insertBefore(row, beforeEl);
@@ -2453,12 +2264,12 @@ document.addEventListener('DOMContentLoaded', () => {
     body.className = 'body message-body';
 
     row.append(header, body);
-    row._messageRole = role || 'message';
+    (row as any)._messageRole = role || 'message';
     updateMessageCardHeader(row, role, text);
     return { row, body, header, title };
   }
 
-  function createRow(kind, title, beforeEl, parentEl = null) {
+  function createRow(kind, title, beforeEl = null, parentEl = null) {
     const { row, body } = buildRow(kind, title);
     if (parentEl) {
       clearPlaceholder();
@@ -2915,7 +2726,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const convoId = conversationMeta?.conversation_id || null;
       const result = await conversationsRpcClient.compactConversation({ conversationId: convoId });
       if (result && result.ok === false) {
-        throw new Error(result.error || 'compact failed');
+        throw new Error(String(result.error || 'compact failed'));
       }
     } catch (err) {
       console.warn('compact failed', err);
@@ -2948,6 +2759,41 @@ document.addEventListener('DOMContentLoaded', () => {
     // Scroll after content is fully added
     maybeAutoScroll();
   }
+
+  const {
+    appendErrorContent,
+    renderCommandResult,
+    renderViewCard,
+    renderSearchCard,
+    renderErrorCard,
+    renderWarningCard,
+    renderContextCompactedCard,
+    renderMetaEnvelopeInjected,
+  } = bindTranscriptCards({
+    getConversationSettings: () => conversationSettings,
+    clearPlaceholder,
+    createRow,
+    makeCollapsible,
+    getLiveEventParent,
+    getBottomSpacerEl: () => bottomSpacerEl,
+    timelineEl,
+    maybeAutoScroll,
+    setLastEventType: (value) => { lastEventType = value; },
+    setStatusDot,
+    renderShellCmdRibbon,
+    detectLangFromCommand,
+    highlightCodeAlways,
+    detectLangFromPath,
+    toRelativePath,
+    postTe2OpenRequest,
+    buildViewCardTitle,
+    normalizeStructuredViewLines,
+    synthesizeStructuredViewLines,
+    renderStructuredViewLineTable,
+    openSplashSettingsModal,
+    addMessage,
+    escapeHtml,
+  });
 
   const { updateSpacerHeights, measureRowHeight } = bindTranscriptMetrics({
     timelineEl,
@@ -3099,14 +2945,15 @@ document.addEventListener('DOMContentLoaded', () => {
           const m = entry.text.match(/^diff --git a\/.+ b\/(.+)$/m);
           if (m) diffPath = m[1];
         }
-        const pathDiv = document.createElement('div');
+          const pathDiv = document.createElement('div');
         pathDiv.className = 'diff-path-label command-ribbon';
         if (diffPath) {
           pathDiv.innerHTML = `<strong>${escapeHtml(toRelativePath(diffPath))}</strong>`;
           pathDiv.style.cursor = 'pointer';
           pathDiv.dataset.hasClickHandler = 'true';
           pathDiv.addEventListener('click', (e) => {
-            if (e.target.closest('.twisty')) return;
+            const target = e.target;
+            if (target instanceof Element && target.closest('.twisty')) return;
             postTe2OpenRequest({ path: diffPath, line: 1, column: 1 });
           });
         } else {
@@ -3145,102 +2992,11 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       if (entry.role === 'command') {
-        const row = document.createElement('div');
-        row.className = 'timeline-row command-result';
-        // If this command replaces a noisy agent PTY block card, remove it on replay.
-        if (entry.agent_block_id) {
-          try {
-            const dup = timelineEl?.querySelector(`.timeline-row.terminal-card[data-agent-block-id="${CSS.escape(entry.agent_block_id)}"]`);
-            if (dup && dup.parentElement) dup.parentElement.removeChild(dup);
-          } catch (_) {}
-        }
-        const body = document.createElement('div');
-        body.className = 'body';
-        // Command ribbon
-        const cmdRibbon = document.createElement('div');
-        cmdRibbon.className = 'command-ribbon';
-        // For user terminal commands, include the prompt in the ribbon.
-        const isUserTerminal = entry.source === 'user_terminal' || entry.source === 'user-terminal';
-        const prompt = entry.prompt || '';
-        const cmd = entry.command || '';
-        const ribbonText = (prompt ? `${prompt}${cmd}` : cmd);
-        if (isUserTerminal && typeof ribbonText === 'string' && ribbonText.includes('\x1b[')) {
-          cmdRibbon.innerHTML = ansiToHtml(ribbonText);
-        } else if (!isUserTerminal) {
-          renderShellCmdRibbon(cmdRibbon, cmd);
-        } else {
-          cmdRibbon.textContent = ribbonText;
-        }
-        body.appendChild(cmdRibbon);
-        // If entry has a path, make ribbon clickable (jump-to-file)
-        if (entry.path) {
-          cmdRibbon.style.cursor = 'pointer';
-          cmdRibbon.title = entry.path;
-          cmdRibbon.dataset.hasClickHandler = 'true';
-          const ePath = entry.path;
-          const eLine = entry.line || 1;
-          cmdRibbon.addEventListener('click', (e) => {
-            if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
-            postTe2OpenRequest({ path: ePath, line: eLine, column: 1 });
-          });
-        }
-        // Output
-        if (entry.output) {
-          const hasAnsi = typeof entry.output === 'string' && entry.output.includes('\x1b[');
-          const lines = entry.output.split('\n');
-          let displayOutput = entry.output;
-          let truncated = false;
-          if (lines.length > truncateLines) {
-            displayOutput = lines.slice(0, truncateLines).join('\n');
-            truncated = true;
-          }
-          const outputPre = document.createElement('pre');
-          outputPre.className = 'command-output';
-          if (isUserTerminal && hasAnsi) {
-            outputPre.innerHTML = ansiToHtml(displayOutput);
-            if (truncated) {
-              const truncNote = document.createElement('span');
-              truncNote.className = 'truncation-note';
-              truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
-              outputPre.appendChild(truncNote);
-            }
-          } else {
-            // Try syntax highlighting based on command
-            const lang = detectLangFromCommand(cmd);
-            if (lang && typeof hljs !== 'undefined') {
-              outputPre.innerHTML = highlightCodeAlways(displayOutput, lang);
-              if (truncated) {
-                const truncNote = document.createElement('span');
-                truncNote.className = 'truncation-note';
-                truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
-                outputPre.appendChild(truncNote);
-              }
-            } else {
-              outputPre.textContent = displayOutput;
-              if (truncated) {
-                outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${lines.length} lines)`;
-              }
-            }
-          }
-          body.appendChild(outputPre);
-        }
-        // Footer
-        const footer = document.createElement('div');
-        footer.className = 'command-footer';
-        const parts = [];
-        if (entry.exit_code !== undefined && entry.exit_code !== null && entry.exit_code !== 0) {
-          parts.push(`Exit: ${entry.exit_code}`);
-        }
-        if (entry.duration_ms !== undefined && entry.duration_ms !== null) {
-          parts.push(`Duration: ${entry.duration_ms}ms`);
-        }
-        if (parts.length) {
-          footer.textContent = parts.join(' | ');
-          body.appendChild(footer);
-        }
-        row.appendChild(body);
-        makeCollapsible(row, `cmd:${entry.id || entry.agent_block_id || cmd.slice(0, 40)}`, false);
-        getTarget().appendChild(row);
+        renderCommandResult(entry, getTarget(), {
+          linkPathFromRibbon: Boolean(entry.path),
+          updateLiveState: false,
+          autoScroll: false,
+        });
         return;
       }
       if (entry.role === 'plan') {
@@ -3560,7 +3316,7 @@ document.addEventListener('DOMContentLoaded', () => {
       incrementMessages();
     });
     clearPlaceholder();
-    const insertBefore = opts.prepend
+    const insertBefore = (opts as AnyRecord).prepend
       ? ((planOverlayEl && planOverlayEl.parentElement === timelineEl) ? planOverlayEl.nextSibling : topSpacerEl?.nextSibling)
       : bottomSpacerEl;
     if (insertBefore && insertBefore.parentElement === timelineEl) {
@@ -3641,7 +3397,8 @@ document.addEventListener('DOMContentLoaded', () => {
         pathLabel.style.cursor = 'pointer';
         pathLabel.dataset.hasClickHandler = 'true';
         pathLabel.addEventListener('click', (e) => {
-          if (e.target.closest('.twisty')) return;
+          const target = e.target;
+          if (target instanceof Element && target.closest('.twisty')) return;
           postTe2OpenRequest({ path, line: 1, column: 1 });
         });
       } else {
@@ -3887,658 +3644,6 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll();
   }
 
-  function normalizeErrorPayload(raw) {
-    if (typeof raw === 'string') {
-      return {
-        message: raw,
-        errorType: '',
-        statusCode: null,
-        providerCallId: '',
-        stack: '',
-        details: '',
-        source: '',
-        code: null,
-      };
-    }
-    const payload = raw && typeof raw === 'object' ? raw : {};
-    const message = typeof payload.message === 'string' && payload.message
-      ? payload.message
-      : (typeof payload.text === 'string' ? payload.text : '');
-    const errorType = typeof payload.error_type === 'string' && payload.error_type
-      ? payload.error_type
-      : (typeof payload.errorType === 'string' ? payload.errorType : '');
-    const statusRaw = payload.status_code ?? payload.statusCode;
-    const statusCode = Number.isFinite(Number(statusRaw)) ? Number(statusRaw) : null;
-    const providerCallId = typeof payload.provider_call_id === 'string' && payload.provider_call_id
-      ? payload.provider_call_id
-      : (typeof payload.providerCallId === 'string' ? payload.providerCallId : '');
-    const stack = typeof payload.stack === 'string' ? payload.stack : '';
-    const details = typeof payload.details === 'string' && payload.details
-      ? payload.details
-      : (typeof payload.additional_details === 'string' ? payload.additional_details : '');
-    const source = typeof payload.source === 'string' && payload.source
-      ? payload.source
-      : (typeof payload.event === 'string' ? payload.event : '');
-    const code = payload.code ?? null;
-    return {
-      message,
-      errorType,
-      statusCode,
-      providerCallId,
-      stack,
-      details,
-      source,
-      code,
-    };
-  }
-
-  function appendErrorContent(body, raw) {
-    if (!body) return;
-    const payload = normalizeErrorPayload(raw);
-    if (payload.message) {
-      const pre = document.createElement('pre');
-      pre.className = 'error-text';
-      pre.textContent = payload.message;
-      body.appendChild(pre);
-    }
-
-    const metaParts = [];
-    if (payload.errorType) metaParts.push(`type: ${payload.errorType}`);
-    if (payload.statusCode !== null) metaParts.push(`status: ${payload.statusCode}`);
-    if (payload.code !== null && payload.code !== '') metaParts.push(`code: ${payload.code}`);
-    if (payload.providerCallId) metaParts.push(`provider_call_id: ${payload.providerCallId}`);
-    if (payload.source) metaParts.push(`source: ${payload.source}`);
-    if (metaParts.length) {
-      const meta = document.createElement('div');
-      meta.className = 'command-footer';
-      meta.textContent = metaParts.join(' | ');
-      body.appendChild(meta);
-    }
-
-    if (payload.details && payload.details !== payload.message) {
-      const detailPre = document.createElement('pre');
-      detailPre.className = 'error-text';
-      detailPre.textContent = payload.details;
-      body.appendChild(detailPre);
-    }
-
-    if (payload.stack && payload.stack !== payload.message && payload.stack !== payload.details) {
-      const stackPre = document.createElement('pre');
-      stackPre.className = 'error-text';
-      stackPre.textContent = payload.stack;
-      body.appendChild(stackPre);
-    }
-  }
-
-  // Render error card
-  function renderErrorCard(raw) {
-    const payload = normalizeErrorPayload(raw);
-    if (!payload.message && !payload.details && !payload.stack) return;
-    clearPlaceholder();
-    
-    const { row, body } = createRow('error', 'error');
-    appendErrorContent(body, payload);
-    
-    if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(row, bottomSpacerEl);
-    } else {
-      timelineEl.appendChild(row);
-    }
-    
-    lastEventType = 'error';
-    maybeAutoScroll();
-  }
-
-  function handleWarningAction(action) {
-    if (!action || typeof action !== 'object') return;
-    const actionId = typeof action.id === 'string' ? action.id.trim() : '';
-    if (actionId === 'open_splash_settings') {
-      openSplashSettingsModal();
-    }
-  }
-
-  // Render warning card
-  function renderWarningCard(message, action = null) {
-    if (!message) return;
-    clearPlaceholder();
-    
-    const { row, body } = createRow('warning', 'warning');
-    const pre = document.createElement('pre');
-    pre.className = 'warning-text';
-    pre.textContent = message;
-    body.appendChild(pre);
-    if (action && typeof action === 'object') {
-      const label = typeof action.label === 'string' ? action.label.trim() : '';
-      if (label) {
-        const actions = document.createElement('div');
-        actions.className = 'warning-actions';
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'btn tiny';
-        button.textContent = label;
-        button.addEventListener('click', () => handleWarningAction(action));
-        actions.appendChild(button);
-        body.appendChild(actions);
-      }
-    }
-    
-    if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(row, bottomSpacerEl);
-    } else {
-      timelineEl.appendChild(row);
-    }
-    
-    lastEventType = 'warning';
-    maybeAutoScroll();
-  }
-
-  function renderContextCompactedCard() {
-    clearPlaceholder();
-    const { row, body } = createRow('system', 'context compacted');
-    const msg = document.createElement('div');
-    msg.className = 'system-message';
-    msg.textContent = 'Context was compacted to fit within the model\'s context window. Some earlier conversation history may have been summarized or dropped.';
-    body.appendChild(msg);
-    lastEventType = 'system';
-    maybeAutoScroll();
-  }
-
-  function renderMetaEnvelopeInjected(evt) {
-    const commandCount = evt.command_count ?? evt.commandCount ?? 0;
-    const envelopeJson = evt.envelope_json ?? evt.envelopeJson ?? '';
-    const pretty = (() => {
-      try {
-        return JSON.stringify(JSON.parse(envelopeJson), null, 2);
-      } catch {
-        return String(envelopeJson || '');
-      }
-    })();
-    // Show the exact prefix/suffix the model sees (as escaped literals so it is visible).
-    const text = [
-      'CODEX_META injected (debug):',
-      `commands: ${commandCount}`,
-      '',
-      '\\u001eCODEX_META ' + pretty + '\\u001f',
-    ].join('\n');
-    addMessage('meta', text);
-  }
-
-  function escapeHtml(s) {
-    return String(s || '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/\"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
-  function ansiToHtml(text) {
-    // Minimal ANSI SGR -> HTML span renderer (keeps output selectable inside <pre>).
-    const input = String(text || '');
-    const sgrRe = /\x1b\[([0-9;]*)m/g;
-    let lastIndex = 0;
-    let html = '';
-    let state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
-
-    function cssFor(st) {
-      const styles = [];
-      if (st.bold) styles.push('font-weight:600');
-      if (st.dim) styles.push('opacity:0.8');
-      if (st.italic) styles.push('font-style:italic');
-      if (st.underline) styles.push('text-decoration:underline');
-      const fgMap = {
-        30: '#000000', 31: '#e06c75', 32: '#98c379', 33: '#e5c07b', 34: '#61afef', 35: '#c678dd', 36: '#56b6c2', 37: '#abb2bf',
-        90: '#5c6370', 91: '#ff7a85', 92: '#b7f39b', 93: '#ffd68a', 94: '#7ab7ff', 95: '#e79aff', 96: '#7ae8f5', 97: '#ffffff',
-      };
-      const bgMap = {
-        40: '#000000', 41: '#e06c75', 42: '#98c379', 43: '#e5c07b', 44: '#61afef', 45: '#c678dd', 46: '#56b6c2', 47: '#abb2bf',
-        100: '#5c6370', 101: '#ff7a85', 102: '#b7f39b', 103: '#ffd68a', 104: '#7ab7ff', 105: '#e79aff', 106: '#7ae8f5', 107: '#ffffff',
-      };
-      let fg = st.fg;
-      let bg = st.bg;
-      if (st.inverse) {
-        const tmp = fg; fg = bg; bg = tmp;
-      }
-      if (fg != null && fgMap[fg]) styles.push(`color:${fgMap[fg]}`);
-      if (bg != null && bgMap[bg]) styles.push(`background-color:${bgMap[bg]}`);
-      return styles.join(';');
-    }
-
-    function applyCodes(codes) {
-      const parts = codes.length ? codes.split(';') : ['0'];
-      for (const p of parts) {
-        const n = Number(p || '0');
-        if (!Number.isFinite(n)) continue;
-        if (n === 0) state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
-        else if (n === 1) state.bold = true;
-        else if (n === 2) state.dim = true;
-        else if (n === 3) state.italic = true;
-        else if (n === 4) state.underline = true;
-        else if (n === 7) state.inverse = true;
-        else if (n === 22) { state.bold = false; state.dim = false; }
-        else if (n === 23) state.italic = false;
-        else if (n === 24) state.underline = false;
-        else if (n === 27) state.inverse = false;
-        else if (n === 39) state.fg = null;
-        else if (n === 49) state.bg = null;
-        else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) state.fg = n;
-        else if ((n >= 40 && n <= 47) || (n >= 100 && n <= 107)) state.bg = n;
-      }
-    }
-
-    function emitChunk(s) {
-      if (!s) return;
-      const css = cssFor(state);
-      const escaped = escapeHtml(s);
-      if (css) html += `<span style="${css}">${escaped}</span>`;
-      else html += escaped;
-    }
-
-    let m;
-    while ((m = sgrRe.exec(input)) !== null) {
-      emitChunk(input.slice(lastIndex, m.index));
-      applyCodes(m[1] || '');
-      lastIndex = sgrRe.lastIndex;
-    }
-    emitChunk(input.slice(lastIndex));
-    return html;
-  }
-
-  function renderCommandResult(evt) {
-    const command = evt.command || '';
-    const cwd = evt.cwd || '';
-    const prompt = evt.prompt || '';
-    const agentBlockId = evt.agent_block_id || evt.agentBlockId || '';
-    const output = evt.output || '';
-    const exitCode = evt.exit_code;
-    const durationMs = evt.duration_ms;
-    
-    // Get truncation limit from settings (default 20 lines)
-    const truncateLines = conversationSettings?.commandOutputLines || 20;
-    
-    // Truncate output if needed
-    let displayOutput = output;
-    let truncated = false;
-    if (output) {
-      const lines = output.split('\n');
-      if (lines.length > truncateLines) {
-        displayOutput = lines.slice(0, truncateLines).join('\n');
-        truncated = true;
-      }
-    }
-    
-    // Build the row
-    clearPlaceholder();
-    // If this command corresponds to an agent PTY block card (noise), remove it.
-    if (agentBlockId) {
-      try {
-        const dup = timelineEl?.querySelector(`.timeline-row.terminal-card[data-agent-block-id="${CSS.escape(agentBlockId)}"]`);
-        if (dup && dup.parentElement) dup.parentElement.removeChild(dup);
-      } catch (_) {}
-    }
-    const row = document.createElement('div');
-    row.className = 'timeline-row command-result';
-    
-    // Body column (full width, no meta)
-    const body = document.createElement('div');
-    body.className = 'body';
-    
-    // Command ribbon (black background, white text)
-    const cmdRibbon = document.createElement('div');
-    cmdRibbon.className = 'command-ribbon';
-    // For user terminal commands, include the prompt in the ribbon.
-    const isUserTerminal = evt.source === 'user_terminal' || evt.source === 'user-terminal';
-    const ribbonText = (prompt ? `${prompt}${command}` : command);
-    if (isUserTerminal && typeof ribbonText === 'string' && ribbonText.includes('\x1b[')) {
-      cmdRibbon.innerHTML = ansiToHtml(ribbonText);
-    } else if (!isUserTerminal) {
-      renderShellCmdRibbon(cmdRibbon, command);
-    } else {
-      cmdRibbon.textContent = ribbonText;
-    }
-    body.appendChild(cmdRibbon);
-    
-    // Output block (if any)
-    if (displayOutput) {
-      const outputPre = document.createElement('pre');
-      outputPre.className = 'command-output';
-      const hasAnsi = typeof displayOutput === 'string' && displayOutput.includes('\x1b[');
-      if (isUserTerminal && hasAnsi) {
-        outputPre.innerHTML = ansiToHtml(displayOutput);
-        if (truncated) {
-          const truncNote = document.createElement('span');
-          truncNote.className = 'truncation-note';
-          truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
-          outputPre.appendChild(truncNote);
-        }
-      } else {
-        // Try syntax highlighting based on command
-        const lang = detectLangFromCommand(command);
-        if (lang && typeof hljs !== 'undefined') {
-          outputPre.innerHTML = highlightCodeAlways(displayOutput, lang);
-          if (truncated) {
-            const truncNote = document.createElement('span');
-            truncNote.className = 'truncation-note';
-            truncNote.textContent = `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
-            outputPre.appendChild(truncNote);
-          }
-        } else {
-          outputPre.textContent = displayOutput;
-          if (truncated) {
-            outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${output.split('\n').length} lines)`;
-          }
-        }
-      }
-      body.appendChild(outputPre);
-    }
-    
-    // Duration footer
-    const footer = document.createElement('div');
-    footer.className = 'command-footer';
-    const parts = [];
-    if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
-      parts.push(`Exit: ${exitCode}`);
-    }
-    if (durationMs !== undefined && durationMs !== null) {
-      parts.push(`Duration: ${durationMs}ms`);
-    }
-    if (parts.length) {
-      footer.textContent = parts.join(' | ');
-      body.appendChild(footer);
-    }
-    
-    row.appendChild(body);
-    makeCollapsible(row, `cmd:${agentBlockId || command.slice(0, 40)}`, false);
-
-    const parentEl = getLiveEventParent(evt);
-    if (parentEl) {
-      clearPlaceholder();
-      parentEl.appendChild(row);
-      maybeAutoScroll();
-    } else if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(row, bottomSpacerEl);
-    } else {
-      timelineEl.appendChild(row);
-    }
-    
-    lastEventType = 'command';
-    maybeAutoScroll();
-    
-    // Update status dot based on exit code
-    if (exitCode === 0 || exitCode === undefined || exitCode === null) {
-      setStatusDot('success');
-    } else {
-      setStatusDot('error');
-    }
-  }
-
-  function renderViewCard(evt, parentEl = null) {
-    const content = evt.content ?? evt.output ?? '';
-    const path = typeof evt.path === 'string' ? evt.path : '';
-    const viewRange = Array.isArray(evt.view_range) ? evt.view_range : (Array.isArray(evt.viewRange) ? evt.viewRange : null);
-    const structuredLines = normalizeStructuredViewLines(evt.lines) ?? synthesizeStructuredViewLines(content, viewRange);
-    const title = evt.title || buildViewCardTitle(path, viewRange, 'view');
-    const truncateLines = conversationSettings?.commandOutputLines || 20;
-
-    let displayContent = typeof content === 'string' ? content : String(content ?? '');
-    let displayLines = structuredLines;
-    let truncated = false;
-    let totalLineCount = 0;
-    if (displayLines) {
-      totalLineCount = displayLines.length;
-      if (displayLines.length > truncateLines) {
-        displayLines = displayLines.slice(0, truncateLines);
-        truncated = true;
-      }
-    } else if (displayContent) {
-      const lines = displayContent.split('\n');
-      totalLineCount = lines.length;
-      if (lines.length > truncateLines) {
-        displayContent = lines.slice(0, truncateLines).join('\n');
-        truncated = true;
-      }
-    }
-
-    clearPlaceholder();
-    const row = document.createElement('div');
-    row.className = 'timeline-row command-result view-card';
-
-    const body = document.createElement('div');
-    body.className = 'body';
-
-    const ribbon = document.createElement('div');
-    ribbon.className = 'command-ribbon';
-    ribbon.textContent = title;
-    body.appendChild(ribbon);
-
-    if (path) {
-      const pathLine = document.createElement('div');
-      pathLine.className = 'view-card-path';
-      pathLine.textContent = toRelativePath(path);
-      pathLine.title = path;
-      pathLine.style.cursor = 'pointer';
-      pathLine.dataset.hasClickHandler = 'true';
-      pathLine.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const preferredLine = displayLines?.[0]?.line_no
-          ?? (Array.isArray(viewRange) && Number.isFinite(Number(viewRange[0])) ? Number(viewRange[0]) : 1);
-        postTe2OpenRequest({ path, line: preferredLine, column: 1 });
-      });
-      body.appendChild(pathLine);
-    }
-
-    if (displayLines) {
-      body.appendChild(renderStructuredViewLineTable(displayLines, path));
-    } else {
-      const outputPre = document.createElement('pre');
-      outputPre.className = 'command-output';
-      const lang = detectLangFromPath(path);
-      if (lang && typeof hljs !== 'undefined') {
-        outputPre.innerHTML = highlightCodeAlways(displayContent, lang);
-      } else {
-        outputPre.textContent = displayContent;
-      }
-      body.appendChild(outputPre);
-    }
-
-    if (truncated) {
-      const truncNote = document.createElement('div');
-      truncNote.className = 'view-card-truncation truncation-note';
-      truncNote.textContent = `... (truncated, showing ${truncateLines} of ${totalLineCount} lines)`;
-      body.appendChild(truncNote);
-    }
-
-    row.appendChild(body);
-    makeCollapsible(row, `view:${evt.id || path || title}`, false);
-
-    const targetEl = parentEl || getLiveEventParent(evt);
-    if (targetEl) {
-      targetEl.appendChild(row);
-    } else if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(row, bottomSpacerEl);
-    } else {
-      timelineEl.appendChild(row);
-    }
-
-    lastEventType = 'view';
-    maybeAutoScroll();
-    setStatusDot('success');
-  }
-
-  function resolveSearchEntryPath(rawPath, rootPath) {
-    if (!rawPath) return '';
-    if (rawPath.startsWith('/')) return rawPath;
-    if (!rootPath) return rawPath;
-    return `${rootPath.replace(/\/+$/, '')}/${rawPath.replace(/^\.?\//, '')}`;
-  }
-
-  function shortenSearchTarget(path) {
-    const relativePath = toRelativePath(path || '');
-    if (!relativePath) return '';
-    const parts = relativePath.split('/').filter(Boolean);
-    if (parts.length <= 3) return relativePath;
-    return `.../${parts.slice(-3).join('/')}`;
-  }
-
-  function formatSearchArgumentValue(key, value) {
-    if (value === undefined || value === null) return '';
-    if (value === '') return '';
-    if (Array.isArray(value) && value.length === 0) return '';
-    if (typeof value === 'object') {
-      try {
-        return JSON.stringify(value);
-      } catch (_) {
-        return String(value);
-      }
-    }
-    if ((key === 'path' || key === 'root' || key === 'cwd') && typeof value === 'string') {
-      return toRelativePath(value);
-    }
-    return String(value);
-  }
-
-  function buildSearchDetailText(mode, rootPath, pattern, args) {
-    const merged = {};
-    if (args && typeof args === 'object') {
-      Object.entries(args).forEach(([key, value]) => {
-        if (value === undefined || value === null || value === '') return;
-        if (Array.isArray(value) && value.length === 0) return;
-        merged[key] = value;
-      });
-    }
-    if (!merged.path && rootPath) merged.path = rootPath;
-    if (!merged.pattern && pattern) merged.pattern = pattern;
-
-    const preferredKeys = ['pattern', 'path', 'glob', 'type', 'output_mode', 'n', 'i', 'A', 'B', 'C', 'head_limit', 'multiline'];
-    const detailLines = [`mode: ${mode}`];
-
-    preferredKeys.forEach((key) => {
-      if (!Object.prototype.hasOwnProperty.call(merged, key)) return;
-      const formatted = formatSearchArgumentValue(key, merged[key]);
-      if (formatted) detailLines.push(`${key}: ${formatted}`);
-      delete merged[key];
-    });
-
-    Object.entries(merged).forEach(([key, value]) => {
-      const formatted = formatSearchArgumentValue(key, value);
-      if (formatted) detailLines.push(`${key}: ${formatted}`);
-    });
-
-    return detailLines.join('\n');
-  }
-
-  function parseSearchCardEntries(mode, content, rootPath = '') {
-    const text = typeof content === 'string' ? content : String(content ?? '');
-    const lines = text.split('\n').map((line) => line.replace(/\r$/, ''));
-    if (mode === 'glob') {
-      return { entries: [], plainText: text };
-    }
-
-    const entries = [];
-    for (const rawLine of lines) {
-      const line = rawLine.trimEnd();
-      const match = line.match(/^(.+?):(\d+)(?::(\d+))?:(.*)$/);
-      if (match) {
-        const resolvedPath = resolveSearchEntryPath(match[1], rootPath);
-        entries.push({
-          path: resolvedPath,
-          line: Number(match[2]),
-          column: match[3] ? Number(match[3]) : 1,
-          preview: match[4] || '',
-        });
-      }
-    }
-    return {
-      entries,
-      plainText: entries.length ? '' : text,
-    };
-  }
-
-  function renderSearchCard(evt, parentEl = null) {
-    const mode = evt.mode || evt.tool || 'search';
-    const pattern = typeof evt.pattern === 'string' ? evt.pattern : '';
-    const rootPath = typeof evt.path === 'string' ? evt.path : '';
-    const searchArgs = evt.arguments && typeof evt.arguments === 'object' ? evt.arguments : {};
-    const { entries, plainText } = parseSearchCardEntries(mode, evt.content ?? evt.result ?? '', rootPath);
-
-    clearPlaceholder();
-    const row = document.createElement('div');
-    row.className = 'timeline-row command-result search-card';
-
-    const body = document.createElement('div');
-    body.className = 'body';
-
-    const ribbon = document.createElement('div');
-    ribbon.className = 'command-ribbon';
-    const shortTarget = shortenSearchTarget(rootPath);
-    const ribbonBase = mode === 'web_search' ? 'web_search' : 'search';
-    ribbon.textContent = shortTarget ? `${ribbonBase} ${shortTarget}` : ribbonBase;
-    if (rootPath) ribbon.title = rootPath;
-    body.appendChild(ribbon);
-
-    const detailLine = document.createElement('pre');
-    detailLine.className = 'search-card-detail';
-    detailLine.textContent = buildSearchDetailText(mode, rootPath, pattern, searchArgs);
-    body.appendChild(detailLine);
-
-    if (entries.length) {
-      const list = document.createElement('div');
-      list.className = 'search-card-list';
-      entries.forEach((entry) => {
-        const item = document.createElement('div');
-        item.className = 'search-card-entry';
-
-        const pathLine = document.createElement('div');
-        pathLine.className = 'search-card-path';
-        pathLine.textContent = entry.line ? `${toRelativePath(entry.path)}:${entry.line}` : toRelativePath(entry.path);
-        pathLine.title = entry.path;
-        pathLine.style.cursor = 'pointer';
-        pathLine.dataset.hasClickHandler = 'true';
-        pathLine.addEventListener('click', (e) => {
-          e.stopPropagation();
-          postTe2OpenRequest({ path: entry.path, line: entry.line || 1, column: entry.column || 1 });
-        });
-        item.appendChild(pathLine);
-
-        if (entry.preview) {
-          const preview = document.createElement('pre');
-          preview.className = 'search-card-preview';
-          const lang = detectLangFromPath(entry.path);
-          if (lang && typeof hljs !== 'undefined') {
-            preview.innerHTML = highlightCodeAlways(entry.preview, lang);
-          } else {
-            preview.textContent = entry.preview;
-          }
-          item.appendChild(preview);
-        }
-
-        list.appendChild(item);
-      });
-      body.appendChild(list);
-    } else {
-      const plain = document.createElement('pre');
-      plain.className = 'search-card-plain';
-      plain.textContent = plainText;
-      body.appendChild(plain);
-    }
-
-    row.appendChild(body);
-    makeCollapsible(row, `search:${evt.id || pattern || mode}`, false);
-
-    const targetEl = parentEl || getLiveEventParent(evt);
-    if (targetEl) {
-      targetEl.appendChild(row);
-    } else if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
-      timelineEl.insertBefore(row, bottomSpacerEl);
-    } else {
-      timelineEl.appendChild(row);
-    }
-
-    lastEventType = 'search';
-    maybeAutoScroll();
-    setStatusDot('success');
-  }
-
   const diffRendering = bindDiffRendering({
     getDiffRow,
     createRow,
@@ -4590,8 +3695,8 @@ document.addEventListener('DOMContentLoaded', () => {
     makeCollapsible,
     getLiveEventParent,
     renderEventMarkdownInto,
-    formatDiff: (...args) => formatDiff(...args),
-    renderDiffBlock: (...args) => renderDiffBlock(...args),
+    formatDiff,
+    renderDiffBlock,
     toRelativePath,
     escapeHtml,
     renderShellCmdRibbon,
@@ -4618,8 +3723,8 @@ document.addEventListener('DOMContentLoaded', () => {
     createRow,
     getSubagentContainer,
     escapeHtml,
-    formatDiff: (...args) => formatDiff(...args),
-    renderDiffBlock: (...args) => renderDiffBlock(...args),
+    formatDiff,
+    renderDiffBlock,
     renderEventMarkdownInto,
     toRelativePath,
     requestCardRuntime,
@@ -4690,7 +3795,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConversation,
     fetchConversations,
     resetTimeline,
-    replayTranscript: (...args) => replayTranscript(...args),
+    replayTranscript: (...args: any[]) => (replayTranscript as any)(...args),
     refreshPlanSurface: (...args) => refreshPlanSurface(...args),
     restorePendingApprovals,
     setDrawerOpen,
@@ -4735,7 +3840,7 @@ document.addEventListener('DOMContentLoaded', () => {
    * @param {object} [options] - { timeoutMs } where timeoutMs: null disables the ack timeout
    * @returns {Promise<any>} Server response (ack value)
    */
-  async function sioCall(event, data = {}, options = {}) {
+  async function sioCall(event, data = {}, options: AnyRecord = {}): Promise<any> {
     if (options && (Object.prototype.hasOwnProperty.call(options, 'fallbackUrl') || Object.prototype.hasOwnProperty.call(options, 'fallbackMethod'))) {
       throw new Error(`HTTP fallbacks are disabled for Socket.IO contract: ${event}`);
     }
@@ -5042,8 +4147,8 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConversation,
     fetchConversations,
     resetTimeline,
-    replayTranscript: (...args) => replayTranscript(...args),
-    refreshPlanSurface: (...args) => refreshPlanSurface(...args),
+    replayTranscript,
+    refreshPlanSurface,
     restorePendingApprovals,
     maybeAutoScroll,
     ensureActivityRow,
@@ -5155,12 +4260,12 @@ document.addEventListener('DOMContentLoaded', () => {
     loadOlderTranscript,
     fetchConversation,
     restorePendingApprovals,
-    refreshPlanSurface: (...args) => refreshPlanSurface(...args),
+    refreshPlanSurface,
     postTe2OpenRequest,
     setMarkdownEnabled,
     setTrackEditsEnabled,
     resetTimeline,
-    replayTranscript: (...args) => replayTranscript(...args),
+    replayTranscript,
     sioCall,
     documentRef: document,
     windowRef: window,

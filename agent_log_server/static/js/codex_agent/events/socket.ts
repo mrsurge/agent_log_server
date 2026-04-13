@@ -1,3 +1,5 @@
+declare const io: any;
+
 export function bindSocketEvents(ctx) {
   const {
     getWsState,

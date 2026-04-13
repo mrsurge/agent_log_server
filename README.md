@@ -89,7 +89,7 @@ The server maintains a richer transcript than raw rollout logs:
 
 Normal transcript replay/range reads ignore `internal: true` rows so UI history stays clean; inspect the raw `transcript.jsonl` or use `include_internal=true` on the transcript range endpoint when you need them.
 
-For detailed documentation, see [CODEX_APP_SERVER_EXTENSION.md](./CODEX_APP_SERVER_EXTENSION.md) and [acp/AGENT_EXTENSION_INTEGRATION.md](./acp/AGENT_EXTENSION_INTEGRATION.md).
+For detailed documentation, see [CODEX_APP_SERVER_EXTENSION.md](./CODEX_APP_SERVER_EXTENSION.md) and [AGENT_EXTENSION_INTEGRATION.md](./AGENT_EXTENSION_INTEGRATION.md).
 
 ---
 

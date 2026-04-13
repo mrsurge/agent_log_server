@@ -82,7 +82,7 @@ If I use a choice-capable approval tool in Step 1 or Step 2, the prompt must inc
 The following files are **platform-agnostic**. They must contain **ZERO** direct imports of, or hardcoded references to, any specific extension handler module (for example `copilot_sdk_client`, `acp_client`, or any future `*_client`):
 
 - **`server.py`** — The backend. All extension interaction MUST go through `extensions/__init__.py` (imported as `ext_loader`). Pattern: `ext_loader.method_name(extension_id, ...)`. **NEVER** `from extensions.some_client import something`.
-- **`static/codex_agent.js`** — The frontend agent harness. No SDK-specific logic, event names, or branching. The existing Codex logic is the **working reference** — it does NOT get changed. New extensions plug in alongside it via the schema system.
+- **`static/codex_agent.ts`** — The frontend agent harness source entrypoint. No SDK-specific logic, event names, or branching. The existing Codex logic is the **working reference** — it does NOT get changed. New extensions plug in alongside it via the schema system.
 - **`static/modals/settings_schema.js`** — Schema-driven settings UI. Renders fields from `settings_schema.json`. No hardcoded extension IDs or SDK-specific event names.
 
 ## Where Extension-Specific Code Does Go
@@ -138,7 +138,7 @@ result = await list_models()
 
 See also:
 
-- `acp/AGENT_EXTENSION_INTEGRATION.md` — canonical extension hook/lifecycle contract
+- `AGENT_EXTENSION_INTEGRATION.md` — canonical extension hook/lifecycle contract
 - `CODEX_APP_SERVER_EXTENSION.md` — architecture/reference implementation manual
 
 ---

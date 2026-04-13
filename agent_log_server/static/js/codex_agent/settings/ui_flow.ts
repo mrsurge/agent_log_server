@@ -3,6 +3,17 @@ import { createSettingsRpcClientPlaceholder } from '../rpc/settings/client.ts';
 const _settingsRpcClientPlaceholder = createSettingsRpcClientPlaceholder;
 void _settingsRpcClientPlaceholder;
 
+type CodexAgentHelpers = {
+  getSchemaFieldInput?: (fieldId: string) => unknown;
+  onAgentChange?: (agentId: string) => unknown;
+};
+
+type CodexAgentWindow = Window & typeof globalThis & {
+  CodexAgent?: {
+    helpers?: CodexAgentHelpers;
+  };
+};
+
 export function bindSettingsUiFlow(ctx) {
   const {
     getState,
@@ -50,7 +61,7 @@ export function bindSettingsUiFlow(ctx) {
     rolloutOverlayEl,
     rolloutListEl,
   } = elements;
-  const windowRef = getWindow ? getWindow() : window;
+  const windowRef = (getWindow ? getWindow() : window) as CodexAgentWindow;
   const pickerCloseBtn = elements.pickerCloseBtn || windowRef?.document?.getElementById('picker-close');
   const pickerUpBtn = elements.pickerUpBtn || windowRef?.document?.getElementById('picker-up');
   const pickerSelectBtn = elements.pickerSelectBtn || windowRef?.document?.getElementById('picker-select');
@@ -301,7 +312,7 @@ export function bindSettingsUiFlow(ctx) {
     settingsModalEl.classList.add('hidden');
   }
 
-  function openPicker(startPath, mode = 'cwd', options = {}) {
+  function openPicker(startPath, mode = 'cwd', options: { input?: unknown } = {}) {
     if (!pickerOverlayEl) return;
     const nextMode = mode || 'cwd';
     pickerTargetInput = nextMode === 'cwd' && isValueInput(options?.input)
@@ -454,7 +465,7 @@ export function bindSettingsUiFlow(ctx) {
     return { value, label };
   }
 
-  function buildDropdown(listEl, options, inputEl, onChange) {
+  function buildDropdown(listEl, options, inputEl, onChange = null) {
     if (!listEl) return;
     listEl.innerHTML = '';
     (options || [])
@@ -475,7 +486,7 @@ export function bindSettingsUiFlow(ctx) {
     });
   }
 
-  function updateDropdownOptions(listEl, options, inputEl, onChange) {
+  function updateDropdownOptions(listEl, options, inputEl, onChange = null) {
     if (!listEl) return;
     const seen = new Set();
     const values = [];

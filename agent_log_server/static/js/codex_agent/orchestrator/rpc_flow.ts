@@ -18,8 +18,8 @@ export function bindRpcFlow(ctx) {
     return id;
   }
 
-  async function sendRpc(method, params, options = {}) {
-    const payload = { method };
+  async function sendRpc(method, params, options: Record<string, any> = {}) {
+    const payload: Record<string, any> = { method };
     if (params !== undefined) payload.params = params;
     if (options.notify) {
       await sioCall('rpc', payload);

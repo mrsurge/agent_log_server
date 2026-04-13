@@ -1,7 +1,5 @@
 # Agent Extension Integration
 
-> Historical note: this file lives under `acp/` for now because that folder predates the current extension system. The content here is no longer ACP-specific.
-
 This document describes the current pluggable agent-extension architecture in `agent_log_server`, the hook surface exposed by the backend, and the real reference implementations that exist today:
 
 - `copilot-sdk` — the more complete, production-style example
@@ -9,7 +7,7 @@ This document describes the current pluggable agent-extension architecture in `a
 - `codex-ext-exp` — the experimental Codex fork for dynamic developer-instruction / pending-context work
 - `codex-ext-testing` — a compatibility registry alias that resolves to `codex-ext`; legacy `codex` is still a separate built-in compatibility path in `server.py`, not a normal registered extension
 
-The goal is to explain how to build a new agent extension without hardcoding backend-specific logic into `server.py`, `static/codex_agent.js`, or `static/modals/settings_schema.js`.
+The goal is to explain how to build a new agent extension without hardcoding backend-specific logic into `server.py`, `static/codex_agent.ts`, or `static/modals/settings_schema.js`.
 
 ## Core invariants
 
@@ -17,7 +15,7 @@ These rules matter more than any individual implementation detail:
 
 1. **Platform-agnostic core files**
    - `agent_log_server/server.py`
-   - `agent_log_server/static/codex_agent.js`
+   - `agent_log_server/static/codex_agent.ts`
    - `agent_log_server/static/modals/settings_schema.js`
 
    These files must not gain extension-specific imports or hardcoded protocol branches beyond explicit compatibility exceptions that already exist.

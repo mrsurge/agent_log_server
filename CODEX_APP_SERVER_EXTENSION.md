@@ -1035,7 +1035,7 @@ Gemini ACP-style fallback when the backend does not advertise a true `session/re
 
 See also:
 
-- `acp/AGENT_EXTENSION_INTEGRATION.md` — canonical extension hook/lifecycle contract
+- `AGENT_EXTENSION_INTEGRATION.md` — canonical extension hook/lifecycle contract
 - `AGENTS.md` — short repo-wide invariant/guardrail
 
 ### ext_loader Pass-Through Methods

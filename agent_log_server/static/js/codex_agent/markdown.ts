@@ -1,10 +1,33 @@
+// @ts-expect-error vendored runtime module without published typings
 import * as smd from '/static/vendor/streaming-markdown/smd.min.js';
 import { createUiRpcClientPlaceholder } from './rpc/ui/client.ts';
 
 const _uiRpcClientPlaceholder = createUiRpcClientPlaceholder;
 void _uiRpcClientPlaceholder;
 
-let markdownLinkHandlers = {
+declare const hljs: any;
+
+type MarkdownFileTarget = {
+  path: string;
+  line: number | null;
+  column: number | null;
+};
+
+type MarkdownLinkHandlers = {
+  openFilePath: ((target: MarkdownFileTarget, anchor: HTMLAnchorElement) => unknown) | null;
+  openExternalUrl: ((url: string, anchor: HTMLAnchorElement) => unknown) | null;
+};
+
+type MarkdownLinkHandlerInput = Partial<{
+  openFilePath: MarkdownLinkHandlers['openFilePath'];
+  openExternalUrl: MarkdownLinkHandlers['openExternalUrl'];
+}>;
+
+type CopyButton = HTMLButtonElement & {
+  _copyResetTimer?: ReturnType<typeof setTimeout> | null;
+};
+
+let markdownLinkHandlers: MarkdownLinkHandlers = {
   openFilePath: null,
   openExternalUrl: null,
 };
@@ -157,7 +180,7 @@ function bindInlineCodeCopy(container) {
   });
 }
 
-export function setMarkdownLinkHandlers(handlers = {}) {
+export function setMarkdownLinkHandlers(handlers: MarkdownLinkHandlerInput = {}) {
   markdownLinkHandlers = {
     openFilePath: typeof handlers.openFilePath === 'function' ? handlers.openFilePath : null,
     openExternalUrl: typeof handlers.openExternalUrl === 'function' ? handlers.openExternalUrl : null,
@@ -265,27 +288,28 @@ async function copyTextToClipboard(text) {
 
 function setCopyButtonState(button, state) {
   if (!(button instanceof HTMLButtonElement)) return;
-  if (button._copyResetTimer) {
-    clearTimeout(button._copyResetTimer);
-    button._copyResetTimer = null;
+  const copyButton = button as CopyButton;
+  if (copyButton._copyResetTimer) {
+    clearTimeout(copyButton._copyResetTimer);
+    copyButton._copyResetTimer = null;
   }
-  button.classList.remove('copied', 'failed');
+  copyButton.classList.remove('copied', 'failed');
   if (state === 'copied') {
-    button.textContent = 'copied';
-    button.classList.add('copied');
+    copyButton.textContent = 'copied';
+    copyButton.classList.add('copied');
   } else if (state === 'failed') {
-    button.textContent = 'failed';
-    button.classList.add('failed');
+    copyButton.textContent = 'failed';
+    copyButton.classList.add('failed');
   } else {
-    button.textContent = 'copy';
+    copyButton.textContent = 'copy';
   }
   if (state !== 'idle') {
-    button.disabled = true;
-    button._copyResetTimer = setTimeout(() => {
-      button.disabled = false;
-      button.classList.remove('copied', 'failed');
-      button.textContent = 'copy';
-      button._copyResetTimer = null;
+    copyButton.disabled = true;
+    copyButton._copyResetTimer = setTimeout(() => {
+      copyButton.disabled = false;
+      copyButton.classList.remove('copied', 'failed');
+      copyButton.textContent = 'copy';
+      copyButton._copyResetTimer = null;
     }, 1200);
   }
 }

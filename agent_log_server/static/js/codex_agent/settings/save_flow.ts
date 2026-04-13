@@ -1,3 +1,14 @@
+type CodexAgentHelpers = {
+  getSchemaParsedValues?: () => unknown;
+  getSchemaValues?: () => unknown;
+};
+
+type CodexAgentWindow = Window & typeof globalThis & {
+  CodexAgent?: {
+    helpers?: CodexAgentHelpers;
+  };
+};
+
 export function bindSettingsSaveFlow(ctx) {
   const {
     getState,
@@ -23,6 +34,7 @@ export function bindSettingsSaveFlow(ctx) {
   } = ctx;
 
   async function saveSettings() {
+    const codexWindow = window as CodexAgentWindow;
     const state = getState();
     const {
       settingsAgentEl,
@@ -65,8 +77,8 @@ export function bindSettingsSaveFlow(ctx) {
     let schemaValues = {};
     try {
       schemaValues =
-        window.CodexAgent?.helpers?.getSchemaParsedValues?.()
-        || window.CodexAgent?.helpers?.getSchemaValues?.()
+        codexWindow.CodexAgent?.helpers?.getSchemaParsedValues?.()
+        || codexWindow.CodexAgent?.helpers?.getSchemaValues?.()
         || {};
     } catch (err) {
       setActivity(err instanceof Error ? err.message : String(err), true);
