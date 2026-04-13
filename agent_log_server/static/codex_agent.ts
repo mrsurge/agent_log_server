@@ -34,6 +34,8 @@ import { bindRuntimeFooter } from './js/codex_agent/runtime_footer.ts';
 import { bindTranscriptCards } from './js/codex_agent/transcript_cards.ts';
 import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.ts';
 import { bindInputFlow } from './js/codex_agent/boot/input_flow.ts';
+import { bindComposerRuntime } from './js/codex_agent/composer/runtime.ts';
+import { bindWidescreenLayout } from './js/codex_agent/layout/widescreen.ts';
 import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations/client.ts';
 import {
   readRpcTransportEnabledPreference,
@@ -41,7 +43,6 @@ import {
 } from './js/codex_agent/rpc/transport.ts';
 
 declare const hljs: any;
-declare const Tribute: any;
 
 type AnyRecord = Record<string, any>;
 
@@ -228,16 +229,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let commandRunning = false; // Whether a PTY command is currently running
   let activeAgentPtyBlockId = null;
   const pending = new Map();
-  const WIDESCREEN_BREAKPOINT = 1280;
-  const WIDESCREEN_SPLIT_STORAGE_KEY = 'codex_widescreen_split';
-  const WIDESCREEN_SPLIT_DEFAULT = 420;
-  const WIDESCREEN_SPLIT_MIN = 320;
-  const WIDESCREEN_SPLIT_MAX = 720;
-  const widescreenMedia = typeof window.matchMedia === 'function'
-    ? window.matchMedia(`(min-width: ${WIDESCREEN_BREAKPOINT}px)`)
-    : null;
-  let widescreenLayout = Boolean(widescreenMedia?.matches);
-  let widescreenResizing = false;
 
   // Detect mobile for input behavior
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
@@ -270,11 +261,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let transcriptLimit = 500;
   let transcriptLoading = false;
   let estimatedRowHeight = 28;
-  let draftSaveTimer = null;
-  let explicitMentionSaveTimer = null;
-  let lastComposerSelectionRange = null;
-  let lastComposerSelectionConversationId = null;
-  let lastDraftHash = null;
+  let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastDraftHash: string | null = null;
   let draftDirty = false;
   let applyingDraft = false;
 
@@ -313,6 +301,21 @@ document.addEventListener('DOMContentLoaded', () => {
     diffSyntaxHighlight = enabled === true;
     if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = diffSyntaxHighlight;
   }
+
+  const widescreenLayoutUi = bindWidescreenLayout({
+    drawerEl,
+    splashViewEl,
+    widescreenResizerEl,
+    getActiveView: () => activeView,
+    documentRef: document,
+    windowRef: window,
+  });
+
+  const {
+    setDrawerOpen,
+    updateWidescreenLayout,
+    bindWidescreenResizer,
+  } = widescreenLayoutUi;
 
   // ── Subagent containers ──────────────────────────────────────────
   const subagentContainers = new Map(); // subagent_id -> { row, body, header, statusEl, items: [] }
@@ -455,206 +458,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Note: underscore emphasis is handled by the markdown renderer; do not escape underscores
   // in the raw text stream, otherwise users will see literal backslashes in output.
-
-  // Debounced draft save to persist composer content
-  function saveDraftDebounced() {
-    if (draftSaveTimer) clearTimeout(draftSaveTimer);
-    // Capture conversation_id NOW to avoid race condition on conversation switch
-    const convoId = conversationMeta?.conversation_id;
-    if (!convoId) return;
-
-    draftSaveTimer = setTimeout(async () => {
-      const text = getPromptDraftText();
-      // Simple hash to avoid sending unchanged drafts
-      const hash = text.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
-      if (hash === lastDraftHash) return;
-      lastDraftHash = hash;
-      try {
-        await sioCall('conversation_draft', {
-          conversation_id: convoId,
-          draft: text
-        });
-        if (conversationMeta && conversationMeta.conversation_id === convoId) {
-          conversationMeta.draft = text;
-        }
-        draftDirty = false;
-      } catch (e) {
-        console.warn('Draft save failed:', e);
-      }
-    }, 500);
-  }
-
-  async function persistDraftNow() {
-    const convoId = conversationMeta?.conversation_id;
-    if (!convoId || !promptEl) return;
-    if (draftSaveTimer) {
-      clearTimeout(draftSaveTimer);
-      draftSaveTimer = null;
-    }
-    const text = getPromptDraftText();
-    const hash = text.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
-    if (hash === lastDraftHash) {
-      draftDirty = false;
-      return;
-    }
-    lastDraftHash = hash;
-    try {
-      await sioCall('conversation_draft', {
-        conversation_id: convoId,
-        draft: text,
-      });
-      if (conversationMeta && conversationMeta.conversation_id === convoId) {
-        conversationMeta.draft = text;
-      }
-      draftDirty = false;
-    } catch (e) {
-      draftDirty = true;
-      console.warn('Immediate draft save failed:', e);
-    }
-  }
-
-  function queueExplicitMentionDraftSave() {
-    if (applyingDraft) return;
-    draftDirty = true;
-    if (explicitMentionSaveTimer) clearTimeout(explicitMentionSaveTimer);
-    explicitMentionSaveTimer = setTimeout(() => {
-      explicitMentionSaveTimer = null;
-      void persistDraftNow();
-    }, 0);
-  }
-
-  function clearStoredComposerSelection() {
-    lastComposerSelectionRange = null;
-    lastComposerSelectionConversationId = null;
-  }
-
-  function isPromptRangeNode(node) {
-    if (!promptEl || !node) return false;
-    try {
-      return node === promptEl || promptEl.contains(node);
-    } catch {
-      return false;
-    }
-  }
-
-  function rememberComposerSelection() {
-    if (!promptEl || applyingDraft) return false;
-    const selection = window.getSelection?.();
-    if (!selection || selection.rangeCount < 1) return false;
-    const range = selection.getRangeAt(0);
-    if (!range) return false;
-    if (!isPromptRangeNode(range.commonAncestorContainer) || !isPromptRangeNode(range.startContainer) || !isPromptRangeNode(range.endContainer)) {
-      return false;
-    }
-    try {
-      lastComposerSelectionRange = range.cloneRange();
-      lastComposerSelectionConversationId = conversationMeta?.conversation_id || null;
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function getStoredComposerSelectionRange() {
-    if (!lastComposerSelectionRange) return null;
-    if ((conversationMeta?.conversation_id || null) !== lastComposerSelectionConversationId) {
-      clearStoredComposerSelection();
-      return null;
-    }
-    try {
-      if (!isPromptRangeNode(lastComposerSelectionRange.startContainer) || !isPromptRangeNode(lastComposerSelectionRange.endContainer)) {
-        clearStoredComposerSelection();
-        return null;
-      }
-      return lastComposerSelectionRange.cloneRange();
-    } catch {
-      clearStoredComposerSelection();
-      return null;
-    }
-  }
-
-  function resolveComposerInsertTarget() {
-    const selection = window.getSelection?.();
-    if (selection && selection.rangeCount > 0) {
-      const liveRange = selection.getRangeAt(0);
-      if (liveRange && isPromptRangeNode(liveRange.commonAncestorContainer) && isPromptRangeNode(liveRange.startContainer) && isPromptRangeNode(liveRange.endContainer)) {
-        return { selection, range: liveRange };
-      }
-    }
-    const storedRange = getStoredComposerSelectionRange();
-    if (!storedRange) return null;
-    promptEl?.focus();
-    const restoredSelection = window.getSelection?.();
-    if (!restoredSelection) return null;
-    try {
-      restoredSelection.removeAllRanges();
-      restoredSelection.addRange(storedRange);
-      return { selection: restoredSelection, range: restoredSelection.getRangeAt(0) };
-    } catch {
-      clearStoredComposerSelection();
-      return null;
-    }
-  }
-
-  function bindComposerSelectionTracking() {
-    if (!promptEl) return;
-    const remember = () => { rememberComposerSelection(); };
-    document.addEventListener('selectionchange', remember);
-    promptEl.addEventListener('input', remember);
-    promptEl.addEventListener('keyup', remember);
-    promptEl.addEventListener('mouseup', remember);
-    promptEl.addEventListener('focus', remember);
-    mentionPillEl?.addEventListener('pointerdown', remember);
-  }
-
-  function restoreDraft() {
-    if (!promptEl) return;
-    const draft = conversationMeta?.draft;
-    if (draft && typeof draft === 'string' && draft.trim()) {
-      renderPromptFromText(draft);
-      draftDirty = false;
-      // Update hash to match restored draft
-      lastDraftHash = draft.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
-    } else {
-      // No draft - clear composer
-      clearPrompt();
-      draftDirty = false;
-      lastDraftHash = null;
-    }
-  }
-
-  function clearDraft() {
-    lastDraftHash = null;
-    draftDirty = false;
-    // Fire and forget - clear the draft from storage
-    const convoId = conversationMeta?.conversation_id;
-    if (convoId) {
-      sioCall('conversation_draft', {
-        conversation_id: convoId,
-        draft: ''
-      }).catch(() => {});
-    }
-  }
-
-  async function syncDraftFromServer(convoId) {
-    if (!convoId) return;
-    if (!promptEl) return;
-    if (draftDirty) return;
-    try {
-      const meta = await sioCall('conversation_get', { conversation_id: convoId });
-      if (!meta || meta.ok === false || meta.conversation_id !== convoId) return;
-      const serverDraft = meta.draft;
-      if (typeof serverDraft !== 'string') return;
-      const localText = getPromptDraftText();
-      if (serverDraft === localText) return;
-      renderPromptFromText(serverDraft);
-      if (conversationMeta) conversationMeta.draft = serverDraft;
-      draftDirty = false;
-      lastDraftHash = serverDraft.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
-    } catch {
-      // ignore
-    }
-  }
 
   const shellSemantic = bindShellSemantic({
     getEnabled: () => semanticShellRibbonEnabled,
@@ -1102,417 +905,42 @@ document.addEventListener('DOMContentLoaded', () => {
     }[c]));
   }
 
-  function appendTextWithBreaks(parent, text) {
-    if (!parent || text === null || text === undefined) return;
-    const parts = String(text).split('\n');
-    parts.forEach((part, idx) => {
-      if (part) parent.appendChild(document.createTextNode(part));
-      if (idx < parts.length - 1) parent.appendChild(document.createElement('br'));
-    });
-  }
+  const composerRuntime = bindComposerRuntime({
+    getState: () => ({
+      conversationMeta,
+      conversationSettings,
+      draftSaveTimer,
+      lastDraftHash,
+      draftDirty,
+      applyingDraft,
+    }),
+    setState: (patch) => {
+      if (patch.draftSaveTimer !== undefined) draftSaveTimer = patch.draftSaveTimer;
+      if (patch.lastDraftHash !== undefined) lastDraftHash = patch.lastDraftHash;
+      if (patch.draftDirty !== undefined) draftDirty = patch.draftDirty === true;
+      if (patch.applyingDraft !== undefined) applyingDraft = patch.applyingDraft === true;
+    },
+    promptEl,
+    mentionPillEl,
+    documentRef: document,
+    windowRef: window,
+    sioCall,
+    escapeHtml,
+  });
 
-  function isAbsPath(p) {
-    return typeof p === 'string' && p.startsWith('/');
-  }
-
-  function joinPath(a, b) {
-    if (!a) return b || '';
-    if (!b) return a || '';
-    if (a.endsWith('/')) return a + b;
-    return `${a}/${b}`;
-  }
-
-  const DRAFT_MENTION_ENVELOPE_START = '\x1eCODEX_MENTION ';
-  const DRAFT_MENTION_ENVELOPE_END = '\x1f';
-
-  function buildDraftMentionPayload(rawPath, opts: AnyRecord = {}) {
-    opts = opts || {};
-    let pathOnly = String(rawPath || '').trim();
-    let line = opts.line ?? opts.lineNo ?? null;
-    let endLine = opts.endLine ?? opts.endLineNo ?? null;
-    const col = opts.col ?? null;
-    const endCol = opts.endCol ?? null;
-    const content = typeof opts.content === 'string' ? opts.content : '';
-    const lineMatch = pathOnly.match(/^(.+):(\d+)(?:-(\d+))?$/);
-    if (lineMatch) {
-      pathOnly = lineMatch[1];
-      if (line == null) line = lineMatch[2];
-      if (endLine == null) endLine = lineMatch[3] || null;
-    }
-    if (!pathOnly) return null;
-    const payload: AnyRecord = { path: pathOnly };
-    if (line != null && String(line).trim()) payload.line = String(line);
-    if (endLine != null && String(endLine).trim()) payload.endLine = String(endLine);
-    if (col != null && String(col).trim()) payload.col = String(col);
-    if (endCol != null && String(endCol).trim()) payload.endCol = String(endCol);
-    if (content) payload.content = content;
-    return payload;
-  }
-
-  function encodeDraftMentionToken(rawPath, opts) {
-    const payload = buildDraftMentionPayload(rawPath, opts);
-    if (!payload) return '';
-    return DRAFT_MENTION_ENVELOPE_START + JSON.stringify(payload) + DRAFT_MENTION_ENVELOPE_END;
-  }
-
-  function decodeDraftMentionPayload(payloadText) {
-    try {
-      const parsed: AnyRecord = JSON.parse(payloadText);
-      if (!parsed || typeof parsed !== 'object') return null;
-      const path = typeof parsed.path === 'string' ? parsed.path.trim() : '';
-      if (!path) return null;
-      const payload: AnyRecord = { path };
-      if (parsed.line != null && String(parsed.line).trim()) payload.line = String(parsed.line);
-      if (parsed.endLine != null && String(parsed.endLine).trim()) payload.endLine = String(parsed.endLine);
-      if (parsed.col != null && String(parsed.col).trim()) payload.col = String(parsed.col);
-      if (parsed.endCol != null && String(parsed.endCol).trim()) payload.endCol = String(parsed.endCol);
-      if (typeof parsed.content === 'string' && parsed.content) payload.content = parsed.content;
-      return payload;
-    } catch {
-      return null;
-    }
-  }
-
-  function toMentionAbsAndBestPath(rawPath) {
-    const cwd = conversationSettings?.cwd || conversationMeta?.cwd || '';
-    const absPath = isAbsPath(rawPath) ? rawPath : (cwd ? joinPath(cwd, rawPath) : String(rawPath || ''));
-    const bestPath = (cwd && isAbsPath(absPath)) ? getRelativePath(absPath, cwd) : absPath;
-    return { absPath, bestPath, cwd };
-  }
-
-  function createMentionToken(rawPath, opts: AnyRecord = {}) {
-    let pathOnly = String(rawPath || '');
-    let parsedLine, parsedEndLine;
-    // Parse line info from path string like "path:42-50"
-    const lineMatch = pathOnly.match(/^(.+):(\d+)(?:-(\d+))?$/);
-    if (lineMatch) {
-      pathOnly = lineMatch[1];
-      parsedLine = lineMatch[2];
-      parsedEndLine = lineMatch[3] || null;
-    }
-
-    const { absPath, bestPath } = toMentionAbsAndBestPath(pathOnly);
-    const span = document.createElement('span');
-    span.className = 'mention-token';
-    span.dataset.abs = absPath || '';
-    span.dataset.path = bestPath || '';
-    span.setAttribute('contenteditable', 'false');
-    span.title = absPath || bestPath || '';
-
-    const line = opts.line || parsedLine;
-    const endLine = opts.endLine || parsedEndLine;
-    if (line) span.dataset.line = String(line);
-    if (endLine) span.dataset.endLine = String(endLine);
-    if (opts.col) span.dataset.col = String(opts.col);
-    if (opts.endCol) span.dataset.endCol = String(opts.endCol);
-
-    const display = String(bestPath || '').split('/').filter(Boolean).pop() || bestPath || absPath;
-    let displayText = display;
-    if (line) {
-      displayText += ':' + line;
-      if (endLine && endLine !== line) displayText += '-' + endLine;
-    }
-
-    const content = opts.content || '';
-    if (content) {
-      span.dataset.content = content;
-      // Pill text as a text node so the code block is separate
-      span.appendChild(document.createTextNode(displayText));
-      // Visual code block preview inside the token
-      const codeEl = document.createElement('code');
-      codeEl.className = 'mention-content-preview';
-      codeEl.textContent = content;
-      span.appendChild(codeEl);
-    } else {
-      span.textContent = displayText;
-    }
-
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'mention-token-remove';
-    removeBtn.textContent = '(x)';
-    removeBtn.setAttribute('aria-label', 'Remove mention');
-    removeBtn.title = 'Remove mention';
-    removeBtn.setAttribute('contenteditable', 'false');
-    removeBtn.tabIndex = -1;
-    span.appendChild(removeBtn);
-
-    return span;
-  }
-
-  function renderPromptFromText(text) {
-    if (!promptEl) return;
-    applyingDraft = true;
-    try {
-      clearStoredComposerSelection();
-      promptEl.innerHTML = '';
-      const str = String(text || '');
-      let cursor = 0;
-
-      while (cursor < str.length) {
-        const startIdx = str.indexOf(DRAFT_MENTION_ENVELOPE_START, cursor);
-        if (startIdx === -1) {
-          const remaining = str.slice(cursor);
-          if (remaining) appendTextWithBreaks(promptEl, remaining);
-          break;
-        }
-
-        const before = str.slice(cursor, startIdx);
-        if (before) appendTextWithBreaks(promptEl, before);
-
-        const payloadStart = startIdx + DRAFT_MENTION_ENVELOPE_START.length;
-        const endIdx = str.indexOf(DRAFT_MENTION_ENVELOPE_END, payloadStart);
-        if (endIdx === -1) {
-          appendTextWithBreaks(promptEl, str.slice(startIdx));
-          break;
-        }
-
-        const mentionPayload = decodeDraftMentionPayload(str.slice(payloadStart, endIdx));
-        if (mentionPayload) {
-          promptEl.appendChild(createMentionToken(mentionPayload.path, {
-            line: mentionPayload.line,
-            endLine: mentionPayload.endLine,
-            col: mentionPayload.col,
-            endCol: mentionPayload.endCol,
-            content: mentionPayload.content,
-          }));
-        } else {
-          appendTextWithBreaks(promptEl, str.slice(startIdx, endIdx + DRAFT_MENTION_ENVELOPE_END.length));
-        }
-        cursor = endIdx + DRAFT_MENTION_ENVELOPE_END.length;
-      }
-    } finally {
-      applyingDraft = false;
-    }
-  }
-
-  function serializePromptNode(node) {
-    if (!node) return '';
-    if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
-    if (node.nodeType !== Node.ELEMENT_NODE) return '';
-    const el = node;
-    if (el.classList.contains('mention-token')) {
-      const absPath = el.dataset.abs || '';
-      const fallback = el.dataset.path || el.textContent || '';
-      const cwd = conversationSettings?.cwd || conversationMeta?.cwd || '';
-      let pathStr = '';
-      if (absPath && cwd) {
-        const best = getRelativePath(absPath, cwd);
-        pathStr = (best !== absPath) ? best : absPath;
-      } else {
-        pathStr = fallback;
-      }
-      if (!pathStr) return '';
-      // Append line info: path:42 or path:42-48
-      const line = el.dataset.line;
-      const endLine = el.dataset.endLine;
-      if (line) {
-        pathStr += ':' + line;
-        if (endLine && endLine !== line) pathStr += '-' + endLine;
-      }
-      const content = el.dataset.content || '';
-      if (content) {
-        return '`' + pathStr + '`\n```\n' + content + '\n```';
-      }
-      return '`' + pathStr + '`';
-    }
-    if (el.tagName === 'BR') return '\n';
-    let out = '';
-    el.childNodes.forEach((child) => { out += serializePromptNode(child); });
-    if (el.tagName === 'DIV' || el.tagName === 'P') out += '\n';
-    return out;
-  }
-
-  function serializePromptNodeForDraft(node) {
-    if (!node) return '';
-    if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
-    if (node.nodeType !== Node.ELEMENT_NODE) return '';
-    const el = node;
-    if (el.classList.contains('mention-token')) {
-      return encodeDraftMentionToken(el.dataset.abs || el.dataset.path || '', {
-        line: el.dataset.line,
-        endLine: el.dataset.endLine,
-        col: el.dataset.col,
-        endCol: el.dataset.endCol,
-        content: el.dataset.content || '',
-      });
-    }
-    if (el.tagName === 'BR') return '\n';
-    let out = '';
-    el.childNodes.forEach((child) => { out += serializePromptNodeForDraft(child); });
-    if (el.tagName === 'DIV' || el.tagName === 'P') out += '\n';
-    return out;
-  }
-
-  function getPromptText() {
-    if (!promptEl) return '';
-    let text = '';
-    promptEl.childNodes.forEach((child) => { text += serializePromptNode(child); });
-    return text;
-  }
-
-  function getPromptDraftText() {
-    if (!promptEl) return '';
-    let text = '';
-    promptEl.childNodes.forEach((child) => { text += serializePromptNodeForDraft(child); });
-    return text;
-  }
-
-  function clearPrompt() {
-    if (!promptEl) return;
-    promptEl.innerHTML = '';
-    clearStoredComposerSelection();
-  }
-
-  function normalizeMentions() {
-    // No longer needed with Tribute - kept as no-op for compatibility
-  }
-
-  function moveCaretToEnd() {
-    if (!promptEl) return;
-    promptEl.focus();
-    const range = document.createRange();
-    range.selectNodeContents(promptEl);
-    range.collapse(false);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    rememberComposerSelection();
-  }
-
-  // Get relative path from CWD
-  function getRelativePath(absolutePath, cwd) {
-    if (!absolutePath || !cwd) return absolutePath;
-    const cwdNorm = cwd.endsWith('/') ? cwd : cwd + '/';
-    if (absolutePath.startsWith(cwdNorm)) {
-      return absolutePath.slice(cwdNorm.length);
-    }
-    return absolutePath;
-  }
-
-  // Initialize Tribute.js for @ mentions
-  function initTribute() {
-    if (!promptEl || typeof Tribute === 'undefined') return;
-    if (tributeInstance) {
-      tributeInstance.detach(promptEl);
-    }
-    
-    tributeInstance = new Tribute({
-      trigger: '@',
-      allowSpaces: false,
-      menuShowMinLength: 1, // Need at least 1 char to search
-      noMatchTemplate: '<li class="tribute-no-match">No files found</li>',
-      selectTemplate: function(item) {
-        if (!item) return '';
-        const absPath = item.original.path || '';
-        queueExplicitMentionDraftSave();
-        return createMentionToken(absPath).outerHTML;
-      },
-      menuItemTemplate: function(item) {
-        const icon = item.original.type === 'directory' ? '📁' : '📄';
-        const typeClass = item.original.type === 'directory' ? 'tribute-dir' : 'tribute-file';
-        const cwd = conversationSettings?.cwd || '';
-        const relPath = getRelativePath(item.original.path, cwd) || item.original.path || '';
-        const safeName = escapeHtml(item.original.name || '');
-        const safePath = escapeHtml(relPath);
-        return '<div class="' + typeClass + '">' +
-                 '<div class="tribute-item-name">' + icon + ' ' + safeName + '</div>' +
-                 '<div class="tribute-item-path">' + safePath + '</div>' +
-               '</div>';
-      },
-      values: async function(text, cb) {
-        if (!text || !text.trim()) { cb([]); return; }
-        try {
-          const cwd = conversationSettings?.cwd || '~';
-          const data = await sioCall('fs_search', { query: text, root: cwd, limit: 30 });
-          if (!data || data.ok === false) { cb([]); return; }
-          // Items already sorted: directories first, then files
-          cb(data.items || []);
-        } catch (e) {
-          console.warn('Tribute fetch error:', e);
-          cb([]);
-        }
-      },
-      lookup: 'name',
-      fillAttr: 'path',
-    });
-    
-    // Add separator between directories and files after menu renders
-    promptEl.addEventListener('tribute-active-true', () => {
-      setTimeout(() => {
-        const menu = query('.tribute-container ul');
-        if (!menu) return;
-        const items = menu.querySelectorAll('li');
-        let lastWasDir = false;
-        let firstFile = null;
-        items.forEach(li => {
-          const isDir = li.querySelector('.tribute-dir');
-          if (lastWasDir && !isDir && !firstFile) {
-            firstFile = li;
-          }
-          lastWasDir = !!isDir;
-        });
-        if (firstFile && !firstFile.previousElementSibling?.classList.contains('tribute-separator')) {
-          const sep = document.createElement('li');
-          sep.className = 'tribute-separator';
-          sep.innerHTML = '<hr>';
-          firstFile.parentNode.insertBefore(sep, firstFile);
-        }
-      }, 10);
-    });
-    
-    tributeInstance.attach(promptEl);
-
-    // Strip formatting on paste — keep only plain text (mention tokens are inserted programmatically)
-    promptEl.addEventListener('paste', (e) => {
-      e.preventDefault();
-      const clipboardData = e.clipboardData || (window as any).clipboardData;
-      const text = clipboardData.getData('text/plain');
-      if (text) {
-        const sel = window.getSelection();
-        if (sel && sel.rangeCount) {
-          const range = sel.getRangeAt(0);
-          range.deleteContents();
-          range.insertNode(document.createTextNode(text));
-          range.collapse(false);
-        }
-      }
-    });
-  }
-
-  // Insert mention via button (manual insertion)
-  function insertMention(path, opts) {
-    if (!promptEl || !path) return;
-    opts = opts || {};
-    const token = createMentionToken(path, {
-      line: opts.lineNo,
-      endLine: opts.endLineNo,
-      col: opts.col,
-      endCol: opts.endCol,
-      content: opts.content,
-    });
-
-    const insertTarget = resolveComposerInsertTarget();
-    if (insertTarget) {
-      const { selection, range } = insertTarget;
-      range.deleteContents();
-      range.insertNode(token);
-      const space = document.createTextNode(' ');
-      range.setStartAfter(token);
-      range.insertNode(space);
-      range.setStartAfter(space);
-      range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      rememberComposerSelection();
-    } else {
-      promptEl.appendChild(token);
-      promptEl.appendChild(document.createTextNode(' '));
-      moveCaretToEnd();
-    }
-    promptEl.focus();
-    queueExplicitMentionDraftSave();
-  }
+  const {
+    saveDraftDebounced,
+    renderPromptFromText,
+    getPromptText,
+    getPromptDraftText,
+    clearPrompt,
+    bindComposerSelectionTracking,
+    restoreDraft,
+    clearDraft,
+    syncDraftFromServer,
+    initTribute,
+    insertMention,
+  } = composerRuntime;
 
   function clearPlaceholder() {
     if (placeholderCleared) return;
@@ -1522,134 +950,7 @@ document.addEventListener('DOMContentLoaded', () => {
     placeholderCleared = true;
   }
 
-  function setDrawerOpen(open) {
-    if (!drawerEl) return;
-    const shouldOpen = widescreenLayout || Boolean(open);
-    drawerEl.classList.toggle('open', shouldOpen);
-    document.body.classList.toggle('drawer-open', shouldOpen);
-  }
-
-  function clampWidescreenSplit(width) {
-    const numericWidth = Number(width);
-    const viewportWidth = Math.max(window.innerWidth || 0, 0);
-    const viewportCap = viewportWidth > 0
-      ? Math.floor(viewportWidth * 0.6)
-      : WIDESCREEN_SPLIT_MAX;
-    const maxWidth = Math.max(WIDESCREEN_SPLIT_MIN, Math.min(WIDESCREEN_SPLIT_MAX, viewportCap));
-    if (!Number.isFinite(numericWidth)) {
-      return Math.max(WIDESCREEN_SPLIT_MIN, Math.min(WIDESCREEN_SPLIT_DEFAULT, maxWidth));
-    }
-    return Math.max(WIDESCREEN_SPLIT_MIN, Math.min(Math.round(numericWidth), maxWidth));
-  }
-
-  function getStoredWidescreenSplit() {
-    try {
-      const raw = localStorage.getItem(WIDESCREEN_SPLIT_STORAGE_KEY);
-      if (!raw) return WIDESCREEN_SPLIT_DEFAULT;
-      return clampWidescreenSplit(Number(raw));
-    } catch {
-      return WIDESCREEN_SPLIT_DEFAULT;
-    }
-  }
-
-  function applyWidescreenSplit(width, { persist = true } = {}) {
-    const clampedWidth = clampWidescreenSplit(width);
-    document.documentElement.style.setProperty('--codex-widescreen-splash-width', `${clampedWidth}px`);
-    if (persist) {
-      try {
-        localStorage.setItem(WIDESCREEN_SPLIT_STORAGE_KEY, String(clampedWidth));
-      } catch {
-        // ignore storage failures
-      }
-    }
-    return clampedWidth;
-  }
-
-  function updateWidescreenLayout() {
-    widescreenLayout = Boolean(widescreenMedia?.matches);
-    document.body.classList.toggle('widescreen-layout', widescreenLayout);
-    if (widescreenLayout) {
-      applyWidescreenSplit(getStoredWidescreenSplit(), { persist: false });
-    } else {
-      finishWidescreenResize();
-    }
-    if (widescreenResizerEl) {
-      widescreenResizerEl.setAttribute('aria-hidden', widescreenLayout ? 'false' : 'true');
-    }
-    setDrawerOpen(activeView === 'conversation');
-  }
-
-  function applyWidescreenResizeFromClientX(clientX) {
-    if (!widescreenLayout || !splashViewEl) return;
-    const gridEl = splashViewEl.parentElement;
-    if (!gridEl) return;
-    const rect = gridEl.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return;
-    const width = clientX - rect.left;
-    applyWidescreenSplit(width);
-  }
-
-  function finishWidescreenResize() {
-    if (!widescreenResizing) return;
-    widescreenResizing = false;
-    document.body.classList.remove('widescreen-resizing');
-    window.removeEventListener('pointermove', handleWidescreenResizeMove);
-    window.removeEventListener('pointerup', finishWidescreenResize);
-    window.removeEventListener('pointercancel', finishWidescreenResize);
-  }
-
-  function handleWidescreenResizeMove(event) {
-    if (!widescreenResizing) return;
-    applyWidescreenResizeFromClientX(event.clientX);
-  }
-
-  function handleWidescreenResizeStart(event) {
-    if (!widescreenLayout || !widescreenResizerEl) return;
-    event.preventDefault();
-    widescreenResizing = true;
-    document.body.classList.add('widescreen-resizing');
-    widescreenResizerEl.focus({ preventScroll: true });
-    if (typeof widescreenResizerEl.setPointerCapture === 'function' && event.pointerId != null) {
-      try {
-        widescreenResizerEl.setPointerCapture(event.pointerId);
-      } catch {
-        // ignore pointer-capture failures
-      }
-    }
-    window.addEventListener('pointermove', handleWidescreenResizeMove);
-    window.addEventListener('pointerup', finishWidescreenResize);
-    window.addEventListener('pointercancel', finishWidescreenResize);
-    applyWidescreenResizeFromClientX(event.clientX);
-  }
-
-  function handleWidescreenResizeKeydown(event) {
-    if (!widescreenLayout) return;
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-    event.preventDefault();
-    const delta = event.shiftKey ? 64 : 24;
-    const direction = event.key === 'ArrowLeft' ? -1 : 1;
-    applyWidescreenSplit(getStoredWidescreenSplit() + (direction * delta));
-  }
-
-  function bindWidescreenResizer() {
-    if (!widescreenResizerEl) return;
-    widescreenResizerEl.addEventListener('pointerdown', handleWidescreenResizeStart);
-    widescreenResizerEl.addEventListener('keydown', handleWidescreenResizeKeydown);
-    widescreenResizerEl.addEventListener('dblclick', () => {
-      if (!widescreenLayout) return;
-      applyWidescreenSplit(WIDESCREEN_SPLIT_DEFAULT);
-    });
-    if (widescreenMedia) {
-      if (typeof widescreenMedia.addEventListener === 'function') {
-        widescreenMedia.addEventListener('change', updateWidescreenLayout);
-      } else if (typeof widescreenMedia.addListener === 'function') {
-        widescreenMedia.addListener(updateWidescreenLayout);
-      }
-    }
-    window.addEventListener('resize', updateWidescreenLayout);
-  }
-
-	  function applyHostUi() {
+  function applyHostUi() {
 	    const show = Boolean(hostUi?.showClose) && !Boolean(hostUi?.ideMode);
 	    if (hostCloseTopEl) {
 	      hostCloseTopEl.style.display = (show && activeView !== 'conversation') ? 'inline-flex' : 'none';
@@ -2126,7 +1427,14 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     sioCall,
     setActivity,
-    getRelativePath,
+    getRelativePath: (absolutePath, cwd) => {
+      if (!absolutePath || !cwd) return absolutePath;
+      const cwdNorm = cwd.endsWith('/') ? cwd : `${cwd}/`;
+      if (absolutePath.startsWith(cwdNorm)) {
+        return absolutePath.slice(cwdNorm.length);
+      }
+      return absolutePath;
+    },
     insertMention,
     getWindow: () => window,
   });
