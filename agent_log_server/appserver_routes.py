@@ -23,6 +23,29 @@ from agent_log_server import conversation_todos as _conv_todos
 from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD,
 )
+from agent_log_server.conversations_rpc_contract import (
+    CONVERSATION_COMPACT_METHOD,
+    CONVERSATION_INTERRUPT_METHOD,
+    CONVERSATION_REPLAY_GET_CHUNK_METHOD,
+    CONVERSATION_SEND_METHOD,
+    ConversationControlParams,
+    ConversationReplayGetChunkParams,
+    ConversationSendParams,
+    ConversationsRpcProtocolError,
+    build_empty_replay_chunk_result,
+    build_jsonrpc_error_response,
+    build_jsonrpc_error_response_from_http_exception,
+    build_jsonrpc_success_response,
+    build_replay_chunk_result,
+    encode_replay_items_jsonl,
+    normalize_conversation_control_result,
+    normalize_conversation_send_result,
+    normalize_replay_range_data,
+    parse_conversation_control_params,
+    parse_conversation_replay_get_chunk_params,
+    parse_conversation_send_params,
+    parse_conversations_rpc_request,
+)
 from agent_log_server.prompt_context import load_repo_memory_snapshot
 from agent_log_server.typing_helpers import (
     AsyncObjectCallable,
@@ -1154,216 +1177,67 @@ class AppserverRoutes:
 
     async def _rpc_conversation_send(
         self,
-        params: ObjectMap,
+        params: ConversationSendParams,
     ) -> ObjectMap:
-        conversation_id_raw = params.get("conversation_id")
-        text_raw = params.get("text")
-        conversation_id = (
-            self._deps.sanitize_conversation_id(conversation_id_raw.strip())
-            if isinstance(conversation_id_raw, str) and conversation_id_raw.strip()
-            else ""
-        )
-        text = text_raw if isinstance(text_raw, str) else ""
-        if not conversation_id or not text:
-            raise HTTPException(status_code=400, detail="conversation_id and text required")
-
         result = await self.api_appserver_message(
-            AppserverMessageIn(conversation_id=conversation_id, text=text),
+            AppserverMessageIn(conversation_id=params.conversation_id, text=params.text),
         )
-        normalized = dict(result) if isinstance(result, dict) else {
-            "ok": False,
-            "error": "Invalid send result",
-        }
-        normalized.setdefault("conversation_id", conversation_id)
-        normalized["accepted"] = normalized.get("ok") is True
-        return normalized
+        return normalize_conversation_send_result(
+            result,
+            conversation_id=params.conversation_id,
+        ).to_json()
 
     async def _rpc_conversation_interrupt(
         self,
-        params: ObjectMap,
+        params: ConversationControlParams,
     ) -> ObjectMap:
-        result = await self.api_appserver_interrupt(params)
-        return self._deps.coerce_json_object(result) if isinstance(result, dict) else {
-            "ok": False,
-            "error": "Invalid interrupt result",
-        }
+        result = await self.api_appserver_interrupt(params.to_json())
+        return normalize_conversation_control_result(
+            result,
+            invalid_error="Invalid interrupt result",
+        ).to_json()
 
     async def _rpc_conversation_compact(
         self,
-        params: ObjectMap,
+        params: ConversationControlParams,
     ) -> ObjectMap:
-        result = await self.api_appserver_compact(params)
-        return self._deps.coerce_json_object(result) if isinstance(result, dict) else {
-            "ok": False,
-            "error": "Invalid compact result",
-        }
+        result = await self.api_appserver_compact(params.to_json())
+        return normalize_conversation_control_result(
+            result,
+            invalid_error="Invalid compact result",
+        ).to_json()
 
-    def _jsonrpc_success(self, request_id: RequestId, result: ObjectMap) -> ObjectMap:
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": result,
-        }
-
-    def _jsonrpc_error(
-        self,
-        request_id: RequestId,
-        *,
-        code: int,
-        message: str,
-        data: ObjectMap | None = None,
-    ) -> ObjectMap:
-        error: ObjectMap = {
-            "code": code,
-            "message": message,
-        }
-        if isinstance(data, dict) and data:
-            error["data"] = data
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": error,
-        }
-
-    def _jsonrpc_error_from_http_exception(
-        self,
-        request_id: RequestId,
-        *,
-        method: str,
-        exc: HTTPException,
-    ) -> ObjectMap:
-        status_code = int(getattr(exc, "status_code", 500) or 500)
-        detail = exc.detail
-        message = detail if isinstance(detail, str) and detail.strip() else "Request failed"
-        if status_code == 400:
-            code = -32602
-            error_code = "INVALID_REQUEST"
-        elif status_code == 404:
-            code = -32004
-            error_code = "NOT_FOUND"
-        elif status_code == 409:
-            code = -32009
-            error_code = "CONFLICT"
-        else:
-            code = -32603
-            error_code = "INTERNAL_ERROR"
-        return self._jsonrpc_error(
-            request_id,
-            code=code,
-            message=message,
-            data={
-                "code": error_code,
-                "status_code": status_code,
-                "method": method,
-            },
-        )
+    async def _get_active_rpc_conversation_id(self) -> str | None:
+        async with self._deps.config_lock:
+            cfg = self._deps.load_appserver_config()
+            active_conversation_id = cfg.get("conversation_id")
+        if not isinstance(active_conversation_id, str) or not active_conversation_id.strip():
+            return None
+        return self._deps.sanitize_conversation_id(active_conversation_id.strip())
 
     async def _rpc_conversation_replay_get_chunk(
         self,
-        params: ObjectMap,
+        params: ConversationReplayGetChunkParams,
     ) -> ObjectMap:
-        def _parse_int(value: object, *, detail: str, default: int | None = None) -> int:
-            candidate = default if value is None else value
-            if isinstance(candidate, bool):
-                raise HTTPException(status_code=400, detail=detail)
-            if isinstance(candidate, int):
-                return candidate
-            if isinstance(candidate, str):
-                try:
-                    return int(candidate)
-                except ValueError as exc:
-                    raise HTTPException(status_code=400, detail=detail) from exc
-            raise HTTPException(status_code=400, detail=detail)
-
-        conversation_id_raw = params.get("conversation_id")
-        conversation_id = str(conversation_id_raw or "").strip()
-        if conversation_id:
-            conversation_id = self._deps.sanitize_conversation_id(conversation_id)
-        else:
-            async with self._deps.config_lock:
-                cfg = self._deps.load_appserver_config()
-                active_conversation_id = cfg.get("conversation_id")
-            if isinstance(active_conversation_id, str) and active_conversation_id.strip():
-                conversation_id = active_conversation_id.strip()
-
-        cursor = params.get("cursor")
-        if cursor is None:
-            cursor = {}
-        if not isinstance(cursor, dict):
-            raise HTTPException(status_code=400, detail="cursor must be an object")
-        cursor_map = self._deps.coerce_json_object(cursor)
-        offset = _parse_int(cursor_map.get("offset", 0), detail="cursor.offset must be an integer")
-        max_entries = _parse_int(params.get("max_entries", 500), detail="max_entries must be an integer")
-        max_entries = min(max(max_entries, 1), 500)
-        max_bytes = _parse_int(params.get("max_bytes", 524288), detail="max_bytes must be an integer")
-        max_bytes = max(max_bytes, 1)
-
-        format_name = str(params.get("format", "jsonl") or "jsonl").strip().lower()
-        if format_name != "jsonl":
-            raise HTTPException(status_code=400, detail="Only format=jsonl is supported")
-
-        include_internal = params.get("include_internal") is True
-        if not conversation_id:
-            return {
-                "conversation_id": None,
-                "replay_id": f"replay_{uuid.uuid4().hex[:12]}",
-                "frame": {
-                    "format": "jsonl",
-                    "offset": 0,
-                    "item_count": 0,
-                    "total_count": 0,
-                    "chunk_index": 0,
-                    "complete": True,
-                    "next_cursor": None,
-                    "jsonl": "",
-                },
-            }
+        if not params.conversation_id:
+            return build_empty_replay_chunk_result(conversation_id=None).to_json()
 
         range_data = self._read_transcript_range_data(
-            conversation_id,
-            offset=offset,
-            limit=max_entries,
-            include_internal=include_internal,
+            params.conversation_id,
+            offset=params.cursor.offset,
+            limit=params.max_entries,
+            include_internal=params.include_internal,
         )
-        items_value = range_data.get("items")
-        items: ObjectList = []
-        if isinstance(items_value, list):
-            items = [self._deps.coerce_json_object(item) for item in items_value if isinstance(item, dict)]
-        actual_offset = _parse_int(range_data.get("offset"), detail="Invalid replay offset", default=0)
-        total_count = _parse_int(range_data.get("total"), detail="Invalid replay total", default=0)
-
-        jsonl_parts: list[str] = []
-        kept_item_count = 0
-        encoded_bytes = 0
-        for item in items:
-            line = json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
-            line_size = len(line.encode("utf-8"))
-            if kept_item_count > 0 and encoded_bytes + line_size > max_bytes:
-                break
-            jsonl_parts.append(line)
-            kept_item_count += 1
-            encoded_bytes += line_size
-
-        if not jsonl_parts and items:
-            jsonl_parts.append(json.dumps(items[0], ensure_ascii=False, separators=(",", ":")) + "\n")
-            kept_item_count = 1
-
-        next_offset = actual_offset + kept_item_count
-        complete = next_offset >= total_count
-        return {
-            "conversation_id": range_data["conversation_id"],
-            "replay_id": f"replay_{uuid.uuid4().hex[:12]}",
-            "frame": {
-                "format": "jsonl",
-                "offset": actual_offset,
-                "item_count": kept_item_count,
-                "total_count": total_count,
-                "chunk_index": actual_offset // max(max_entries, 1),
-                "complete": complete,
-                "next_cursor": None if complete else {"offset": next_offset},
-                "jsonl": "".join(jsonl_parts),
-            },
-        }
+        normalized_range = normalize_replay_range_data(range_data)
+        jsonl_chunk = encode_replay_items_jsonl(
+            normalized_range.items,
+            max_bytes=params.max_bytes,
+        )
+        return build_replay_chunk_result(
+            params=params,
+            range_data=normalized_range,
+            jsonl_chunk=jsonl_chunk,
+        ).to_json()
 
     async def api_appserver_rpc(
         self,
@@ -1377,75 +1251,56 @@ class AppserverRoutes:
         self,
         payload: ObjectMap,
     ) -> ObjectMap:
-        request_id_raw = payload.get("id") if isinstance(payload, dict) else None
-        request_id: RequestId = request_id_raw if isinstance(request_id_raw, (str, int)) else None
-        if not isinstance(payload, dict):
-            return self._jsonrpc_error(
-                request_id,
-                code=-32600,
-                message="Invalid request",
-                data={"code": "INVALID_REQUEST", "reason": "Payload must be an object"},
-            )
-
-        if payload.get("jsonrpc") != "2.0":
-            return self._jsonrpc_error(
-                request_id,
-                code=-32600,
-                message="Invalid request",
-                data={"code": "INVALID_REQUEST", "reason": "jsonrpc must be '2.0'"},
-            )
-
-        method = payload.get("method")
-        if not isinstance(method, str) or not method.strip():
-            return self._jsonrpc_error(
-                request_id,
-                code=-32600,
-                message="Invalid request",
-                data={"code": "INVALID_REQUEST", "reason": "method is required"},
-            )
-
-        params = payload.get("params", {})
-        if params is None:
-            params = {}
-        if not isinstance(params, dict):
-            return self._jsonrpc_error(
-                request_id,
-                code=-32602,
-                message="Invalid params",
-                data={"code": "INVALID_REQUEST", "reason": "params must be an object"},
-            )
-
-        handlers: dict[str, Callable[[ObjectMap], Awaitable[ObjectMap]]] = {
-            "conversation.send": self._rpc_conversation_send,
-            "conversation.interrupt": self._rpc_conversation_interrupt,
-            "conversation.compact": self._rpc_conversation_compact,
-            "conversation.replay.getChunk": self._rpc_conversation_replay_get_chunk,
-        }
-        handler = handlers.get(method)
-        if handler is None:
-            return self._jsonrpc_error(
-                request_id,
-                code=-32601,
-                message="Method not found",
-                data={"code": "NOT_FOUND", "method": method},
-            )
+        try:
+            request = parse_conversations_rpc_request(payload)
+        except ConversationsRpcProtocolError as exc:
+            return build_jsonrpc_error_response(
+                exc.request_id,
+                code=exc.code,
+                message=exc.message,
+                data=exc.data,
+            ).to_json()
 
         try:
-            result = await handler(params)
+            if request.method == CONVERSATION_SEND_METHOD:
+                send_params = parse_conversation_send_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                )
+                result = await self._rpc_conversation_send(send_params)
+            elif request.method == CONVERSATION_INTERRUPT_METHOD:
+                control_params = parse_conversation_control_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                )
+                result = await self._rpc_conversation_interrupt(control_params)
+            elif request.method == CONVERSATION_COMPACT_METHOD:
+                control_params = parse_conversation_control_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                )
+                result = await self._rpc_conversation_compact(control_params)
+            else:
+                replay_params = parse_conversation_replay_get_chunk_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                    active_conversation_id=await self._get_active_rpc_conversation_id(),
+                )
+                result = await self._rpc_conversation_replay_get_chunk(replay_params)
         except HTTPException as exc:
-            return self._jsonrpc_error_from_http_exception(
-                request_id,
-                method=method,
+            return build_jsonrpc_error_response_from_http_exception(
+                request.request_id,
+                method=request.method,
                 exc=exc,
-            )
+            ).to_json()
         except Exception as exc:
-            return self._jsonrpc_error(
-                request_id,
+            return build_jsonrpc_error_response(
+                request.request_id,
                 code=-32603,
                 message="Internal error",
                 data={"code": "INTERNAL_ERROR", "reason": str(exc)},
-            )
-        return self._jsonrpc_success(request_id, result)
+            ).to_json()
+        return build_jsonrpc_success_response(request.request_id, result).to_json()
 
     async def api_appserver_approval_record(
         self,

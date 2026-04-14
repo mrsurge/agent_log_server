@@ -1,6 +1,39 @@
-declare const io: any;
+import type { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 
-export function bindSocketEvents(ctx) {
+type IoEventHandler = (...args: unknown[]) => void;
+type ConversationsLiveTransport = 'legacy' | 'rpc';
+
+interface AppserverSocket {
+  connected?: boolean;
+  emit(event: string, payload?: unknown, ack?: (response: unknown) => void): void;
+  on(event: string, handler: IoEventHandler): void;
+}
+
+type IoFactory = (namespace: string, options: Record<string, unknown>) => AppserverSocket;
+
+declare const io: IoFactory | undefined;
+
+interface WsState {
+  wsOpen: boolean;
+  wsReconnectDelay?: number;
+  wsReadyResolve?: ((ready: boolean) => void) | null;
+  wsReadyPromise: Promise<boolean>;
+}
+
+interface BindSocketEventsContext {
+  getWsState: () => WsState;
+  setWsState: (patch: Partial<WsState>) => void;
+  setSocket: (socket: AppserverSocket) => void;
+  wsStatusEl?: Element | null;
+  setPill: (element: Element | null | undefined, label: string, tone: string) => void;
+  syncDraftFromServer: (conversationId: string | null | undefined) => void;
+  getConversationId: () => string | null | undefined;
+  getWindow: () => Window;
+  conversationsRpcClient?: ReturnType<typeof createConversationsRpcClient> | null;
+  isRpcTransportEnabled?: () => boolean;
+}
+
+export function bindSocketEvents(ctx: BindSocketEventsContext) {
   const {
     getWsState,
     setWsState,
@@ -13,12 +46,33 @@ export function bindSocketEvents(ctx) {
     conversationsRpcClient,
     isRpcTransportEnabled,
   } = ctx;
-  let unsubscribeRpcNotifications = null;
+  let unsubscribeRpcNotifications: (() => void) | null = null;
   let rpcNotificationsReady = false;
+  let currentSocket: AppserverSocket | null = null;
+  let lastSyncedConversationsLiveTransport: ConversationsLiveTransport | null = null;
+
+  function resolveConversationsLiveTransport(): ConversationsLiveTransport {
+    const rpcEnabled = typeof isRpcTransportEnabled === 'function' ? Boolean(isRpcTransportEnabled()) : false;
+    return rpcEnabled && rpcNotificationsReady ? 'rpc' : 'legacy';
+  }
+
+  function syncConversationsLiveTransportOwnership(): void {
+    if (!currentSocket?.connected) {
+      return;
+    }
+    const nextTransport = resolveConversationsLiveTransport();
+    if (lastSyncedConversationsLiveTransport === nextTransport) {
+      return;
+    }
+    currentSocket.emit('set_conversations_live_transport', {
+      transport: nextTransport,
+    });
+    lastSyncedConversationsLiveTransport = nextTransport;
+  }
 
   function resetWsReady() {
-    let wsReadyResolve = null;
-    const wsReadyPromise = new Promise((resolve) => { wsReadyResolve = resolve; });
+    let wsReadyResolve: ((ready: boolean) => void) | null = null;
+    const wsReadyPromise = new Promise<boolean>((resolve) => { wsReadyResolve = resolve; });
     setWsState({
       wsOpen: false,
       wsReadyResolve,
@@ -41,12 +95,12 @@ export function bindSocketEvents(ctx) {
   async function waitForWs(timeoutMs = 3000) {
     const state = getWsState();
     if (state.wsOpen) return true;
-    let timer;
-    const timeout = new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => resolve(false), timeoutMs);
     });
     const ok = await Promise.race([state.wsReadyPromise, timeout]);
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     return Boolean(ok);
   }
 
@@ -57,7 +111,7 @@ export function bindSocketEvents(ctx) {
     return '/socket.io';
   }
 
-  function connectWS(onEvent) {
+  function connectWS(onEvent?: (event: unknown) => void) {
     if (typeof io === 'undefined') {
       setPill(wsStatusEl, 'no-io', 'err');
       return;
@@ -72,6 +126,7 @@ export function bindSocketEvents(ctx) {
           enabled: () => (typeof isRpcTransportEnabled === 'function' ? Boolean(isRpcTransportEnabled()) : false),
           onConnectionChange: (connected) => {
             rpcNotificationsReady = connected === true;
+            syncConversationsLiveTransportOwnership();
           },
           onError: (error) => {
             console.warn('conversation rpc notify error', error);
@@ -82,6 +137,7 @@ export function bindSocketEvents(ctx) {
         });
       } catch (error) {
         rpcNotificationsReady = false;
+        syncConversationsLiveTransportOwnership();
         console.warn('conversation rpc notify subscribe failed', error);
       }
     }
@@ -94,18 +150,23 @@ export function bindSocketEvents(ctx) {
       reconnectionDelay: 500,
       reconnectionDelayMax: 5000,
     });
+    currentSocket = sock;
     setSocket(sock);
     sock.on('connect', () => {
       markWsOpen();
+      lastSyncedConversationsLiveTransport = null;
       setPill(wsStatusEl, '👍', 'ok');
       syncDraftFromServer(getConversationId());
+      syncConversationsLiveTransportOwnership();
     });
     sock.on('disconnect', () => {
       resetWsReady();
+      lastSyncedConversationsLiveTransport = null;
       setPill(wsStatusEl, '👎', 'err');
     });
     sock.on('connect_error', () => {
       resetWsReady();
+      lastSyncedConversationsLiveTransport = null;
       setPill(wsStatusEl, '👎', 'err');
     });
     sock.on('appserver_event', (data) => {

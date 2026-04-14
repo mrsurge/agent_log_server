@@ -1,17 +1,44 @@
 import { bindPlanOverlay } from '../plan_overlay.ts';
 import { bindPlanModal } from '../plan_modal.ts';
+import type { JsonObject } from '../rpc/conversations/contract.ts';
 
-type AnyRecord = Record<string, any>;
+type PlanRuntimeRecord = JsonObject;
+
+interface PlanStep {
+  step: string;
+  status: string;
+}
+
+interface PlanDocumentState extends PlanRuntimeRecord {
+  has_plan?: boolean;
+  plan_exists?: boolean;
+  plan_content?: string;
+  plan_path?: string | null;
+  plan_source?: string | null;
+}
+
+interface TodoState extends PlanRuntimeRecord {
+  has_todo?: boolean;
+  plan_steps?: PlanStep[];
+  steps?: unknown[];
+  step?: string;
+  status?: string;
+}
+
+interface PlanFetchResult extends PlanRuntimeRecord {
+  ok?: boolean;
+  error?: string;
+}
 
 interface PlanRuntimeState {
-  conversationMeta?: AnyRecord;
-  conversationSettings?: AnyRecord;
-  runtimeOptions?: AnyRecord;
+  conversationMeta?: PlanRuntimeRecord;
+  conversationSettings?: PlanRuntimeRecord;
+  runtimeOptions?: PlanRuntimeRecord;
   planOverlayEl?: HTMLDivElement | null;
   planListEl?: HTMLDivElement | null;
   planCollapsed?: boolean;
-  planDocState?: AnyRecord;
-  todoState?: AnyRecord;
+  planDocState?: PlanDocumentState;
+  todoState?: TodoState;
   planDocDirty?: boolean;
   planFetchSerial?: number;
   topSpacerEl?: HTMLElement | null;
@@ -21,15 +48,26 @@ interface PlanRuntimeContext {
   getState(): PlanRuntimeState;
   setState(patch: Partial<PlanRuntimeState>): void;
   timelineEl: HTMLElement | null;
-  planItems: Map<any, any>;
-  sioCall(event: string, data?: Record<string, unknown>): Promise<any>;
+  planItems: Map<string, HTMLDivElement>;
+  sioCall(event: string, data?: Record<string, unknown>): Promise<unknown>;
   currentExtensionId(): string;
   planModalEl: HTMLElement | null;
   planCloseBtn: HTMLElement | null;
   planDismissBtn: HTMLElement | null;
   planBodyEl: HTMLElement | null;
-  renderMarkdownInto: (...args: any[]) => any;
-  highlightCode: (...args: any[]) => any;
+  renderMarkdownInto: (...args: unknown[]) => unknown;
+  highlightCode: (...args: unknown[]) => unknown;
+}
+
+function asObject(value: unknown): PlanRuntimeRecord | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as PlanRuntimeRecord;
+}
+
+function isPlanStep(value: PlanStep | null): value is PlanStep {
+  return Boolean(value);
 }
 
 export function bindPlanRuntime(ctx: PlanRuntimeContext) {
@@ -88,7 +126,7 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     };
   }
 
-  function normalizePlanDocumentState(nextState: AnyRecord = {}) {
+  function normalizePlanDocumentState(nextState: PlanDocumentState = {}) {
     const { planDocState = {}, runtimeOptions = {} } = getState();
     const hasPlan = nextState.has_plan ?? planDocState.has_plan ?? Boolean(runtimeOptions?.has_plan);
     const planContent = typeof nextState.plan_content === 'string'
@@ -107,23 +145,24 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     };
   }
 
-  function normalizeTodoState(nextState: AnyRecord = {}) {
+  function normalizeTodoState(nextState: TodoState = {}) {
     const { todoState = {}, runtimeOptions = {} } = getState();
     const hasTodo = nextState.has_todo ?? todoState.has_todo ?? Boolean(runtimeOptions?.has_todo);
     const rawSteps = Array.isArray(nextState.plan_steps)
       ? nextState.plan_steps
       : (Array.isArray(nextState.steps) ? nextState.steps : (todoState.plan_steps || []));
     const steps = rawSteps
-      .map((item) => {
-        if (!item || typeof item !== 'object') return null;
-        const step = typeof item.step === 'string' ? item.step : '';
-        if (!step) return null;
-        return {
-          step,
-          status: typeof item.status === 'string' ? item.status : 'pending',
-        };
-      })
-      .filter(Boolean);
+      .map((item: unknown) => {
+          if (!item || typeof item !== 'object') return null;
+          const stepRecord = item as { step?: unknown; status?: unknown };
+          const step = typeof stepRecord.step === 'string' ? stepRecord.step : '';
+          if (!step) return null;
+          return {
+            step,
+            status: typeof stepRecord.status === 'string' ? stepRecord.status : 'pending',
+          };
+        })
+        .filter(isPlanStep);
     return {
       has_todo: Boolean(hasTodo),
       plan_steps: steps,
@@ -196,12 +235,12 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
   const planOverlay = bindPlanOverlay({
     timelineEl,
     getState: () => ({
-      planOverlayEl: getState().planOverlayEl,
-      planListEl: getState().planListEl,
-      planCollapsed: getState().planCollapsed,
+      planOverlayEl: getState().planOverlayEl ?? null,
+      planListEl: getState().planListEl ?? null,
+      planCollapsed: Boolean(getState().planCollapsed),
       planItems,
       planState: currentPlanState(),
-      topSpacerEl: getState().topSpacerEl,
+      topSpacerEl: getState().topSpacerEl ?? null,
     }),
     setState: (patch) => {
       const nextPatch: Partial<PlanRuntimeState> = {};
@@ -234,7 +273,7 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     return planOverlay.syncPlanOverlayUi();
   }
 
-  function restorePlanOverlay(snapshot: AnyRecord) {
+  function restorePlanOverlay(snapshot: PlanRuntimeRecord) {
     return planOverlay.restorePlanOverlay(snapshot);
   }
 
@@ -255,7 +294,7 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     return mergedState;
   }
 
-  function applyAuthoritativePlanState(nextState: AnyRecord) {
+  function applyAuthoritativePlanState(nextState: PlanDocumentState & TodoState) {
     setState({
       planDocState: normalizePlanDocumentState(nextState),
       todoState: normalizeTodoState(nextState),
@@ -264,12 +303,12 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     return syncPlanSurface({ renderModal: true });
   }
 
-  function applyTodoState(nextState: AnyRecord) {
+  function applyTodoState(nextState: TodoState) {
     setState({ todoState: normalizeTodoState(nextState) });
     return syncPlanSurface();
   }
 
-  function updateTodoStateStep(step: string, status: string) {
+  function updateTodoStateStep(step: string, status: string | undefined) {
     const normalizedStep = typeof step === 'string' ? step : '';
     if (!normalizedStep) return currentPlanState();
     const normalizedStatus = typeof status === 'string' && status ? status : 'pending';
@@ -291,7 +330,7 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     return syncPlanSurface();
   }
 
-  function handleLiveTodoUpdate(nextState: AnyRecord = {}) {
+  function handleLiveTodoUpdate(nextState: TodoState = {}) {
     if (Array.isArray(nextState.plan_steps) || Array.isArray(nextState.steps)) {
       return applyTodoState(nextState);
     }
@@ -301,7 +340,7 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     return currentPlanState();
   }
 
-  function handleLivePlanState(nextState: AnyRecord = {}) {
+  function handleLivePlanState(nextState: PlanDocumentState & TodoState = {}) {
     handleLiveTodoUpdate(nextState);
     const operation = typeof nextState.plan_operation === 'string' ? nextState.plan_operation.trim().toLowerCase() : '';
     const modalOpen = planModal.isPlanModalOpen();
@@ -336,17 +375,18 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     setState({ planFetchSerial: requestSerial });
 
     try {
-      const data = await sioCall('get_extension_plan', {
+      const data = asObject(await sioCall('get_extension_plan', {
         extension_id: extensionId,
         conversation_id: convoId,
         force,
-      });
+      }));
       if (requestSerial !== getState().planFetchSerial) return currentPlanState();
-      if (!data || data.ok === false) {
-        console.warn('failed to fetch plan state', data?.error || 'unknown error');
+      const planData = data as (PlanFetchResult & PlanDocumentState & TodoState) | null;
+      if (!planData || planData.ok === false) {
+        console.warn('failed to fetch plan state', planData?.error || 'unknown error');
         return currentPlanState();
       }
-      return applyAuthoritativePlanState(data);
+      return applyAuthoritativePlanState(planData);
     } catch (err) {
       if (requestSerial !== getState().planFetchSerial) return currentPlanState();
       console.warn('failed to refresh plan state', err);

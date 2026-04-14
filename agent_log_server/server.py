@@ -33,8 +33,10 @@ from agent_log_server.extension_cli import (
     run_extension_command as _run_extension_command,
 )
 from agent_log_server.appserver_socketio import (
+    APPSERVER_NAMESPACE,
     AppserverSocketioDeps,
     CONVERSATIONS_RPC_NAMESPACE,
+    get_appserver_event_targets,
     register_appserver_socketio_handlers,
 )
 from agent_log_server.appserver_routes import (
@@ -1485,11 +1487,13 @@ async def _broadcast_appserver_ui(event: ObjectMap) -> None:
     evt = dict(event)
     evt_type = str(evt.get("type") or "").strip().lower()
     _store_conversation_preview_from_event(evt)
-    try:
-        await socketio_server.emit("appserver_event", evt, namespace="/appserver")
-    except Exception:
-        pass
     rpc_method = _conversation_rpc_notification_method(evt_type)
+    appserver_targets = get_appserver_event_targets(suppress_rpc_owned=(rpc_method is not None))
+    for sid in appserver_targets:
+        try:
+            await socketio_server.emit("appserver_event", evt, namespace=APPSERVER_NAMESPACE, to=sid)
+        except Exception:
+            pass
     if rpc_method:
         try:
             await socketio_server.emit(

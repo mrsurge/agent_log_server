@@ -1,4 +1,60 @@
-export function bindRuntimeFooter(ctx) {
+import type { JsonObject } from './rpc/conversations/contract.ts';
+
+type RuntimeOptionKind = string;
+
+interface RuntimeOptionChoice {
+  value: string;
+  label: string;
+}
+
+interface RuntimeOptionField extends JsonObject {
+  current?: string;
+}
+
+interface RuntimeOptionDescriptor {
+  settingKey: string;
+  label: string;
+  footerLabel: string;
+  options: RuntimeOptionChoice[];
+  current: string;
+  default: string;
+  accents: Record<string, string>;
+}
+
+interface RuntimeOptionsState extends JsonObject {
+  quickControls?: unknown[];
+  fields?: Record<string, RuntimeOptionField>;
+}
+
+interface RuntimeFooterState {
+  runtimeOptions?: RuntimeOptionsState;
+  openDropdownEl?: HTMLElement | null;
+  conversationSettings?: JsonObject;
+  activeRuntimeOptionValues?: Record<string, string>;
+  conversationMeta?: JsonObject;
+}
+
+interface RuntimeFooterContext {
+  getState: () => RuntimeFooterState;
+  setState: (patch: Partial<RuntimeFooterState>) => void;
+  footerRuntimeControlsEl: HTMLElement | null;
+  closeDropdownMenu: (element: HTMLElement) => void;
+  toggleDropdownMenu: (element: HTMLElement) => void;
+  sioCall: (event: string, data?: Record<string, unknown>) => Promise<unknown>;
+}
+
+function asObject(value: unknown): JsonObject | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as JsonObject;
+}
+
+function isRuntimeOptionChoice(value: RuntimeOptionChoice | null): value is RuntimeOptionChoice {
+  return Boolean(value);
+}
+
+export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
   const {
     getState,
     setState,
@@ -8,57 +64,66 @@ export function bindRuntimeFooter(ctx) {
     sioCall,
   } = ctx;
 
-  function normalizeApprovalValue(value) {
+  function normalizeApprovalValue(value: string | undefined): string | undefined {
     if (!value) return value;
     if (value === 'unlessTrusted') return 'untrusted';
     return value;
   }
 
-  function normalizeRuntimeOptionDescriptor(kind) {
+  function normalizeRuntimeOptionDescriptor(kind: RuntimeOptionKind): RuntimeOptionDescriptor | null {
     const { runtimeOptions } = getState();
     const raw = runtimeOptions?.[kind];
-    if (!raw || typeof raw !== 'object') return null;
-    const settingKey = typeof raw.settingKey === 'string' ? raw.settingKey.trim() : '';
-    const options = Array.isArray(raw.options)
-      ? raw.options
-          .map((item) => {
+    const rawDescriptor = asObject(raw);
+    if (!rawDescriptor) return null;
+    const settingKey = typeof rawDescriptor.settingKey === 'string' ? rawDescriptor.settingKey.trim() : '';
+    const options = Array.isArray(rawDescriptor.options)
+      ? rawDescriptor.options
+          .map((item: unknown) => {
             if (typeof item === 'string') {
               const text = item.trim();
               return text ? { value: text, label: text } : null;
             }
-            if (!item || typeof item !== 'object') return null;
-            const value = typeof item.value === 'string' ? item.value.trim() : '';
+            const choice = asObject(item);
+            if (!choice) return null;
+            const value = typeof choice.value === 'string' ? choice.value.trim() : '';
             if (!value) return null;
-            const label = typeof item.label === 'string' && item.label.trim() ? item.label.trim() : value;
+            const label = typeof choice.label === 'string' && choice.label.trim() ? choice.label.trim() : value;
             return { value, label };
           })
-          .filter(Boolean)
+          .filter(isRuntimeOptionChoice)
       : [];
+    const rawAccents = asObject(rawDescriptor.accents);
+    const accents = rawAccents
+      ? Object.fromEntries(
+          Object.entries(rawAccents)
+            .filter(([, accent]) => typeof accent === 'string'),
+        ) as Record<string, string>
+      : {};
     return {
       settingKey,
-      label: typeof raw.label === 'string' ? raw.label.trim() : '',
-      footerLabel: typeof raw.footerLabel === 'string' ? raw.footerLabel.trim() : '',
+      label: typeof rawDescriptor.label === 'string' ? rawDescriptor.label.trim() : '',
+      footerLabel: typeof rawDescriptor.footerLabel === 'string' ? rawDescriptor.footerLabel.trim() : '',
       options,
-      current: typeof raw.current === 'string' ? raw.current.trim() : '',
-      default: typeof raw.default === 'string' ? raw.default.trim() : '',
-      accents: raw.accents && typeof raw.accents === 'object' ? { ...raw.accents } : {},
+      current: typeof rawDescriptor.current === 'string' ? rawDescriptor.current.trim() : '',
+      default: typeof rawDescriptor.default === 'string' ? rawDescriptor.default.trim() : '',
+      accents,
     };
   }
 
-  function getQuickControlKinds() {
+  function getQuickControlKinds(): string[] {
     const { runtimeOptions } = getState();
     const configured = Array.isArray(runtimeOptions?.quickControls)
       ? runtimeOptions.quickControls
-          .map((item) => (typeof item === 'string' ? item.trim() : ''))
+          .map((item: unknown) => (typeof item === 'string' ? item.trim() : ''))
           .filter(Boolean)
       : [];
     if (configured.length) return configured;
     return normalizeRuntimeOptionDescriptor('approval') ? ['approval'] : [];
   }
 
-  function getFooterSlotKinds() {
+  function getFooterSlotKinds(): string[] {
     const configured = new Set(getQuickControlKinds());
-    const kinds = [];
+    const kinds: string[] = [];
     const approvalDescriptor = normalizeRuntimeOptionDescriptor('approval');
     if (configured.has('approval') || approvalDescriptor?.options?.length) {
       kinds.push('approval');
@@ -67,18 +132,18 @@ export function bindRuntimeFooter(ctx) {
     return kinds;
   }
 
-  function getFooterRuntimeLabel(kind, descriptor) {
+  function getFooterRuntimeLabel(kind: RuntimeOptionKind, descriptor: RuntimeOptionDescriptor | null): string {
     if (kind === 'mode') {
       return descriptor?.label || descriptor?.footerLabel || 'Mode';
     }
     return descriptor?.footerLabel || descriptor?.label || kind;
   }
 
-  function getRuntimeSettingKey(kind, fallbackKey) {
+  function getRuntimeSettingKey(kind: RuntimeOptionKind, fallbackKey: string): string {
     return normalizeRuntimeOptionDescriptor(kind)?.settingKey || fallbackKey;
   }
 
-  function getConversationSettingByRuntimeKey(kind, fallbackKey) {
+  function getConversationSettingByRuntimeKey(kind: RuntimeOptionKind, fallbackKey: string): string {
     const { conversationSettings } = getState();
     const key = getRuntimeSettingKey(kind, fallbackKey);
     if (!key || !conversationSettings || typeof conversationSettings !== 'object') return '';
@@ -86,14 +151,14 @@ export function bindRuntimeFooter(ctx) {
     return typeof value === 'string' ? value : '';
   }
 
-  function getRuntimeOptionLabel(kind, value) {
+  function getRuntimeOptionLabel(kind: RuntimeOptionKind, value: string): string {
     if (!value) return '';
     const descriptor = normalizeRuntimeOptionDescriptor(kind);
-    const match = descriptor?.options?.find((option) => option.value === value);
+      const match = descriptor?.options?.find((option: RuntimeOptionChoice) => option.value === value);
     return match?.label || value;
   }
 
-  function getRuntimeQuickValue(kind, fallbackKey) {
+  function getRuntimeQuickValue(kind: RuntimeOptionKind, fallbackKey: string): string {
     const { activeRuntimeOptionValues } = getState();
     const activeValue = activeRuntimeOptionValues?.[kind];
     if (typeof activeValue === 'string' && activeValue.trim()) {
@@ -106,7 +171,7 @@ export function bindRuntimeFooter(ctx) {
       || '';
   }
 
-  function renderFooterRuntimeControls() {
+  function renderFooterRuntimeControls(): void {
     if (!footerRuntimeControlsEl) return;
     const { runtimeOptions, openDropdownEl } = getState();
     if (openDropdownEl && footerRuntimeControlsEl.contains(openDropdownEl)) {
@@ -120,7 +185,7 @@ export function bindRuntimeFooter(ctx) {
     }
     const kinds = getFooterSlotKinds();
     footerRuntimeControlsEl.style.display = kinds.length ? '' : 'none';
-    kinds.forEach((kind) => {
+    kinds.forEach((kind: string) => {
       const descriptor = normalizeRuntimeOptionDescriptor(kind);
       if (!descriptor || !descriptor.options.length) {
         if (kind === 'mode') {
@@ -182,7 +247,12 @@ export function bindRuntimeFooter(ctx) {
     });
   }
 
-  function updateRuntimeOptionsCurrent(runtimeOptions, kind, settingKey, nextValue) {
+  function updateRuntimeOptionsCurrent(
+    runtimeOptions: RuntimeOptionsState | undefined,
+    kind: RuntimeOptionKind,
+    settingKey: string,
+    nextValue: string,
+  ): RuntimeOptionsState | undefined {
     let nextRuntimeOptions = runtimeOptions;
     if (nextRuntimeOptions?.[kind] && typeof nextRuntimeOptions[kind] === 'object') {
       nextRuntimeOptions = {
@@ -208,7 +278,11 @@ export function bindRuntimeFooter(ctx) {
     return nextRuntimeOptions;
   }
 
-  async function saveRuntimeOptionQuick(kind, value, fallbackKey) {
+  async function saveRuntimeOptionQuick(
+    kind: RuntimeOptionKind,
+    value: string | undefined,
+    fallbackKey: string,
+  ): Promise<void> {
     const state = getState();
     let nextValue = value?.trim();
     if (kind === 'approval') {
@@ -230,11 +304,11 @@ export function bindRuntimeFooter(ctx) {
     renderFooterRuntimeControls();
   }
 
-  async function saveApprovalQuick(value) {
+  async function saveApprovalQuick(value: string | undefined): Promise<void> {
     await saveRuntimeOptionQuick('approval', value, 'approvalPolicy');
   }
 
-  function applyRuntimeMode(kind) {
+  function applyRuntimeMode(kind: string): void {
     const { activeRuntimeOptionValues } = getState();
     const normalizedKind = typeof kind === 'string' ? kind.trim() : '';
     if (normalizedKind) {

@@ -1,7 +1,181 @@
-type ApprovalData = Record<string, any>;
-type ApprovalRowOptions = Record<string, any>;
+type ApprovalDecisionObject = {
+  acceptWithExecpolicyAmendment?: boolean;
+  applyNetworkPolicyAmendment?: boolean;
+  [key: string]: unknown;
+};
 
-function normalizeDecisionLabel(decision) {
+type ApprovalDecision = string | ApprovalDecisionObject;
+
+interface ApprovalChange {
+  diff?: string;
+  path?: string;
+  unified_diff?: string;
+  patch?: string;
+  file_path?: string;
+}
+
+type ApprovalChangeMap = Record<string, ApprovalChange>;
+
+interface ApprovalPayload {
+  kind?: string;
+  command?: string | string[];
+  cwd?: string;
+  reason?: string;
+  question?: string;
+  message?: string;
+  warning?: string;
+  diff?: string;
+  path?: string;
+  changes?: ApprovalChange[] | ApprovalChangeMap;
+}
+
+interface ApprovalResult {
+  decision?: ApprovalDecision;
+  action?: string;
+  success?: boolean;
+  [key: string]: unknown;
+}
+
+interface ApprovalData {
+  type?: string;
+  id?: unknown;
+  request_id?: unknown;
+  card_id?: unknown;
+  cardId?: unknown;
+  item_id?: unknown;
+  turn_id?: string;
+  subagent_id?: string;
+  kind?: string;
+  payload?: ApprovalPayload;
+  result?: ApprovalResult;
+  status?: string;
+  decision?: string;
+  request_method?: string | null;
+  requestMethod?: string | null;
+  request_params?: ApprovalPayload;
+  render_event?: ApprovalData;
+  created_at?: string;
+  conversation_id?: string | null;
+  replay?: boolean;
+  ask_user_msg_id?: unknown;
+  askUserMsgId?: unknown;
+  timeoutMs?: number | null;
+  row?: HTMLElement;
+  extensionId?: string;
+  diff?: string;
+  path?: string;
+  file_path?: string;
+  unified_diff?: string;
+  patch?: string;
+  changes?: ApprovalPayload['changes'];
+  pending_approvals?: Record<string, ApprovalData>;
+  handoff_event?: ApprovalData;
+  ok?: boolean;
+  error?: string;
+  [key: string]: unknown;
+}
+
+interface ApprovalRowOptions {
+  source?: string;
+  readOnly?: boolean;
+  parentEl?: HTMLElement | null;
+  row?: HTMLElement | null;
+  useExisting?: boolean;
+  extensionId?: string;
+}
+
+interface ApprovalRequestOptions {
+  timeoutMs?: number | null;
+}
+
+interface ApprovalSubmitMeta {
+  requestMethod?: string | null;
+  payload?: ApprovalPayload | null;
+  extensionId?: string;
+  row?: HTMLElement;
+  timeoutMs?: number | null;
+  diff?: string | null;
+  path?: string | null;
+}
+
+interface ApprovalResponse {
+  ok?: boolean;
+  error?: string;
+  handoff_event?: ApprovalData;
+  [key: string]: unknown;
+}
+
+interface RequestCardRuntime {
+  render: (
+    evt: ApprovalData,
+    context: {
+      extensionId: string;
+      row: HTMLElement;
+      body: HTMLElement;
+      helpers: ApprovalRenderHelpers;
+    },
+  ) => Promise<boolean>;
+}
+
+interface ApprovalRenderHelpers {
+  escapeHtml: (text: string) => string;
+  formatDiff: (diff: string, path: string) => string;
+  toRelativePath: (path: string) => string;
+  normalizeDecisionLabel: (decision: ApprovalDecision | undefined) => string;
+  renderMarkdown: (container: HTMLElement, text: unknown, extraClass?: string) => void;
+  readOnly: boolean;
+  submitResult: (result: ApprovalResult, meta?: ApprovalSubmitMeta) => Promise<{
+    ok: boolean;
+    response?: ApprovalResponse;
+  }>;
+  respondApproval: (
+    requestId: unknown,
+    result: unknown,
+    options?: ApprovalRequestOptions,
+  ) => Promise<ApprovalResponse>;
+  recordApproval: () => Promise<ApprovalResponse>;
+}
+
+interface ApprovalUiContext {
+  sioCall: (
+    event: string,
+    payload?: Record<string, unknown>,
+    options?: ApprovalRequestOptions,
+  ) => Promise<unknown>;
+  getConversationId: () => string | null;
+  getConversationMeta?: () => ApprovalData | null | undefined;
+  setConversationMeta?: (nextMeta: ApprovalData) => void;
+  getCurrentExtensionId?: () => string;
+  createRow: (
+    rowType: string,
+    metaLabel: string,
+    rowId?: ChildNode | null,
+    parentEl?: HTMLElement | null,
+  ) => { row: HTMLElement; body: HTMLElement };
+  getSubagentContainer: (
+    subagentId: string,
+    title: string,
+    status: string,
+  ) => { body?: HTMLElement | null } & Record<string, unknown>;
+  escapeHtml: (text: string) => string;
+  formatDiff: (diff: string, path: string) => string;
+  renderDiffBlock?: (container: HTMLElement, diff: string, path: string) => void;
+  renderEventMarkdownInto?: (container: HTMLElement, text: string) => void;
+  toRelativePath: (path: string) => string;
+  requestCardRuntime?: Partial<RequestCardRuntime> | null;
+  timelineEl?: HTMLElement | null;
+  onAfterRender?: () => void;
+}
+
+function asApprovalData(value: unknown): ApprovalData | null {
+  return value && typeof value === 'object' ? value as ApprovalData : null;
+}
+
+function asApprovalResponse(value: unknown): ApprovalResponse | null {
+  return value && typeof value === 'object' ? value as ApprovalResponse : null;
+}
+
+function normalizeDecisionLabel(decision: ApprovalDecision | undefined): string {
   if (typeof decision === 'string') {
     switch (decision) {
       case 'accept':
@@ -28,7 +202,7 @@ function normalizeDecisionLabel(decision) {
   return 'Submit';
 }
 
-function decisionKey(result) {
+function decisionKey(result: ApprovalResult | null | undefined): string {
   const decision = result?.decision;
   if (typeof decision === 'string') {
     return decision;
@@ -45,7 +219,7 @@ function decisionKey(result) {
   return '';
 }
 
-function approvalStatusFromResult(result) {
+function approvalStatusFromResult(result: ApprovalResult | null | undefined): string {
   const key = decisionKey(result);
   if (key === 'decline') return 'declined';
   if (key === 'cancel') return 'cancelled';
@@ -56,7 +230,7 @@ function approvalStatusFromResult(result) {
   return 'accepted';
 }
 
-export function bindApprovalUi(ctx) {
+export function bindApprovalUi(ctx: ApprovalUiContext) {
   const {
     sioCall,
     getConversationId,
@@ -140,17 +314,17 @@ export function bindApprovalUi(ctx) {
     const requestId = approvalRequestId(evt);
     const cardId = approvalCardId(evt);
     const parentEl = options.parentEl || (evt?.subagent_id
-      ? getSubagentContainer(evt.subagent_id, '', '').body
+      ? getSubagentContainer(evt.subagent_id, '', '').body ?? null
       : null);
     const existingRow = options.row instanceof HTMLElement
       ? options.row
       : (options.useExisting === false ? null : findApprovalRow(evt));
-    let row;
-    let body;
+    let row: HTMLElement;
+    let body: HTMLElement;
     if (existingRow) {
       row = existingRow;
-      const meta = row.querySelector(':scope > .meta') || document.createElement('div');
-      body = row.querySelector(':scope > .body') || document.createElement('div');
+      const meta = (row.querySelector(':scope > .meta') as HTMLElement | null) || document.createElement('div');
+      body = (row.querySelector(':scope > .body') as HTMLElement | null) || document.createElement('div');
       if (!meta.parentElement || !body.parentElement) {
         meta.className = 'meta';
         body.className = 'body';
@@ -206,7 +380,7 @@ export function bindApprovalUi(ctx) {
     return { row, body };
   }
 
-  function prunePendingApproval(requestId) {
+  function prunePendingApproval(requestId: unknown) {
     if (requestId === null || requestId === undefined || requestId === '') return;
     const currentMeta = getConversationMeta?.();
     if (!currentMeta || typeof currentMeta !== 'object') return;
@@ -221,7 +395,7 @@ export function bindApprovalUi(ctx) {
     });
   }
 
-  function renderApprovalMarkdown(container, text, extraClass = '') {
+  function renderApprovalMarkdown(container: HTMLElement | null | undefined, text: unknown, extraClass = '') {
     if (!(container instanceof HTMLElement)) return;
     if (typeof extraClass === 'string' && extraClass.trim()) {
       extraClass.trim().split(/\s+/).forEach((cls) => {
@@ -230,13 +404,13 @@ export function bindApprovalUi(ctx) {
     }
     if (typeof renderEventMarkdownInto === 'function') {
       container.classList.add('markdown-body', 'approval-markdown');
-      renderEventMarkdownInto(container, text);
+      renderEventMarkdownInto(container, String(text || ''));
       return;
     }
     container.textContent = String(text || '');
   }
 
-  function appendMarkdownValue(container, label, value) {
+  function appendMarkdownValue(container: HTMLElement, label: string, value: unknown) {
     if (!(container instanceof HTMLElement)) return;
     if (value === null || value === undefined || value === '') return;
     const row = document.createElement('div');
@@ -248,15 +422,21 @@ export function bindApprovalUi(ctx) {
     container.append(row);
   }
 
-  async function respondApproval(requestId, result, options: ApprovalData = {}) {
-    if (requestId === null || requestId === undefined) return;
-    const resultPayload = typeof result === 'string'
+  async function respondApproval(
+    requestId: unknown,
+    result: unknown,
+    options: ApprovalRequestOptions = {},
+  ): Promise<ApprovalResponse> {
+    if (requestId === null || requestId === undefined) {
+      return { ok: false, error: 'approval failed' };
+    }
+    const resultPayload: ApprovalResult = typeof result === 'string'
       ? { decision: result }
-      : (result && typeof result === 'object' ? result : {});
-      const payload: ApprovalData = {
-        conversation_id: getConversationId() || null,
-        request_id: String(requestId),
-      };
+      : (asApprovalData(result) ?? {});
+    const payload: ApprovalData = {
+      conversation_id: getConversationId() || null,
+      request_id: String(requestId),
+    };
     if (Object.keys(resultPayload).length) {
       payload.result = resultPayload;
     }
@@ -264,22 +444,28 @@ export function bindApprovalUi(ctx) {
       payload.decision = resultPayload.decision;
     }
     try {
-      const sioOptions: ApprovalData = {};
+      const sioOptions: ApprovalRequestOptions = {};
       if (Object.prototype.hasOwnProperty.call(options, 'timeoutMs')) {
         sioOptions.timeoutMs = options.timeoutMs;
       }
-      return await sioCall('approval_response', payload, sioOptions);
+      return asApprovalResponse(await sioCall('approval_response', payload, sioOptions))
+        ?? { ok: false, error: 'approval failed' };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error || 'approval failed') };
     }
   }
 
-  async function submitApproval(requestId, result, meta: ApprovalData = {}) {
+  async function submitApproval(
+    requestId: unknown,
+    result: ApprovalResult,
+    meta: ApprovalSubmitMeta = {},
+  ): Promise<{ ok: boolean; response?: ApprovalResponse }> {
     const timeoutMs = meta?.requestMethod === 'agent-pty/ask-user' ? null : undefined;
     const response = await respondApproval(requestId, result, { timeoutMs });
     if (!response || response.ok === false) return { ok: false, response };
-    if (response?.handoff_event && typeof response.handoff_event === 'object') {
-      handoffApproval(response.handoff_event, {
+    const handoffEvent = asApprovalData(response.handoff_event);
+    if (handoffEvent) {
+      handoffApproval(handoffEvent, {
         row: meta.row,
         extensionId: meta.extensionId,
       });
@@ -287,20 +473,20 @@ export function bindApprovalUi(ctx) {
     return { ok: true, response };
   }
 
-  function renderGenericApprovalBody(body, evt, helpers) {
+  function renderGenericApprovalBody(body: HTMLElement, evt: ApprovalData, helpers: ApprovalRenderHelpers) {
     const payload = evt.payload || {};
-    let diffText = null;
-    let filePath = null;
+    let diffText: string | null = null;
+    let filePath: string | null = null;
     let renderedAny = false;
     body.textContent = '';
-    const appendPlainValue = (label, value) => {
+    const appendPlainValue = (label: string, value: unknown) => {
       if (value === null || value === undefined || value === '') return;
       const row = document.createElement('div');
       row.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${escapeHtml(String(value))}`;
       body.append(row);
       renderedAny = true;
     };
-    const appendNarrativeValue = (label, value) => {
+    const appendNarrativeValue = (label: string, value: unknown) => {
       if (value === null || value === undefined || value === '') return;
       appendMarkdownValue(body, label, value);
       renderedAny = true;
@@ -329,29 +515,30 @@ export function bindApprovalUi(ctx) {
     if (payload.diff) {
       diffText = payload.diff;
       filePath = payload.path || filePath;
-      const diffBlock = document.createElement('div');
-      diffBlock.className = 'diff-block';
-      if (typeof renderDiffBlock === 'function') {
-        renderDiffBlock(diffBlock, payload.diff, payload.path);
-      } else {
-        diffBlock.innerHTML = formatDiff(payload.diff, payload.path);
-      }
+        const diffBlock = document.createElement('div');
+        diffBlock.className = 'diff-block';
+        if (typeof renderDiffBlock === 'function') {
+          renderDiffBlock(diffBlock, payload.diff, payload.path || '');
+        } else {
+          diffBlock.innerHTML = formatDiff(payload.diff, payload.path || '');
+        }
       body.append(diffBlock);
       renderedAny = true;
     }
     if (payload.changes && Array.isArray(payload.changes)) {
-      payload.changes.forEach((change) => {
+      payload.changes.forEach((change: ApprovalChange) => {
         if (change && change.diff) {
+          const changePath = change.path || '';
           diffText = diffText || change.diff;
-          filePath = filePath || change.path;
+          filePath = filePath || change.path || null;
           const label = document.createElement('div');
-          label.innerHTML = `<strong>${escapeHtml(toRelativePath(change.path) || 'file')}</strong>`;
+          label.innerHTML = `<strong>${escapeHtml(toRelativePath(changePath) || 'file')}</strong>`;
           const diffBlock = document.createElement('div');
           diffBlock.className = 'diff-block';
           if (typeof renderDiffBlock === 'function') {
-            renderDiffBlock(diffBlock, change.diff, change.path);
+            renderDiffBlock(diffBlock, change.diff, changePath);
           } else {
-            diffBlock.innerHTML = formatDiff(change.diff, change.path);
+            diffBlock.innerHTML = formatDiff(change.diff, changePath);
           }
           body.append(label, diffBlock);
           renderedAny = true;
@@ -360,7 +547,7 @@ export function bindApprovalUi(ctx) {
     }
     if (payload.changes && payload.changes.constructor === Object) {
       Object.entries(payload.changes).forEach(([changePath, change]) => {
-        const changeRecord = change && typeof change === 'object' ? change as ApprovalData : null;
+        const changeRecord = change && typeof change === 'object' ? change as ApprovalChange : null;
         if (!changeRecord) return;
         const changeDiff = changeRecord.diff || changeRecord.unified_diff || changeRecord.patch || '';
         if (!changeDiff) return;
@@ -435,9 +622,9 @@ export function bindApprovalUi(ctx) {
       formatDiff,
       toRelativePath,
       normalizeDecisionLabel,
-      renderMarkdown: (container, text, extraClass = '') => renderApprovalMarkdown(container, text, extraClass),
+      renderMarkdown: (container: HTMLElement, text: unknown, extraClass = '') => renderApprovalMarkdown(container, text, extraClass),
       readOnly: options.readOnly === true,
-      submitResult: async (result, meta = {}) => submitApproval(requestId, result, {
+      submitResult: async (result: ApprovalResult, meta: ApprovalSubmitMeta = {}) => submitApproval(requestId, result, {
         requestMethod: evt?.request_method || evt?.requestMethod || null,
         payload: evt?.payload || null,
         extensionId: options.extensionId,
@@ -455,17 +642,18 @@ export function bindApprovalUi(ctx) {
     const extensionId = options.extensionId
       || (typeof getCurrentExtensionId === 'function' ? getCurrentExtensionId() : '');
     body.textContent = 'Loading approval…';
+    const requestCardRender = requestCardRuntime?.render;
 
     const fallback = () => renderGenericApprovalBody(body, evt, helpers);
 
-    if (!requestCardRuntime) {
+    if (typeof requestCardRender !== 'function') {
       fallback();
       onAfterRender?.();
       return row;
     }
 
     void (async () => {
-      const handled = await requestCardRuntime.render(evt, {
+      const handled = await requestCardRender(evt, {
         extensionId,
         row,
         body,
@@ -512,7 +700,7 @@ export function bindApprovalUi(ctx) {
 
   function restorePendingApprovals() {
     if (!timelineEl) return;
-    timelineEl.querySelectorAll('.timeline-row[data-approval-source="pending"]').forEach((row) => row.remove());
+    timelineEl.querySelectorAll('.timeline-row[data-approval-source="pending"]').forEach((row: Element) => row.remove());
     const conversationMeta = getConversationMeta?.();
     const pending = conversationMeta?.pending_approvals;
     if (!pending || typeof pending !== 'object') {

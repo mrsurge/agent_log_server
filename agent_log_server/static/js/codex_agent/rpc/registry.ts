@@ -1,49 +1,48 @@
 import { RPC_NAMESPACES } from './namespaces.ts';
+import {
+  CONVERSATIONS_RPC_METHOD_DESCRIPTORS,
+  CONVERSATIONS_RPC_NOTIFICATION_METHODS,
+  type ConversationsRpcMethod,
+} from './conversations/contract.ts';
 
-export interface RpcMethodPlaceholder {
-  name: string;
+export type RpcSurfaceStatus = 'planned' | 'implemented';
+export type RpcRegistryStatus = 'partial' | 'implemented';
+
+export interface RpcMethodDescriptor<Name extends string = string> {
+  name: Name;
   namespace: string;
-  status: 'planned';
+  status: RpcSurfaceStatus;
 }
 
-export interface RpcNamespaceRegistryPlaceholder {
+export interface RpcNamespaceRegistry<Name extends string = string> {
+  status: RpcSurfaceStatus;
   namespace: string;
-  methods: RpcMethodPlaceholder[];
-  notifications: string[];
+  methods: readonly RpcMethodDescriptor<Name>[];
+  notifications: readonly string[];
 }
 
-export interface RpcRegistryPlaceholder {
-  status: 'placeholder';
+export interface RpcRegistry {
+  status: RpcRegistryStatus;
   compatibilityNamespace: string;
   namespaces: {
-    conversations: RpcNamespaceRegistryPlaceholder;
-    settings: RpcNamespaceRegistryPlaceholder;
-    ui: RpcNamespaceRegistryPlaceholder;
+    conversations: RpcNamespaceRegistry<ConversationsRpcMethod>;
+    settings: RpcNamespaceRegistry;
+    ui: RpcNamespaceRegistry;
   };
 }
 
-export const RPC_REGISTRY_PLACEHOLDER: RpcRegistryPlaceholder = {
-  status: 'placeholder',
+export const RPC_REGISTRY: RpcRegistry = {
+  status: 'partial',
   compatibilityNamespace: RPC_NAMESPACES.legacyAppserver,
   namespaces: {
     conversations: {
+      status: 'implemented',
       namespace: RPC_NAMESPACES.conversations,
-      methods: [
-        { name: 'conversation.send', namespace: RPC_NAMESPACES.conversations, status: 'planned' },
-        { name: 'conversation.interrupt', namespace: RPC_NAMESPACES.conversations, status: 'planned' },
-        { name: 'conversation.compact', namespace: RPC_NAMESPACES.conversations, status: 'planned' },
-        { name: 'conversation.replay.getChunk', namespace: RPC_NAMESPACES.conversations, status: 'planned' },
-      ],
-      notifications: [
-        'conversation.message.delta',
-        'conversation.message.final',
-        'conversation.reasoning.delta',
-        'conversation.reasoning.final',
-        'conversation.preview.updated',
-        'conversation.toast',
-      ],
+      methods: CONVERSATIONS_RPC_METHOD_DESCRIPTORS,
+      notifications: CONVERSATIONS_RPC_NOTIFICATION_METHODS,
     },
     settings: {
+      status: 'planned',
       namespace: RPC_NAMESPACES.settings,
       methods: [
         { name: 'extensions.list', namespace: RPC_NAMESPACES.settings, status: 'planned' },
@@ -59,6 +58,7 @@ export const RPC_REGISTRY_PLACEHOLDER: RpcRegistryPlaceholder = {
       ],
     },
     ui: {
+      status: 'planned',
       namespace: RPC_NAMESPACES.ui,
       methods: [
         { name: 'view.set', namespace: RPC_NAMESPACES.ui, status: 'planned' },
@@ -74,6 +74,12 @@ export const RPC_REGISTRY_PLACEHOLDER: RpcRegistryPlaceholder = {
   },
 };
 
-export function getRpcRegistryPlaceholder(): RpcRegistryPlaceholder {
-  return RPC_REGISTRY_PLACEHOLDER;
+export function getRpcRegistry(): RpcRegistry {
+  return RPC_REGISTRY;
 }
+
+export type RpcMethodPlaceholder = RpcMethodDescriptor;
+export type RpcNamespaceRegistryPlaceholder = RpcNamespaceRegistry;
+export type RpcRegistryPlaceholder = RpcRegistry;
+export const RPC_REGISTRY_PLACEHOLDER = RPC_REGISTRY;
+export const getRpcRegistryPlaceholder = getRpcRegistry;

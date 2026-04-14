@@ -1,9 +1,34 @@
-import { getRpcRegistryPlaceholder } from '../rpc/registry.ts';
+import { getRpcRegistry } from '../rpc/registry.ts';
 
-const _rpcRegistryPlaceholder = getRpcRegistryPlaceholder;
-void _rpcRegistryPlaceholder;
+const _rpcRegistry = getRpcRegistry;
+void _rpcRegistry;
 
-export function bindRpcFlow(ctx) {
+type JsonObject = Record<string, unknown>;
+
+interface PendingRpcEntry {
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface LegacyRpcRequestPayload extends JsonObject {
+  method: string;
+  params?: JsonObject;
+  id?: number;
+}
+
+interface SendRpcOptions {
+  notify?: boolean;
+}
+
+interface RpcFlowContext {
+  waitForWs: () => Promise<boolean>;
+  sioCall: (event: string, payload?: JsonObject, options?: JsonObject) => Promise<unknown>;
+  getPending: () => Map<string | number, PendingRpcEntry>;
+  getConversationId?: () => string | null | undefined;
+}
+
+export function bindRpcFlow(ctx: RpcFlowContext) {
   const {
     waitForWs,
     sioCall,
@@ -12,14 +37,18 @@ export function bindRpcFlow(ctx) {
 
   let rpcId = 1;
 
-  function nextRpcId() {
+  function nextRpcId(): number {
     const id = rpcId;
     rpcId += 1;
     return id;
   }
 
-  async function sendRpc(method, params, options: Record<string, any> = {}) {
-    const payload: Record<string, any> = { method };
+  async function sendRpc(
+    method: string,
+    params?: JsonObject,
+    options: SendRpcOptions = {},
+  ): Promise<unknown | null> {
+    const payload: LegacyRpcRequestPayload = { method };
     if (params !== undefined) payload.params = params;
     if (options.notify) {
       await sioCall('rpc', payload);
@@ -29,7 +58,7 @@ export function bindRpcFlow(ctx) {
     payload.id = id;
     await waitForWs();
     await sioCall('rpc', payload);
-    return new Promise((resolve, reject) => {
+    return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         getPending().delete(id);
         reject(new Error('rpc timeout'));

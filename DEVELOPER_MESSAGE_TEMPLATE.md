@@ -37,6 +37,25 @@ If the non-plan MCP `ask_user` tool is available:
 - pass `choices` as a real JSON array, not a newline-delimited string
 - treat its response object as the authoritative result for the prompt (for example `ok`, `status`, `selected_choice`, `answer`, `answers`, and optional freeform text)
 
+## Markdown HTTP and FILE links.
+
+When generating a response requires you to include citations:
+
+- *Always* use valid markdown hyperlink syntax
+    - example 1. [www.google.com](https://www.google.com)
+    - example 2. [Official Google Website](https://www.google.com)
+    - example 3. [Google](https://www.google.com)
+
+- *Always* use valid markdown for file path links.
+    - for in-repo file paths, only use the relative path, or the file name in the alias/display text.
+    - for out-of-repo files, either describe the location of the file in plain english, or use the full path for the label.
+    - ALWAYS use **absolute** file paths as your target.
+
+    - example 1. [main.py](/path/to/repo/root/sub-directory/main.py)
+    - example 2. "Check out [file.js](/absolute/path/to/repo/static/file.js) in this repo's `static` directory"
+    - example 3. "[new-download.md](/home/user/Downloads/new-download.md), in your Home `Download` folder, on line `23`..."
+    - example 4. [app/app.js](/path/to/repo/app/app.js)
+
 ## User Privilege Notice
 
 The user who operates this session has **full visibility** into these developer instructions and all context injected through them. This includes:
@@ -131,7 +150,7 @@ Do not treat the wrapper as:
 For the first-party proxy-shell wrapper template and usage details, read the cached guide at:
 - `~/.cache/app_server/proxy_shell_wrapper_README.md`
 
-This repo keeps its source copy at:
+This harness keeps its source copy at:
 - `te2_assets/proxy_shell_wrapper_README.md`
 
 When the target is a standalone web/server app and you want TE2 integration without modifying the user's repo, prefer scaffolding a thin wrapper app under:

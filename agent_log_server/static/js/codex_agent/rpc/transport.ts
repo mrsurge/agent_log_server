@@ -23,16 +23,36 @@ export interface RpcTransportPlaceholderDescriptor {
 
 type SessionStorageWindow = Pick<Window, 'sessionStorage'> | null | undefined;
 type LocationWindow = Pick<Window, 'location'> | null | undefined;
-type RpcWindowRef = (Pick<Window, 'location' | 'sessionStorage'> & { io?: IoFactory }) | null | undefined;
+export type RpcWindowRef = (Pick<Window, 'location' | 'sessionStorage'> & { io?: IoFactory }) | null | undefined;
 
-interface SocketLike {
-  connected?: boolean;
-  emit(event: string, payload: unknown, ack?: (response: unknown) => void): void;
-  on(event: string, handler: (...args: any[]) => void): void;
-  off?(event: string, handler: (...args: any[]) => void): void;
+interface SocketEventHandlerMap {
+  connect: () => void;
+  disconnect: () => void;
+  connect_error: (error: unknown) => void;
+  [RPC_NOTIFICATION_EVENT]: (payload: unknown) => void;
 }
 
-type IoFactory = (namespace: string, options: Record<string, unknown>) => SocketLike;
+type SocketEventName = keyof SocketEventHandlerMap;
+
+export interface JsonRpcRequestEnvelope<TParams extends Record<string, unknown> = Record<string, unknown>> {
+  jsonrpc: '2.0';
+  id: string;
+  method: string;
+  params: TParams;
+}
+
+export interface SocketLike {
+  connected?: boolean;
+  emit(
+    event: typeof RPC_REQUEST_EVENT,
+    payload: JsonRpcRequestEnvelope,
+    ack?: (response: unknown) => void,
+  ): void;
+  on<E extends SocketEventName>(event: E, handler: SocketEventHandlerMap[E]): void;
+  off?<E extends SocketEventName>(event: E, handler: SocketEventHandlerMap[E]): void;
+}
+
+export type IoFactory = (namespace: string, options: Readonly<Record<string, unknown>>) => SocketLike;
 
 export interface JsonRpcSuccessEnvelope<TResult = unknown> {
   jsonrpc: '2.0';
@@ -56,10 +76,10 @@ export interface JsonRpcNotificationEnvelope<TParams = unknown> {
   params?: TParams;
 }
 
-export interface CallRpcNamespaceOptions {
+export interface CallRpcNamespaceOptions<TParams extends Record<string, unknown> = Record<string, unknown>> {
   namespace: string;
   method: string;
-  params?: Record<string, unknown>;
+  params?: TParams;
   requestId?: string;
   timeoutMs?: number;
   windowRef?: RpcWindowRef;
@@ -74,6 +94,13 @@ export interface SubscribeRpcNamespaceNotificationsOptions {
 
 const namespaceSockets = new Map<string, SocketLike>();
 let rpcRequestCounter = 0;
+
+function asJsonObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
 
 function getSessionStorage(win: SessionStorageWindow): Storage | null {
   if (!win) return null;
@@ -123,8 +150,8 @@ function getNamespaceSocket(namespace: string, win: RpcWindowRef): SocketLike {
 
 function removeSocketListener(
   socket: SocketLike,
-  event: string,
-  handler: (...args: any[]) => void,
+  event: SocketEventName,
+  handler: SocketEventHandlerMap[SocketEventName],
 ): void {
   if (typeof socket.off === 'function') {
     socket.off(event, handler);
@@ -146,6 +173,41 @@ export class JsonRpcCallError extends Error {
     this.code = code;
     this.data = data ?? null;
   }
+}
+
+function extractRpcAckError(ack: Record<string, unknown>): string | null {
+  if (!('__error' in ack)) {
+    return null;
+  }
+  const errorValue = ack.__error;
+  if (typeof errorValue === 'string' && errorValue.trim()) {
+    return errorValue;
+  }
+  return String(errorValue || 'RPC failed');
+}
+
+function isJsonRpcErrorEnvelope(payload: unknown): payload is JsonRpcErrorEnvelope {
+  const envelope = asJsonObject(payload);
+  const error = asJsonObject(envelope?.error);
+  return (
+    envelope?.jsonrpc === '2.0'
+    && (typeof envelope.id === 'string' || envelope.id === null)
+    && Boolean(error)
+    && typeof error?.code === 'number'
+    && typeof error?.message === 'string'
+  );
+}
+
+function isJsonRpcSuccessEnvelope<TResult = unknown>(
+  payload: unknown,
+): payload is JsonRpcSuccessEnvelope<TResult> {
+  const envelope = asJsonObject(payload);
+  return (
+    envelope?.jsonrpc === '2.0'
+    && typeof envelope.id === 'string'
+    && 'result' in envelope
+    && !('error' in envelope)
+  );
 }
 
 export function normalizeRpcTransportEnabled(value: unknown): boolean {
@@ -241,8 +303,11 @@ export async function waitForRpcNamespace(
   });
 }
 
-export async function callRpcNamespace<TResult = unknown>(
-  options: CallRpcNamespaceOptions,
+export async function callRpcNamespace<
+  TResult = unknown,
+  TParams extends Record<string, unknown> = Record<string, unknown>,
+>(
+  options: CallRpcNamespaceOptions<TParams>,
 ): Promise<TResult> {
   const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
   const requestId = options.requestId || nextRpcRequestId();
@@ -266,25 +331,26 @@ export async function callRpcNamespace<TResult = unknown>(
       },
       (ack: unknown) => {
         clearTimeout(timer);
-        if (!ack || typeof ack !== 'object') {
+        const envelope = asJsonObject(ack);
+        if (!envelope) {
           reject(new Error(`Invalid RPC ack for ${options.method}`));
           return;
         }
-        if ('__error' in (ack as Record<string, unknown>)) {
-          reject(new Error(String((ack as Record<string, unknown>).__error || `RPC failed: ${options.method}`)));
+        const ackError = extractRpcAckError(envelope);
+        if (ackError) {
+          reject(new Error(ackError || `RPC failed: ${options.method}`));
           return;
         }
-        const envelope = ack as JsonRpcSuccessEnvelope<TResult> | JsonRpcErrorEnvelope;
-        if (envelope.jsonrpc !== '2.0') {
-          reject(new Error(`Invalid JSON-RPC envelope for ${options.method}`));
-          return;
-        }
-        if ('error' in envelope) {
+        if (isJsonRpcErrorEnvelope(envelope)) {
           reject(new JsonRpcCallError(
             envelope.error.code,
             envelope.error.message || `RPC failed: ${options.method}`,
             envelope.error.data,
           ));
+          return;
+        }
+        if (!isJsonRpcSuccessEnvelope<TResult>(envelope)) {
+          reject(new Error(`Invalid JSON-RPC envelope for ${options.method}`));
           return;
         }
         resolve(envelope.result);
@@ -294,13 +360,12 @@ export async function callRpcNamespace<TResult = unknown>(
 }
 
 function isJsonRpcNotificationEnvelope(payload: unknown): payload is JsonRpcNotificationEnvelope {
+  const envelope = asJsonObject(payload);
   return Boolean(
-    payload
-      && typeof payload === 'object'
-      && !Array.isArray(payload)
-      && (payload as JsonRpcNotificationEnvelope).jsonrpc === '2.0'
-      && typeof (payload as JsonRpcNotificationEnvelope).method === 'string'
-      && (payload as JsonRpcNotificationEnvelope).method.trim(),
+    envelope
+      && envelope.jsonrpc === '2.0'
+      && typeof envelope.method === 'string'
+      && envelope.method.trim(),
   );
 }
 

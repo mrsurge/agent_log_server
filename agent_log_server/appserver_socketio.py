@@ -4,7 +4,7 @@ import shutil
 import urllib.parse
 from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Literal, cast
 
 import socketio
 import extensions as ext_loader
@@ -22,6 +22,46 @@ from agent_log_server.typing_helpers import (
 
 APPSERVER_NAMESPACE = "/appserver"
 CONVERSATIONS_RPC_NAMESPACE = "/rpc/conversations"
+ConversationsLiveTransport = Literal["legacy", "rpc"]
+
+_APPSERVER_CONNECTED_SIDS: set[str] = set()
+_APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID: dict[str, ConversationsLiveTransport] = {}
+
+
+def _normalize_conversations_live_transport(value: object) -> ConversationsLiveTransport:
+    if isinstance(value, str) and value.strip().lower() == "rpc":
+        return "rpc"
+    return "legacy"
+
+
+def register_appserver_sid(sid: str) -> None:
+    _APPSERVER_CONNECTED_SIDS.add(sid)
+    _APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID[sid] = "legacy"
+
+
+def unregister_appserver_sid(sid: str) -> None:
+    _APPSERVER_CONNECTED_SIDS.discard(sid)
+    _APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID.pop(sid, None)
+
+
+def set_appserver_conversations_live_transport(
+    sid: str,
+    transport: object,
+) -> ConversationsLiveTransport:
+    normalized = _normalize_conversations_live_transport(transport)
+    _APPSERVER_CONNECTED_SIDS.add(sid)
+    _APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID[sid] = normalized
+    return normalized
+
+
+def get_appserver_event_targets(*, suppress_rpc_owned: bool) -> tuple[str, ...]:
+    if not suppress_rpc_owned:
+        return tuple(_APPSERVER_CONNECTED_SIDS)
+    return tuple(
+        sid
+        for sid in _APPSERVER_CONNECTED_SIDS
+        if _APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID.get(sid, "legacy") != "rpc"
+    )
 
 
 @dataclass(frozen=True)
@@ -138,9 +178,17 @@ def register_appserver_socketio_handlers(
         return False, message or f"xdg-open exited with {proc.returncode}"
 
     async def _appserver_connect(sid: str, environ: ObjectMap) -> object:
+        register_appserver_sid(sid)
         return None
 
     async def _appserver_disconnect(sid: str) -> object:
+        unregister_appserver_sid(sid)
+        return None
+
+    async def _conversations_rpc_connect(sid: str, environ: ObjectMap) -> object:
+        return None
+
+    async def _conversations_rpc_disconnect(sid: str) -> object:
         return None
 
     async def _sio_send_message(sid: str, data: object) -> object:
@@ -194,6 +242,17 @@ def register_appserver_socketio_handlers(
             return await deps.api_appserver_compact(_payload(data))
         except HTTPException as exc:
             return _sio_error(exc.detail)
+        except Exception as exc:
+            return _sio_error(exc)
+
+    async def _sio_set_conversations_live_transport(sid: str, data: object) -> object:
+        try:
+            payload = _payload(data)
+            transport = set_appserver_conversations_live_transport(
+                sid,
+                payload.get("transport"),
+            )
+            return {"ok": True, "transport": transport}
         except Exception as exc:
             return _sio_error(exc)
 
@@ -831,6 +890,7 @@ def register_appserver_socketio_handlers(
         ("send_message", _sio_send_message),
         ("shell_exec", _sio_shell_exec),
         ("rpc", _sio_rpc),
+        ("set_conversations_live_transport", _sio_set_conversations_live_transport),
         ("interrupt", _sio_interrupt),
         ("compact", _sio_compact),
         ("conversation_get", _sio_conversation_get),
@@ -892,8 +952,8 @@ def register_appserver_socketio_handlers(
         socketio_server.on(event, handler, namespace=APPSERVER_NAMESPACE)
 
     conversations_rpc_registrations: list[tuple[str, Callable[..., Awaitable[object]]]] = [
-        ("connect", _appserver_connect),
-        ("disconnect", _appserver_disconnect),
+        ("connect", _conversations_rpc_connect),
+        ("disconnect", _conversations_rpc_disconnect),
         ("rpc", _sio_conversations_rpc),
     ]
     for event, handler in conversations_rpc_registrations:

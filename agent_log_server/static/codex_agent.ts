@@ -231,7 +231,12 @@ document.addEventListener('DOMContentLoaded', () => {
   };
   let commandRunning = false; // Whether a PTY command is currently running
   let activeAgentPtyBlockId: string | null = null;
-  const pending = new Map<string, AnyRecord>();
+  type PendingRpcEntry = {
+    resolve: (value: unknown) => void;
+    reject: (reason?: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  const pending = new Map<string | number, PendingRpcEntry>();
 
   // Detect mobile for input behavior
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
