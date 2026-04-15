@@ -114,8 +114,9 @@ export function bindRequestCardRuntime(ctx: RequestCardRuntimeContext): RequestC
   async function fetchConfig(extensionId: string): Promise<RequestCardConfig> {
     const normalizedId = typeof extensionId === 'string' ? extensionId.trim() : '';
     if (!normalizedId) return { extension_id: '', cards: [], schemas: {} };
-    if (configCache.has(normalizedId)) {
-      return configCache.get(normalizedId);
+    const cachedConfig = configCache.get(normalizedId);
+    if (cachedConfig) {
+      return cachedConfig;
     }
     const promise = (async () => {
       try {
@@ -139,8 +140,9 @@ export function bindRequestCardRuntime(ctx: RequestCardRuntimeContext): RequestC
     if (!moduleUrl) return null;
     const exportName = typeof card?.export === 'string' && card.export.trim() ? card.export.trim() : 'renderRequestCard';
     const cacheKey = `${moduleUrl}#${exportName}`;
-    if (moduleCache.has(cacheKey)) {
-      return moduleCache.get(cacheKey);
+    const cachedModule = moduleCache.get(cacheKey);
+    if (cachedModule) {
+      return cachedModule;
     }
     const promise = (async () => {
       const mod = (await import(moduleUrl)) as RequestCardModule;

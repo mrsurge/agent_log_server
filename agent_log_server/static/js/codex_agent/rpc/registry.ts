@@ -4,6 +4,18 @@ import {
   CONVERSATIONS_RPC_NOTIFICATION_METHODS,
   type ConversationsRpcMethod,
 } from './conversations/contract.ts';
+import {
+  SETTINGS_RPC_METHODS,
+  SETTINGS_RPC_NAMESPACE,
+  SETTINGS_RPC_NOTIFICATION_METHODS,
+  type SettingsRpcMethod,
+} from './settings/contract.ts';
+import {
+  UI_RPC_METHODS,
+  UI_RPC_NAMESPACE,
+  UI_RPC_NOTIFICATION_METHODS,
+  type UiRpcMethod,
+} from './ui/contract.ts';
 
 export type RpcSurfaceStatus = 'planned' | 'implemented';
 export type RpcRegistryStatus = 'partial' | 'implemented';
@@ -26,8 +38,8 @@ export interface RpcRegistry {
   compatibilityNamespace: string;
   namespaces: {
     conversations: RpcNamespaceRegistry<ConversationsRpcMethod>;
-    settings: RpcNamespaceRegistry;
-    ui: RpcNamespaceRegistry;
+    settings: RpcNamespaceRegistry<SettingsRpcMethod>;
+    ui: RpcNamespaceRegistry<UiRpcMethod>;
   };
 }
 
@@ -42,34 +54,35 @@ export const RPC_REGISTRY: RpcRegistry = {
       notifications: CONVERSATIONS_RPC_NOTIFICATION_METHODS,
     },
     settings: {
-      status: 'planned',
-      namespace: RPC_NAMESPACES.settings,
+      status: 'implemented',
+      namespace: SETTINGS_RPC_NAMESPACE,
       methods: [
-        { name: 'extensions.list', namespace: RPC_NAMESPACES.settings, status: 'planned' },
-        { name: 'extension.settingsSchema.get', namespace: RPC_NAMESPACES.settings, status: 'planned' },
-        { name: 'extension.models.list', namespace: RPC_NAMESPACES.settings, status: 'planned' },
-        { name: 'extension.sessions.list', namespace: RPC_NAMESPACES.settings, status: 'planned' },
-        { name: 'extension.session.bind', namespace: RPC_NAMESPACES.settings, status: 'planned' },
+        { name: SETTINGS_RPC_METHODS.configGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.configUpdate, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionsList, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionsReload, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionSettingsSchemaGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionRuntimeOptionsGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionModelsList, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionSessionsList, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionSessionBind, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
       ],
-      notifications: [
-        'extensions.updated',
-        'extension.status.updated',
-        'extension.runtimeOptions.updated',
-      ],
+      notifications: [...SETTINGS_RPC_NOTIFICATION_METHODS],
     },
     ui: {
-      status: 'planned',
-      namespace: RPC_NAMESPACES.ui,
+      status: 'implemented',
+      namespace: UI_RPC_NAMESPACE,
       methods: [
-        { name: 'view.set', namespace: RPC_NAMESPACES.ui, status: 'planned' },
-        { name: 'hostUi.get', namespace: RPC_NAMESPACES.ui, status: 'planned' },
-        { name: 'file.open', namespace: RPC_NAMESPACES.ui, status: 'planned' },
-        { name: 'url.open', namespace: RPC_NAMESPACES.ui, status: 'planned' },
+        { name: UI_RPC_METHODS.viewGet, namespace: UI_RPC_NAMESPACE, status: 'implemented' },
+        { name: UI_RPC_METHODS.viewSet, namespace: UI_RPC_NAMESPACE, status: 'implemented' },
+        { name: UI_RPC_METHODS.hostUiGet, namespace: UI_RPC_NAMESPACE, status: 'implemented' },
+        { name: UI_RPC_METHODS.hostUiRecheck, namespace: UI_RPC_NAMESPACE, status: 'implemented' },
+        { name: UI_RPC_METHODS.filesystemList, namespace: UI_RPC_NAMESPACE, status: 'implemented' },
+        { name: UI_RPC_METHODS.filesystemSearch, namespace: UI_RPC_NAMESPACE, status: 'implemented' },
+        { name: UI_RPC_METHODS.fileOpen, namespace: UI_RPC_NAMESPACE, status: 'implemented' },
+        { name: UI_RPC_METHODS.urlOpen, namespace: UI_RPC_NAMESPACE, status: 'implemented' },
       ],
-      notifications: [
-        'view.changed',
-        'hostUi.updated',
-      ],
+      notifications: [...UI_RPC_NOTIFICATION_METHODS],
     },
   },
 };

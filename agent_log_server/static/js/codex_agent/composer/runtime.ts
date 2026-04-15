@@ -1,3 +1,5 @@
+import { createUiRpcClient } from '../rpc/ui/client.ts';
+
 declare const Tribute: any;
 
 type AnyRecord = Record<string, any>;
@@ -60,6 +62,10 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     sioCall,
     escapeHtml,
   } = ctx;
+  const uiRpcClient = createUiRpcClient({
+    sioCall,
+    windowRef,
+  });
 
   let tributeInstance: any = null;
   let explicitMentionSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -580,7 +586,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
         }
         try {
           const cwd = getState().conversationSettings?.cwd || '~';
-          const data = await sioCall('fs_search', { query: text, root: cwd, limit: 30 });
+          const data = await uiRpcClient.searchFilesystem({ query: text, root: cwd, limit: 30 });
           if (!data || data.ok === false) {
             cb([]);
             return;
@@ -599,21 +605,22 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       setTimeout(() => {
         const menu = documentRef.querySelector('.tribute-container ul');
         if (!(menu instanceof HTMLElement)) return;
-        const items = menu.querySelectorAll('li');
+        const items = menu.querySelectorAll<HTMLLIElement>('li');
         let lastWasDir = false;
         let firstFile: Element | null = null;
-        items.forEach((item) => {
+        for (const item of Array.from(items)) {
           const isDir = item.querySelector('.tribute-dir');
           if (lastWasDir && !isDir && !firstFile) {
             firstFile = item;
           }
           lastWasDir = Boolean(isDir);
-        });
-        if (firstFile && !(firstFile.previousElementSibling instanceof HTMLElement && firstFile.previousElementSibling.classList.contains('tribute-separator'))) {
+        }
+        const firstFileEl = firstFile;
+        if (firstFileEl && !(firstFileEl.previousElementSibling instanceof HTMLElement && firstFileEl.previousElementSibling.classList.contains('tribute-separator'))) {
           const separator = documentRef.createElement('li');
           separator.className = 'tribute-separator';
           separator.innerHTML = '<hr>';
-          firstFile.parentNode?.insertBefore(separator, firstFile);
+          firstFileEl.parentElement?.insertBefore(separator, firstFileEl);
         }
       }, 10);
     });

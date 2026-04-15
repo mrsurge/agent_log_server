@@ -1,6 +1,129 @@
-type ToolPayload = Record<string, any>;
+import {
+  applyTranscriptCardMetadata,
+  type TranscriptCardMetadata,
+} from './transcript_card_metadata.ts';
 
-export function bindToolRender(ctx) {
+type ToolPayload = Record<string, unknown>;
+type ToolStructuredValue = ToolPayload | unknown[];
+type ToolRenderTarget = 'request' | 'response';
+type ToolRenderSourceKey = 'request' | 'args' | 'arguments' | 'response' | 'result';
+type ToolRenderFieldKey = 'requestFields' | 'argsFields' | 'argumentsFields' | 'responseFields' | 'resultFields';
+
+type ToolRenderSpec =
+  | { kind: 'plain' }
+  | { kind: 'markdown' }
+  | { kind: 'hljs'; language?: string };
+
+interface ToolRenderRule {
+  server?: string;
+  tool?: string;
+  serverPrefix?: string;
+  toolPrefix?: string;
+  servers?: string[];
+  tools?: string[];
+  request?: unknown;
+  args?: unknown;
+  arguments?: unknown;
+  response?: unknown;
+  result?: unknown;
+  requestFields?: Record<string, unknown>;
+  argsFields?: Record<string, unknown>;
+  argumentsFields?: Record<string, unknown>;
+  responseFields?: Record<string, unknown>;
+  resultFields?: Record<string, unknown>;
+}
+
+interface ToolRenderPolicy {
+  default?: ToolRenderRule | null;
+  rules?: ToolRenderRule[] | null;
+}
+
+interface ToolEvent extends ToolPayload {
+  id?: string;
+  item_id?: string;
+  card_id?: string;
+  order_id?: number;
+  nid?: string;
+  tool?: string;
+  server?: string;
+  request?: ToolPayload | null;
+  arguments?: ToolPayload | null;
+  payload?: ToolPayload | null;
+  response?: unknown;
+  result?: unknown;
+  output?: string;
+  delta?: string;
+  duration_ms?: number;
+  is_error?: boolean;
+  new_file?: boolean;
+  newFile?: boolean;
+}
+
+interface ToolRowEntry {
+  row: HTMLDivElement;
+  body: HTMLDivElement;
+  header: HTMLDivElement;
+  argsEls: HTMLElement[];
+  resultHeaderEl: HTMLElement | null;
+  resultEls: HTMLElement[];
+  footerEl: HTMLElement | null;
+  streamEl: HTMLPreElement | null;
+  interactionEl: HTMLPreElement | null;
+  diffLabelEl: HTMLDivElement | null;
+  diffBlock: HTMLDivElement | null;
+}
+
+interface ToolRenderContext {
+  toolRows: Map<string, ToolRowEntry>;
+  clearPlaceholder: () => void;
+  insertRow: (row: HTMLElement) => void;
+  makeCollapsible: (
+    row: HTMLElement | null,
+    cardId: string,
+    startExpanded: boolean,
+    options?: Record<string, unknown>,
+  ) => void;
+  getLiveEventParent: (evt: ToolEvent | null | undefined) => HTMLElement | null;
+  renderEventMarkdownInto?: (container: HTMLElement, text: string) => void;
+  formatDiff: (text: string, filePath: string) => string;
+  renderDiffBlock?: (block: HTMLElement, text: string, filePath: string) => void;
+  toRelativePath: (path: string) => string;
+  escapeHtml?: (text: string) => string;
+  renderShellCmdRibbon: (el: HTMLElement | null, cmd: string) => unknown;
+  maybeAutoScroll: () => void;
+  setLastEventType: (value: string) => void;
+  setStatusDot: (value: string) => void;
+  getToolRenderPolicy?: () => unknown;
+  highlightCodeAlways?: (text: string, language: string) => string;
+}
+
+function isToolPayload(value: unknown): value is ToolPayload {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function asToolPayload(value: unknown): ToolPayload | null {
+  return isToolPayload(value) ? value : null;
+}
+
+function isToolStructuredValue(value: unknown): value is ToolStructuredValue {
+  return Array.isArray(value) || isToolPayload(value);
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function getDefaultToolRenderPolicy(): ToolRenderPolicy {
+  return {
+    default: {
+      request: { kind: 'plain' },
+      response: { kind: 'plain' },
+    },
+    rules: [],
+  };
+}
+
+export function bindToolRender(ctx: ToolRenderContext) {
   const {
     toolRows,
     clearPlaceholder,
@@ -19,32 +142,29 @@ export function bindToolRender(ctx) {
     highlightCodeAlways,
   } = ctx;
 
-  function getActiveToolRenderPolicy() {
+  function getActiveToolRenderPolicy(): ToolRenderPolicy {
     if (typeof getToolRenderPolicy === 'function') {
       const policy = getToolRenderPolicy();
-      if (policy && typeof policy === 'object') return policy;
+      if (policy && typeof policy === 'object') return policy as ToolRenderPolicy;
     }
-    return {
-      default: {
-        request: { kind: 'plain' },
-        response: { kind: 'plain' },
-      },
-      rules: [],
-    };
+    return getDefaultToolRenderPolicy();
   }
 
-  function normalizeRenderSpec(spec) {
+  function normalizeRenderSpec(spec: unknown): ToolRenderSpec {
     if (!spec || typeof spec !== 'object') return { kind: 'plain' };
-    const kind = typeof spec.kind === 'string' ? spec.kind.trim().toLowerCase() : 'plain';
+    const specRecord = spec as ToolPayload;
+    const kind = typeof specRecord.kind === 'string' ? specRecord.kind.trim().toLowerCase() : 'plain';
     if (kind === 'markdown') return { kind: 'markdown' };
     if (kind === 'hljs') {
-      const language = typeof spec.language === 'string' && spec.language.trim() ? spec.language.trim() : '';
+      const language = typeof specRecord.language === 'string' && specRecord.language.trim()
+        ? specRecord.language.trim()
+        : '';
       return language ? { kind: 'hljs', language } : { kind: 'hljs' };
     }
     return { kind: 'plain' };
   }
 
-  function ruleMatches(rule, serverName, toolName) {
+  function ruleMatches(rule: ToolRenderRule | null | undefined, serverName: string, toolName: string): boolean {
     if (!rule || typeof rule !== 'object') return false;
     const server = typeof serverName === 'string' ? serverName : '';
     const tool = typeof toolName === 'string' ? toolName : '';
@@ -52,8 +172,12 @@ export function bindToolRender(ctx) {
     const exactTool = typeof rule.tool === 'string' && rule.tool ? rule.tool : '';
     const serverPrefix = typeof rule.serverPrefix === 'string' && rule.serverPrefix ? rule.serverPrefix : '';
     const toolPrefix = typeof rule.toolPrefix === 'string' && rule.toolPrefix ? rule.toolPrefix : '';
-    const servers = Array.isArray(rule.servers) ? rule.servers.filter((value) => typeof value === 'string' && value) : [];
-    const tools = Array.isArray(rule.tools) ? rule.tools.filter((value) => typeof value === 'string' && value) : [];
+    const servers = Array.isArray(rule.servers)
+      ? rule.servers.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : [];
+    const tools = Array.isArray(rule.tools)
+      ? rule.tools.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : [];
     if (exactServer && server !== exactServer) return false;
     if (exactTool && tool !== exactTool) return false;
     if (serverPrefix && !server.startsWith(serverPrefix)) return false;
@@ -63,35 +187,47 @@ export function bindToolRender(ctx) {
     return Boolean(exactServer || exactTool || serverPrefix || toolPrefix || servers.length || tools.length);
   }
 
-  function resolveRenderSpec(serverName, toolName, target, fieldName = '') {
+  function resolveRenderSpec(
+    serverName: string,
+    toolName: string,
+    target: ToolRenderTarget,
+    fieldName = '',
+  ): ToolRenderSpec {
     const policy = getActiveToolRenderPolicy();
     const defaults = policy.default && typeof policy.default === 'object' ? policy.default : {};
     const rules = Array.isArray(policy.rules) ? policy.rules : [];
     const matchedRule = rules.find((rule) => ruleMatches(rule, serverName, toolName)) || null;
-    const targetConfig = target === 'request'
+    const targetConfig: {
+      primary: ToolRenderSourceKey;
+      legacy: ToolRenderSourceKey[];
+      fieldPrimary: ToolRenderFieldKey;
+      fieldLegacy: ToolRenderFieldKey[];
+    } = target === 'request'
       ? {
-        primary: 'request',
-        legacy: ['args', 'arguments'],
-        fieldPrimary: 'requestFields',
-        fieldLegacy: ['argsFields', 'argumentsFields'],
-      }
+          primary: 'request',
+          legacy: ['args', 'arguments'],
+          fieldPrimary: 'requestFields',
+          fieldLegacy: ['argsFields', 'argumentsFields'],
+        }
       : {
-        primary: 'response',
-        legacy: ['result'],
-        fieldPrimary: 'responseFields',
-        fieldLegacy: ['resultFields'],
-      };
+          primary: 'response',
+          legacy: ['result'],
+          fieldPrimary: 'responseFields',
+          fieldLegacy: ['resultFields'],
+        };
     if (fieldName) {
       const ruleFieldSources = [targetConfig.fieldPrimary, ...targetConfig.fieldLegacy];
       for (const fieldKey of ruleFieldSources) {
-        const matchedField = matchedRule && matchedRule[fieldKey] && typeof matchedRule[fieldKey] === 'object'
-          ? matchedRule[fieldKey][fieldName]
+        const fieldMap = matchedRule?.[fieldKey];
+        const matchedField = fieldMap && typeof fieldMap === 'object'
+          ? (fieldMap as Record<string, unknown>)[fieldName]
           : null;
         if (matchedField) return normalizeRenderSpec(matchedField);
       }
       for (const fieldKey of ruleFieldSources) {
-        const defaultField = defaults[fieldKey] && typeof defaults[fieldKey] === 'object'
-          ? defaults[fieldKey][fieldName]
+        const fieldMap = defaults?.[fieldKey];
+        const defaultField = fieldMap && typeof fieldMap === 'object'
+          ? (fieldMap as Record<string, unknown>)[fieldName]
           : null;
         if (defaultField) return normalizeRenderSpec(defaultField);
       }
@@ -106,7 +242,7 @@ export function bindToolRender(ctx) {
     return normalizeRenderSpec(null);
   }
 
-  function buildRenderedTextElement(text, spec, className) {
+  function buildRenderedTextElement(text: unknown, spec: unknown, className: string): HTMLElement {
     const normalizedText = text == null ? '' : String(text);
     const normalizedSpec = normalizeRenderSpec(spec);
     if (normalizedSpec.kind === 'markdown' && typeof renderEventMarkdownInto === 'function') {
@@ -133,10 +269,10 @@ export function bindToolRender(ctx) {
     return pre;
   }
 
-  function buildObjectText(result) {
-    const lines = [];
+  function buildObjectText(result: ToolStructuredValue): string {
+    const lines: string[] = [];
     Object.entries(result).forEach(([key, value]) => {
-      if (typeof value === 'object' && value !== null) {
+      if (isToolPayload(value)) {
         lines.push(`  ${key}:`);
         Object.entries(value).forEach(([innerKey, innerValue]) => {
           lines.push(`    ${innerKey}: ${JSON.stringify(innerValue)}`);
@@ -148,23 +284,29 @@ export function bindToolRender(ctx) {
     return lines.join('\n');
   }
 
-  function removeNode(node) {
+  function removeNode(node: Node | null | undefined): void {
     if (node && node.parentElement) {
       node.parentElement.removeChild(node);
     }
   }
 
-  function removeNodes(nodes) {
+  function removeNodes(nodes: Array<Node | null | undefined> | null | undefined): void {
     if (!Array.isArray(nodes)) return;
     nodes.forEach((node) => removeNode(node));
   }
 
-  function getToolRow(id, label, parentEl = null) {
+  function getToolRow(
+    id: string | undefined,
+    label: string | undefined,
+    parentEl: HTMLElement | null = null,
+    metadata: TranscriptCardMetadata | null = null,
+  ): ToolRowEntry {
     const key = id || `tool:${label || 'tool'}`;
     let entry = toolRows.get(key);
     if (!entry) {
       const row = document.createElement('div');
       row.className = 'timeline-row command-result mcp-tool-card';
+      applyTranscriptCardMetadata(row, metadata);
       const body = document.createElement('div');
       body.className = 'body';
       const header = document.createElement('div');
@@ -198,22 +340,23 @@ export function bindToolRender(ctx) {
       parentEl.appendChild(entry.row);
       maybeAutoScroll();
     }
+    applyTranscriptCardMetadata(entry.row, metadata);
     return entry;
   }
 
-  function resolveToolCardPath(toolName, payload: ToolPayload = {}) {
+  function resolveToolCardPath(_toolName: string, payload: ToolPayload = {}): string {
     if (!payload || typeof payload !== 'object') return '';
     if (typeof payload.path === 'string' && payload.path.trim()) {
       return payload.path.trim();
     }
-    const argumentsPayload = payload.arguments && typeof payload.arguments === 'object' ? payload.arguments : {};
+    const argumentsPayload = asToolPayload(payload.arguments) ?? {};
     if (typeof argumentsPayload.path === 'string' && argumentsPayload.path.trim()) {
       return argumentsPayload.path.trim();
     }
     const candidateLists = [argumentsPayload.paths, payload.paths];
     for (const list of candidateLists) {
       if (!Array.isArray(list)) continue;
-      const firstPath = list.find((value) => typeof value === 'string' && value.trim());
+      const firstPath = list.find((value): value is string => typeof value === 'string' && value.trim().length > 0);
       if (typeof firstPath === 'string' && firstPath.trim()) {
         return firstPath.trim();
       }
@@ -221,7 +364,7 @@ export function bindToolRender(ctx) {
     return '';
   }
 
-  function resolveToolCardDiff(toolName, payload: ToolPayload = {}) {
+  function resolveToolCardDiff(toolName: string, payload: ToolPayload = {}): string {
     if (toolName !== 'apply_patch' || !payload || typeof payload !== 'object') return '';
     if (typeof payload.diff === 'string' && payload.diff.trim()) {
       return payload.diff;
@@ -233,9 +376,9 @@ export function bindToolRender(ctx) {
     return '';
   }
 
-  function resolveToolCardOutcome(toolName, payload: ToolPayload = {}) {
+  function resolveToolCardOutcome(toolName: string, payload: ToolPayload = {}): string {
     if (toolName !== 'apply_patch' || !payload || typeof payload !== 'object') return '';
-    const result = payload.result && typeof payload.result === 'object' ? payload.result : null;
+    const result = asToolPayload(payload.result);
     const status = typeof payload.status === 'string' ? payload.status.trim().toLowerCase() : '';
     const resultStatus = typeof result?.status === 'string' ? result.status.trim().toLowerCase() : '';
     const isError = payload.is_error === true || result?.isError === true || result?.success === false;
@@ -254,18 +397,18 @@ export function bindToolRender(ctx) {
     return isCompleted ? 'success' : '';
   }
 
-  function applyPatchOutcomeEmoji(outcome) {
+  function applyPatchOutcomeEmoji(outcome: string): string {
     if (outcome === 'success') return '🟢';
     if (outcome === 'error') return '🔴';
     return '';
   }
 
-  function isApplyPatchNewFile(payload: ToolPayload = {}) {
+  function isApplyPatchNewFile(payload: ToolPayload = {}): boolean {
     if (!payload || typeof payload !== 'object') return false;
-    const args = payload.arguments && typeof payload.arguments === 'object' ? payload.arguments : {};
-    const request = payload.request && typeof payload.request === 'object' ? payload.request : {};
-    const response = payload.response && typeof payload.response === 'object' ? payload.response : {};
-    const result = payload.result && typeof payload.result === 'object' ? payload.result : {};
+    const args = asToolPayload(payload.arguments) ?? {};
+    const request = asToolPayload(payload.request) ?? {};
+    const response = asToolPayload(payload.response) ?? {};
+    const result = asToolPayload(payload.result) ?? {};
     return payload.new_file === true
       || payload.newFile === true
       || args.new_file === true
@@ -278,7 +421,7 @@ export function bindToolRender(ctx) {
       || result.newFile === true;
   }
 
-  function toolCardLabel(toolName, serverName = '', filePath = '', payload = {}) {
+  function toolCardLabel(toolName: string, serverName = '', filePath = '', payload: ToolPayload = {}): string {
     if (toolName === 'apply_patch') {
       const resolvedPath = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : '';
       const relPath = resolvedPath ? (toRelativePath(resolvedPath) || resolvedPath.split('/').pop() || resolvedPath) : '';
@@ -290,7 +433,13 @@ export function bindToolRender(ctx) {
     return serverName ? `${serverName}:${toolName}` : `tool:${toolName}`;
   }
 
-  function renderToolCardHeader(headerEl, toolName, serverName = '', filePath = '', payload = {}) {
+  function renderToolCardHeader(
+    headerEl: HTMLElement | null,
+    toolName: string,
+    serverName = '',
+    filePath = '',
+    payload: ToolPayload = {},
+  ): string {
     if (!headerEl) return '';
     const label = toolCardLabel(toolName, serverName, filePath, payload);
     if (toolName === 'apply_patch') {
@@ -307,7 +456,7 @@ export function bindToolRender(ctx) {
     return label;
   }
 
-  function buildToolDiffPreview(diffText, filePath = '') {
+  function buildToolDiffPreview(diffText: string, filePath = ''): { label: HTMLDivElement; block: HTMLDivElement } | null {
     if (typeof diffText !== 'string' || !diffText.trim()) return null;
     const label = document.createElement('div');
     label.className = 'mcp-tool-arg-label mcp-tool-diff-label';
@@ -316,40 +465,47 @@ export function bindToolRender(ctx) {
     const block = document.createElement('div');
     block.className = 'diff-block mcp-tool-diff';
     if (typeof renderDiffBlock === 'function') {
-      renderDiffBlock(block, diffText, resolvedPath || null);
+      renderDiffBlock(block, diffText, resolvedPath || '');
     } else {
-      block.innerHTML = formatDiff(diffText, resolvedPath || null);
+      block.innerHTML = formatDiff(diffText, resolvedPath || '');
     }
     return { label, block };
   }
 
-  function ensureToolDiffPreview(entry, diffText, filePath = '') {
-    if (!entry || typeof diffText !== 'string' || !diffText.trim()) return;
+  function ensureToolDiffPreview(entry: ToolRowEntry, diffText: string, filePath = ''): void {
+    if (typeof diffText !== 'string' || !diffText.trim()) return;
     const preview = buildToolDiffPreview(diffText, filePath);
     if (!preview) return;
     if (!entry.diffLabelEl) {
       entry.diffLabelEl = preview.label;
-      entry.body.insertBefore(entry.diffLabelEl, entry.body.firstChild.nextSibling || null);
+      const anchor = entry.body.firstElementChild?.nextSibling ?? null;
+      entry.body.insertBefore(entry.diffLabelEl, anchor);
     } else {
       entry.diffLabelEl.textContent = preview.label.textContent;
     }
     if (!entry.diffBlock) {
       entry.diffBlock = preview.block;
       const anchor = entry.diffLabelEl.nextSibling;
-      entry.body.insertBefore(entry.diffBlock, anchor || null);
+      entry.body.insertBefore(entry.diffBlock, anchor);
     } else {
       entry.diffBlock.innerHTML = preview.block.innerHTML;
     }
   }
 
-  function appendStructuredToolFields(body, values, serverName, toolName, target, isError = false) {
-    if (!values || typeof values !== 'object') return null;
+  function appendStructuredToolFields(
+    body: HTMLElement,
+    values: ToolPayload,
+    serverName: string,
+    toolName: string,
+    target: ToolRenderTarget,
+    isError = false,
+  ): HTMLElement[] | null {
     const entries = Object.entries(values);
     if (!entries.length) return null;
     const hasDeclaredFieldPolicy = entries.some(([key]) => resolveRenderSpec(serverName, toolName, target, key).kind !== 'plain');
     if (!hasDeclaredFieldPolicy) return null;
-    const inserted = [];
-    const valueClass = target === 'args' ? 'mcp-tool-arg-value-plain' : 'mcp-tool-content';
+    const inserted: HTMLElement[] = [];
+    const valueClass = target === 'request' ? 'mcp-tool-arg-value-plain' : 'mcp-tool-content';
     entries.forEach(([key, value]) => {
       const label = document.createElement('div');
       label.className = 'mcp-tool-arg-label';
@@ -358,7 +514,7 @@ export function bindToolRender(ctx) {
       inserted.push(label);
       const renderSpec = resolveRenderSpec(serverName, toolName, target, key);
       const serializedValue = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-      let rendered;
+      let rendered: HTMLElement;
       if (typeof value === 'string' || renderSpec.kind === 'hljs') {
         rendered = buildRenderedTextElement(serializedValue, renderSpec, valueClass);
       } else {
@@ -373,13 +529,13 @@ export function bindToolRender(ctx) {
     return inserted;
   }
 
-  function appendToolArguments(body, args, serverName = '', toolName = '') {
-    if (!args || typeof args !== 'object' || Object.keys(args).length === 0) return [];
+  function appendToolArguments(body: HTMLElement, args: ToolPayload | null | undefined, serverName = '', toolName = ''): HTMLElement[] {
+    if (!isToolPayload(args) || Object.keys(args).length === 0) return [];
     const structured = appendStructuredToolFields(body, args, serverName, toolName, 'request');
     if (structured) return structured;
     const argsPre = document.createElement('pre');
     argsPre.className = 'mcp-tool-args';
-    const lines = [];
+    const lines: string[] = [];
     Object.entries(args).forEach(([key, value]) => {
       const renderedValue = typeof value === 'string' ? value : JSON.stringify(value);
       lines.push(`  ${key}: ${renderedValue}`);
@@ -389,7 +545,13 @@ export function bindToolRender(ctx) {
     return [argsPre];
   }
 
-  function appendToolResult(body, result, isError, serverName = '', toolName = '') {
+  function appendToolResult(
+    body: HTMLElement,
+    result: unknown,
+    isError: boolean,
+    serverName = '',
+    toolName = '',
+  ): { headerEl: HTMLElement | null; nodes: HTMLElement[] } {
     if (result === undefined || result === null) {
       return { headerEl: null, nodes: [] };
     }
@@ -398,11 +560,20 @@ export function bindToolRender(ctx) {
     resultHeader.textContent = '→';
     body.appendChild(resultHeader);
 
-    if (typeof result === 'object') {
+    if (isToolPayload(result)) {
       const structured = appendStructuredToolFields(body, result, serverName, toolName, 'response', isError);
       if (structured) {
         return { headerEl: resultHeader, nodes: structured };
       }
+      const resultPre = document.createElement('pre');
+      resultPre.className = 'mcp-tool-content';
+      resultPre.textContent = buildObjectText(result);
+      if (isError) resultPre.classList.add('error-text');
+      body.appendChild(resultPre);
+      return { headerEl: resultHeader, nodes: [resultPre] };
+    }
+
+    if (Array.isArray(result)) {
       const resultPre = document.createElement('pre');
       resultPre.className = 'mcp-tool-content';
       resultPre.textContent = buildObjectText(result);
@@ -417,12 +588,12 @@ export function bindToolRender(ctx) {
     return { headerEl: resultHeader, nodes: [rendered] };
   }
 
-  function setToolArguments(entry, args, serverName, toolName) {
+  function setToolArguments(entry: ToolRowEntry, args: ToolPayload | null | undefined, serverName: string, toolName: string): void {
     removeNodes(entry.argsEls);
     entry.argsEls = appendToolArguments(entry.body, args, serverName, toolName);
   }
 
-  function setToolResult(entry, result, isError, serverName, toolName) {
+  function setToolResult(entry: ToolRowEntry, result: unknown, isError: boolean, serverName: string, toolName: string): void {
     removeNode(entry.resultHeaderEl);
     removeNodes(entry.resultEls);
     entry.resultHeaderEl = null;
@@ -432,7 +603,7 @@ export function bindToolRender(ctx) {
     entry.resultEls = rendered.nodes;
   }
 
-  function setToolFooter(entry, durationMs) {
+  function setToolFooter(entry: Pick<ToolRowEntry, 'body' | 'footerEl'>, durationMs: number | null | undefined): void {
     removeNode(entry.footerEl);
     entry.footerEl = null;
     if (durationMs === undefined || durationMs === null) return;
@@ -443,9 +614,10 @@ export function bindToolRender(ctx) {
     entry.footerEl = footer;
   }
 
-  function buildReplayToolRow(entry) {
+  function buildReplayToolRow(entry: ToolEvent): HTMLElement {
     const row = document.createElement('div');
     row.className = 'timeline-row command-result mcp-tool-card';
+    applyTranscriptCardMetadata(row, entry);
     const body = document.createElement('div');
     body.className = 'body';
 
@@ -457,7 +629,8 @@ export function bindToolRender(ctx) {
     renderToolCardHeader(header, toolName, serverName, filePath, entry);
     body.appendChild(header);
 
-    appendToolArguments(body, entry.request ?? entry.arguments, serverName, toolName);
+    const request = asToolPayload(entry.request) ?? asToolPayload(entry.arguments);
+    appendToolArguments(body, request, serverName, toolName);
 
     const diffText = resolveToolCardDiff(toolName, entry);
     if (diffText) {
@@ -469,40 +642,42 @@ export function bindToolRender(ctx) {
       const outputPre = document.createElement('pre');
       outputPre.className = 'mcp-tool-content';
       outputPre.textContent = entry.output;
-      if (entry.is_error && ((entry.response ?? entry.result) === undefined || (entry.response ?? entry.result) === null)) {
+      if (entry.is_error === true && ((entry.response ?? entry.result) === undefined || (entry.response ?? entry.result) === null)) {
         outputPre.classList.add('error-text');
       }
       body.appendChild(outputPre);
     }
 
     appendToolResult(body, entry.response ?? entry.result, entry.is_error === true, serverName, toolName);
-    setToolFooter({ body, footerEl: null }, entry.duration_ms);
+    setToolFooter({ body, footerEl: null }, readNumber(entry.duration_ms));
 
     row.appendChild(body);
     makeCollapsible(row, `tool:${entry.id || entry.item_id || `${entry.server || ''}:${entry.tool || ''}`}`, false);
     return row;
   }
 
-  function renderToolBegin(evt) {
+  function renderToolBegin(evt: ToolEvent): void {
     const toolName = evt.tool || 'tool';
     if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
     const filePath = resolveToolCardPath(toolName, evt);
     const label = toolCardLabel(toolName, serverName, filePath, evt);
-    const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
+    const entry = getToolRow(evt.id, label, getLiveEventParent(evt), evt);
     renderToolCardHeader(entry.header, toolName, serverName, filePath, evt);
-    setToolArguments(entry, evt.request ?? evt.arguments ?? evt.payload ?? {}, serverName, toolName);
+    const request = asToolPayload(evt.request) ?? asToolPayload(evt.arguments) ?? asToolPayload(evt.payload) ?? {};
+    setToolArguments(entry, request, serverName, toolName);
     ensureToolDiffPreview(entry, resolveToolCardDiff(toolName, evt), filePath);
     setLastEventType('tool');
   }
 
-  function renderToolDelta(evt) {
+  function renderToolDelta(evt: ToolEvent): void {
     const toolName = evt.tool || 'tool';
     if (toolName === 'command' || toolName === 'shell') return;
     const entry = getToolRow(
       evt.id,
       toolCardLabel(toolName, evt.server || '', resolveToolCardPath(toolName, evt), evt),
       getLiveEventParent(evt),
+      evt,
     );
     const delta = evt.delta || '';
     if (delta) {
@@ -512,34 +687,37 @@ export function bindToolRender(ctx) {
         entry.body.appendChild(streamPre);
         entry.streamEl = streamPre;
       }
-      entry.streamEl.textContent += delta;
+      entry.streamEl.textContent = `${entry.streamEl.textContent || ''}${delta}`;
     }
     setLastEventType('tool');
     maybeAutoScroll();
   }
 
-  function renderToolEnd(evt) {
+  function renderToolEnd(evt: ToolEvent): void {
     const toolName = evt.tool || 'tool';
     if (toolName === 'command' || toolName === 'shell') return;
     const serverName = evt.server || '';
     const filePath = resolveToolCardPath(toolName, evt);
     const label = toolCardLabel(toolName, serverName, filePath, evt);
-    const entry = getToolRow(evt.id, label, getLiveEventParent(evt));
+    const entry = getToolRow(evt.id, label, getLiveEventParent(evt), evt);
     renderToolCardHeader(entry.header, toolName, serverName, filePath, evt);
 
-    const request = evt.request ?? evt.arguments ?? evt.payload ?? {};
-    if (!entry.argsEls.length && request && typeof request === 'object') {
+    const request = asToolPayload(evt.request) ?? asToolPayload(evt.arguments) ?? asToolPayload(evt.payload) ?? {};
+    if (!entry.argsEls.length && Object.keys(request).length > 0) {
       setToolArguments(entry, request, serverName, toolName);
     }
     const result = evt.response ?? evt.result ?? evt.payload ?? null;
-    const durationMs = evt.duration_ms ?? (result && result.duration_ms) ?? (result && result.durationMs);
-    const isError = evt.is_error || (result && result.isError) || false;
+    const resultRecord = asToolPayload(result);
+    const durationMs = readNumber(evt.duration_ms)
+      ?? readNumber(resultRecord?.duration_ms)
+      ?? readNumber(resultRecord?.durationMs);
+    const isError = evt.is_error === true || resultRecord?.isError === true || false;
     ensureToolDiffPreview(entry, resolveToolCardDiff(toolName, evt), filePath);
     setToolResult(entry, result, isError, serverName, toolName);
     setToolFooter(entry, durationMs);
 
     setLastEventType('tool');
-    const exitCode = result && (result.exit_code ?? result.exitCode);
+    const exitCode = resultRecord?.exit_code ?? resultRecord?.exitCode;
     if (!isError && (exitCode === 0 || exitCode === undefined || exitCode === null)) {
       setStatusDot('success');
     } else {
@@ -547,17 +725,17 @@ export function bindToolRender(ctx) {
     }
   }
 
-  function renderToolInteraction(evt) {
+  function renderToolInteraction(evt: ToolEvent): void {
     const toolName = evt.tool || 'tool';
     const serverName = evt.server || '';
     const filePath = resolveToolCardPath(toolName, evt);
-    const entry = getToolRow(evt.id, toolCardLabel(toolName, serverName, filePath, evt), getLiveEventParent(evt));
+    const entry = getToolRow(evt.id, toolCardLabel(toolName, serverName, filePath, evt), getLiveEventParent(evt), evt);
     renderToolCardHeader(entry.header, toolName, serverName, filePath, evt);
-    const payload = evt.payload || {};
+    const payload = asToolPayload(evt.payload) ?? {};
     const stdin = payload.stdin ? `stdin: ${payload.stdin}` : '';
     const stdout = payload.stdout ? `stdout: ${payload.stdout}` : '';
     const pid = payload.pid ? `pid=${payload.pid}` : '';
-    const parts = [pid, stdin, stdout].filter(Boolean);
+    const parts = [pid, stdin, stdout].filter((value): value is string => Boolean(value));
     if (parts.length) {
       if (!entry.interactionEl) {
         const interactionPre = document.createElement('pre');
@@ -565,7 +743,7 @@ export function bindToolRender(ctx) {
         entry.body.appendChild(interactionPre);
         entry.interactionEl = interactionPre;
       }
-      entry.interactionEl.textContent += `[io] ${parts.join(' ')}\n`;
+      entry.interactionEl.textContent = `${entry.interactionEl.textContent || ''}[io] ${parts.join(' ')}\n`;
     }
     setLastEventType('tool');
   }

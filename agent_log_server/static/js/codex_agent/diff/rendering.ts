@@ -81,7 +81,12 @@ type CreatedRow = {
 };
 
 type DiffRenderingContext = {
-  getDiffRow(id: string, path: string, parentEl?: HTMLElement | null): DiffRowEntry;
+  getDiffRow(
+    id: string,
+    path: string,
+    parentEl?: HTMLElement | null,
+    metadata?: TranscriptCardMetadata | null,
+  ): DiffRowEntry;
   createRow(kind: string, cls?: string): CreatedRow;
   escapeHtml(text: string): string;
   toRelativePath(path: string | null | undefined): string;
@@ -227,8 +232,14 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
     return getDiffRenderState();
   }
 
-  function addDiff(id: string, text: string | null | undefined, path: string, parentEl?: HTMLElement | null): void {
-    const entry = getDiffRow(id, path, parentEl);
+  function addDiff(
+    id: string,
+    text: string | null | undefined,
+    path: string,
+    parentEl?: HTMLElement | null,
+    metadata: TranscriptCardMetadata | null = null,
+  ): void {
+    const entry = getDiffRow(id, path, parentEl, metadata);
     renderDiffBlock(entry.block, text || '', path);
     setLastEventType('diff');
     maybeAutoScroll();
@@ -789,3 +800,4 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
     bindDiffClickHandler,
   };
 }
+import type { TranscriptCardMetadata } from '../transcript_card_metadata.ts';

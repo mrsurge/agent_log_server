@@ -2,7 +2,7 @@ declare const hljs: any;
 
 type AnyRecord = Record<string, any>;
 
-type StructuredViewLine = {
+export type StructuredViewLine = {
   line_no: number;
   content: string;
 };

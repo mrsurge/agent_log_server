@@ -8,7 +8,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Dict, List, NoReturn, Optional, Tuple
+from typing import Annotated, Dict, List, NoReturn, Optional, Tuple, cast
 from contextlib import suppress, asynccontextmanager, redirect_stdout
 import hashlib
 import re
@@ -58,6 +58,22 @@ from agent_log_server.page_routes import PageRoutesDeps, register_page_routes
 from agent_log_server.te2_sync import Te2SyncHelpers
 from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD as _AGENT_PTY_ASK_USER_REQUEST_METHOD,
+)
+from agent_log_server.conversations_rpc_contract import (
+    conversation_rpc_notification_method as _conversation_rpc_notification_method,
+)
+from agent_log_server.settings_ui_rpc_contract import (
+    SETTINGS_RPC_NAMESPACE,
+    UI_RPC_NAMESPACE,
+    settings_rpc_notification_method as _settings_rpc_notification_method,
+    ui_rpc_notification_method as _ui_rpc_notification_method,
+)
+from agent_log_server.transcript_card_metadata import (
+    normalize_live_transcript_event,
+    normalize_transcript_card_record,
+    transcript_card_id,
+    transcript_card_reservation_key,
+    transcript_order_id,
 )
 from agent_log_server.ipc_auth import load_or_create_ipc_secret
 from agent_log_server.te2_mcp_config import (
@@ -148,44 +164,6 @@ _appserver_routes_state = AppserverRoutesState()
 _host_routes: Optional[HostRoutes] = None
 _IPC_NAMESPACE = "/ipc"
 _IPC_SIDS: set[str] = set()
-_CONVERSATIONS_RPC_NOTIFICATION_METHODS: dict[str, str] = {
-    "activity": "conversation.activity",
-    "approval": "conversation.approval.request",
-    "approval_handoff": "conversation.approval.handoff",
-    "assistant_delta": "conversation.message.delta",
-    "assistant_end": "conversation.message.final",
-    "assistant_finalize": "conversation.message.final",
-    "command_result": "conversation.command.result",
-    "context_compacted": "conversation.context.compacted",
-    "diff": "conversation.diff",
-    "diff_declined": "conversation.diff.declined",
-    "draft_update": "conversation.draft.updated",
-    "error": "conversation.error",
-    "mention_insert": "conversation.mention.inserted",
-    "message": "conversation.user.message",
-    "meta_updated": "conversation.meta.updated",
-    "mode": "conversation.mode.changed",
-    "plan": "conversation.plan",
-    "plan_state": "conversation.plan.state",
-    "plan_update": "conversation.plan.update",
-    "preview_updated": "conversation.preview.updated",
-    "reasoning_delta": "conversation.reasoning.delta",
-    "reasoning_end": "conversation.reasoning.final",
-    "reasoning_finalize": "conversation.reasoning.final",
-    "shell_begin": "conversation.command.begin",
-    "shell_delta": "conversation.command.delta",
-    "shell_end": "conversation.command.end",
-    "status": "conversation.status",
-    "subagent_end": "conversation.subagent.end",
-    "subagent_start": "conversation.subagent.start",
-    "thought": "conversation.thought",
-    "toast": "conversation.toast",
-    "token_count": "conversation.token.updated",
-    "tool_begin": "conversation.tool.begin",
-    "tool_delta": "conversation.tool.delta",
-    "tool_end": "conversation.tool.end",
-    "warning": "conversation.warning",
-}
 
 
 def _ipc_error(msg: object) -> ObjectMap:
@@ -209,13 +187,6 @@ def _ipc_refuse(reason: str) -> NoReturn:
     exceptions_mod = getattr(socketio, "exceptions", None)
     exc_type = getattr(exceptions_mod, "ConnectionRefusedError", RuntimeError)
     raise exc_type(reason)
-
-
-def _conversation_rpc_notification_method(evt_type: object) -> str | None:
-    normalized = str(evt_type or "").strip().lower()
-    if not normalized:
-        return None
-    return _CONVERSATIONS_RPC_NOTIFICATION_METHODS.get(normalized)
 
 
 def _iter_pending_approvals(
@@ -481,6 +452,91 @@ _write_codex_te2_mcp_config = _te2_sync_helpers.write_codex_te2_mcp_config
 _sync_codex_te2_mcp_from_app_config = _te2_sync_helpers.sync_codex_te2_mcp_from_app_config
 _transcript_lock = asyncio.Lock()
 _transcript_seen: set[tuple[str, str, str]] = set()
+_transcript_next_order: dict[str, int] = {}
+_transcript_live_order_reservations: dict[str, dict[str, int]] = {}
+
+
+def _scan_next_transcript_order_id(conversation_id: str) -> int:
+    path = _transcript_path(conversation_id)
+    if not path.exists():
+        return 0
+    next_order = 0
+    fallback_order = 0
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record_raw = cast(object, json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record_raw, dict):
+                    continue
+                record = normalize_transcript_card_record(record_raw, conversation_id=conversation_id)
+                order_id = transcript_order_id(record.get("order_id"))
+                if order_id is None:
+                    order_id = fallback_order
+                fallback_order = max(fallback_order + 1, order_id + 1)
+                next_order = max(next_order, order_id + 1)
+    except Exception:
+        return 0
+    return next_order
+
+
+def _load_next_transcript_order_id(conversation_id: str) -> int:
+    cached = _transcript_next_order.get(conversation_id)
+    if isinstance(cached, int) and cached >= 0:
+        return cached
+    meta = _load_conversation_meta(conversation_id)
+    next_order = transcript_order_id(meta.get("next_transcript_order_id")) if isinstance(meta, dict) else None
+    if next_order is None:
+        next_order = _scan_next_transcript_order_id(conversation_id)
+    _transcript_next_order[conversation_id] = next_order
+    if isinstance(meta, dict) and transcript_order_id(meta.get("next_transcript_order_id")) != next_order:
+        meta["next_transcript_order_id"] = next_order
+        _save_conversation_meta(conversation_id, meta)
+    return next_order
+
+
+def _set_next_transcript_order_id(conversation_id: str, next_order: int) -> None:
+    normalized_next = max(0, int(next_order))
+    _transcript_next_order[conversation_id] = normalized_next
+    meta = _load_conversation_meta(conversation_id)
+    if transcript_order_id(meta.get("next_transcript_order_id")) == normalized_next:
+        return
+    meta["next_transcript_order_id"] = normalized_next
+    _save_conversation_meta(conversation_id, meta)
+
+
+def _reserve_live_transcript_order_id(conversation_id: str, event: ObjectMap) -> int | None:
+    reservation_key = transcript_card_reservation_key(event)
+    if not reservation_key:
+        return None
+    conversation_reservations = _transcript_live_order_reservations.setdefault(conversation_id, {})
+    existing_order = conversation_reservations.get(reservation_key)
+    if isinstance(existing_order, int) and existing_order >= 0:
+        return existing_order
+    next_order = _load_next_transcript_order_id(conversation_id)
+    conversation_reservations[reservation_key] = next_order
+    _set_next_transcript_order_id(conversation_id, next_order + 1)
+    return next_order
+
+
+def _pop_reserved_live_transcript_order_id(conversation_id: str, record: ObjectMap) -> int | None:
+    reservation_key = transcript_card_reservation_key(record)
+    if not reservation_key:
+        return None
+    conversation_reservations = _transcript_live_order_reservations.get(conversation_id)
+    if not conversation_reservations:
+        return None
+    reserved_order = conversation_reservations.pop(reservation_key, None)
+    if not conversation_reservations:
+        _transcript_live_order_reservations.pop(conversation_id, None)
+    if isinstance(reserved_order, int) and reserved_order >= 0:
+        return reserved_order
+    return None
 
 
 async def _require_conversation_id(*, create_if_missing: bool = True) -> str:
@@ -807,6 +863,12 @@ def _build_pending_approval_descriptor(
     )
     normalized_render_event["turn_id"] = normalized_render_event.get("turn_id") or turn_id
     normalized_render_event["created_at"] = str(normalized_render_event.get("created_at") or created_at_value)
+    if (
+        resolved_request_method == _AGENT_PTY_ASK_USER_REQUEST_METHOD
+        and "order_id" not in normalized_render_event
+        and "orderId" not in normalized_render_event
+    ):
+        normalized_render_event["order_id"] = -1
     return {
         "request_id": request_id_text,
         "agent": agent_id,
@@ -1004,12 +1066,12 @@ def _build_approval_handoff_event(
 async def _append_approval_handoff_transcript_entry(
     conversation_id: str,
     handoff_event: ObjectMap,
-) -> None:
+) -> ObjectMap | None:
     payload = _coerce_json_object(handoff_event.get("payload"))
     card_id = str(handoff_event.get("card_id") or "").strip() or None
     request_id = handoff_event.get("request_id", handoff_event.get("id"))
     item_id = card_id or request_id
-    await _append_transcript_entry(conversation_id, {
+    return await _append_transcript_entry(conversation_id, {
         "role": "approval",
         "status": handoff_event.get("status"),
         "decision": handoff_event.get("decision"),
@@ -1418,30 +1480,64 @@ async def _write_transcript_entries(conversation_id: str, items: list[ObjectMap]
     path = _transcript_path(conversation_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     async with _transcript_lock:
+        next_order = 0
         with path.open("w", encoding="utf-8") as f:
             for entry in items:
                 if not isinstance(entry, dict):
                     continue
-                record = {"ts": utc_ts(), **entry}
+                record = normalize_transcript_card_record(entry, conversation_id=conversation_id)
+                if not _is_internal_transcript_item(record):
+                    order_id = transcript_order_id(record.get("order_id"))
+                    if order_id is None:
+                        order_id = next_order
+                    next_order = max(next_order, order_id + 1)
+                    record = normalize_transcript_card_record(
+                        record,
+                        conversation_id=conversation_id,
+                        fallback_order_id=order_id,
+                    )
+                record = {"ts": utc_ts(), **record}
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        _transcript_live_order_reservations.pop(conversation_id, None)
+        _set_next_transcript_order_id(conversation_id, next_order)
 
 
-async def _append_transcript_entry(conversation_id: str, entry: ObjectMap) -> None:
+async def _append_transcript_entry(conversation_id: str, entry: ObjectMap) -> ObjectMap | None:
     if not conversation_id:
-        return
+        return None
     path = _transcript_path(conversation_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"ts": utc_ts(), **entry}
     async with _transcript_lock:
-        item_id = entry.get("item_id")
-        role = entry.get("role")
+        record = normalize_transcript_card_record(entry, conversation_id=conversation_id)
+        item_id = record.get("item_id")
+        role = record.get("role")
         if item_id and role:
             key = (conversation_id, str(item_id), str(role))
             if key in _transcript_seen:
                 return
             _transcript_seen.add(key)
+        if not _is_internal_transcript_item(record):
+            current_next_order = _load_next_transcript_order_id(conversation_id)
+            order_id = transcript_order_id(record.get("order_id"))
+            reserved_order = _pop_reserved_live_transcript_order_id(conversation_id, record)
+            if reserved_order is not None and not str(record.get("card_id") or "").strip():
+                reserved_card_id = transcript_card_id(record)
+                if reserved_card_id:
+                    record["card_id"] = reserved_card_id
+            if order_id is None and reserved_order is not None:
+                order_id = reserved_order
+            if order_id is None:
+                order_id = current_next_order
+            record = normalize_transcript_card_record(
+                record,
+                conversation_id=conversation_id,
+                fallback_order_id=order_id,
+            )
+            _set_next_transcript_order_id(conversation_id, max(current_next_order, order_id + 1))
+        record = {"ts": utc_ts(), **record}
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
 
 
 def _ensure_framework_shells_secret() -> None:
@@ -1486,6 +1582,26 @@ async def _broadcast_appserver_ui(event: ObjectMap) -> None:
         return
     evt = dict(event)
     evt_type = str(evt.get("type") or "").strip().lower()
+    conversation_id = str(evt.get("conversation_id") or "").strip()
+    if conversation_id:
+        async with _transcript_lock:
+            if (
+                evt_type == "approval"
+                and str(evt.get("request_method") or evt.get("requestMethod") or "").strip().lower()
+                == _AGENT_PTY_ASK_USER_REQUEST_METHOD
+                and "order_id" not in evt
+                and "orderId" not in evt
+            ):
+                evt["order_id"] = -1
+            evt = normalize_live_transcript_event(evt, conversation_id=conversation_id)
+            if evt_type != "approval" and transcript_order_id(evt.get("order_id")) is None:
+                reserved_order = _reserve_live_transcript_order_id(conversation_id, evt)
+                if reserved_order is not None:
+                    evt = normalize_live_transcript_event(
+                        evt,
+                        conversation_id=conversation_id,
+                        fallback_order_id=reserved_order,
+                    )
     _store_conversation_preview_from_event(evt)
     rpc_method = _conversation_rpc_notification_method(evt_type)
     appserver_targets = get_appserver_event_targets(suppress_rpc_owned=(rpc_method is not None))
@@ -1507,6 +1623,34 @@ async def _broadcast_appserver_ui(event: ObjectMap) -> None:
             )
         except Exception:
             pass
+    settings_rpc_method = _settings_rpc_notification_method(evt_type)
+    if settings_rpc_method:
+        try:
+            await socketio_server.emit(
+                "rpc.notify",
+                {
+                    "jsonrpc": "2.0",
+                    "method": settings_rpc_method,
+                    "params": evt,
+                },
+                namespace=SETTINGS_RPC_NAMESPACE,
+            )
+        except Exception:
+            pass
+    ui_rpc_method = _ui_rpc_notification_method(evt_type)
+    if ui_rpc_method:
+        try:
+            await socketio_server.emit(
+                "rpc.notify",
+                {
+                    "jsonrpc": "2.0",
+                    "method": ui_rpc_method,
+                    "params": evt,
+                },
+                namespace=UI_RPC_NAMESPACE,
+            )
+        except Exception:
+            pass
 
     if evt_type == "status":
         turn_status = str(evt.get("turn_status") or "").strip().lower()
@@ -1520,7 +1664,6 @@ async def _broadcast_appserver_ui(event: ObjectMap) -> None:
                     else {"status": "error", "error": "turn failed"}
                 ),
             )
-
     if _host_routes is not None:
         await _host_routes.maybe_emit_sidebar_edit(evt)
 
@@ -1574,7 +1717,7 @@ async def _emit_command_result_mirror(
         transcript_entry["source"] = source
     if event is not None:
         transcript_entry["event"] = event
-    await _append_transcript_entry(conversation_id, transcript_entry)
+    recorded_entry = await _append_transcript_entry(conversation_id, transcript_entry)
 
     live_event: ObjectMap = {
         "type": "command_result",
@@ -1597,6 +1740,10 @@ async def _emit_command_result_mirror(
         live_event["source"] = source
     if event is not None:
         live_event["event"] = event
+    if isinstance(recorded_entry, dict):
+        for key in ("nid", "card_id", "order_id"):
+            if key in recorded_entry:
+                live_event[key] = recorded_entry[key]
     await _broadcast_appserver_ui(live_event)
 
 

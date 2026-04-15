@@ -15,6 +15,14 @@ import { bindToolRender } from './js/codex_agent/tool_render.ts';
 import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.ts';
 import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.ts';
 import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.ts';
+import {
+  isVisibleTranscriptCardRecord,
+  parseTranscriptOrderId,
+} from './js/codex_agent/transcript_card_metadata.ts';
+import {
+  DEFAULT_TRANSCRIPT_LIMIT,
+  isTranscriptTailRange,
+} from './js/codex_agent/transcript_config.ts';
 import { bindSocketEvents } from './js/codex_agent/events/socket.ts';
 import { bindEventRouter } from './js/codex_agent/events/router.ts';
 import { bindTimelineStickyHeaders } from './js/codex_agent/timeline_sticky_headers.ts';
@@ -40,6 +48,8 @@ import { bindTimelineRows } from './js/codex_agent/timeline/rows.ts';
 import { bindTimelineLiveItems } from './js/codex_agent/timeline/live_items.ts';
 import { bindTimelineReplay } from './js/codex_agent/timeline/replay.ts';
 import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations/client.ts';
+import { createSettingsRpcClient } from './js/codex_agent/rpc/settings/client.ts';
+import { createUiRpcClient } from './js/codex_agent/rpc/ui/client.ts';
 import {
   readRpcTransportEnabledPreference,
   writeRpcTransportEnabledPreference,
@@ -253,6 +263,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let messageCount = 0;
   let tokenCount = 0;
   let contextWindow: number | null = null;
+  let transcriptGeneration = 0;
   let autoScroll = true;
   let _scrollProgrammatic = false; // Guard: prevent programmatic scroll from unpinning
   let normalizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -266,8 +277,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const planItems = new Map();
   let transcriptStart = 0;
   let transcriptEnd = 0;
-  let transcriptLimit = 500;
+  let transcriptLimit = DEFAULT_TRANSCRIPT_LIMIT;
   let transcriptLoading = false;
+  let transcriptHistoryMode = false;
+  let transcriptLiveDirty = false;
   let estimatedRowHeight = 28;
   let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastDraftHash: string | null = null;
@@ -359,7 +372,12 @@ document.addEventListener('DOMContentLoaded', () => {
     bindWidescreenResizer,
   } = widescreenLayoutUi;
 
-  let getSubagentContainer = (_id: string, _name: string, _intent: string): AnyRecord => ({ body: null });
+  let getSubagentContainer = (
+    _id: string,
+    _name: string,
+    _intent: string,
+    _metadata?: AnyRecord | null,
+  ): AnyRecord => ({ body: null });
   let getLiveEventParent = (_evt: AnyRecord | null | undefined): HTMLElement | null => null;
   let finalizeSubagent = (_id: string, _summary: string, _success: boolean): void => {};
   let makeCollapsible = (_row: HTMLElement | null, _cardId: string, _startExpanded: boolean, _options: AnyRecord = {}): void => {};
@@ -679,6 +697,9 @@ document.addEventListener('DOMContentLoaded', () => {
     replayTranscript: (...args) => replayTranscript(...args),
     refreshPlanSurface: (...args) => refreshPlanSurface(...args),
     restorePendingApprovals,
+    resetConversationUiState: () => {
+      resetRuntimeFooterState();
+    },
     setDrawerOpen,
     applyHostUi,
     openSettingsModal,
@@ -738,6 +759,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
       if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
       if (patch.activeRuntimeOptionValues !== undefined) activeRuntimeOptionValues = patch.activeRuntimeOptionValues || {};
+      if (patch.openDropdownEl !== undefined) openDropdownEl = patch.openDropdownEl || null;
     },
     footerRuntimeControlsEl,
     closeDropdownMenu: (...args: unknown[]) => closeDropdownMenu(...args),
@@ -750,6 +772,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderFooterRuntimeControls,
     saveApprovalQuick,
     applyRuntimeMode,
+    resetRuntimeFooterState,
   } = runtimeFooter;
 
   function openPicker(...args: unknown[]) {
@@ -1071,7 +1094,6 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptStart,
       transcriptTotal,
       transcriptEnd,
-      transcriptLimit,
       estimatedRowHeight,
     }),
     setTranscriptState: (patch: AnyRecord) => {
@@ -1221,6 +1243,10 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptTotal,
       transcriptStart,
       transcriptEnd,
+      transcriptLoading,
+      transcriptGeneration,
+      transcriptHistoryMode,
+      transcriptLiveDirty,
       debugEnabled: _dbg,
     }),
     setState: (patch) => {
@@ -1231,6 +1257,10 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.transcriptTotal !== undefined) transcriptTotal = Number(patch.transcriptTotal || 0);
       if (patch.transcriptStart !== undefined) transcriptStart = Number(patch.transcriptStart || 0);
       if (patch.transcriptEnd !== undefined) transcriptEnd = Number(patch.transcriptEnd || 0);
+      if (patch.transcriptLoading !== undefined) transcriptLoading = patch.transcriptLoading === true;
+      if (patch.transcriptGeneration !== undefined) transcriptGeneration = Number(patch.transcriptGeneration || 0);
+      if (patch.transcriptHistoryMode !== undefined) transcriptHistoryMode = patch.transcriptHistoryMode === true;
+      if (patch.transcriptLiveDirty !== undefined) transcriptLiveDirty = patch.transcriptLiveDirty === true;
       if (patch.lastEventType !== undefined) lastEventType = patch.lastEventType as string | null;
       if (patch.contextWindow !== undefined) {
         contextWindow = typeof patch.contextWindow === 'number' && Number.isFinite(patch.contextWindow)
@@ -1383,6 +1413,14 @@ document.addEventListener('DOMContentLoaded', () => {
     sioCall,
     windowRef: window,
   });
+  const settingsRpcClient = createSettingsRpcClient({
+    sioCall,
+    windowRef: window,
+  });
+  const uiRpcClient = createUiRpcClient({
+    sioCall,
+    windowRef: window,
+  });
 
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
     getWsState: () => ({ wsOpen, wsReadyResolve, wsReadyPromise, wsReconnectDelay }),
@@ -1476,6 +1514,7 @@ document.addEventListener('DOMContentLoaded', () => {
       conversationMeta,
       autoScroll,
       rpcTransportEnabled,
+      transcriptHistoryMode,
     }),
     setState: (patch: AnyRecord) => {
       if (patch.initialized !== undefined) initialized = patch.initialized;
@@ -1490,14 +1529,21 @@ document.addEventListener('DOMContentLoaded', () => {
     renderShellBatchResult,
     setStatusDot,
     shellRows,
+    snapTranscriptToLive: async () => {
+      const cid = clientConversationId || conversationMeta?.conversation_id || null;
+      const gen = transcriptGeneration || 0;
+      await resumeLiveTail(cid, gen);
+    },
   });
 
   const {
     fetchTranscriptRange,
     loadOlderTranscript,
+    loadNewerTranscript,
     replayTranscript,
+    resumeLiveTail,
   } = bindTranscriptLoader({
-    getConversationId: () => conversationMeta?.conversation_id || null,
+    getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
     sioCall,
     getTranscriptState: () => ({
       transcriptTotal,
@@ -1505,6 +1551,9 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptEnd,
       transcriptLimit,
       transcriptLoading,
+      transcriptGeneration,
+      transcriptHistoryMode,
+      transcriptLiveDirty,
     }),
     setTranscriptState: (patch: AnyRecord) => {
       if (patch.transcriptTotal !== undefined) transcriptTotal = patch.transcriptTotal;
@@ -1512,8 +1561,13 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.transcriptEnd !== undefined) transcriptEnd = patch.transcriptEnd;
       if (patch.transcriptLimit !== undefined) transcriptLimit = patch.transcriptLimit;
       if (patch.transcriptLoading !== undefined) transcriptLoading = patch.transcriptLoading;
+      if (patch.transcriptGeneration !== undefined) transcriptGeneration = patch.transcriptGeneration;
+      if (patch.transcriptHistoryMode !== undefined) transcriptHistoryMode = patch.transcriptHistoryMode === true;
+      if (patch.transcriptLiveDirty !== undefined) transcriptLiveDirty = patch.transcriptLiveDirty === true;
     },
     renderTranscriptEntries,
+    prepareTranscriptWindow: timelineReplay.prepareTranscriptWindow,
+    timelineEl,
     scrollContainer,
     setScrollProgrammatic: (v: unknown) => { _scrollProgrammatic = Boolean(v); },
     isSemanticShellRibbonEnabled,
@@ -1521,10 +1575,12 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     setLastEventType: (v: string) => { lastEventType = v; },
     refreshPlanSurface,
+    restorePendingApprovals,
   });
 
   const { handleEvent } = bindEventRouter({
     getState: () => ({
+      clientConversationId,
       conversationMeta,
       hostUi,
       activeView,
@@ -1596,6 +1652,84 @@ document.addEventListener('DOMContentLoaded', () => {
     renderPromptFromText,
     applyRuntimeMode,
   });
+
+  function transcriptEventType(evt: AnyRecord | null): string {
+    if (!evt || typeof evt !== 'object') return '';
+    return typeof evt.type === 'string' ? evt.type.trim().toLowerCase() : '';
+  }
+
+  function isTranscriptMutationLiveEvent(evt: AnyRecord | null): boolean {
+    const evtType = transcriptEventType(evt);
+    if (!evtType || !evt || typeof evt !== 'object') {
+      return false;
+    }
+    if (isVisibleTranscriptCardRecord(evt)) {
+      return true;
+    }
+    return evtType === 'status' || evtType === 'token_count' || evtType === 'mode';
+  }
+
+  function isCurrentConversationEvent(evt: AnyRecord | null): boolean {
+    if (!evt || typeof evt !== 'object') {
+      return false;
+    }
+    const eventConversationId = typeof evt.conversation_id === 'string'
+      ? evt.conversation_id
+      : (typeof evt.conversationId === 'string' ? evt.conversationId : '');
+    const activeConversationId = clientConversationId || conversationMeta?.conversation_id || '';
+    return Boolean(eventConversationId && activeConversationId && eventConversationId === activeConversationId);
+  }
+
+  function recordLiveTranscriptOrder(evt: AnyRecord): void {
+    const orderId = parseTranscriptOrderId(evt.order_id ?? evt.orderId);
+    if (orderId === null || orderId < 0) {
+      return;
+    }
+    const nextOrder = orderId + 1;
+    transcriptTotal = Math.max(Number(transcriptTotal) || 0, nextOrder);
+    if (!transcriptHistoryMode) {
+      transcriptEnd = Math.max(Number(transcriptEnd) || 0, nextOrder);
+      transcriptLiveDirty = false;
+      transcriptHistoryMode = !isTranscriptTailRange(transcriptEnd, transcriptTotal);
+    }
+  }
+
+  function trimTranscriptHead(): void {
+    if (!timelineEl) return;
+    const limit = transcriptLimit || DEFAULT_TRANSCRIPT_LIMIT;
+    const rows = timelineEl.querySelectorAll('[data-transcript-order-id]');
+    if (rows.length <= limit) return;
+    const excess = rows.length - limit;
+    for (let i = 0; i < excess; i++) {
+      rows[i].remove();
+    }
+    transcriptStart += excess;
+    updateSpacerHeights();
+  }
+
+  function handleSocketEvent(event: unknown): void {
+    const evt = event && typeof event === 'object' ? event as AnyRecord : null;
+    let isTranscriptMutation = false;
+    if (isCurrentConversationEvent(evt) && isTranscriptMutationLiveEvent(evt)) {
+      isTranscriptMutation = true;
+      recordLiveTranscriptOrder(evt as AnyRecord);
+      if (transcriptHistoryMode) {
+        transcriptLiveDirty = true;
+        if (isVisibleTranscriptCardRecord(evt)) {
+          return;
+        }
+      }
+    }
+    handleEvent(event);
+    if (isTranscriptMutation && !transcriptHistoryMode) {
+      if (autoScroll) {
+        trimTranscriptHead();
+      } else {
+        transcriptHistoryMode = true;
+        transcriptLiveDirty = true;
+      }
+    }
+  }
 
   const {
     initializeBoot,
@@ -1703,6 +1837,8 @@ document.addEventListener('DOMContentLoaded', () => {
       getDiffRenderState,
       setDiffRenderMode,
       sioCall,
+      settingsRpc: settingsRpcClient,
+      uiRpc: uiRpcClient,
       waitForWs,
       fetchAppConfig,
       formatJsonSetting,
@@ -1719,7 +1855,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   bindWidescreenResizer();
   updateWidescreenLayout();
-  initializeBoot(handleEvent);
+  initializeBoot(handleSocketEvent);
   setupSettingsBoot();
   installCodexAgentGlobal();
   bindStartStopButtons();
@@ -1735,7 +1871,12 @@ document.addEventListener('DOMContentLoaded', () => {
       isMobile,
       transcriptLoading,
       transcriptStart,
+      transcriptEnd,
+      transcriptTotal,
+      transcriptHistoryMode,
+      transcriptLiveDirty,
       topSpacerEl,
+      bottomSpacerEl,
       estimatedRowHeight,
       scrollProgrammatic: _scrollProgrammatic,
       autoScroll,
@@ -1780,6 +1921,7 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     isNearBottom,
     loadOlderTranscript,
+    loadNewerTranscript,
     fetchConversation,
     restorePendingApprovals,
     refreshPlanSurface,

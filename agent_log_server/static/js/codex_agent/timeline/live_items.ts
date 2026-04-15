@@ -1,6 +1,10 @@
 import { bindAssistantStream } from '../assistant_stream.ts';
 import { bindDiffRendering } from '../diff/rendering.ts';
 import { bindApprovalUi } from '../approvals/ui.ts';
+import {
+  applyTranscriptCardMetadata,
+  type TranscriptCardMetadata,
+} from '../transcript_card_metadata.ts';
 
 type AnyRecord = Record<string, any>;
 
@@ -125,21 +129,36 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     },
   });
 
-  function appendAssistantDelta(id: string | null | undefined, delta: string, parentEl?: HTMLElement | null) {
+  function appendAssistantDelta(
+    id: string | null | undefined,
+    delta: string,
+    parentEl?: HTMLElement | null,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
     setLastEventType('message');
-    assistantStream.appendAssistantDelta(id, delta, parentEl);
+    assistantStream.appendAssistantDelta(id, delta, parentEl, metadata);
   }
 
-  function finalizeAssistant(id: string | null | undefined, text: string, parentEl?: HTMLElement | null) {
+  function finalizeAssistant(
+    id: string | null | undefined,
+    text: string,
+    parentEl?: HTMLElement | null,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
     setLastEventType('message');
-    assistantStream.finalizeAssistant(id, text, parentEl);
+    assistantStream.finalizeAssistant(id, text, parentEl, metadata);
   }
 
-  function getReasoningRow(id: string | null | undefined, parentEl: HTMLElement | null = null) {
+  function getReasoningRow(
+    id: string | null | undefined,
+    parentEl: HTMLElement | null = null,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
     const key = id || 'reasoning';
     let entry = reasoningRows.get(key);
     if (!entry) {
       const { row, body } = createRow('reasoning', 'reasoning', undefined, parentEl);
+      applyTranscriptCardMetadata(row, metadata);
       const pre = document.createElement('pre');
       pre.textContent = '';
       body.append(pre);
@@ -148,29 +167,46 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     } else if (parentEl && entry.row && entry.row.parentElement !== parentEl) {
       parentEl.appendChild(entry.row);
     }
+    applyTranscriptCardMetadata(entry.row, metadata);
     return entry;
   }
 
-  function appendReasoningDelta(id: string | null | undefined, delta: string, parentEl: HTMLElement | null = null) {
+  function appendReasoningDelta(
+    id: string | null | undefined,
+    delta: string,
+    parentEl: HTMLElement | null = null,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
     if (delta === undefined || delta === null) return;
-    const entry = getReasoningRow(id, parentEl);
+    const entry = getReasoningRow(id, parentEl, metadata);
     entry.pre.textContent += delta;
     setLastEventType('reasoning');
     maybeAutoScroll();
   }
 
-  function finalizeReasoning(id: string | null | undefined, text: string, parentEl: HTMLElement | null = null) {
-    const entry = getReasoningRow(id, parentEl);
+  function finalizeReasoning(
+    id: string | null | undefined,
+    text: string,
+    parentEl: HTMLElement | null = null,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
+    const entry = getReasoningRow(id, parentEl, metadata);
     if (text) entry.pre.textContent = text;
     setLastEventType('reasoning');
     maybeAutoScroll();
   }
 
-  function getDiffRow(id: string | null | undefined, path: string, parentEl?: HTMLElement | null) {
+  function getDiffRow(
+    id: string | null | undefined,
+    path: string,
+    parentEl?: HTMLElement | null,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
     const key = id || 'diff';
     let entry = diffRows.get(key);
     if (!entry) {
       const { row, body } = buildRow('diff', 'diff');
+      applyTranscriptCardMetadata(row, metadata);
       const pathLabel = document.createElement('div');
       pathLabel.className = 'diff-path-label command-ribbon';
       if (path) {
@@ -198,6 +234,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
       entry = { block, row };
       diffRows.set(key, entry);
     }
+    applyTranscriptCardMetadata(entry.row, metadata);
     return entry;
   }
 
@@ -215,8 +252,14 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     postTe2OpenRequest,
   });
 
-  function addDiff(id: string, text: string, path: string, parentEl?: HTMLElement | null) {
-    return diffRendering.addDiff(id, text, path, parentEl);
+  function addDiff(
+    id: string,
+    text: string,
+    path: string,
+    parentEl?: HTMLElement | null,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
+    return diffRendering.addDiff(id, text, path, parentEl, metadata);
   }
 
   function addDeclinedDiff(id: string, text: string, path: string) {
@@ -239,7 +282,11 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     return diffRendering.setDiffRenderMode(mode);
   }
 
-  function getAgentBlockRow(blockId: string | null | undefined, label: string) {
+  function getAgentBlockRow(
+    blockId: string | null | undefined,
+    label: string,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
     const key = blockId || `agent-block:${label || 'agent'}`;
     let entry = agentBlockRows.get(key);
     if (!entry) {
@@ -247,6 +294,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
       const row = document.createElement('div');
       row.className = 'timeline-row command-result terminal-card';
       row.dataset.agentBlockId = key;
+      applyTranscriptCardMetadata(row, metadata);
 
       const body = document.createElement('div');
       body.className = 'body';
@@ -264,6 +312,8 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
       insertRow(row);
       entry = { row, cmdRibbon, termEl, text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
       agentBlockRows.set(key, entry);
+    } else {
+      applyTranscriptCardMetadata(entry.row, metadata);
     }
     return entry;
   }
@@ -273,7 +323,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     const blockId = evt.block_id || block.block_id || evt.blockId || 'agent';
     const cmd = block.cmd || '';
     const label = cmd ? `$ ${cmd}` : 'agent pty';
-    const entry = getAgentBlockRow(blockId, label);
+    const entry = getAgentBlockRow(blockId, label, evt);
     entry.cmdRibbon.textContent = cmd ? `$ ${cmd}` : '';
     entry.text = '';
     entry.screenRows = null;
@@ -289,7 +339,8 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
 
   function renderAgentBlockDelta(evt: AnyRecord) {
     const blockId = evt.block_id || evt.blockId || 'agent';
-    const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
+    const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty', evt);
+    applyTranscriptCardMetadata(entry.row, evt);
     if (entry.renderMode === 'screen' || entry.hasRawStream) return;
     const delta = evt.delta || '';
     if (!delta) return;
@@ -302,7 +353,8 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
   function renderScreenDelta(evt: AnyRecord) {
     const blockId = evt.block_id || evt.blockId;
     if (!blockId) return;
-    const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty');
+    const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty', evt);
+    applyTranscriptCardMetadata(entry.row, evt);
     if (entry.renderMode !== 'screen') return;
     if (entry.renderMode !== 'screen') {
       entry.renderMode = 'screen';
@@ -334,6 +386,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     const blockId = evt.block_id || block.block_id || evt.blockId || 'agent';
     const entry = agentBlockRows.get(blockId);
     if (!entry) return;
+    applyTranscriptCardMetadata(entry.row, evt);
     const exitCode = block.exit_code ?? block.exitCode;
     if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
       const footer = document.createElement('div');
@@ -353,9 +406,14 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     }
   }
 
-  function renderPlanCard(steps: AnyRecord[], parentEl: HTMLElement | null = null) {
+  function renderPlanCard(
+    steps: AnyRecord[],
+    parentEl: HTMLElement | null = null,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
     if (!steps || !steps.length) return;
     const { row, body } = createRow('plan', 'plan', undefined, parentEl);
+    applyTranscriptCardMetadata(row, metadata);
 
     const header = document.createElement('div');
     header.className = 'plan-card-header';

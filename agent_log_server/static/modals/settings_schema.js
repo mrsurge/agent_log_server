@@ -32,6 +32,14 @@ window.CodexAgentModules.push((ctx) => {
     return sioCall;
   }
 
+  function requireSettingsRpc() {
+    const client = ctx.helpers?.settingsRpc;
+    if (!client || typeof client !== 'object') {
+      throw new Error('Settings RPC helper unavailable');
+    }
+    return client;
+  }
+
   function dynamicSourceErrorMessage(err) {
     if (typeof err === 'string' && err) return err;
     if (err && typeof err === 'object') {
@@ -90,20 +98,22 @@ window.CodexAgentModules.push((ctx) => {
   }
 
   async function fetchDynamicSource(sourceUrl, options = {}) {
-    const sioCall = requireSioCall();
-    const pathname = sourcePathname(sourceUrl);
+    const settingsRpc = requireSettingsRpc();
     const request = async () => {
       const extensionIdForSessions = extensionIdFromApiPath(sourceUrl, 'sessions');
       if (extensionIdForSessions) {
-        return unwrapDynamicSourceResult(await sioCall('get_sessions', { extension_id: extensionIdForSessions }));
+        return unwrapDynamicSourceResult(await settingsRpc.listExtensionSessions({
+          extensionId: extensionIdForSessions,
+          cwd: options.cwd || null,
+        }));
       }
       const extensionIdForModels = extensionIdFromApiPath(sourceUrl, 'models');
       if (extensionIdForModels) {
-        return unwrapDynamicSourceResult(await sioCall('get_extension_models', { extension_id: extensionIdForModels }));
+        return unwrapDynamicSourceResult(await settingsRpc.listExtensionModels({ extensionId: extensionIdForModels }));
       }
       if (isRuntimeOptionsSource(sourceUrl)) {
-        return unwrapDynamicSourceResult(await sioCall('get_runtime_options', {
-          conversation_id: options.conversationId || null,
+        return unwrapDynamicSourceResult(await settingsRpc.getRuntimeOptions({
+          conversationId: options.conversationId || null,
           agent: options.agent || null,
         }));
       }
@@ -207,7 +217,7 @@ window.CodexAgentModules.push((ctx) => {
     
     try {
       console.log(`[schema] loading schema for ${extensionId} sioCall=${!!ctx.helpers?.sioCall}`);
-      const schema = await requireSioCall()('get_extension_settings_schema', { extension_id: extensionId });
+      const schema = await requireSettingsRpc().getExtensionSettingsSchema(extensionId);
       console.log(`[schema] loaded schema for ${extensionId}`, schema ? Object.keys(schema) : null);
       if (schema && schema.cache !== 'none') {
         schemaCache[extensionId] = schema;

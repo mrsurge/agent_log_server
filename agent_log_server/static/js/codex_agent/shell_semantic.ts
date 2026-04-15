@@ -1,6 +1,94 @@
-declare const hljs: any;
+interface HighlightJsRuntime {
+  getLanguage?: (language: string) => boolean;
+  highlight: (text: string, options: { language: string; ignoreIllegals: boolean }) => { value: string };
+  highlightElement: (element: Element) => void;
+}
 
-export function bindShellSemantic(ctx) {
+declare const hljs: HighlightJsRuntime | undefined;
+
+interface TreeSitterNode {
+  startIndex: number;
+  endIndex: number;
+}
+
+interface TreeSitterTree {
+  rootNode: TreeSitterNode;
+}
+
+interface TreeSitterLanguage {}
+
+interface TreeSitterParserInstance {
+  setLanguage: (language: TreeSitterLanguage) => void;
+  parse: (text: string) => TreeSitterTree;
+}
+
+interface TreeSitterParserStatic {
+  new (): TreeSitterParserInstance;
+  init: (options: { locateFile: (file: string) => string }) => Promise<void>;
+}
+
+interface TreeSitterLanguageStatic {
+  load: (path: string) => Promise<TreeSitterLanguage>;
+}
+
+interface TreeSitterQueryInstance {
+  captures: (node: TreeSitterNode) => TreeSitterCapture[];
+}
+
+interface TreeSitterQueryStatic {
+  new (language: TreeSitterLanguage, source: string): TreeSitterQueryInstance;
+}
+
+interface TreeSitterCapture {
+  name?: string;
+  capture?: string;
+  node?: TreeSitterNode;
+  0?: string;
+  1?: TreeSitterNode;
+}
+
+interface TreeSitterModule {
+  Parser?: TreeSitterParserStatic;
+  Language?: TreeSitterLanguageStatic;
+  Query?: TreeSitterQueryStatic;
+}
+
+type QuotedSegment =
+  | { type: 'text'; text: string }
+  | { type: 'quote'; quote: string; text: string };
+
+type ParsedStructuredScript = {
+  wrapperPrefix: string;
+  prefix: string;
+  body: string;
+  terminator: string;
+  tail: string;
+  language: string;
+};
+
+type HighlightSpan = {
+  start: number;
+  end: number;
+  cls: string;
+  len: number;
+};
+
+type ShellSemanticContext = {
+  getEnabled: () => boolean;
+  setEnabled: (enabled: boolean) => void;
+  getQuoteParsingEnabled: () => boolean;
+  setQuoteParsingEnabled: (enabled: boolean) => void;
+  getCheckboxEl?: () => HTMLInputElement | null;
+  escapeHtml: (text: string) => string;
+};
+
+const SCRIPT_LANGUAGE_BY_INTERPRETER: Record<string, string> = {
+  python: 'python',
+  python3: 'python',
+  node: 'javascript',
+};
+
+export function bindShellSemantic(ctx: ShellSemanticContext) {
   const {
     getEnabled,
     setEnabled,
@@ -11,72 +99,73 @@ export function bindShellSemantic(ctx) {
   } = ctx;
 
   let tsRibbonReady = false;
-  let tsRibbonInitPromise = null;
-  let tsRibbonParser = null;
-  let tsRibbonLang = null;
-  let tsRibbonQuery = null;
-  const tsRibbonCache = new Map();
+  let tsRibbonInitPromise: Promise<boolean> | null = null;
+  let tsRibbonParser: TreeSitterParserInstance | null = null;
+  let tsRibbonLang: TreeSitterLanguage | null = null;
+  let tsRibbonQuery: TreeSitterQueryInstance | null = null;
+  const tsRibbonCache = new Map<string, string>();
   const TS_RIBBON_CACHE_MAX = 500;
 
-  function isSemanticShellRibbonEnabled() {
+  function isSemanticShellRibbonEnabled(): boolean {
     return getEnabled() === true;
   }
 
-  function setSemanticShellRibbonEnabled(enabled) {
+  function setSemanticShellRibbonEnabled(enabled: unknown): void {
     const next = enabled === true;
     setEnabled(next);
     const el = getCheckboxEl?.();
     if (el) el.checked = next;
   }
 
-  function isSemanticShellQuoteParsingEnabled() {
+  function isSemanticShellQuoteParsingEnabled(): boolean {
     return getQuoteParsingEnabled() === true;
   }
 
-  function setSemanticShellQuoteParsingEnabled(enabled) {
+  function setSemanticShellQuoteParsingEnabled(enabled: unknown): void {
     setQuoteParsingEnabled(enabled === true);
   }
 
-  function normalizeCaptureName(name) {
+  function normalizeCaptureName(name: unknown): string {
     const raw = String(name || '').replace(/^@/, '');
     return raw.replace(/[^\w.-]+/g, '-').replace(/\./g, '-');
   }
 
-  function maybeCachePut(key, value) {
+  function maybeCachePut(key: string, value: string): void {
     if (!key) return;
     if (tsRibbonCache.has(key)) tsRibbonCache.delete(key);
     tsRibbonCache.set(key, value);
     while (tsRibbonCache.size > TS_RIBBON_CACHE_MAX) {
       const first = tsRibbonCache.keys().next().value;
+      if (typeof first !== 'string') break;
       tsRibbonCache.delete(first);
     }
   }
 
-  function utf8Len(cp) {
+  function utf8Len(cp: number): number {
     if (cp <= 0x7F) return 1;
     if (cp <= 0x7FF) return 2;
     if (cp <= 0xFFFF) return 3;
     return 4;
   }
 
-  function buildJsIndexToUtf8ByteOffsets(text) {
+  function buildJsIndexToUtf8ByteOffsets(text: unknown): number[] {
     const s = String(text || '');
-    const offsets = new Array(s.length + 1);
+    const offsets: number[] = new Array(s.length + 1);
     let byte = 0;
     for (let i = 0; i < s.length; ) {
       offsets[i] = byte;
-      const cp = s.codePointAt(i);
+      const cp = s.codePointAt(i) ?? 0;
       byte += utf8Len(cp);
       i += cp > 0xFFFF ? 2 : 1;
     }
     offsets[s.length] = byte;
-    for (let i = 1; i < offsets.length; i++) {
+    for (let i = 1; i < offsets.length; i += 1) {
       if (offsets[i] == null) offsets[i] = offsets[i - 1];
     }
     return offsets;
   }
 
-  function utf8ByteToJsIndex(offsets, byteIndex) {
+  function utf8ByteToJsIndex(offsets: number[], byteIndex: unknown): number {
     const arr = offsets;
     let lo = 0;
     let hi = arr.length - 1;
@@ -89,12 +178,12 @@ export function bindShellSemantic(ctx) {
     return lo;
   }
 
-  async function ensureTreeSitterRibbonReady() {
+  async function ensureTreeSitterRibbonReady(): Promise<boolean> {
     if (!isSemanticShellRibbonEnabled()) return false;
     if (tsRibbonReady) return true;
     if (tsRibbonInitPromise) return tsRibbonInitPromise;
     tsRibbonInitPromise = (async () => {
-      const loadTreeSitterModule = new Function("return import('/static/vendor/web-tree-sitter/web-tree-sitter.js')");
+      const loadTreeSitterModule = new Function("return import('/static/vendor/web-tree-sitter/web-tree-sitter.js')") as () => Promise<TreeSitterModule>;
       const mod = await loadTreeSitterModule();
       const Parser = mod?.Parser;
       const Language = mod?.Language;
@@ -103,7 +192,7 @@ export function bindShellSemantic(ctx) {
         throw new Error('web-tree-sitter module did not export Parser/Language/Query');
       }
       await Parser.init({
-        locateFile: (file) => `/static/vendor/web-tree-sitter/${file}`,
+        locateFile: (file: string) => `/static/vendor/web-tree-sitter/${file}`,
       });
       tsRibbonLang = await Language.load('/static/vendor/tree-sitter-bash/tree-sitter-bash.wasm');
       tsRibbonParser = new Parser();
@@ -123,13 +212,13 @@ export function bindShellSemantic(ctx) {
     return tsRibbonInitPromise;
   }
 
-  function splitQuotedSegments(text) {
+  function splitQuotedSegments(text: unknown): QuotedSegment[] {
     const s = String(text || '');
-    const segs = [];
+    const segs: QuotedSegment[] = [];
     let buf = '';
     let i = 0;
 
-    function pushText() {
+    function pushText(): void {
       if (buf) {
         segs.push({ type: 'text', text: buf });
         buf = '';
@@ -180,36 +269,38 @@ export function bindShellSemantic(ctx) {
     return segs;
   }
 
-  function treeSitterHighlightHtml(text) {
-    if (!tsRibbonReady || !tsRibbonParser || !tsRibbonQuery) {
-      return escapeHtml(text || '');
-    }
+  function treeSitterHighlightHtml(text: unknown): string {
     const input = String(text || '');
+    if (!tsRibbonReady || !tsRibbonParser || !tsRibbonQuery) {
+      return escapeHtml(input);
+    }
     if (!input.trim()) return escapeHtml(input);
     const cached = tsRibbonCache.get(input);
     if (cached) return cached;
 
-    let tree;
+    let tree: TreeSitterTree;
     try {
       tree = tsRibbonParser.parse(input);
-    } catch (_) {
+    } catch {
       const escaped = escapeHtml(input);
       maybeCachePut(input, escaped);
       return escaped;
     }
 
-    let captures = [];
+    let captures: TreeSitterCapture[] = [];
     try {
       captures = tsRibbonQuery.captures(tree.rootNode) || [];
-    } catch (_) {
+    } catch {
       captures = [];
     }
 
     const offsets = buildJsIndexToUtf8ByteOffsets(input);
-    const spans = [];
+    const spans: HighlightSpan[] = [];
     for (const cap of captures) {
-      const name = cap && (cap.name || cap.capture || cap[0]);
-      const node = cap && (cap.node || cap[1]);
+      const name = typeof cap.name === 'string'
+        ? cap.name
+        : (typeof cap.capture === 'string' ? cap.capture : (typeof cap[0] === 'string' ? cap[0] : ''));
+      const node = cap.node || cap[1] || null;
       const startB = node?.startIndex;
       const endB = node?.endIndex;
       if (startB == null || endB == null) continue;
@@ -225,7 +316,7 @@ export function bindShellSemantic(ctx) {
     }
 
     spans.sort((a, b) => (a.start - b.start) || (b.len - a.len));
-    const picked = [];
+    const picked: HighlightSpan[] = [];
     let lastEnd = 0;
     for (const span of spans) {
       if (span.start < lastEnd) continue;
@@ -245,13 +336,7 @@ export function bindShellSemantic(ctx) {
     return out;
   }
 
-  const SCRIPT_LANGUAGE_BY_INTERPRETER = {
-    python: 'python',
-    python3: 'python',
-    node: 'javascript',
-  };
-
-  function stripOuterMatchingQuotes(text) {
+  function stripOuterMatchingQuotes(text: unknown): string {
     const value = String(text || '').trim();
     if (value.length < 2) return value;
     const first = value[0];
@@ -262,7 +347,7 @@ export function bindShellSemantic(ctx) {
     return value;
   }
 
-  function unwrapShellWrappedCommand(command) {
+  function unwrapShellWrappedCommand(command: unknown): { wrapperPrefix: string; innerCommand: string } {
     const normalized = String(command || '').replace(/\r\n?/g, '\n').trim();
     const match = normalized.match(/^\s*((?:\/bin\/)?(?:sh|bash)\s+-(?:c|lc))\s+([\s\S]+)$/);
     if (!match) {
@@ -274,14 +359,14 @@ export function bindShellSemantic(ctx) {
     };
   }
 
-  function tokenizeShellWords(text) {
+  function tokenizeShellWords(text: unknown): string[] | null {
     const input = String(text || '');
-    const tokens = [];
+    const tokens: string[] = [];
     let buf = '';
     let quote = '';
     let idx = 0;
 
-    function pushToken() {
+    function pushToken(): void {
       if (!buf) return;
       tokens.push(buf);
       buf = '';
@@ -338,7 +423,7 @@ export function bindShellSemantic(ctx) {
     return tokens;
   }
 
-  function parseInterpreterHeredocCommand(command) {
+  function parseInterpreterHeredocCommand(command: unknown): ParsedStructuredScript | null {
     const { wrapperPrefix, innerCommand } = unwrapShellWrappedCommand(command);
     if (!innerCommand.includes('\n')) return null;
     const lines = innerCommand.split('\n');
@@ -373,7 +458,7 @@ export function bindShellSemantic(ctx) {
     };
   }
 
-  function parseInterpreterInlineCommand(command) {
+  function parseInterpreterInlineCommand(command: unknown): ParsedStructuredScript | null {
     const { wrapperPrefix, innerCommand } = unwrapShellWrappedCommand(command);
     const tokens = tokenizeShellWords(innerCommand);
     if (!Array.isArray(tokens) || tokens.length < 3) return null;
@@ -381,17 +466,14 @@ export function bindShellSemantic(ctx) {
     const language = SCRIPT_LANGUAGE_BY_INTERPRETER[interpreter] || '';
     if (!language) return null;
     let flagIndex = -1;
-    let flag = '';
     for (let idx = 1; idx < tokens.length - 1; idx += 1) {
       const token = String(tokens[idx] || '').trim();
       if ((interpreter === 'python' || interpreter === 'python3') && token === '-c') {
         flagIndex = idx;
-        flag = token;
         break;
       }
       if (interpreter === 'node' && (token === '-e' || token === '--eval')) {
         flagIndex = idx;
-        flag = token;
         break;
       }
     }
@@ -408,7 +490,7 @@ export function bindShellSemantic(ctx) {
     };
   }
 
-  function highlightStructuredScriptBodyHtml(body, language) {
+  function highlightStructuredScriptBodyHtml(body: unknown, language: string): string {
     const text = String(body || '');
     if (!text) return '';
     if (typeof hljs === 'undefined' || !hljs.getLanguage?.(language)) {
@@ -416,15 +498,15 @@ export function bindShellSemantic(ctx) {
     }
     try {
       return hljs.highlight(text, { language, ignoreIllegals: true }).value;
-    } catch (_) {
+    } catch {
       return escapeHtml(text);
     }
   }
 
-  function renderStructuredScriptCommandHtml(command) {
+  function renderStructuredScriptCommandHtml(command: unknown): string | null {
     const parsed = parseInterpreterHeredocCommand(command) || parseInterpreterInlineCommand(command);
     if (!parsed) return null;
-    const parts = [];
+    const parts: string[] = [];
     if (parsed.wrapperPrefix) parts.push(treeSitterHighlightHtml(parsed.wrapperPrefix));
     parts.push(treeSitterHighlightHtml(parsed.prefix));
     parts.push(highlightStructuredScriptBodyHtml(parsed.body, parsed.language));
@@ -433,7 +515,7 @@ export function bindShellSemantic(ctx) {
     return parts.join('\n');
   }
 
-  function renderShellCmdRibbon(el, cmd) {
+  function renderShellCmdRibbon(el: HTMLElement | null | undefined, cmd: unknown): void {
     if (!el) return;
     const command = String(cmd || '');
 
@@ -442,21 +524,18 @@ export function bindShellSemantic(ctx) {
 
     if (isSemanticShellRibbonEnabled()) {
       if (!tsRibbonReady && !tsRibbonInitPromise) {
-        ensureTreeSitterRibbonReady();
+        void ensureTreeSitterRibbonReady();
       }
       if (tsRibbonReady) {
         try {
           const structuredHtml = renderStructuredScriptCommandHtml(command);
-          let html = structuredHtml;
-          if (typeof html !== 'string') {
-            html = '';
-          }
+          let html = typeof structuredHtml === 'string' ? structuredHtml : '';
           if (!html && isSemanticShellQuoteParsingEnabled()) {
             const segs = splitQuotedSegments(command);
             for (const seg of segs) {
               if (seg.type === 'text') {
                 html += treeSitterHighlightHtml(seg.text);
-              } else if (seg.type === 'quote') {
+              } else {
                 const q = escapeHtml(seg.quote);
                 html += `<span class="ts-quote">${q}</span>`;
                 html += `<span class="ts-quoted-inner">${treeSitterHighlightHtml(seg.text)}</span>`;
@@ -470,7 +549,7 @@ export function bindShellSemantic(ctx) {
           if (savedTwisty) el.appendChild(savedTwisty);
           if (savedToggle) el.appendChild(savedToggle);
           return;
-        } catch (_) {
+        } catch {
           // Fall through to hljs rendering.
         }
       }
@@ -493,7 +572,7 @@ export function bindShellSemantic(ctx) {
       codeEl.textContent = command;
       el.append(prefix, codeEl);
       hljs.highlightElement(codeEl);
-    } catch (_) {
+    } catch {
       el.textContent = `$ ${command}`;
     }
 

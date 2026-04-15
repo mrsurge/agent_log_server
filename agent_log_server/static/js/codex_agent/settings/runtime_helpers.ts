@@ -1,4 +1,4 @@
-export function formatJsonSetting(value) {
+export function formatJsonSetting(value: unknown): string {
   if (value == null || value === '') return '';
   if (typeof value === 'string') return value;
   try {
@@ -8,7 +8,7 @@ export function formatJsonSetting(value) {
   }
 }
 
-export function parseJsonSetting(raw, label = 'JSON value') {
+export function parseJsonSetting(raw: unknown, label = 'JSON value'): unknown {
   const text = typeof raw === 'string' ? raw.trim() : '';
   if (!text) return null;
   try {

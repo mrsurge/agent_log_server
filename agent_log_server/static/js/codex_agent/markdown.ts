@@ -5,7 +5,81 @@ import { createUiRpcClientPlaceholder } from './rpc/ui/client.ts';
 const _uiRpcClientPlaceholder = createUiRpcClientPlaceholder;
 void _uiRpcClientPlaceholder;
 
-declare const hljs: any;
+interface HighlightJsResult {
+  value: string;
+  language?: string;
+}
+
+interface HighlightJsRuntime {
+  highlightElement: (element: Element) => void;
+  getLanguage: (language: string) => boolean;
+  highlight: (source: string, options: { language: string; ignoreIllegals: boolean }) => HighlightJsResult;
+  highlightAuto: (source: string) => HighlightJsResult;
+}
+
+declare const hljs: HighlightJsRuntime | undefined;
+
+interface StreamingMarkdownRuntime {
+  default_renderer: (container: HTMLElement) => unknown;
+  parser: (renderer: unknown) => unknown;
+  parser_write: (parser: unknown, text: string) => void;
+  parser_end: (parser: unknown) => void;
+}
+
+interface MarkdownItOptions {
+  html: boolean;
+  linkify: boolean;
+  typographer: boolean;
+  breaks: boolean;
+  highlight: (source: string, lang: string) => string;
+}
+
+interface MarkdownDelimiter {
+  marker: number;
+  length: number;
+  token: number;
+  end: number;
+  open: boolean;
+  close: boolean;
+}
+
+interface MarkdownToken {
+  type: string;
+  tag: string;
+  nesting: number;
+  markup: string;
+  content: string;
+}
+
+interface MarkdownTokenMeta {
+  delimiters?: MarkdownDelimiter[];
+}
+
+interface MarkdownScannedDelims {
+  length: number;
+  can_open: boolean;
+  can_close: boolean;
+}
+
+interface MarkdownInlineState {
+  pos: number;
+  src: string;
+  tokens: MarkdownToken[];
+  delimiters: MarkdownDelimiter[];
+  tokens_meta?: Array<MarkdownTokenMeta | null | undefined>;
+  scanDelims: (start: number, canSplitWord: boolean) => MarkdownScannedDelims;
+  push: (type: string, tag: string, nesting: number) => MarkdownToken;
+}
+
+interface MarkdownRenderer {
+  render: (text: string) => string;
+  inline: {
+    ruler: { at: (name: string, fn: (state: MarkdownInlineState, silent: boolean) => boolean) => void };
+    ruler2: { at: (name: string, fn: (state: MarkdownInlineState) => void) => void };
+  };
+}
+
+type MarkdownItFactory = (options: MarkdownItOptions) => MarkdownRenderer;
 
 type MarkdownFileTarget = {
   path: string;
@@ -23,16 +97,20 @@ type MarkdownLinkHandlerInput = Partial<{
   openExternalUrl: MarkdownLinkHandlers['openExternalUrl'];
 }>;
 
+type CopyButtonState = 'idle' | 'copied' | 'failed';
+
 type CopyButton = HTMLButtonElement & {
   _copyResetTimer?: ReturnType<typeof setTimeout> | null;
 };
+
+const streamingMarkdown = smd as unknown as StreamingMarkdownRuntime;
 
 let markdownLinkHandlers: MarkdownLinkHandlers = {
   openFilePath: null,
   openExternalUrl: null,
 };
 
-function parseLineColumnHash(hash) {
+function parseLineColumnHash(hash: unknown): { line: number; column: number | null } | null {
   const text = typeof hash === 'string' ? hash.trim() : '';
   const match = text.match(/^#L(\d+)(?:C(\d+))?$/i);
   if (!match) return null;
@@ -41,11 +119,11 @@ function parseLineColumnHash(hash) {
   if (!Number.isFinite(line) || line < 1) return null;
   return {
     line,
-    column: Number.isFinite(column) && column >= 1 ? column : null,
+    column: column !== null && Number.isFinite(column) && column >= 1 ? column : null,
   };
 }
 
-function parseLineColumnSuffix(pathText) {
+function parseLineColumnSuffix(pathText: unknown): MarkdownFileTarget | null {
   const text = typeof pathText === 'string' ? pathText.trim() : '';
   const match = text.match(/^(.*?):(\d+)(?::(\d+))?$/);
   if (!match) return null;
@@ -55,23 +133,23 @@ function parseLineColumnSuffix(pathText) {
   return {
     path: match[1] || '',
     line,
-    column: Number.isFinite(column) && column >= 1 ? column : null,
+    column: column !== null && Number.isFinite(column) && column >= 1 ? column : null,
   };
 }
 
-function normalizeMarkdownHref(rawHref) {
+function normalizeMarkdownHref(rawHref: unknown): string {
   return typeof rawHref === 'string' ? rawHref.trim() : '';
 }
 
-function isExternalHttpUrl(rawHref) {
+function isExternalHttpUrl(rawHref: string): boolean {
   return /^https?:\/\//i.test(rawHref);
 }
 
-function isFileUrl(rawHref) {
+function isFileUrl(rawHref: string): boolean {
   return /^file:\/\//i.test(rawHref);
 }
 
-function decodeFileUrlPath(rawHref) {
+function decodeFileUrlPath(rawHref: string): string {
   try {
     const url = new URL(rawHref);
     return decodeURIComponent(url.pathname || '');
@@ -80,7 +158,7 @@ function decodeFileUrlPath(rawHref) {
   }
 }
 
-function decodePathLikeHref(rawHref) {
+function decodePathLikeHref(rawHref: string): string {
   try {
     return decodeURIComponent(rawHref);
   } catch {
@@ -88,18 +166,21 @@ function decodePathLikeHref(rawHref) {
   }
 }
 
-function normalizeParsedFileTarget(path, line = null, column = null) {
+function normalizeParsedFileTarget(
+  path: unknown,
+  line: number | null = null,
+  column: number | null = null,
+): MarkdownFileTarget | null {
   const normalizedPath = typeof path === 'string' ? path.trim() : '';
   if (!normalizedPath) return null;
   return {
     path: normalizedPath,
-    line: Number.isFinite(line) && line >= 1 ? line : null,
-    column: Number.isFinite(column) && column >= 1 ? column : null,
+    line: line !== null && Number.isFinite(line) && line >= 1 ? line : null,
+    column: column !== null && Number.isFinite(column) && column >= 1 ? column : null,
   };
 }
 
-function parseFileTargetFromAnchor(anchor, rawHref) {
-  if (!(anchor instanceof HTMLAnchorElement)) return null;
+function parseFileTargetFromAnchor(anchor: HTMLAnchorElement, rawHref: string): MarkdownFileTarget | null {
   const decodedHref = decodePathLikeHref(rawHref);
   if (isFileUrl(decodedHref)) {
     const hashParts = parseLineColumnHash(anchor.hash);
@@ -124,7 +205,7 @@ function parseFileTargetFromAnchor(anchor, rawHref) {
   return normalizeParsedFileTarget(basePath || decodedHref);
 }
 
-function isLikelyFilePath(rawHref) {
+function isLikelyFilePath(rawHref: string): boolean {
   if (!rawHref) return false;
   if (rawHref.startsWith('#')) return false;
   if (isExternalHttpUrl(rawHref)) return false;
@@ -133,10 +214,10 @@ function isLikelyFilePath(rawHref) {
   return true;
 }
 
-function bindMarkdownLinkRouting(container) {
+function bindMarkdownLinkRouting(container: HTMLElement | null | undefined): void {
   if (!container || container.dataset.markdownLinkRoutingBound === 'true') return;
   container.dataset.markdownLinkRoutingBound = 'true';
-  container.addEventListener('click', (evt) => {
+  container.addEventListener('click', (evt: MouseEvent) => {
     const target = evt.target;
     if (!(target instanceof Element)) return;
     const anchor = target.closest('a[href]');
@@ -161,10 +242,10 @@ function bindMarkdownLinkRouting(container) {
   });
 }
 
-function bindInlineCodeCopy(container) {
+function bindInlineCodeCopy(container: HTMLElement | null | undefined): void {
   if (!container || container.dataset.inlineCodeCopyBound === 'true') return;
   container.dataset.inlineCodeCopyBound = 'true';
-  container.addEventListener('click', (evt) => {
+  container.addEventListener('click', (evt: MouseEvent) => {
     const target = evt.target;
     if (!(target instanceof HTMLElement)) return;
     const code = target.closest('code');
@@ -180,14 +261,14 @@ function bindInlineCodeCopy(container) {
   });
 }
 
-export function setMarkdownLinkHandlers(handlers: MarkdownLinkHandlerInput = {}) {
+export function setMarkdownLinkHandlers(handlers: MarkdownLinkHandlerInput = {}): void {
   markdownLinkHandlers = {
     openFilePath: typeof handlers.openFilePath === 'function' ? handlers.openFilePath : null,
     openExternalUrl: typeof handlers.openExternalUrl === 'function' ? handlers.openExternalUrl : null,
   };
 }
 
-export function highlightCode(container) {
+export function highlightCode(container: HTMLElement | null | undefined): void {
   if (!container) return;
   container.querySelectorAll('pre code').forEach((block) => {
     if (typeof hljs !== 'undefined') {
@@ -197,37 +278,39 @@ export function highlightCode(container) {
   attachCodeCopyButtons(container);
 }
 
-export function renderMarkdownInto(container, text) {
-  const renderer = smd.default_renderer(container);
-  const parser = smd.parser(renderer);
+export function renderMarkdownInto(container: HTMLElement | null | undefined, text: unknown): void {
+  if (!container) return;
+  const renderer = streamingMarkdown.default_renderer(container);
+  const parser = streamingMarkdown.parser(renderer);
   bindMarkdownLinkRouting(container);
   bindInlineCodeCopy(container);
-  smd.parser_write(parser, text || '');
-  smd.parser_end(parser);
+  streamingMarkdown.parser_write(parser, text == null ? '' : String(text));
+  streamingMarkdown.parser_end(parser);
 }
 
-export function renderMarkdownSourceInto(container, text) {
+export function renderMarkdownSourceInto(container: HTMLElement | null | undefined, text: unknown): void {
   if (!container) return;
   container.textContent = '';
   const pre = document.createElement('pre');
   const code = document.createElement('code');
   code.className = 'language-markdown';
-  code.textContent = text || '';
+  code.textContent = text == null ? '' : String(text);
   pre.appendChild(code);
   container.appendChild(pre);
   highlightCode(container);
 }
 
-function escapeHtmlText(text) {
+function escapeHtmlText(text: unknown): string {
   const value = document.createElement('div');
-  value.textContent = text || '';
+  value.textContent = text == null ? '' : String(text);
   return value.innerHTML;
 }
 
-function renderHighlightedFenceHtml(source, lang) {
+function renderHighlightedFenceHtml(source: unknown, lang: unknown): string {
+  const normalizedSource = source == null ? '' : String(source);
   const rawLang = typeof lang === 'string' ? lang.trim() : '';
   const requestedLangRaw = rawLang ? rawLang.split(/\s+/, 1)[0].toLowerCase() : '';
-  const languageAliasMap = {
+  const languageAliasMap: Record<string, string> = {
     sh: 'bash',
     shell: 'bash',
     zsh: 'bash',
@@ -235,28 +318,28 @@ function renderHighlightedFenceHtml(source, lang) {
   const requestedLang = languageAliasMap[requestedLangRaw] || requestedLangRaw;
   if (typeof hljs === 'undefined') {
     const languageClass = requestedLang ? ` language-${requestedLang}` : '';
-    return `<pre><code class="hljs${languageClass}">${escapeHtmlText(source)}</code></pre>`;
+    return `<pre><code class="hljs${languageClass}">${escapeHtmlText(normalizedSource)}</code></pre>`;
   }
 
   try {
     if (requestedLang && hljs.getLanguage(requestedLang)) {
-      const highlighted = hljs.highlight(source, { language: requestedLang, ignoreIllegals: true });
+      const highlighted = hljs.highlight(normalizedSource, { language: requestedLang, ignoreIllegals: true });
       const languageClass = highlighted.language ? ` language-${highlighted.language}` : ` language-${requestedLang}`;
       return `<pre><code class="hljs${languageClass}">${highlighted.value}</code></pre>`;
     }
 
-    const auto = hljs.highlightAuto(source);
+    const auto = hljs.highlightAuto(normalizedSource);
     const languageClass = auto.language ? ` language-${auto.language}` : (requestedLang ? ` language-${requestedLang}` : '');
     return `<pre><code class="hljs${languageClass}">${auto.value}</code></pre>`;
-  } catch (_) {
+  } catch {
     const languageClass = requestedLang ? ` language-${requestedLang}` : '';
-    return `<pre><code class="hljs${languageClass}">${escapeHtmlText(source)}</code></pre>`;
+    return `<pre><code class="hljs${languageClass}">${escapeHtmlText(normalizedSource)}</code></pre>`;
   }
 }
 
-function fallbackCopyText(text) {
+function fallbackCopyText(text: unknown): boolean {
   const textarea = document.createElement('textarea');
-  textarea.value = text || '';
+  textarea.value = text == null ? '' : String(text);
   textarea.setAttribute('readonly', 'readonly');
   textarea.setAttribute('aria-hidden', 'true');
   textarea.style.position = 'fixed';
@@ -268,25 +351,25 @@ function fallbackCopyText(text) {
   let ok = false;
   try {
     ok = document.execCommand('copy') === true;
-  } catch (_) {
+  } catch {
     ok = false;
   }
   textarea.remove();
   return ok;
 }
 
-async function copyTextToClipboard(text) {
+async function copyTextToClipboard(text: unknown): Promise<boolean> {
   const value = text == null ? '' : String(text);
   if (navigator?.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(value);
       return true;
-    } catch (_) {}
+    } catch {}
   }
   return fallbackCopyText(value);
 }
 
-function setCopyButtonState(button, state) {
+function setCopyButtonState(button: HTMLButtonElement | null | undefined, state: CopyButtonState): void {
   if (!(button instanceof HTMLButtonElement)) return;
   const copyButton = button as CopyButton;
   if (copyButton._copyResetTimer) {
@@ -314,7 +397,7 @@ function setCopyButtonState(button, state) {
   }
 }
 
-function attachCodeCopyButtons(container) {
+function attachCodeCopyButtons(container: HTMLElement | null | undefined): void {
   if (!container) return;
   container.querySelectorAll('pre > code').forEach((codeBlock) => {
     const pre = codeBlock.parentElement;
@@ -326,7 +409,7 @@ function attachCodeCopyButtons(container) {
     button.textContent = 'copy';
     button.setAttribute('aria-label', 'Copy code block');
     button.title = 'Copy code block';
-    button.addEventListener('click', async (evt) => {
+    button.addEventListener('click', async (evt: MouseEvent) => {
       evt.preventDefault();
       evt.stopPropagation();
       const ok = await copyTextToClipboard(codeBlock.textContent || '');
@@ -336,7 +419,7 @@ function attachCodeCopyButtons(container) {
   });
 }
 
-function emphasisTokenizeAsteriskOnly(state, silent) {
+function emphasisTokenizeAsteriskOnly(state: MarkdownInlineState, silent: boolean): boolean {
   const start = state.pos;
   const marker = state.src.charCodeAt(start);
 
@@ -361,7 +444,7 @@ function emphasisTokenizeAsteriskOnly(state, silent) {
   return true;
 }
 
-function postProcessAsteriskOnly(state, delimiters) {
+function postProcessAsteriskOnly(state: MarkdownInlineState, delimiters: MarkdownDelimiter[]): void {
   const max = delimiters.length;
   for (let idx = max - 1; idx >= 0; idx -= 1) {
     const startDelim = delimiters[idx];
@@ -370,11 +453,12 @@ function postProcessAsteriskOnly(state, delimiters) {
     }
 
     const endDelim = delimiters[startDelim.end];
+    const afterEndDelim = delimiters[startDelim.end + 1];
     const isStrong = idx > 0
       && delimiters[idx - 1].end === startDelim.end + 1
       && delimiters[idx - 1].marker === startDelim.marker
       && delimiters[idx - 1].token === startDelim.token - 1
-      && delimiters[startDelim.end + 1].token === endDelim.token + 1;
+      && afterEndDelim?.token === endDelim.token + 1;
 
     const tokenOpen = state.tokens[startDelim.token];
     tokenOpen.type = isStrong ? 'strong_open' : 'em_open';
@@ -392,43 +476,44 @@ function postProcessAsteriskOnly(state, delimiters) {
 
     if (isStrong) {
       state.tokens[delimiters[idx - 1].token].content = '';
-      state.tokens[delimiters[startDelim.end + 1].token].content = '';
+      if (afterEndDelim) {
+        state.tokens[afterEndDelim.token].content = '';
+      }
       idx -= 1;
     }
   }
 }
 
-function emphasisPostProcessAsteriskOnly(state) {
+function emphasisPostProcessAsteriskOnly(state: MarkdownInlineState): void {
   const tokensMeta = state.tokens_meta || [];
   postProcessAsteriskOnly(state, state.delimiters || []);
   for (let idx = 0; idx < tokensMeta.length; idx += 1) {
-    if (tokensMeta[idx] && tokensMeta[idx].delimiters) {
-      postProcessAsteriskOnly(state, tokensMeta[idx].delimiters);
+    if (tokensMeta[idx]?.delimiters) {
+      postProcessAsteriskOnly(state, tokensMeta[idx]?.delimiters || []);
     }
   }
 }
 
-let cachedEventMarkdownRenderer;
+let cachedEventMarkdownRenderer: MarkdownRenderer | null | undefined;
 
-function getEventMarkdownRenderer() {
+function getEventMarkdownRenderer(): MarkdownRenderer | null {
   if (cachedEventMarkdownRenderer !== undefined) {
     return cachedEventMarkdownRenderer;
   }
 
-  const MarkdownIt = globalThis?.markdownit;
+  const MarkdownIt = (globalThis as typeof globalThis & { markdownit?: MarkdownItFactory }).markdownit;
   if (typeof MarkdownIt !== 'function') {
     cachedEventMarkdownRenderer = null;
     return cachedEventMarkdownRenderer;
   }
 
-  let renderer = null;
-  renderer = MarkdownIt({
+  const renderer = MarkdownIt({
     html: false,
     linkify: false,
     typographer: false,
     breaks: true,
-    highlight(str, lang) {
-      return renderHighlightedFenceHtml(str, lang);
+    highlight(source: string, lang: string): string {
+      return renderHighlightedFenceHtml(source, lang);
     },
   });
   renderer.inline.ruler.at('emphasis', emphasisTokenizeAsteriskOnly);
@@ -437,20 +522,20 @@ function getEventMarkdownRenderer() {
   return cachedEventMarkdownRenderer;
 }
 
-export function renderEventMarkdownInto(container, text) {
+export function renderEventMarkdownInto(container: HTMLElement | null | undefined, text: unknown): void {
   if (!container) return;
   const renderer = getEventMarkdownRenderer();
   if (!renderer) {
     renderMarkdownSourceInto(container, text);
     return;
   }
-  container.innerHTML = renderer.render(text || '');
+  container.innerHTML = renderer.render(text == null ? '' : String(text));
   bindMarkdownLinkRouting(container);
   bindInlineCodeCopy(container);
   attachCodeCopyButtons(container);
 }
 
-export function renderMarkdownBlock(text, extraClass = '') {
+export function renderMarkdownBlock(text: unknown, extraClass = ''): HTMLDivElement {
   const container = document.createElement('div');
   container.className = extraClass ? `markdown-body ${extraClass}` : 'markdown-body';
   renderMarkdownInto(container, text);
@@ -458,23 +543,23 @@ export function renderMarkdownBlock(text, extraClass = '') {
   return container;
 }
 
-export function renderMarkdownItBlock(text, extraClass = '') {
+export function renderMarkdownItBlock(text: unknown, extraClass = ''): HTMLDivElement {
   const container = document.createElement('div');
   container.className = extraClass ? `markdown-body ${extraClass}` : 'markdown-body';
   renderEventMarkdownInto(container, text);
   return container;
 }
 
-export function createStreamingParser(container) {
-  const renderer = smd.default_renderer(container);
+export function createStreamingParser(container: HTMLElement): unknown {
+  const renderer = streamingMarkdown.default_renderer(container);
   bindMarkdownLinkRouting(container);
-  return smd.parser(renderer);
+  return streamingMarkdown.parser(renderer);
 }
 
-export function streamWrite(parser, text) {
-  smd.parser_write(parser, text || '');
+export function streamWrite(parser: unknown, text: unknown): void {
+  streamingMarkdown.parser_write(parser, text == null ? '' : String(text));
 }
 
-export function streamEnd(parser) {
-  smd.parser_end(parser);
+export function streamEnd(parser: unknown): void {
+  streamingMarkdown.parser_end(parser);
 }

@@ -1,3 +1,6 @@
+import { createSettingsRpcClient } from '../rpc/settings/client.ts';
+import { createUiRpcClient } from '../rpc/ui/client.ts';
+
 type Awaitable = Promise<unknown> | unknown;
 
 interface ConversationSettings extends Record<string, unknown> {
@@ -5,11 +8,11 @@ interface ConversationSettings extends Record<string, unknown> {
 }
 
 interface ConversationMeta extends Record<string, unknown> {
-  conversation_id?: string;
+  conversation_id?: string | null;
   settings?: ConversationSettings;
 }
 
-interface DrawerState {
+export interface DrawerState {
   clientConversationId?: string | null;
   conversationMeta?: ConversationMeta | null;
   miniConversationDrawerOpen?: boolean;
@@ -31,10 +34,10 @@ interface ConversationListResponse {
   activeView: string | null;
 }
 
-interface ConversationCreateResponse extends ConversationMeta {
+type ConversationCreateResponse = Omit<ConversationMeta, 'conversation_id' | 'settings'> & {
   conversation_id: string | null;
   settings: ConversationSettings;
-}
+};
 
 interface ConversationDrawerActionsContext {
   sioCall(event: string, payload: Record<string, unknown>): Promise<unknown>;
@@ -45,6 +48,7 @@ interface ConversationDrawerActionsContext {
   replayTranscript(): Awaitable;
   refreshPlanSurface?(): Awaitable;
   restorePendingApprovals(): void;
+  resetConversationUiState(): void;
   setDrawerOpen(open: boolean): void;
   applyHostUi(): void;
   openSettingsModal(): void;
@@ -113,6 +117,7 @@ export function createConversationDrawerActions(
     replayTranscript,
     refreshPlanSurface,
     restorePendingApprovals,
+    resetConversationUiState,
     setDrawerOpen,
     applyHostUi,
     openSettingsModal,
@@ -130,6 +135,14 @@ export function createConversationDrawerActions(
     documentRef,
     windowRef,
   } = ctx;
+  const settingsRpcClient = createSettingsRpcClient({
+    sioCall,
+    windowRef,
+  });
+  const uiRpcClient = createUiRpcClient({
+    sioCall,
+    windowRef,
+  });
 
   function getActiveConversationId(): string | null {
     const state = getState();
@@ -149,7 +162,7 @@ export function createConversationDrawerActions(
       conversationTitleEl.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
       conversationTitleEl.setAttribute('title', isOpen ? 'Hide conversation switcher' : 'Show conversation switcher');
     }
-    renderMiniConversationList(getState().conversationList, getActiveConversationId());
+    renderMiniConversationList(getState().conversationList || [], getActiveConversationId());
   }
 
   function setMiniDrawerOpen(open: boolean): void {
@@ -167,9 +180,8 @@ export function createConversationDrawerActions(
     try {
       let extensionCatalog = getState().extensionCatalog;
       try {
-        const extData = await sioCall('get_extensions', {});
-        const extPayload = isRecord(extData) ? extData : null;
-        extensionCatalog = Array.isArray(extPayload?.extensions) ? extPayload.extensions : [];
+        const extData = await settingsRpcClient.listExtensions();
+        extensionCatalog = Array.isArray(extData.extensions) ? extData.extensions : [];
       } catch {
         // ignore
       }
@@ -192,7 +204,7 @@ export function createConversationDrawerActions(
 
   async function setActiveView(view: string): Promise<void> {
     try {
-      await sioCall('set_view', { view });
+      await uiRpcClient.setView(view);
     } catch {
       // ignore - SSOT is best-effort for boot defaults
     }
@@ -219,6 +231,7 @@ export function createConversationDrawerActions(
       setState({ draftSaveTimer: null });
     }
     setState({ lastDraftHash: null, miniConversationDrawerOpen: false });
+    resetConversationUiState();
     resetTimeline();
     setState({ clientConversationId: conversationId, clientActiveView: view });
     try {
@@ -248,6 +261,7 @@ export function createConversationDrawerActions(
       setState({ draftSaveTimer: null });
     }
     setState({ lastDraftHash: null });
+    resetConversationUiState();
     const meta = normalizeConversationCreateResponse(await sioCall('conversation_create', {}));
     if (meta.conversation_id) {
       setState({
@@ -276,24 +290,67 @@ export function createConversationDrawerActions(
 
   async function deleteConversation(conversationId: string): Promise<void> {
     if (!conversationId) return;
-    await sioCall('conversation_delete', { conversation_id: conversationId });
-    const state = getState();
-    if (state.clientConversationId && state.clientConversationId === conversationId) {
-      setState({
-        clientConversationId: null,
-        clientActiveView: 'splash',
-        activeView: 'splash',
-        miniConversationDrawerOpen: false,
+    const performDelete = async (): Promise<void> => {
+      await sioCall('conversation_delete', { conversation_id: conversationId });
+      const state = getState();
+      if (state.clientConversationId && state.clientConversationId === conversationId) {
+        resetConversationUiState();
+        setState({
+          clientConversationId: null,
+          clientActiveView: 'splash',
+          activeView: 'splash',
+          miniConversationDrawerOpen: false,
+        });
+        setDrawerOpen(false);
+      }
+      await fetchConversations();
+      await fetchConversation();
+      if (!getState().conversationMeta?.conversation_id) {
+        setDrawerOpen(false);
+        await setActiveView('splash');
+      }
+      syncMiniDrawerUi();
+    };
+
+    const warningHelpers = (
+      windowRef as (Window & typeof globalThis & {
+        CodexAgent?: {
+          helpers?: {
+            openWarningModal?: (options: {
+              title?: string;
+              body?: string;
+              confirmText?: string;
+              onConfirm?: () => Promise<void> | void;
+              onCancel?: () => void;
+            }) => void;
+          };
+        };
+      })
+    )?.CodexAgent?.helpers;
+    const openWarningModal = warningHelpers?.openWarningModal;
+    if (typeof openWarningModal !== 'function') {
+      await performDelete();
+      return;
+    }
+    const conversation = getState().conversationList?.find((item) => item.conversation_id === conversationId);
+    const label = conversation?.settings?.alias || conversation?.settings?.label || conversationId;
+    await new Promise<void>((resolve) => {
+      openWarningModal({
+        title: 'Delete conversation?',
+        body: `Delete ${label}? This removes the local harness conversation history only.`,
+        confirmText: 'Delete',
+        onConfirm: async () => {
+          try {
+            await performDelete();
+          } finally {
+            resolve();
+          }
+        },
+        onCancel: () => {
+          resolve();
+        },
       });
-      setDrawerOpen(false);
-    }
-    await fetchConversations();
-    await fetchConversation();
-    if (!getState().conversationMeta?.conversation_id) {
-      setDrawerOpen(false);
-      await setActiveView('splash');
-    }
-    syncMiniDrawerUi();
+    });
   }
 
   async function setConversationPins(pinnedConversationIds: string[]): Promise<void> {
@@ -367,13 +424,13 @@ export function createConversationDrawerActions(
       setState({ splashTab: 'all' });
       const state = getState();
       renderSplashTabs();
-      renderConversationList(state.conversationList, state.conversationMeta?.conversation_id || null);
+      renderConversationList(state.conversationList || [], state.conversationMeta?.conversation_id || null);
     });
     splashTabProjectBtn?.addEventListener('click', async () => {
       setState({ splashTab: 'project' });
       const state = getState();
       renderSplashTabs();
-      renderConversationList(state.conversationList, state.conversationMeta?.conversation_id || null);
+      renderConversationList(state.conversationList || [], state.conversationMeta?.conversation_id || null);
     });
     if (splashRpcToggleEl instanceof HTMLInputElement) {
       splashRpcToggleEl.addEventListener('change', () => {

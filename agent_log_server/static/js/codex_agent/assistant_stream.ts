@@ -1,5 +1,10 @@
 // Assistant streaming row helpers extracted from static/codex_agent.js
 
+import {
+  applyTranscriptCardMetadata,
+  type TranscriptCardMetadata,
+} from './transcript_card_metadata.ts';
+
 interface AssistantRowEntry {
   row: HTMLElement;
   container: HTMLElement;
@@ -27,9 +32,23 @@ interface AssistantStreamContext {
 }
 
 interface AssistantStreamBinding {
-  getAssistantRow(id?: string | null, parentEl?: HTMLElement | null): AssistantRowEntry;
-  appendAssistantDelta(id: string | null | undefined, delta: string, parentEl?: HTMLElement | null): void;
-  finalizeAssistant(id: string | null | undefined, text: string, parentEl?: HTMLElement | null): void;
+  getAssistantRow(
+    id?: string | null,
+    parentEl?: HTMLElement | null,
+    metadata?: TranscriptCardMetadata | null,
+  ): AssistantRowEntry;
+  appendAssistantDelta(
+    id: string | null | undefined,
+    delta: string,
+    parentEl?: HTMLElement | null,
+    metadata?: TranscriptCardMetadata | null,
+  ): void;
+  finalizeAssistant(
+    id: string | null | undefined,
+    text: string,
+    parentEl?: HTMLElement | null,
+    metadata?: TranscriptCardMetadata | null,
+  ): void;
 }
 
 export function bindAssistantStream(ctx: AssistantStreamContext): AssistantStreamBinding {
@@ -49,11 +68,16 @@ export function bindAssistantStream(ctx: AssistantStreamContext): AssistantStrea
     maybeAutoScroll,
   } = ctx;
 
-  function getAssistantRow(id?: string | null, parentEl?: HTMLElement | null): AssistantRowEntry {
+  function getAssistantRow(
+    id?: string | null,
+    parentEl?: HTMLElement | null,
+    metadata: TranscriptCardMetadata | null = null,
+  ): AssistantRowEntry {
     const key = id || 'assistant';
     let entry = assistantRows.get(key);
     if (!entry) {
       const { row, body } = buildMessageCard('assistant', '');
+      applyTranscriptCardMetadata(row, metadata);
       // If parentEl provided (subagent body), insert there instead of main timeline
       if (parentEl) {
         parentEl.appendChild(row);
@@ -74,13 +98,20 @@ export function bindAssistantStream(ctx: AssistantStreamContext): AssistantStrea
         entry = { row, container, pre, useMarkdown: false, counted: false, rawText: '' };
       }
       assistantRows.set(key, entry);
+    } else {
+      applyTranscriptCardMetadata(entry.row, metadata);
     }
     return entry;
   }
 
-  function appendAssistantDelta(id: string | null | undefined, delta: string, parentEl?: HTMLElement | null): void {
+  function appendAssistantDelta(
+    id: string | null | undefined,
+    delta: string,
+    parentEl?: HTMLElement | null,
+    metadata: TranscriptCardMetadata | null = null,
+  ): void {
     if (!delta) return;
-    const entry = getAssistantRow(id, parentEl);
+    const entry = getAssistantRow(id, parentEl, metadata);
     const cleanDelta = stripCitations(delta);
     entry.rawText = `${entry.rawText || ''}${cleanDelta}`;
     updateMessageCardHeader(entry.row, 'assistant', entry.rawText);
@@ -92,14 +123,21 @@ export function bindAssistantStream(ctx: AssistantStreamContext): AssistantStrea
     maybeAutoScroll();
   }
 
-  function finalizeAssistant(id: string | null | undefined, text: string, parentEl?: HTMLElement | null): void {
+  function finalizeAssistant(
+    id: string | null | undefined,
+    text: string,
+    parentEl?: HTMLElement | null,
+    metadata: TranscriptCardMetadata | null = null,
+  ): void {
     const key = id || 'assistant';
     let entry = assistantRows.get(key);
     if (!entry) {
       // No prior delta created this row (e.g. SDK sends ASSISTANT_MESSAGE complete, not deltas)
       // Create the row now and feed the full text through the streaming parser
-      entry = getAssistantRow(id, parentEl);
-      if (text) appendAssistantDelta(id, text, parentEl);
+      entry = getAssistantRow(id, parentEl, metadata);
+      if (text) appendAssistantDelta(id, text, parentEl, metadata);
+    } else {
+      applyTranscriptCardMetadata(entry.row, metadata);
     }
     const finalText = stripCitations(text || entry.rawText || '');
     entry.rawText = finalText;

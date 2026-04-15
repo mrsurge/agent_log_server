@@ -1,7 +1,5 @@
-import { createSettingsRpcClientPlaceholder } from '../rpc/settings/client.ts';
-
-const _settingsRpcClientPlaceholder = createSettingsRpcClientPlaceholder;
-void _settingsRpcClientPlaceholder;
+import { createSettingsRpcClient } from '../rpc/settings/client.ts';
+import { createUiRpcClient } from '../rpc/ui/client.ts';
 
 type CodexAgentHelpers = {
   getSchemaFieldInput?: (fieldId: string) => unknown;
@@ -14,7 +12,227 @@ type CodexAgentWindow = Window & typeof globalThis & {
   };
 };
 
-export function bindSettingsUiFlow(ctx) {
+type TextValueInput = HTMLInputElement | HTMLTextAreaElement;
+type PickerMode = 'cwd' | 'mention';
+type DropdownOption = { value: string; label: string };
+type DropdownOptionInput = string | { value?: string; label?: string; [key: string]: unknown };
+
+type RuntimeOptionInput = {
+  settingKey?: string;
+  options?: DropdownOptionInput[];
+  current?: string;
+  default?: string;
+  [key: string]: unknown;
+};
+
+type RuntimeOptionDescriptor = {
+  settingKey: string;
+  options: DropdownOption[];
+  current: string;
+  default: string;
+};
+
+type RuntimeOptionsState = {
+  approval?: RuntimeOptionInput;
+  sandbox?: RuntimeOptionInput;
+  agent?: string;
+  [key: string]: unknown;
+};
+
+type ConversationSettings = {
+  cwd?: string;
+  agent?: string;
+  approvalPolicy?: string;
+  sandboxPolicy?: string;
+  model?: string;
+  effort?: string;
+  summary?: string;
+  developer_instructions?: string;
+  label?: string;
+  alias?: string;
+  commandOutputLines?: string;
+  viewWrap?: boolean;
+  markdown?: boolean;
+  diffSyntax?: boolean;
+  semanticShellRibbon?: boolean;
+  te2_mcp_integration?: boolean;
+  rolloutId?: string;
+  [key: string]: unknown;
+};
+
+type ConversationMeta = {
+  conversation_id?: string;
+  settings?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+type HostUiState = {
+  ideMode?: boolean;
+  projectRoot?: string;
+  [key: string]: unknown;
+};
+
+type PickerItem = {
+  name?: string;
+  path?: string;
+  type?: string;
+  [key: string]: unknown;
+};
+
+type RolloutItem = {
+  id?: string;
+  short_id?: string;
+  preview?: string;
+  cwd?: string;
+  [key: string]: unknown;
+};
+
+type PendingRolloutState = {
+  id?: string;
+  items?: RolloutItem[];
+  token_total?: number | null;
+};
+
+type ExtensionCatalogEntry = {
+  id?: string;
+  name?: string;
+  active?: boolean;
+  [key: string]: unknown;
+};
+
+type ModelEffortInput = string | { reasoningEffort?: string; reasoning_effort?: string; value?: string; [key: string]: unknown };
+
+type ExtensionModel = {
+  id?: string;
+  supportedReasoningEfforts?: ModelEffortInput[];
+  supported_reasoning_efforts?: ModelEffortInput[];
+  defaultReasoningEffort?: string;
+  default_reasoning_effort?: string;
+  [key: string]: unknown;
+};
+
+type SettingsUiState = {
+  conversationMeta?: ConversationMeta | null;
+  conversationSettings?: ConversationSettings | null;
+  pendingNewConversation?: boolean;
+  pendingRollout?: PendingRolloutState | null;
+  hostUi?: HostUiState | null;
+  splashTab?: string;
+  pickerPath?: string | null;
+  pickerMode?: string | null;
+  pickerItems?: PickerItem[];
+  filterTimer?: ReturnType<typeof setTimeout> | null;
+  openDropdownEl?: HTMLElement | null;
+  modelList?: ExtensionModel[];
+  runtimeOptions?: RuntimeOptionsState;
+  extensionCatalog?: ExtensionCatalogEntry[];
+  rolloutPickerProvider?: RolloutPickerProvider | null;
+};
+
+type RolloutProviderArgs = {
+  cwd: string;
+  state: SettingsUiState;
+  setState: (patch: Partial<SettingsUiState>) => void;
+  setActivity: (message: string, isError: boolean) => unknown;
+  sioCall: (event: string, payload?: Record<string, unknown>) => Promise<unknown>;
+};
+
+type RolloutPreviewArgs = RolloutProviderArgs & {
+  rolloutId: string;
+};
+
+type RolloutProviderResult = {
+  items?: RolloutItem[];
+  token_total?: number | null;
+};
+
+type RolloutPickerProvider = {
+  list?: (args: RolloutProviderArgs) => Promise<RolloutProviderResult | null | undefined>;
+  preview?: (args: RolloutPreviewArgs) => Promise<RolloutProviderResult | null | undefined>;
+};
+
+type SettingsUiElements = {
+  settingsModalEl?: HTMLElement | null;
+  settingsCwdEl?: TextValueInput | null;
+  settingsApprovalEl?: TextValueInput | null;
+  settingsSandboxEl?: TextValueInput | null;
+  settingsModelEl?: TextValueInput | null;
+  settingsEffortEl?: TextValueInput | null;
+  settingsSummaryEl?: TextValueInput | null;
+  settingsDeveloperInstructionsEl?: TextValueInput | null;
+  settingsLabelEl?: TextValueInput | null;
+  settingsAliasEl?: TextValueInput | null;
+  settingsCommandLinesEl?: TextValueInput | null;
+  settingsViewWrapEl?: HTMLInputElement | null;
+  settingsMarkdownEl?: HTMLInputElement | null;
+  settingsDiffSyntaxEl?: HTMLInputElement | null;
+  settingsSemanticShellRibbonEl?: HTMLInputElement | null;
+  settingsTe2McpIntegrationEl?: HTMLInputElement | null;
+  settingsAgentEl?: TextValueInput | null;
+  settingsAgentOptions?: HTMLElement | null;
+  settingsAgentRowEl?: HTMLElement | null;
+  settingsRolloutEl?: TextValueInput | null;
+  settingsRolloutRowEl?: HTMLElement | null;
+  settingsApprovalOptions?: HTMLElement | null;
+  settingsSandboxOptions?: HTMLElement | null;
+  settingsModelOptions?: HTMLElement | null;
+  settingsEffortOptions?: HTMLElement | null;
+  settingsSummaryOptions?: HTMLElement | null;
+  pickerOverlayEl?: HTMLElement | null;
+  pickerPathEl?: HTMLElement | null;
+  pickerListEl?: HTMLElement | null;
+  pickerTitleEl?: HTMLElement | null;
+  pickerFilterEl?: HTMLInputElement | null;
+  rolloutOverlayEl?: HTMLElement | null;
+  rolloutListEl?: HTMLElement | null;
+  pickerCloseBtn?: HTMLElement | null;
+  pickerUpBtn?: HTMLElement | null;
+  pickerSelectBtn?: HTMLElement | null;
+};
+
+type SettingsUiContext = {
+  getState: () => SettingsUiState;
+  setState: (patch: Partial<SettingsUiState>) => void;
+  elements: SettingsUiElements;
+  sioCall: (event: string, payload?: Record<string, unknown>) => Promise<unknown>;
+  setActivity: (message: string, isError: boolean) => unknown;
+  getRelativePath: (absolutePath: string | null | undefined, cwd: string | null | undefined) => string | null | undefined;
+  insertMention: (text: string) => unknown;
+  getWindow?: () => CodexAgentWindow;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function firstArray(...values: unknown[]): unknown[] {
+  for (const value of values) {
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function isValueInput(candidate: unknown): candidate is TextValueInput {
+  return !!candidate && typeof (candidate as TextValueInput).value === 'string';
+}
+
+function isExtensionCatalogEntry(value: unknown): value is ExtensionCatalogEntry {
+  return isRecord(value);
+}
+
+function isExtensionModel(value: unknown): value is ExtensionModel {
+  return isRecord(value) && typeof value.id === 'string' && value.id.trim().length > 0;
+}
+
+function isPickerItem(value: unknown): value is PickerItem {
+  return isRecord(value);
+}
+
+function isRolloutItem(value: unknown): value is RolloutItem {
+  return isRecord(value);
+}
+
+export function bindSettingsUiFlow(ctx: SettingsUiContext) {
   const {
     getState,
     setState,
@@ -62,29 +280,34 @@ export function bindSettingsUiFlow(ctx) {
     rolloutListEl,
   } = elements;
   const windowRef = (getWindow ? getWindow() : window) as CodexAgentWindow;
+  const settingsRpcClient = createSettingsRpcClient({
+    sioCall,
+    windowRef,
+  });
+  const uiRpcClient = createUiRpcClient({
+    sioCall,
+    windowRef,
+  });
   const pickerCloseBtn = elements.pickerCloseBtn || windowRef?.document?.getElementById('picker-close');
   const pickerUpBtn = elements.pickerUpBtn || windowRef?.document?.getElementById('picker-up');
   const pickerSelectBtn = elements.pickerSelectBtn || windowRef?.document?.getElementById('picker-select');
-  let pickerTargetInput = null;
+  let pickerTargetInput: TextValueInput | null = null;
 
-  function isValueInput(candidate) {
-    return !!candidate && typeof candidate.value === 'string';
-  }
-
-  function getSchemaFieldInput(fieldId) {
+  function getSchemaFieldInput(fieldId: string): TextValueInput | null {
     const getter = windowRef?.CodexAgent?.helpers?.getSchemaFieldInput;
     if (typeof getter !== 'function') return null;
-    return getter(fieldId);
+    const input = getter(fieldId);
+    return isValueInput(input) ? input : null;
   }
 
-  function getActiveCwdInput() {
+  function getActiveCwdInput(): TextValueInput | null {
     const schemaInput = getSchemaFieldInput('cwd');
     if (isValueInput(schemaInput)) return schemaInput;
     if (isValueInput(settingsCwdEl)) return settingsCwdEl;
     return null;
   }
 
-  function getActiveCwdValue({ fallbackToSaved = true } = {}) {
+  function getActiveCwdValue({ fallbackToSaved = true }: { fallbackToSaved?: boolean } = {}): string {
     const input = getActiveCwdInput();
     const currentValue = isValueInput(input) ? input.value.trim() : '';
     if (currentValue) return currentValue;
@@ -93,16 +316,16 @@ export function bindSettingsUiFlow(ctx) {
     return typeof saved === 'string' ? saved.trim() : '';
   }
 
-  function setPickerChrome(mode) {
+  function setPickerChrome(mode: PickerMode): void {
     if (pickerTitleEl) {
       pickerTitleEl.textContent = mode === 'mention' ? 'Mentioning' : 'Pick CWD';
     }
     const isMention = mode === 'mention';
-    if (pickerSelectBtn) pickerSelectBtn.style.display = isMention ? 'none' : '';
-    if (pickerUpBtn) pickerUpBtn.style.display = isMention ? 'none' : '';
+    if (pickerSelectBtn instanceof HTMLElement) pickerSelectBtn.style.display = isMention ? 'none' : '';
+    if (pickerUpBtn instanceof HTMLElement) pickerUpBtn.style.display = isMention ? 'none' : '';
   }
 
-  function applyPickedCwd(path) {
+  function applyPickedCwd(path: unknown): void {
     const nextPath = typeof path === 'string' ? path.trim() : '';
     if (!nextPath) return;
     const targetInput = isValueInput(pickerTargetInput) ? pickerTargetInput : getActiveCwdInput();
@@ -114,7 +337,7 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
-  function parentPickerPath(path) {
+  function parentPickerPath(path: unknown): string {
     const raw = typeof path === 'string' ? path.trim() : '';
     if (!raw || raw === '~' || raw === '/') return raw || '~';
     if (raw.startsWith('~/')) {
@@ -128,23 +351,23 @@ export function bindSettingsUiFlow(ctx) {
     return slash <= 0 ? '/' : trimmed.slice(0, slash);
   }
 
-  function normalizeRuntimeOption(option) {
-    if (!option || typeof option !== 'object') return null;
+  function normalizeRuntimeOption(option: unknown): RuntimeOptionDescriptor | null {
+    if (!isRecord(option)) return null;
     const settingKey = typeof option.settingKey === 'string' ? option.settingKey.trim() : '';
     const options = Array.isArray(option.options)
       ? option.options
-          .map((item) => {
+          .map((item): DropdownOption | null => {
             if (typeof item === 'string') {
               const text = item.trim();
               return text ? { value: text, label: text } : null;
             }
-            if (!item || typeof item !== 'object') return null;
+            if (!isRecord(item)) return null;
             const value = typeof item.value === 'string' ? item.value.trim() : '';
             if (!value) return null;
             const label = typeof item.label === 'string' && item.label.trim() ? item.label.trim() : value;
             return { value, label };
           })
-          .filter(Boolean)
+          .filter((item): item is DropdownOption => Boolean(item))
       : [];
     return {
       settingKey,
@@ -154,37 +377,38 @@ export function bindSettingsUiFlow(ctx) {
     };
   }
 
-  function getSettingValueByKey(settings, key) {
-    if (!settings || typeof settings !== 'object' || !key) return '';
+  function getSettingValueByKey(settings: ConversationSettings | null | undefined, key: string): string {
+    if (!settings || !key) return '';
     const value = settings[key];
     return typeof value === 'string' ? value : '';
   }
 
-  function getActiveAgentOptions(state = getState()) {
-    const extensions = Array.isArray(state?.extensionCatalog) ? state.extensionCatalog : [];
+  function getActiveAgentOptions(state: SettingsUiState = getState()): DropdownOption[] {
+    const extensions = Array.isArray(state.extensionCatalog) ? state.extensionCatalog : [];
     return extensions
       .filter((ext) => ext?.active === true && ext?.id && ext.id !== 'codex')
       .map((ext) => ({
-        value: ext.id,
-        label: ext.name || ext.id,
-      }));
+        value: ext.id || '',
+        label: ext.name || ext.id || '',
+      }))
+      .filter((ext) => Boolean(ext.value));
   }
 
-  function getDefaultAgentId(state = getState()) {
-    const runtimeAgent = typeof state?.runtimeOptions?.agent === 'string' ? state.runtimeOptions.agent.trim() : '';
+  function getDefaultAgentId(state: SettingsUiState = getState()): string {
+    const runtimeAgent = typeof state.runtimeOptions?.agent === 'string' ? state.runtimeOptions.agent.trim() : '';
     if (runtimeAgent && runtimeAgent !== 'codex') return runtimeAgent;
     return getActiveAgentOptions(state)[0]?.value || '';
   }
 
-  function resolveAgentId(candidate, state = getState()) {
+  function resolveAgentId(candidate: unknown, state: SettingsUiState = getState()): string {
     const agent = typeof candidate === 'string' ? candidate.trim() : '';
     if (agent && agent !== 'codex') return agent;
-    const savedAgent = typeof state?.conversationSettings?.agent === 'string' ? state.conversationSettings.agent.trim() : '';
+    const savedAgent = typeof state.conversationSettings?.agent === 'string' ? state.conversationSettings.agent.trim() : '';
     if (savedAgent && savedAgent !== 'codex') return savedAgent;
     return getDefaultAgentId(state);
   }
 
-  function applyRuntimeOptions(runtimeOptions) {
+  function applyRuntimeOptions(runtimeOptions: RuntimeOptionsState | null | undefined): void {
     const state = getState();
     const approval = normalizeRuntimeOption(runtimeOptions?.approval);
     const sandbox = normalizeRuntimeOption(runtimeOptions?.sandbox);
@@ -214,27 +438,27 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
-  async function loadRuntimeOptions(agentId, conversationId) {
+  async function loadRuntimeOptions(agentId: unknown, conversationId: unknown): Promise<RuntimeOptionsState> {
     const agent = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : '';
     const conversation_id = typeof conversationId === 'string' && conversationId.trim() ? conversationId.trim() : '';
     try {
-      const data = await sioCall('get_runtime_options', {
-        conversation_id: conversation_id || null,
+      const data = await settingsRpcClient.getRuntimeOptions({
+        conversationId: conversation_id || null,
         agent: agent || null,
       });
-      const next = (data && typeof data === 'object') ? data : {};
+      const next = isRecord(data) ? data as RuntimeOptionsState : {};
       setState({ runtimeOptions: next });
       applyRuntimeOptions(next);
       return next;
     } catch {
-      const next = {};
+      const next: RuntimeOptionsState = {};
       setState({ runtimeOptions: next });
       applyRuntimeOptions(next);
       return next;
     }
   }
 
-  async function openSettingsModal() {
+  async function openSettingsModal(): Promise<void> {
     if (!settingsModalEl) return;
     const state = getState();
     if (state.pendingNewConversation) {
@@ -261,8 +485,8 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsAgentEl) settingsAgentEl.value = resolveAgentId('', state);
     } else {
       if (settingsCwdEl) settingsCwdEl.value = state.conversationSettings?.cwd || '';
-      if (settingsApprovalEl) settingsApprovalEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.approval?.settingKey) || state.conversationSettings?.approvalPolicy || '';
-      if (settingsSandboxEl) settingsSandboxEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.sandbox?.settingKey) || state.conversationSettings?.sandboxPolicy || '';
+      if (settingsApprovalEl) settingsApprovalEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.approval?.settingKey || '') || state.conversationSettings?.approvalPolicy || '';
+      if (settingsSandboxEl) settingsSandboxEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.sandbox?.settingKey || '') || state.conversationSettings?.sandboxPolicy || '';
       if (settingsModelEl) settingsModelEl.value = state.conversationSettings?.model || '';
       updateEffortOptionsForModel(state.conversationSettings?.model);
       if (settingsEffortEl) settingsEffortEl.value = state.conversationSettings?.effort || '';
@@ -280,11 +504,11 @@ export function bindSettingsUiFlow(ctx) {
       if (settingsAgentEl) settingsAgentEl.value = resolveAgentId(state.conversationSettings?.agent, state);
     }
     if (settingsAgentRowEl) {
-      const hasSavedSettings = !state.pendingNewConversation && state.conversationMeta?.settings && Object.values(state.conversationMeta.settings).some((v) => v);
+      const hasSavedSettings = !state.pendingNewConversation && !!state.conversationMeta?.settings && Object.values(state.conversationMeta.settings).some((value) => Boolean(value));
       settingsAgentRowEl.style.display = hasSavedSettings ? 'none' : 'block';
     }
     if (settingsRolloutRowEl) {
-      const hasSavedSettings = !state.pendingNewConversation && state.conversationMeta?.settings && Object.values(state.conversationMeta.settings).some((v) => v);
+      const hasSavedSettings = !state.pendingNewConversation && !!state.conversationMeta?.settings && Object.values(state.conversationMeta.settings).some((value) => Boolean(value));
       settingsRolloutRowEl.style.display = hasSavedSettings ? 'none' : 'block';
     }
     settingsModalEl.classList.remove('hidden');
@@ -295,7 +519,7 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
-  function closeSettingsModal() {
+  function closeSettingsModal(): void {
     if (!settingsModalEl) return;
     const state = getState();
     const agentType = resolveAgentId(settingsAgentEl?.value, state);
@@ -312,27 +536,27 @@ export function bindSettingsUiFlow(ctx) {
     settingsModalEl.classList.add('hidden');
   }
 
-  function openPicker(startPath, mode = 'cwd', options: { input?: unknown } = {}) {
+  function openPicker(startPath: unknown, mode: PickerMode = 'cwd', options: { input?: unknown } = {}): void {
     if (!pickerOverlayEl) return;
     const nextMode = mode || 'cwd';
     pickerTargetInput = nextMode === 'cwd' && isValueInput(options?.input)
       ? options.input
       : (nextMode === 'cwd' ? getActiveCwdInput() : null);
-    const nextPath = startPath
+    const nextPath = (typeof startPath === 'string' && startPath.trim())
       || (nextMode === 'cwd' ? getActiveCwdValue({ fallbackToSaved: true }) : '')
       || getState().pickerPath
       || '~';
     setState({ pickerMode: nextMode, pickerPath: nextPath });
     setPickerChrome(nextMode);
     pickerOverlayEl.classList.remove('hidden');
-    fetchPicker(nextPath);
+    void fetchPicker(nextPath);
     if (pickerFilterEl) {
       pickerFilterEl.value = '';
       setTimeout(() => pickerFilterEl.focus(), 0);
     }
   }
 
-  function closePicker() {
+  function closePicker(): void {
     if (!pickerOverlayEl) return;
     pickerOverlayEl.classList.add('hidden');
     pickerTargetInput = null;
@@ -340,7 +564,7 @@ export function bindSettingsUiFlow(ctx) {
     setState({ pickerMode: 'cwd' });
   }
 
-  function bindPickerFilter() {
+  function bindPickerFilter(): void {
     if (!pickerFilterEl) return;
     pickerFilterEl.addEventListener('input', () => {
       const state = getState();
@@ -352,7 +576,7 @@ export function bindSettingsUiFlow(ctx) {
     });
   }
 
-  function openRolloutPicker() {
+  function openRolloutPicker(): void {
     if (!rolloutOverlayEl) return;
     const cwdOk = Boolean(getActiveCwdValue({ fallbackToSaved: false }));
     if (!cwdOk) {
@@ -360,21 +584,21 @@ export function bindSettingsUiFlow(ctx) {
       return;
     }
     rolloutOverlayEl.classList.remove('hidden');
-    fetchRollouts();
+    void fetchRollouts();
   }
 
-  function closeRolloutPicker() {
+  function closeRolloutPicker(): void {
     if (!rolloutOverlayEl) return;
     rolloutOverlayEl.classList.add('hidden');
   }
 
-  function getRolloutPickerProvider() {
+  function getRolloutPickerProvider(): RolloutPickerProvider | null {
     const provider = getState().rolloutPickerProvider;
     if (provider && typeof provider === 'object') return provider;
     return null;
   }
 
-  function renderRolloutList(items, emptyText = 'No rollouts found') {
+  function renderRolloutList(items: RolloutItem[], emptyText = 'No rollouts found'): void {
     if (!rolloutListEl) return;
     rolloutListEl.innerHTML = '';
     if (!items.length) {
@@ -387,19 +611,19 @@ export function bindSettingsUiFlow(ctx) {
     items.forEach((item) => {
       const row = document.createElement('div');
       row.className = 'picker-item rollout-item';
-      row.dataset.rolloutId = item?.id || '';
+      row.dataset.rolloutId = item.id || '';
       const idSpan = document.createElement('span');
       idSpan.className = 'rollout-id';
-      idSpan.textContent = item?.short_id || item?.id || '';
+      idSpan.textContent = item.short_id || item.id || '';
       const previewSpan = document.createElement('span');
       previewSpan.className = 'rollout-preview';
-      previewSpan.textContent = item?.preview || '';
+      previewSpan.textContent = item.preview || '';
       row.append(idSpan, previewSpan);
       rolloutListEl.appendChild(row);
     });
   }
 
-  async function fetchRollouts() {
+  async function fetchRollouts(): Promise<void> {
     const provider = getRolloutPickerProvider();
     if (!provider || typeof provider.list !== 'function') {
       renderRolloutList([], 'No rollout provider');
@@ -409,7 +633,7 @@ export function bindSettingsUiFlow(ctx) {
     try {
       const cwd = getActiveCwdValue({ fallbackToSaved: false });
       const data = await provider.list({ cwd, state: getState(), setState, setActivity, sioCall });
-      let items = Array.isArray(data?.items) ? data.items : [];
+      let items = Array.isArray(data?.items) ? data.items.filter(isRolloutItem) : [];
       if (cwd) {
         items = items.filter((item) => item && item.cwd && String(item.cwd) === cwd);
       }
@@ -420,8 +644,9 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
-  async function loadRolloutPreview(rolloutId) {
-    if (!rolloutId) return;
+  async function loadRolloutPreview(rolloutId: unknown): Promise<void> {
+    const resolvedRolloutId = typeof rolloutId === 'string' ? rolloutId.trim() : '';
+    if (!resolvedRolloutId) return;
     const provider = getRolloutPickerProvider();
     if (!provider || typeof provider.preview !== 'function') {
       setActivity('rollout preview unavailable', true);
@@ -430,22 +655,22 @@ export function bindSettingsUiFlow(ctx) {
     try {
       const cwd = getActiveCwdValue({ fallbackToSaved: false });
       const data = await provider.preview({
-        rolloutId,
+        rolloutId: resolvedRolloutId,
         cwd,
         state: getState(),
         setState,
         setActivity,
         sioCall,
       });
-      const items = Array.isArray(data?.items) ? data.items : [];
+      const items = Array.isArray(data?.items) ? data.items.filter(isRolloutItem) : [];
       setState({
         pendingRollout: {
-          id: rolloutId,
+          id: resolvedRolloutId,
           items,
-          token_total: data?.token_total ?? null,
+          token_total: typeof data?.token_total === 'number' ? data.token_total : null,
         },
       });
-      if (settingsRolloutEl) settingsRolloutEl.value = rolloutId;
+      if (settingsRolloutEl) settingsRolloutEl.value = resolvedRolloutId;
       closeRolloutPicker();
     } catch (err) {
       console.warn('rollout preview failed', err);
@@ -453,7 +678,7 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
-  function normalizeDropdownOption(option) {
+  function normalizeDropdownOption(option: DropdownOptionInput | null | undefined): DropdownOption | null {
     if (typeof option === 'string') {
       const text = option.trim();
       return text ? { value: text, label: text } : null;
@@ -465,31 +690,41 @@ export function bindSettingsUiFlow(ctx) {
     return { value, label };
   }
 
-  function buildDropdown(listEl, options, inputEl, onChange = null) {
+  function buildDropdown(
+    listEl: HTMLElement | null | undefined,
+    options: DropdownOptionInput[] | null | undefined,
+    inputEl: TextValueInput | null | undefined,
+    onChange: ((value: string) => unknown) | null = null,
+  ): void {
     if (!listEl) return;
     listEl.innerHTML = '';
     (options || [])
       .map(normalizeDropdownOption)
-      .filter(Boolean)
+      .filter((opt): opt is DropdownOption => Boolean(opt))
       .forEach((opt) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'dropdown-item';
-      btn.dataset.value = opt.value;
-      btn.textContent = opt.label;
-      btn.addEventListener('click', () => {
-        if (inputEl) inputEl.value = opt.value;
-        closeDropdownMenu(listEl);
-        if (typeof onChange === 'function') onChange(opt.value);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'dropdown-item';
+        btn.dataset.value = opt.value;
+        btn.textContent = opt.label;
+        btn.addEventListener('click', () => {
+          if (inputEl) inputEl.value = opt.value;
+          closeDropdownMenu(listEl);
+          if (typeof onChange === 'function') onChange(opt.value);
+        });
+        listEl.appendChild(btn);
       });
-      listEl.appendChild(btn);
-    });
   }
 
-  function updateDropdownOptions(listEl, options, inputEl, onChange = null) {
+  function updateDropdownOptions(
+    listEl: HTMLElement | null | undefined,
+    options: DropdownOptionInput[] | null | undefined,
+    inputEl: TextValueInput | null | undefined,
+    onChange: ((value: string) => unknown) | null = null,
+  ): void {
     if (!listEl) return;
-    const seen = new Set();
-    const values = [];
+    const seen = new Set<string>();
+    const values: DropdownOption[] = [];
     (options || []).forEach((option) => {
       const normalized = normalizeDropdownOption(option);
       if (!normalized || seen.has(normalized.value)) return;
@@ -499,7 +734,7 @@ export function bindSettingsUiFlow(ctx) {
     buildDropdown(listEl, values, inputEl, onChange);
   }
 
-  async function loadModelOptions(agentId = '') {
+  async function loadModelOptions(agentId = ''): Promise<void> {
     try {
       const resolvedAgent = resolveAgentId(agentId, getState());
       if (!resolvedAgent) {
@@ -508,28 +743,24 @@ export function bindSettingsUiFlow(ctx) {
         updateEffortOptionsForModel(settingsModelEl?.value);
         return;
       }
-      const data = await sioCall('get_extension_models', { extension_id: resolvedAgent });
-      const items = Array.isArray(data)
-        ? data
-        : data?.models || data?.data || data?.result?.models || data?.result?.data || [];
-      if (Array.isArray(items)) {
-        setState({ modelList: items.filter((m) => m && typeof m === 'object' && m.id) });
-        const names = items.filter((m) => m && typeof m === 'object' && m.id).map((m) => m.id);
-        if (names.length) {
-          updateDropdownOptions(settingsModelOptions, names, settingsModelEl, updateEffortOptionsForModel);
-        }
-        updateEffortOptionsForModel(settingsModelEl?.value);
+      const data = await settingsRpcClient.listExtensionModels({ extensionId: resolvedAgent });
+      const items = firstArray(data.models).filter(isExtensionModel);
+      setState({ modelList: items });
+      const names = items.map((model) => model.id || '').filter(Boolean);
+      if (names.length) {
+        updateDropdownOptions(settingsModelOptions, names, settingsModelEl, updateEffortOptionsForModel);
       }
+      updateEffortOptionsForModel(settingsModelEl?.value);
     } catch {
       // ignore
     }
   }
 
-  async function loadAgentOptions() {
+  async function loadAgentOptions(): Promise<void> {
     try {
-      const data = await sioCall('get_extensions', {});
-      const extensions = data?.extensions || [];
-      const nextState = { ...getState(), extensionCatalog: Array.isArray(extensions) ? extensions : [] };
+      const data = await settingsRpcClient.listExtensions();
+      const extensions = firstArray(data.extensions).filter(isExtensionCatalogEntry);
+      const nextState: SettingsUiState = { ...getState(), extensionCatalog: extensions };
       setState({ extensionCatalog: nextState.extensionCatalog });
       const agents = getActiveAgentOptions(nextState);
       updateDropdownOptions(settingsAgentOptions, agents, settingsAgentEl, onAgentSelectionChange);
@@ -540,24 +771,27 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
-  getWindow()?.addEventListener?.('codexagent:extensions-updated', () => {
+  const eventsWindow = (getWindow ? getWindow() : window) as CodexAgentWindow;
+  eventsWindow.addEventListener?.('codexagent:extensions-updated', () => {
     void loadAgentOptions();
   });
 
-  async function onAgentSelectionChange(agentId) {
+  async function onAgentSelectionChange(agentId: string | null | undefined): Promise<void> {
     const resolvedAgent = resolveAgentId(agentId, getState());
     if (settingsAgentEl) settingsAgentEl.value = resolvedAgent;
-    const win = getWindow ? getWindow() : window;
-    if (win.CodexAgent?.helpers?.onAgentChange) {
-      await win.CodexAgent.helpers.onAgentChange(resolvedAgent);
+    const win = (getWindow ? getWindow() : window) as CodexAgentWindow;
+    const onAgentChange = win.CodexAgent?.helpers?.onAgentChange;
+    if (typeof onAgentChange === 'function') {
+      await onAgentChange(resolvedAgent);
     }
     await loadModelOptions(resolvedAgent);
     await loadRuntimeOptions(resolvedAgent, getState().conversationMeta?.conversation_id);
   }
 
-  function normalizeModelEfforts(model) {
-    const raw = model?.supportedReasoningEfforts ?? model?.supported_reasoning_efforts;
-    if (!Array.isArray(raw)) return [];
+  function normalizeModelEfforts(model: ExtensionModel | null | undefined): string[] {
+    const raw = Array.isArray(model?.supportedReasoningEfforts)
+      ? model.supportedReasoningEfforts
+      : (Array.isArray(model?.supported_reasoning_efforts) ? model.supported_reasoning_efforts : []);
     return raw
       .map((item) => {
         if (typeof item === 'string') return item;
@@ -566,12 +800,12 @@ export function bindSettingsUiFlow(ctx) {
         }
         return '';
       })
-      .filter(Boolean);
+      .filter((item): item is string => typeof item === 'string' && item.length > 0);
   }
 
-  function updateEffortOptionsForModel(modelId) {
+  function updateEffortOptionsForModel(modelId: string | null | undefined): void {
     const state = getState();
-    if (!modelId || !state.modelList.length) return;
+    if (!modelId || !state.modelList?.length) return;
     const model = state.modelList.find((item) => item.id === modelId);
     if (!model) {
       updateDropdownOptions(settingsEffortOptions, ['low', 'medium', 'high'], settingsEffortEl);
@@ -590,7 +824,7 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
-  function openDropdownMenu(listEl) {
+  function openDropdownMenu(listEl: HTMLElement | null | undefined): void {
     if (!listEl) return;
     const state = getState();
     if (state.openDropdownEl && state.openDropdownEl !== listEl) {
@@ -600,7 +834,7 @@ export function bindSettingsUiFlow(ctx) {
     setState({ openDropdownEl: listEl });
   }
 
-  function closeDropdownMenu(listEl) {
+  function closeDropdownMenu(listEl: HTMLElement | null | undefined): void {
     if (!listEl) return;
     listEl.classList.remove('open');
     if (getState().openDropdownEl === listEl) {
@@ -608,7 +842,7 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
-  function toggleDropdownMenu(listEl) {
+  function toggleDropdownMenu(listEl: HTMLElement | null | undefined): void {
     if (!listEl) return;
     if (listEl.classList.contains('open')) {
       closeDropdownMenu(listEl);
@@ -617,43 +851,56 @@ export function bindSettingsUiFlow(ctx) {
     }
   }
 
-  function setupDropdown(inputEl, toggleEl, listEl, options) {
+  function setupDropdown(
+    inputEl: TextValueInput | null | undefined,
+    toggleEl: HTMLElement | null | undefined,
+    listEl: HTMLElement | null | undefined,
+    options: DropdownOptionInput[] | null | undefined,
+  ): void {
     if (!listEl || !inputEl) return;
     buildDropdown(listEl, options, inputEl);
-    toggleEl?.addEventListener('click', (evt) => {
+    toggleEl?.addEventListener('click', (evt: MouseEvent) => {
       evt.preventDefault();
       toggleDropdownMenu(listEl);
     });
   }
 
-  async function fetchPicker(path) {
+  async function fetchPicker(path: unknown): Promise<void> {
     try {
-      const data = await sioCall('fs_list', { path: path || '~' });
-      if (!data || data.ok === false) return;
+      const targetPath = typeof path === 'string' && path.trim() ? path : '~';
+      const data = await uiRpcClient.listFilesystem(targetPath);
+      const record = isRecord(data) ? data : null;
+      if (!record || record.ok === false) return;
+      const nextPath = typeof record.path === 'string' ? record.path : targetPath;
+      const items = firstArray(record.items).filter(isPickerItem);
       setState({
-        pickerPath: data?.path || path || '~',
-        pickerItems: Array.isArray(data?.items) ? data.items : [],
+        pickerPath: nextPath,
+        pickerItems: items,
       });
-      if (pickerPathEl) pickerPathEl.textContent = data?.path || path || '~';
+      if (pickerPathEl) pickerPathEl.textContent = nextPath;
       applyPickerFilter();
     } catch {
       // ignore
     }
   }
 
-  async function fetchPickerSearch(query) {
+  async function fetchPickerSearch(query: unknown): Promise<PickerItem[]> {
     try {
       const state = getState();
       const root = state.conversationSettings?.cwd || settingsCwdEl?.value || state.pickerPath || '~';
-      const data = await sioCall('fs_search', { query, root });
-      if (!data || data.ok === false) return [];
-      return Array.isArray(data?.items) ? data.items : [];
+      const data = await uiRpcClient.searchFilesystem({
+        query: typeof query === 'string' ? query : '',
+        root,
+      });
+      const record = isRecord(data) ? data : null;
+      if (!record || record.ok === false) return [];
+      return firstArray(record.items).filter(isPickerItem);
     } catch {
       return [];
     }
   }
 
-  function applyPickerFilter() {
+  function applyPickerFilter(): void {
     const state = getState();
     if (!pickerFilterEl) {
       renderPickerList(state.pickerItems || []);
@@ -665,10 +912,10 @@ export function bindSettingsUiFlow(ctx) {
       return;
     }
     if (state.pickerMode === 'mention') {
-      fetchPickerSearch(raw).then(renderPickerList);
+      void fetchPickerSearch(raw).then(renderPickerList);
       return;
     }
-    let regex = null;
+    let regex: RegExp | null = null;
     try {
       regex = new RegExp(raw, 'i');
     } catch {
@@ -677,23 +924,22 @@ export function bindSettingsUiFlow(ctx) {
     }
     const items = (state.pickerItems || []).filter((item) => {
       const target = `${item?.name || ''} ${item?.path || ''}`;
-      return regex.test(target);
+      return regex?.test(target) === true;
     });
     renderPickerList(items);
   }
 
-  function renderPickerList(items) {
+  function renderPickerList(items: PickerItem[]): void {
     if (!pickerListEl) return;
     pickerListEl.innerHTML = '';
     const state = getState();
     items.forEach((item) => {
-      if (!item) return;
       const row = document.createElement('div');
       row.className = 'picker-item';
       const icon = document.createElement('span');
       icon.textContent = item.type === 'directory' ? '📁' : '📄';
       const name = document.createElement('span');
-      name.textContent = item.name || item.path;
+      name.textContent = item.name || item.path || '';
       if (state.pickerMode === 'mention') {
         const textWrap = document.createElement('span');
         textWrap.className = 'picker-item-text';
@@ -701,8 +947,9 @@ export function bindSettingsUiFlow(ctx) {
         const path = document.createElement('span');
         path.className = 'picker-item-path';
         const cwd = state.conversationSettings?.cwd || '';
-        const relPath = getRelativePath(item.path || item.name || '', cwd) || (item.path || item.name || '');
-        path.textContent = relPath;
+        const itemPath = item.path || item.name || '';
+        const relPath = getRelativePath(itemPath, cwd) || itemPath;
+        path.textContent = relPath || '';
         textWrap.append(name, path);
         row.append(icon, textWrap);
       } else {
@@ -710,7 +957,7 @@ export function bindSettingsUiFlow(ctx) {
       }
       row.addEventListener('click', () => {
         if (item.type === 'directory') {
-          fetchPicker(item.path);
+          void fetchPicker(item.path || item.name || '');
           return;
         }
         if (getState().pickerMode === 'mention') {
@@ -726,7 +973,7 @@ export function bindSettingsUiFlow(ctx) {
   pickerUpBtn?.addEventListener('click', () => {
     if (getState().pickerMode === 'mention') return;
     const currentPath = getState().pickerPath || getActiveCwdValue({ fallbackToSaved: true }) || '~';
-    fetchPicker(parentPickerPath(currentPath));
+    void fetchPicker(parentPickerPath(currentPath));
   });
   pickerSelectBtn?.addEventListener('click', () => {
     if (getState().pickerMode === 'mention') return;

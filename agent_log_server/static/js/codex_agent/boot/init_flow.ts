@@ -1,4 +1,112 @@
-export function bindBootInitFlow(ctx) {
+type InputLikeElement = HTMLElement & {
+  value: string;
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject): void;
+};
+
+type ConversationSettingsState = {
+  agent?: string | null;
+};
+
+type ConversationMetaState = {
+  conversation_id?: string | null;
+  settings?: ConversationSettingsState | null;
+};
+
+type BootInitState = {
+  messageCount?: number;
+  tokenCount?: number;
+  activeView?: string;
+  conversationSettings?: ConversationSettingsState | null;
+  conversationMeta?: ConversationMetaState | null;
+  pendingNewConversation?: boolean;
+  pendingRollout?: unknown;
+  rolloutPickerProvider?: unknown;
+  pickerPath?: string | null;
+  pickerMode?: string | null;
+  splashTab?: string;
+  hostUi?: unknown;
+  appConfig?: unknown;
+  openDropdownEl?: HTMLElement | null;
+};
+
+type BootElements = {
+  statusEl?: HTMLElement | null;
+  counterMessagesEl?: HTMLElement | null;
+  counterTokensEl?: HTMLElement | null;
+  settingsApprovalEl?: HTMLElement | null;
+  settingsApprovalToggle?: HTMLElement | null;
+  settingsApprovalOptions?: HTMLElement | null;
+  settingsSandboxEl?: HTMLElement | null;
+  settingsSandboxToggle?: HTMLElement | null;
+  settingsSandboxOptions?: HTMLElement | null;
+  settingsModelEl?: InputLikeElement | null;
+  settingsModelToggle?: HTMLElement | null;
+  settingsModelOptions?: HTMLElement | null;
+  settingsEffortEl?: HTMLElement | null;
+  settingsEffortToggle?: HTMLElement | null;
+  settingsEffortOptions?: HTMLElement | null;
+  settingsSummaryEl?: HTMLElement | null;
+  settingsSummaryToggle?: HTMLElement | null;
+  settingsSummaryOptions?: HTMLElement | null;
+  settingsAgentEl?: HTMLElement | null;
+  settingsAgentToggle?: HTMLElement | null;
+  settingsAgentOptions?: HTMLElement | null;
+  startBtn?: HTMLElement | null;
+  stopBtn?: HTMLElement | null;
+};
+
+type CodexAgentApi = {
+  helpers: Record<string, unknown>;
+  state: Record<string, unknown>;
+};
+
+type CodexAgentWindow = Window & {
+  CodexAgent?: CodexAgentApi;
+  CodexAgentModules?: Array<(api: CodexAgentApi | undefined) => void>;
+};
+
+interface BootInitFlowContext {
+  getState: () => BootInitState;
+  setState: (patch: Partial<BootInitState>) => void;
+  elements: BootElements;
+  setPill: (el: HTMLElement | null, text: string, cls?: string) => void;
+  setCounter: (el: HTMLElement | null, count: number) => void;
+  updateScrollButton: () => void;
+  resetWsReady: () => void;
+  connectWS: (handleEvent?: (event: unknown) => void) => void;
+  waitForWs: (timeoutMs: number) => Promise<boolean>;
+  recheckSidebarConnection?: () => Promise<unknown> | unknown;
+  fetchHostUi: () => Promise<unknown>;
+  fetchAppConfig: () => Promise<unknown>;
+  bindPickerFilter: () => void;
+  setDrawerOpen: (open: boolean) => void;
+  fetchConversation: () => Promise<unknown>;
+  fetchConversations: () => Promise<unknown>;
+  resetTimeline: () => void;
+  replayTranscript: () => Promise<unknown>;
+  refreshPlanSurface?: () => Promise<unknown> | unknown;
+  restorePendingApprovals: () => void;
+  maybeAutoScroll: (force?: boolean) => void;
+  ensureActivityRow: () => void;
+  fetchStatus: () => Promise<unknown>;
+  setupDropdown: (
+    inputEl: HTMLElement | null | undefined,
+    toggleEl: HTMLElement | null | undefined,
+    optionsEl: HTMLElement | null | undefined,
+    items: string[],
+  ) => void;
+  loadAgentOptions: () => void;
+  loadModelOptions: () => void;
+  loadRuntimeOptions: (agentId: string | null, conversationId?: string | null) => void;
+  updateEffortOptionsForModel: (model: string) => void;
+  helperFns: Record<string, unknown>;
+  closeDropdownMenu: (dropdownEl: HTMLElement) => void;
+  sioCall: (event: string, payload?: Record<string, unknown>) => Promise<unknown>;
+  documentRef: Document;
+  windowRef: CodexAgentWindow;
+}
+
+export function bindBootInitFlow(ctx: BootInitFlowContext) {
   const {
     getState,
     setState,
@@ -61,11 +169,11 @@ export function bindBootInitFlow(ctx) {
     stopBtn,
   } = elements;
 
-  function initializeBoot(handleEvent) {
+  function initializeBoot(handleEvent?: (event: unknown) => void) {
     const state = getState();
-    setPill(statusEl, 'idle', 'warn');
-    setCounter(counterMessagesEl, state.messageCount);
-    setCounter(counterTokensEl, state.tokenCount);
+    setPill(statusEl ?? null, 'idle', 'warn');
+    setCounter(counterMessagesEl ?? null, state.messageCount ?? 0);
+    setCounter(counterTokensEl ?? null, state.tokenCount ?? 0);
     updateScrollButton();
     resetWsReady();
     connectWS(handleEvent);
@@ -133,14 +241,14 @@ export function bindBootInitFlow(ctx) {
     const api = {
       helpers: {
         ...helperFns,
-        setPendingNewConversation: (val) => { setState({ pendingNewConversation: Boolean(val) }); },
-        setPendingRollout: (val) => { setState({ pendingRollout: val }); },
-        setRolloutPickerProvider: (provider) => { setState({ rolloutPickerProvider: provider || null }); },
+        setPendingNewConversation: (val: unknown) => { setState({ pendingNewConversation: Boolean(val) }); },
+        setPendingRollout: (val: unknown) => { setState({ pendingRollout: val }); },
+        setRolloutPickerProvider: (provider: unknown) => { setState({ rolloutPickerProvider: provider || null }); },
         getRolloutPickerProvider: () => getState().rolloutPickerProvider || null,
         getPickerPath: () => getState().pickerPath,
-        setPickerPath: (val) => { setState({ pickerPath: val }); },
+        setPickerPath: (val: string | null | undefined) => { setState({ pickerPath: val ?? null }); },
         getPickerMode: () => getState().pickerMode,
-        setPickerMode: (val) => { setState({ pickerMode: val || 'cwd' }); },
+        setPickerMode: (val: string | null | undefined) => { setState({ pickerMode: val || 'cwd' }); },
       },
       state: {
         get pendingNewConversation() { return getState().pendingNewConversation; },
@@ -163,7 +271,7 @@ export function bindBootInitFlow(ctx) {
   }
 
   function initExternalModules() {
-    (windowRef.CodexAgentModules || []).forEach((fn) => {
+    (windowRef.CodexAgentModules || []).forEach((fn: (api: CodexAgentApi | undefined) => void) => {
       try {
         fn(windowRef.CodexAgent);
       } catch (err) {
@@ -173,7 +281,7 @@ export function bindBootInitFlow(ctx) {
   }
 
   function bindDropdownClose() {
-    documentRef.addEventListener('click', (evt) => {
+    documentRef.addEventListener('click', (evt: MouseEvent) => {
       const openDropdownEl = getState().openDropdownEl;
       if (!openDropdownEl) return;
       const target = evt.target;

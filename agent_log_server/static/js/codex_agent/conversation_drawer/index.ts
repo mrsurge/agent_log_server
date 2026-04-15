@@ -1,35 +1,28 @@
 import { createConversationDrawerList } from './list.ts';
 import { createConversationDrawerActions } from './actions.ts';
+import type { DrawerListState, HostUiState } from './list.ts';
+import type { DrawerState as DrawerActionsState } from './actions.ts';
 
-interface ConversationDrawerListBinding {
-  renderConversationList: (...args: unknown[]) => void;
-  renderMiniConversationList: (...args: unknown[]) => void;
-  renderSplashTabs: (...args: unknown[]) => void;
-}
-
-interface ConversationDrawerActionsBinding {
-  bindHeaderHandlers?(): void;
-  selectConversation?(...args: unknown[]): unknown;
-  selectConversationWithView?(...args: unknown[]): unknown;
-  setConversationPins?(...args: unknown[]): unknown;
-  deleteConversation?(...args: unknown[]): unknown;
-}
+type CombinedDrawerState = DrawerListState & DrawerActionsState;
+type ConversationDrawerListBinding = ReturnType<typeof createConversationDrawerList>;
+type ConversationDrawerActionsBinding = ReturnType<typeof createConversationDrawerActions>;
 
 interface ConversationDrawerContext {
   conversationListEl: HTMLElement | null;
   conversationMiniListEl: HTMLElement | null;
-  getState(): unknown;
-  getHostUi(): unknown;
+  getState(): CombinedDrawerState;
+  getHostUi(): HostUiState | null | undefined;
   getSplashTab(): string;
   getConversationPreview(conversationId: string): unknown;
   openSettingsModal(): unknown;
   sioCall(event: string, payload: Record<string, unknown>): Promise<unknown>;
-  setState(nextState: Record<string, unknown>): void;
+  setState(nextState: Partial<CombinedDrawerState>): void;
   resetTimeline(): void;
   fetchConversation(conversationId?: string | null): Promise<unknown>;
   replayTranscript(): Promise<unknown>;
   refreshPlanSurface?(): Promise<unknown>;
   restorePendingApprovals(): void;
+  resetConversationUiState(): void;
   setDrawerOpen(open: boolean): void;
   applyHostUi(): void;
   updateActiveConversationLabel(): void;
@@ -63,7 +56,7 @@ export function bindConversationDrawer(ctx: ConversationDrawerContext): Conversa
     deleteConversation: (...args) => actionsRef?.deleteConversation?.(...args),
     documentRef: ctx.documentRef,
     windowRef: ctx.windowRef,
-  }) as ConversationDrawerListBinding;
+  });
 
   const actions = createConversationDrawerActions({
     sioCall: ctx.sioCall,
@@ -74,6 +67,7 @@ export function bindConversationDrawer(ctx: ConversationDrawerContext): Conversa
     replayTranscript: ctx.replayTranscript,
     refreshPlanSurface: ctx.refreshPlanSurface,
     restorePendingApprovals: ctx.restorePendingApprovals,
+    resetConversationUiState: ctx.resetConversationUiState,
     setDrawerOpen: ctx.setDrawerOpen,
     applyHostUi: ctx.applyHostUi,
     openSettingsModal: ctx.openSettingsModal,
@@ -90,7 +84,7 @@ export function bindConversationDrawer(ctx: ConversationDrawerContext): Conversa
     conversationMiniCloseBtn: ctx.conversationMiniCloseBtn,
     documentRef: ctx.documentRef,
     windowRef: ctx.windowRef,
-  }) as ConversationDrawerActionsBinding;
+  });
 
   actionsRef = actions;
   actions.bindHeaderHandlers?.();

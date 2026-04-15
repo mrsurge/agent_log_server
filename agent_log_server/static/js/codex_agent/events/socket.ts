@@ -24,8 +24,8 @@ interface BindSocketEventsContext {
   getWsState: () => WsState;
   setWsState: (patch: Partial<WsState>) => void;
   setSocket: (socket: AppserverSocket) => void;
-  wsStatusEl?: Element | null;
-  setPill: (element: Element | null | undefined, label: string, tone: string) => void;
+  wsStatusEl?: HTMLElement | null;
+  setPill: (element: HTMLElement | null, label: string, tone?: string) => void;
   syncDraftFromServer: (conversationId: string | null | undefined) => void;
   getConversationId: () => string | null | undefined;
   getWindow: () => Window;
@@ -113,7 +113,7 @@ export function bindSocketEvents(ctx: BindSocketEventsContext) {
 
   function connectWS(onEvent?: (event: unknown) => void) {
     if (typeof io === 'undefined') {
-      setPill(wsStatusEl, 'no-io', 'err');
+      setPill(wsStatusEl ?? null, 'no-io', 'err');
       return;
     }
     if (typeof unsubscribeRpcNotifications === 'function') {
@@ -141,7 +141,7 @@ export function bindSocketEvents(ctx: BindSocketEventsContext) {
         console.warn('conversation rpc notify subscribe failed', error);
       }
     }
-    setPill(wsStatusEl, '…', 'warn');
+    setPill(wsStatusEl ?? null, '…', 'warn');
     const sock = io('/appserver', {
       path: socketIoPath(),
       transports: ['websocket'],
@@ -155,19 +155,19 @@ export function bindSocketEvents(ctx: BindSocketEventsContext) {
     sock.on('connect', () => {
       markWsOpen();
       lastSyncedConversationsLiveTransport = null;
-      setPill(wsStatusEl, '👍', 'ok');
+      setPill(wsStatusEl ?? null, '👍', 'ok');
       syncDraftFromServer(getConversationId());
       syncConversationsLiveTransportOwnership();
     });
     sock.on('disconnect', () => {
       resetWsReady();
       lastSyncedConversationsLiveTransport = null;
-      setPill(wsStatusEl, '👎', 'err');
+      setPill(wsStatusEl ?? null, '👎', 'err');
     });
     sock.on('connect_error', () => {
       resetWsReady();
       lastSyncedConversationsLiveTransport = null;
-      setPill(wsStatusEl, '👎', 'err');
+      setPill(wsStatusEl ?? null, '👎', 'err');
     });
     sock.on('appserver_event', (data) => {
       if (

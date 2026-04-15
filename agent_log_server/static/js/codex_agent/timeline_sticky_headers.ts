@@ -115,7 +115,7 @@ function findNextTimelineRowAfterSubtree(row: StickySourceRow | null): NextTimel
       }
       sibling = sibling.nextElementSibling;
     }
-    const parentRow = cursor.parentElement?.closest('.timeline-row');
+    const parentRow: Element | null = cursor.parentElement?.closest('.timeline-row') ?? null;
     cursor = isTimelineRowElement(parentRow) ? parentRow : null;
     climbed += 1;
   }
@@ -193,14 +193,18 @@ export function bindTimelineStickyHeaders(
     };
   }
 
+  const wrapEl = timelineWrapEl;
+  const tlEl = timelineEl;
+
   const doc = documentRef || document;
   const win = windowRef || window;
-  let container = timelineWrapEl.querySelector<HTMLDivElement>('.timeline-sticky-overlay');
+  let container = wrapEl.querySelector<HTMLDivElement>('.timeline-sticky-overlay');
   if (!container) {
     container = doc.createElement('div');
     container.className = 'timeline-sticky-overlay';
-    timelineWrapEl.insertBefore(container, timelineEl);
+    wrapEl.insertBefore(container, tlEl);
   }
+  const overlayEl = container;
 
   let disposed = false;
   let rafId: number | null = null;
@@ -241,7 +245,7 @@ export function bindTimelineStickyHeaders(
     while (stickySlots.length < count) {
       const underlay = doc.createElement('div');
       underlay.className = 'timeline-sticky-underlay';
-      container.appendChild(underlay);
+      overlayEl.appendChild(underlay);
       stickyUnderlays.push(underlay);
 
       const slot = doc.createElement('div') as StickySlotElement;
@@ -259,7 +263,7 @@ export function bindTimelineStickyHeaders(
         }
         scheduleUpdate();
       });
-      container.appendChild(slot);
+      overlayEl.appendChild(slot);
       stickySlots.push(slot);
       stickyRows.push(host);
     }
@@ -281,8 +285,8 @@ export function bindTimelineStickyHeaders(
     stickyHeights = [];
     visibleHeight = 0;
     ensureSlotCount(0);
-    container.style.display = 'none';
-    container.style.height = '0px';
+    overlayEl.style.display = 'none';
+    overlayEl.style.height = '0px';
   }
 
   function syncSlotFromSource(srcRow: StickySourceRow, depth: number): number {
@@ -292,7 +296,7 @@ export function bindTimelineStickyHeaders(
     const sourceHeader = getHeaderForRow(srcRow);
     if (!underlay || !slot || !host || !sourceHeader) return DEFAULT_ROW_HEIGHT;
 
-    const wrapRect = timelineWrapEl.getBoundingClientRect();
+    const wrapRect = wrapEl.getBoundingClientRect();
     const headerRect = sourceHeader.getBoundingClientRect();
     if (isElementVisibleRect(wrapRect) && isElementVisibleRect(headerRect)) {
       const left = Math.max(0, Math.round(headerRect.left - wrapRect.left));
@@ -384,14 +388,14 @@ export function bindTimelineStickyHeaders(
   function updateNow(): void {
     if (disposed) return;
 
-    const wrapRect = timelineWrapEl.getBoundingClientRect();
+    const wrapRect = wrapEl.getBoundingClientRect();
     if (!isElementVisibleRect(wrapRect)) {
       clearOverlay();
       return;
     }
 
     const captureTop = wrapRect.top + (typeof getTopOffset === 'function' ? getTopOffset() : 0);
-    const rawChain = computeStickyChain(captureTop, timelineEl, []);
+    const rawChain = computeStickyChain(captureTop, tlEl, []);
     const rawKey = rawChain.map(getRowUid).join('|');
     let chain = rawChain;
     let key = rawKey;
@@ -431,8 +435,8 @@ export function bindTimelineStickyHeaders(
 
     const topOffset = typeof getTopOffset === 'function' ? getTopOffset() : 0;
     const hostTop = wrapRect.top + topOffset;
-    container.style.display = 'block';
-    container.style.top = `${topOffset}px`;
+    overlayEl.style.display = 'block';
+    overlayEl.style.top = `${topOffset}px`;
     ensureSlotCount(chain.length);
     stickySourceRows = chain.slice();
     stickyHeights = new Array(chain.length);
@@ -440,7 +444,7 @@ export function bindTimelineStickyHeaders(
       syncSlotFromSource(srcRow, depth);
     });
     visibleHeight = stickyHeights.reduce((sum, height) => sum + (height || DEFAULT_ROW_HEIGHT), 0) + BOTTOM_SHADOW_PAD_PX;
-    container.style.height = '0px';
+    overlayEl.style.height = '0px';
     lastKey = key;
     applyPushTransforms(chain, hostTop);
 
@@ -451,7 +455,7 @@ export function bindTimelineStickyHeaders(
   }
 
   const observer = new MutationObserver(scheduleUpdate);
-  observer.observe(timelineEl, {
+  observer.observe(tlEl, {
     childList: true,
     subtree: true,
     characterData: true,
@@ -463,7 +467,7 @@ export function bindTimelineStickyHeaders(
     scheduleUpdate();
   }
 
-  timelineWrapEl.addEventListener('scroll', onScroll, { passive: true });
+  wrapEl.addEventListener('scroll', onScroll, { passive: true });
   win.addEventListener('resize', scheduleUpdate);
   scheduleUpdate();
 
@@ -472,16 +476,16 @@ export function bindTimelineStickyHeaders(
     destroy() {
       disposed = true;
       observer.disconnect();
-      timelineWrapEl.removeEventListener('scroll', onScroll);
+      wrapEl.removeEventListener('scroll', onScroll);
       win.removeEventListener('resize', scheduleUpdate);
       if (rafId) {
         win.cancelAnimationFrame(rafId);
         rafId = null;
       }
-      container.remove();
+      overlayEl.remove();
     },
     getVisibleHeight() {
-      if (container.style.display === 'none') return 0;
+      if (overlayEl.style.display === 'none') return 0;
       return visibleHeight;
     },
   };

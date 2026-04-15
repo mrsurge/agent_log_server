@@ -9,7 +9,82 @@ type CodexAgentWindow = Window & typeof globalThis & {
   };
 };
 
-export function bindSettingsSaveFlow(ctx) {
+type TextValueInput = HTMLElement & { value: string };
+type ToggleInput = HTMLInputElement | null;
+
+type RuntimeSettingDescriptor = {
+  settingKey?: string | null;
+};
+
+type RuntimeOptionsState = {
+  agent?: string | null;
+  approval?: RuntimeSettingDescriptor | null;
+  sandbox?: RuntimeSettingDescriptor | null;
+};
+
+type ConversationSettingsState = Record<string, unknown> & {
+  cwd?: string | null;
+};
+
+type ConversationMetaState = Record<string, unknown> & {
+  conversation_id?: string | null;
+  settings?: ConversationSettingsState | null;
+};
+
+type SettingsSaveState = {
+  runtimeOptions?: RuntimeOptionsState | null;
+  conversationSettings?: ConversationSettingsState | null;
+  conversationMeta?: ConversationMetaState | null;
+  trackEditsEnabled?: boolean;
+  lineNumbersEnabled?: boolean;
+  pendingNewConversation?: boolean;
+  clientConversationId?: string | null;
+  clientActiveView?: string | null;
+};
+
+type SettingsSaveElements = {
+  settingsAgentEl?: TextValueInput | null;
+  settingsCwdEl?: TextValueInput | null;
+  settingsCommandLinesEl?: TextValueInput | null;
+  settingsMarkdownEl?: ToggleInput;
+  settingsDiffSyntaxEl?: ToggleInput;
+  settingsSemanticShellRibbonEl?: ToggleInput;
+  settingsTe2McpIntegrationEl?: ToggleInput;
+  settingsApprovalEl?: TextValueInput | null;
+  settingsSandboxEl?: TextValueInput | null;
+  settingsModelEl?: TextValueInput | null;
+  settingsEffortEl?: TextValueInput | null;
+  settingsSummaryEl?: TextValueInput | null;
+  settingsDeveloperInstructionsEl?: TextValueInput | null;
+  settingsLabelEl?: TextValueInput | null;
+  settingsAliasEl?: TextValueInput | null;
+  settingsViewWrapEl?: ToggleInput;
+};
+
+interface SettingsSaveFlowContext {
+  getState(): SettingsSaveState;
+  setState(patch: Partial<SettingsSaveState>): void;
+  elements: SettingsSaveElements;
+  normalizeApprovalValue(value: string | undefined): string | undefined;
+  setActivity(message: string, isError: boolean): void;
+  setMarkdownEnabled(enabled: boolean): void;
+  setViewWrapEnabled(enabled: boolean): void;
+  setDiffSyntaxEnabled(enabled: boolean): void;
+  setSemanticShellRibbonEnabled(enabled: boolean): void;
+  ensureTreeSitterRibbonReady(): Promise<unknown>;
+  sioCall(event: string, payload?: Record<string, unknown>): Promise<ConversationMetaState | null>;
+  closeSettingsModal(): void;
+  fetchConversation(conversationId?: string | null): Promise<unknown>;
+  fetchConversations(): Promise<unknown>;
+  resetTimeline(): void;
+  replayTranscript(): Promise<unknown>;
+  refreshPlanSurface?(): Promise<unknown> | unknown;
+  restorePendingApprovals(): void;
+  setDrawerOpen(open: boolean): void;
+  updateConversationHeaderLabel(): void;
+}
+
+export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
   const {
     getState,
     setState,
@@ -60,7 +135,7 @@ export function bindSettingsSaveFlow(ctx) {
       setActivity('Agent required', true);
       return;
     }
-    const normalizeStringSetting = (value) => {
+    const normalizeStringSetting = (value: unknown): unknown | null => {
       if (typeof value === 'string') {
         const trimmed = value.trim();
         return trimmed || null;
@@ -74,23 +149,23 @@ export function bindSettingsSaveFlow(ctx) {
     const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
     const semanticRibbonEnabled = settingsSemanticShellRibbonEl?.checked === true;
 
-    let schemaValues = {};
+    let schemaValues: Record<string, unknown> = {};
     try {
-      schemaValues =
+      const rawSchemaValues =
         codexWindow.CodexAgent?.helpers?.getSchemaParsedValues?.()
         || codexWindow.CodexAgent?.helpers?.getSchemaValues?.()
         || {};
+      schemaValues = rawSchemaValues && typeof rawSchemaValues === 'object' && !Array.isArray(rawSchemaValues)
+        ? rawSchemaValues as Record<string, unknown>
+        : {};
     } catch (err) {
       setActivity(err instanceof Error ? err.message : String(err), true);
       return;
     }
-    if (!schemaValues || typeof schemaValues !== 'object' || Array.isArray(schemaValues)) {
-      schemaValues = {};
-    }
     const approvalKey = state.runtimeOptions?.approval?.settingKey || 'approvalPolicy';
     const sandboxKey = state.runtimeOptions?.sandbox?.settingKey || 'sandboxPolicy';
     const schemaManagedKeys = new Set(Object.keys(schemaValues));
-    const normalizedSchemaSettings = Object.fromEntries(
+    const normalizedSchemaSettings: Record<string, unknown> = Object.fromEntries(
       Object.entries(schemaValues).map(([key, value]) => {
         if (key === approvalKey) {
           const approvalValue = typeof value === 'string' ? normalizeApprovalValue(value.trim()) : '';
@@ -99,7 +174,7 @@ export function bindSettingsSaveFlow(ctx) {
         return [key, normalizeStringSetting(value)];
       })
     );
-    const schemaManages = (key) => schemaManagedKeys.has(key);
+    const schemaManages = (key: string) => schemaManagedKeys.has(key);
 
     let cwd = schemaManages('cwd')
       ? normalizedSchemaSettings.cwd
@@ -112,7 +187,7 @@ export function bindSettingsSaveFlow(ctx) {
       return;
     }
 
-    const preservedSettings = { ...(state.conversationSettings || {}) };
+    const preservedSettings: Record<string, unknown> = { ...(state.conversationSettings || {}) };
     [
       'cwd',
       'approvalPolicy',
@@ -140,7 +215,7 @@ export function bindSettingsSaveFlow(ctx) {
       if (!key) return;
       delete preservedSettings[key];
     });
-    const settings = {
+    const settings: Record<string, unknown> = {
       ...preservedSettings,
       ...normalizedSchemaSettings,
       cwd,
@@ -199,9 +274,9 @@ export function bindSettingsSaveFlow(ctx) {
     }
 
     nextState = getState();
-    await sioCall('conversation_update', {
-      conversation_id: nextState.conversationMeta?.conversation_id, settings,
-    });
+      await sioCall('conversation_update', {
+        conversation_id: nextState.conversationMeta?.conversation_id, settings,
+      });
 
     closeSettingsModal();
     await fetchConversation(getState().conversationMeta?.conversation_id);

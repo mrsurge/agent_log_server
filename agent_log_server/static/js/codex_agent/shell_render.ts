@@ -1,8 +1,58 @@
 // Shell streaming card rendering helpers extracted from static/codex_agent.js
 
+import {
+  applyTranscriptCardMetadata,
+  type TranscriptCardMetadata,
+} from './transcript_card_metadata.ts';
+
 declare const hljs: any;
 
-export function bindShellRender(ctx) {
+type ShellRowEntry = {
+  row: HTMLDivElement;
+  cmdRibbon: HTMLDivElement;
+  termEl: HTMLPreElement;
+  text: string;
+};
+
+type SubagentContainer = Record<string, unknown> & {
+  body?: HTMLElement | null;
+  label?: HTMLElement | null;
+};
+
+type ShellRenderEvent = {
+  id?: string;
+  card_id?: string;
+  order_id?: number;
+  nid?: string;
+  command?: string;
+  subagent_id?: string;
+  path?: string;
+  line?: number;
+  activity?: string;
+  delta?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+};
+
+interface ShellRenderContext {
+  shellRows: Map<string, ShellRowEntry>;
+  clearPlaceholder: () => void;
+  insertRow: (row: HTMLElement) => void;
+  makeCollapsible: (row: HTMLElement, key: string, startExpanded: boolean) => void;
+  getSubagentContainer: (id: string, name: string, intent: string) => SubagentContainer;
+  renderShellCmdRibbon: (el: HTMLElement | null, cmd: string) => void;
+  postTe2OpenRequest: (target: { path: string; line: number; column: number }) => void;
+  detectLangFromCommand: (command: string) => string | null;
+  highlightCodeAlways: (text: string, language: string) => string;
+  setStatusDot: (value: string) => void;
+  setActivity: (message: string, active: boolean) => void;
+  maybeAutoScroll: (force?: boolean) => void;
+  setLastEventType?: (value: string) => void;
+  _dbg?: boolean;
+}
+
+export function bindShellRender(ctx: ShellRenderContext) {
   const {
     shellRows,
     clearPlaceholder,
@@ -21,13 +71,18 @@ export function bindShellRender(ctx) {
   } = ctx;
 
   // Uses same styling as command-result (renderCommandResult)
-  function getShellRow(id, parentEl) {
+  function getShellRow(
+    id: string,
+    parentEl: HTMLElement | null,
+    metadata: TranscriptCardMetadata | null = null,
+  ): ShellRowEntry {
     let entry = shellRows.get(id);
     if (!entry) {
       clearPlaceholder();
       const row = document.createElement('div');
       row.className = 'timeline-row command-result terminal-card';
       row.dataset.shellId = id;
+      applyTranscriptCardMetadata(row, metadata);
 
       const body = document.createElement('div');
       body.className = 'body';
@@ -53,20 +108,24 @@ export function bindShellRender(ctx) {
 
       entry = { row, cmdRibbon, termEl, text: '' };
       shellRows.set(id, entry);
+    } else {
+      applyTranscriptCardMetadata(entry.row, metadata);
     }
     return entry;
   }
 
-  function renderShellBegin(evt) {
+  function renderShellBegin(evt: ShellRenderEvent) {
     // Route into subagent container if tagged
     let parentEl = null;
     if (evt.subagent_id) {
       const sa = getSubagentContainer(evt.subagent_id, '', '');
-      parentEl = sa.body;
+      parentEl = sa.body || null;
       // Update subagent header with current action
-      sa.label.textContent = `${sa.label.textContent.split(':')[0]}: ${evt.command || 'working'}`;
+      if (sa.label) {
+        sa.label.textContent = `${(sa.label.textContent || '').split(':')[0]}: ${evt.command || 'working'}`;
+      }
     }
-    const entry = getShellRow(evt.id, parentEl);
+    const entry = getShellRow(evt.id || '', parentEl, evt);
     // Just show the command, skip cwd line (redundant)
     renderShellCmdRibbon(entry.cmdRibbon, evt.command || '');
 
@@ -76,13 +135,14 @@ export function bindShellRender(ctx) {
     if (evt.path && entry.cmdRibbon) {
       entry.cmdRibbon.style.cursor = 'pointer';
       entry.cmdRibbon.title = evt.path;
-      entry.cmdRibbon.addEventListener('click', (e) => {
-        if (_dbg) console.log('[RIBBON_CLICK] FIRED', e.target.tagName, e.target.className);
-        if (_dbg) console.log('[RIBBON_CLICK] twisty?', !!e.target.closest('.twisty'), 'toggle?', !!e.target.closest('.ribbon-toggle-zone'));
-        if (e.target.closest('.twisty') || e.target.closest('.ribbon-toggle-zone')) return;
+      entry.cmdRibbon.addEventListener('click', (e: MouseEvent) => {
+        const target = e.target;
+        if (_dbg && target instanceof HTMLElement) console.log('[RIBBON_CLICK] FIRED', target.tagName, target.className);
+        if (_dbg && target instanceof Element) console.log('[RIBBON_CLICK] twisty?', !!target.closest('.twisty'), 'toggle?', !!target.closest('.ribbon-toggle-zone'));
+        if (target instanceof Element && (target.closest('.twisty') || target.closest('.ribbon-toggle-zone'))) return;
         const line = evt.line || 1;
         if (_dbg) console.log('[RIBBON_CLICK] calling postTe2OpenRequest path=', evt.path, 'line=', line);
-        postTe2OpenRequest({ path: evt.path, line, column: 1 });
+        postTe2OpenRequest({ path: evt.path || '', line, column: 1 });
       });
       if (_dbg) console.log('[RIBBON_CLICK] handler wired for path=', evt.path);
     }
@@ -97,9 +157,10 @@ export function bindShellRender(ctx) {
     maybeAutoScroll();
   }
 
-  function renderShellDelta(evt) {
-    const entry = shellRows.get(evt.id);
+  function renderShellDelta(evt: ShellRenderEvent) {
+    const entry = shellRows.get(evt.id || '');
     if (!entry) return;
+    applyTranscriptCardMetadata(entry.row, evt);
     const delta = evt.delta || '';
     if (delta) {
       entry.text += delta;
@@ -110,13 +171,14 @@ export function bindShellRender(ctx) {
     maybeAutoScroll();
   }
 
-  function renderShellEnd(evt) {
-    const entry = shellRows.get(evt.id);
+  function renderShellEnd(evt: ShellRenderEvent) {
+    const entry = shellRows.get(evt.id || '');
     if (!entry) {
       // No streaming happened, render batch result
       renderShellBatchResult(evt);
       return;
     }
+    applyTranscriptCardMetadata(entry.row, evt);
 
     const exitCode = evt.exitCode ?? 0;
 
@@ -129,9 +191,9 @@ export function bindShellRender(ctx) {
         entry.cmdRibbon.style.cursor = 'pointer';
         entry.cmdRibbon.title = evt.path;
         entry.cmdRibbon.dataset.hasClickHandler = 'true';
-        entry.cmdRibbon.addEventListener('click', (e) => {
+        entry.cmdRibbon.addEventListener('click', (e: MouseEvent) => {
           if (e.target instanceof Element && e.target.closest('.twisty')) return;
-          postTe2OpenRequest({ path: evt.path, line: evt.line || 1, column: 1 });
+          postTe2OpenRequest({ path: evt.path || '', line: evt.line || 1, column: 1 });
         });
       }
     }
@@ -168,7 +230,7 @@ export function bindShellRender(ctx) {
       const footer = document.createElement('div');
       footer.className = 'command-footer';
       footer.textContent = `exit ${exitCode}`;
-      entry.row.querySelector('.body').appendChild(footer);
+      entry.row.querySelector<HTMLElement>('.body')?.appendChild(footer);
     }
 
     // Update status
@@ -178,14 +240,15 @@ export function bindShellRender(ctx) {
     maybeAutoScroll();
 
     // Clean up tracking
-    shellRows.delete(evt.id);
+    shellRows.delete(evt.id || '');
   }
 
-  function renderShellBatchResult(evt) {
+  function renderShellBatchResult(evt: ShellRenderEvent) {
     // Fallback - shell_end without prior shell_begin
     clearPlaceholder();
     const row = document.createElement('div');
     row.className = 'timeline-row command-result';
+    applyTranscriptCardMetadata(row, evt);
 
     const body = document.createElement('div');
     body.className = 'body';
@@ -201,9 +264,9 @@ export function bindShellRender(ctx) {
       cmdRibbon.style.cursor = 'pointer';
       cmdRibbon.title = evt.path;
       cmdRibbon.dataset.hasClickHandler = 'true';
-      cmdRibbon.addEventListener('click', (e) => {
+      cmdRibbon.addEventListener('click', (e: MouseEvent) => {
         if (e.target instanceof Element && e.target.closest('.twisty')) return;
-        postTe2OpenRequest({ path: evt.path, line: evt.line || 1, column: 1 });
+        postTe2OpenRequest({ path: evt.path || '', line: evt.line || 1, column: 1 });
       });
     }
     body.appendChild(cmdRibbon);

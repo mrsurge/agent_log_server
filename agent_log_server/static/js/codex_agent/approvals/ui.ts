@@ -1,3 +1,5 @@
+import { applyTranscriptCardMetadata } from '../transcript_card_metadata.ts';
+
 type ApprovalDecisionObject = {
   acceptWithExecpolicyAmendment?: boolean;
   applyNetworkPolicyAmendment?: boolean;
@@ -616,6 +618,7 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     const requestId = approvalRequestId(evt);
     if (!requestId) return null;
     const { row, body } = ensureApprovalRow(evt, options);
+    applyTranscriptCardMetadata(row, evt);
 
     const helpers = {
       escapeHtml,
@@ -727,14 +730,12 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     if (activeRow) activeRow.remove();
     prunePendingApproval(requestId);
     const askUserMsgId = evt?.ask_user_msg_id ?? evt?.askUserMsgId;
-    const resolvedCardId = askUserMsgId != null
-      ? `ask_user_resolved_${askUserMsgId}`
-      : approvalCardId(evt);
+    const resolvedCardId = approvalCardId(evt);
     const handoffEvent = {
       ...evt,
       type: 'approval',
-      request_id: resolvedCardId,
-      id: resolvedCardId,
+      request_id: requestId,
+      id: evt?.id ?? requestId,
       card_id: resolvedCardId,
       ask_user_msg_id: askUserMsgId,
       replay: false,

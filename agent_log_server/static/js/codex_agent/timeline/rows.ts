@@ -1,3 +1,5 @@
+import { applyTranscriptCardMetadata, type TranscriptCardMetadata } from '../transcript_card_metadata.ts';
+
 interface TimelineRowsState {
   bottomSpacerEl?: HTMLElement | null;
   placeholderCleared?: boolean;
@@ -208,12 +210,18 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     }
   }
 
-  function addMessage(role: string, text: string, parentEl: HTMLElement | null = null) {
+  function addMessage(
+    role: string,
+    text: string,
+    parentEl: HTMLElement | null = null,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
     const cleanText = role === 'assistant' ? stripCitations(text || '') : (text || '');
     const useMessageCard = role === 'assistant' || role === 'user';
     const { row, body } = useMessageCard
       ? buildMessageCard(role, cleanText)
       : buildRow('message', role === 'assistant' ? 'assistant' : role);
+    applyTranscriptCardMetadata(row, metadata);
     if (!useMessageCard && role === 'user') row.classList.add('user');
     if (parentEl) {
       clearPlaceholder();

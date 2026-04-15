@@ -237,6 +237,7 @@ class ConversationStore:
             "thread_id": None,
             "pending_approvals": {},
             "ask_user_msg_counter": 0,
+            "next_transcript_order_id": 0,
             "active_plan": None,
             "settings": {},
             "status": "draft",

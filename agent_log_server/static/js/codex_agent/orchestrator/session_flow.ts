@@ -13,6 +13,7 @@ interface SessionFlowState {
   initialized?: boolean;
   rpcTransportEnabled?: boolean;
   autoScroll?: boolean;
+  transcriptHistoryMode?: boolean;
   conversationMeta?: SessionConversationMeta | null;
 }
 
@@ -46,6 +47,7 @@ interface SessionFlowContext {
   renderShellBatchResult: (result: ShellBatchResult) => void;
   setStatusDot: (status: string) => void;
   shellRows: ShellRowLookup;
+  snapTranscriptToLive?: () => Promise<void>;
 }
 
 function asObject(value: unknown): JsonObject | null {
@@ -100,6 +102,7 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
     renderShellBatchResult,
     setStatusDot,
     shellRows,
+    snapTranscriptToLive,
   } = ctx;
 
   async function ensureInitialized() {
@@ -120,6 +123,9 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
     if (!convoId) {
       setActivity('save settings first', true);
       return;
+    }
+    if (state.transcriptHistoryMode === true && typeof snapTranscriptToLive === 'function') {
+      await snapTranscriptToLive();
     }
     setState({ autoScroll: true });
     updateScrollButton();

@@ -6,8 +6,8 @@ interface PendingRpcEntry {
   timer: ReturnType<typeof setTimeout>;
 }
 
-interface SubagentContainer {
-  body?: Element | null;
+interface SubagentContainer extends Record<string, unknown> {
+  body?: HTMLElement | null;
 }
 
 interface ConversationPreview {
@@ -27,6 +27,7 @@ interface HostUiState {
 }
 
 interface RouterState {
+  clientConversationId?: string | null;
   conversationMeta?: ConversationMetaState | null;
   hostUi?: HostUiState | null;
   activeView?: string;
@@ -92,6 +93,9 @@ interface RouterEvent extends JsonObject {
   stdout?: string;
   stderr?: string;
   conversation_id?: string;
+  card_id?: string;
+  order_id?: number;
+  nid?: string;
 }
 
 interface EventRouterContext {
@@ -108,14 +112,14 @@ interface EventRouterContext {
   renderWarningCard: (message: string, action: unknown) => void;
   clearReasoningRibbon: () => void;
   setReasoningRibbon: (text: string) => void;
-  addMessage: (role: string, text: string, parent?: Element | null) => void;
-  getSubagentContainer: (id: string | undefined, name: string, intent: string) => SubagentContainer;
-  appendAssistantDelta: (id: string | undefined, delta: string, parent?: Element | null) => void;
-  finalizeAssistant: (id: string | undefined, text: string, parent?: Element | null) => void;
-  appendReasoningDelta: (id: string | undefined, delta: string, parent?: Element | null) => void;
-  finalizeReasoning: (id: string | undefined, text: string, parent?: Element | null) => void;
-  addDiff: (id: string | undefined, text: string, path: string, parent?: Element | null) => void;
-  addDeclinedDiff: (id: string | undefined, text: string, path: string) => void;
+  addMessage: (role: string, text: string, parent?: HTMLElement | null, metadata?: RouterEvent | null) => void;
+  getSubagentContainer: (id: string, name: string, intent: string, metadata?: RouterEvent | null) => SubagentContainer;
+  appendAssistantDelta: (id: string | null | undefined, delta: string, parent?: HTMLElement | null, metadata?: RouterEvent | null) => void;
+  finalizeAssistant: (id: string | null | undefined, text: string, parent?: HTMLElement | null, metadata?: RouterEvent | null) => void;
+  appendReasoningDelta: (id: string | null | undefined, delta: string, parent?: HTMLElement | null, metadata?: RouterEvent | null) => void;
+  finalizeReasoning: (id: string | null | undefined, text: string, parent?: HTMLElement | null, metadata?: RouterEvent | null) => void;
+  addDiff: (id: string, text: string, path: string, parent?: HTMLElement | null, metadata?: RouterEvent | null) => void;
+  addDeclinedDiff: (id: string, text: string, path: string) => void;
   renderApproval: (event: RouterEvent) => void;
   renderCommandResult: (event: RouterEvent) => void;
   renderViewCard: (event: RouterEvent) => void;
@@ -131,16 +135,16 @@ interface EventRouterContext {
   renderShellBegin: (event: RouterEvent) => void;
   renderShellDelta: (event: RouterEvent) => void;
   renderShellEnd: (event: RouterEvent) => void;
-  finalizeSubagent: (id: string | undefined, summary?: string, success?: boolean) => void;
+  finalizeSubagent: (id: string, summary: string, success: boolean) => void;
   maybeAutoScroll: () => void;
   handleLivePlanState: (event: RouterEvent) => void;
   handleLiveTodoUpdate: (event: RouterEvent) => void;
   restorePlanOverlay?: (...args: unknown[]) => void;
-  renderPlanCard: (steps: unknown[]) => void;
+  renderPlanCard: (steps: Record<string, unknown>[], parent?: HTMLElement | null, metadata?: RouterEvent | null) => void;
   clearPlanOverlay: () => void;
-  updateTokens: (total: unknown) => void;
-  updateContextRemaining: (total: unknown, contextWindow: number) => void;
-  renderContextCompactedCard: () => void;
+  updateTokens: (total: number) => void;
+  updateContextRemaining: (total: number, contextWindow: number) => void;
+  renderContextCompactedCard: (event?: RouterEvent | null) => void;
   renderMetaEnvelopeInjected: (event: RouterEvent) => void;
   applyHostUi: () => void;
   renderSplashTabs: () => void;
@@ -334,8 +338,9 @@ export function bindEventRouter(ctx: EventRouterContext) {
       return;
     }
     setState({ conversationPreviewCache: { ...cache, [convoId]: nextPreview } });
-    renderConversationList(state.conversationList, state.conversationMeta?.conversation_id || null);
-    renderMiniConversationList(state.conversationList, state.conversationMeta?.conversation_id || null);
+    const activeConversationId = state.clientConversationId || state.conversationMeta?.conversation_id || null;
+    renderConversationList(state.conversationList, activeConversationId);
+    renderMiniConversationList(state.conversationList, activeConversationId);
   }
 
   function handleEvent(evt: unknown): void {
@@ -346,7 +351,7 @@ export function bindEventRouter(ctx: EventRouterContext) {
     updateConversationPreview(event);
 
     // Filter events by conversation_id - only render events for active conversation
-    const activeConvoId = state.conversationMeta?.conversation_id;
+    const activeConvoId = state.clientConversationId || state.conversationMeta?.conversation_id || null;
     if (event.conversation_id && activeConvoId && event.conversation_id !== activeConvoId) {
       return;
     }
@@ -385,9 +390,9 @@ export function bindEventRouter(ctx: EventRouterContext) {
         setLastEventType('message');
         if (event.subagent_id) {
           const sa = getSubagentContainer(event.subagent_id, '', '');
-          addMessage(event.role || 'message', event.text || '', sa.body);
+          addMessage(event.role || 'message', event.text || '', sa.body, event);
         } else {
-          addMessage(event.role || 'message', event.text || '');
+          addMessage(event.role || 'message', event.text || '', undefined, event);
         }
         return;
       case 'assistant_delta':
@@ -395,18 +400,18 @@ export function bindEventRouter(ctx: EventRouterContext) {
         if (debugEnabled) console.log('[LIVE-MSG-DEBUG] assistant_delta:', event.id, 'subagent_id:', event.subagent_id, 'delta:', (event.delta || '').slice(0, 50));
         if (event.subagent_id) {
           const sa = getSubagentContainer(event.subagent_id, '', '');
-          appendAssistantDelta(event.id, event.delta || '', sa.body);
+          appendAssistantDelta(event.id, event.delta || '', sa.body, event);
         } else {
-          appendAssistantDelta(event.id, event.delta || '');
+          appendAssistantDelta(event.id, event.delta || '', undefined, event);
         }
         return;
       case 'assistant_finalize':
         setLastEventType('assistant');
         if (event.subagent_id) {
           const sa = getSubagentContainer(event.subagent_id, '', '');
-          finalizeAssistant(event.id, event.text || '', sa.body);
+          finalizeAssistant(event.id, event.text || '', sa.body, event);
         } else {
-          finalizeAssistant(event.id, event.text || '');
+          finalizeAssistant(event.id, event.text || '', undefined, event);
         }
         setStatusDot('success');
         return;
@@ -414,18 +419,18 @@ export function bindEventRouter(ctx: EventRouterContext) {
         setLastEventType('reasoning');
         if (event.subagent_id) {
           const sa = getSubagentContainer(event.subagent_id, '', '');
-          appendReasoningDelta(event.id, event.delta || '', sa.body);
+          appendReasoningDelta(event.id, event.delta || '', sa.body, event);
         } else {
-          appendReasoningDelta(event.id, event.delta || '');
+          appendReasoningDelta(event.id, event.delta || '', undefined, event);
         }
         return;
       case 'reasoning_finalize':
         setLastEventType('reasoning');
         if (event.subagent_id) {
           const sa = getSubagentContainer(event.subagent_id, '', '');
-          finalizeReasoning(event.id, event.text || '', sa.body);
+          finalizeReasoning(event.id, event.text || '', sa.body, event);
         } else {
-          finalizeReasoning(event.id, event.text || '');
+          finalizeReasoning(event.id, event.text || '', undefined, event);
         }
         return;
       case 'diff': {
@@ -437,15 +442,15 @@ export function bindEventRouter(ctx: EventRouterContext) {
         }
         if (event.subagent_id) {
           const sa = getSubagentContainer(event.subagent_id, '', '');
-          addDiff(event.id, event.text || '', dp, sa.body);
+          addDiff(event.id || '', event.text || '', dp, sa.body, event);
         } else {
-          addDiff(event.id, event.text || '', dp);
+          addDiff(event.id || '', event.text || '', dp, undefined, event);
         }
         return;
       }
       case 'diff_declined':
         setLastEventType('diff');
-        addDeclinedDiff(event.id, event.text || '', event.path || '');
+        addDeclinedDiff(event.id || '', event.text || '', event.path || '');
         return;
       case 'approval':
         setLastEventType('approval');
@@ -499,13 +504,13 @@ export function bindEventRouter(ctx: EventRouterContext) {
         return;
       case 'subagent_start':
         setLastEventType('subagent');
-        getSubagentContainer(event.id, event.name || 'subagent', event.intent || 'working');
+        getSubagentContainer(event.id || '', event.name || 'subagent', event.intent || 'working', event);
         setActivity(`subagent: ${event.intent || event.name || 'working'}`, true);
         maybeAutoScroll();
         return;
       case 'subagent_end':
         setLastEventType('subagent');
-        finalizeSubagent(event.id, event.summary, event.success);
+        finalizeSubagent(event.id || '', event.summary || '', Boolean(event.success));
         maybeAutoScroll();
         return;
       case 'plan_update':
@@ -518,7 +523,13 @@ export function bindEventRouter(ctx: EventRouterContext) {
         return;
       case 'plan':
         setLastEventType('plan');
-        renderPlanCard(event.steps || []);
+        renderPlanCard(
+          Array.isArray(event.steps)
+            ? event.steps.filter((step): step is Record<string, unknown> => Boolean(step) && typeof step === 'object')
+            : [],
+          undefined,
+          event,
+        );
         clearPlanOverlay();
         return;
       case 'token_count':
@@ -526,9 +537,11 @@ export function bindEventRouter(ctx: EventRouterContext) {
         if (Number.isFinite(event.context_window)) {
           setState({ contextWindow: Number(event.context_window) });
         }
-        updateTokens(event.total);
-        if (Number.isFinite(event.context_window)) {
-          updateContextRemaining(event.total, Number(event.context_window));
+        if (typeof event.total === 'number' && Number.isFinite(event.total)) {
+          updateTokens(event.total);
+          if (Number.isFinite(event.context_window)) {
+            updateContextRemaining(event.total, Number(event.context_window));
+          }
         }
         return;
       case 'mode':
@@ -538,7 +551,7 @@ export function bindEventRouter(ctx: EventRouterContext) {
         return;
       case 'context_compacted':
         setLastEventType('system');
-        renderContextCompactedCard();
+        renderContextCompactedCard(event);
         return;
       case 'meta_envelope_injected':
         setLastEventType('system');
@@ -556,14 +569,15 @@ export function bindEventRouter(ctx: EventRouterContext) {
         const s = getState();
         if (s.activeView === 'splash' && s.hostUi?.ideMode && s.splashTab === 'project') {
           renderSplashTabs();
-          renderConversationList(s.conversationList, s.conversationMeta?.conversation_id || null);
+          renderConversationList(s.conversationList, s.clientConversationId || s.conversationMeta?.conversation_id || null);
         }
         return;
       }
       case 'mention_insert': {
         const s = getState();
-        if (!s.conversationMeta?.conversation_id) return;
-        if (event.conversation_id && event.conversation_id !== s.conversationMeta.conversation_id) return;
+        const activeConversationId = s.clientConversationId || s.conversationMeta?.conversation_id || null;
+        if (!activeConversationId) return;
+        if (event.conversation_id && event.conversation_id !== activeConversationId) return;
         insertMention(event.path || '', {
           lineNo: event.lineNo,
           endLineNo: event.endLineNo,
@@ -576,8 +590,9 @@ export function bindEventRouter(ctx: EventRouterContext) {
       case 'draft_update': {
         const s = getState();
         if (!promptEl) return;
-        if (!s.conversationMeta?.conversation_id) return;
-        if (event.conversation_id && event.conversation_id !== s.conversationMeta.conversation_id) return;
+        const activeConversationId = s.clientConversationId || s.conversationMeta?.conversation_id || null;
+        if (!activeConversationId) return;
+        if (event.conversation_id && event.conversation_id !== activeConversationId) return;
         const draft = event.draft;
         if (typeof draft !== 'string') return;
         const incomingHash = draft.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);

@@ -16,10 +16,49 @@ from agent_log_server.typing_helpers import (
     coerce_object_map,
 )
 
+CONVERSATIONS_RPC_NAMESPACE = "/rpc/conversations"
 CONVERSATION_SEND_METHOD = "conversation.send"
 CONVERSATION_INTERRUPT_METHOD = "conversation.interrupt"
 CONVERSATION_COMPACT_METHOD = "conversation.compact"
 CONVERSATION_REPLAY_GET_CHUNK_METHOD = "conversation.replay.getChunk"
+CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE: dict[str, str] = {
+    "activity": "conversation.activity",
+    "approval": "conversation.approval.request",
+    "approval_handoff": "conversation.approval.handoff",
+    "assistant_delta": "conversation.message.delta",
+    "assistant_end": "conversation.message.final",
+    "assistant_finalize": "conversation.message.final",
+    "command_result": "conversation.command.result",
+    "context_compacted": "conversation.context.compacted",
+    "diff": "conversation.diff",
+    "diff_declined": "conversation.diff.declined",
+    "draft_update": "conversation.draft.updated",
+    "error": "conversation.error",
+    "mention_insert": "conversation.mention.inserted",
+    "message": "conversation.user.message",
+    "meta_updated": "conversation.meta.updated",
+    "mode": "conversation.mode.changed",
+    "plan": "conversation.plan",
+    "plan_state": "conversation.plan.state",
+    "plan_update": "conversation.plan.update",
+    "preview_updated": "conversation.preview.updated",
+    "reasoning_delta": "conversation.reasoning.delta",
+    "reasoning_end": "conversation.reasoning.final",
+    "reasoning_finalize": "conversation.reasoning.final",
+    "shell_begin": "conversation.command.begin",
+    "shell_delta": "conversation.command.delta",
+    "shell_end": "conversation.command.end",
+    "status": "conversation.status",
+    "subagent_end": "conversation.subagent.end",
+    "subagent_start": "conversation.subagent.start",
+    "thought": "conversation.thought",
+    "toast": "conversation.toast",
+    "token_count": "conversation.token.updated",
+    "tool_begin": "conversation.tool.begin",
+    "tool_delta": "conversation.tool.delta",
+    "tool_end": "conversation.tool.end",
+    "warning": "conversation.warning",
+}
 
 ConversationsRpcMethod: TypeAlias = Literal[
     "conversation.send",
@@ -202,6 +241,13 @@ def coerce_request_id(value: object) -> RequestId:
     if isinstance(value, bool):
         return None
     return value if isinstance(value, (str, int)) else None
+
+
+def conversation_rpc_notification_method(evt_type: object) -> str | None:
+    normalized = str(evt_type or "").strip().lower()
+    if not normalized:
+        return None
+    return CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE.get(normalized)
 
 
 def build_jsonrpc_success_response(

@@ -326,10 +326,24 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
     renderFooterRuntimeControls();
   }
 
+  function resetRuntimeFooterState(): void {
+    const { openDropdownEl } = getState();
+    if (openDropdownEl && footerRuntimeControlsEl?.contains(openDropdownEl)) {
+      closeDropdownMenu(openDropdownEl);
+    }
+    setState({
+      runtimeOptions: {},
+      activeRuntimeOptionValues: {},
+      openDropdownEl: null,
+    });
+    renderFooterRuntimeControls();
+  }
+
   return {
     normalizeApprovalValue,
     renderFooterRuntimeControls,
     saveApprovalQuick,
     applyRuntimeMode,
+    resetRuntimeFooterState,
   };
 }

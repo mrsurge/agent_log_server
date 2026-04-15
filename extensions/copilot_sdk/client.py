@@ -60,11 +60,13 @@ from ._vendor.copilot.types import (
     UserInputResponse,
     UserPromptSubmittedHandler,
 )
+from ._vendor.copilot.generated.session_events import SessionEventType
 
 from .file_change_preview import build_file_change_preview
 from .fws_pipe_process import FrameworkShellPipeProcess
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from .te2_runtime import build_copilot_mcp_servers
+import agent_log_server.ask_user_interactions as ask_user_interactions
 from agent_log_server.prompt_context import build_effective_prompt_context
 from agent_log_server.te2_mcp_config import (
     te2_mcp_integration_enabled,
@@ -403,6 +405,8 @@ async def _drain_event_queue(conversation_id: str) -> None:
                 router = _routers.get(conversation_id)
                 if router is None:
                     continue
+                if await _handle_mcp_ask_user_event(conversation_id, event):
+                    continue
                 await router.route_event(event)
             finally:
                 queue.task_done()
@@ -546,6 +550,7 @@ def _log_runtime_config(stage: str, conversation_id: str, config: SettingsDict) 
 # Pending approval futures: request_id -> asyncio.Future
 _pending_approvals: dict[str, asyncio.Future[object]] = {}
 _pending_request_specs: dict[str, PendingRequestSpec] = {}
+_pending_mcp_ask_user_tools: Dict[str, Dict[str, str]] = {}
 _PERMISSION_RESULT_KIND_VALUES = set(get_args(PermissionRequestResultKind))
 
 
@@ -555,6 +560,42 @@ def _string_or_empty(value: object) -> str:
 
 def _optional_string(value: object) -> Optional[str]:
     return value if isinstance(value, str) else None
+
+
+def _coerce_copilot_tool_arguments(raw_args: object) -> PayloadDict:
+    direct_args = _object_mapping(raw_args)
+    if direct_args is not None:
+        return dict(direct_args)
+    if isinstance(raw_args, str):
+        text = raw_args.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = cast(object, json.loads(text))
+            except Exception:
+                parsed = None
+            parsed_args = _object_mapping(parsed)
+            if parsed_args is not None:
+                return dict(parsed_args)
+    return {}
+
+
+def _copilot_mcp_tool_identity(data: object) -> Tuple[str, str]:
+    raw_tool_name = _optional_string(getattr(data, "tool_name", None)) or ""
+    server_name = _optional_string(getattr(data, "mcp_server_name", None)) or ""
+    tool_name = _optional_string(getattr(data, "mcp_tool_name", None)) or ""
+    if not server_name and not tool_name:
+        prefix = f"{ask_user_interactions.AGENT_PTY_ASK_USER_SERVER}-"
+        if raw_tool_name.startswith(prefix):
+            return ask_user_interactions.AGENT_PTY_ASK_USER_SERVER, raw_tool_name[len(prefix):]
+    return server_name, tool_name or raw_tool_name
+
+
+def _is_copilot_mcp_ask_user_event(data: object) -> bool:
+    server_name, tool_name = _copilot_mcp_tool_identity(data)
+    return (
+        server_name == ask_user_interactions.AGENT_PTY_ASK_USER_SERVER
+        and tool_name == ask_user_interactions.AGENT_PTY_ASK_USER_TOOL
+    )
 
 
 def _normalize_reasoning_effort(value: object) -> Optional[ReasoningEffort]:
@@ -2031,6 +2072,31 @@ async def read_plan(extension_id: str, conversation_id: str) -> PayloadDict:
 
 async def get_request_card_schemas(extension_id: str) -> PayloadDict:
     return {
+        ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD: {
+            "request": {
+                "type": "object",
+                "properties": {
+                    "requestId": {"type": "string"},
+                    "question": {"type": "string"},
+                    "choices": {"type": "array", "items": {"type": "string"}},
+                    "allowFreeform": {"type": "boolean"},
+                },
+                "required": ["question"],
+                "additionalProperties": True,
+            },
+            "response": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["accept", "decline", "cancel"]},
+                    "answer": {"type": "string"},
+                    "answers": {"type": "array", "items": {"type": "string"}},
+                    "selected_choice": {"type": "string"},
+                    "freeform_answer": {"type": "string"},
+                    "wasFreeform": {"type": "boolean"},
+                },
+                "additionalProperties": True,
+            },
+        },
         _COPILOT_PERMISSION_REQUEST_METHOD: {
             "request": {
                 "type": "object",
@@ -2333,6 +2399,176 @@ def _make_user_input_handler(conversation_id: str) -> UserInputHandler:
         return _normalize_user_input_resolution(result, request_spec=response_request_spec)
 
     return handler
+
+
+async def _start_mcp_ask_user_request(conversation_id: str, event: SessionEvent) -> None:
+    request_id = conversation_id.strip()
+    if not request_id:
+        return
+    data = event.data
+    tool_call_id = _optional_string(getattr(data, "tool_call_id", None)) or _optional_string(event.id) or request_id
+    arguments = _coerce_copilot_tool_arguments(cast(object, getattr(data, "arguments", None)))
+    question = str(arguments.get("question") or "").strip()
+    choices = ask_user_interactions.normalize_choices(arguments.get("choices"))
+    allow_freeform = bool(arguments.get("allow_freeform", arguments.get("allowFreeform", True)))
+    if not question:
+        return
+
+    _pending_mcp_ask_user_tools.setdefault(conversation_id, {})[tool_call_id] = request_id
+
+    existing_future = _pending_approvals.get(request_id)
+    if isinstance(existing_future, asyncio.Future) and not existing_future.done():
+        return
+
+    loop = asyncio.get_running_loop()
+    _pending_approvals[request_id] = loop.create_future()
+    request_params: PayloadDict = {
+        "requestId": request_id,
+        "question": question,
+        "choices": list(choices),
+        "allowFreeform": allow_freeform,
+    }
+    _pending_request_specs[request_id] = {
+        "type": "user_input",
+        "request_method": ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD,
+        "request_params": request_params,
+        "choices": list(choices),
+    }
+
+    router = _routers.get(conversation_id)
+    session = _sessions.get(conversation_id)
+    runtime_signature = _runtime_signatures.get(conversation_id) or _runtime_signature(conversation_id)
+    turn_id = _string_or_empty(router.current_turn_id if router else "")
+    created_at = datetime.now(timezone.utc).isoformat()
+    payload: PayloadDict = {
+        "requestId": request_id,
+        "question": question,
+        "choices": list(choices),
+        "allowFreeform": allow_freeform,
+        "message": question,
+        "tool_call_id": tool_call_id,
+    }
+    approval_event: PayloadDict = {
+        "type": "approval",
+        "conversation_id": conversation_id,
+        "id": request_id,
+        "request_id": request_id,
+        "card_id": tool_call_id,
+        "kind": "user_input",
+        "tool_call_id": tool_call_id,
+        "turn_id": turn_id,
+        "request_method": ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD,
+        "request_params": request_params,
+        "payload": payload,
+        "created_at": created_at,
+    }
+    session_thread_id = _optional_string(getattr(session, "session_id", None))
+    transcript_anchor: PayloadDict = {"turn_id": turn_id}
+    descriptor: ApprovalDescriptor = {}
+    descriptor["request_id"] = request_id
+    descriptor["agent"] = "copilot-sdk"
+    descriptor["kind"] = "user_input"
+    descriptor["payload"] = payload
+    descriptor["request_method"] = ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD
+    descriptor["request_params"] = request_params
+    descriptor["thread_id"] = session_thread_id
+    descriptor["turn_id"] = turn_id
+    descriptor["runtime_signature"] = runtime_signature
+    descriptor["runtime_instance_id"] = session_thread_id
+    descriptor["transcript_anchor"] = transcript_anchor
+    descriptor["source"] = "live"
+    descriptor["created_at"] = created_at
+    descriptor["render_event"] = approval_event
+    _upsert_pending_approval(conversation_id, descriptor)
+
+    if _broadcast_fn:
+        await _broadcast_fn(approval_event)
+
+
+def _mcp_ask_user_completion_resolution(event: SessionEvent) -> PayloadDict:
+    data = event.data
+    result_obj = getattr(data, "result", None)
+    normalized_result = _json_safe_sdk_value(cast(object, result_obj))
+    if isinstance(normalized_result, dict):
+        return cast(PayloadDict, normalized_result)
+
+    error_reason = str(getattr(data, "error_reason", "") or "").strip()
+    error_value = getattr(data, "error", None)
+    if error_reason or error_value not in (None, "", {}):
+        resolution: PayloadDict = {"status": "error"}
+        if error_reason:
+            resolution["error"] = error_reason
+        elif isinstance(error_value, str):
+            resolution["error"] = error_value
+        elif error_value not in (None, "", {}):
+            resolution["error"] = str(error_value)
+        return resolution
+
+    content = ""
+    if isinstance(result_obj, str):
+        content = result_obj
+    elif isinstance(getattr(data, "content", None), str):
+        content = cast(str, getattr(data, "content"))
+    elif isinstance(getattr(data, "output", None), str):
+        content = cast(str, getattr(data, "output"))
+    if content.strip():
+        return {"answer": content.strip()}
+    return {"action": "cancel"}
+
+
+async def _complete_mcp_ask_user_request(conversation_id: str, event: SessionEvent) -> None:
+    data = event.data
+    tool_call_id = (
+        _optional_string(getattr(data, "tool_call_id", None))
+        or (_optional_string(event.parent_id) or _optional_string(event.id))
+        or ""
+    )
+    tool_calls = _pending_mcp_ask_user_tools.get(conversation_id)
+    request_id = tool_calls.pop(tool_call_id, None) if isinstance(tool_calls, dict) else None
+    if isinstance(tool_calls, dict) and not tool_calls:
+        _pending_mcp_ask_user_tools.pop(conversation_id, None)
+    resolved_request_id = request_id or conversation_id.strip()
+    if not resolved_request_id:
+        return
+
+    pending_future = _pending_approvals.pop(resolved_request_id, None)
+    if isinstance(pending_future, asyncio.Future) and not pending_future.done():
+        pending_future.cancel()
+    _pending_request_specs.pop(resolved_request_id, None)
+
+    await ask_user_interactions.finalize_interaction(
+        resolved_request_id,
+        _mcp_ask_user_completion_resolution(event),
+    )
+
+
+async def _handle_mcp_ask_user_event(conversation_id: str, event: SessionEvent) -> bool:
+    etype = event.type
+    data = event.data
+    if etype == SessionEventType.TOOL_EXECUTION_START:
+        if not _is_copilot_mcp_ask_user_event(data):
+            return False
+        await _start_mcp_ask_user_request(conversation_id, event)
+        return True
+
+    tool_call_id = (
+        _optional_string(getattr(data, "tool_call_id", None))
+        or (_optional_string(event.parent_id) or _optional_string(event.id))
+        or ""
+    )
+    active_tools = _pending_mcp_ask_user_tools.get(conversation_id) or {}
+    is_known_tool = bool(tool_call_id and tool_call_id in active_tools)
+
+    if etype in {SessionEventType.TOOL_EXECUTION_PROGRESS, SessionEventType.TOOL_EXECUTION_PARTIAL_RESULT}:
+        return is_known_tool
+
+    if etype == SessionEventType.TOOL_EXECUTION_COMPLETE:
+        if not is_known_tool and not _is_copilot_mcp_ask_user_event(data):
+            return False
+        await _complete_mcp_ask_user_request(conversation_id, event)
+        return True
+
+    return False
 
 
 # ── Pre-tool-use hook (sandbox + web policy) ────────────────────────
@@ -3282,6 +3518,7 @@ async def _destroy_session_unlocked(conversation_id: str) -> bool:
     _runtime_signatures.pop(conversation_id, None)
     _plan_doc_state.pop(conversation_id, None)
     _debug_raw_entry_counters.pop(conversation_id, None)
+    _pending_mcp_ask_user_tools.pop(conversation_id, None)
 
     if session and _client:
         with _client._sessions_lock:  # type: ignore[attr-defined]

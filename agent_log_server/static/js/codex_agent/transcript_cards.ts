@@ -1,6 +1,171 @@
-type AnyRecord = Record<string, any>;
+import type { StructuredViewLine } from './render/utils.ts';
+import {
+  applyTranscriptCardMetadata,
+  type TranscriptCardMetadata,
+} from './transcript_card_metadata.ts';
 
-export function bindTranscriptCards(ctx) {
+type TranscriptRecord = Record<string, unknown>;
+
+type TranscriptEvent = TranscriptRecord & {
+  id?: string;
+  command?: string;
+  prompt?: string;
+  agent_block_id?: string;
+  agentBlockId?: string;
+  output?: string;
+  exit_code?: number;
+  exitCode?: number;
+  duration_ms?: number;
+  durationMs?: number;
+  source?: string;
+  path?: string;
+  line?: number;
+  content?: unknown;
+  view_range?: unknown;
+  viewRange?: unknown;
+  lines?: unknown;
+  title?: string;
+  mode?: string;
+  tool?: string;
+  pattern?: string;
+  arguments?: TranscriptRecord | null;
+  result?: unknown;
+  response?: unknown;
+  action?: unknown;
+  message?: string;
+  envelope_json?: string;
+  envelopeJson?: string;
+  command_count?: number;
+  commandCount?: number;
+};
+
+type TranscriptWarningAction = {
+  id?: string;
+  label?: string;
+  [key: string]: unknown;
+};
+
+type RenderCommandOptions = {
+  linkPathFromRibbon?: boolean;
+  updateLiveState?: boolean;
+  autoScroll?: boolean;
+};
+
+type SearchEntry = {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+};
+
+type NormalizedErrorPayload = {
+  message: string;
+  errorType: string;
+  statusCode: number | null;
+  providerCallId: string;
+  stack: string;
+  details: string;
+  source: string;
+  code: unknown;
+};
+
+type AnsiState = {
+  fg: number | null;
+  bg: number | null;
+  bold: boolean;
+  dim: boolean;
+  italic: boolean;
+  underline: boolean;
+  inverse: boolean;
+};
+
+type TranscriptCardsContext = {
+  getConversationSettings?: () => { commandOutputLines?: number | string; [key: string]: unknown } | null | undefined;
+  clearPlaceholder: () => void;
+  createRow: (
+    rowType: string,
+    metaLabel: string,
+    rowId?: ChildNode | null,
+    parentEl?: HTMLElement | null,
+  ) => { row: HTMLElement; body: HTMLElement };
+  makeCollapsible: (
+    row: HTMLElement | null,
+    cardId: string,
+    startExpanded: boolean,
+    options?: TranscriptRecord,
+  ) => void;
+  getLiveEventParent: (evt: TranscriptEvent | null | undefined) => HTMLElement | null;
+  getBottomSpacerEl?: () => HTMLElement | null;
+  timelineEl?: HTMLElement | null;
+  maybeAutoScroll: () => void;
+  setLastEventType: (value: string) => void;
+  setStatusDot: (value: string) => void;
+  renderShellCmdRibbon: (el: HTMLElement | null, cmd: string) => unknown;
+  detectLangFromCommand: (command: string) => string | null;
+  highlightCodeAlways: (text: string, language: string) => string;
+  detectLangFromPath: (path: string) => string | null;
+  toRelativePath: (path: string) => string;
+  postTe2OpenRequest: (target: { path: string; line: number; column: number }) => unknown;
+  buildViewCardTitle: (path: string, viewRange: number[] | null, fallback: string) => string;
+  normalizeStructuredViewLines: (lines: unknown) => StructuredViewLine[] | null;
+  synthesizeStructuredViewLines: (content: string, viewRange: number[] | null) => StructuredViewLine[] | null;
+  renderStructuredViewLineTable: (lines: StructuredViewLine[], path: string) => HTMLDivElement;
+  openSplashSettingsModal?: () => unknown;
+  addMessage?: (role: string, message: string) => unknown;
+  escapeHtml: (text: string) => string;
+};
+
+const ANSI_FG_MAP: Record<number, string> = {
+  30: '#000000',
+  31: '#e06c75',
+  32: '#98c379',
+  33: '#e5c07b',
+  34: '#61afef',
+  35: '#c678dd',
+  36: '#56b6c2',
+  37: '#abb2bf',
+  90: '#5c6370',
+  91: '#ff7a85',
+  92: '#b7f39b',
+  93: '#ffd68a',
+  94: '#7ab7ff',
+  95: '#e79aff',
+  96: '#7ae8f5',
+  97: '#ffffff',
+};
+
+const ANSI_BG_MAP: Record<number, string> = {
+  40: '#000000',
+  41: '#e06c75',
+  42: '#98c379',
+  43: '#e5c07b',
+  44: '#61afef',
+  45: '#c678dd',
+  46: '#56b6c2',
+  47: '#abb2bf',
+  100: '#5c6370',
+  101: '#ff7a85',
+  102: '#b7f39b',
+  103: '#ffd68a',
+  104: '#7ab7ff',
+  105: '#e79aff',
+  106: '#7ae8f5',
+  107: '#ffffff',
+};
+
+function isRecord(value: unknown): value is TranscriptRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeViewRange(raw: unknown): number[] | null {
+  if (!Array.isArray(raw)) return null;
+  const values = raw
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value));
+  return values.length ? values : null;
+}
+
+export function bindTranscriptCards(ctx: TranscriptCardsContext) {
   const {
     getConversationSettings,
     clearPlaceholder,
@@ -27,27 +192,32 @@ export function bindTranscriptCards(ctx) {
     escapeHtml,
   } = ctx;
 
-  function getCommandOutputLineLimit() {
-    const settings = typeof getConversationSettings === 'function' ? getConversationSettings() : {};
-    return settings?.commandOutputLines || 20;
+  function getCommandOutputLineLimit(): number {
+    const settings = typeof getConversationSettings === 'function' ? getConversationSettings() : null;
+    const raw = settings?.commandOutputLines;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
   }
 
-  function mountRow(row, parentEl: HTMLElement | null = null, evt: AnyRecord | null = null) {
+  function mountRow(row: HTMLElement, parentEl: HTMLElement | null = null, evt: TranscriptEvent | null = null): void {
     const targetEl = parentEl || (evt ? getLiveEventParent(evt) : null);
     clearPlaceholder();
+    if (evt) {
+      applyTranscriptCardMetadata(row, evt as TranscriptCardMetadata);
+    }
     if (targetEl) {
       targetEl.appendChild(row);
       return;
     }
     const bottomSpacerEl = typeof getBottomSpacerEl === 'function' ? getBottomSpacerEl() : null;
-    if (bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
+    if (timelineEl && bottomSpacerEl && bottomSpacerEl.parentElement === timelineEl) {
       timelineEl.insertBefore(row, bottomSpacerEl);
     } else {
       timelineEl?.appendChild(row);
     }
   }
 
-  function appendTruncationNote(container, text, asSpan = false) {
+  function appendTruncationNote(container: HTMLElement | null | undefined, text: string, asSpan = false): void {
     if (!container || !text) return;
     const note = document.createElement(asSpan ? 'span' : 'div');
     note.className = 'truncation-note';
@@ -55,27 +225,27 @@ export function bindTranscriptCards(ctx) {
     container.appendChild(note);
   }
 
-  function ansiToHtml(text) {
+  function ansiToHtml(text: unknown): string {
     const input = String(text || '');
     const sgrRe = /\x1b\[([0-9;]*)m/g;
     let lastIndex = 0;
     let html = '';
-    let state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
+    let state: AnsiState = {
+      fg: null,
+      bg: null,
+      bold: false,
+      dim: false,
+      italic: false,
+      underline: false,
+      inverse: false,
+    };
 
-    function cssFor(st) {
-      const styles = [];
+    function cssFor(st: AnsiState): string {
+      const styles: string[] = [];
       if (st.bold) styles.push('font-weight:600');
       if (st.dim) styles.push('opacity:0.8');
       if (st.italic) styles.push('font-style:italic');
       if (st.underline) styles.push('text-decoration:underline');
-      const fgMap = {
-        30: '#000000', 31: '#e06c75', 32: '#98c379', 33: '#e5c07b', 34: '#61afef', 35: '#c678dd', 36: '#56b6c2', 37: '#abb2bf',
-        90: '#5c6370', 91: '#ff7a85', 92: '#b7f39b', 93: '#ffd68a', 94: '#7ab7ff', 95: '#e79aff', 96: '#7ae8f5', 97: '#ffffff',
-      };
-      const bgMap = {
-        40: '#000000', 41: '#e06c75', 42: '#98c379', 43: '#e5c07b', 44: '#61afef', 45: '#c678dd', 46: '#56b6c2', 47: '#abb2bf',
-        100: '#5c6370', 101: '#ff7a85', 102: '#b7f39b', 103: '#ffd68a', 104: '#7ab7ff', 105: '#e79aff', 106: '#7ae8f5', 107: '#ffffff',
-      };
       let fg = st.fg;
       let bg = st.bg;
       if (st.inverse) {
@@ -83,18 +253,19 @@ export function bindTranscriptCards(ctx) {
         fg = bg;
         bg = tmp;
       }
-      if (fg != null && fgMap[fg]) styles.push(`color:${fgMap[fg]}`);
-      if (bg != null && bgMap[bg]) styles.push(`background-color:${bgMap[bg]}`);
+      if (fg !== null && ANSI_FG_MAP[fg]) styles.push(`color:${ANSI_FG_MAP[fg]}`);
+      if (bg !== null && ANSI_BG_MAP[bg]) styles.push(`background-color:${ANSI_BG_MAP[bg]}`);
       return styles.join(';');
     }
 
-    function applyCodes(codes) {
+    function applyCodes(codes: string): void {
       const parts = codes.length ? codes.split(';') : ['0'];
       for (const part of parts) {
         const n = Number(part || '0');
         if (!Number.isFinite(n)) continue;
-        if (n === 0) state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
-        else if (n === 1) state.bold = true;
+        if (n === 0) {
+          state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
+        } else if (n === 1) state.bold = true;
         else if (n === 2) state.dim = true;
         else if (n === 3) state.italic = true;
         else if (n === 4) state.underline = true;
@@ -112,7 +283,7 @@ export function bindTranscriptCards(ctx) {
       }
     }
 
-    function emitChunk(chunk) {
+    function emitChunk(chunk: string): void {
       if (!chunk) return;
       const css = cssFor(state);
       const escaped = escapeHtml(chunk);
@@ -120,7 +291,7 @@ export function bindTranscriptCards(ctx) {
       else html += escaped;
     }
 
-    let match;
+    let match: RegExpExecArray | null;
     while ((match = sgrRe.exec(input)) !== null) {
       emitChunk(input.slice(lastIndex, match.index));
       applyCodes(match[1] || '');
@@ -130,16 +301,18 @@ export function bindTranscriptCards(ctx) {
     return html;
   }
 
-  function renderCommandResult(evt: AnyRecord, parentEl: HTMLElement | null = null, options: AnyRecord = {}) {
+  function renderCommandResult(evt: TranscriptEvent, parentEl: HTMLElement | null = null, options: RenderCommandOptions = {}): void {
     const {
       linkPathFromRibbon = false,
       updateLiveState = true,
       autoScroll = updateLiveState,
     } = options;
-    const command = evt.command || '';
-    const prompt = evt.prompt || '';
-    const agentBlockId = evt.agent_block_id || evt.agentBlockId || '';
-    const output = evt.output || '';
+    const command = typeof evt.command === 'string' ? evt.command : '';
+    const prompt = typeof evt.prompt === 'string' ? evt.prompt : '';
+    const agentBlockId = typeof evt.agent_block_id === 'string'
+      ? evt.agent_block_id
+      : (typeof evt.agentBlockId === 'string' ? evt.agentBlockId : '');
+    const output = typeof evt.output === 'string' ? evt.output : '';
     const exitCode = evt.exit_code ?? evt.exitCode;
     const durationMs = evt.duration_ms ?? evt.durationMs;
     const truncateLines = getCommandOutputLineLimit();
@@ -160,7 +333,7 @@ export function bindTranscriptCards(ctx) {
       try {
         const dup = timelineEl?.querySelector(`.timeline-row.terminal-card[data-agent-block-id="${CSS.escape(agentBlockId)}"]`);
         if (dup && dup.parentElement) dup.parentElement.removeChild(dup);
-      } catch (_) {}
+      } catch {}
     }
 
     const row = document.createElement('div');
@@ -173,20 +346,20 @@ export function bindTranscriptCards(ctx) {
     cmdRibbon.className = 'command-ribbon';
     const isUserTerminal = evt.source === 'user_terminal' || evt.source === 'user-terminal';
     const ribbonText = prompt ? `${prompt}${command}` : command;
-    if (isUserTerminal && typeof ribbonText === 'string' && ribbonText.includes('\x1b[')) {
+    if (isUserTerminal && ribbonText.includes('\x1b[')) {
       cmdRibbon.innerHTML = ansiToHtml(ribbonText);
     } else if (!isUserTerminal) {
       renderShellCmdRibbon(cmdRibbon, command);
     } else {
       cmdRibbon.textContent = ribbonText;
     }
-    if (linkPathFromRibbon && evt.path) {
+    if (linkPathFromRibbon && typeof evt.path === 'string' && evt.path) {
       cmdRibbon.style.cursor = 'pointer';
       cmdRibbon.title = evt.path;
       cmdRibbon.dataset.hasClickHandler = 'true';
       const path = evt.path;
       const line = Number.isFinite(Number(evt.line)) ? Number(evt.line) : 1;
-      cmdRibbon.addEventListener('click', (e) => {
+      cmdRibbon.addEventListener('click', (e: MouseEvent) => {
         const target = e.target;
         if (target instanceof Element && (target.closest('.twisty') || target.closest('.ribbon-toggle-zone'))) return;
         postTe2OpenRequest({ path, line, column: 1 });
@@ -197,7 +370,7 @@ export function bindTranscriptCards(ctx) {
     if (displayOutput) {
       const outputPre = document.createElement('pre');
       outputPre.className = 'command-output';
-      const hasAnsi = typeof displayOutput === 'string' && displayOutput.includes('\x1b[');
+      const hasAnsi = displayOutput.includes('\x1b[');
       if (isUserTerminal && hasAnsi) {
         outputPre.innerHTML = ansiToHtml(displayOutput);
         if (truncated) {
@@ -223,7 +396,7 @@ export function bindTranscriptCards(ctx) {
 
     const footer = document.createElement('div');
     footer.className = 'command-footer';
-    const parts = [];
+    const parts: string[] = [];
     if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
       parts.push(`Exit: ${exitCode}`);
     }
@@ -250,12 +423,12 @@ export function bindTranscriptCards(ctx) {
     }
   }
 
-  function renderViewCard(evt: AnyRecord, parentEl: HTMLElement | null = null) {
+  function renderViewCard(evt: TranscriptEvent, parentEl: HTMLElement | null = null): void {
     const content = evt.content ?? evt.output ?? '';
     const path = typeof evt.path === 'string' ? evt.path : '';
-    const viewRange = Array.isArray(evt.view_range) ? evt.view_range : (Array.isArray(evt.viewRange) ? evt.viewRange : null);
-    const structuredLines = normalizeStructuredViewLines(evt.lines) ?? synthesizeStructuredViewLines(content, viewRange);
-    const title = evt.title || buildViewCardTitle(path, viewRange, 'view');
+    const viewRange = normalizeViewRange(evt.view_range) ?? normalizeViewRange(evt.viewRange);
+    const structuredLines = normalizeStructuredViewLines(evt.lines) ?? synthesizeStructuredViewLines(String(content ?? ''), viewRange);
+    const title = typeof evt.title === 'string' && evt.title ? evt.title : buildViewCardTitle(path, viewRange, 'view');
     const truncateLines = getCommandOutputLineLimit();
 
     let displayContent = typeof content === 'string' ? content : String(content ?? '');
@@ -295,7 +468,7 @@ export function bindTranscriptCards(ctx) {
       pathLine.title = path;
       pathLine.style.cursor = 'pointer';
       pathLine.dataset.hasClickHandler = 'true';
-      pathLine.addEventListener('click', (e) => {
+      pathLine.addEventListener('click', (e: MouseEvent) => {
         e.stopPropagation();
         const preferredLine = displayLines?.[0]?.line_no
           ?? (Array.isArray(viewRange) && Number.isFinite(Number(viewRange[0])) ? Number(viewRange[0]) : 1);
@@ -331,14 +504,14 @@ export function bindTranscriptCards(ctx) {
     setStatusDot('success');
   }
 
-  function resolveSearchEntryPath(rawPath, rootPath) {
-    if (!rawPath) return '';
+  function resolveSearchEntryPath(rawPath: unknown, rootPath: string): string {
+    if (typeof rawPath !== 'string' || !rawPath) return '';
     if (rawPath.startsWith('/')) return rawPath;
     if (!rootPath) return rawPath;
     return `${rootPath.replace(/\/+$/, '')}/${rawPath.replace(/^\.?\//, '')}`;
   }
 
-  function shortenSearchTarget(path) {
+  function shortenSearchTarget(path: string): string {
     const relativePath = toRelativePath(path || '');
     if (!relativePath) return '';
     const parts = relativePath.split('/').filter(Boolean);
@@ -346,14 +519,13 @@ export function bindTranscriptCards(ctx) {
     return `.../${parts.slice(-3).join('/')}`;
   }
 
-  function formatSearchArgumentValue(key, value) {
-    if (value === undefined || value === null) return '';
-    if (value === '') return '';
+  function formatSearchArgumentValue(key: string, value: unknown): string {
+    if (value === undefined || value === null || value === '') return '';
     if (Array.isArray(value) && value.length === 0) return '';
     if (typeof value === 'object') {
       try {
         return JSON.stringify(value);
-      } catch (_) {
+      } catch {
         return String(value);
       }
     }
@@ -363,8 +535,8 @@ export function bindTranscriptCards(ctx) {
     return String(value);
   }
 
-  function buildSearchDetailText(mode, rootPath, pattern, args) {
-    const merged: Record<string, any> = {};
+  function buildSearchDetailText(mode: string, rootPath: string, pattern: string, args: TranscriptRecord | null): string {
+    const merged: Record<string, unknown> = {};
     if (args && typeof args === 'object') {
       Object.entries(args).forEach(([key, value]) => {
         if (value === undefined || value === null || value === '') return;
@@ -393,14 +565,14 @@ export function bindTranscriptCards(ctx) {
     return detailLines.join('\n');
   }
 
-  function parseSearchCardEntries(mode, content, rootPath = '') {
+  function parseSearchCardEntries(mode: string, content: unknown, rootPath = ''): { entries: SearchEntry[]; plainText: string } {
     const text = typeof content === 'string' ? content : String(content ?? '');
     const lines = text.split('\n').map((line) => line.replace(/\r$/, ''));
     if (mode === 'glob') {
       return { entries: [], plainText: text };
     }
 
-    const entries = [];
+    const entries: SearchEntry[] = [];
     for (const rawLine of lines) {
       const line = rawLine.trimEnd();
       const match = line.match(/^(.+?):(\d+)(?::(\d+))?:(.*)$/);
@@ -419,11 +591,11 @@ export function bindTranscriptCards(ctx) {
     };
   }
 
-  function renderSearchCard(evt: AnyRecord, parentEl: HTMLElement | null = null) {
-    const mode = evt.mode || evt.tool || 'search';
+  function renderSearchCard(evt: TranscriptEvent, parentEl: HTMLElement | null = null): void {
+    const mode = typeof evt.mode === 'string' && evt.mode ? evt.mode : (typeof evt.tool === 'string' ? evt.tool : 'search');
     const pattern = typeof evt.pattern === 'string' ? evt.pattern : '';
     const rootPath = typeof evt.path === 'string' ? evt.path : '';
-    const searchArgs = evt.arguments && typeof evt.arguments === 'object' ? evt.arguments : {};
+    const searchArgs = isRecord(evt.arguments) ? evt.arguments : {};
     const { entries, plainText } = parseSearchCardEntries(mode, evt.content ?? evt.result ?? '', rootPath);
 
     const row = document.createElement('div');
@@ -458,7 +630,7 @@ export function bindTranscriptCards(ctx) {
         pathLine.title = entry.path;
         pathLine.style.cursor = 'pointer';
         pathLine.dataset.hasClickHandler = 'true';
-        pathLine.addEventListener('click', (e) => {
+        pathLine.addEventListener('click', (e: MouseEvent) => {
           e.stopPropagation();
           postTe2OpenRequest({ path: entry.path, line: entry.line || 1, column: entry.column || 1 });
         });
@@ -500,7 +672,7 @@ export function bindTranscriptCards(ctx) {
     setStatusDot('success');
   }
 
-  function normalizeErrorPayload(raw) {
+  function normalizeErrorPayload(raw: unknown): NormalizedErrorPayload {
     if (typeof raw === 'string') {
       return {
         message: raw,
@@ -513,7 +685,7 @@ export function bindTranscriptCards(ctx) {
         code: null,
       };
     }
-    const payload = raw && typeof raw === 'object' ? raw : {};
+    const payload = isRecord(raw) ? raw : {};
     const message = typeof payload.message === 'string' && payload.message
       ? payload.message
       : (typeof payload.text === 'string' ? payload.text : '');
@@ -545,7 +717,7 @@ export function bindTranscriptCards(ctx) {
     };
   }
 
-  function appendErrorContent(body, raw) {
+  function appendErrorContent(body: HTMLElement | null | undefined, raw: unknown): void {
     if (!body) return;
     const payload = normalizeErrorPayload(raw);
     if (payload.message) {
@@ -555,7 +727,7 @@ export function bindTranscriptCards(ctx) {
       body.appendChild(pre);
     }
 
-    const metaParts = [];
+    const metaParts: string[] = [];
     if (payload.errorType) metaParts.push(`type: ${payload.errorType}`);
     if (payload.statusCode !== null) metaParts.push(`status: ${payload.statusCode}`);
     if (payload.code !== null && payload.code !== '') metaParts.push(`code: ${payload.code}`);
@@ -583,17 +755,20 @@ export function bindTranscriptCards(ctx) {
     }
   }
 
-  function renderErrorCard(raw) {
+  function renderErrorCard(raw: unknown): void {
     const payload = normalizeErrorPayload(raw);
     if (!payload.message && !payload.details && !payload.stack) return;
     clearPlaceholder();
-    const { body } = createRow('error', 'error');
+    const { row, body } = createRow('error', 'error');
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      applyTranscriptCardMetadata(row, raw as TranscriptCardMetadata);
+    }
     appendErrorContent(body, payload);
     setLastEventType('error');
     maybeAutoScroll();
   }
 
-  function handleWarningAction(action) {
+  function handleWarningAction(action: TranscriptWarningAction | null | undefined): void {
     if (!action || typeof action !== 'object') return;
     const actionId = typeof action.id === 'string' ? action.id.trim() : '';
     if (actionId === 'open_splash_settings') {
@@ -601,7 +776,7 @@ export function bindTranscriptCards(ctx) {
     }
   }
 
-  function renderWarningCard(message, action = null) {
+  function renderWarningCard(message: string | null | undefined, action: unknown = null): void {
     if (!message) return;
     clearPlaceholder();
     const { body } = createRow('warning', 'warning');
@@ -610,7 +785,8 @@ export function bindTranscriptCards(ctx) {
     pre.textContent = message;
     body.appendChild(pre);
     if (action && typeof action === 'object') {
-      const label = typeof action.label === 'string' ? action.label.trim() : '';
+      const warningAction = action as TranscriptWarningAction;
+      const label = typeof warningAction.label === 'string' ? warningAction.label.trim() : '';
       if (label) {
         const actions = document.createElement('div');
         actions.className = 'warning-actions';
@@ -618,7 +794,7 @@ export function bindTranscriptCards(ctx) {
         button.type = 'button';
         button.className = 'btn tiny';
         button.textContent = label;
-        button.addEventListener('click', () => handleWarningAction(action));
+        button.addEventListener('click', () => handleWarningAction(warningAction));
         actions.appendChild(button);
         body.appendChild(actions);
       }
@@ -627,9 +803,12 @@ export function bindTranscriptCards(ctx) {
     maybeAutoScroll();
   }
 
-  function renderContextCompactedCard() {
+  function renderContextCompactedCard(evt: TranscriptEvent | null = null): void {
     clearPlaceholder();
-    const { body } = createRow('system', 'context compacted');
+    const { row, body } = createRow('system', 'context compacted');
+    if (evt) {
+      applyTranscriptCardMetadata(row, evt as TranscriptCardMetadata);
+    }
     const msg = document.createElement('div');
     msg.className = 'system-message';
     msg.textContent = 'Context was compacted to fit within the model\'s context window. Some earlier conversation history may have been summarized or dropped.';
@@ -638,9 +817,11 @@ export function bindTranscriptCards(ctx) {
     maybeAutoScroll();
   }
 
-  function renderMetaEnvelopeInjected(evt) {
+  function renderMetaEnvelopeInjected(evt: TranscriptEvent): void {
     const commandCount = evt.command_count ?? evt.commandCount ?? 0;
-    const envelopeJson = evt.envelope_json ?? evt.envelopeJson ?? '';
+    const envelopeJson = typeof evt.envelope_json === 'string'
+      ? evt.envelope_json
+      : (typeof evt.envelopeJson === 'string' ? evt.envelopeJson : '');
     const pretty = (() => {
       try {
         return JSON.stringify(JSON.parse(envelopeJson), null, 2);
@@ -652,7 +833,7 @@ export function bindTranscriptCards(ctx) {
       'CODEX_META injected (debug):',
       `commands: ${commandCount}`,
       '',
-      '\\u001eCODEX_META ' + pretty + '\\u001f',
+      '\u001eCODEX_META ' + pretty + '\u001f',
     ].join('\n');
     if (typeof addMessage === 'function') {
       addMessage('meta', text);

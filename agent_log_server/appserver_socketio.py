@@ -12,6 +12,39 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 from agent_log_server import conversation_todos as _conv_todos
+from agent_log_server.conversations_rpc_contract import CONVERSATIONS_RPC_NAMESPACE
+from agent_log_server.settings_ui_rpc_contract import (
+    SETTINGS_CONFIG_GET_METHOD,
+    SETTINGS_CONFIG_UPDATE_METHOD,
+    SETTINGS_CONFIG_UPDATED_NOTIFICATION,
+    SETTINGS_EXTENSION_MODELS_LIST_METHOD,
+    SETTINGS_EXTENSION_RUNTIME_OPTIONS_GET_METHOD,
+    SETTINGS_EXTENSION_SESSION_BIND_METHOD,
+    SETTINGS_EXTENSION_SESSIONS_LIST_METHOD,
+    SETTINGS_EXTENSION_SETTINGS_SCHEMA_GET_METHOD,
+    SETTINGS_EXTENSIONS_LIST_METHOD,
+    SETTINGS_EXTENSIONS_RELOAD_METHOD,
+    SETTINGS_EXTENSIONS_UPDATED_NOTIFICATION,
+    SETTINGS_RPC_NAMESPACE,
+    UI_FILE_OPEN_METHOD,
+    UI_FILESYSTEM_LIST_METHOD,
+    UI_FILESYSTEM_SEARCH_METHOD,
+    UI_HOST_UI_GET_METHOD,
+    UI_HOST_UI_RECHECK_METHOD,
+    UI_HOST_UI_UPDATED_NOTIFICATION,
+    UI_RPC_NAMESPACE,
+    UI_URL_OPEN_METHOD,
+    UI_VIEW_CHANGED_NOTIFICATION,
+    UI_VIEW_GET_METHOD,
+    UI_VIEW_SET_METHOD,
+    build_jsonrpc_error_response,
+    build_jsonrpc_error_response_from_http_exception,
+    build_jsonrpc_notification,
+    build_jsonrpc_success_response,
+    parse_settings_rpc_request,
+    parse_ui_rpc_request,
+    SettingsUiRpcProtocolError,
+)
 from agent_log_server.typing_helpers import (
     AsyncObjectCallable,
     ObjectEntriesWriter,
@@ -21,7 +54,6 @@ from agent_log_server.typing_helpers import (
 )
 
 APPSERVER_NAMESPACE = "/appserver"
-CONVERSATIONS_RPC_NAMESPACE = "/rpc/conversations"
 ConversationsLiveTransport = Literal["legacy", "rpc"]
 
 _APPSERVER_CONNECTED_SIDS: set[str] = set()
@@ -148,6 +180,91 @@ def register_appserver_socketio_handlers(
             return str(payload["conversation_id"]).strip() or None
         return None
 
+    def _http_exception_from_json_response(result: JSONResponse, fallback: str) -> HTTPException:
+        try:
+            body = cast(object, json.loads(bytes(result.body).decode("utf-8")))
+        except Exception:
+            return HTTPException(status_code=result.status_code or 500, detail=fallback)
+        if isinstance(body, dict):
+            body_map = coerce_object_map(body)
+            detail = body_map.get("error") or body_map.get("detail") or body_map.get("message")
+            if detail:
+                return HTTPException(status_code=result.status_code or 500, detail=detail)
+        return HTTPException(status_code=result.status_code or 500, detail=fallback)
+
+    def _require_extension_id(payload: ObjectMap) -> str:
+        extension_id = str(payload.get("extension_id") or "").strip()
+        if not extension_id:
+            raise HTTPException(status_code=400, detail="Missing required field: extension_id")
+        if not ext_loader.has_extension(extension_id):
+            raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
+        return extension_id
+
+    def _optional_str(payload: ObjectMap, key: str) -> str | None:
+        value = payload.get(key)
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    async def _emit_rpc_notification(
+        namespace: str,
+        method: str,
+        params: ObjectMap | None = None,
+    ) -> None:
+        try:
+            await socketio_server.emit(
+                "rpc.notify",
+                build_jsonrpc_notification(method, params),
+                namespace=namespace,
+            )
+        except Exception:
+            pass
+
+    async def _resume_extension_session(payload: ObjectMap) -> ObjectMap:
+        ext_id = _require_extension_id(payload)
+        session_id = _optional_str(payload, "session_id")
+        if not session_id:
+            raise HTTPException(status_code=400, detail="Missing session_id")
+        conversation_id = _optional_str(payload, "conversation_id") or await deps.ensure_conversation()
+        if not conversation_id:
+            raise HTTPException(status_code=500, detail="Failed to create conversation")
+        cwd = _optional_str(payload, "cwd")
+        model = _optional_str(payload, "model")
+        settings = coerce_object_map(payload.get("settings")) or None
+        bind_settings = deps.merge_extension_bind_settings(
+            conversation_id,
+            cwd=cwd,
+            model=model,
+            settings=settings,
+        )
+        result = coerce_object_map(
+            await ext_loader.resume_session_with_history(
+                ext_id,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                cwd=cwd,
+                model=model,
+                settings=bind_settings,
+            )
+        )
+        if not result.get("ok"):
+            return result
+        items = coerce_object_list(
+            await ext_loader.hydrate_transcript(
+                ext_id,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                cwd=cwd,
+                model=model,
+                settings=bind_settings,
+            )
+        )
+        if items:
+            await deps.write_transcript_entries(conversation_id, items)
+        result["history_count"] = len(items)
+        return result
+
     async def _open_external_http_url(url: str) -> tuple[bool, str]:
         opener = shutil.which("xdg-open")
         if not opener:
@@ -191,6 +308,18 @@ def register_appserver_socketio_handlers(
     async def _conversations_rpc_disconnect(sid: str) -> object:
         return None
 
+    async def _settings_rpc_connect(sid: str, environ: ObjectMap) -> object:
+        return None
+
+    async def _settings_rpc_disconnect(sid: str) -> object:
+        return None
+
+    async def _ui_rpc_connect(sid: str, environ: ObjectMap) -> object:
+        return None
+
+    async def _ui_rpc_disconnect(sid: str) -> object:
+        return None
+
     async def _sio_send_message(sid: str, data: object) -> object:
         try:
             payload = _payload(data)
@@ -228,6 +357,174 @@ def register_appserver_socketio_handlers(
             return _sio_error(exc.detail)
         except Exception as exc:
             return _sio_error(exc)
+
+    async def _sio_settings_rpc(sid: str, data: object) -> object:
+        request_id = None
+        try:
+            request = parse_settings_rpc_request(data)
+            request_id = request.request_id
+            result: ObjectMap
+            if request.method == SETTINGS_CONFIG_GET_METHOD:
+                result = coerce_object_map(await deps.api_appserver_config())
+            elif request.method == SETTINGS_CONFIG_UPDATE_METHOD:
+                result = coerce_object_map(await deps.api_appserver_config_update(request.params))
+                await _emit_rpc_notification(
+                    SETTINGS_RPC_NAMESPACE,
+                    SETTINGS_CONFIG_UPDATED_NOTIFICATION,
+                    {"config": result},
+                )
+            elif request.method == SETTINGS_EXTENSIONS_LIST_METHOD:
+                result = coerce_object_map(await deps.api_extensions_list())
+            elif request.method == SETTINGS_EXTENSIONS_RELOAD_METHOD:
+                result = coerce_object_map(await deps.api_extensions_reload(request.params))
+                await _emit_rpc_notification(
+                    SETTINGS_RPC_NAMESPACE,
+                    SETTINGS_EXTENSIONS_UPDATED_NOTIFICATION,
+                    result or {"ok": True},
+                )
+            elif request.method == SETTINGS_EXTENSION_SETTINGS_SCHEMA_GET_METHOD:
+                extension_id = _require_extension_id(request.params)
+                schema = await deps.api_extension_settings_schema(extension_id)
+                if isinstance(schema, JSONResponse):
+                    raise _http_exception_from_json_response(schema, "Extension settings schema unavailable")
+                result = coerce_object_map(schema)
+            elif request.method == SETTINGS_EXTENSION_RUNTIME_OPTIONS_GET_METHOD:
+                result = coerce_object_map(
+                    await deps.api_appserver_runtime_options(
+                        conversation_id=request.params.get("conversation_id"),
+                        agent=request.params.get("agent"),
+                    )
+                )
+            elif request.method == SETTINGS_EXTENSION_MODELS_LIST_METHOD:
+                extension_id = _require_extension_id(request.params)
+                result = coerce_object_map(
+                    {"models": coerce_object_list(await ext_loader.list_models(extension_id))}
+                )
+            elif request.method == SETTINGS_EXTENSION_SESSIONS_LIST_METHOD:
+                extension_id = _require_extension_id(request.params)
+                result = coerce_object_map(
+                    {
+                        "sessions": coerce_object_list(
+                            await ext_loader.list_sessions(
+                                extension_id,
+                                cwd=_optional_str(request.params, "cwd"),
+                            )
+                        )
+                    }
+                )
+            elif request.method == SETTINGS_EXTENSION_SESSION_BIND_METHOD:
+                result = await _resume_extension_session(request.params)
+            else:
+                raise HTTPException(status_code=404, detail=f"Unknown method: {request.method}")
+            return build_jsonrpc_success_response(request.request_id, result).to_json()
+        except SettingsUiRpcProtocolError as exc:
+            return build_jsonrpc_error_response(
+                exc.request_id,
+                code=exc.code,
+                message=exc.message,
+                data=exc.data or None,
+            ).to_json()
+        except HTTPException as exc:
+            return build_jsonrpc_error_response_from_http_exception(request_id, exc).to_json()
+        except Exception as exc:
+            return build_jsonrpc_error_response(
+                request_id,
+                code=500,
+                message=str(exc or "RPC request failed"),
+            ).to_json()
+
+    async def _sio_ui_rpc(sid: str, data: object) -> object:
+        request_id = None
+        try:
+            request = parse_ui_rpc_request(data)
+            request_id = request.request_id
+            result: ObjectMap
+            if request.method == UI_VIEW_GET_METHOD:
+                config = coerce_object_map(await deps.api_appserver_config())
+                result = coerce_object_map(
+                    {
+                        "active_view": _optional_str(config, "active_view"),
+                        "conversation_id": _optional_str(config, "conversation_id"),
+                    }
+                )
+            elif request.method == UI_VIEW_SET_METHOD:
+                updated = coerce_object_map(await deps.api_appserver_set_view(request.params))
+                result = coerce_object_map(
+                    {
+                        "active_view": _optional_str(updated, "active_view"),
+                        "conversation_id": _optional_str(updated, "conversation_id"),
+                    }
+                )
+                await _emit_rpc_notification(
+                    UI_RPC_NAMESPACE,
+                    UI_VIEW_CHANGED_NOTIFICATION,
+                    result,
+                )
+            elif request.method == UI_HOST_UI_GET_METHOD:
+                result = coerce_object_map(await deps.api_host_ui_get())
+            elif request.method == UI_HOST_UI_RECHECK_METHOD:
+                recheck = coerce_object_map(await deps.sidebar_recheck_status())
+                host_ui = coerce_object_map(await deps.api_host_ui_get())
+                result = coerce_object_map({"recheck": recheck, **host_ui})
+                await _emit_rpc_notification(
+                    UI_RPC_NAMESPACE,
+                    UI_HOST_UI_UPDATED_NOTIFICATION,
+                    host_ui,
+                )
+            elif request.method == UI_FILESYSTEM_LIST_METHOD:
+                result = coerce_object_map(await deps.api_fs_list(path=request.params.get("path")))
+            elif request.method == UI_FILESYSTEM_SEARCH_METHOD:
+                limit_value = request.params.get("limit")
+                if limit_value in (None, ""):
+                    limit = 200
+                elif isinstance(limit_value, (int, float, str)):
+                    try:
+                        limit = int(limit_value)
+                    except Exception as exc:
+                        raise HTTPException(status_code=400, detail="limit must be an integer") from exc
+                else:
+                    raise HTTPException(status_code=400, detail="limit must be an integer")
+                result = coerce_object_map(
+                    await deps.api_fs_search(
+                        query=str(request.params.get("query") or ""),
+                        root=_optional_str(request.params, "root"),
+                        limit=min(max(limit, 1), 200),
+                    )
+                )
+            elif request.method == UI_FILE_OPEN_METHOD:
+                await deps.emit_sidebar_agent_open(request.params)
+                result = coerce_object_map(
+                    {
+                        "ok": True,
+                        "path": _optional_str(request.params, "path"),
+                        "line": request.params.get("line"),
+                        "column": request.params.get("column"),
+                    }
+                )
+            elif request.method == UI_URL_OPEN_METHOD:
+                url = str(request.params.get("url") or "").strip()
+                ok, error = await _open_external_http_url(url)
+                if not ok:
+                    raise HTTPException(status_code=400, detail=error or "Failed to open URL")
+                result = coerce_object_map({"ok": True, "url": url})
+            else:
+                raise HTTPException(status_code=404, detail=f"Unknown method: {request.method}")
+            return build_jsonrpc_success_response(request.request_id, result).to_json()
+        except SettingsUiRpcProtocolError as exc:
+            return build_jsonrpc_error_response(
+                exc.request_id,
+                code=exc.code,
+                message=exc.message,
+                data=exc.data or None,
+            ).to_json()
+        except HTTPException as exc:
+            return build_jsonrpc_error_response_from_http_exception(request_id, exc).to_json()
+        except Exception as exc:
+            return build_jsonrpc_error_response(
+                request_id,
+                code=500,
+                message=str(exc or "RPC request failed"),
+            ).to_json()
 
     async def _sio_interrupt(sid: str, data: object) -> object:
         try:
@@ -525,64 +822,9 @@ def register_appserver_socketio_handlers(
 
     async def _sio_session_resume(sid: str, data: object) -> object:
         try:
-            payload = _payload(data)
-            ext_id_value = payload.get("extension_id")
-            ext_id = ext_id_value.strip() if isinstance(ext_id_value, str) and ext_id_value.strip() else ""
-            if not ext_id or not ext_loader.has_extension(ext_id):
-                return _sio_error(f"Unknown extension: {ext_id}")
-            session_id_value = payload.get("session_id")
-            session_id = (
-                session_id_value.strip()
-                if isinstance(session_id_value, str) and session_id_value.strip()
-                else ""
-            )
-            if not session_id:
-                return _sio_error("Missing session_id")
-            conversation_value = payload.get("conversation_id")
-            conversation_id = (
-                conversation_value.strip()
-                if isinstance(conversation_value, str) and conversation_value.strip()
-                else await deps.ensure_conversation()
-            )
-            if not conversation_id:
-                return _sio_error("Failed to create conversation")
-            cwd_value = payload.get("cwd")
-            cwd = cwd_value if isinstance(cwd_value, str) else None
-            model_value = payload.get("model")
-            model = model_value if isinstance(model_value, str) else None
-            settings = coerce_object_map(payload.get("settings")) or None
-            bind_settings = deps.merge_extension_bind_settings(
-                conversation_id,
-                cwd=cwd,
-                model=model,
-                settings=settings,
-            )
-            result = coerce_object_map(
-                await ext_loader.resume_session_with_history(
-                    ext_id,
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    cwd=cwd,
-                    model=model,
-                    settings=bind_settings,
-                )
-            )
-            if not result.get("ok"):
-                return result
-            items = coerce_object_list(
-                await ext_loader.hydrate_transcript(
-                    ext_id,
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    cwd=cwd,
-                    model=model,
-                    settings=bind_settings,
-                )
-            )
-            if items:
-                await deps.write_transcript_entries(conversation_id, items)
-            result["history_count"] = len(items)
-            return result
+            return await _resume_extension_session(_payload(data))
+        except HTTPException as exc:
+            return _sio_error(exc.detail)
         except Exception as exc:
             return _sio_error(exc)
 
@@ -958,3 +1200,19 @@ def register_appserver_socketio_handlers(
     ]
     for event, handler in conversations_rpc_registrations:
         socketio_server.on(event, handler, namespace=CONVERSATIONS_RPC_NAMESPACE)
+
+    settings_rpc_registrations: list[tuple[str, Callable[..., Awaitable[object]]]] = [
+        ("connect", _settings_rpc_connect),
+        ("disconnect", _settings_rpc_disconnect),
+        ("rpc", _sio_settings_rpc),
+    ]
+    for event, handler in settings_rpc_registrations:
+        socketio_server.on(event, handler, namespace=SETTINGS_RPC_NAMESPACE)
+
+    ui_rpc_registrations: list[tuple[str, Callable[..., Awaitable[object]]]] = [
+        ("connect", _ui_rpc_connect),
+        ("disconnect", _ui_rpc_disconnect),
+        ("rpc", _sio_ui_rpc),
+    ]
+    for event, handler in ui_rpc_registrations:
+        socketio_server.on(event, handler, namespace=UI_RPC_NAMESPACE)

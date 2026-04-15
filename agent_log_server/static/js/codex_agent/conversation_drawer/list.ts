@@ -16,7 +16,7 @@ interface ConversationMeta extends Record<string, unknown> {
   last_preview?: unknown;
 }
 
-interface HostUiState {
+export interface HostUiState {
   projectRoot?: string;
 }
 
@@ -36,7 +36,7 @@ interface ExtensionCatalogEntry extends Record<string, unknown> {
   dependency_message?: string;
 }
 
-interface DrawerListState {
+export interface DrawerListState {
   conversationList?: ConversationMeta[];
   clientConversationId?: string | null;
   conversationMeta?: ConversationMeta | null;
@@ -164,7 +164,8 @@ export function createConversationDrawerList(
   function getPinnedConversationIds(): string[] {
     return getConversationListState()
       .filter((meta) => meta?.pinned === true && typeof meta?.conversation_id === 'string' && meta.conversation_id)
-      .map((meta) => meta.conversation_id);
+      .map((meta) => (typeof meta.conversation_id === 'string' ? meta.conversation_id : ''))
+      .filter((conversationId): conversationId is string => Boolean(conversationId));
   }
 
   function clearPinnedDragMarkers(doc: Document | null | undefined): void {

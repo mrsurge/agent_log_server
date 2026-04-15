@@ -47,6 +47,7 @@ from agent_log_server.conversations_rpc_contract import (
     parse_conversations_rpc_request,
 )
 from agent_log_server.prompt_context import load_repo_memory_snapshot
+from agent_log_server.transcript_card_metadata import normalize_transcript_card_record
 from agent_log_server.typing_helpers import (
     AsyncObjectCallable,
     ObjectEntriesWriter,
@@ -198,7 +199,7 @@ class AppserverRoutes:
             transcript_entry["code"] = code
         if isinstance(turn_id, str) and turn_id.strip():
             transcript_entry["turn_id"] = turn_id.strip()
-        await self._deps.append_transcript_entry(conversation_id, transcript_entry)
+        recorded_entry = await self._deps.append_transcript_entry(conversation_id, transcript_entry)
 
         event: ObjectMap = {
             "type": "error",
@@ -221,6 +222,10 @@ class AppserverRoutes:
             event["code"] = code
         if isinstance(turn_id, str) and turn_id.strip():
             event["turn_id"] = turn_id.strip()
+        if isinstance(recorded_entry, dict):
+            for key in ("nid", "card_id", "order_id"):
+                if key in recorded_entry:
+                    event[key] = recorded_entry[key]
         await self._deps.broadcast_appserver_ui(event)
         await self._deps.broadcast_appserver_ui(
             {
@@ -960,7 +965,11 @@ class AppserverRoutes:
                         continue
                     if not isinstance(record_raw, dict):
                         continue
-                    record = self._deps.coerce_json_object(record_raw)
+                    record = normalize_transcript_card_record(
+                        self._deps.coerce_json_object(record_raw),
+                        conversation_id=str(conversation_id),
+                        fallback_order_id=total,
+                    )
                     if not include_internal and self._deps.is_internal_transcript_item(record):
                         continue
                     total += 1
@@ -981,7 +990,11 @@ class AppserverRoutes:
                         continue
                     if not isinstance(record_raw, dict):
                         continue
-                    record = self._deps.coerce_json_object(record_raw)
+                    record = normalize_transcript_card_record(
+                        self._deps.coerce_json_object(record_raw),
+                        conversation_id=str(conversation_id),
+                        fallback_order_id=total,
+                    )
                     if not include_internal and self._deps.is_internal_transcript_item(record):
                         continue
                     if start <= total < end:
@@ -1020,7 +1033,11 @@ class AppserverRoutes:
                     except json.JSONDecodeError:
                         continue
                     if isinstance(record_raw, dict):
-                        record = self._deps.coerce_json_object(record_raw)
+                        record = normalize_transcript_card_record(
+                            self._deps.coerce_json_object(record_raw),
+                            conversation_id=str(convo_id),
+                            fallback_order_id=len(items),
+                        )
                         items.append(record)
         except Exception:
             return {"conversation_id": str(convo_id), "items": []}
@@ -1457,11 +1474,19 @@ class AppserverRoutes:
             raise HTTPException(status_code=409, detail="Approval is stale or no longer actionable")
 
         handoff_event = self._deps.build_approval_handoff_event(str(conversation_id), descriptor, resolution)
+        recorded_handoff_entry: ObjectMap | None = None
         if isinstance(handoff_event, dict):
-            await self._deps.append_approval_handoff_transcript_entry(str(conversation_id), handoff_event)
+            recorded_handoff_entry = cast(
+                ObjectMap | None,
+                await self._deps.append_approval_handoff_transcript_entry(str(conversation_id), handoff_event),
+            )
         self._deps.remove_pending_approval(str(conversation_id), request_id)
         if isinstance(handoff_event, dict):
             handoff_event_dict = handoff_event
+            if isinstance(recorded_handoff_entry, dict):
+                for key in ("nid", "card_id", "order_id"):
+                    if key in recorded_handoff_entry:
+                        handoff_event_dict[key] = recorded_handoff_entry[key]
             await self._deps.broadcast_appserver_ui(handoff_event_dict)
             payload_value = handoff_event_dict.get("payload")
             handoff_payload = payload_value if isinstance(payload_value, dict) else {}

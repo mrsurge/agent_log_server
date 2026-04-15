@@ -8,11 +8,15 @@ window.CodexAgentModules.push((ctx) => {
   const titleEl = modalEl?.querySelector('h3');
 
   let onConfirm = null;
+  let onCancel = null;
 
-  function close() {
+  function close(reason = 'cancel') {
     if (!modalEl) return;
     modalEl.classList.add('hidden');
+    const cancelHandler = reason === 'confirm' ? null : onCancel;
     onConfirm = null;
+    onCancel = null;
+    if (typeof cancelHandler === 'function') cancelHandler();
   }
 
   function open(opts) {
@@ -21,6 +25,7 @@ window.CodexAgentModules.push((ctx) => {
     if (bodyEl && opts?.body) bodyEl.textContent = opts.body;
     if (confirmBtn && opts?.confirmText) confirmBtn.textContent = opts.confirmText;
     onConfirm = typeof opts?.onConfirm === 'function' ? opts.onConfirm : null;
+    onCancel = typeof opts?.onCancel === 'function' ? opts.onCancel : null;
     modalEl.classList.remove('hidden');
   }
 
@@ -28,7 +33,7 @@ window.CodexAgentModules.push((ctx) => {
   cancelBtn?.addEventListener('click', close);
   confirmBtn?.addEventListener('click', async () => {
     const handler = onConfirm;
-    close();
+    close('confirm');
     if (handler) await handler();
   });
 

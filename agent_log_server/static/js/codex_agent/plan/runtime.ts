@@ -55,8 +55,8 @@ interface PlanRuntimeContext {
   planCloseBtn: HTMLElement | null;
   planDismissBtn: HTMLElement | null;
   planBodyEl: HTMLElement | null;
-  renderMarkdownInto: (...args: unknown[]) => unknown;
-  highlightCode: (...args: unknown[]) => unknown;
+  renderMarkdownInto: (container: HTMLElement | null | undefined, text: unknown) => void;
+  highlightCode: (container: HTMLElement | null | undefined) => void;
 }
 
 function asObject(value: unknown): PlanRuntimeRecord | null {

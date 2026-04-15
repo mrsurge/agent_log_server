@@ -1,14 +1,15 @@
+import { TRANSCRIPT_TOP_SPACER_ROWS } from './transcript_config.ts';
+
 interface TranscriptState {
   transcriptStart?: number;
   transcriptTotal?: number;
   transcriptEnd?: number;
-  transcriptLimit?: number;
   estimatedRowHeight?: number;
 }
 
 interface TranscriptSpacerElements {
   topSpacerEl: HTMLElement | null;
-  bottomSpacerEl: HTMLElement | null;
+  bottomSpacerEl?: HTMLElement | null;
 }
 
 interface TranscriptMetricsContext {
@@ -30,24 +31,22 @@ export function bindTranscriptMetrics(ctx: TranscriptMetricsContext): Transcript
     getTranscriptState,
     setTranscriptState,
   } = ctx;
-  const TRANSCRIPT_SCOPE_BUFFER_RATIO = 0.5;
-
   function updateSpacerHeights() {
     const { topSpacerEl, bottomSpacerEl } = getSpacerEls();
-    if (!topSpacerEl || !bottomSpacerEl) return;
+    if (!topSpacerEl) return;
     const {
       transcriptStart,
       transcriptTotal,
       transcriptEnd,
-      transcriptLimit,
       estimatedRowHeight,
     } = getTranscriptState();
     const above = Math.max(0, Number(transcriptStart) || 0);
     const below = Math.max(0, (Number(transcriptTotal) || 0) - (Number(transcriptEnd) || 0));
     const rowHeight = Math.max(1, Number(estimatedRowHeight) || 0);
-    const bufferRows = Math.max(1, Math.floor(Math.max(1, Number(transcriptLimit) || 0) * TRANSCRIPT_SCOPE_BUFFER_RATIO));
-    topSpacerEl.style.height = `${Math.max(0, Math.min(above, bufferRows) * rowHeight)}px`;
-    bottomSpacerEl.style.height = `${Math.max(0, Math.min(below, bufferRows) * rowHeight)}px`;
+    topSpacerEl.style.height = above > 0 ? `${TRANSCRIPT_TOP_SPACER_ROWS * rowHeight}px` : '0px';
+    if (bottomSpacerEl) {
+      bottomSpacerEl.style.height = '0px';
+    }
   }
 
   function measureRowHeight() {

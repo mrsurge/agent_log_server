@@ -27,7 +27,7 @@ ListPendingApprovalsFn = Callable[..., object]
 RecordSubmittedResolutionFn = Callable[[str, str, ObjectMap], object]
 RemovePendingApprovalFn = Callable[[str, RequestId], bool]
 BuildHandoffEventFn = Callable[[str, ObjectMap, ObjectMap], object]
-AppendHandoffFn = Callable[[str, ObjectMap], Awaitable[None]]
+AppendHandoffFn = Callable[[str, ObjectMap], Awaitable[ObjectMap | None]]
 BroadcastUiFn = Callable[[ObjectMap], Awaitable[None]]
 
 _emit_ipc_fn: EmitIpcFn | None = None
@@ -76,6 +76,19 @@ def _submitted_resolution(descriptor: ObjectMap) -> ObjectMap | None:
         return None
     submitted = coerce_object_map(submitted_obj)
     return submitted if submitted else None
+
+
+def _merge_recorded_handoff_entry(
+    handoff_event: ObjectMap,
+    recorded_handoff_entry: ObjectMap | None,
+) -> ObjectMap:
+    if not isinstance(recorded_handoff_entry, dict):
+        return handoff_event
+    merged = dict(handoff_event)
+    for key in ("nid", "card_id", "order_id"):
+        if key in recorded_handoff_entry:
+            merged[key] = recorded_handoff_entry[key]
+    return merged
 
 def configure(
     *,
@@ -290,8 +303,10 @@ async def acknowledge_interaction(request_id: object) -> bool:
         handoff_event_obj = _build_handoff_event_fn(conversation_id, descriptor, submitted)
         if isinstance(handoff_event_obj, dict):
             handoff_event = coerce_object_map(handoff_event_obj)
-            await _append_handoff_fn(conversation_id, handoff_event)
-            await _broadcast_ui_fn(handoff_event)
+            recorded_handoff_entry = await _append_handoff_fn(conversation_id, handoff_event)
+            await _broadcast_ui_fn(
+                _merge_recorded_handoff_entry(handoff_event, recorded_handoff_entry),
+            )
     _ask_user_log(f"acknowledge cleared request_id={request_id_text} conversation_id={conversation_id}")
     return True
 
@@ -365,8 +380,10 @@ async def finalize_interaction(request_id: object, resolution: object = None) ->
         handoff_event_obj = _build_handoff_event_fn(conversation_id, descriptor, final_resolution)
         if isinstance(handoff_event_obj, dict):
             handoff_event = coerce_object_map(handoff_event_obj)
-            await _append_handoff_fn(conversation_id, handoff_event)
-            await _broadcast_ui_fn(handoff_event)
+            recorded_handoff_entry = await _append_handoff_fn(conversation_id, handoff_event)
+            await _broadcast_ui_fn(
+                _merge_recorded_handoff_entry(handoff_event, recorded_handoff_entry),
+            )
     return True
 
 

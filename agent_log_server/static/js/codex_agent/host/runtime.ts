@@ -1,3 +1,6 @@
+import { createSettingsRpcClient } from '../rpc/settings/client.ts';
+import { createUiRpcClient } from '../rpc/ui/client.ts';
+
 type AnyRecord = Record<string, any>;
 
 interface HostRuntimeState {
@@ -42,6 +45,14 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     windowRef,
     getSocketConnected,
   } = ctx;
+  const settingsRpcClient = createSettingsRpcClient({
+    sioCall,
+    windowRef,
+  });
+  const uiRpcClient = createUiRpcClient({
+    sioCall,
+    windowRef,
+  });
 
   function applyHostUi() {
     const { hostUi, activeView } = getState();
@@ -76,9 +87,9 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
 
   async function fetchHostUi() {
     try {
-      const data = await sioCall('get_host_ui', {});
+      const data = await uiRpcClient.getHostUi();
       if (!data || data.ok === false) return;
-      const ui = data?.host_ui || {};
+      const ui = (data?.host_ui && typeof data.host_ui === 'object' ? data.host_ui : {}) as AnyRecord;
       setState({
         hostUi: {
           showClose: Boolean(ui.show_close),
@@ -95,7 +106,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
 
   async function recheckSidebarConnection() {
     try {
-      await sioCall('sidebar_recheck', {});
+      await uiRpcClient.recheckHostUi();
     } catch {
       // Best-effort only; host UI fetch still runs after this.
     }
@@ -123,7 +134,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     if (Number.isFinite(column)) payload.column = Number(column);
     console.log('[TE2_OPEN] payload:', JSON.stringify(payload), 'socket_connected:', getSocketConnected());
     try {
-      const result = await sioCall('te2_agent_open', payload);
+      const result = await uiRpcClient.openFile(payload);
       console.log('[TE2_OPEN] result:', JSON.stringify(result));
     } catch (err) {
       console.warn('[TE2_OPEN] error:', err);
@@ -135,7 +146,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     if (!target) return;
     try {
       const { conversationMeta } = getState();
-      const result = await sioCall('open_external_url', {
+      const result = await uiRpcClient.openUrl({
         url: target,
         source: 'codex-agent',
         conversation_id: conversationMeta?.conversation_id || null,
@@ -154,17 +165,20 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
   }
 
   function getUserDisplayName() {
-    const userName = typeof getState().appConfig?.user_name === 'string' ? getState().appConfig.user_name.trim() : '';
+    const appConfig = getState().appConfig;
+    const userName = typeof appConfig?.user_name === 'string' ? appConfig.user_name.trim() : '';
     return userName || 'user';
   }
 
   function getAssistantDisplayName() {
-    const alias = typeof getState().conversationSettings?.alias === 'string' ? getState().conversationSettings.alias.trim() : '';
+    const conversationSettings = getState().conversationSettings;
+    const alias = typeof conversationSettings?.alias === 'string' ? conversationSettings.alias.trim() : '';
     return alias || 'assistant';
   }
 
   function getConversationHeaderTitle() {
-    const alias = typeof getState().conversationSettings?.alias === 'string' ? getState().conversationSettings.alias.trim() : '';
+    const conversationSettings = getState().conversationSettings;
+    const alias = typeof conversationSettings?.alias === 'string' ? conversationSettings.alias.trim() : '';
     return alias || 'Conversation';
   }
 
@@ -193,7 +207,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
 
   async function fetchAppConfig() {
     try {
-      const data = await sioCall('get_config', {});
+      const data = await settingsRpcClient.getConfig();
       if (!data || data.ok === false) return null;
       applyAppConfig(data);
       return data;
@@ -221,7 +235,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
 
   async function saveSplashSettings() {
     try {
-      const data = await sioCall('update_config', {
+      const data = await settingsRpcClient.updateConfig({
         user_name: splashSettingsUserNameEl?.value?.trim() || null,
         te2_mcp_integration: splashSettingsTe2McpIntegrationEl?.checked === true,
       });

@@ -1,3 +1,8 @@
+import {
+  applyTranscriptCardMetadata,
+  type TranscriptCardMetadata,
+} from '../transcript_card_metadata.ts';
+
 type AnyRecord = Record<string, any>;
 
 interface SubagentsCollapsibleContext {
@@ -43,8 +48,9 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
 
   function makeCollapsible(row: HTMLElement | null, cardId: string, startExpanded: boolean, options: AnyRecord = {}) {
     if (!(row instanceof HTMLElement)) return;
+    const rowEl = row;
     const {
-      headerEl = row.querySelector('.command-ribbon') || row.querySelector('.diff-path-label'),
+      headerEl = rowEl.querySelector('.command-ribbon') || rowEl.querySelector('.diff-path-label'),
       persist = true,
       fullHeaderToggle = false,
       toggleZone = !fullHeaderToggle,
@@ -52,9 +58,9 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
     } = options;
     if (!(headerEl instanceof HTMLElement)) return;
 
-    row.classList.add('collapsible');
+    rowEl.classList.add('collapsible');
     const isExpanded = Boolean(startExpanded || (persist && cardId && expandedCards.has(cardId)));
-    row.classList.toggle('expanded', isExpanded);
+    rowEl.classList.toggle('expanded', isExpanded);
 
     let twistyEl = headerEl.querySelector(':scope > .twisty') as HTMLElement | null;
     if (!(twistyEl instanceof HTMLElement)) {
@@ -81,8 +87,8 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
     function toggleCollapse(forceExpanded?: boolean) {
       const expanded = typeof forceExpanded === 'boolean'
         ? forceExpanded
-        : !row.classList.contains('expanded');
-      row.classList.toggle('expanded', expanded);
+        : !rowEl.classList.contains('expanded');
+      rowEl.classList.toggle('expanded', expanded);
       persistExpandedState(expanded);
       syncExpandedState(expanded);
       if (typeof onToggle === 'function') onToggle(expanded);
@@ -90,7 +96,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       return expanded;
     }
 
-    (row as AnyRecord)._toggleCollapse = toggleCollapse;
+    (rowEl as AnyRecord)._toggleCollapse = toggleCollapse;
     syncExpandedState(isExpanded);
 
     twistyEl.style.pointerEvents = 'auto';
@@ -122,7 +128,12 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
     }
   }
 
-  function getSubagentContainer(id: string, name: string, intent: string) {
+  function getSubagentContainer(
+    id: string,
+    name: string,
+    intent: string,
+    metadata: TranscriptCardMetadata | null = null,
+  ) {
     let subagent = subagentContainers.get(id);
     if (!subagent) {
       clearPlaceholder();
@@ -143,6 +154,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       const body = documentRef.createElement('div');
       body.className = 'subagent-body';
       row.appendChild(body);
+      applyTranscriptCardMetadata(row, metadata);
 
       insertRow(row);
       makeCollapsible(row, `subagent:${id}`, false, {
@@ -151,6 +163,8 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       });
       subagent = { row, body, header, statusEl, label, items: [] };
       subagentContainers.set(id, subagent);
+    } else if (subagent.row instanceof HTMLElement) {
+      applyTranscriptCardMetadata(subagent.row, metadata);
     }
     return subagent;
   }

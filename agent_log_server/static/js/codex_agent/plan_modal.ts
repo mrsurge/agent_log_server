@@ -17,8 +17,8 @@ interface PlanModalState {
 interface PlanModalContext {
   elements: PlanModalElements;
   getState(): PlanModalState | null | undefined;
-  renderMarkdownInto(target: HTMLElement, markdown: string): void;
-  highlightCode(target: HTMLElement): void;
+  renderMarkdownInto(target: HTMLElement | null | undefined, markdown: string): void;
+  highlightCode(target: HTMLElement | null | undefined): void;
 }
 
 interface PlanModalBinding {
@@ -76,7 +76,7 @@ export function bindPlanModal(ctx: PlanModalContext): PlanModalBinding {
   }
 
   function isPlanModalOpen() {
-    return Boolean(planModalEl) && !planModalEl.classList.contains('hidden');
+    return planModalEl instanceof HTMLElement && !planModalEl.classList.contains('hidden');
   }
 
   async function openPlanModal(): Promise<void> {
