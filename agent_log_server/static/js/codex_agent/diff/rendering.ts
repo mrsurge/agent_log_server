@@ -63,6 +63,7 @@ type DiffTableRow = {
   display: string;
   codeHtml: string;
   activePath: string;
+  wholeLineEmphasis?: boolean;
 };
 
 type DiffAlignmentPair = {
@@ -560,6 +561,11 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
     return parts.some((part) => part.changed && /\S/.test(part.text));
   }
 
+  function markWholeLineEmphasis(row: DiffTableRow | undefined): void {
+    if (!row || row.kind !== 'code') return;
+    row.wholeLineEmphasis = true;
+  }
+
   function renderDiffCodeHtml(display: string, activePath: string): string {
     let codeHtml = escapeHtml(display);
     if (isDiffSyntaxEnabled() && typeof hljs !== 'undefined' && display.trim()) {
@@ -583,7 +589,7 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
     let idx = 0;
     while (idx < rows.length) {
       const row = rows[idx];
-      if (!row || row.kind !== 'code' || row.cls !== 'diff-del') {
+      if (!row || row.kind !== 'code' || (row.cls !== 'diff-del' && row.cls !== 'diff-add')) {
         idx += 1;
         continue;
       }
@@ -601,20 +607,45 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
         addIdx += 1;
       }
 
+      if (!deletions.length) {
+        additions.forEach((addition) => markWholeLineEmphasis(addition));
+        idx = addIdx;
+        continue;
+      }
+
       if (!additions.length) {
+        deletions.forEach((deletion) => markWholeLineEmphasis(deletion));
         continue;
       }
 
       const alignedPairs = alignChangedLineRuns(deletions, additions);
+      const matchedDeletionIndices = new Set<number>();
+      const matchedAdditionIndices = new Set<number>();
       alignedPairs.forEach(({ deletionIndex, additionIndex }) => {
+        matchedDeletionIndices.add(deletionIndex);
+        matchedAdditionIndices.add(additionIndex);
         const deletion = deletions[deletionIndex];
         const addition = additions[additionIndex];
         const pair = buildJsDiffIntralineParts(deletion.display, addition.display)
           || buildIntralineParts(deletion.display, addition.display);
-        if (!pair) return;
-        if (!hasMeaningfulChangedContent(pair.leftParts) && !hasMeaningfulChangedContent(pair.rightParts)) return;
+        if (!pair || (!hasMeaningfulChangedContent(pair.leftParts) && !hasMeaningfulChangedContent(pair.rightParts))) {
+          markWholeLineEmphasis(deletion);
+          markWholeLineEmphasis(addition);
+          return;
+        }
         deletion.codeHtml = renderDiffPartsHtml(pair.leftParts, 'diff-intraline-change diff-intraline-del');
         addition.codeHtml = renderDiffPartsHtml(pair.rightParts, 'diff-intraline-change diff-intraline-add');
+      });
+
+      deletions.forEach((deletion, deletionIndex) => {
+        if (!matchedDeletionIndices.has(deletionIndex)) {
+          markWholeLineEmphasis(deletion);
+        }
+      });
+      additions.forEach((addition, additionIndex) => {
+        if (!matchedAdditionIndices.has(additionIndex)) {
+          markWholeLineEmphasis(addition);
+        }
       });
 
       idx = addIdx;
@@ -622,11 +653,17 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
   }
 
   function renderDiffRowHtml(row: DiffTableRow): string {
-    const codeHtml = row.codeHtml || renderDiffCodeHtml(row.display || '', row.activePath || '');
+    let codeHtml = row.codeHtml || renderDiffCodeHtml(row.display || '', row.activePath || '');
+    if (row.wholeLineEmphasis && row.cls === 'diff-add' && codeHtml) {
+      codeHtml = `<span class="diff-intraline-change diff-intraline-add">${codeHtml}</span>`;
+    } else if (row.wholeLineEmphasis && row.cls === 'diff-del' && codeHtml) {
+      codeHtml = `<span class="diff-intraline-change diff-intraline-del">${codeHtml}</span>`;
+    }
     const safePath = row.path ? escapeHtml(String(row.path)) : '';
     const safeOldLine = escapeHtml(String(row.oldLine || ''));
     const safeNewLine = escapeHtml(String(row.newLine || ''));
-    return `<tr class="diff-line ${row.cls}" data-path="${safePath}" data-old-line="${safeOldLine}" data-new-line="${safeNewLine}"><td class="diff-gutter transcript-line-no">${escapeHtml(row.gutterText || '')}</td><td class="diff-text">${codeHtml}</td></tr>`;
+    const rowClasses = ['diff-line', row.cls, row.wholeLineEmphasis ? 'diff-full-line' : ''].filter(Boolean).join(' ');
+    return `<tr class="${rowClasses}" data-path="${safePath}" data-old-line="${safeOldLine}" data-new-line="${safeNewLine}"><td class="diff-gutter transcript-line-no">${escapeHtml(row.gutterText || '')}</td><td class="diff-text">${codeHtml}</td></tr>`;
   }
 
   function formatDiff(text: string, filePath?: string | null): string {

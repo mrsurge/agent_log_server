@@ -7,6 +7,12 @@ export const CONVERSATIONS_RPC_NAMESPACE = RPC_NAMESPACES.conversations;
 export const CONVERSATIONS_RPC_IMPLEMENTATION_STATUS = 'implemented' as const;
 
 export const CONVERSATIONS_RPC_METHODS = {
+  get: 'conversation.get',
+  list: 'conversation.list',
+  create: 'conversation.create',
+  select: 'conversation.select',
+  delete: 'conversation.delete',
+  pinsSet: 'conversation.pins.set',
   send: 'conversation.send',
   interrupt: 'conversation.interrupt',
   compact: 'conversation.compact',
@@ -17,9 +23,29 @@ export type ConversationsRpcMethod =
   typeof CONVERSATIONS_RPC_METHODS[keyof typeof CONVERSATIONS_RPC_METHODS];
 
 export const CONVERSATIONS_RPC_ANCHOR_MODULES = [
+  'conversation/runtime.ts',
+  'conversation_drawer/actions.ts',
   'orchestrator/session_flow.js',
   'transcript_loader.js',
 ] as const;
+
+export interface ConversationMetaRecord extends JsonObject {
+  conversation_id?: string | null;
+  active_view?: string | null;
+  settings?: JsonObject;
+}
+
+export interface ConversationListResult extends JsonObject {
+  items: ConversationMetaRecord[];
+  active_conversation_id: string | null;
+  active_view: string | null;
+  pinned_conversations?: string[];
+  transport: ConversationsRpcTransport;
+}
+
+export interface ConversationMetaResult extends ConversationMetaRecord {
+  transport: ConversationsRpcTransport;
+}
 
 export interface ReplayChunkCursor {
   offset: number;
@@ -174,6 +200,36 @@ export interface RpcMethodDescriptor<Name extends string = string> {
 }
 
 export const CONVERSATIONS_RPC_METHOD_DESCRIPTORS: readonly RpcMethodDescriptor<ConversationsRpcMethod>[] = [
+  {
+    name: CONVERSATIONS_RPC_METHODS.get,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.list,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.create,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.select,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.delete,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.pinsSet,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
   {
     name: CONVERSATIONS_RPC_METHODS.send,
     namespace: CONVERSATIONS_RPC_NAMESPACE,

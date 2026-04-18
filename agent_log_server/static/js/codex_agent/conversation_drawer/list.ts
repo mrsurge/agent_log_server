@@ -152,6 +152,7 @@ export function createConversationDrawerList(
     openSettingsModal,
     deleteConversation,
     documentRef,
+    windowRef,
   } = ctx;
 
   let draggingConversationId: string | null = null;
@@ -198,6 +199,32 @@ export function createConversationDrawerList(
       nextPinnedIds = [...pinnedIds, conversationId];
     }
     await persistPinnedConversationOrder(nextPinnedIds);
+  }
+
+  function bindPinnedDragSource(
+    handle: HTMLElement,
+    row: HTMLDivElement,
+    meta: ConversationMeta | null | undefined,
+    doc: Document | null | undefined,
+  ): void {
+    const canPersistPins = typeof setConversationPins === 'function';
+    const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
+    const canDrag = Boolean(canPersistPins && meta?.pinned === true && conversationId);
+    handle.draggable = canDrag;
+    if (!canDrag) return;
+    handle.addEventListener('dragstart', (evt) => {
+      if (!evt.dataTransfer) {
+        evt.preventDefault();
+        return;
+      }
+      draggingConversationId = conversationId;
+      evt.dataTransfer.effectAllowed = 'move';
+      evt.dataTransfer.setData('text/plain', conversationId);
+      row.classList.add('dragging');
+    });
+    handle.addEventListener('dragend', () => {
+      clearPinnedDragState(doc);
+    });
   }
 
   function reorderPinnedConversationIds(targetConversationId: string): string[] | null {
@@ -303,7 +330,7 @@ export function createConversationDrawerList(
     doc: Document,
     meta: ConversationMeta | null | undefined,
     row: HTMLDivElement,
-    { compact = false }: { compact?: boolean } = {},
+    { compact = false, includeDragHandle = true }: { compact?: boolean; includeDragHandle?: boolean } = {},
   ): HTMLDivElement {
     const controls = doc.createElement('div');
     controls.className = compact ? 'conversation-card-controls conversation-mini-controls' : 'conversation-card-controls';
@@ -323,40 +350,72 @@ export function createConversationDrawerList(
     });
     controls.appendChild(pinBtn);
 
-    const dragHandle = doc.createElement('button');
-    dragHandle.type = 'button';
-    dragHandle.className = `btn tiny conversation-drag-handle${meta?.pinned === true ? '' : ' disabled'}`;
-    dragHandle.textContent = '↕';
-    dragHandle.title = meta?.pinned === true
-      ? 'Drag to reorder pinned conversations'
-      : 'Pin this conversation to enable drag reordering';
-    dragHandle.disabled = !canPersistPins || meta?.pinned !== true;
-    dragHandle.draggable = canPersistPins && meta?.pinned === true;
-    dragHandle.addEventListener('click', (evt) => {
-      evt.preventDefault();
-      evt.stopPropagation();
-    });
-    dragHandle.addEventListener('dragstart', (evt) => {
-      if (!canPersistPins || meta?.pinned !== true || !meta?.conversation_id) {
+    if (includeDragHandle) {
+      const dragHandle = doc.createElement('button');
+      dragHandle.type = 'button';
+      dragHandle.className = `btn tiny conversation-drag-handle${meta?.pinned === true ? '' : ' disabled'}`;
+      dragHandle.textContent = '↕';
+      dragHandle.title = meta?.pinned === true
+        ? 'Drag to reorder pinned conversations'
+        : 'Pin this conversation to enable drag reordering';
+      dragHandle.disabled = !canPersistPins || meta?.pinned !== true;
+      dragHandle.addEventListener('click', (evt) => {
         evt.preventDefault();
-        return;
-      }
-      if (!evt.dataTransfer) {
-        evt.preventDefault();
-        return;
-      }
-      draggingConversationId = meta.conversation_id;
-      evt.dataTransfer.effectAllowed = 'move';
-      evt.dataTransfer.setData('text/plain', meta.conversation_id);
-      row.classList.add('dragging');
-    });
-    dragHandle.addEventListener('dragend', () => {
-      clearPinnedDragState(doc);
-    });
-    controls.appendChild(dragHandle);
+        evt.stopPropagation();
+      });
+      bindPinnedDragSource(dragHandle, row, meta, doc);
+      controls.appendChild(dragHandle);
+    }
 
     bindPinnedDropTarget(row, meta, doc);
     return controls;
+  }
+
+  function buildConversationRowHandle(
+    doc: Document,
+    meta: ConversationMeta | null | undefined,
+    row: HTMLDivElement,
+  ): HTMLDivElement {
+    const handle = doc.createElement('div');
+    const canDrag = typeof setConversationPins === 'function' && meta?.pinned === true && meta?.conversation_id;
+    handle.className = `conversation-row-handle${canDrag ? '' : ' disabled'}`;
+    handle.textContent = '≡';
+    handle.title = canDrag
+      ? 'Drag to reorder pinned conversations'
+      : 'Pin this conversation to enable drag reordering';
+    bindPinnedDragSource(handle, row, meta, doc);
+    return handle;
+  }
+
+  function hasActiveTextSelection(): boolean {
+    const selection = windowRef?.getSelection?.();
+    return Boolean(selection && !selection.isCollapsed && String(selection).trim());
+  }
+
+  function shouldIgnoreRowActivation(evt: Event): boolean {
+    if (hasActiveTextSelection()) return true;
+    const target = evt.target;
+    if (!(target instanceof Element)) return false;
+    return Boolean(target.closest('button, a, input, label, select, textarea, summary'));
+  }
+
+  function bindConversationRowActivation(
+    row: HTMLDivElement,
+    conversationId: string,
+  ): void {
+    if (!conversationId) return;
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.addEventListener('click', (evt) => {
+      if (shouldIgnoreRowActivation(evt)) return;
+      void selectConversation(conversationId);
+    });
+    row.addEventListener('keydown', (evt) => {
+      if (shouldIgnoreRowActivation(evt)) return;
+      if (evt.key !== 'Enter' && evt.key !== ' ') return;
+      evt.preventDefault();
+      void selectConversation(conversationId);
+    });
   }
 
   function renderConversationList(list: ConversationMeta[], activeConversationId: string | null): void {
@@ -380,22 +439,16 @@ export function createConversationDrawerList(
       row.className = 'conversation-row';
       if (conversationId && conversationId === activeConversationId) row.classList.add('active');
       if (meta?.pinned === true) row.classList.add('pinned');
+      bindConversationRowActivation(row, conversationId);
+
+      row.appendChild(buildConversationRowHandle(doc, meta, row));
 
       const info = buildConversationInfo(doc, meta);
       row.appendChild(info);
 
       const actions = doc.createElement('div');
       actions.className = 'conversation-actions';
-      actions.appendChild(buildConversationCardControls(doc, meta, row));
-
-      const openBtn = doc.createElement('button');
-      openBtn.className = 'btn tiny primary';
-      openBtn.textContent = 'Open';
-      openBtn.addEventListener('click', () => {
-        if (!conversationId) return;
-        void selectConversation(conversationId);
-      });
-      actions.appendChild(openBtn);
+      actions.appendChild(buildConversationCardControls(doc, meta, row, { includeDragHandle: false }));
 
       const settingsBtn = doc.createElement('button');
       settingsBtn.className = 'btn tiny';

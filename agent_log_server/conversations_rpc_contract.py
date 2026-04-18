@@ -4,7 +4,7 @@ import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 from fastapi import HTTPException
 
@@ -21,6 +21,12 @@ CONVERSATION_SEND_METHOD = "conversation.send"
 CONVERSATION_INTERRUPT_METHOD = "conversation.interrupt"
 CONVERSATION_COMPACT_METHOD = "conversation.compact"
 CONVERSATION_REPLAY_GET_CHUNK_METHOD = "conversation.replay.getChunk"
+CONVERSATION_GET_METHOD = "conversation.get"
+CONVERSATION_LIST_METHOD = "conversation.list"
+CONVERSATION_CREATE_METHOD = "conversation.create"
+CONVERSATION_SELECT_METHOD = "conversation.select"
+CONVERSATION_DELETE_METHOD = "conversation.delete"
+CONVERSATION_PINS_SET_METHOD = "conversation.pins.set"
 CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE: dict[str, str] = {
     "activity": "conversation.activity",
     "approval": "conversation.approval.request",
@@ -61,6 +67,12 @@ CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE: dict[str, str] = {
 }
 
 ConversationsRpcMethod: TypeAlias = Literal[
+    "conversation.get",
+    "conversation.list",
+    "conversation.create",
+    "conversation.select",
+    "conversation.delete",
+    "conversation.pins.set",
     "conversation.send",
     "conversation.interrupt",
     "conversation.compact",
@@ -130,6 +142,47 @@ class ParsedConversationsRpcRequest:
 class ConversationSendParams:
     conversation_id: str
     text: str
+
+
+@dataclass(frozen=True)
+class ConversationGetParams:
+    conversation_id: str | None
+
+
+@dataclass(frozen=True)
+class ConversationCreateParams:
+    settings: ObjectMap | None
+
+    def to_json(self) -> ObjectMap:
+        payload: ObjectMap = {}
+        if self.settings:
+            payload["settings"] = self.settings
+        return payload
+
+
+@dataclass(frozen=True)
+class ConversationSelectParams:
+    conversation_id: str
+    view: Literal["splash", "conversation"] | None = None
+
+    def to_json(self) -> ObjectMap:
+        payload: ObjectMap = {"conversation_id": self.conversation_id}
+        if self.view is not None:
+            payload["view"] = self.view
+        return payload
+
+
+@dataclass(frozen=True)
+class ConversationDeleteParams:
+    conversation_id: str
+
+
+@dataclass(frozen=True)
+class ConversationPinsSetParams:
+    pinned_conversations: list[str]
+
+    def to_json(self) -> ObjectMap:
+        return {"pinned_conversations": list(self.pinned_conversations)}
 
 
 @dataclass(frozen=True)
@@ -345,8 +398,20 @@ def parse_conversations_rpc_request(payload: object) -> ParsedConversationsRpcRe
         )
 
     method = method_value.strip()
-    if method == CONVERSATION_SEND_METHOD:
-        parsed_method: ConversationsRpcMethod = CONVERSATION_SEND_METHOD
+    if method == CONVERSATION_GET_METHOD:
+        parsed_method: ConversationsRpcMethod = CONVERSATION_GET_METHOD
+    elif method == CONVERSATION_LIST_METHOD:
+        parsed_method = CONVERSATION_LIST_METHOD
+    elif method == CONVERSATION_CREATE_METHOD:
+        parsed_method = CONVERSATION_CREATE_METHOD
+    elif method == CONVERSATION_SELECT_METHOD:
+        parsed_method = CONVERSATION_SELECT_METHOD
+    elif method == CONVERSATION_DELETE_METHOD:
+        parsed_method = CONVERSATION_DELETE_METHOD
+    elif method == CONVERSATION_PINS_SET_METHOD:
+        parsed_method = CONVERSATION_PINS_SET_METHOD
+    elif method == CONVERSATION_SEND_METHOD:
+        parsed_method = CONVERSATION_SEND_METHOD
     elif method == CONVERSATION_INTERRUPT_METHOD:
         parsed_method = CONVERSATION_INTERRUPT_METHOD
     elif method == CONVERSATION_COMPACT_METHOD:
@@ -396,6 +461,80 @@ def parse_conversation_control_params(
         detail="Missing required field: conversation_id",
     )
     return ConversationControlParams(conversation_id=conversation_id)
+
+
+def parse_conversation_get_params(
+    params: ObjectMap,
+    *,
+    sanitize_conversation_id: SanitizeConversationId,
+    active_conversation_id: str | None,
+) -> ConversationGetParams:
+    conversation_id_raw = params.get("conversation_id")
+    if isinstance(conversation_id_raw, str) and conversation_id_raw.strip():
+        return ConversationGetParams(
+            conversation_id=sanitize_conversation_id(conversation_id_raw.strip()),
+        )
+    if isinstance(active_conversation_id, str) and active_conversation_id.strip():
+        return ConversationGetParams(
+            conversation_id=sanitize_conversation_id(active_conversation_id.strip()),
+        )
+    return ConversationGetParams(conversation_id=None)
+
+
+def parse_conversation_create_params(params: ObjectMap) -> ConversationCreateParams:
+    settings_value = params.get("settings")
+    settings = coerce_object_map(settings_value) if isinstance(settings_value, dict) else None
+    return ConversationCreateParams(settings=settings or None)
+
+
+def parse_conversation_select_params(
+    params: ObjectMap,
+    *,
+    sanitize_conversation_id: SanitizeConversationId,
+) -> ConversationSelectParams:
+    conversation_id = _require_sanitized_conversation_id(
+        params.get("conversation_id", params.get("id")),
+        sanitize_conversation_id=sanitize_conversation_id,
+        detail="Missing conversation_id",
+    )
+    view_value = params.get("view")
+    view: Literal["splash", "conversation"] | None = None
+    if isinstance(view_value, str):
+        normalized_view = view_value.strip().lower()
+        if normalized_view in {"splash", "conversation"}:
+            view = cast(Literal["splash", "conversation"], normalized_view)
+    return ConversationSelectParams(conversation_id=conversation_id, view=view)
+
+
+def parse_conversation_delete_params(
+    params: ObjectMap,
+    *,
+    sanitize_conversation_id: SanitizeConversationId,
+) -> ConversationDeleteParams:
+    conversation_id = _require_sanitized_conversation_id(
+        params.get("conversation_id"),
+        sanitize_conversation_id=sanitize_conversation_id,
+        detail="Missing conversation_id",
+    )
+    return ConversationDeleteParams(conversation_id=conversation_id)
+
+
+def parse_conversation_pins_set_params(
+    params: ObjectMap,
+    *,
+    sanitize_conversation_id: SanitizeConversationId,
+) -> ConversationPinsSetParams:
+    requested = params.get("pinned_conversations")
+    if not isinstance(requested, list):
+        raise HTTPException(status_code=400, detail="pinned_conversations must be a list")
+    pinned: list[str] = []
+    for item in requested:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        convo_id = sanitize_conversation_id(item.strip())
+        if convo_id and convo_id not in pinned:
+            pinned.append(convo_id)
+    return ConversationPinsSetParams(pinned_conversations=pinned)
 
 
 def parse_conversation_replay_get_chunk_params(

@@ -153,8 +153,8 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     try {
       const state = getState();
       const cid = conversationId || state.clientConversationId;
-      const data: AnyRecord = await sioCall('conversation_get', {
-        conversation_id: cid || null,
+      const data: AnyRecord = await conversationsRpcClient.getConversation({
+        conversationId: cid || null,
       });
       if (!data || data.ok === false) return;
 

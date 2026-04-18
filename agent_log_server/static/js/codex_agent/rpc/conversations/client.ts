@@ -7,6 +7,9 @@ import {
   subscribeRpcNamespaceNotifications,
 } from '../transport.ts';
 import {
+  type ConversationListResult,
+  type ConversationMetaRecord,
+  type ConversationMetaResult,
   CONVERSATIONS_RPC_ANCHOR_MODULES,
   CONVERSATIONS_RPC_CANONICAL_EVENT_TYPE_BY_METHOD,
   CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
@@ -102,6 +105,41 @@ function normalizeConversationSendResult(
     ...payload,
     conversation_id: typeof payload.conversation_id === 'string' ? payload.conversation_id : conversationId,
     accepted: payload.accepted === true || (payload.accepted == null && payload.ok === true),
+    transport,
+  };
+}
+
+function normalizeConversationMetaResult(
+  result: unknown,
+  transport: 'rpc' | 'legacy',
+): ConversationMetaResult {
+  const payload = asObject(result) ?? {};
+  return {
+    ...payload,
+    conversation_id: typeof payload.conversation_id === 'string' ? payload.conversation_id : null,
+    active_view: typeof payload.active_view === 'string' ? payload.active_view : null,
+    settings: asObject(payload.settings) ?? {},
+    transport,
+  };
+}
+
+function normalizeConversationListResult(
+  result: unknown,
+  transport: 'rpc' | 'legacy',
+): ConversationListResult {
+  const payload = asObject(result) ?? {};
+  const items = Array.isArray(payload.items)
+    ? payload.items.map((item) => asObject(item)).filter((item): item is ConversationMetaRecord => Boolean(item))
+    : [];
+  const pinned = Array.isArray(payload.pinned_conversations)
+    ? payload.pinned_conversations.filter((item): item is string => typeof item === 'string')
+    : [];
+  return {
+    ...payload,
+    items,
+    active_conversation_id: typeof payload.active_conversation_id === 'string' ? payload.active_conversation_id : null,
+    active_view: typeof payload.active_view === 'string' ? payload.active_view : null,
+    pinned_conversations: pinned,
     transport,
   };
 }
@@ -308,6 +346,134 @@ export function createConversationsRpcClient(
     return readRpcTransportEnabledPreference(deps.windowRef ?? (typeof window !== 'undefined' ? window : null));
   }
 
+  async function getConversation(options: {
+    conversationId?: string | null;
+    timeoutMs?: number;
+  } = {}): Promise<ConversationMetaResult> {
+    const conversationId = typeof options.conversationId === 'string' && options.conversationId
+      ? options.conversationId
+      : null;
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    if (!rpcEnabled()) {
+      const legacy = await deps.sioCall('conversation_get', { conversation_id: conversationId }, { timeoutMs });
+      return normalizeConversationMetaResult(legacy, 'legacy');
+    }
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.get,
+      params: {
+        conversation_id: conversationId,
+      },
+      timeoutMs,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+    });
+    return normalizeConversationMetaResult(result, 'rpc');
+  }
+
+  async function listConversations(options: {
+    timeoutMs?: number;
+  } = {}): Promise<ConversationListResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    if (!rpcEnabled()) {
+      const legacy = await deps.sioCall('conversations_list', {}, { timeoutMs });
+      return normalizeConversationListResult(legacy, 'legacy');
+    }
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.list,
+      params: {},
+      timeoutMs,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+    });
+    return normalizeConversationListResult(result, 'rpc');
+  }
+
+  async function createConversation(options: {
+    settings?: JsonObject | null;
+    timeoutMs?: number;
+  } = {}): Promise<ConversationMetaResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const payload = options.settings ? { settings: options.settings } : {};
+    if (!rpcEnabled()) {
+      const legacy = await deps.sioCall('conversation_create', payload, { timeoutMs });
+      return normalizeConversationMetaResult(legacy, 'legacy');
+    }
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.create,
+      params: payload,
+      timeoutMs,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+    });
+    return normalizeConversationMetaResult(result, 'rpc');
+  }
+
+  async function selectConversation(options: {
+    conversationId: string;
+    view?: string | null;
+    timeoutMs?: number;
+  }): Promise<ConversationMetaResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const payload: JsonObject = {
+      conversation_id: options.conversationId,
+    };
+    if (typeof options.view === 'string' && options.view.trim()) {
+      payload.view = options.view.trim();
+    }
+    if (!rpcEnabled()) {
+      const legacy = await deps.sioCall('conversation_select', payload, { timeoutMs });
+      return normalizeConversationMetaResult(legacy, 'legacy');
+    }
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.select,
+      params: payload,
+      timeoutMs,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+    });
+    return normalizeConversationMetaResult(result, 'rpc');
+  }
+
+  async function deleteConversation(options: {
+    conversationId: string;
+    timeoutMs?: number;
+  }): Promise<ConversationControlResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const payload = { conversation_id: options.conversationId };
+    if (!rpcEnabled()) {
+      const legacy = await deps.sioCall('conversation_delete', payload, { timeoutMs });
+      return normalizeConversationControlResult(legacy, 'legacy');
+    }
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.delete,
+      params: payload,
+      timeoutMs,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+    });
+    return normalizeConversationControlResult(result, 'rpc');
+  }
+
+  async function setConversationPins(options: {
+    pinnedConversationIds: string[];
+    timeoutMs?: number;
+  }): Promise<ConversationControlResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const payload = { pinned_conversations: options.pinnedConversationIds };
+    if (!rpcEnabled()) {
+      const legacy = await deps.sioCall('conversation_pins_update', payload, { timeoutMs });
+      return normalizeConversationControlResult(legacy, 'legacy');
+    }
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.pinsSet,
+      params: payload,
+      timeoutMs,
+      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+    });
+    return normalizeConversationControlResult(result, 'rpc');
+  }
+
   async function fetchReplayChunk(options: {
     conversationId?: string | null;
     offset: number;
@@ -466,6 +632,12 @@ export function createConversationsRpcClient(
   }
 
   return {
+    getConversation,
+    listConversations,
+    createConversation,
+    selectConversation,
+    deleteConversation,
+    setConversationPins,
     fetchReplayChunk,
     sendMessage,
     interruptConversation,

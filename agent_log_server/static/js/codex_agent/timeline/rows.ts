@@ -27,6 +27,8 @@ interface TimelineRowsContext {
   maybeAutoScroll(force?: boolean): void;
 }
 
+const WAITING_FOR_EVENTS_LABEL = 'Waiting for events...';
+
 export function bindTimelineRows(ctx: TimelineRowsContext) {
   const {
     getState,
@@ -151,6 +153,22 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     if (statusRibbonEl) statusRibbonEl.classList.toggle('active', Boolean(active));
   }
 
+  function showWaitingForEvents() {
+    setActivity(WAITING_FOR_EVENTS_LABEL, true);
+    clearReasoningRibbon();
+    setStatusDot(null);
+  }
+
+  function clearWaitingForEvents() {
+    if (
+      statusLabelEl
+      && statusLabelEl.textContent === WAITING_FOR_EVENTS_LABEL
+      && statusRibbonEl?.classList.contains('active')
+    ) {
+      setActivity('idle', false);
+    }
+  }
+
   function setReasoningRibbon(text: string) {
     if (!statusReasoningEl) return;
     if (!text) {
@@ -250,6 +268,8 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     buildMessageCard,
     createRow,
     setActivity,
+    showWaitingForEvents,
+    clearWaitingForEvents,
     setReasoningRibbon,
     clearReasoningRibbon,
     setStatusDot,

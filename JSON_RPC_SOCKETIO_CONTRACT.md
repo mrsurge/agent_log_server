@@ -69,6 +69,13 @@ Live today:
   `/rpc/conversations` `rpc.notify`
 - when the splash RPC toggle is enabled, the frontend suppresses duplicate legacy
   `appserver_event` handling after the conversations RPC lane is connected
+- frontend replay/treadmill defaults currently target:
+  - replay window: `200` entries
+  - preload trigger: `25` estimated row-heights
+  - spacer buffer: `50` estimated row-heights
+- authoritative conversations contract modules are:
+  - frontend: `agent_log_server/static/js/codex_agent/rpc/conversations/contract.ts`
+  - backend: `agent_log_server/conversations_rpc_contract.py`
 
 Still planned / migrating:
 
@@ -192,6 +199,60 @@ Server-initiated notifications are emitted on `rpc.notify`:
 - there is no event-name-per-method transport on the new namespaces; the method lives inside JSON-RPC
 - batch support is reserved for later; initial rollout only requires single-request objects
 - transport adapters may expose promise helpers, but the wire format stays JSON-RPC 2.0
+
+### Routing and envelope discipline
+
+Both ends must be strict about routing, envelope construction, and envelope stripping.
+
+Rules:
+
+- backend transport code constructs canonical envelopes; do not leak ad hoc transport-specific
+  wrapper shapes once data has entered a public RPC lane
+- frontend transport/router code consumes the full envelope exactly once:
+  - validate `jsonrpc`
+  - route by namespace + `method`
+  - normalize the payload shape
+- once routing/validation is complete, destination-facing handlers should receive mostly stripped
+  `params` / payload data plus only the minimum routing metadata they still need
+- do not keep full JSON-RPC or Socket.IO wrapper objects alive deep in feature/UI state when the
+  destination only needs the stripped payload
+- `nid` is the stable frontend identity/update target for a routed object (card, modal, toast,
+  runtime surface, etc.); it is not, by itself, a replacement for semantic method routing
+- if a redundant future-facing `channel` field is introduced, keep it canonical with the current
+  namespace/method split and ignore it operationally until the frontend transport router is ready to
+  consume it
+
+Practical rule of thumb:
+
+- wire format may stay rich
+- in-memory destination payloads should be aggressively stripped after routing
+
+Example transport notification:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "hostUi.updated",
+  "params": {
+    "channel": "ui",
+    "nid": "host-ui:sidebar",
+    "host_ui": {
+      "drawer_open": true
+    }
+  }
+}
+```
+
+Example destination-facing normalized payload after routing:
+
+```json
+{
+  "nid": "host-ui:sidebar",
+  "host_ui": {
+    "drawer_open": true
+  }
+}
+```
 
 ## Error model
 
@@ -534,6 +595,10 @@ Rules:
 - this namespace is request/response heavy; notification volume should stay comparatively low
 - extension-specific data still stays behind generic method names plus `extension_id` params
 - schema-driven settings remain the source of truth for extension settings surfaces
+- destination handlers for this namespace should not retain raw transport wrappers once the request
+  / notification has been routed and validated
+- if a routed settings-side object needs stable frontend identity across updates, use `nid`
+  explicitly instead of feature-local ad hoc keys
 
 ## `/rpc/ui`
 
@@ -572,6 +637,10 @@ Rules:
 - this namespace is for shell/host presentation and control, not for extension conversation semantics
 - open-file/open-url methods should remain generic and host-owned
 - host UI notifications should not be tunneled through conversation event methods
+- destination handlers for this namespace should receive stripped payloads after routing, not raw
+  transport envelopes
+- if a UI/runtime surface is incrementally updated over time, give it a stable `nid` so the frontend
+  can target/update the existing object without depending on transport-specific framing
 
 ## Frontend module layout
 
@@ -594,6 +663,18 @@ Migration guidance:
 - `orchestrator/session_flow.js` and `transcript_loader.js` are the natural legacy anchors for conversation RPC client work
 - `settings/ui_flow.js` is the natural legacy anchor for the settings RPC client
 - `markdown.js` is a natural legacy anchor for the UI RPC client because it already routes file/open-url behavior
+
+## Reusable transport layer question
+
+This routing/envelope pattern is repeated enough that it should be treated as a candidate shared
+module rather than assumed bespoke application code forever.
+
+Open design question:
+
+- should the frontend/backend transport contract remain mirrored TypeScript/Python modules, or should
+  this project eventually extract/generate a reusable shared contract layer (likely Python-first with
+  mirrored/generated TypeScript bindings) so new routed surfaces do not keep rebuilding the same
+  envelope/routing boilerplate?
 
 ## Transcript and replay invariants
 

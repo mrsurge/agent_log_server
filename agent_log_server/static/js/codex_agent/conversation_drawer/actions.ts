@@ -1,3 +1,4 @@
+import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 import { createSettingsRpcClient } from '../rpc/settings/client.ts';
 import { createUiRpcClient } from '../rpc/ui/client.ts';
 
@@ -139,6 +140,10 @@ export function createConversationDrawerActions(
     sioCall,
     windowRef,
   });
+  const conversationsRpcClient = createConversationsRpcClient({
+    sioCall,
+    windowRef,
+  });
   const uiRpcClient = createUiRpcClient({
     sioCall,
     windowRef,
@@ -185,7 +190,7 @@ export function createConversationDrawerActions(
       } catch {
         // ignore
       }
-      const data = normalizeConversationListResponse(await sioCall('conversations_list', {}));
+      const data = normalizeConversationListResponse(await conversationsRpcClient.listConversations());
       const state = getState();
       const conversationList = data.items;
       const ssotActiveId = data.activeConversationId;
@@ -235,7 +240,7 @@ export function createConversationDrawerActions(
     resetTimeline();
     setState({ clientConversationId: conversationId, clientActiveView: view });
     try {
-      await sioCall('conversation_select', { conversation_id: conversationId, view });
+      await conversationsRpcClient.selectConversation({ conversationId, view });
     } catch {
       // ignore - SSOT is best-effort for boot defaults
     }
@@ -262,7 +267,7 @@ export function createConversationDrawerActions(
     }
     setState({ lastDraftHash: null });
     resetConversationUiState();
-    const meta = normalizeConversationCreateResponse(await sioCall('conversation_create', {}));
+    const meta = normalizeConversationCreateResponse(await conversationsRpcClient.createConversation());
     if (meta.conversation_id) {
       setState({
         clientConversationId: meta.conversation_id,
@@ -270,11 +275,6 @@ export function createConversationDrawerActions(
         conversationMeta: meta,
         conversationSettings: meta.settings,
       });
-      try {
-        await sioCall('conversation_select', { conversation_id: meta.conversation_id, view: 'conversation' });
-      } catch {
-        // ignore
-      }
     }
     await fetchConversation(getState().clientConversationId);
     await fetchConversations();
@@ -291,7 +291,7 @@ export function createConversationDrawerActions(
   async function deleteConversation(conversationId: string): Promise<void> {
     if (!conversationId) return;
     const performDelete = async (): Promise<void> => {
-      await sioCall('conversation_delete', { conversation_id: conversationId });
+      await conversationsRpcClient.deleteConversation({ conversationId });
       const state = getState();
       if (state.clientConversationId && state.clientConversationId === conversationId) {
         resetConversationUiState();
@@ -355,7 +355,7 @@ export function createConversationDrawerActions(
 
   async function setConversationPins(pinnedConversationIds: string[]): Promise<void> {
     if (!Array.isArray(pinnedConversationIds)) return;
-    await sioCall('conversation_pins_update', { pinned_conversations: pinnedConversationIds });
+    await conversationsRpcClient.setConversationPins({ pinnedConversationIds });
     await fetchConversations();
   }
 

@@ -99,7 +99,7 @@ def _object_dict(value: object) -> Dict[str, object]:
 
 def _save_meta(conversation_id: str, meta: Dict[str, object]) -> None:
     if _meta_fns and "save" in _meta_fns:
-        _save_meta(conversation_id, meta)
+        _meta_fns["save"](conversation_id, meta)
 
 
 def _merge_runtime_settings(

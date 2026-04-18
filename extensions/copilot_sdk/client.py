@@ -150,6 +150,10 @@ _recent_event_keys: Dict[str, Deque[Tuple[str, str, str]]] = {}
 _recent_event_key_sets: Dict[str, set[Tuple[str, str, str]]] = {}
 # Runtime signature tracking: conversation_id -> signature of effective session config inputs
 _runtime_signatures: Dict[str, str] = {}
+# Last known agent mode per conversation.
+_session_modes: Dict[str, str] = {}
+# Deferred cold-send recovery tasks keyed by conversation_id.
+_deferred_send_tasks: Dict[str, asyncio.Task[None]] = {}
 # Per-conversation session locks: serialize init/resume/send/destroy per conversation.
 _session_locks: Dict[str, asyncio.Lock] = {}
 # Live todo watch tasks keyed by conversation_id.
@@ -1692,11 +1696,17 @@ def _normalize_mode_value(value: object) -> Optional[str]:
     return None
 
 
+def _desired_session_mode(settings: Optional[SettingsDict] = None) -> Optional[str]:
+    if not isinstance(settings, dict):
+        return None
+    return _normalize_mode_value(settings.get("mode"))
+
+
 async def _apply_session_mode(
     session: CopilotSession,
     settings: Optional[SettingsDict] = None,
 ) -> Optional[str]:
-    desired_mode = _normalize_mode_value(settings.get("mode")) if isinstance(settings, dict) else None
+    desired_mode = _desired_session_mode(settings)
     if not desired_mode:
         return None
     result = await session.rpc.mode.set(SessionModeSetParams(mode=SessionMode(desired_mode)))
@@ -1725,6 +1735,7 @@ async def _recover_evicted_session(
     stale_session = _sessions.pop(conversation_id, None)
     _routers.pop(conversation_id, None)
     _runtime_signatures.pop(conversation_id, None)
+    _session_modes.pop(conversation_id, None)
     if conversation_id in _unsubs:
         try:
             _unsubs.pop(conversation_id)()
@@ -1741,6 +1752,140 @@ async def _recover_evicted_session(
         model=model,
         settings=settings,
     )
+
+
+async def _await_deferred_send(conversation_id: str) -> None:
+    task = _deferred_send_tasks.get(conversation_id)
+    if task is None:
+        return
+    try:
+        await asyncio.shield(task)
+    except Exception:
+        pass
+    finally:
+        if _deferred_send_tasks.get(conversation_id) is task and task.done():
+            _deferred_send_tasks.pop(conversation_id, None)
+
+
+async def _emit_deferred_send_error(
+    conversation_id: str,
+    message: str,
+    *,
+    error_type: str = "message_send_failed",
+    router: Optional[CopilotEventRouter] = None,
+    turn_id: Optional[str] = None,
+) -> None:
+    active_router = router or _routers.get(conversation_id)
+    if active_router is None:
+        return
+    msg = str(message or "Message send failed").strip() or "Message send failed"
+    active_turn_id = turn_id or getattr(active_router, "current_turn_id", None)
+    event: PayloadDict = {
+        "type": "error",
+        "conversation_id": conversation_id,
+        "message": msg,
+        "source": "copilot-sdk",
+    }
+    entry: PayloadDict = {
+        "role": "error",
+        "message": msg,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "copilot-sdk",
+        "event": "copilot-sdk",
+    }
+    if active_turn_id:
+        event["turn_id"] = active_turn_id
+        entry["turn_id"] = active_turn_id
+    if error_type:
+        event["error_type"] = error_type
+        entry["error_type"] = error_type
+    await active_router._emit(event)
+    await active_router._record(entry)
+    await active_router._emit(
+        {
+            "type": "activity",
+            "conversation_id": conversation_id,
+            "label": "error",
+            "active": False,
+            "turn_id": active_turn_id,
+        }
+    )
+
+
+async def _complete_deferred_cold_send(
+    conversation_id: str,
+    text: str,
+    *,
+    cwd: Optional[str],
+    model: Optional[str],
+    settings: SettingsDict,
+) -> None:
+    preserved_router = _routers.get(conversation_id)
+    preserved_turn_id = getattr(preserved_router, "current_turn_id", None)
+    try:
+        async with _get_session_lock(conversation_id):
+            result = await _recover_evicted_session(
+                conversation_id,
+                cwd=cwd,
+                model=model,
+                settings=settings,
+            )
+            if not result.get("ok"):
+                await _emit_deferred_send_error(
+                    conversation_id,
+                    str(result.get("error") or "Session resume failed"),
+                    error_type="session_resume_failed",
+                    router=preserved_router,
+                    turn_id=preserved_turn_id,
+                )
+                return
+
+            session = _sessions.get(conversation_id)
+            active_router = _routers.get(conversation_id) or preserved_router
+            if not session:
+                await _emit_deferred_send_error(
+                    conversation_id,
+                    "Session not found after resume",
+                    error_type="session_resume_failed",
+                    router=active_router,
+                    turn_id=preserved_turn_id,
+                )
+                return
+
+            desired_mode = _desired_session_mode(settings)
+            known_mode = _session_modes.get(conversation_id, _DEFAULT_MODE)
+            if desired_mode and desired_mode != known_mode:
+                try:
+                    applied_mode = await _apply_session_mode(session, settings=settings)
+                except Exception as exc:
+                    print(f"[CopilotSDK] Deferred retry mode.set failed: {exc}")
+                    _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {exc}")
+                    await _emit_deferred_send_error(
+                        conversation_id,
+                        str(exc),
+                        error_type="mode_set_failed",
+                        router=active_router,
+                        turn_id=preserved_turn_id,
+                    )
+                    return
+                if applied_mode:
+                    _session_modes[conversation_id] = applied_mode
+
+            await session.send(MessageOptions(prompt=text, attachments=[]))
+            _add_to_raw_buffer("out", conversation_id, "deferred_send_completed")
+    except Exception as exc:
+        print(f"[CopilotSDK] Deferred cold send failed: {exc}")
+        _add_to_raw_buffer("out", conversation_id, f"deferred_send_error: {exc}")
+        await _emit_deferred_send_error(
+            conversation_id,
+            str(exc),
+            router=_routers.get(conversation_id) or preserved_router,
+            turn_id=preserved_turn_id,
+        )
+    finally:
+        current = asyncio.current_task()
+        if current is not None and _deferred_send_tasks.get(conversation_id) is current:
+            _deferred_send_tasks.pop(conversation_id, None)
 
 
 def _session_event_paths(session_id: str) -> List[Path]:
@@ -2849,6 +2994,7 @@ async def _init_session_unlocked(
         sdk_session_id = session.session_id
         _sessions[conversation_id] = session
         _runtime_signatures[conversation_id] = runtime_signature
+        _session_modes[conversation_id] = _DEFAULT_MODE
 
         # Subscribe to events
         _replace_session_subscription(conversation_id, session)
@@ -2972,6 +3118,7 @@ async def _resume_session_unlocked(
         # Key in-memory by our conversation_id
         _sessions[conversation_id] = session
         _runtime_signatures[conversation_id] = runtime_signature
+        _session_modes[conversation_id] = _desired_session_mode(settings) or _DEFAULT_MODE
 
         _replace_session_subscription(conversation_id, session)
 
@@ -2993,8 +3140,9 @@ def _register_attached_session(
     sdk_session_id: str,
     runtime_signature: str,
     config: ResumeSessionConfig,
+    assumed_mode: Optional[str] = None,
     debug_trace: bool = False,
-) -> CopilotSession:
+) -> tuple[CopilotSession, bool]:
     """
     Attach to a known SDK session id without issuing session.resume first.
 
@@ -3013,7 +3161,13 @@ def _register_attached_session(
     )
     _routers[conversation_id] = router
 
-    session = CopilotSession(sdk_session_id, client._client)  # type: ignore[attr-defined]
+    cold_bound_session = False
+    with client._sessions_lock:  # type: ignore[attr-defined]
+        session = client._sessions.get(sdk_session_id)  # type: ignore[attr-defined]
+        if session is None:
+            session = CopilotSession(sdk_session_id, client._client)  # type: ignore[attr-defined]
+            client._sessions[sdk_session_id] = session  # type: ignore[attr-defined]
+            cold_bound_session = True
     session._register_permission_handler(config.get("on_permission_request"))
     hooks = config.get("hooks")
     if hooks:
@@ -3022,14 +3176,13 @@ def _register_attached_session(
     if on_user_input_request:
         session._register_user_input_handler(on_user_input_request)
 
-    with client._sessions_lock:  # type: ignore[attr-defined]
-        client._sessions[sdk_session_id] = session  # type: ignore[attr-defined]
-
     _sessions[conversation_id] = session
     _runtime_signatures[conversation_id] = runtime_signature
+    _session_modes[conversation_id] = assumed_mode or _DEFAULT_MODE
     _replace_session_subscription(conversation_id, session)
-    _add_to_raw_buffer("out", conversation_id, f"session_attached sdk={sdk_session_id[:8]}")
-    return session
+    attach_mode = "cold" if cold_bound_session else "hot"
+    _add_to_raw_buffer("out", conversation_id, f"session_attached sdk={sdk_session_id[:8]} mode={attach_mode}")
+    return session, cold_bound_session
 
 
 # ── Message handling ────────────────────────────────────────────────
@@ -3046,6 +3199,7 @@ async def handle_message(
     Main entry point called by server.py extension router.
     Follows the codex pattern: lazy resume on first message, not on conversation select.
     """
+    await _await_deferred_send(conversation_id)
     async with _get_session_lock(conversation_id):
         if not _broadcast_fn or not _transcript_fn:
             return {"ok": False, "error": "Manager not initialized"}
@@ -3066,6 +3220,8 @@ async def handle_message(
         )
         resume_config = _build_resume_session_config(config)
 
+        cold_bound_session = False
+
         # Ensure session exists — attach/send first for known sessions, init for new ones
         if conversation_id not in _sessions:
             # Check if this conversation already has a thread_id.
@@ -3078,12 +3234,13 @@ async def handle_message(
 
             if thread_id:
                 client = await _ensure_client()
-                _register_attached_session(
+                _, cold_bound_session = _register_attached_session(
                     client,
                     conversation_id,
                     str(thread_id),
                     desired_signature,
                     resume_config,
+                    assumed_mode=_desired_session_mode(settings) or _DEFAULT_MODE,
                     debug_trace=_copilot_debug_trace_enabled(
                         conversation_id,
                         settings=settings,
@@ -3130,36 +3287,46 @@ async def handle_message(
                 model=model,
             )
         )
-        try:
-            applied_mode = await _apply_session_mode(session, settings=settings)
-        except Exception as e:
-            if not _is_session_not_found_error(e):
-                print(f"[CopilotSDK] mode.set failed: {e}")
-                _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {e}")
-                return {"ok": False, "error": str(e)}
-
-            result = await _recover_evicted_session(
-                conversation_id,
-                cwd=cwd,
-                model=model,
-                settings=settings,
-            )
-            if not result.get("ok"):
-                print(f"[CopilotSDK] Re-resume after mode.set failed: {result}")
-                return result
-
-            session = _sessions.get(conversation_id)
-            router = _routers.get(conversation_id)
-            if not session or not router:
-                return {"ok": False, "error": "Session not found after mode re-resume"}
+        desired_mode = _desired_session_mode(settings)
+        known_mode = _session_modes.get(conversation_id)
+        if known_mode is None:
+            known_mode = desired_mode or _DEFAULT_MODE
+            _session_modes[conversation_id] = known_mode
+        applied_mode = None
+        if desired_mode and desired_mode != known_mode and not cold_bound_session:
             try:
                 applied_mode = await _apply_session_mode(session, settings=settings)
-            except Exception as retry_error:
-                print(f"[CopilotSDK] Retry mode.set failed: {retry_error}")
-                _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {retry_error}")
-                return {"ok": False, "error": str(retry_error)}
+            except Exception as e:
+                if not _is_session_not_found_error(e):
+                    print(f"[CopilotSDK] mode.set failed: {e}")
+                    _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {e}")
+                    return {"ok": False, "error": str(e)}
+
+                result = await _recover_evicted_session(
+                    conversation_id,
+                    cwd=cwd,
+                    model=model,
+                    settings=settings,
+                )
+                if not result.get("ok"):
+                    print(f"[CopilotSDK] Re-resume after mode.set failed: {result}")
+                    return result
+
+                session = _sessions.get(conversation_id)
+                router = _routers.get(conversation_id)
+                if not session or not router:
+                    return {"ok": False, "error": "Session not found after mode re-resume"}
+                known_mode = _session_modes.get(conversation_id, _DEFAULT_MODE)
+                if desired_mode and desired_mode != known_mode:
+                    try:
+                        applied_mode = await _apply_session_mode(session, settings=settings)
+                    except Exception as retry_error:
+                        print(f"[CopilotSDK] Retry mode.set failed: {retry_error}")
+                        _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {retry_error}")
+                        return {"ok": False, "error": str(retry_error)}
         if applied_mode:
             settings["mode"] = applied_mode
+            _session_modes[conversation_id] = applied_mode
 
         turn_token = uuid4().hex
 
@@ -3180,34 +3347,25 @@ async def handle_message(
             err_msg = str(e)
             # SDK binary evicts inactive sessions — catch and retry via resume
             if _is_session_not_found_error(e):
-                result = await _recover_evicted_session(
-                    conversation_id,
-                    cwd=cwd,
-                    model=model,
-                    settings=settings,
+                settings_snapshot: SettingsDict = dict(settings)
+                task = asyncio.create_task(
+                    _complete_deferred_cold_send(
+                        conversation_id,
+                        text,
+                        cwd=cwd,
+                        model=model,
+                        settings=settings_snapshot,
+                    ),
+                    name=f"copilot-deferred-send-{conversation_id[:8]}",
                 )
-                if not result.get("ok"):
-                    print(f"[CopilotSDK] Re-resume failed: {result}")
-                    return result
-                session = _sessions.get(conversation_id)
-                router = _routers.get(conversation_id)
-                if not session or not router:
-                    return {"ok": False, "error": "Session not found after re-resume"}
-                try:
-                    applied_mode = await _apply_session_mode(session, settings=settings)
-                except Exception as retry_error:
-                    print(f"[CopilotSDK] Retry mode.set failed: {retry_error}")
-                    _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {retry_error}")
-                    return {"ok": False, "error": str(retry_error)}
-                if applied_mode:
-                    settings["mode"] = applied_mode
-                await router.on_turn_start(text, turn_token=turn_token)
-                try:
-                    await session.send(MessageOptions(prompt=text, attachments=[]))
-                    return {"ok": True, "session_id": conversation_id}
-                except Exception as e2:
-                    print(f"[CopilotSDK] Retry send failed: {e2}")
-                    return {"ok": False, "error": str(e2)}
+                _deferred_send_tasks[conversation_id] = task
+                _add_to_raw_buffer("out", conversation_id, "deferred_send_scheduled")
+                return {
+                    "ok": True,
+                    "session_id": conversation_id,
+                    "deferred": True,
+                    "resume_ack": "session.resume",
+                }
 
             print(f"[CopilotSDK] send failed: {e}")
             _add_to_raw_buffer("out", conversation_id, f"send_error: {e}")
@@ -3516,6 +3674,7 @@ async def _destroy_session_unlocked(conversation_id: str) -> bool:
     session = _sessions.pop(conversation_id, None)
     _routers.pop(conversation_id, None)
     _runtime_signatures.pop(conversation_id, None)
+    _session_modes.pop(conversation_id, None)
     _plan_doc_state.pop(conversation_id, None)
     _debug_raw_entry_counters.pop(conversation_id, None)
     _pending_mcp_ask_user_tools.pop(conversation_id, None)

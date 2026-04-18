@@ -110,6 +110,7 @@ interface EventRouterContext {
   renderErrorCard: (event: RouterEvent) => void;
   setStatusDot: (status: string) => void;
   renderWarningCard: (message: string, action: unknown) => void;
+  clearWaitingForEvents?: () => void;
   clearReasoningRibbon: () => void;
   setReasoningRibbon: (text: string) => void;
   addMessage: (role: string, text: string, parent?: HTMLElement | null, metadata?: RouterEvent | null) => void;
@@ -176,6 +177,7 @@ export function bindEventRouter(ctx: EventRouterContext) {
     renderErrorCard,
     setStatusDot,
     renderWarningCard,
+    clearWaitingForEvents,
     clearReasoningRibbon,
     setReasoningRibbon,
     addMessage,
@@ -355,6 +357,7 @@ export function bindEventRouter(ctx: EventRouterContext) {
     if (event.conversation_id && activeConvoId && event.conversation_id !== activeConvoId) {
       return;
     }
+    clearWaitingForEvents?.();
 
     switch (event.type) {
       case 'activity':

@@ -23,12 +23,14 @@ import socketio
 from socketio.exceptions import ConnectionRefusedError as SocketIOConnectionRefusedError
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
+from agent_log_server.conversations_rpc_contract import CONVERSATIONS_RPC_NAMESPACE
+from agent_log_server.settings_ui_rpc_contract import SETTINGS_RPC_NAMESPACE, UI_RPC_NAMESPACE
+
 logger = logging.getLogger(__name__)
 
 # Target appserver — the standalone server.py instance
 APPSERVER_ORIGIN = "http://127.0.0.1:12359"
 APPSERVER_SIO_PATH = "/socket.io"  # default SIO path on the target
-CONVERSATIONS_RPC_NAMESPACE = "/rpc/conversations"
 
 # --- Option A: Reverse-proxy relay (two SIO servers) ---
 #
@@ -208,9 +210,10 @@ class _AppserverRelay(socketio.AsyncNamespace):
         return await self._relay("app_stop", sid, data)
 
 
-class _ConversationsRpcRelay(socketio.AsyncNamespace):
-    def __init__(self):
-        super().__init__(CONVERSATIONS_RPC_NAMESPACE)
+class _RpcNamespaceRelay(socketio.AsyncNamespace):
+    def __init__(self, namespace: str):
+        super().__init__(namespace)
+        self._namespace = namespace
         self._backends: dict[str, socketio.AsyncClient] = {}
 
     async def _get_backend(self, sid: str) -> Optional[socketio.AsyncClient]:
@@ -225,29 +228,29 @@ class _ConversationsRpcRelay(socketio.AsyncNamespace):
             except Exception:
                 pass
 
-        client.on("rpc.notify", _on_rpc_notify, namespace=CONVERSATIONS_RPC_NAMESPACE)
+        client.on("rpc.notify", _on_rpc_notify, namespace=self._namespace)
 
         try:
             await client.connect(
                 APPSERVER_ORIGIN,
-                namespaces=[CONVERSATIONS_RPC_NAMESPACE],
+                namespaces=[self._namespace],
                 socketio_path=APPSERVER_SIO_PATH,
                 wait_timeout=10,
             )
             self._backends[sid] = client
             return client
         except Exception as e:
-            logger.error("Failed to connect conversations RPC relay for sid=%s: %s", sid, e)
+            logger.error("Failed to connect %s relay for sid=%s: %s", self._namespace, sid, e)
             return None
 
     async def on_connect(self, sid, environ):
-        logger.info("TE2 client connected to %s relay: %s", CONVERSATIONS_RPC_NAMESPACE, sid)
+        logger.info("TE2 client connected to %s relay: %s", self._namespace, sid)
         backend = await self._get_backend(sid)
         if not backend:
             raise SocketIOConnectionRefusedError("Backend unavailable")
 
     async def on_disconnect(self, sid):
-        logger.info("TE2 client disconnected from %s relay: %s", CONVERSATIONS_RPC_NAMESPACE, sid)
+        logger.info("TE2 client disconnected from %s relay: %s", self._namespace, sid)
         backend = self._backends.pop(sid, None)
         if backend:
             try:
@@ -260,7 +263,7 @@ class _ConversationsRpcRelay(socketio.AsyncNamespace):
         if not backend or not backend.connected:
             return {"__error": "Backend not connected"}
         try:
-            return await backend.call("rpc", data, namespace=CONVERSATIONS_RPC_NAMESPACE, timeout=30)
+            return await backend.call("rpc", data, namespace=self._namespace, timeout=30)
         except SocketIOTimeoutError:
             return {"__error": "Timeout relaying rpc"}
         except Exception as e:
@@ -344,9 +347,9 @@ def register(app) -> None:
     relay = _AppserverRelay()
     sio.register_namespace(relay)
     logger.info("Registered /appserver SIO relay namespace")
-    conversations_rpc_relay = _ConversationsRpcRelay()
-    sio.register_namespace(conversations_rpc_relay)
-    logger.info("Registered %s SIO relay namespace", CONVERSATIONS_RPC_NAMESPACE)
+    for namespace in (CONVERSATIONS_RPC_NAMESPACE, SETTINGS_RPC_NAMESPACE, UI_RPC_NAMESPACE):
+        sio.register_namespace(_RpcNamespaceRelay(namespace))
+        logger.info("Registered %s SIO relay namespace", namespace)
 
     # 2. Mount HTTP reverse proxy for iframe content
     try:

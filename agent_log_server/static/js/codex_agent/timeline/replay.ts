@@ -1,4 +1,7 @@
-import { applyTranscriptCardMetadata } from '../transcript_card_metadata.ts';
+import {
+  applyTranscriptCardMetadata,
+  findTranscriptCardRow,
+} from '../transcript_card_metadata.ts';
 
 type AnyRecord = Record<string, any>;
 
@@ -35,6 +38,8 @@ interface TimelineReplayContext {
   ensureActivityRow(): void;
   setCounter(el: HTMLElement | null, value: number): void;
   setActivity(label: string, active: boolean): void;
+  showWaitingForEvents(): void;
+  clearWaitingForEvents(): void;
   clearReasoningRibbon(): void;
   setStatusDot(status: string | null): void;
   maybeAutoScroll(force?: boolean): void;
@@ -87,6 +92,8 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     ensureActivityRow,
     setCounter,
     setActivity,
+    showWaitingForEvents,
+    clearWaitingForEvents,
     clearReasoningRibbon,
     setStatusDot,
     maybeAutoScroll,
@@ -158,17 +165,14 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     setCounter(counterMessagesEl, 0);
     setCounter(counterTokensEl, 0);
     if (contextRemainingEl) contextRemainingEl.textContent = '—';
-    setActivity('idle', false);
-    setStatusDot(null);
-    clearReasoningRibbon();
-    timelineEl.appendChild(topSpacerEl);
     if (options.showPlaceholder) {
-      const placeholder = documentRef.createElement('div');
-      placeholder.id = 'timeline-placeholder';
-      placeholder.className = 'timeline-row muted';
-      placeholder.textContent = 'Waiting for events...';
-      timelineEl.appendChild(placeholder);
+      showWaitingForEvents();
+    } else {
+      setActivity('idle', false);
+      setStatusDot(null);
+      clearReasoningRibbon();
     }
+    timelineEl.appendChild(topSpacerEl);
     ensureActivityRow();
     if (options.showPlaceholder || options.bumpGeneration) {
       maybeAutoScroll(true);
@@ -258,6 +262,10 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
             if (subagent.body instanceof HTMLElement) subagent.body.appendChild(summaryEl);
           }
         }
+        return;
+      }
+
+      if (findTranscriptCardRow(timelineEl, entry)) {
         return;
       }
 
@@ -579,6 +587,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       addMessage(entry.role, entry.text || '', getTarget(), entry);
     });
 
+    clearWaitingForEvents();
     clearPlaceholder();
     const nextState = getState();
     const insertBefore = opts.prepend

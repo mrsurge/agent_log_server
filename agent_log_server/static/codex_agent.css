@@ -256,13 +256,14 @@ body.drawer-open {
 .conversation-row {
   display: flex;
   flex-shrink: 0;
-  align-items: flex-start;
+  align-items: stretch;
   justify-content: space-between;
   gap: 10px;
   padding: 10px 12px;
   border-top: 1px solid #202634;
   border-bottom: 1px solid #12151d;
   background: #0f121a;
+  cursor: pointer;
 }
 
 .conversation-row.pinned,
@@ -281,6 +282,39 @@ body.drawer-open {
   outline-offset: -4px;
 }
 
+.conversation-row[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.conversation-row-handle {
+  flex: 0 0 clamp(14px, 4.166%, 24px);
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid #202634;
+  color: #8b949e;
+  font-size: 16px;
+  line-height: 1;
+  user-select: none;
+  cursor: grab;
+}
+
+.conversation-row-handle.disabled {
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.conversation-row-handle:active {
+  cursor: grabbing;
+}
+
+.conversation-row.active .conversation-row-handle {
+  color: #b7ffcd;
+  border-right-color: rgba(46, 160, 67, 0.4);
+}
+
 .conversation-meta {
   display: flex;
   flex-direction: column;
@@ -290,6 +324,7 @@ body.drawer-open {
   min-width: 0;
   word-break: break-word;
   white-space: normal;
+  user-select: text;
 }
 
 .conversation-status {
@@ -360,6 +395,7 @@ body.drawer-open {
   gap: 6px;
   align-items: flex-end;
   flex-shrink: 0;
+  user-select: none;
 }
 
 .footer-dropdown {

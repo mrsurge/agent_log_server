@@ -24,13 +24,24 @@ from agent_log_server.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD,
 )
 from agent_log_server.conversations_rpc_contract import (
+    CONVERSATION_CREATE_METHOD,
+    CONVERSATION_DELETE_METHOD,
+    CONVERSATION_GET_METHOD,
     CONVERSATION_COMPACT_METHOD,
     CONVERSATION_INTERRUPT_METHOD,
+    CONVERSATION_LIST_METHOD,
+    CONVERSATION_PINS_SET_METHOD,
     CONVERSATION_REPLAY_GET_CHUNK_METHOD,
     CONVERSATION_SEND_METHOD,
+    CONVERSATION_SELECT_METHOD,
     ConversationControlParams,
+    ConversationCreateParams,
+    ConversationDeleteParams,
+    ConversationGetParams,
+    ConversationPinsSetParams,
     ConversationReplayGetChunkParams,
     ConversationSendParams,
+    ConversationSelectParams,
     ConversationsRpcProtocolError,
     build_empty_replay_chunk_result,
     build_jsonrpc_error_response,
@@ -41,9 +52,14 @@ from agent_log_server.conversations_rpc_contract import (
     normalize_conversation_control_result,
     normalize_conversation_send_result,
     normalize_replay_range_data,
+    parse_conversation_create_params,
+    parse_conversation_delete_params,
+    parse_conversation_get_params,
+    parse_conversation_pins_set_params,
     parse_conversation_control_params,
     parse_conversation_replay_get_chunk_params,
     parse_conversation_send_params,
+    parse_conversation_select_params,
     parse_conversations_rpc_request,
 )
 from agent_log_server.prompt_context import load_repo_memory_snapshot
@@ -1224,6 +1240,41 @@ class AppserverRoutes:
             invalid_error="Invalid compact result",
         ).to_json()
 
+    async def _rpc_conversation_get(
+        self,
+        params: ConversationGetParams,
+    ) -> ObjectMap:
+        if params.conversation_id:
+            return await self.api_appserver_conversation_meta(params.conversation_id)
+        return await self.api_appserver_conversation()
+
+    async def _rpc_conversation_list(self) -> ObjectMap:
+        return await self.api_appserver_conversations()
+
+    async def _rpc_conversation_create(
+        self,
+        params: ConversationCreateParams,
+    ) -> ObjectMap:
+        return await self.api_appserver_conversation_create(params.to_json())
+
+    async def _rpc_conversation_select(
+        self,
+        params: ConversationSelectParams,
+    ) -> ObjectMap:
+        return await self.api_appserver_conversation_select(params.to_json())
+
+    async def _rpc_conversation_delete(
+        self,
+        params: ConversationDeleteParams,
+    ) -> ObjectMap:
+        return await self.api_appserver_conversation_delete(params.conversation_id)
+
+    async def _rpc_conversation_pins_set(
+        self,
+        params: ConversationPinsSetParams,
+    ) -> ObjectMap:
+        return await self.api_appserver_conversation_pins(params.to_json())
+
     async def _get_active_rpc_conversation_id(self) -> str | None:
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
@@ -1279,7 +1330,37 @@ class AppserverRoutes:
             ).to_json()
 
         try:
-            if request.method == CONVERSATION_SEND_METHOD:
+            if request.method == CONVERSATION_GET_METHOD:
+                get_params = parse_conversation_get_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                    active_conversation_id=await self._get_active_rpc_conversation_id(),
+                )
+                result = await self._rpc_conversation_get(get_params)
+            elif request.method == CONVERSATION_LIST_METHOD:
+                result = await self._rpc_conversation_list()
+            elif request.method == CONVERSATION_CREATE_METHOD:
+                create_params = parse_conversation_create_params(request.params)
+                result = await self._rpc_conversation_create(create_params)
+            elif request.method == CONVERSATION_SELECT_METHOD:
+                select_params = parse_conversation_select_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                )
+                result = await self._rpc_conversation_select(select_params)
+            elif request.method == CONVERSATION_DELETE_METHOD:
+                delete_params = parse_conversation_delete_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                )
+                result = await self._rpc_conversation_delete(delete_params)
+            elif request.method == CONVERSATION_PINS_SET_METHOD:
+                pins_params = parse_conversation_pins_set_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                )
+                result = await self._rpc_conversation_pins_set(pins_params)
+            elif request.method == CONVERSATION_SEND_METHOD:
                 send_params = parse_conversation_send_params(
                     request.params,
                     sanitize_conversation_id=self._deps.sanitize_conversation_id,

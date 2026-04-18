@@ -150,3 +150,42 @@ export function readTranscriptCardId(
     ? row.dataset.transcriptCardId
     : null;
 }
+
+export function findTranscriptCardRow(
+  root: ParentNode | null | undefined,
+  metadata: TranscriptCardMetadata | null | undefined,
+): HTMLElement | null {
+  if (!root || !metadata || typeof metadata !== 'object') {
+    return null;
+  }
+  const expectedOrderId = parseTranscriptOrderId(metadata.order_id ?? metadata.orderId);
+  const expectedCardId = typeof metadata.card_id === 'string' && metadata.card_id
+    ? metadata.card_id
+    : (typeof metadata.cardId === 'string' ? metadata.cardId : '');
+  const expectedConversationId = typeof metadata.conversation_id === 'string' && metadata.conversation_id
+    ? metadata.conversation_id
+    : (typeof metadata.conversationId === 'string' ? metadata.conversationId : '');
+  if (expectedOrderId === null && !expectedCardId) {
+    return null;
+  }
+  const rows = Array.from(
+    root.querySelectorAll<HTMLElement>('[data-transcript-order-id], [data-transcript-card-id]'),
+  );
+  let cardMatch: HTMLElement | null = null;
+  for (const row of rows) {
+    const rowConversationId = typeof row.dataset.transcriptConversationId === 'string'
+      ? row.dataset.transcriptConversationId
+      : '';
+    if (expectedConversationId && rowConversationId && rowConversationId !== expectedConversationId) {
+      continue;
+    }
+    const rowOrderId = parseTranscriptOrderId(row.dataset.transcriptOrderId);
+    if (expectedOrderId !== null && rowOrderId === expectedOrderId) {
+      return row;
+    }
+    if (expectedCardId && row.dataset.transcriptCardId === expectedCardId) {
+      cardMatch = cardMatch || row;
+    }
+  }
+  return cardMatch;
+}

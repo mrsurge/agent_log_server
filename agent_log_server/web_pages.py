@@ -281,7 +281,6 @@ def render_codex_agent_ui(package_root: Path) -> HTMLResponse:
     conversation_main = Div(
         Div(
             Div(
-                Div("Waiting for events...", id="timeline-placeholder", cls="timeline-row muted"),
                 id="agent-timeline",
                 cls="timeline",
             ),
