@@ -354,17 +354,26 @@ window.CodexAgentModules.push((ctx) => {
     };
 
     const normalizeEffortList = (model) => {
-      const raw = model?.supported_reasoning_efforts ?? model?.supportedReasoningEfforts;
-      if (!Array.isArray(raw)) return [];
-      return raw
-        .map((item) => {
-          if (typeof item === 'string') return item;
-          if (item && typeof item === 'object') {
-            return item.reasoning_effort || item.reasoningEffort || item.value || '';
-          }
-          return '';
-        })
-        .filter(Boolean);
+      const candidates = [
+        model?.supported_reasoning_efforts,
+        model?.supportedReasoningEfforts,
+        model?.capabilities?.supports?.reasoning_effort,
+        model?.capabilities?.supports?.reasoningEffort,
+      ];
+      const values = [];
+      candidates.forEach((raw) => {
+        if (!Array.isArray(raw)) return;
+        raw.forEach((item) => {
+          const value = typeof item === 'string'
+            ? item
+            : (item && typeof item === 'object'
+              ? (item.reasoning_effort || item.reasoningEffort || item.value || '')
+              : '');
+          if (!value || values.includes(value)) return;
+          values.push(value);
+        });
+      });
+      return values;
     };
 
     const normalizeDynamicSelectOptions = (field, data) => {

@@ -17,11 +17,11 @@ from typing import Optional, Callable, Awaitable, Protocol, TypeAlias, TypedDict
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from ._vendor.copilot import SessionEvent
+from ._vendor.copilot.session import SessionEvent
 from ._vendor.copilot.generated.session_events import (
-    Data as SessionEventData,
     SessionEventType,
 )
+from .protocol_adapter import CopilotEventView
 from ..message_card_contracts import (
     build_assistant_delta_event,
     build_assistant_finalize_event,
@@ -280,7 +280,7 @@ class CopilotEventRouter:
                 return coerced
         return None
 
-    def _remember_active_model(self, data: SessionEventData) -> None:
+    def _remember_active_model(self, data: CopilotEventView) -> None:
         candidate = None
         for value in (
             data.current_model,
@@ -370,7 +370,7 @@ class CopilotEventRouter:
         await self._emit(event)
         await self._record(entry)
 
-    async def _handle_context_compacted(self, data: SessionEventData, *, source: str) -> None:
+    async def _handle_context_compacted(self, data: CopilotEventView, *, source: str) -> None:
         context_window = self._coerce_int(data.token_limit)
         total = self._first_int(
             data.post_compaction_tokens,
@@ -472,8 +472,8 @@ class CopilotEventRouter:
             return False
         return candidate in self._active_subagents or candidate in self._known_subagent_ids
 
-    def _resolve_message_subagent_id(self, event: SessionEvent) -> Optional[str]:
-        data = event.data
+    def _resolve_message_subagent_id(self, event: CopilotEventView) -> Optional[str]:
+        data = event
         candidate = self._normalize_id(data.parent_tool_call_id)
         if candidate and self._is_known_subagent_id(candidate):
             return candidate
@@ -481,11 +481,11 @@ class CopilotEventRouter:
 
     def _resolve_subagent_event_id(
         self,
-        event: SessionEvent,
+        event: CopilotEventView,
         *,
         allow_single_active: bool = False,
     ) -> Optional[str]:
-        data = event.data
+        data = event
         for candidate in (
             data.tool_call_id,
             data.parent_tool_call_id,
@@ -497,7 +497,7 @@ class CopilotEventRouter:
             return next(iter(self._active_subagents))
         return None
 
-    def _resolve_reasoning_id(self, data: SessionEventData | None = None) -> Optional[str]:
+    def _resolve_reasoning_id(self, data: CopilotEventView | None = None) -> Optional[str]:
         for candidate in (
             self._extract_reasoning_id(data),
             self.current_reasoning_id,
@@ -507,12 +507,12 @@ class CopilotEventRouter:
                 return normalized
         return None
 
-    def _extract_reasoning_id(self, data: SessionEventData | None = None) -> Optional[str]:
+    def _extract_reasoning_id(self, data: CopilotEventView | None = None) -> Optional[str]:
         if data is None:
             return None
         return self._normalize_id(data.reasoning_id)
 
-    def _extract_message_id(self, data: SessionEventData | None = None) -> Optional[str]:
+    def _extract_message_id(self, data: CopilotEventView | None = None) -> Optional[str]:
         if data is None:
             return None
         return self._normalize_id(data.message_id)
@@ -523,7 +523,7 @@ class CopilotEventRouter:
         return f"{prefix}_{normalized or uuid4().hex}"
 
     @staticmethod
-    def _extract_reasoning_text(data: SessionEventData | None) -> str:
+    def _extract_reasoning_text(data: CopilotEventView | None) -> str:
         if data is None:
             return ""
         return data.reasoning_text or ""
@@ -538,7 +538,7 @@ class CopilotEventRouter:
             self.current_reasoning_id = self._build_local_id("reasoning")
         return self.current_reasoning_id
 
-    async def _record_reasoning(self, text: str, *, data: SessionEventData | None = None) -> bool:
+    async def _record_reasoning(self, text: str, *, data: CopilotEventView | None = None) -> bool:
         if not text:
             return False
 
@@ -591,7 +591,7 @@ class CopilotEventRouter:
 
     async def _trace_subagent_provenance(
         self,
-        event: SessionEvent,
+        event: CopilotEventView,
         *,
         scope: str,
         decision: str,
@@ -599,7 +599,7 @@ class CopilotEventRouter:
     ) -> None:
         if not self.debug_trace:
             return
-        data = event.data
+        data = event
         payload = {
             "type": "debug_trace",
             "role": "debug_trace",
@@ -607,8 +607,8 @@ class CopilotEventRouter:
             "conversation_id": self.conversation_id,
             "scope": scope,
             "decision": decision,
-            "event_type": event.type.value,
-            "sdk_event_id": self._normalize_id(event.id),
+            "event_type": event.event_type.value,
+            "sdk_event_id": self._normalize_id(event.event_id),
             "parent_id": self._normalize_id(event.parent_id),
             "tool_call_id": self._normalize_id(data.tool_call_id),
             "parent_tool_call_id": self._normalize_id(data.parent_tool_call_id),
@@ -640,18 +640,21 @@ class CopilotEventRouter:
 
     async def route_event(self, event: SessionEvent) -> None:
         """Route a Copilot SDK SessionEvent to the appropriate handler."""
-        etype = event.type
-        data = event.data
+        data = CopilotEventView.from_event(event)
+        etype = data.event_type
         self._remember_active_model(data)
         if _is_debug():
-            print(f"[ROUTER-EVENT] type={etype} id={event.id} parent_id={event.parent_id} data_type={type(data).__name__}")
+            print(
+                f"[ROUTER-EVENT] type={etype} id={data.event_id} "
+                f"parent_id={data.parent_id} data_type={type(data.payload).__name__}"
+            )
 
         if etype == SessionEventType.ASSISTANT_MESSAGE_DELTA:
-            await self._handle_message_delta(event)
+            await self._handle_message_delta(data)
         elif etype == SessionEventType.ASSISTANT_REASONING_DELTA:
             await self._handle_reasoning_delta(data)
         elif etype == SessionEventType.ASSISTANT_MESSAGE:
-            await self._handle_message_complete(event)
+            await self._handle_message_complete(data)
         elif etype == SessionEventType.ASSISTANT_REASONING:
             await self._handle_reasoning_complete(data)
         elif etype == SessionEventType.ASSISTANT_TURN_START:
@@ -659,13 +662,13 @@ class CopilotEventRouter:
         elif etype == SessionEventType.ASSISTANT_TURN_END:
             await self._handle_turn_end(data)
         elif etype == SessionEventType.TOOL_EXECUTION_START:
-            await self._handle_tool_start(event)
+            await self._handle_tool_start(data)
         elif etype == SessionEventType.TOOL_EXECUTION_COMPLETE:
-            await self._handle_tool_complete(event)
+            await self._handle_tool_complete(data)
         elif etype == SessionEventType.TOOL_EXECUTION_PROGRESS:
-            await self._handle_tool_progress(event)
+            await self._handle_tool_progress(data)
         elif etype == SessionEventType.TOOL_EXECUTION_PARTIAL_RESULT:
-            await self._handle_tool_progress(event)
+            await self._handle_tool_progress(data)
         elif etype == SessionEventType.ASSISTANT_INTENT:
             await self._handle_intent(data)
         elif etype == SessionEventType.ASSISTANT_USAGE:
@@ -700,20 +703,22 @@ class CopilotEventRouter:
             await self._handle_plan_changed(data)
         # Subagent events
         elif etype == SessionEventType.SUBAGENT_STARTED:
-            sa_id = data.tool_call_id or str(event.id)
+            sa_id = data.tool_call_id or data.event_id
             intent = data.intent or ""
             name = data.agent_display_name or data.agent_name or "subagent"
             self._active_subagents[sa_id] = {"name": name, "intent": intent}
             self._known_subagent_ids.add(sa_id)
             await self._trace_subagent_provenance(
-                event,
+                data,
                 scope="subagent_lifecycle",
                 decision="subagent_started_registered",
                 resolved_subagent_id=sa_id,
             )
             if _is_debug():
-                print(f"[SUBAGENT-DEBUG] SUBAGENT_STARTED: sa_id={sa_id} event.id={event.id} "
-                      f"data.tool_call_id={data.tool_call_id} event.parent_id={event.parent_id}")
+                print(
+                    f"[SUBAGENT-DEBUG] SUBAGENT_STARTED: sa_id={sa_id} event.id={data.event_id} "
+                    f"data.tool_call_id={data.tool_call_id} event.parent_id={data.parent_id}"
+                )
             sa_evt = {
                 "type": "subagent_start",
                 "conversation_id": self.conversation_id,
@@ -734,9 +739,9 @@ class CopilotEventRouter:
         elif etype == SessionEventType.SUBAGENT_SELECTED:
             pass  # Selection happens before start, no UI needed
         elif etype == SessionEventType.SUBAGENT_DESELECTED:
-            sa_id = self._resolve_subagent_event_id(event, allow_single_active=True)
+            sa_id = self._resolve_subagent_event_id(data, allow_single_active=True)
             await self._trace_subagent_provenance(
-                event,
+                data,
                 scope="subagent_lifecycle",
                 decision="subagent_deselected_resolved" if sa_id else "subagent_deselected_unresolved",
                 resolved_subagent_id=sa_id,
@@ -745,11 +750,11 @@ class CopilotEventRouter:
                 self._active_subagents.pop(sa_id, None)
                 await self._emit_subagent_end(sa_id, summary="", success=True)
         elif etype == SessionEventType.SUBAGENT_COMPLETED:
-            sa_id = self._resolve_subagent_event_id(event, allow_single_active=True)
+            sa_id = self._resolve_subagent_event_id(data, allow_single_active=True)
             summary = data.summary or ""
             success = data.success if isinstance(data.success, bool) else True
             await self._trace_subagent_provenance(
-                event,
+                data,
                 scope="subagent_lifecycle",
                 decision="subagent_completed_resolved" if sa_id else "subagent_completed_unresolved",
                 resolved_subagent_id=sa_id,
@@ -758,12 +763,12 @@ class CopilotEventRouter:
                 self._active_subagents.pop(sa_id, None)
                 await self._emit_subagent_end(sa_id, summary=summary, success=success)
         elif etype == SessionEventType.SUBAGENT_FAILED:
-            sa_id = self._resolve_subagent_event_id(event, allow_single_active=True)
+            sa_id = self._resolve_subagent_event_id(data, allow_single_active=True)
             error_value = data.error or data.error_reason or ""
             error = error_value if isinstance(error_value, str) else str(error_value)
             fail_summary = f"Failed: {error}" if error else "Failed"
             await self._trace_subagent_provenance(
-                event,
+                data,
                 scope="subagent_lifecycle",
                 decision="subagent_failed_resolved" if sa_id else "subagent_failed_unresolved",
                 resolved_subagent_id=sa_id,
@@ -774,8 +779,7 @@ class CopilotEventRouter:
 
     # ── Message deltas ──────────────────────────────────────────────
 
-    async def _handle_message_delta(self, event: SessionEvent) -> None:
-        data = event.data
+    async def _handle_message_delta(self, data: CopilotEventView) -> None:
         text = data.delta_content or ""
         if not text:
             return
@@ -794,7 +798,7 @@ class CopilotEventRouter:
 
         self.current_message_text += text
 
-        resolved_subagent_id = self._resolve_message_subagent_id(event)
+        resolved_subagent_id = self._resolve_message_subagent_id(data)
         if resolved_subagent_id:
             self.current_message_subagent_id = resolved_subagent_id
             subagent_id = resolved_subagent_id
@@ -802,7 +806,7 @@ class CopilotEventRouter:
             subagent_id = self.current_message_subagent_id
         if started_new_message:
             await self._trace_subagent_provenance(
-                event,
+                data,
                 scope="message_provenance",
                 decision="message_bound_from_parent_tool_call" if subagent_id else "message_top_level",
                 resolved_subagent_id=subagent_id,
@@ -817,7 +821,7 @@ class CopilotEventRouter:
             subagent_id=subagent_id,
         ))
 
-    async def _handle_reasoning_delta(self, data: SessionEventData) -> None:
+    async def _handle_reasoning_delta(self, data: CopilotEventView) -> None:
         text = data.delta_content or ""
         if not text:
             return
@@ -841,9 +845,8 @@ class CopilotEventRouter:
 
     # ── Message/reasoning complete ──────────────────────────────────
 
-    async def _handle_message_complete(self, event: SessionEvent) -> None:
+    async def _handle_message_complete(self, data: CopilotEventView) -> None:
         """Authoritative complete message (replaces accumulated deltas)."""
-        data = event.data
         provider_message_id = self._extract_message_id(data)
         if provider_message_id:
             self.current_message_id = provider_message_id
@@ -851,7 +854,7 @@ class CopilotEventRouter:
         if not content:
             return
 
-        resolved_subagent_id = self._resolve_message_subagent_id(event)
+        resolved_subagent_id = self._resolve_message_subagent_id(data)
         if resolved_subagent_id:
             self.current_message_subagent_id = resolved_subagent_id
             subagent_id = resolved_subagent_id
@@ -887,7 +890,7 @@ class CopilotEventRouter:
 
         if trace_needed:
             await self._trace_subagent_provenance(
-                event,
+                data,
                 scope="message_provenance",
                 decision="message_complete_bound_from_parent_tool_call" if subagent_id else "message_complete_top_level",
                 resolved_subagent_id=subagent_id,
@@ -895,13 +898,13 @@ class CopilotEventRouter:
 
         await self._finalize_message(content, subagent_id=subagent_id)
 
-    async def _handle_reasoning_complete(self, data: SessionEventData) -> None:
+    async def _handle_reasoning_complete(self, data: CopilotEventView) -> None:
         text = self._extract_reasoning_text(data) or self.current_thought_text
         await self._record_reasoning(text, data=data)
 
     # ── Turn lifecycle ──────────────────────────────────────────────
 
-    async def _handle_turn_start(self, data: SessionEventData) -> None:
+    async def _handle_turn_start(self, data: CopilotEventView) -> None:
         """SDK-initiated turn start (assistant begins processing)."""
         # Reset block tracking so new turn's messages get fresh IDs
         self._last_block_type = None
@@ -923,7 +926,7 @@ class CopilotEventRouter:
             "turn_id": self.current_turn_id,
         })
 
-    async def _handle_turn_end(self, data: SessionEventData) -> None:
+    async def _handle_turn_end(self, data: CopilotEventView) -> None:
         """Assistant turn completed."""
         # Flush any pending reasoning
         if self.current_thought_text:
@@ -992,7 +995,7 @@ class CopilotEventRouter:
                 return prefix, tool_name[len(needle):]
         return None, None
 
-    def _build_tool_render_state(self, data: SessionEventData, tool_name: str, raw_args: object) -> ToolRenderState:
+    def _build_tool_render_state(self, data: CopilotEventView, tool_name: str, raw_args: object) -> ToolRenderState:
         args = self._coerce_tool_arguments(raw_args)
         file_path = _mapping_str(args, "path", "file_path")
 
@@ -1175,12 +1178,11 @@ class CopilotEventRouter:
             args_str = " " + raw_args
         return (f"{tool_name}{args_str}", "executing", None)
 
-    async def _handle_tool_start(self, event: SessionEvent) -> None:
-        data = event.data
+    async def _handle_tool_start(self, data: CopilotEventView) -> None:
         # SDK uses data.tool_call_id as the stable tool call identifier
-        tool_call_id = data.tool_call_id or str(event.id)
+        tool_call_id = data.tool_call_id or data.event_id
         tool_name = data.tool_name or data.mcp_tool_name or "tool"
-        parent_id = data.parent_tool_call_id or (str(event.parent_id) if event.parent_id else None)
+        parent_id = data.parent_tool_call_id or data.parent_id
 
         # Check if this tool belongs to a subagent
         subagent_id = None
@@ -1190,7 +1192,7 @@ class CopilotEventRouter:
         elif tool_call_id in self._subagent_tool_ids:
             subagent_id = tool_call_id  # edge case
         await self._trace_subagent_provenance(
-            event,
+            data,
             scope="tool_provenance",
             decision=(
                 "tool_bound_from_parent_tool_call"
@@ -1304,9 +1306,8 @@ class CopilotEventRouter:
             tool_begin_evt["subagent_id"] = subagent_id
         await self._emit(tool_begin_evt)
 
-    async def _handle_tool_complete(self, event: SessionEvent) -> None:
-        data = event.data
-        tool_call_id = data.tool_call_id or str(event.parent_id or event.id)
+    async def _handle_tool_complete(self, data: CopilotEventView) -> None:
+        tool_call_id = data.tool_call_id or data.parent_id or data.event_id
 
         # Suppressed UI-only tools — skip shell_end and transcript
         if tool_call_id in self._suppressed_tools:
@@ -1317,8 +1318,8 @@ class CopilotEventRouter:
         content = ""
         detailed = ""
         if result_obj:
-            content = result_obj.content or ""
-            detailed = result_obj.detailed_content or ""
+            content = data.result_content
+            detailed = data.result_detailed_content
         else:
             output = cast(object, data.output)
             content = data.content or (output if isinstance(output, str) else "") or ""
@@ -1345,7 +1346,7 @@ class CopilotEventRouter:
         subagent_id = tool_call.get("subagent_id") if tool_call else None
 
         # Determine success/failure
-        has_error = bool(getattr(data, "error", None) or getattr(data, "error_reason", None))
+        has_error = bool(data.error or data.error_reason)
         exit_code = 1 if has_error else 0
 
         if render_kind == "view":
@@ -1562,9 +1563,8 @@ class CopilotEventRouter:
                 "subagent_id": subagent_id,
             })
 
-    async def _handle_tool_progress(self, event: SessionEvent) -> None:
-        data = event.data
-        tool_call_id = data.tool_call_id or str(event.parent_id or event.id)
+    async def _handle_tool_progress(self, data: CopilotEventView) -> None:
+        tool_call_id = data.tool_call_id or data.parent_id or data.event_id
 
         # Suppressed UI-only tools — skip shell_delta
         if tool_call_id in self._suppressed_tools:
@@ -1573,8 +1573,8 @@ class CopilotEventRouter:
         # Progress can come via partial_output, progress_message, or content
         content = data.partial_output or data.progress_message or data.content or ""
         # For PARTIAL_RESULT events, check result object too
-        if not content and data.result:
-            content = getattr(data.result, "content", "") or ""
+        if not content:
+            content = data.result_content
 
         if content:
             tool_call = self.tool_calls.get(tool_call_id)
@@ -1608,7 +1608,7 @@ class CopilotEventRouter:
 
     # ── Intent / usage / error ──────────────────────────────────────
 
-    async def _handle_intent(self, data: SessionEventData) -> None:
+    async def _handle_intent(self, data: CopilotEventView) -> None:
         intent = data.intent or ""
         if intent:
             await self._emit({
@@ -1618,7 +1618,7 @@ class CopilotEventRouter:
                 "turn_id": self.current_turn_id,
             })
 
-    async def _handle_usage(self, data: SessionEventData, *, source: str = "assistant.usage") -> None:
+    async def _handle_usage(self, data: CopilotEventView, *, source: str = "assistant.usage") -> None:
         input_tokens = self._coerce_int(data.input_tokens)
         output_tokens = self._coerce_int(data.output_tokens)
         cache_read = self._coerce_int(data.cache_read_tokens)
@@ -1641,7 +1641,7 @@ class CopilotEventRouter:
             source=source,
         )
 
-    async def _handle_error(self, data: SessionEventData) -> None:
+    async def _handle_error(self, data: CopilotEventView) -> None:
         msg = data.message or "Unknown error"
         error_type = data.error_type or ""
         status_code = self._coerce_int(data.status_code)
@@ -1688,7 +1688,7 @@ class CopilotEventRouter:
             "turn_id": self.current_turn_id,
         })
 
-    async def _handle_plan_changed(self, data: SessionEventData) -> None:
+    async def _handle_plan_changed(self, data: CopilotEventView) -> None:
         plan_content = data.plan_content
         content = plan_content if isinstance(plan_content, str) else ""
         plan_doc_update = {
@@ -1718,7 +1718,7 @@ class CopilotEventRouter:
             "turn_id": self.current_turn_id,
         })
 
-    async def _handle_mode_changed(self, data: SessionEventData) -> None:
+    async def _handle_mode_changed(self, data: CopilotEventView) -> None:
         await self._emit_mode(
             data.new_mode or data.mode,
             source="session.mode_changed",

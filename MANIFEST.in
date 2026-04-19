@@ -5,3 +5,4 @@ recursive-include agent_log_server/templates *
 recursive-include agent_log_server/shellspec *
 recursive-include agent_log_server/te2_assets *
 recursive-include extensions *.json
+recursive-include extensions/codex_ext_exp/schemas *.json

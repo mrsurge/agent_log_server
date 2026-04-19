@@ -9,44 +9,761 @@ Example:
     >>>
     >>> async with CopilotClient() as client:
     ...     session = await client.create_session()
-    ...     await session.send({"prompt": "Hello!"})
+    ...     await session.send("Hello!")
 """
+
+from __future__ import annotations
 
 import asyncio
 import inspect
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
+import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from types import TracebackType
+from typing import Any, Literal, TypedDict, cast, overload
 
-from .generated.rpc import ServerRpc
-from .generated.session_events import PermissionRequest, session_event_from_dict
-from .jsonrpc import JsonRpcClient, ProcessExitedError
-from .sdk_protocol_version import get_sdk_protocol_version
-from .session import CopilotSession
-from .types import (
-    ConnectionState,
-    CopilotClientOptions,
+from ._jsonrpc import JsonRpcClient, ProcessExitedError
+from ._sdk_protocol_version import get_sdk_protocol_version
+from ._telemetry import get_trace_context, trace_context
+from .generated.rpc import (
+    ClientSessionApiHandlers,
+    ServerRpc,
+    register_client_session_api_handlers,
+)
+from .generated.session_events import (
+    PermissionRequest,
+    SessionEvent,
+    session_event_from_dict,
+)
+from .session import (
+    CommandDefinition,
+    CopilotSession,
+    CreateSessionFsHandler,
     CustomAgentConfig,
-    GetAuthStatusResponse,
-    GetStatusResponse,
-    ModelInfo,
-    PingResponse,
+    ElicitationHandler,
+    InfiniteSessionConfig,
+    MCPServerConfig,
     ProviderConfig,
-    ResumeSessionConfig,
-    SessionConfig,
-    SessionLifecycleEvent,
-    SessionLifecycleEventType,
-    SessionLifecycleHandler,
-    SessionListFilter,
-    SessionMetadata,
-    StopError,
-    ToolInvocation,
-    ToolResult,
+    ReasoningEffort,
+    SectionTransformFn,
+    SessionFsConfig,
+    SessionHooks,
+    SystemMessageConfig,
+    UserInputHandler,
+    _PermissionHandlerFn,
+)
+from .tools import Tool, ToolInvocation, ToolResult
+
+# ============================================================================
+# Connection Types
+# ============================================================================
+
+ConnectionState = Literal["disconnected", "connecting", "connected", "error"]
+
+LogLevel = Literal["none", "error", "warning", "info", "debug", "all"]
+
+
+def _validate_session_fs_config(config: SessionFsConfig) -> None:
+    if not config.get("initial_cwd"):
+        raise ValueError("session_fs.initial_cwd is required")
+    if not config.get("session_state_path"):
+        raise ValueError("session_fs.session_state_path is required")
+    if config.get("conventions") not in ("posix", "windows"):
+        raise ValueError("session_fs.conventions must be either 'posix' or 'windows'")
+
+
+class TelemetryConfig(TypedDict, total=False):
+    """Configuration for OpenTelemetry integration with the Copilot CLI."""
+
+    otlp_endpoint: str
+    """OTLP HTTP endpoint URL for trace/metric export. Sets OTEL_EXPORTER_OTLP_ENDPOINT."""
+    file_path: str
+    """File path for JSON-lines trace output. Sets COPILOT_OTEL_FILE_EXPORTER_PATH."""
+    exporter_type: str
+    """Exporter backend type: "otlp-http" or "file". Sets COPILOT_OTEL_EXPORTER_TYPE."""
+    source_name: str
+    """Instrumentation scope name. Sets COPILOT_OTEL_SOURCE_NAME."""
+    capture_content: bool
+    """Whether to capture message content. Sets OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT."""  # noqa: E501
+
+
+@dataclass
+class SubprocessConfig:
+    """Config for spawning a local Copilot CLI subprocess.
+
+    Example:
+        >>> config = SubprocessConfig(github_token="ghp_...")
+        >>> client = CopilotClient(config)
+
+        >>> # Custom CLI path with TCP transport
+        >>> config = SubprocessConfig(
+        ...     cli_path="/usr/local/bin/copilot",
+        ...     use_stdio=False,
+        ...     log_level="debug",
+        ... )
+    """
+
+    cli_path: str | None = None
+    """Path to the Copilot CLI executable. ``None`` uses the bundled binary."""
+
+    cli_args: list[str] = field(default_factory=list)
+    """Extra arguments passed to the CLI executable (inserted before SDK-managed args)."""
+
+    _: KW_ONLY
+
+    cwd: str | None = None
+    """Working directory for the CLI process. ``None`` uses the current directory."""
+
+    use_stdio: bool = True
+    """Use stdio transport (``True``, default) or TCP (``False``)."""
+
+    port: int = 0
+    """TCP port for the CLI server (only when ``use_stdio=False``). 0 means random."""
+
+    log_level: LogLevel = "info"
+    """Log level for the CLI process."""
+
+    env: dict[str, str] | None = None
+    """Environment variables for the CLI process. ``None`` inherits the current env."""
+
+    process: Any | None = None
+    """Optional externally managed stdio transport/process-like object.
+
+    When provided, the client attaches to this existing stdio transport instead of
+    spawning the Copilot CLI itself. The object must expose ``stdin`` and
+    ``stdout`` attributes compatible with :class:`JsonRpcClient`.
+    """
+
+    github_token: str | None = None
+    """GitHub token for authentication. Takes priority over other auth methods."""
+
+    use_logged_in_user: bool | None = None
+    """Use the logged-in user for authentication.
+
+    ``None`` (default) resolves to ``True`` unless ``github_token`` is set.
+    """
+
+    telemetry: TelemetryConfig | None = None
+    """OpenTelemetry configuration. Providing this enables telemetry — no separate flag needed."""
+
+    session_fs: SessionFsConfig | None = None
+    """Connection-level session filesystem provider configuration."""
+
+
+@dataclass
+class ExternalServerConfig:
+    """Config for connecting to an existing Copilot CLI server over TCP.
+
+    Example:
+        >>> config = ExternalServerConfig(url="localhost:3000")
+        >>> client = CopilotClient(config)
+    """
+
+    url: str
+    """Server URL. Supports ``"host:port"``, ``"http://host:port"``, or just ``"port"``."""
+
+    _: KW_ONLY
+
+    session_fs: SessionFsConfig | None = None
+    """Connection-level session filesystem provider configuration."""
+
+
+# ============================================================================
+# Response Types
+# ============================================================================
+
+
+@dataclass
+class PingResponse:
+    """Response from ping"""
+
+    message: str  # Echo message with "pong: " prefix
+    timestamp: int  # Server timestamp in milliseconds
+    protocolVersion: int  # Protocol version for SDK compatibility
+
+    @staticmethod
+    def from_dict(obj: Any) -> PingResponse:
+        assert isinstance(obj, dict)
+        message = obj.get("message")
+        timestamp = obj.get("timestamp")
+        protocolVersion = obj.get("protocolVersion")
+        if message is None or timestamp is None or protocolVersion is None:
+            raise ValueError(
+                f"Missing required fields in PingResponse: message={message}, "
+                f"timestamp={timestamp}, protocolVersion={protocolVersion}"
+            )
+        return PingResponse(str(message), int(timestamp), int(protocolVersion))
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["message"] = self.message
+        result["timestamp"] = self.timestamp
+        result["protocolVersion"] = self.protocolVersion
+        return result
+
+
+@dataclass
+class StopError(Exception):
+    """Error that occurred during client stop cleanup."""
+
+    message: str  # Error message describing what failed during cleanup
+
+    def __post_init__(self) -> None:
+        Exception.__init__(self, self.message)
+
+    @staticmethod
+    def from_dict(obj: Any) -> StopError:
+        assert isinstance(obj, dict)
+        message = obj.get("message")
+        if message is None:
+            raise ValueError("Missing required field 'message' in StopError")
+        return StopError(str(message))
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["message"] = self.message
+        return result
+
+
+@dataclass
+class GetStatusResponse:
+    """Response from status.get"""
+
+    version: str  # Package version (e.g., "1.0.0")
+    protocolVersion: int  # Protocol version for SDK compatibility
+
+    @staticmethod
+    def from_dict(obj: Any) -> GetStatusResponse:
+        assert isinstance(obj, dict)
+        version = obj.get("version")
+        protocolVersion = obj.get("protocolVersion")
+        if version is None or protocolVersion is None:
+            raise ValueError(
+                f"Missing required fields in GetStatusResponse: version={version}, "
+                f"protocolVersion={protocolVersion}"
+            )
+        return GetStatusResponse(str(version), int(protocolVersion))
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["version"] = self.version
+        result["protocolVersion"] = self.protocolVersion
+        return result
+
+
+@dataclass
+class GetAuthStatusResponse:
+    """Response from auth.getStatus"""
+
+    isAuthenticated: bool  # Whether the user is authenticated
+    authType: str | None = None  # Authentication type
+    host: str | None = None  # GitHub host URL
+    login: str | None = None  # User login name
+    statusMessage: str | None = None  # Human-readable status message
+
+    @staticmethod
+    def from_dict(obj: Any) -> GetAuthStatusResponse:
+        assert isinstance(obj, dict)
+        isAuthenticated = obj.get("isAuthenticated")
+        if isAuthenticated is None:
+            raise ValueError("Missing required field 'isAuthenticated' in GetAuthStatusResponse")
+        authType = obj.get("authType")
+        host = obj.get("host")
+        login = obj.get("login")
+        statusMessage = obj.get("statusMessage")
+        return GetAuthStatusResponse(
+            isAuthenticated=bool(isAuthenticated),
+            authType=authType,
+            host=host,
+            login=login,
+            statusMessage=statusMessage,
+        )
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["isAuthenticated"] = self.isAuthenticated
+        if self.authType is not None:
+            result["authType"] = self.authType
+        if self.host is not None:
+            result["host"] = self.host
+        if self.login is not None:
+            result["login"] = self.login
+        if self.statusMessage is not None:
+            result["statusMessage"] = self.statusMessage
+        return result
+
+
+# ============================================================================
+# Model Types
+# ============================================================================
+
+
+@dataclass
+class ModelVisionLimits:
+    """Vision-specific limits"""
+
+    supported_media_types: list[str] | None = None
+    max_prompt_images: int | None = None
+    max_prompt_image_size: int | None = None
+
+    @staticmethod
+    def from_dict(obj: Any) -> ModelVisionLimits:
+        assert isinstance(obj, dict)
+        supported_media_types = obj.get("supported_media_types")
+        max_prompt_images = obj.get("max_prompt_images")
+        max_prompt_image_size = obj.get("max_prompt_image_size")
+        return ModelVisionLimits(
+            supported_media_types=supported_media_types,
+            max_prompt_images=max_prompt_images,
+            max_prompt_image_size=max_prompt_image_size,
+        )
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        if self.supported_media_types is not None:
+            result["supported_media_types"] = self.supported_media_types
+        if self.max_prompt_images is not None:
+            result["max_prompt_images"] = self.max_prompt_images
+        if self.max_prompt_image_size is not None:
+            result["max_prompt_image_size"] = self.max_prompt_image_size
+        return result
+
+
+@dataclass
+class ModelLimits:
+    """Model limits"""
+
+    max_prompt_tokens: int | None = None
+    max_context_window_tokens: int | None = None
+    vision: ModelVisionLimits | None = None
+
+    @staticmethod
+    def from_dict(obj: Any) -> ModelLimits:
+        assert isinstance(obj, dict)
+        max_prompt_tokens = obj.get("max_prompt_tokens")
+        max_context_window_tokens = obj.get("max_context_window_tokens")
+        vision_dict = obj.get("vision")
+        vision = ModelVisionLimits.from_dict(vision_dict) if vision_dict else None
+        return ModelLimits(
+            max_prompt_tokens=max_prompt_tokens,
+            max_context_window_tokens=max_context_window_tokens,
+            vision=vision,
+        )
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        if self.max_prompt_tokens is not None:
+            result["max_prompt_tokens"] = self.max_prompt_tokens
+        if self.max_context_window_tokens is not None:
+            result["max_context_window_tokens"] = self.max_context_window_tokens
+        if self.vision is not None:
+            result["vision"] = self.vision.to_dict()
+        return result
+
+
+@dataclass
+class ModelSupports:
+    """Model support flags"""
+
+    vision: bool = False
+    reasoning_effort: bool = False  # Whether this model supports reasoning effort
+
+    @staticmethod
+    def from_dict(obj: Any) -> ModelSupports:
+        assert isinstance(obj, dict)
+        vision = obj.get("vision", False)
+        reasoning_effort = obj.get("reasoningEffort", False)
+        return ModelSupports(vision=bool(vision), reasoning_effort=bool(reasoning_effort))
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["vision"] = self.vision
+        result["reasoningEffort"] = self.reasoning_effort
+        return result
+
+
+@dataclass
+class ModelCapabilities:
+    """Model capabilities and limits"""
+
+    supports: ModelSupports
+    limits: ModelLimits
+
+    @staticmethod
+    def from_dict(obj: Any) -> ModelCapabilities:
+        assert isinstance(obj, dict)
+        supports_dict = obj.get("supports")
+        limits_dict = obj.get("limits")
+        supports = ModelSupports.from_dict(supports_dict) if supports_dict else ModelSupports()
+        limits = ModelLimits.from_dict(limits_dict) if limits_dict else ModelLimits()
+        return ModelCapabilities(supports=supports, limits=limits)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["supports"] = self.supports.to_dict()
+        result["limits"] = self.limits.to_dict()
+        return result
+
+
+@dataclass
+class ModelVisionLimitsOverride:
+    supported_media_types: list[str] | None = None
+    max_prompt_images: int | None = None
+    max_prompt_image_size: int | None = None
+
+
+@dataclass
+class ModelLimitsOverride:
+    max_prompt_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_context_window_tokens: int | None = None
+    vision: ModelVisionLimitsOverride | None = None
+
+
+@dataclass
+class ModelSupportsOverride:
+    vision: bool | None = None
+    reasoning_effort: bool | None = None
+
+
+@dataclass
+class ModelCapabilitiesOverride:
+    supports: ModelSupportsOverride | None = None
+    limits: ModelLimitsOverride | None = None
+
+
+def _capabilities_to_dict(caps: ModelCapabilitiesOverride) -> dict:
+    result: dict = {}
+    if caps.supports is not None:
+        s: dict = {}
+        if caps.supports.vision is not None:
+            s["vision"] = caps.supports.vision
+        if caps.supports.reasoning_effort is not None:
+            s["reasoningEffort"] = caps.supports.reasoning_effort
+        if s:
+            result["supports"] = s
+    if caps.limits is not None:
+        lim: dict = {}
+        if caps.limits.max_prompt_tokens is not None:
+            lim["max_prompt_tokens"] = caps.limits.max_prompt_tokens
+        if caps.limits.max_output_tokens is not None:
+            lim["max_output_tokens"] = caps.limits.max_output_tokens
+        if caps.limits.max_context_window_tokens is not None:
+            lim["max_context_window_tokens"] = caps.limits.max_context_window_tokens
+        if caps.limits.vision is not None:
+            v: dict = {}
+            if caps.limits.vision.supported_media_types is not None:
+                v["supported_media_types"] = caps.limits.vision.supported_media_types
+            if caps.limits.vision.max_prompt_images is not None:
+                v["max_prompt_images"] = caps.limits.vision.max_prompt_images
+            if caps.limits.vision.max_prompt_image_size is not None:
+                v["max_prompt_image_size"] = caps.limits.vision.max_prompt_image_size
+            if v:
+                lim["vision"] = v
+        if lim:
+            result["limits"] = lim
+    return result
+
+
+@dataclass
+class ModelPolicy:
+    """Model policy state"""
+
+    state: str  # "enabled", "disabled", or "unconfigured"
+    terms: str
+
+    @staticmethod
+    def from_dict(obj: Any) -> ModelPolicy:
+        assert isinstance(obj, dict)
+        state = obj.get("state")
+        terms = obj.get("terms")
+        if state is None or terms is None:
+            raise ValueError(
+                f"Missing required fields in ModelPolicy: state={state}, terms={terms}"
+            )
+        return ModelPolicy(state=str(state), terms=str(terms))
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["state"] = self.state
+        result["terms"] = self.terms
+        return result
+
+
+@dataclass
+class ModelBilling:
+    """Model billing information"""
+
+    multiplier: float
+
+    @staticmethod
+    def from_dict(obj: Any) -> ModelBilling:
+        assert isinstance(obj, dict)
+        multiplier = obj.get("multiplier")
+        if multiplier is None:
+            raise ValueError("Missing required field 'multiplier' in ModelBilling")
+        return ModelBilling(multiplier=float(multiplier))
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["multiplier"] = self.multiplier
+        return result
+
+
+@dataclass
+class ModelInfo:
+    """Information about an available model"""
+
+    id: str  # Model identifier (e.g., "claude-sonnet-4.5")
+    name: str  # Display name
+    capabilities: ModelCapabilities  # Model capabilities and limits
+    policy: ModelPolicy | None = None  # Policy state
+    billing: ModelBilling | None = None  # Billing information
+    # Supported reasoning effort levels (only present if model supports reasoning effort)
+    supported_reasoning_efforts: list[str] | None = None
+    # Default reasoning effort level (only present if model supports reasoning effort)
+    default_reasoning_effort: str | None = None
+
+    @staticmethod
+    def from_dict(obj: Any) -> ModelInfo:
+        def _collect_reasoning_efforts(raw: Any) -> list[str]:
+            if not isinstance(raw, list):
+                return []
+            values: list[str] = []
+            for item in raw:
+                if not isinstance(item, str):
+                    continue
+                value = item.strip()
+                if not value or value in values:
+                    continue
+                values.append(value)
+            return values
+
+        assert isinstance(obj, dict)
+        id = obj.get("id")
+        name = obj.get("name")
+        capabilities_dict = obj.get("capabilities")
+        if id is None or name is None or capabilities_dict is None:
+            raise ValueError(
+                f"Missing required fields in ModelInfo: id={id}, name={name}, "
+                f"capabilities={capabilities_dict}"
+            )
+        capabilities = ModelCapabilities.from_dict(capabilities_dict)
+        policy_dict = obj.get("policy")
+        policy = ModelPolicy.from_dict(policy_dict) if policy_dict else None
+        billing_dict = obj.get("billing")
+        billing = ModelBilling.from_dict(billing_dict) if billing_dict else None
+        supported_reasoning_efforts = _collect_reasoning_efforts(
+            obj.get("supportedReasoningEfforts")
+        )
+        supports_dict = (
+            capabilities_dict.get("supports")
+            if isinstance(capabilities_dict, dict)
+            else None
+        )
+        if isinstance(supports_dict, dict):
+            for key in ("reasoning_effort", "reasoningEffort"):
+                for effort in _collect_reasoning_efforts(supports_dict.get(key)):
+                    if effort not in supported_reasoning_efforts:
+                        supported_reasoning_efforts.append(effort)
+        default_reasoning_effort = obj.get("defaultReasoningEffort")
+        return ModelInfo(
+            id=str(id),
+            name=str(name),
+            capabilities=capabilities,
+            policy=policy,
+            billing=billing,
+            supported_reasoning_efforts=supported_reasoning_efforts or None,
+            default_reasoning_effort=default_reasoning_effort,
+        )
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["id"] = self.id
+        result["name"] = self.name
+        result["capabilities"] = self.capabilities.to_dict()
+        if self.policy is not None:
+            result["policy"] = self.policy.to_dict()
+        if self.billing is not None:
+            result["billing"] = self.billing.to_dict()
+        if self.supported_reasoning_efforts is not None:
+            result["supportedReasoningEfforts"] = self.supported_reasoning_efforts
+        if self.default_reasoning_effort is not None:
+            result["defaultReasoningEffort"] = self.default_reasoning_effort
+        return result
+
+
+# ============================================================================
+# Session Metadata Types
+# ============================================================================
+
+
+@dataclass
+class SessionContext:
+    """Working directory context for a session"""
+
+    cwd: str  # Working directory where the session was created
+    gitRoot: str | None = None  # Git repository root (if in a git repo)
+    repository: str | None = None  # GitHub repository in "owner/repo" format
+    branch: str | None = None  # Current git branch
+
+    @staticmethod
+    def from_dict(obj: Any) -> SessionContext:
+        assert isinstance(obj, dict)
+        cwd = obj.get("cwd")
+        if cwd is None:
+            raise ValueError("Missing required field 'cwd' in SessionContext")
+        return SessionContext(
+            cwd=str(cwd),
+            gitRoot=obj.get("gitRoot"),
+            repository=obj.get("repository"),
+            branch=obj.get("branch"),
+        )
+
+    def to_dict(self) -> dict:
+        result: dict = {"cwd": self.cwd}
+        if self.gitRoot is not None:
+            result["gitRoot"] = self.gitRoot
+        if self.repository is not None:
+            result["repository"] = self.repository
+        if self.branch is not None:
+            result["branch"] = self.branch
+        return result
+
+
+@dataclass
+class SessionListFilter:
+    """Filter options for listing sessions"""
+
+    cwd: str | None = None  # Filter by exact cwd match
+    gitRoot: str | None = None  # Filter by git root
+    repository: str | None = None  # Filter by repository (owner/repo format)
+    branch: str | None = None  # Filter by branch
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        if self.cwd is not None:
+            result["cwd"] = self.cwd
+        if self.gitRoot is not None:
+            result["gitRoot"] = self.gitRoot
+        if self.repository is not None:
+            result["repository"] = self.repository
+        if self.branch is not None:
+            result["branch"] = self.branch
+        return result
+
+
+@dataclass
+class SessionMetadata:
+    """Metadata about a session"""
+
+    sessionId: str  # Session identifier
+    startTime: str  # ISO 8601 timestamp when session was created
+    modifiedTime: str  # ISO 8601 timestamp when session was last modified
+    isRemote: bool  # Whether the session is remote
+    summary: str | None = None  # Optional summary of the session
+    context: SessionContext | None = None  # Working directory context
+
+    @staticmethod
+    def from_dict(obj: Any) -> SessionMetadata:
+        assert isinstance(obj, dict)
+        sessionId = obj.get("sessionId")
+        startTime = obj.get("startTime")
+        modifiedTime = obj.get("modifiedTime")
+        isRemote = obj.get("isRemote")
+        if sessionId is None or startTime is None or modifiedTime is None or isRemote is None:
+            raise ValueError(
+                f"Missing required fields in SessionMetadata: sessionId={sessionId}, "
+                f"startTime={startTime}, modifiedTime={modifiedTime}, isRemote={isRemote}"
+            )
+        summary = obj.get("summary")
+        context_dict = obj.get("context")
+        context = SessionContext.from_dict(context_dict) if context_dict else None
+        return SessionMetadata(
+            sessionId=str(sessionId),
+            startTime=str(startTime),
+            modifiedTime=str(modifiedTime),
+            isRemote=bool(isRemote),
+            summary=summary,
+            context=context,
+        )
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["sessionId"] = self.sessionId
+        result["startTime"] = self.startTime
+        result["modifiedTime"] = self.modifiedTime
+        result["isRemote"] = self.isRemote
+        if self.summary is not None:
+            result["summary"] = self.summary
+        if self.context is not None:
+            result["context"] = self.context.to_dict()
+        return result
+
+
+# ============================================================================
+# Session Lifecycle Types (for TUI+server mode)
+# ============================================================================
+
+SessionLifecycleEventType = Literal[
+    "session.created",
+    "session.deleted",
+    "session.updated",
+    "session.foreground",
+    "session.background",
+]
+
+
+@dataclass
+class SessionLifecycleEventMetadata:
+    """Metadata for session lifecycle events."""
+
+    startTime: str
+    modifiedTime: str
+    summary: str | None = None
+
+    @staticmethod
+    def from_dict(data: dict) -> SessionLifecycleEventMetadata:
+        return SessionLifecycleEventMetadata(
+            startTime=data.get("startTime", ""),
+            modifiedTime=data.get("modifiedTime", ""),
+            summary=data.get("summary"),
+        )
+
+
+@dataclass
+class SessionLifecycleEvent:
+    """Session lifecycle event notification."""
+
+    type: SessionLifecycleEventType
+    sessionId: str
+    metadata: SessionLifecycleEventMetadata | None = None
+
+    @staticmethod
+    def from_dict(data: dict) -> SessionLifecycleEvent:
+        metadata = None
+        if "metadata" in data and data["metadata"]:
+            metadata = SessionLifecycleEventMetadata.from_dict(data["metadata"])
+        return SessionLifecycleEvent(
+            type=data.get("type", "session.updated"),
+            sessionId=data.get("sessionId", ""),
+            metadata=metadata,
+        )
+
+
+SessionLifecycleHandler = Callable[[SessionLifecycleEvent], None]
+
+HandlerUnsubcribe = Callable[[], None]
+
+NO_RESULT_PERMISSION_V2_ERROR = (
+    "Permission handlers cannot return 'no-result' when connected to a protocol v2 server."
 )
 
 # Minimum protocol version this SDK can communicate with.
@@ -74,6 +791,41 @@ def _get_bundled_cli_path() -> str | None:
     return None
 
 
+def _extract_transform_callbacks(
+    system_message: SystemMessageConfig | dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, SectionTransformFn] | None]:
+    """Extract function-valued actions from system message config.
+
+    Returns a wire-safe payload (with callable actions replaced by ``"transform"``)
+    and a dict of transform callbacks keyed by section ID.
+    """
+    wire_system_message = cast(dict[str, Any] | None, system_message)
+    if (
+        not wire_system_message
+        or wire_system_message.get("mode") != "customize"
+        or not wire_system_message.get("sections")
+    ):
+        return wire_system_message, None
+
+    callbacks: dict[str, SectionTransformFn] = {}
+    wire_sections: dict[str, Any] = {}
+    for section_id, override in wire_system_message["sections"].items():
+        if not override:
+            continue
+        action = override.get("action")
+        if callable(action):
+            callbacks[section_id] = action
+            wire_sections[section_id] = {"action": "transform"}
+        else:
+            wire_sections[section_id] = override
+
+    if not callbacks:
+        return wire_system_message, None
+
+    wire_payload = {**wire_system_message, "sections": wire_sections}
+    return wire_payload, callbacks
+
+
 class CopilotClient:
     """
     Main client for interacting with the Copilot CLI.
@@ -85,129 +837,107 @@ class CopilotClient:
     The client supports both stdio (default) and TCP transport modes for
     communication with the CLI server.
 
-    Attributes:
-        options: The configuration options for the client.
-
     Example:
         >>> # Create a client with default options (spawns CLI server)
         >>> client = CopilotClient()
         >>> await client.start()
         >>>
         >>> # Create a session and send a message
-        >>> session = await client.create_session({
-        ...     "on_permission_request": PermissionHandler.approve_all,
-        ...     "model": "gpt-4",
-        ... })
+        >>> session = await client.create_session(
+        ...     on_permission_request=PermissionHandler.approve_all,
+        ...     model="gpt-4",
+        ... )
         >>> session.on(lambda event: print(event.type))
-        >>> await session.send({"prompt": "Hello!"})
+        >>> await session.send("Hello!")
         >>>
         >>> # Clean up
         >>> await session.disconnect()
         >>> await client.stop()
 
         >>> # Or connect to an existing server
-        >>> client = CopilotClient({"cli_url": "localhost:3000"})
+        >>> client = CopilotClient(ExternalServerConfig(url="localhost:3000"))
     """
 
-    def __init__(self, options: CopilotClientOptions | None = None):
+    def __init__(
+        self,
+        config: SubprocessConfig | ExternalServerConfig | None = None,
+        *,
+        auto_start: bool = True,
+        on_list_models: Callable[[], list[ModelInfo] | Awaitable[list[ModelInfo]]] | None = None,
+    ):
         """
         Initialize a new CopilotClient.
 
         Args:
-            options: Optional configuration options for the client. If not provided,
-                default options are used (spawns CLI server using stdio).
-
-        Raises:
-            ValueError: If mutually exclusive options are provided (e.g., cli_url
-                with use_stdio or cli_path).
+            config: Connection configuration. Pass a :class:`SubprocessConfig` to
+                spawn a local CLI process, or an :class:`ExternalServerConfig` to
+                connect to an existing server. Defaults to ``SubprocessConfig()``.
+            auto_start: Automatically start the connection on first use
+                (default: ``True``).
+            on_list_models: Custom handler for :meth:`list_models`. When provided,
+                the handler is called instead of querying the CLI server.
 
         Example:
-            >>> # Default options - spawns CLI server using stdio
+            >>> # Default — spawns CLI server using stdio
             >>> client = CopilotClient()
             >>>
             >>> # Connect to an existing server
-            >>> client = CopilotClient({"cli_url": "localhost:3000"})
+            >>> client = CopilotClient(ExternalServerConfig(url="localhost:3000"))
             >>>
             >>> # Custom CLI path with specific log level
-            >>> client = CopilotClient({
-            ...     "cli_path": "/usr/local/bin/copilot",
-            ...     "log_level": "debug"
-            ... })
+            >>> client = CopilotClient(
+            ...     SubprocessConfig(
+            ...         cli_path="/usr/local/bin/copilot",
+            ...         log_level="debug",
+            ...     )
+            ... )
         """
-        opts = options or {}
+        if config is None:
+            config = SubprocessConfig()
 
-        injected_process = opts.get("process")
+        self._config: SubprocessConfig | ExternalServerConfig = config
+        self._auto_start = auto_start
+        self._on_list_models = on_list_models
 
-        # Validate mutually exclusive options
-        if opts.get("cli_url") and (opts.get("use_stdio") or opts.get("cli_path") or injected_process is not None):
-            raise ValueError("cli_url is mutually exclusive with use_stdio and cli_path")
-        if injected_process is not None and opts.get("cli_path"):
-            raise ValueError("process is mutually exclusive with cli_path")
-
-        # Validate auth options with external server
-        if opts.get("cli_url") and (
-            opts.get("github_token") or opts.get("use_logged_in_user") is not None
-        ):
-            raise ValueError(
-                "github_token and use_logged_in_user cannot be used with cli_url "
-                "(external server manages its own auth)"
-            )
-
-        # Parse cli_url if provided
+        # Resolve connection-mode-specific state
         self._actual_host: str = "localhost"
-        self._is_external_server: bool = False
-        if opts.get("cli_url"):
-            self._actual_host, actual_port = self._parse_cli_url(opts["cli_url"])
+        self._is_external_server: bool = isinstance(config, ExternalServerConfig)
+
+        if isinstance(config, ExternalServerConfig):
+            self._actual_host, actual_port = self._parse_cli_url(config.url)
             self._actual_port: int | None = actual_port
-            self._is_external_server = True
         else:
             self._actual_port = None
+            injected_process = config.process
+            if injected_process is not None:
+                if config.cli_path is not None:
+                    raise ValueError("SubprocessConfig.process is mutually exclusive with cli_path")
+                if not config.use_stdio:
+                    raise ValueError("SubprocessConfig.process requires use_stdio=True")
+                if config.port:
+                    raise ValueError("SubprocessConfig.process is mutually exclusive with port")
 
-        # Determine CLI path: explicit option > bundled binary
-        # Not needed when connecting to external server via cli_url
-        if opts.get("cli_url"):
-            default_cli_path = ""  # Not used for external server
-        elif injected_process is not None:
-            default_cli_path = ""
-        elif opts.get("cli_path"):
-            default_cli_path = opts["cli_path"]
-        else:
-            bundled_path = _get_bundled_cli_path()
-            if bundled_path:
-                default_cli_path = bundled_path
-            else:
-                raise RuntimeError(
-                    "Copilot CLI not found. The bundled CLI binary is not available. "
-                    "Ensure you installed a platform-specific wheel, or provide cli_path."
-                )
+            # Resolve CLI path: explicit > COPILOT_CLI_PATH env var > bundled binary
+            effective_env = config.env if config.env is not None else os.environ
+            if config.cli_path is None and injected_process is None:
+                env_cli_path = effective_env.get("COPILOT_CLI_PATH")
+                if env_cli_path:
+                    config.cli_path = env_cli_path
+                else:
+                    bundled_path = _get_bundled_cli_path()
+                    if bundled_path:
+                        config.cli_path = bundled_path
+                    else:
+                        raise RuntimeError(
+                            "Copilot CLI not found. The bundled CLI binary is not available. "
+                            "Ensure you installed a platform-specific wheel, or provide cli_path."
+                        )
 
-        # Default use_logged_in_user to False when github_token is provided
-        github_token = opts.get("github_token")
-        use_logged_in_user = opts.get("use_logged_in_user")
-        if use_logged_in_user is None:
-            use_logged_in_user = False if github_token else True
+            # Resolve use_logged_in_user default
+            if config.use_logged_in_user is None:
+                config.use_logged_in_user = not bool(config.github_token)
 
-        self.options: CopilotClientOptions = {
-            "cli_path": default_cli_path,
-            "cwd": opts.get("cwd", os.getcwd()),
-            "port": opts.get("port", 0),
-            "use_stdio": False if opts.get("cli_url") else opts.get("use_stdio", True),
-            "log_level": opts.get("log_level", "info"),
-            "auto_start": opts.get("auto_start", True),
-            "auto_restart": opts.get("auto_restart", True),
-            "use_logged_in_user": use_logged_in_user,
-        }
-        if opts.get("cli_args"):
-            self.options["cli_args"] = opts["cli_args"]
-        if opts.get("cli_url"):
-            self.options["cli_url"] = opts["cli_url"]
-        if opts.get("env"):
-            self.options["env"] = opts["env"]
-        if github_token:
-            self.options["github_token"] = github_token
-        if injected_process is not None:
-            self.options["process"] = injected_process
-
+        injected_process = config.process if isinstance(config, SubprocessConfig) else None
         self._process: Any | None = injected_process
         self._owns_process = injected_process is None and not self._is_external_server
         self._client: JsonRpcClient | None = None
@@ -223,6 +953,9 @@ class CopilotClient:
         self._lifecycle_handlers_lock = threading.Lock()
         self._rpc: ServerRpc | None = None
         self._negotiated_protocol_version: int | None = None
+        if config.session_fs is not None:
+            _validate_session_fs_config(config.session_fs)
+        self._session_fs_config = config.session_fs
 
     @property
     def rpc(self) -> ServerRpc:
@@ -285,12 +1018,45 @@ class CopilotClient:
 
         return (host, port)
 
+    async def __aenter__(self) -> CopilotClient:
+        """
+        Enter the async context manager.
+
+        Automatically starts the CLI server and establishes a connection if not
+        already connected.
+
+        Returns:
+            The CopilotClient instance.
+
+        Example:
+            >>> async with CopilotClient() as client:
+            ...     session = await client.create_session()
+            ...     await session.send("Hello!")
+        """
+        await self.start()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> None:
+        """
+        Exit the async context manager.
+
+        Performs graceful cleanup by destroying all active sessions and stopping
+        the CLI server.
+        """
+        await self.stop()
+
     async def start(self) -> None:
         """
         Start the CLI server and establish a connection.
 
-        If connecting to an external server (via cli_url), only establishes the
-        connection. Otherwise, spawns the CLI server process and then connects.
+        If connecting to an external server (via :class:`ExternalServerConfig`),
+        only establishes the connection. Otherwise, spawns the CLI server process
+        and then connects.
 
         This method is called automatically when creating a session if ``auto_start``
         is True (default).
@@ -299,7 +1065,7 @@ class CopilotClient:
             RuntimeError: If the server fails to start or the connection fails.
 
         Example:
-            >>> client = CopilotClient({"auto_start": False})
+            >>> client = CopilotClient(auto_start=False)
             >>> await client.start()
             >>> # Now ready to create sessions
         """
@@ -319,6 +1085,9 @@ class CopilotClient:
             # Verify protocol version compatibility
             await self._verify_protocol_version()
 
+            if self._session_fs_config:
+                await self._set_session_fs_provider()
+
             self._state = "connected"
         except ProcessExitedError as e:
             # Process exited with error - reraise as RuntimeError with stderr
@@ -336,6 +1105,13 @@ class CopilotClient:
                             f"CLI process exited with code {return_code}\nstderr: {stderr_output}"
                         ) from e
             raise
+
+    async def _close_process_streams(self) -> None:
+        if self._process is None or not hasattr(self._process, "close_streams"):
+            return
+        maybe_close = self._process.close_streams()
+        if inspect.isawaitable(maybe_close):
+            await maybe_close
 
     async def stop(self) -> None:
         """
@@ -376,10 +1152,7 @@ class CopilotClient:
                     StopError(message=f"Failed to disconnect session {session.session_id}: {e}")
                 )
 
-        if self._process and hasattr(self._process, "close_streams"):
-            maybe_close = self._process.close_streams()
-            if inspect.isawaitable(maybe_close):
-                await maybe_close
+        await self._close_process_streams()
 
         # Close client
         if self._client:
@@ -427,10 +1200,7 @@ class CopilotClient:
         with self._sessions_lock:
             self._sessions.clear()
 
-        if self._process and hasattr(self._process, "close_streams"):
-            maybe_close = self._process.close_streams()
-            if inspect.isawaitable(maybe_close):
-                await maybe_close
+        await self._close_process_streams()
 
         # Close the transport first to signal the server immediately.
         # For external servers (TCP), this closes the socket.
@@ -441,8 +1211,6 @@ class CopilotClient:
                     self._process.terminate()  # closes the TCP socket
                 elif self._owns_process:
                     self._process.kill()
-                else:
-                    pass
             except Exception:
                 pass
             self._process = None
@@ -464,7 +1232,38 @@ class CopilotClient:
         if not self._is_external_server:
             self._actual_port = None
 
-    async def create_session(self, config: SessionConfig) -> CopilotSession:
+    async def create_session(
+        self,
+        *,
+        on_permission_request: _PermissionHandlerFn,
+        model: str | None = None,
+        session_id: str | None = None,
+        client_name: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        tools: list[Tool] | None = None,
+        system_message: SystemMessageConfig | None = None,
+        available_tools: list[str] | None = None,
+        excluded_tools: list[str] | None = None,
+        on_user_input_request: UserInputHandler | None = None,
+        hooks: SessionHooks | None = None,
+        working_directory: str | None = None,
+        provider: ProviderConfig | None = None,
+        model_capabilities: ModelCapabilitiesOverride | None = None,
+        streaming: bool | None = None,
+        include_sub_agent_streaming_events: bool | None = None,
+        mcp_servers: dict[str, MCPServerConfig] | None = None,
+        custom_agents: list[CustomAgentConfig] | None = None,
+        agent: str | None = None,
+        config_dir: str | None = None,
+        enable_config_discovery: bool | None = None,
+        skill_directories: list[str] | None = None,
+        disabled_skills: list[str] | None = None,
+        infinite_sessions: InfiniteSessionConfig | None = None,
+        on_event: Callable[[SessionEvent], None] | None = None,
+        commands: list[CommandDefinition] | None = None,
+        on_elicitation_request: ElicitationHandler | None = None,
+        create_session_fs_handler: CreateSessionFsHandler | None = None,
+    ) -> CopilotSession:
         """
         Create a new conversation session with the Copilot CLI.
 
@@ -473,44 +1272,74 @@ class CopilotClient:
         automatically start the connection.
 
         Args:
-            config: Optional configuration for the session, including model selection,
-                custom tools, system messages, and more.
+            on_permission_request: Handler for permission requests. Use
+                ``PermissionHandler.approve_all`` to allow all permissions.
+            model: The model to use for the session (e.g. ``"gpt-4"``).
+            session_id: Optional session ID. If not provided, a UUID is generated.
+            client_name: Optional client name for identification.
+            reasoning_effort: Reasoning effort level for the model.
+            tools: Custom tools to register with the session.
+            system_message: System message configuration.
+            available_tools: Allowlist of built-in tools to enable.
+            excluded_tools: List of built-in tools to disable.
+            on_user_input_request: Handler for user input requests.
+            hooks: Lifecycle hooks for the session.
+            working_directory: Working directory for the session.
+            provider: Provider configuration for Azure or custom endpoints.
+            model_capabilities: Override individual model capabilities resolved by the runtime.
+            streaming: Whether to enable streaming responses.
+            include_sub_agent_streaming_events: Whether to include sub-agent streaming
+                delta events (e.g., ``assistant.message_delta``,
+                ``assistant.reasoning_delta``, ``assistant.streaming_delta`` with
+                ``agentId`` set). When False, only non-streaming sub-agent events and
+                ``subagent.*`` lifecycle events are forwarded. Defaults to True.
+            mcp_servers: MCP server configurations.
+            custom_agents: Custom agent configurations.
+            agent: Agent to use for the session.
+            config_dir: Override for the configuration directory.
+            enable_config_discovery: When True, automatically discovers MCP server
+                configurations (e.g. ``.mcp.json``, ``.vscode/mcp.json``) and skill
+                directories from the working directory and merges them with any
+                explicitly provided ``mcp_servers`` and ``skill_directories``, with
+                explicit values taking precedence on name collision. Custom instruction
+                files (``.github/copilot-instructions.md``, ``AGENTS.md``, etc.) are
+                always loaded regardless of this setting.
+            skill_directories: Directories to search for skills.
+            disabled_skills: Skills to disable.
+            infinite_sessions: Infinite session configuration.
+            on_event: Callback for session events.
 
         Returns:
             A :class:`CopilotSession` instance for the new session.
 
         Raises:
             RuntimeError: If the client is not connected and auto_start is disabled.
+            ValueError: If ``on_permission_request`` is not a valid callable.
 
         Example:
-            >>> # Basic session
-            >>> config = {"on_permission_request": PermissionHandler.approve_all}
-            >>> session = await client.create_session(config)
+            >>> session = await client.create_session(
+            ...     on_permission_request=PermissionHandler.approve_all,
+            ... )
             >>>
             >>> # Session with model and streaming
-            >>> session = await client.create_session({
-            ...     "on_permission_request": PermissionHandler.approve_all,
-            ...     "model": "gpt-4",
-            ...     "streaming": True
-            ... })
+            >>> session = await client.create_session(
+            ...     on_permission_request=PermissionHandler.approve_all,
+            ...     model="gpt-4",
+            ...     streaming=True,
+            ... )
         """
+        if not on_permission_request or not callable(on_permission_request):
+            raise ValueError(
+                "A valid on_permission_request handler is required. "
+                "Use PermissionHandler.approve_all or provide a custom handler."
+            )
         if not self._client:
-            if self.options["auto_start"]:
+            if self._auto_start:
                 await self.start()
             else:
                 raise RuntimeError("Client not connected. Call start() first.")
 
-        cfg = config
-
-        if not cfg.get("on_permission_request"):
-            raise ValueError(
-                "An on_permission_request handler is required when creating a session. "
-                "For example, to allow all permissions, use "
-                '{"on_permission_request": PermissionHandler.approve_all}.'
-            )
-
         tool_defs = []
-        tools = cfg.get("tools")
         if tools:
             for tool in tools:
                 definition: dict[str, Any] = {
@@ -521,92 +1350,104 @@ class CopilotClient:
                     definition["parameters"] = tool.parameters
                 if tool.overrides_built_in_tool:
                     definition["overridesBuiltInTool"] = True
+                if tool.skip_permission:
+                    definition["skipPermission"] = True
                 tool_defs.append(definition)
 
         payload: dict[str, Any] = {}
-        if cfg.get("model"):
-            payload["model"] = cfg["model"]
-        if cfg.get("session_id"):
-            payload["sessionId"] = cfg["session_id"]
-        if cfg.get("client_name"):
-            payload["clientName"] = cfg["client_name"]
-        if cfg.get("reasoning_effort"):
-            payload["reasoningEffort"] = cfg["reasoning_effort"]
+        if model:
+            payload["model"] = model
+        if client_name:
+            payload["clientName"] = client_name
+        if reasoning_effort:
+            payload["reasoningEffort"] = reasoning_effort
         if tool_defs:
             payload["tools"] = tool_defs
 
-        # Add system message configuration if provided
-        system_message = cfg.get("system_message")
-        if system_message:
-            payload["systemMessage"] = system_message
+        wire_system_message, transform_callbacks = _extract_transform_callbacks(system_message)
+        if wire_system_message:
+            payload["systemMessage"] = wire_system_message
 
-        # Add tool filtering options
-        available_tools = cfg.get("available_tools")
         if available_tools is not None:
             payload["availableTools"] = available_tools
-        excluded_tools = cfg.get("excluded_tools")
         if excluded_tools is not None:
             payload["excludedTools"] = excluded_tools
 
-        # Always enable permission request callback (deny by default if no handler provided)
-        on_permission_request = cfg.get("on_permission_request")
+        # Always enable permission request callback
         payload["requestPermission"] = True
 
         # Enable user input request callback if handler provided
-        on_user_input_request = cfg.get("on_user_input_request")
         if on_user_input_request:
             payload["requestUserInput"] = True
 
+        # Enable elicitation request callback if handler provided
+        payload["requestElicitation"] = bool(on_elicitation_request)
+
+        # Serialize commands (name + description only) into payload
+        if commands:
+            payload["commands"] = [
+                {"name": cmd.name, "description": cmd.description} for cmd in commands
+            ]
+
         # Enable hooks callback if any hook handler provided
-        hooks = cfg.get("hooks")
         if hooks and any(hooks.values()):
             payload["hooks"] = True
 
         # Add working directory if provided
-        working_directory = cfg.get("working_directory")
         if working_directory:
             payload["workingDirectory"] = working_directory
 
         # Add streaming option if provided
-        streaming = cfg.get("streaming")
         if streaming is not None:
             payload["streaming"] = streaming
 
+        # Include sub-agent streaming events (defaults to True)
+        payload["includeSubAgentStreamingEvents"] = (
+            include_sub_agent_streaming_events
+            if include_sub_agent_streaming_events is not None
+            else True
+        )
+
         # Add provider configuration if provided
-        provider = cfg.get("provider")
         if provider:
             payload["provider"] = self._convert_provider_to_wire_format(provider)
 
+        # Add model capabilities override if provided
+        if model_capabilities:
+            payload["modelCapabilities"] = _capabilities_to_dict(model_capabilities)
+
         # Add MCP servers configuration if provided
-        mcp_servers = cfg.get("mcp_servers")
         if mcp_servers:
             payload["mcpServers"] = mcp_servers
         payload["envValueMode"] = "direct"
 
         # Add custom agents configuration if provided
-        custom_agents = cfg.get("custom_agents")
         if custom_agents:
             payload["customAgents"] = [
                 self._convert_custom_agent_to_wire_format(agent) for agent in custom_agents
             ]
 
+        # Add agent selection if provided
+        if agent:
+            payload["agent"] = agent
+
         # Add config directory override if provided
-        config_dir = cfg.get("config_dir")
         if config_dir:
             payload["configDir"] = config_dir
 
+        # Add config discovery flag if provided
+        if enable_config_discovery is not None:
+            payload["enableConfigDiscovery"] = enable_config_discovery
+
         # Add skill directories configuration if provided
-        skill_directories = cfg.get("skill_directories")
         if skill_directories:
             payload["skillDirectories"] = skill_directories
 
         # Add disabled skills configuration if provided
-        disabled_skills = cfg.get("disabled_skills")
         if disabled_skills:
             payload["disabledSkills"] = disabled_skills
 
         # Add infinite sessions configuration if provided
-        infinite_sessions = cfg.get("infinite_sessions")
         if infinite_sessions:
             wire_config: dict[str, Any] = {}
             if "enabled" in infinite_sessions:
@@ -623,23 +1464,84 @@ class CopilotClient:
 
         if not self._client:
             raise RuntimeError("Client not connected")
-        response = await self._client.request("session.create", payload)
 
-        session_id = response["sessionId"]
-        workspace_path = response.get("workspacePath")
-        session = CopilotSession(session_id, self._client, workspace_path)
+        actual_session_id = session_id or str(uuid.uuid4())
+        payload["sessionId"] = actual_session_id
+
+        # Propagate W3C Trace Context to CLI if OpenTelemetry is active
+        trace_ctx = get_trace_context()
+        payload.update(trace_ctx)
+
+        # Create and register the session before issuing the RPC so that
+        # events emitted by the CLI (e.g. session.start) are not dropped.
+        session = CopilotSession(actual_session_id, self._client, workspace_path=None)
+        if self._session_fs_config:
+            if create_session_fs_handler is None:
+                raise ValueError(
+                    "create_session_fs_handler is required in session config when "
+                    "session_fs is enabled in client options."
+                )
+            session._client_session_apis.session_fs = create_session_fs_handler(session)
         session._register_tools(tools)
+        session._register_commands(commands)
         session._register_permission_handler(on_permission_request)
         if on_user_input_request:
             session._register_user_input_handler(on_user_input_request)
+        if on_elicitation_request:
+            session._register_elicitation_handler(on_elicitation_request)
         if hooks:
             session._register_hooks(hooks)
+        if transform_callbacks:
+            session._register_transform_callbacks(transform_callbacks)
+        if on_event:
+            session.on(on_event)
         with self._sessions_lock:
-            self._sessions[session_id] = session
+            self._sessions[actual_session_id] = session
+
+        try:
+            response = await self._client.request("session.create", payload)
+            session._workspace_path = response.get("workspacePath")
+            capabilities = response.get("capabilities")
+            session._set_capabilities(capabilities)
+        except BaseException:
+            with self._sessions_lock:
+                self._sessions.pop(actual_session_id, None)
+            raise
 
         return session
 
-    async def resume_session(self, session_id: str, config: ResumeSessionConfig) -> CopilotSession:
+    async def resume_session(
+        self,
+        session_id: str,
+        *,
+        on_permission_request: _PermissionHandlerFn,
+        model: str | None = None,
+        client_name: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        tools: list[Tool] | None = None,
+        system_message: SystemMessageConfig | None = None,
+        available_tools: list[str] | None = None,
+        excluded_tools: list[str] | None = None,
+        on_user_input_request: UserInputHandler | None = None,
+        hooks: SessionHooks | None = None,
+        working_directory: str | None = None,
+        provider: ProviderConfig | None = None,
+        model_capabilities: ModelCapabilitiesOverride | None = None,
+        streaming: bool | None = None,
+        include_sub_agent_streaming_events: bool | None = None,
+        mcp_servers: dict[str, MCPServerConfig] | None = None,
+        custom_agents: list[CustomAgentConfig] | None = None,
+        agent: str | None = None,
+        config_dir: str | None = None,
+        enable_config_discovery: bool | None = None,
+        skill_directories: list[str] | None = None,
+        disabled_skills: list[str] | None = None,
+        infinite_sessions: InfiniteSessionConfig | None = None,
+        on_event: Callable[[SessionEvent], None] | None = None,
+        commands: list[CommandDefinition] | None = None,
+        on_elicitation_request: ElicitationHandler | None = None,
+        create_session_fs_handler: CreateSessionFsHandler | None = None,
+    ) -> CopilotSession:
         """
         Resume an existing conversation session by its ID.
 
@@ -649,42 +1551,74 @@ class CopilotClient:
 
         Args:
             session_id: The ID of the session to resume.
-            config: Optional configuration for the resumed session.
+            on_permission_request: Handler for permission requests. Use
+                ``PermissionHandler.approve_all`` to allow all permissions.
+            model: The model to use for the resumed session.
+            client_name: Optional client name for identification.
+            reasoning_effort: Reasoning effort level for the model.
+            tools: Custom tools to register with the session.
+            system_message: System message configuration.
+            available_tools: Allowlist of built-in tools to enable.
+            excluded_tools: List of built-in tools to disable.
+            on_user_input_request: Handler for user input requests.
+            hooks: Lifecycle hooks for the session.
+            working_directory: Working directory for the session.
+            provider: Provider configuration for Azure or custom endpoints.
+            model_capabilities: Override individual model capabilities resolved by the runtime.
+            streaming: Whether to enable streaming responses.
+            include_sub_agent_streaming_events: Whether to include sub-agent streaming
+                delta events (e.g., ``assistant.message_delta``,
+                ``assistant.reasoning_delta``, ``assistant.streaming_delta`` with
+                ``agentId`` set). When False, only non-streaming sub-agent events and
+                ``subagent.*`` lifecycle events are forwarded. Defaults to True.
+            mcp_servers: MCP server configurations.
+            custom_agents: Custom agent configurations.
+            agent: Agent to use for the session.
+            config_dir: Override for the configuration directory.
+            enable_config_discovery: When True, automatically discovers MCP server
+                configurations (e.g. ``.mcp.json``, ``.vscode/mcp.json``) and skill
+                directories from the working directory and merges them with any
+                explicitly provided ``mcp_servers`` and ``skill_directories``, with
+                explicit values taking precedence on name collision. Custom instruction
+                files (``.github/copilot-instructions.md``, ``AGENTS.md``, etc.) are
+                always loaded regardless of this setting.
+            skill_directories: Directories to search for skills.
+            disabled_skills: Skills to disable.
+            infinite_sessions: Infinite session configuration.
+            on_event: Callback for session events.
 
         Returns:
             A :class:`CopilotSession` instance for the resumed session.
 
         Raises:
             RuntimeError: If the session does not exist or the client is not connected.
+            ValueError: If ``on_permission_request`` is not a valid callable.
 
         Example:
-            >>> # Resume a previous session
-            >>> config = {"on_permission_request": PermissionHandler.approve_all}
-            >>> session = await client.resume_session("session-123", config)
+            >>> session = await client.resume_session(
+            ...     "session-123",
+            ...     on_permission_request=PermissionHandler.approve_all,
+            ... )
             >>>
             >>> # Resume with new tools
-            >>> session = await client.resume_session("session-123", {
-            ...     "on_permission_request": PermissionHandler.approve_all,
-            ...     "tools": [my_new_tool]
-            ... })
+            >>> session = await client.resume_session(
+            ...     "session-123",
+            ...     on_permission_request=PermissionHandler.approve_all,
+            ...     tools=[my_new_tool],
+            ... )
         """
+        if not on_permission_request or not callable(on_permission_request):
+            raise ValueError(
+                "A valid on_permission_request handler is required. "
+                "Use PermissionHandler.approve_all or provide a custom handler."
+            )
         if not self._client:
-            if self.options["auto_start"]:
+            if self._auto_start:
                 await self.start()
             else:
                 raise RuntimeError("Client not connected. Call start() first.")
 
-        cfg = config
-
-        if not cfg.get("on_permission_request"):
-            raise ValueError(
-                "An on_permission_request handler is required when resuming a session. "
-                "For example, to allow all permissions, use "
-                '{"on_permission_request": PermissionHandler.approve_all}.'
-            )
-
         tool_defs = []
-        tools = cfg.get("tools")
         if tools:
             for tool in tools:
                 definition: dict[str, Any] = {
@@ -695,102 +1629,83 @@ class CopilotClient:
                     definition["parameters"] = tool.parameters
                 if tool.overrides_built_in_tool:
                     definition["overridesBuiltInTool"] = True
+                if tool.skip_permission:
+                    definition["skipPermission"] = True
                 tool_defs.append(definition)
 
         payload: dict[str, Any] = {"sessionId": session_id}
 
-        # Add client name if provided
-        client_name = cfg.get("client_name")
         if client_name:
             payload["clientName"] = client_name
-
-        # Add model if provided
-        model = cfg.get("model")
         if model:
             payload["model"] = model
-
-        if cfg.get("reasoning_effort"):
-            payload["reasoningEffort"] = cfg["reasoning_effort"]
+        if reasoning_effort:
+            payload["reasoningEffort"] = reasoning_effort
         if tool_defs:
             payload["tools"] = tool_defs
-
-        # Add system message configuration if provided
-        system_message = cfg.get("system_message")
-        if system_message:
-            payload["systemMessage"] = system_message
-
-        # Add available/excluded tools if provided
-        available_tools = cfg.get("available_tools")
+        wire_system_message, transform_callbacks = _extract_transform_callbacks(system_message)
+        if wire_system_message:
+            payload["systemMessage"] = wire_system_message
         if available_tools is not None:
             payload["availableTools"] = available_tools
-
-        excluded_tools = cfg.get("excluded_tools")
         if excluded_tools is not None:
             payload["excludedTools"] = excluded_tools
-
-        provider = cfg.get("provider")
         if provider:
             payload["provider"] = self._convert_provider_to_wire_format(provider)
-
-        # Add streaming option if provided
-        streaming = cfg.get("streaming")
+        if model_capabilities:
+            payload["modelCapabilities"] = _capabilities_to_dict(model_capabilities)
         if streaming is not None:
             payload["streaming"] = streaming
 
-        # Always enable permission request callback (deny by default if no handler provided)
-        on_permission_request = cfg.get("on_permission_request")
+        # Include sub-agent streaming events (defaults to True)
+        payload["includeSubAgentStreamingEvents"] = (
+            include_sub_agent_streaming_events
+            if include_sub_agent_streaming_events is not None
+            else True
+        )
+
+        # Always enable permission request callback
         payload["requestPermission"] = True
 
-        # Enable user input request callback if handler provided
-        on_user_input_request = cfg.get("on_user_input_request")
         if on_user_input_request:
             payload["requestUserInput"] = True
 
-        # Enable hooks callback if any hook handler provided
-        hooks = cfg.get("hooks")
+        # Enable elicitation request callback if handler provided
+        payload["requestElicitation"] = bool(on_elicitation_request)
+
+        # Serialize commands (name + description only) into payload
+        if commands:
+            payload["commands"] = [
+                {"name": cmd.name, "description": cmd.description} for cmd in commands
+            ]
+
         if hooks and any(hooks.values()):
             payload["hooks"] = True
 
-        # Add working directory if provided
-        working_directory = cfg.get("working_directory")
         if working_directory:
             payload["workingDirectory"] = working_directory
-
-        # Add config directory if provided
-        config_dir = cfg.get("config_dir")
         if config_dir:
             payload["configDir"] = config_dir
+        if enable_config_discovery is not None:
+            payload["enableConfigDiscovery"] = enable_config_discovery
 
-        # Add disable resume flag if provided
-        disable_resume = cfg.get("disable_resume")
-        if disable_resume:
-            payload["disableResume"] = True
-
-        # Add MCP servers configuration if provided
-        mcp_servers = cfg.get("mcp_servers")
+        # TODO: disable_resume is not a keyword arg yet; keeping for future use
         if mcp_servers:
             payload["mcpServers"] = mcp_servers
         payload["envValueMode"] = "direct"
 
-        # Add custom agents configuration if provided
-        custom_agents = cfg.get("custom_agents")
         if custom_agents:
             payload["customAgents"] = [
-                self._convert_custom_agent_to_wire_format(agent) for agent in custom_agents
+                self._convert_custom_agent_to_wire_format(a) for a in custom_agents
             ]
 
-        # Add skill directories configuration if provided
-        skill_directories = cfg.get("skill_directories")
+        if agent:
+            payload["agent"] = agent
         if skill_directories:
             payload["skillDirectories"] = skill_directories
-
-        # Add disabled skills configuration if provided
-        disabled_skills = cfg.get("disabled_skills")
         if disabled_skills:
             payload["disabledSkills"] = disabled_skills
 
-        # Add infinite sessions configuration if provided
-        infinite_sessions = cfg.get("infinite_sessions")
         if infinite_sessions:
             wire_config: dict[str, Any] = {}
             if "enabled" in infinite_sessions:
@@ -807,19 +1722,46 @@ class CopilotClient:
 
         if not self._client:
             raise RuntimeError("Client not connected")
-        response = await self._client.request("session.resume", payload)
 
-        resumed_session_id = response["sessionId"]
-        workspace_path = response.get("workspacePath")
-        session = CopilotSession(resumed_session_id, self._client, workspace_path)
-        session._register_tools(cfg.get("tools"))
+        # Propagate W3C Trace Context to CLI if OpenTelemetry is active
+        trace_ctx = get_trace_context()
+        payload.update(trace_ctx)
+
+        # Create and register the session before issuing the RPC so that
+        # events emitted by the CLI (e.g. session.start) are not dropped.
+        session = CopilotSession(session_id, self._client, workspace_path=None)
+        if self._session_fs_config:
+            if create_session_fs_handler is None:
+                raise ValueError(
+                    "create_session_fs_handler is required in session config when "
+                    "session_fs is enabled in client options."
+                )
+            session._client_session_apis.session_fs = create_session_fs_handler(session)
+        session._register_tools(tools)
+        session._register_commands(commands)
         session._register_permission_handler(on_permission_request)
         if on_user_input_request:
             session._register_user_input_handler(on_user_input_request)
+        if on_elicitation_request:
+            session._register_elicitation_handler(on_elicitation_request)
         if hooks:
             session._register_hooks(hooks)
+        if transform_callbacks:
+            session._register_transform_callbacks(transform_callbacks)
+        if on_event:
+            session.on(on_event)
         with self._sessions_lock:
-            self._sessions[resumed_session_id] = session
+            self._sessions[session_id] = session
+
+        try:
+            response = await self._client.request("session.resume", payload)
+            session._workspace_path = response.get("workspacePath")
+            capabilities = response.get("capabilities")
+            session._set_capabilities(capabilities)
+        except BaseException:
+            with self._sessions_lock:
+                self._sessions.pop(session_id, None)
+            raise
 
         return session
 
@@ -837,7 +1779,7 @@ class CopilotClient:
         """
         return self._state
 
-    async def ping(self, message: str | None = None) -> "PingResponse":
+    async def ping(self, message: str | None = None) -> PingResponse:
         """
         Send a ping request to the server to verify connectivity.
 
@@ -860,7 +1802,7 @@ class CopilotClient:
         result = await self._client.request("ping", {"message": message})
         return PingResponse.from_dict(result)
 
-    async def get_status(self) -> "GetStatusResponse":
+    async def get_status(self) -> GetStatusResponse:
         """
         Get CLI status including version and protocol information.
 
@@ -880,7 +1822,7 @@ class CopilotClient:
         result = await self._client.request("status.get", {})
         return GetStatusResponse.from_dict(result)
 
-    async def get_auth_status(self) -> "GetAuthStatusResponse":
+    async def get_auth_status(self) -> GetAuthStatusResponse:
         """
         Get current authentication status.
 
@@ -901,18 +1843,22 @@ class CopilotClient:
         result = await self._client.request("auth.getStatus", {})
         return GetAuthStatusResponse.from_dict(result)
 
-    async def list_models(self) -> list["ModelInfo"]:
+    async def list_models(self) -> list[ModelInfo]:
         """
         List available models with their metadata.
 
         Results are cached after the first successful call to avoid rate limiting.
         The cache is cleared when the client disconnects.
 
+        If a custom ``on_list_models`` handler was provided in the client options,
+        it is called instead of querying the CLI server. The handler may be sync
+        or async.
+
         Returns:
             A list of ModelInfo objects with model details.
 
         Raises:
-            RuntimeError: If the client is not connected.
+            RuntimeError: If the client is not connected (when no custom handler is set).
             Exception: If not authenticated.
 
         Example:
@@ -920,28 +1866,34 @@ class CopilotClient:
             >>> for model in models:
             ...     print(f"{model.id}: {model.name}")
         """
-        if not self._client:
-            raise RuntimeError("Client not connected")
-
         # Use asyncio lock to prevent race condition with concurrent calls
         async with self._models_cache_lock:
             # Check cache (already inside lock)
             if self._models_cache is not None:
                 return list(self._models_cache)  # Return a copy to prevent cache mutation
 
-            # Cache miss - fetch from backend while holding lock
-            response = await self._client.request("models.list", {})
-            models_data = response.get("models", [])
-            models = [ModelInfo.from_dict(model) for model in models_data]
+            if self._on_list_models:
+                # Use custom handler instead of CLI RPC
+                result = self._on_list_models()
+                if inspect.isawaitable(result):
+                    models = cast(list[ModelInfo], await result)
+                else:
+                    models = cast(list[ModelInfo], result)
+            else:
+                if not self._client:
+                    raise RuntimeError("Client not connected")
 
-            # Update cache before releasing lock
-            self._models_cache = models
+                # Cache miss - fetch from backend while holding lock
+                response = await self._client.request("models.list", {})
+                models_data = response.get("models", [])
+                models = [ModelInfo.from_dict(model) for model in models_data]
+
+            # Update cache before releasing lock (copy to prevent external mutation)
+            self._models_cache = list(models)
 
             return list(models)  # Return a copy to prevent cache mutation
 
-    async def list_sessions(
-        self, filter: "SessionListFilter | None" = None
-    ) -> list["SessionMetadata"]:
+    async def list_sessions(self, filter: SessionListFilter | None = None) -> list[SessionMetadata]:
         """
         List all available sessions known to the server.
 
@@ -962,7 +1914,7 @@ class CopilotClient:
             >>> for session in sessions:
             ...     print(f"Session: {session.sessionId}")
             >>> # Filter sessions by repository
-            >>> from copilot import SessionListFilter
+            >>> from copilot.client import SessionListFilter
             >>> filtered = await client.list_sessions(SessionListFilter(repository="owner/repo"))
         """
         if not self._client:
@@ -975,6 +1927,36 @@ class CopilotClient:
         response = await self._client.request("session.list", payload)
         sessions_data = response.get("sessions", [])
         return [SessionMetadata.from_dict(session) for session in sessions_data]
+
+    async def get_session_metadata(self, session_id: str) -> SessionMetadata | None:
+        """
+        Get metadata for a specific session by ID.
+
+        This provides an efficient O(1) lookup of a single session's metadata
+        instead of listing all sessions. Returns None if the session is not found.
+
+        Args:
+            session_id: The ID of the session to look up.
+
+        Returns:
+            A SessionMetadata object, or None if the session was not found.
+
+        Raises:
+            RuntimeError: If the client is not connected.
+
+        Example:
+            >>> metadata = await client.get_session_metadata("session-123")
+            >>> if metadata:
+            ...     print(f"Session started at: {metadata.startTime}")
+        """
+        if not self._client:
+            raise RuntimeError("Client not connected")
+
+        response = await self._client.request("session.getMetadata", {"sessionId": session_id})
+        session_data = response.get("session")
+        if session_data is None:
+            return None
+        return SessionMetadata.from_dict(session_data)
 
     async def delete_session(self, session_id: str) -> None:
         """
@@ -1084,11 +2066,20 @@ class CopilotClient:
             error = response.get("error", "Unknown error")
             raise RuntimeError(f"Failed to set foreground session: {error}")
 
+    @overload
+    def on(self, handler: SessionLifecycleHandler, /) -> HandlerUnsubcribe: ...
+
+    @overload
+    def on(
+        self, event_type: SessionLifecycleEventType, /, handler: SessionLifecycleHandler
+    ) -> HandlerUnsubcribe: ...
+
     def on(
         self,
         event_type_or_handler: SessionLifecycleEventType | SessionLifecycleHandler,
+        /,
         handler: SessionLifecycleHandler | None = None,
-    ) -> Callable[[], None]:
+    ) -> HandlerUnsubcribe:
         """
         Subscribe to session lifecycle events.
 
@@ -1213,6 +2204,8 @@ class CopilotClient:
             wire_provider["wireApi"] = provider["wire_api"]
         if "bearer_token" in provider:
             wire_provider["bearerToken"] = provider["bearer_token"]
+        if "headers" in provider:
+            wire_provider["headers"] = provider["headers"]
         if "azure" in provider:
             azure = provider["azure"]
             wire_azure: dict[str, Any] = {}
@@ -1245,6 +2238,8 @@ class CopilotClient:
             wire_agent["mcpServers"] = agent["mcp_servers"]
         if "infer" in agent:
             wire_agent["infer"] = agent["infer"]
+        if "skills" in agent:
+            wire_agent["skills"] = agent["skills"]
         return wire_agent
 
     async def _start_cli_server(self) -> None:
@@ -1257,25 +2252,30 @@ class CopilotClient:
         Raises:
             RuntimeError: If the server fails to start or times out.
         """
-        cli_path = self.options["cli_path"]
+        assert isinstance(self._config, SubprocessConfig)
+        cfg = self._config
+
+        cli_path = cfg.cli_path
+        assert cli_path is not None  # resolved in __init__
 
         # Verify CLI exists
         if not os.path.exists(cli_path):
-            raise RuntimeError(f"Copilot CLI not found at {cli_path}")
+            original_path = cli_path
+            if (cli_path := shutil.which(cli_path)) is None:
+                raise RuntimeError(f"Copilot CLI not found at {original_path}")
 
         # Start with user-provided cli_args, then add SDK-managed args
-        cli_args = self.options.get("cli_args") or []
-        args = list(cli_args) + [
+        args = list(cfg.cli_args) + [
             "--headless",
             "--no-auto-update",
             "--log-level",
-            self.options["log_level"],
+            cfg.log_level,
         ]
 
         # Add auth-related flags
-        if self.options.get("github_token"):
+        if cfg.github_token:
             args.extend(["--auth-token-env", "COPILOT_SDK_AUTH_TOKEN"])
-        if not self.options.get("use_logged_in_user", True):
+        if not cfg.use_logged_in_user:
             args.append("--no-auto-login")
 
         # If cli_path is a .js file, run it with node
@@ -1286,21 +2286,39 @@ class CopilotClient:
             args = [cli_path] + args
 
         # Get environment variables
-        env = self.options.get("env")
-        if env is None:
+        if cfg.env is None:
             env = dict(os.environ)
         else:
-            env = dict(env)
+            env = dict(cfg.env)
 
         # Set auth token in environment if provided
-        if self.options.get("github_token"):
-            env["COPILOT_SDK_AUTH_TOKEN"] = self.options["github_token"]
+        if cfg.github_token:
+            env["COPILOT_SDK_AUTH_TOKEN"] = cfg.github_token
+
+        # Set OpenTelemetry environment variables if telemetry config is provided
+        telemetry = cfg.telemetry
+        if telemetry is not None:
+            env["COPILOT_OTEL_ENABLED"] = "true"
+            if "otlp_endpoint" in telemetry:
+                env["OTEL_EXPORTER_OTLP_ENDPOINT"] = telemetry["otlp_endpoint"]
+            if "file_path" in telemetry:
+                env["COPILOT_OTEL_FILE_EXPORTER_PATH"] = telemetry["file_path"]
+            if "exporter_type" in telemetry:
+                env["COPILOT_OTEL_EXPORTER_TYPE"] = telemetry["exporter_type"]
+            if "source_name" in telemetry:
+                env["COPILOT_OTEL_SOURCE_NAME"] = telemetry["source_name"]
+            if "capture_content" in telemetry:
+                env["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = str(
+                    telemetry["capture_content"]
+                ).lower()
 
         # On Windows, hide the console window to avoid distracting users in GUI apps
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+        cwd = cfg.cwd or os.getcwd()
+
         # Choose transport mode
-        if self.options["use_stdio"]:
+        if cfg.use_stdio:
             args.append("--stdio")
             # Use regular Popen with pipes (buffering=0 for unbuffered)
             self._process = subprocess.Popen(
@@ -1309,25 +2327,25 @@ class CopilotClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
-                cwd=self.options["cwd"],
+                cwd=cwd,
                 env=env,
                 creationflags=creationflags,
             )
         else:
-            if self.options["port"] > 0:
-                args.extend(["--port", str(self.options["port"])])
+            if cfg.port > 0:
+                args.extend(["--port", str(cfg.port)])
             self._process = subprocess.Popen(
                 args,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=self.options["cwd"],
+                cwd=cwd,
                 env=env,
                 creationflags=creationflags,
             )
 
         # For stdio mode, we're ready immediately
-        if self.options["use_stdio"]:
+        if cfg.use_stdio:
             return
 
         # For TCP mode, wait for port announcement
@@ -1362,7 +2380,8 @@ class CopilotClient:
         Raises:
             RuntimeError: If the connection fails.
         """
-        if self.options["use_stdio"]:
+        use_stdio = isinstance(self._config, SubprocessConfig) and self._config.use_stdio
+        if use_stdio:
             await self._connect_via_stdio()
         else:
             await self._connect_via_tcp()
@@ -1381,6 +2400,7 @@ class CopilotClient:
 
         # Create JSON-RPC client with the process
         self._client = JsonRpcClient(self._process)
+        self._client.on_close = lambda: setattr(self, "_state", "disconnected")
         self._rpc = ServerRpc(self._client)
 
         # Set up notification handler for session events
@@ -1409,6 +2429,10 @@ class CopilotClient:
         self._client.set_request_handler("permission.request", self._handle_permission_request_v2)
         self._client.set_request_handler("userInput.request", self._handle_user_input_request)
         self._client.set_request_handler("hooks.invoke", self._handle_hooks_invoke)
+        self._client.set_request_handler(
+            "systemMessage.transform", self._handle_system_message_transform
+        )
+        register_client_session_api_handlers(self._client, self._get_client_session_handlers)
 
         # Start listening for messages
         loop = asyncio.get_running_loop()
@@ -1455,10 +2479,26 @@ class CopilotClient:
                 self._socket = sock_obj
 
             def terminate(self):
+                import socket as _socket_mod
+
+                # shutdown() sends TCP FIN to the server (triggering
+                # server-side disconnect detection) and interrupts any
+                # pending blocking reads on other threads immediately.
+                try:
+                    self._socket.shutdown(_socket_mod.SHUT_RDWR)
+                except OSError:
+                    pass  # Safe to ignore — socket may already be closed
+                # Close the file wrapper — makefile() holds its own
+                # reference to the fd, so socket.close() alone won't
+                # release the OS resource until the wrapper is closed too.
+                try:
+                    self.stdin.close()
+                except OSError:
+                    pass  # Safe to ignore — already closed
                 try:
                     self._socket.close()
                 except OSError:
-                    pass
+                    pass  # Safe to ignore — already closed
 
             def kill(self):
                 self.terminate()
@@ -1468,6 +2508,7 @@ class CopilotClient:
 
         self._process = SocketWrapper(sock_file, sock)  # type: ignore
         self._client = JsonRpcClient(self._process)
+        self._client.on_close = lambda: setattr(self, "_state", "disconnected")
         self._rpc = ServerRpc(self._client)
 
         # Set up notification handler for session events
@@ -1493,10 +2534,34 @@ class CopilotClient:
         self._client.set_request_handler("permission.request", self._handle_permission_request_v2)
         self._client.set_request_handler("userInput.request", self._handle_user_input_request)
         self._client.set_request_handler("hooks.invoke", self._handle_hooks_invoke)
+        self._client.set_request_handler(
+            "systemMessage.transform", self._handle_system_message_transform
+        )
+        register_client_session_api_handlers(self._client, self._get_client_session_handlers)
 
         # Start listening for messages
         loop = asyncio.get_running_loop()
         self._client.start(loop)
+
+    async def _set_session_fs_provider(self) -> None:
+        if not self._session_fs_config or not self._client:
+            return
+
+        await self._client.request(
+            "sessionFs.setProvider",
+            {
+                "initialCwd": self._session_fs_config["initial_cwd"],
+                "sessionStatePath": self._session_fs_config["session_state_path"],
+                "conventions": self._session_fs_config["conventions"],
+            },
+        )
+
+    def _get_client_session_handlers(self, session_id: str) -> ClientSessionApiHandlers:
+        with self._sessions_lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            raise ValueError(f"unknown session {session_id}")
+        return session._client_session_apis
 
     async def _handle_user_input_request(self, params: dict) -> dict:
         """
@@ -1553,6 +2618,21 @@ class CopilotClient:
         output = await session._handle_hooks_invoke(hook_type, input_data)
         return {"output": output}
 
+    async def _handle_system_message_transform(self, params: dict) -> dict:
+        """Handle a systemMessage.transform request from the CLI server."""
+        session_id = params.get("sessionId")
+        sections = params.get("sections")
+
+        if not session_id or not sections:
+            raise ValueError("invalid systemMessage.transform payload")
+
+        with self._sessions_lock:
+            session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"unknown session {session_id}")
+
+        return await session._handle_system_message_transform(sections)
+
     # ========================================================================
     # Protocol v2 backward-compatibility adapters
     # ========================================================================
@@ -1592,10 +2672,14 @@ class CopilotClient:
             arguments=arguments,
         )
 
+        tp = params.get("traceparent")
+        ts = params.get("tracestate")
+
         try:
-            result = handler(invocation)
-            if inspect.isawaitable(result):
-                result = await result
+            with trace_context(tp, ts):
+                result = handler(invocation)
+                if inspect.isawaitable(result):
+                    result = await result
 
             tool_result: ToolResult = result  # type: ignore[assignment]
             return {
@@ -1635,6 +2719,8 @@ class CopilotClient:
         try:
             perm_request = PermissionRequest.from_dict(permission_request)
             result = await session._handle_permission_request(perm_request)
+            if result.kind == "no-result":
+                raise ValueError(NO_RESULT_PERMISSION_V2_ERROR)
             result_payload: dict = {"kind": result.kind}
             if result.rules is not None:
                 result_payload["rules"] = result.rules
@@ -1645,6 +2731,14 @@ class CopilotClient:
             if result.path is not None:
                 result_payload["path"] = result.path
             return {"result": result_payload}
+        except ValueError as exc:
+            if str(exc) == NO_RESULT_PERMISSION_V2_ERROR:
+                raise
+            return {
+                "result": {
+                    "kind": "denied-no-approval-rule-and-could-not-request-from-user",
+                }
+            }
         except Exception:  # pylint: disable=broad-except
             return {
                 "result": {

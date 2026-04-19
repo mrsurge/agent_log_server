@@ -101,6 +101,15 @@ type ExtensionCatalogEntry = {
 };
 
 type ModelEffortInput = string | { reasoningEffort?: string; reasoning_effort?: string; value?: string; [key: string]: unknown };
+type ModelSupportsInput = {
+  reasoningEffort?: ModelEffortInput[] | boolean;
+  reasoning_effort?: ModelEffortInput[] | boolean;
+  [key: string]: unknown;
+};
+type ModelCapabilitiesInput = {
+  supports?: ModelSupportsInput;
+  [key: string]: unknown;
+};
 
 type ExtensionModel = {
   id?: string;
@@ -108,6 +117,7 @@ type ExtensionModel = {
   supported_reasoning_efforts?: ModelEffortInput[];
   defaultReasoningEffort?: string;
   default_reasoning_effort?: string;
+  capabilities?: ModelCapabilitiesInput;
   [key: string]: unknown;
 };
 
@@ -789,37 +799,63 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
   }
 
   function normalizeModelEfforts(model: ExtensionModel | null | undefined): string[] {
-    const raw = Array.isArray(model?.supportedReasoningEfforts)
-      ? model.supportedReasoningEfforts
-      : (Array.isArray(model?.supported_reasoning_efforts) ? model.supported_reasoning_efforts : []);
-    return raw
-      .map((item) => {
-        if (typeof item === 'string') return item;
-        if (item && typeof item === 'object') {
-          return item.reasoningEffort || item.reasoning_effort || item.value || '';
-        }
-        return '';
-      })
-      .filter((item): item is string => typeof item === 'string' && item.length > 0);
+    const candidates: (ModelEffortInput[] | boolean | undefined)[] = [
+      model?.supportedReasoningEfforts,
+      model?.supported_reasoning_efforts,
+      model?.capabilities?.supports?.reasoning_effort,
+      model?.capabilities?.supports?.reasoningEffort,
+    ];
+    const efforts: string[] = [];
+    candidates.forEach((raw) => {
+      if (!Array.isArray(raw)) return;
+      raw.forEach((item) => {
+        const value = typeof item === 'string'
+          ? item
+          : (item && typeof item === 'object'
+            ? (item.reasoningEffort || item.reasoning_effort || item.value || '')
+            : '');
+        if (!value || efforts.includes(value)) return;
+        efforts.push(value);
+      });
+    });
+    return efforts;
   }
 
   function updateEffortOptionsForModel(modelId: string | null | undefined): void {
     const state = getState();
-    if (!modelId || !state.modelList?.length) return;
+    if (!modelId || !state.modelList?.length) {
+      updateDropdownOptions(settingsEffortOptions, [], settingsEffortEl);
+      if (settingsEffortEl) {
+        settingsEffortEl.value = '';
+        settingsEffortEl.placeholder = 'Select model first';
+      }
+      return;
+    }
     const model = state.modelList.find((item) => item.id === modelId);
     if (!model) {
-      updateDropdownOptions(settingsEffortOptions, ['low', 'medium', 'high'], settingsEffortEl);
+      updateDropdownOptions(settingsEffortOptions, [], settingsEffortEl);
+      if (settingsEffortEl) {
+        settingsEffortEl.value = '';
+        settingsEffortEl.placeholder = 'Model capabilities unavailable';
+      }
       return;
     }
     const efforts = normalizeModelEfforts(model);
     if (!efforts.length) {
-      updateDropdownOptions(settingsEffortOptions, ['low', 'medium', 'high'], settingsEffortEl);
+      updateDropdownOptions(settingsEffortOptions, [], settingsEffortEl);
+      if (settingsEffortEl) {
+        settingsEffortEl.value = '';
+        settingsEffortEl.placeholder = 'Not supported by selected model';
+      }
       return;
     }
     updateDropdownOptions(settingsEffortOptions, efforts, settingsEffortEl);
+    if (settingsEffortEl) {
+      settingsEffortEl.placeholder = 'Select reasoning effort';
+    }
     const currentEffort = settingsEffortEl?.value;
     const defaultEffort = model.defaultReasoningEffort || model.default_reasoning_effort || efforts[0] || '';
-    if (currentEffort && !efforts.includes(currentEffort) && settingsEffortEl) {
+    if (settingsEffortEl && (!currentEffort || !efforts.includes(currentEffort))) {
       settingsEffortEl.value = defaultEffort;
     }
   }

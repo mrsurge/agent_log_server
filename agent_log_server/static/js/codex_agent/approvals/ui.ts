@@ -107,6 +107,8 @@ interface ApprovalResponse {
   [key: string]: unknown;
 }
 
+const AGENT_PTY_ASK_USER_REQUEST_METHOD = 'agent-pty/ask-user';
+
 interface RequestCardRuntime {
   render: (
     evt: ApprovalData,
@@ -271,10 +273,24 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     return String(requestId);
   }
 
+  function approvalRequestMethod(evt: ApprovalData = {}) {
+    const requestMethod = evt?.request_method ?? evt?.requestMethod;
+    if (requestMethod === null || requestMethod === undefined || requestMethod === '') return '';
+    return String(requestMethod).trim();
+  }
+
   function approvalCardId(evt: ApprovalData = {}) {
     const cardId = evt?.card_id ?? evt?.cardId ?? evt?.item_id ?? evt?.id ?? evt?.request_id;
     if (cardId === null || cardId === undefined || cardId === '') return '';
     return String(cardId);
+  }
+
+  function isAskUserApproval(evt: ApprovalData = {}) {
+    return approvalRequestMethod(evt) === AGENT_PTY_ASK_USER_REQUEST_METHOD;
+  }
+
+  function isPendingAskUserApproval(evt: ApprovalData = {}, options: ApprovalRowOptions = {}) {
+    return !options.readOnly && isAskUserApproval(evt);
   }
 
   function approvalRowKey(evt: ApprovalData = {}) {
@@ -300,6 +316,9 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
       const exactCard = rows.find((row) => row.dataset.approvalCardId === wantedCardId);
       if (exactCard) return exactCard;
     }
+    if (isAskUserApproval(evt)) {
+      return null;
+    }
     if (wantedTurnId) {
       return rows.find((row) => (
         row.dataset.approvalId === wantedRequestId
@@ -310,6 +329,22 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
       row.dataset.approvalId === wantedRequestId
       && !String(row.dataset.turnId || '').trim()
     )) || null;
+  }
+
+  function removeConflictingPendingAskUserRows(evt: ApprovalData, preserveRow: HTMLElement | null) {
+    if (!timelineEl || !isAskUserApproval(evt)) return;
+    const requestId = approvalRequestId(evt);
+    if (!requestId) return;
+    const cardId = approvalCardId(evt);
+    const rows = Array.from((timelineEl as Element).querySelectorAll('.timeline-row[data-approval-id]')) as HTMLElement[];
+    rows.forEach((row) => {
+      if (row === preserveRow) return;
+      if (row.dataset.approvalId !== requestId) return;
+      if (String(row.dataset.requestMethod || '').trim() !== AGENT_PTY_ASK_USER_REQUEST_METHOD) return;
+      if (row.dataset.approvalSource === 'resolved' || row.dataset.approvalSource === 'replay') return;
+      if (cardId && row.dataset.approvalCardId === cardId) return;
+      row.remove();
+    });
   }
 
   function ensureApprovalRow(evt: ApprovalData, options: ApprovalRowOptions = {}) {
@@ -334,8 +369,11 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
       }
       meta.textContent = 'approval';
       body.textContent = '';
-      if (parentEl && row.parentElement !== parentEl) {
-        parentEl.appendChild(row);
+      const targetParent = parentEl || row.parentElement;
+      if (targetParent instanceof HTMLElement) {
+        if (row.parentElement !== targetParent || isPendingAskUserApproval(evt, options)) {
+          targetParent.appendChild(row);
+        }
       }
     } else {
       ({ row, body } = createRow(
@@ -378,6 +416,13 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
       row.dataset.replay = 'true';
     } else {
       delete row.dataset.replay;
+    }
+    if (isPendingAskUserApproval(evt, options)) {
+      const targetParent = parentEl || row.parentElement;
+      if (targetParent instanceof HTMLElement) {
+        targetParent.appendChild(row);
+      }
+      removeConflictingPendingAskUserRows(evt, row);
     }
     return { row, body };
   }

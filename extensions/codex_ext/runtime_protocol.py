@@ -25,6 +25,7 @@ _extensions_dir: Optional[Path] = None
 _runtime_lock: Optional[asyncio.Lock] = None
 _runtime_protocol: Optional["RuntimeProtocol"] = None
 _AGENT_PTY_BLOCKS_MCP_SERVER_NAME = "agent-pty-blocks"
+_AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC = 3600
 
 SchemaDict = Dict[str, object]
 SchemaRegistry = Dict[str, SchemaDict]
@@ -1305,6 +1306,14 @@ def _build_agent_pty_blocks_mcp_server(
     command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
     merged: SchemaDict = dict(existing_server) if isinstance(existing_server, dict) else {}
     env = _dict_value(merged.get("env"))
+    existing_timeout = merged.get("tool_timeout_sec")
+    tool_timeout_sec = (
+        existing_timeout
+        if isinstance(existing_timeout, int)
+        and not isinstance(existing_timeout, bool)
+        and existing_timeout > _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC
+        else _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC
+    )
     env["PWD"] = launch_cwd
     if isinstance(conversation_id, str) and conversation_id.strip():
         env["CONVERSATION_ID"] = conversation_id.strip()
@@ -1315,6 +1324,7 @@ def _build_agent_pty_blocks_mcp_server(
         "args": [str(_agent_pty_mcp_server_script_path())],
         "cwd": launch_cwd,
         "env": env,
+        "tool_timeout_sec": tool_timeout_sec,
     }
 
 

@@ -30,19 +30,18 @@ from framework_shells.orchestrator import Orchestrator
 from ._vendor.copilot import (
     CopilotClient,
     CopilotSession,
+    SubprocessConfig,
+)
+from ._vendor.copilot.generated.rpc import ModeSetRequest as SessionModeSetParams, SessionMode
+from ._vendor.copilot.session import (
     SessionConfig,
     ResumeSessionConfig,
-    MessageOptions,
     SessionEvent,
     PermissionRequest,
     PermissionRequestResult,
-)
-from ._vendor.copilot.generated.rpc import SessionModeSetParams, Mode as SessionMode
-from ._vendor.copilot.types import (
-    CopilotClientOptions,
     ErrorOccurredHandler,
-    MCPLocalServerConfig,
-    MCPRemoteServerConfig,
+    MCPStdioServerConfig as MCPLocalServerConfig,
+    MCPHTTPServerConfig as MCPRemoteServerConfig,
     MCPServerConfig,
     PostToolUseHandler,
     PreToolUseHandler,
@@ -64,6 +63,7 @@ from ._vendor.copilot.generated.session_events import SessionEventType
 
 from .file_change_preview import build_file_change_preview
 from .fws_pipe_process import FrameworkShellPipeProcess
+from .protocol_adapter import compact_sdk_session, resume_sdk_session
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from .te2_runtime import build_copilot_mcp_servers
 import agent_log_server.ask_user_interactions as ask_user_interactions
@@ -533,6 +533,7 @@ def _summarize_runtime_config(config: SettingsDict) -> PayloadDict:
         "config_dir": config.get("config_dir"),
         "reasoning_effort": config.get("reasoning_effort"),
         "streaming": config.get("streaming") is True,
+        "include_sub_agent_streaming_events": config.get("include_sub_agent_streaming_events") is True,
         "has_system_message": bool(system_message),
         "system_message_mode": system_message.get("mode") if isinstance(system_message, dict) else None,
         "system_message_chars": len(system_content) if isinstance(system_content, str) else 0,
@@ -763,6 +764,10 @@ def _populate_common_session_config(
     streaming = config.get("streaming")
     if isinstance(streaming, bool):
         target["streaming"] = streaming
+
+    include_sub_agent_streaming_events = config.get("include_sub_agent_streaming_events")
+    if isinstance(include_sub_agent_streaming_events, bool):
+        target["include_sub_agent_streaming_events"] = include_sub_agent_streaming_events
 
     config_dir = config.get("config_dir")
     if isinstance(config_dir, str) and config_dir:
@@ -1641,6 +1646,7 @@ def _build_session_runtime_config(
     merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
     config: SettingsDict = {
         "streaming": True,
+        "include_sub_agent_streaming_events": True,
         "config_dir": _copilot_config_dir(),
         "on_permission_request": _make_permission_handler(conversation_id),
         "on_user_input_request": _make_user_input_handler(conversation_id),
@@ -1871,7 +1877,7 @@ async def _complete_deferred_cold_send(
                 if applied_mode:
                     _session_modes[conversation_id] = applied_mode
 
-            await session.send(MessageOptions(prompt=text, attachments=[]))
+            await session.send(text, attachments=[])
             _add_to_raw_buffer("out", conversation_id, "deferred_send_completed")
     except Exception as exc:
         print(f"[CopilotSDK] Deferred cold send failed: {exc}")
@@ -2791,14 +2797,15 @@ def _make_pre_tool_use_hook(conversation_id: str) -> PreToolUseHandler:
 def _make_event_handler(conversation_id: str) -> Callable[[SessionEvent], None]:
     """Create an event handler that routes SessionEvents to the conversation's router."""
     def handler(event: SessionEvent) -> None:
+        router = _routers.get(conversation_id)
+        debug_payload = _serialize_session_event(event) if router and router.debug_trace else None
         _add_to_raw_buffer(
             "in",
             conversation_id,
             f"{event.type.value}: {str(event.data)[:200]}",
-            payload=_serialize_session_event(event),
+            payload=debug_payload,
             category="session_event",
         )
-        router = _routers.get(conversation_id)
         if router:
             # Schedule the coroutine on the running event loop
             try:
@@ -2841,13 +2848,11 @@ async def _ensure_client() -> CopilotClient:
     global _client, _copilot_fws_process
     async with _get_client_lock():
         if _client is None:
-            client_options: CopilotClientOptions = {
-                "use_stdio": True,
-                "auto_start": True,
-                "auto_restart": True,
-                "log_level": "info",
-                "cwd": _copilot_shell_cwd(),
-            }
+            client_config = SubprocessConfig(
+                use_stdio=True,
+                log_level="info",
+                cwd=_copilot_shell_cwd(),
+            )
             cli_path = _resolve_external_copilot_cli_path()
             if _fws_getter is not None:
                 shell_id = await _get_or_start_copilot_shell()
@@ -2857,13 +2862,13 @@ async def _ensure_client() -> CopilotClient:
                     shell_id,
                     asyncio.get_running_loop(),
                 )
-                client_options["process"] = _copilot_fws_process
+                client_config.process = _copilot_fws_process
                 launch_mode = f"fws:{shell_id}"
             else:
                 if cli_path:
-                    client_options["cli_path"] = cli_path
+                    client_config.cli_path = cli_path
                 launch_mode = cli_path or "bundled/default"
-            _client = CopilotClient(client_options)
+            _client = CopilotClient(client_config, auto_start=True)
             try:
                 await _client.start()
             except Exception:
@@ -2990,7 +2995,7 @@ async def _init_session_unlocked(
         _log_runtime_config("create_session", conversation_id, config)
 
         # Let SDK generate its own session_id (don't pass ours)
-        session = await client.create_session(create_config)
+        session = await client.create_session(**create_config)
         sdk_session_id = session.session_id
         _sessions[conversation_id] = session
         _runtime_signatures[conversation_id] = runtime_signature
@@ -3111,10 +3116,7 @@ async def _resume_session_unlocked(
         _log_runtime_config("resume_session", conversation_id, config)
 
         # Resume using the real SDK session ID
-        session = await client.resume_session(
-            sdk_session_id,
-            resume_config,
-        )
+        session = await resume_sdk_session(client, sdk_session_id, resume_config)
         # Key in-memory by our conversation_id
         _sessions[conversation_id] = session
         _runtime_signatures[conversation_id] = runtime_signature
@@ -3338,7 +3340,8 @@ async def handle_message(
 
             # Fire-and-forget send — events come via session.on() handler
             await session.send(
-                MessageOptions(prompt=text, attachments=[]),
+                text,
+                attachments=[],
             )
 
             return {"ok": True, "session_id": conversation_id}
@@ -3379,6 +3382,23 @@ async def list_models() -> list[PayloadDict]:
     try:
         client = await _ensure_client()
         models = await client.list_models()
+        def _normalize_reasoning_efforts(model: object) -> list[str] | None:
+            explicit = getattr(model, "supported_reasoning_efforts", None)
+            supports = getattr(getattr(model, "capabilities", None), "supports", None)
+            raw_supported = getattr(supports, "reasoning_effort", None)
+            ordered: list[str] = []
+            for raw in (explicit, raw_supported):
+                if not isinstance(raw, list):
+                    continue
+                for item in raw:
+                    if not isinstance(item, str):
+                        continue
+                    value = item.strip().lower()
+                    if not value or value == "none" or value in ordered:
+                        continue
+                    ordered.append(value)
+            return ordered or None
+
         return [
             {
                 "id": m.id,
@@ -3386,7 +3406,7 @@ async def list_models() -> list[PayloadDict]:
                 "billing": _json_safe(getattr(m, "billing", None)),
                 "capabilities": _json_safe(getattr(m, "capabilities", None)),
                 "policy": _json_safe(getattr(m, "policy", None)),
-                "supported_reasoning_efforts": _json_safe(getattr(m, "supported_reasoning_efforts", None)),
+                "supported_reasoning_efforts": _json_safe(_normalize_reasoning_efforts(m)),
                 "default_reasoning_effort": _json_safe(getattr(m, "default_reasoning_effort", None)),
             }
             for m in models
@@ -3748,7 +3768,7 @@ async def compact_session(conversation_id: str) -> PayloadDict:
     if not session:
         return {"ok": False, "error": "no active session for conversation"}
     try:
-        result = await session.rpc.compaction.compact(timeout=30.0)
+        result = await compact_sdk_session(session)
         success = getattr(result, "success", None)
         print(f"[CopilotSDK] Compacted: {conversation_id[:8]} success={success}")
         return {"ok": bool(success), "conversation_id": conversation_id}

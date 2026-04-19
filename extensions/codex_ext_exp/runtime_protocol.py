@@ -2,11 +2,8 @@ import asyncio
 import contextlib
 import json
 import os
-import platform
 import re
-import shutil
 import sys
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, cast
@@ -17,8 +14,6 @@ from agent_log_server.te2_mcp_config import (
     te2_mcp_integration_enabled,
 )
 from .dependencies import is_android_termux as _is_android_termux
-from .dependencies import recommended_codex_install_command as _recommended_codex_install_command
-from .dependencies import recommended_codex_package as _recommended_codex_package
 
 JSONDict = Dict[str, object]
 JSONList = List[object]
@@ -28,6 +23,8 @@ _extensions_dir: Optional[Path] = None
 _runtime_lock: Optional[asyncio.Lock] = None
 _runtime_protocol: Optional["RuntimeProtocol"] = None
 _AGENT_PTY_BLOCKS_MCP_SERVER_NAME = "agent-pty-blocks"
+_AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC = 3600
+_VENDORED_SCHEMA_VERSION = "0.118.0"
 
 
 _SEMANTIC_SUFFIXES = {
@@ -198,8 +195,8 @@ def _get_runtime_lock() -> asyncio.Lock:
     return _runtime_lock
 
 
-def _cache_root() -> Path:
-    return Path.home() / ".cache" / "app_server" / "codex_app_server_schema"
+def _vendored_schema_dir() -> Path:
+    return Path(os.path.abspath(__file__)).parent / "schemas" / _VENDORED_SCHEMA_VERSION
 
 
 def _schema_bundle_path(cache_dir: Path) -> Path:
@@ -251,11 +248,7 @@ def _expand_path(raw: object) -> Optional[str]:
     return os.path.expanduser(text) if text.startswith("~") else text
 
 
-def _codex_binary_path() -> str:
-    return shutil.which("codex") or "<not found>"
-
-
-def _generated_schema_files(root: Path, limit: int = 24) -> List[str]:
+def _schema_bundle_files(root: Path, limit: int = 24) -> List[str]:
     if not root.exists():
         return []
     files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
@@ -268,143 +261,28 @@ def _json_dict_loads(text: str) -> JSONDict:
     return _dict_value(cast(object, json.loads(text)))
 
 
-
-def _codex_runtime_context() -> str:
-    prefix = os.environ.get("PREFIX", "")
-    parts = [f"platform={platform.platform()}"]
-    if prefix:
-        parts.append(f"PREFIX={prefix}")
-    return "; ".join(parts)
-
-
-def _format_codex_unavailable_message(error: str) -> str:
-    return "\n".join(
-        (
-            f"codex CLI unavailable: {error}",
-            f"codex binary: {_codex_binary_path()}",
-            _codex_runtime_context(),
-            f"Repair command: {_recommended_codex_install_command()}",
-        )
-    )
-
-
-def _format_schema_generation_failure(
-    *,
-    version_raw: str,
-    version_key: str,
-    temp_dir: Path,
-    expected_schema: Path,
-    command_error: Optional[str] = None,
-) -> str:
-    legacy_schema = _legacy_schema_bundle_path(temp_dir)
-    generated_files = _generated_schema_files(temp_dir)
+def _format_vendored_schema_missing(schema_dir: Path, expected_schema: Path) -> str:
+    vendored_files = _schema_bundle_files(schema_dir)
     lines = [
-        f"schema bundle missing expected file: {expected_schema}",
-        f"codex binary: {_codex_binary_path()}",
-        f"codex --version: {version_raw}",
-        _codex_runtime_context(),
+        f"vendored experimental schema bundle missing expected file: {expected_schema}",
+        f"expected vendored schema directory: {schema_dir}",
+        "codex-ext-exp now uses the bundled schema snapshot instead of ~/.cache/app_server/codex_app_server_schema.",
     ]
-    if version_key == "0.0.0":
-        lines.append(
-            "Detected Codex version key 0.0.0, which usually indicates an incompatible or placeholder CLI build."
-        )
-    if command_error:
-        lines.append(f"schema generation command error: {command_error}")
-    if legacy_schema.exists() and not expected_schema.exists():
-        lines.append(
-            f"Found legacy schema bundle {legacy_schema.name} but not {expected_schema.name}; "
-            "the installed Codex CLI does not match the v2 schema layout expected by this extension."
-        )
-    if generated_files:
-        lines.append("Generated files:")
-        lines.extend(f"  - {entry}" for entry in generated_files)
+    if vendored_files:
+        lines.append("Present vendored files:")
+        lines.extend(f"  - {entry}" for entry in vendored_files)
     else:
-        lines.append("Generated files: none")
-    lines.append(f"Repair command: {_recommended_codex_install_command()}")
+        lines.append("Present vendored files: none")
     return "\n".join(lines)
 
 
-async def _run_process(*args: str, timeout: float) -> str:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"command not found: {args[0]}") from exc
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        raise RuntimeError(f"command timed out: {' '.join(args)}")
-    if proc.returncode != 0:
-        message = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"{' '.join(args)} failed: {message or f'exit {proc.returncode}'}")
-    return stdout.decode("utf-8", errors="replace").strip()
-
-
-def _cleanup_old_cache_dirs(root: Path, keep_name: str) -> None:
-    for child in root.iterdir():
-        if not child.is_dir() or child.name == keep_name or child.name.startswith(".tmp-"):
-            continue
-        shutil.rmtree(child, ignore_errors=True)
-
-
 async def _ensure_schema_bundle() -> tuple[str, str, Path]:
-    try:
-        version_raw = await _run_process("codex", "--version", timeout=15.0)
-    except RuntimeError as exc:
-        raise RuntimeError(_format_codex_unavailable_message(str(exc))) from exc
+    version_raw = _VENDORED_SCHEMA_VERSION
     version_key = _version_key(version_raw)
-    cache_root = _cache_root()
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache_dir = cache_root / version_key
-    schema_path = _schema_bundle_path(cache_dir)
-    if schema_path.exists():
-        _cleanup_old_cache_dirs(cache_root, keep_name=version_key)
-        return version_raw, version_key, schema_path
-
-    temp_dir = cache_root / f".tmp-{version_key}-{uuid.uuid4().hex}"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        try:
-            await _run_process(
-                "codex",
-                "app-server",
-                "generate-json-schema",
-                "--out",
-                str(temp_dir),
-                timeout=60.0,
-            )
-        except RuntimeError as exc:
-            raise RuntimeError(
-                _format_schema_generation_failure(
-                    version_raw=version_raw,
-                    version_key=version_key,
-                    temp_dir=temp_dir,
-                    expected_schema=_schema_bundle_path(temp_dir),
-                    command_error=str(exc),
-                )
-            ) from exc
-        generated_schema = _schema_bundle_path(temp_dir)
-        if not generated_schema.exists():
-            raise RuntimeError(
-                _format_schema_generation_failure(
-                    version_raw=version_raw,
-                    version_key=version_key,
-                    temp_dir=temp_dir,
-                    expected_schema=generated_schema,
-                )
-            )
-        if cache_dir.exists():
-            shutil.rmtree(cache_dir, ignore_errors=True)
-        temp_dir.rename(cache_dir)
-    except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-    _cleanup_old_cache_dirs(cache_root, keep_name=version_key)
+    schema_dir = _vendored_schema_dir()
+    schema_path = _schema_bundle_path(schema_dir)
+    if not schema_path.exists():
+        raise RuntimeError(_format_vendored_schema_missing(schema_dir, schema_path))
     return version_raw, version_key, schema_path
 
 
@@ -1318,6 +1196,14 @@ def _build_agent_pty_blocks_mcp_server(
     command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
     merged: JSONDict = dict(existing_server) if isinstance(existing_server, dict) else {}
     env = _dict_value(merged.get("env"))
+    existing_timeout = merged.get("tool_timeout_sec")
+    tool_timeout_sec = (
+        existing_timeout
+        if isinstance(existing_timeout, int)
+        and not isinstance(existing_timeout, bool)
+        and existing_timeout > _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC
+        else _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC
+    )
     env["PWD"] = launch_cwd
     if isinstance(conversation_id, str) and conversation_id.strip():
         env["CONVERSATION_ID"] = conversation_id.strip()
@@ -1328,6 +1214,7 @@ def _build_agent_pty_blocks_mcp_server(
         "args": [str(_agent_pty_mcp_server_script_path())],
         "cwd": launch_cwd,
         "env": env,
+        "tool_timeout_sec": tool_timeout_sec,
     }
 
 

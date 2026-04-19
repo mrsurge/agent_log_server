@@ -427,7 +427,7 @@ try {{
                                 Div(
 	                                Div(
 	                                    H1("CodexAS-Extension"),
-	                                    Small("App-Server JSON-RPC • Unified Timeline"),
+	                                    Small("Unified Timeline"),
 	                                    cls="brand"
 	                                ),
 	                                Div(
