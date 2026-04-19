@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-log-server"
-version = "0.2.13"
+version = "0.2.14"
 description = "FastAPI server for Codex Agent UI, agent log, and TE2-hosted orchestration."
 readme = "README.md"
 requires-python = ">=3.11"

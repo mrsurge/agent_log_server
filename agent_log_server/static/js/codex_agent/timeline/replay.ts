@@ -2,6 +2,7 @@ import {
   applyTranscriptCardMetadata,
   findTranscriptCardRow,
 } from '../transcript_card_metadata.ts';
+import { buildShellCommandPreview } from '../shell_render.ts';
 
 type AnyRecord = Record<string, any>;
 
@@ -54,7 +55,7 @@ interface TimelineReplayContext {
   renderSearchCard(entry: AnyRecord, parentEl: HTMLElement): void;
   renderApproval(entry: AnyRecord, options?: AnyRecord): void;
   buildReplayToolRow(entry: AnyRecord): HTMLElement;
-  renderShellCmdRibbon(el: HTMLElement, cmd: string): void;
+  renderShellCmdRibbon(el: HTMLElement, cmd: string, options?: { promptPrefix?: string }): void;
   highlightCodeAlways(text: string, lang: string): string;
   detectLangFromCommand(command: string): string;
   escapeHtml(text: string): string;
@@ -403,15 +404,35 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       if (entry.role === 'shell') {
         const exitCode = entry.exit_code || 0;
         const row = documentRef.createElement('div');
-        row.className = 'timeline-row command-result';
+        row.className = 'timeline-row command-result terminal-card shell-card';
         applyTranscriptCardMetadata(row, entry);
         const body = documentRef.createElement('div');
         body.className = 'body';
-        const cmdRibbon = documentRef.createElement('div');
-        cmdRibbon.className = 'command-ribbon';
+        const summaryRibbon = documentRef.createElement('div');
+        summaryRibbon.className = 'command-ribbon shell-card-summary';
+        const summaryTextEl = documentRef.createElement('span');
+        summaryTextEl.className = 'shell-card-summary-text';
         const shellCmd = String(entry.command || '');
-        renderShellCmdRibbon(cmdRibbon, shellCmd);
-        body.appendChild(cmdRibbon);
+        summaryTextEl.textContent = buildShellCommandPreview(shellCmd);
+        summaryRibbon.appendChild(summaryTextEl);
+        body.appendChild(summaryRibbon);
+        const detailEl = documentRef.createElement('div');
+        detailEl.className = 'shell-card-detail';
+        const cmdRibbon = documentRef.createElement('div');
+        cmdRibbon.className = 'command-ribbon shell-card-command';
+        renderShellCmdRibbon(cmdRibbon, shellCmd, { promptPrefix: '' });
+        if (typeof entry.path === 'string' && entry.path) {
+          const path = entry.path;
+          const line = Number.isFinite(Number(entry.line)) ? Number(entry.line) : 1;
+          cmdRibbon.style.cursor = 'pointer';
+          cmdRibbon.title = path;
+          cmdRibbon.dataset.hasClickHandler = 'true';
+          cmdRibbon.addEventListener('click', (event: MouseEvent) => {
+            event.stopPropagation();
+            postTe2OpenRequest({ path, line, column: 1 });
+          });
+        }
+        detailEl.appendChild(cmdRibbon);
         const pre = documentRef.createElement('pre');
         pre.className = 'command-output';
         const stdout = String(entry.stdout || '');
@@ -433,14 +454,16 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         if (!stdout && !stderr) {
           pre.textContent = '(no output)';
         }
-        body.appendChild(pre);
+        detailEl.appendChild(pre);
         if (exitCode !== 0) {
           const footer = documentRef.createElement('div');
           footer.className = 'command-footer';
           footer.textContent = `exit ${exitCode}`;
-          body.appendChild(footer);
+          detailEl.appendChild(footer);
         }
+        body.appendChild(detailEl);
         row.appendChild(body);
+        makeCollapsible(row, `shell:${entry.card_id || entry.id || shellCmd.slice(0, 40)}`, false, { headerEl: summaryRibbon });
         getTarget().appendChild(row);
         setStatusDot(exitCode === 0 ? 'success' : 'error');
         return;

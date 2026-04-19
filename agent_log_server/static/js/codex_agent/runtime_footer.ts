@@ -290,16 +290,43 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
     }
     if (!nextValue) return;
     const settingKey = getRuntimeSettingKey(kind, fallbackKey || kind);
+    const conversationId = state.conversationMeta?.conversation_id;
+    const metaSettings = asObject(state.conversationMeta?.settings);
+    const agentId = typeof state.runtimeOptions?.agent === 'string' && state.runtimeOptions.agent.trim()
+      ? state.runtimeOptions.agent.trim()
+      : (typeof state.conversationSettings?.agent === 'string' && state.conversationSettings.agent.trim()
+        ? state.conversationSettings.agent.trim()
+        : (typeof metaSettings?.agent === 'string' && metaSettings.agent.trim()
+          ? metaSettings.agent.trim()
+          : ''));
     await sioCall('conversation_update', {
-      conversation_id: state.conversationMeta?.conversation_id,
+      conversation_id: conversationId,
       settings: { [settingKey]: nextValue },
     });
+    let nextRuntimeOptions = updateRuntimeOptionsCurrent(state.runtimeOptions, kind, settingKey, nextValue);
+    let persistedSettingValue = nextValue;
+    try {
+      const refreshed = await sioCall('get_runtime_options', {
+        conversation_id: conversationId,
+        agent: agentId || null,
+      });
+      const refreshedPayload = asObject(refreshed);
+      if (refreshedPayload) {
+        nextRuntimeOptions = refreshedPayload as RuntimeOptionsState;
+        const refreshedDescriptor = asObject(refreshedPayload[kind]);
+        if (refreshedDescriptor && typeof refreshedDescriptor.current === 'string') {
+          persistedSettingValue = refreshedDescriptor.current.trim() || persistedSettingValue;
+        }
+      }
+    } catch {
+      // Keep the optimistic local state if the authoritative refresh fails.
+    }
     setState({
       conversationSettings: {
         ...(state.conversationSettings || {}),
-        [settingKey]: nextValue,
+        [settingKey]: persistedSettingValue,
       },
-      runtimeOptions: updateRuntimeOptionsCurrent(state.runtimeOptions, kind, settingKey, nextValue),
+      runtimeOptions: nextRuntimeOptions,
     });
     renderFooterRuntimeControls();
   }

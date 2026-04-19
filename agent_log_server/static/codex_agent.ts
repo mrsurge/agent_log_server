@@ -449,8 +449,12 @@ document.addEventListener('DOMContentLoaded', () => {
     return shellSemantic.ensureTreeSitterRibbonReady();
   }
 
-  function renderShellCmdRibbon(el: HTMLElement | null, cmd: string): unknown {
-    return shellSemantic.renderShellCmdRibbon(el, cmd);
+  function renderShellCmdRibbon(
+    el: HTMLElement | null,
+    cmd: string,
+    options?: { promptPrefix?: string },
+  ): unknown {
+    return shellSemantic.renderShellCmdRibbon(el, cmd, options);
   }
 
   function setCommandRunning(running: unknown): void {

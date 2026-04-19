@@ -3,6 +3,7 @@ import {
   applyTranscriptCardMetadata,
   type TranscriptCardMetadata,
 } from './transcript_card_metadata.ts';
+import { buildShellCommandPreview } from './shell_render.ts';
 
 type TranscriptRecord = Record<string, unknown>;
 
@@ -100,7 +101,7 @@ type TranscriptCardsContext = {
   maybeAutoScroll: () => void;
   setLastEventType: (value: string) => void;
   setStatusDot: (value: string) => void;
-  renderShellCmdRibbon: (el: HTMLElement | null, cmd: string) => unknown;
+  renderShellCmdRibbon: (el: HTMLElement | null, cmd: string, options?: { promptPrefix?: string }) => unknown;
   detectLangFromCommand: (command: string) => string | null;
   highlightCodeAlways: (text: string, language: string) => string;
   detectLangFromPath: (path: string) => string | null;
@@ -337,19 +338,37 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     }
 
     const row = document.createElement('div');
-    row.className = 'timeline-row command-result';
+    row.className = 'timeline-row command-result terminal-card shell-card';
+    if (agentBlockId) {
+      row.dataset.agentBlockId = agentBlockId;
+    }
 
     const body = document.createElement('div');
     body.className = 'body';
-
-    const cmdRibbon = document.createElement('div');
-    cmdRibbon.className = 'command-ribbon';
     const isUserTerminal = evt.source === 'user_terminal' || evt.source === 'user-terminal';
     const ribbonText = prompt ? `${prompt}${command}` : command;
+
+    const summaryRibbon = document.createElement('div');
+    summaryRibbon.className = 'command-ribbon shell-card-summary';
+    const summaryTextEl = document.createElement('span');
+    summaryTextEl.className = 'shell-card-summary-text';
+    summaryTextEl.textContent = buildShellCommandPreview(
+      ribbonText,
+      undefined,
+      isUserTerminal ? '' : '$ ',
+    );
+    summaryRibbon.appendChild(summaryTextEl);
+    body.appendChild(summaryRibbon);
+
+    const detailEl = document.createElement('div');
+    detailEl.className = 'shell-card-detail';
+
+    const cmdRibbon = document.createElement('div');
+    cmdRibbon.className = 'command-ribbon shell-card-command';
     if (isUserTerminal && ribbonText.includes('\x1b[')) {
       cmdRibbon.innerHTML = ansiToHtml(ribbonText);
     } else if (!isUserTerminal) {
-      renderShellCmdRibbon(cmdRibbon, command);
+      renderShellCmdRibbon(cmdRibbon, command, { promptPrefix: '' });
     } else {
       cmdRibbon.textContent = ribbonText;
     }
@@ -365,7 +384,7 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
         postTe2OpenRequest({ path, line, column: 1 });
       });
     }
-    body.appendChild(cmdRibbon);
+    detailEl.appendChild(cmdRibbon);
 
     if (displayOutput) {
       const outputPre = document.createElement('pre');
@@ -391,7 +410,7 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
           }
         }
       }
-      body.appendChild(outputPre);
+      detailEl.appendChild(outputPre);
     }
 
     const footer = document.createElement('div');
@@ -405,11 +424,12 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     }
     if (parts.length) {
       footer.textContent = parts.join(' | ');
-      body.appendChild(footer);
+      detailEl.appendChild(footer);
     }
 
+    body.appendChild(detailEl);
     row.appendChild(body);
-    makeCollapsible(row, `cmd:${evt.id || agentBlockId || command.slice(0, 40)}`, false);
+    makeCollapsible(row, `cmd:${evt.id || agentBlockId || command.slice(0, 40)}`, false, { headerEl: summaryRibbon });
     mountRow(row, parentEl, evt);
 
     if (updateLiveState) {

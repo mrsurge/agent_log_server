@@ -47,7 +47,7 @@ interface TreeSitterCapture {
   1?: TreeSitterNode;
 }
 
-interface TreeSitterModule {
+  interface TreeSitterModule {
   Parser?: TreeSitterParserStatic;
   Language?: TreeSitterLanguageStatic;
   Query?: TreeSitterQueryStatic;
@@ -73,14 +73,18 @@ type HighlightSpan = {
   len: number;
 };
 
-type ShellSemanticContext = {
+  type ShellSemanticContext = {
   getEnabled: () => boolean;
   setEnabled: (enabled: boolean) => void;
   getQuoteParsingEnabled: () => boolean;
   setQuoteParsingEnabled: (enabled: boolean) => void;
   getCheckboxEl?: () => HTMLInputElement | null;
-  escapeHtml: (text: string) => string;
-};
+    escapeHtml: (text: string) => string;
+  };
+
+  type ShellRibbonRenderOptions = {
+    promptPrefix?: string;
+  };
 
 const SCRIPT_LANGUAGE_BY_INTERPRETER: Record<string, string> = {
   python: 'python',
@@ -515,9 +519,14 @@ export function bindShellSemantic(ctx: ShellSemanticContext) {
     return parts.join('\n');
   }
 
-  function renderShellCmdRibbon(el: HTMLElement | null | undefined, cmd: unknown): void {
+  function renderShellCmdRibbon(
+    el: HTMLElement | null | undefined,
+    cmd: unknown,
+    options: ShellRibbonRenderOptions = {},
+  ): void {
     if (!el) return;
     const command = String(cmd || '');
+    const promptPrefix = typeof options.promptPrefix === 'string' ? options.promptPrefix : '$ ';
 
     const savedTwisty = el.querySelector('.twisty');
     const savedToggle = el.querySelector('.ribbon-toggle-zone');
@@ -545,7 +554,9 @@ export function bindShellSemantic(ctx: ShellSemanticContext) {
           } else if (!html) {
             html = treeSitterHighlightHtml(command);
           }
-          el.innerHTML = `<span class="shell-prompt">$ </span><code class="tsribbon">${html}</code>`;
+          el.innerHTML = promptPrefix
+            ? `<span class="shell-prompt">${escapeHtml(promptPrefix)}</span><code class="tsribbon">${html}</code>`
+            : `<code class="tsribbon">${html}</code>`;
           if (savedTwisty) el.appendChild(savedTwisty);
           if (savedToggle) el.appendChild(savedToggle);
           return;
@@ -556,7 +567,7 @@ export function bindShellSemantic(ctx: ShellSemanticContext) {
     }
 
     if (typeof hljs === 'undefined' || !command.trim()) {
-      el.textContent = `$ ${command}`;
+      el.textContent = `${promptPrefix}${command}`;
       if (savedTwisty) el.appendChild(savedTwisty);
       if (savedToggle) el.appendChild(savedToggle);
       return;
@@ -564,16 +575,20 @@ export function bindShellSemantic(ctx: ShellSemanticContext) {
 
     try {
       el.innerHTML = '';
-      const prefix = document.createElement('span');
-      prefix.className = 'shell-prompt';
-      prefix.textContent = '$ ';
       const codeEl = document.createElement('code');
       codeEl.className = 'language-bash';
       codeEl.textContent = command;
-      el.append(prefix, codeEl);
+      if (promptPrefix) {
+        const prefix = document.createElement('span');
+        prefix.className = 'shell-prompt';
+        prefix.textContent = promptPrefix;
+        el.append(prefix, codeEl);
+      } else {
+        el.append(codeEl);
+      }
       hljs.highlightElement(codeEl);
     } catch {
-      el.textContent = `$ ${command}`;
+      el.textContent = `${promptPrefix}${command}`;
     }
 
     if (savedTwisty) el.appendChild(savedTwisty);

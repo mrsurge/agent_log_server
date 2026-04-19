@@ -2220,6 +2220,7 @@ textarea {
   transform: translateY(-50%) rotate(90deg);
 }
 /* Hide output when collapsed */
+.collapsible:not(.expanded) > .body > .shell-card-detail,
 .collapsible:not(.expanded) > .body > pre.command-output,
 .collapsible:not(.expanded) > .body > .command-output,
 .collapsible:not(.expanded) > .body > .command-footer,
@@ -2314,6 +2315,42 @@ textarea {
 .command-ribbon .ts-embedded { color: #56b6c2; }
 .command-ribbon .ts-quote { opacity: 0.85; }
 .command-ribbon .ts-quoted-inner { color: inherit; }
+
+.shell-card-summary {
+  padding-right: 42px;
+  white-space: nowrap;
+  word-break: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shell-card-summary .shell-card-summary-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-card-detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.shell-card-command {
+  background: #11161a;
+  color: #9fb0ba;
+  padding: 8px 14px;
+  font-size: 0.82em;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: default;
+}
+
+.shell-card-command[data-has-click-handler="true"] {
+  cursor: pointer;
+}
 
 /* Picker overlay (CWD + mentions): show basename + path for disambiguation */
 .picker-item-text {

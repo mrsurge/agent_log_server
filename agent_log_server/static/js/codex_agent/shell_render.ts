@@ -9,6 +9,8 @@ declare const hljs: any;
 
 type ShellRowEntry = {
   row: HTMLDivElement;
+  summaryTextEl: HTMLSpanElement;
+  detailEl: HTMLDivElement;
   cmdRibbon: HTMLDivElement;
   termEl: HTMLPreElement;
   text: string;
@@ -39,9 +41,9 @@ interface ShellRenderContext {
   shellRows: Map<string, ShellRowEntry>;
   clearPlaceholder: () => void;
   insertRow: (row: HTMLElement) => void;
-  makeCollapsible: (row: HTMLElement, key: string, startExpanded: boolean) => void;
+  makeCollapsible: (row: HTMLElement, key: string, startExpanded: boolean, options?: Record<string, unknown>) => void;
   getSubagentContainer: (id: string, name: string, intent: string) => SubagentContainer;
-  renderShellCmdRibbon: (el: HTMLElement | null, cmd: string) => void;
+  renderShellCmdRibbon: (el: HTMLElement | null, cmd: string, options?: { promptPrefix?: string }) => void;
   postTe2OpenRequest: (target: { path: string; line: number; column: number }) => void;
   detectLangFromCommand: (command: string) => string | null;
   highlightCodeAlways: (text: string, language: string) => string;
@@ -50,6 +52,24 @@ interface ShellRenderContext {
   maybeAutoScroll: (force?: boolean) => void;
   setLastEventType?: (value: string) => void;
   _dbg?: boolean;
+}
+
+const DEFAULT_SHELL_PREVIEW_LENGTH = 120;
+
+export function buildShellCommandPreview(
+  command: unknown,
+  maxLength = DEFAULT_SHELL_PREVIEW_LENGTH,
+  prefix = '$ ',
+): string {
+  const normalized = String(command || '').replace(/\s+/g, ' ').trim();
+  const normalizedPrefix = String(prefix || '');
+  if (!normalized) {
+    return normalizedPrefix ? `${normalizedPrefix}(shell)` : '(shell)';
+  }
+  const limit = Math.max(24, Number(maxLength) || DEFAULT_SHELL_PREVIEW_LENGTH);
+  const preview = `${normalizedPrefix}${normalized}`;
+  if (preview.length <= limit) return preview;
+  return `${preview.slice(0, Math.max(0, limit - 3)).trimEnd()}...`;
 }
 
 export function bindShellRender(ctx: ShellRenderContext) {
@@ -70,6 +90,68 @@ export function bindShellRender(ctx: ShellRenderContext) {
     _dbg,
   } = ctx;
 
+  function createShellCardElements(metadata: TranscriptCardMetadata | null = null) {
+    const row = document.createElement('div');
+    row.className = 'timeline-row command-result terminal-card shell-card';
+    applyTranscriptCardMetadata(row, metadata);
+
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const summaryRibbon = document.createElement('div');
+    summaryRibbon.className = 'command-ribbon shell-card-summary';
+    const summaryTextEl = document.createElement('span');
+    summaryTextEl.className = 'shell-card-summary-text';
+    summaryTextEl.textContent = '$ ...';
+    summaryRibbon.appendChild(summaryTextEl);
+    body.appendChild(summaryRibbon);
+
+    const detailEl = document.createElement('div');
+    detailEl.className = 'shell-card-detail';
+
+    const cmdRibbon = document.createElement('div');
+    cmdRibbon.className = 'command-ribbon shell-card-command';
+    cmdRibbon.addEventListener('click', (event: MouseEvent) => {
+      const path = String(row.dataset.shellPath || '').trim();
+      if (!path) return;
+      event.stopPropagation();
+      const line = Number(row.dataset.shellLine || '1');
+      postTe2OpenRequest({ path, line: Number.isFinite(line) ? line : 1, column: 1 });
+    });
+    detailEl.appendChild(cmdRibbon);
+
+    const termEl = document.createElement('pre');
+    termEl.className = 'command-output';
+    detailEl.appendChild(termEl);
+
+    body.appendChild(detailEl);
+    row.appendChild(body);
+
+    return { row, summaryRibbon, summaryTextEl, detailEl, cmdRibbon, termEl };
+  }
+
+  function syncShellCommandLink(
+    row: HTMLElement,
+    cmdRibbon: HTMLElement,
+    path: string | undefined,
+    line: number | undefined,
+  ): void {
+    const normalizedPath = typeof path === 'string' ? path.trim() : '';
+    if (!normalizedPath) {
+      delete row.dataset.shellPath;
+      delete row.dataset.shellLine;
+      cmdRibbon.style.removeProperty('cursor');
+      cmdRibbon.removeAttribute('title');
+      delete cmdRibbon.dataset.hasClickHandler;
+      return;
+    }
+    row.dataset.shellPath = normalizedPath;
+    row.dataset.shellLine = String(Number.isFinite(Number(line)) ? Number(line) : 1);
+    cmdRibbon.style.cursor = 'pointer';
+    cmdRibbon.title = normalizedPath;
+    cmdRibbon.dataset.hasClickHandler = 'true';
+  }
+
   // Uses same styling as command-result (renderCommandResult)
   function getShellRow(
     id: string,
@@ -79,34 +161,23 @@ export function bindShellRender(ctx: ShellRenderContext) {
     let entry = shellRows.get(id);
     if (!entry) {
       clearPlaceholder();
-      const row = document.createElement('div');
-      row.className = 'timeline-row command-result terminal-card';
+      const {
+        row,
+        summaryRibbon,
+        summaryTextEl,
+        detailEl,
+        cmdRibbon,
+        termEl,
+      } = createShellCardElements(metadata);
       row.dataset.shellId = id;
-      applyTranscriptCardMetadata(row, metadata);
-
-      const body = document.createElement('div');
-      body.className = 'body';
-
-      // Command ribbon (same as renderCommandResult)
-      const cmdRibbon = document.createElement('div');
-      cmdRibbon.className = 'command-ribbon';
-      cmdRibbon.textContent = '$ ...';
-      body.appendChild(cmdRibbon);
-
-      // Output area - plain terminal text.
-      const termEl = document.createElement('pre');
-      termEl.className = 'command-output';
-      body.appendChild(termEl);
-
-      row.appendChild(body);
       if (parentEl) {
         parentEl.appendChild(row);
       } else {
         insertRow(row);
       }
-      makeCollapsible(row, `shell:${id}`, false);
+      makeCollapsible(row, `shell:${id}`, false, { headerEl: summaryRibbon });
 
-      entry = { row, cmdRibbon, termEl, text: '' };
+      entry = { row, summaryTextEl, detailEl, cmdRibbon, termEl, text: '' };
       shellRows.set(id, entry);
     } else {
       applyTranscriptCardMetadata(entry.row, metadata);
@@ -126,30 +197,16 @@ export function bindShellRender(ctx: ShellRenderContext) {
       }
     }
     const entry = getShellRow(evt.id || '', parentEl, evt);
-    // Just show the command, skip cwd line (redundant)
-    renderShellCmdRibbon(entry.cmdRibbon, evt.command || '');
+    entry.summaryTextEl.textContent = buildShellCommandPreview(evt.command || '');
+    renderShellCmdRibbon(entry.cmdRibbon, evt.command || '', { promptPrefix: '' });
+    syncShellCommandLink(entry.row, entry.cmdRibbon, evt.path, evt.line);
 
     if (_dbg) console.log('[SHELL_BEGIN] id=', evt.id, 'path=', evt.path, 'command=', evt.command, 'hasCmdRibbon=', !!entry.cmdRibbon);
-
-    // If event includes a file path, make the ribbon clickable (jump-to-file)
-    if (evt.path && entry.cmdRibbon) {
-      entry.cmdRibbon.style.cursor = 'pointer';
-      entry.cmdRibbon.title = evt.path;
-      entry.cmdRibbon.addEventListener('click', (e: MouseEvent) => {
-        const target = e.target;
-        if (_dbg && target instanceof HTMLElement) console.log('[RIBBON_CLICK] FIRED', target.tagName, target.className);
-        if (_dbg && target instanceof Element) console.log('[RIBBON_CLICK] twisty?', !!target.closest('.twisty'), 'toggle?', !!target.closest('.ribbon-toggle-zone'));
-        if (target instanceof Element && (target.closest('.twisty') || target.closest('.ribbon-toggle-zone'))) return;
-        const line = evt.line || 1;
-        if (_dbg) console.log('[RIBBON_CLICK] calling postTe2OpenRequest path=', evt.path, 'line=', line);
-        postTe2OpenRequest({ path: evt.path || '', line, column: 1 });
-      });
-      if (_dbg) console.log('[RIBBON_CLICK] handler wired for path=', evt.path);
-    }
 
     entry.text = '';
     // Plain text mode.
     entry.termEl.textContent = '';
+    entry.detailEl.querySelector('.command-footer')?.remove();
     if (setLastEventType) setLastEventType('shell');
     if (!evt.subagent_id) {
       setActivity(evt.activity || 'executing', true);
@@ -184,19 +241,12 @@ export function bindShellRender(ctx: ShellRenderContext) {
 
     // Update command ribbon if shell_end carries a refined label
     const cmd = String(evt.command || '');
+    entry.summaryTextEl.textContent = buildShellCommandPreview(cmd);
     if (cmd && entry.cmdRibbon) {
-      renderShellCmdRibbon(entry.cmdRibbon, cmd);
-      // Add path click handler if provided and not already wired
-      if (evt.path && !entry.cmdRibbon.dataset.hasClickHandler) {
-        entry.cmdRibbon.style.cursor = 'pointer';
-        entry.cmdRibbon.title = evt.path;
-        entry.cmdRibbon.dataset.hasClickHandler = 'true';
-        entry.cmdRibbon.addEventListener('click', (e: MouseEvent) => {
-          if (e.target instanceof Element && e.target.closest('.twisty')) return;
-          postTe2OpenRequest({ path: evt.path || '', line: evt.line || 1, column: 1 });
-        });
-      }
+      renderShellCmdRibbon(entry.cmdRibbon, cmd, { promptPrefix: '' });
     }
+    syncShellCommandLink(entry.row, entry.cmdRibbon, evt.path, evt.line);
+    entry.detailEl.querySelector('.command-footer')?.remove();
 
     // Prefer final stdout/stderr from the event so we can do syntax highlighting.
     const stdout = String(evt.stdout || '');
@@ -230,7 +280,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
       const footer = document.createElement('div');
       footer.className = 'command-footer';
       footer.textContent = `exit ${exitCode}`;
-      entry.row.querySelector<HTMLElement>('.body')?.appendChild(footer);
+      entry.detailEl.appendChild(footer);
     }
 
     // Update status
@@ -246,30 +296,18 @@ export function bindShellRender(ctx: ShellRenderContext) {
   function renderShellBatchResult(evt: ShellRenderEvent) {
     // Fallback - shell_end without prior shell_begin
     clearPlaceholder();
-    const row = document.createElement('div');
-    row.className = 'timeline-row command-result';
-    applyTranscriptCardMetadata(row, evt);
-
-    const body = document.createElement('div');
-    body.className = 'body';
-
-    // Command ribbon — same polish as replay/shell_begin
-    const cmdRibbon = document.createElement('div');
-    cmdRibbon.className = 'command-ribbon';
+    const {
+      row,
+      summaryRibbon,
+      summaryTextEl,
+      detailEl,
+      cmdRibbon,
+      termEl,
+    } = createShellCardElements(evt);
     const cmd = String(evt.command || '(shell)');
-    renderShellCmdRibbon(cmdRibbon, cmd);
-
-    // If event includes a file path, make ribbon clickable
-    if (evt.path) {
-      cmdRibbon.style.cursor = 'pointer';
-      cmdRibbon.title = evt.path;
-      cmdRibbon.dataset.hasClickHandler = 'true';
-      cmdRibbon.addEventListener('click', (e: MouseEvent) => {
-        if (e.target instanceof Element && e.target.closest('.twisty')) return;
-        postTe2OpenRequest({ path: evt.path || '', line: evt.line || 1, column: 1 });
-      });
-    }
-    body.appendChild(cmdRibbon);
+    summaryTextEl.textContent = buildShellCommandPreview(cmd);
+    renderShellCmdRibbon(cmdRibbon, cmd, { promptPrefix: '' });
+    syncShellCommandLink(row, cmdRibbon, evt.path, evt.line);
 
     // Route into subagent container if tagged
     let parentEl = null;
@@ -279,31 +317,28 @@ export function bindShellRender(ctx: ShellRenderContext) {
     }
 
     // Output
-    const pre = document.createElement('pre');
-    pre.className = 'command-output';
     const stdout = String(evt.stdout || '');
     const stderr = String(evt.stderr || '');
     const lang = detectLangFromCommand(cmd);
     if (stdout || stderr) {
       if (lang && typeof hljs !== 'undefined') {
         try {
-          pre.innerHTML = highlightCodeAlways(stdout, lang);
+          termEl.innerHTML = highlightCodeAlways(stdout, lang);
         } catch {
-          pre.textContent = stdout;
+          termEl.textContent = stdout;
         }
       } else {
-        pre.textContent = stdout;
+        termEl.textContent = stdout;
       }
       if (stderr) {
         const span = document.createElement('span');
         span.className = 'shell-stderr';
         span.textContent = stderr;
-        pre.appendChild(span);
+        termEl.appendChild(span);
       }
     } else {
-      pre.textContent = '(no output)';
+      termEl.textContent = '(no output)';
     }
-    body.appendChild(pre);
 
     // Footer with exit code
     const exitCode = evt.exitCode ?? 0;
@@ -311,16 +346,15 @@ export function bindShellRender(ctx: ShellRenderContext) {
       const footer = document.createElement('div');
       footer.className = 'command-footer';
       footer.textContent = `exit ${exitCode}`;
-      body.appendChild(footer);
+      detailEl.appendChild(footer);
     }
 
-    row.appendChild(body);
     if (parentEl) {
       parentEl.appendChild(row);
     } else {
       insertRow(row);
     }
-    makeCollapsible(row, `shell-batch:${evt.id || cmd.slice(0, 40)}`, false);
+    makeCollapsible(row, `shell-batch:${evt.id || cmd.slice(0, 40)}`, false, { headerEl: summaryRibbon });
 
     setStatusDot(exitCode === 0 ? 'success' : 'error');
   }

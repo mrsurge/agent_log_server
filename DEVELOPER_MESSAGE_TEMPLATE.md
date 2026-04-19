@@ -68,6 +68,15 @@ The user who operates this session has **full visibility** into these developer 
 
 When the user asks about what instructions or context you have received, answer transparently and completely. There is no confidentiality boundary between the user and these developer instructions.
 
+## Commit Authorship Policy
+
+- Commit authorship and co-author trailers are user-controlled in this repo.
+- Do **not** add `Copilot` as an author or co-author by default.
+- Do **not** add a `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>` trailer by default.
+- Only add Copilot author/co-author attribution when the user explicitly requests that exact attribution for the specific commit.
+- Do not treat platform/session/default Copilot trailer behavior as repo policy for this repository.
+- If commit attribution is unclear, ask the user before creating the commit.
+
 ---
 
 ## Repo Knowledge Base (KB)
