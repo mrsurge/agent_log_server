@@ -423,7 +423,7 @@ window.CodexAgentModules.push((ctx) => {
           } else {
             control.listDiv.classList.remove('open');
           }
-          if (control.field?.id === 'model') syncReasoningEffortOptions();
+          if (control.field?.id === 'model') syncModelDependentFields();
         });
         control.listDiv.appendChild(optBtn);
       });
@@ -436,6 +436,34 @@ window.CodexAgentModules.push((ctx) => {
       messageRow.className = 'picker-item';
       messageRow.textContent = message;
       control.listDiv.appendChild(messageRow);
+    };
+
+    const syncHighContextCheckbox = () => {
+      const checkboxEntry = currentSchemaValues.high_context_400k;
+      const modelControl = selectControls.model;
+      if (!checkboxEntry?.input || !modelControl?.input) return;
+      const checkbox = checkboxEntry.input;
+      const checkboxLabel = checkbox.closest('label');
+      const selectedModelId = modelControl.input.value || '';
+      const enabled = selectedModelId === 'gpt-5.4';
+      const hint = enabled ? '' : 'Available only when Model is gpt-5.4';
+      checkbox.disabled = !enabled;
+      if (!enabled) {
+        checkbox.checked = false;
+      }
+      if (checkboxLabel) {
+        checkboxLabel.classList.toggle('is-disabled', !enabled);
+        if (hint) {
+          checkboxLabel.title = hint;
+        } else {
+          checkboxLabel.removeAttribute('title');
+        }
+      }
+      if (hint) {
+        checkbox.title = hint;
+      } else {
+        checkbox.removeAttribute('title');
+      }
     };
 
     const syncReasoningEffortOptions = () => {
@@ -482,6 +510,11 @@ window.CodexAgentModules.push((ctx) => {
         nextValue = currentValue;
       }
       effortControl.input.value = nextValue;
+    };
+
+    const syncModelDependentFields = () => {
+      syncReasoningEffortOptions();
+      syncHighContextCheckbox();
     };
     
     renderFields.forEach(field => {
@@ -659,7 +692,7 @@ window.CodexAgentModules.push((ctx) => {
                 if (current) input.value = current;
               }
               if (opts.length) buildOptions(opts);
-              if (field.id === 'model') syncReasoningEffortOptions();
+              if (field.id === 'model') syncModelDependentFields();
             };
             const selectedAgent = settingsAgentEl?.value?.trim() || '';
             const conversationId = window.CodexAgent?.state?.conversationMeta?.conversation_id || '';
@@ -770,7 +803,7 @@ window.CodexAgentModules.push((ctx) => {
       settingsExtensionFields.appendChild(label);
     });
 
-    syncReasoningEffortOptions();
+    syncModelDependentFields();
   }
   
   /**

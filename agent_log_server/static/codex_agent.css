@@ -814,6 +814,18 @@ body.widescreen-resizing * {
   cursor: pointer;
 }
 
+.settings-checkbox-row input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+
+.settings-checkbox-row.is-disabled {
+  opacity: 0.65;
+}
+
+.settings-checkbox-row.is-disabled span {
+  color: var(--muted);
+}
+
 .settings-overlay,
 .picker-overlay {
   position: fixed;

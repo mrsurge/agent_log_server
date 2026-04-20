@@ -1335,6 +1335,7 @@ def _build_codex_ext_thread_config(
     base_url: Optional[str],
     cwd: object,
     force_te2_mcp_entry: bool = False,
+    enable_high_context_400k: bool = False,
     conversation_id: object = None,
 ) -> Optional[SchemaDict]:
     merged = build_codex_thread_config(
@@ -1342,6 +1343,7 @@ def _build_codex_ext_thread_config(
         te2_enabled=te2_enabled,
         base_url=base_url,
         force_te2_mcp_entry=force_te2_mcp_entry,
+        enable_high_context_400k=enable_high_context_400k,
     )
     config: SchemaDict = dict(merged) if isinstance(merged, dict) else {}
 
@@ -1399,6 +1401,7 @@ def build_request_params(
         params["input"] = [{"type": "text", "text": text}]
 
     normalized_settings = dict(settings)
+    high_context_400k = normalized_settings.get("high_context_400k") in (True, "true")
     cwd = _expand_path(normalized_settings.get("cwd"))
     if cwd:
         normalized_settings["cwd"] = cwd
@@ -1426,6 +1429,7 @@ def build_request_params(
             base_url=base_url,
             cwd=config_cwd,
             force_te2_mcp_entry=force_te2_config,
+            enable_high_context_400k=high_context_400k,
             conversation_id=conversation_id,
         )
         if config:
@@ -1509,6 +1513,12 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Schem
                 "dynamic_source": f"/api/extensions/{extension_id}/models",
                 "placeholder": "Use server default",
                 "default": "",
+            },
+            {
+                "id": "high_context_400k",
+                "type": "checkbox",
+                "label": "400k Context",
+                "default": False,
             },
             {
                 "id": "reasoning_effort",

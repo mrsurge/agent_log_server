@@ -6,6 +6,8 @@ TE2_MCP_SERVER_NAME = "te2-mcp"
 TE2_APP_ROUTE_PREFIX = ""
 TE2_MCP_ROUTE = "/te2_mcp"
 TE2_MCP_STREAMABLE_HTTP_ROUTE = "/te2_mcp_http"
+CODEX_HIGH_CONTEXT_MODEL_CONTEXT_WINDOW = 630000
+CODEX_HIGH_CONTEXT_AUTO_COMPACT_TOKEN_LIMIT = 580000
 
 
 def te2_mcp_integration_enabled(settings: object) -> bool:
@@ -30,6 +32,7 @@ def build_codex_thread_config(
     te2_enabled: bool,
     base_url: str | None,
     force_te2_mcp_entry: bool = False,
+    enable_high_context_400k: bool = False,
 ) -> ObjectMap | None:
     if existing_config in (None, ""):
         merged: ObjectMap = {}
@@ -57,6 +60,13 @@ def build_codex_thread_config(
         merged["mcp_servers"] = mcp_servers
     else:
         merged.pop("mcp_servers", None)
+
+    if enable_high_context_400k:
+        merged["model_context_window"] = CODEX_HIGH_CONTEXT_MODEL_CONTEXT_WINDOW
+        merged["model_auto_compact_token_limit"] = CODEX_HIGH_CONTEXT_AUTO_COMPACT_TOKEN_LIMIT
+    else:
+        merged.pop("model_context_window", None)
+        merged.pop("model_auto_compact_token_limit", None)
 
     return merged or None
 
