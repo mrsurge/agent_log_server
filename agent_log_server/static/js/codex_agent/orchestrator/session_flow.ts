@@ -1,9 +1,5 @@
-import type { createConversationsRpcClient } from '../rpc/conversations/client.ts';
-import type {
-  ConversationControlResult,
-  ConversationSendResult,
-  JsonObject,
-} from '../rpc/conversations/contract.ts';
+import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
+import type { JsonObject } from '../rpc/conversations/contract.ts';
 
 interface SessionConversationMeta {
   conversation_id?: string | null;
@@ -57,34 +53,6 @@ function asObject(value: unknown): JsonObject | null {
   return value as JsonObject;
 }
 
-function normalizeLegacySendResult(
-  value: unknown,
-  conversationId: string,
-): ConversationSendResult {
-  const payload = asObject(value) ?? {};
-  return {
-    ...payload,
-    accepted: payload.accepted === true || (payload.accepted == null && payload.ok === true),
-    conversation_id: typeof payload.conversation_id === 'string' ? payload.conversation_id : conversationId,
-    transport: 'legacy',
-  };
-}
-
-function normalizeLegacyControlResult(value: unknown): ConversationControlResult {
-  const payload = asObject(value);
-  if (!payload) {
-    return {
-      ok: false,
-      error: 'Invalid response',
-      transport: 'legacy',
-    };
-  }
-  return {
-    ...payload,
-    transport: 'legacy',
-  };
-}
-
 function normalizeShellExecResponse(value: unknown): ShellExecResponse {
   return asObject(value) ?? {};
 }
@@ -104,6 +72,7 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
     shellRows,
     snapTranscriptToLive,
   } = ctx;
+  const activeConversationsRpcClient = conversationsRpcClient ?? createConversationsRpcClient({});
 
   async function ensureInitialized() {
     const state = getState();
@@ -132,15 +101,10 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
     maybeAutoScroll(true);
     setActivity('sending', true);
     await ensureInitialized();
-    const result = conversationsRpcClient
-      ? await conversationsRpcClient.sendMessage({
-        conversationId: convoId,
-        text,
-      })
-      : normalizeLegacySendResult(await sioCall('send_message', {
-        conversation_id: convoId,
-        text,
-      }), convoId);
+    const result = await activeConversationsRpcClient.sendMessage({
+      conversationId: convoId,
+      text,
+    });
     if (result?.accepted === false || result?.ok === false) {
       console.error('sendUserMessage failed:', result?.error);
       setActivity(result?.error || 'send failed', true);
@@ -188,9 +152,7 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
       setActivity('interrupt', true);
       const state = getState();
       const convoId = state.conversationMeta?.conversation_id || null;
-      const result = conversationsRpcClient
-        ? await conversationsRpcClient.interruptConversation({ conversationId: convoId })
-        : normalizeLegacyControlResult(await sioCall('interrupt', convoId ? { conversation_id: convoId } : {}));
+      const result = await activeConversationsRpcClient.interruptConversation({ conversationId: convoId });
       if (result?.ok === false) {
         throw new Error(String(result?.error || 'interrupt failed'));
       }

@@ -25,8 +25,10 @@ CONVERSATION_GET_METHOD = "conversation.get"
 CONVERSATION_LIST_METHOD = "conversation.list"
 CONVERSATION_CREATE_METHOD = "conversation.create"
 CONVERSATION_SELECT_METHOD = "conversation.select"
+CONVERSATION_UPDATE_METHOD = "conversation.update"
 CONVERSATION_DELETE_METHOD = "conversation.delete"
 CONVERSATION_PINS_SET_METHOD = "conversation.pins.set"
+CONVERSATION_DRAFT_SET_METHOD = "conversation.draft.set"
 CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE: dict[str, str] = {
     "activity": "conversation.activity",
     "approval": "conversation.approval.request",
@@ -71,8 +73,10 @@ ConversationsRpcMethod: TypeAlias = Literal[
     "conversation.list",
     "conversation.create",
     "conversation.select",
+    "conversation.update",
     "conversation.delete",
     "conversation.pins.set",
+    "conversation.draft.set",
     "conversation.send",
     "conversation.interrupt",
     "conversation.compact",
@@ -173,6 +177,23 @@ class ConversationSelectParams:
 
 
 @dataclass(frozen=True)
+class ConversationUpdateParams:
+    conversation_id: str | None
+    settings: ObjectMap | None = None
+    thread_id: str | None = None
+
+    def to_json(self) -> ObjectMap:
+        payload: ObjectMap = {}
+        if self.conversation_id:
+            payload["conversation_id"] = self.conversation_id
+        if self.settings is not None:
+            payload["settings"] = self.settings
+        if self.thread_id:
+            payload["thread_id"] = self.thread_id
+        return payload
+
+
+@dataclass(frozen=True)
 class ConversationDeleteParams:
     conversation_id: str
 
@@ -183,6 +204,18 @@ class ConversationPinsSetParams:
 
     def to_json(self) -> ObjectMap:
         return {"pinned_conversations": list(self.pinned_conversations)}
+
+
+@dataclass(frozen=True)
+class ConversationDraftSetParams:
+    conversation_id: str | None
+    draft: str
+
+    def to_json(self) -> ObjectMap:
+        payload: ObjectMap = {"draft": self.draft}
+        if self.conversation_id:
+            payload["conversation_id"] = self.conversation_id
+        return payload
 
 
 @dataclass(frozen=True)
@@ -406,10 +439,14 @@ def parse_conversations_rpc_request(payload: object) -> ParsedConversationsRpcRe
         parsed_method = CONVERSATION_CREATE_METHOD
     elif method == CONVERSATION_SELECT_METHOD:
         parsed_method = CONVERSATION_SELECT_METHOD
+    elif method == CONVERSATION_UPDATE_METHOD:
+        parsed_method = CONVERSATION_UPDATE_METHOD
     elif method == CONVERSATION_DELETE_METHOD:
         parsed_method = CONVERSATION_DELETE_METHOD
     elif method == CONVERSATION_PINS_SET_METHOD:
         parsed_method = CONVERSATION_PINS_SET_METHOD
+    elif method == CONVERSATION_DRAFT_SET_METHOD:
+        parsed_method = CONVERSATION_DRAFT_SET_METHOD
     elif method == CONVERSATION_SEND_METHOD:
         parsed_method = CONVERSATION_SEND_METHOD
     elif method == CONVERSATION_INTERRUPT_METHOD:
@@ -506,6 +543,28 @@ def parse_conversation_select_params(
     return ConversationSelectParams(conversation_id=conversation_id, view=view)
 
 
+def parse_conversation_update_params(
+    params: ObjectMap,
+    *,
+    sanitize_conversation_id: SanitizeConversationId,
+) -> ConversationUpdateParams:
+    conversation_id_raw = params.get("conversation_id")
+    conversation_id = (
+        sanitize_conversation_id(conversation_id_raw.strip())
+        if isinstance(conversation_id_raw, str) and conversation_id_raw.strip()
+        else None
+    )
+    settings_value = params.get("settings")
+    settings = coerce_object_map(settings_value) if isinstance(settings_value, dict) else None
+    thread_id_value = params.get("thread_id")
+    thread_id = thread_id_value.strip() if isinstance(thread_id_value, str) and thread_id_value.strip() else None
+    return ConversationUpdateParams(
+        conversation_id=conversation_id,
+        settings=settings,
+        thread_id=thread_id,
+    )
+
+
 def parse_conversation_delete_params(
     params: ObjectMap,
     *,
@@ -535,6 +594,22 @@ def parse_conversation_pins_set_params(
         if convo_id and convo_id not in pinned:
             pinned.append(convo_id)
     return ConversationPinsSetParams(pinned_conversations=pinned)
+
+
+def parse_conversation_draft_set_params(
+    params: ObjectMap,
+    *,
+    sanitize_conversation_id: SanitizeConversationId,
+) -> ConversationDraftSetParams:
+    conversation_id_raw = params.get("conversation_id")
+    conversation_id = (
+        sanitize_conversation_id(conversation_id_raw.strip())
+        if isinstance(conversation_id_raw, str) and conversation_id_raw.strip()
+        else None
+    )
+    draft_value = params.get("draft", "")
+    draft = draft_value if isinstance(draft_value, str) else ""
+    return ConversationDraftSetParams(conversation_id=conversation_id, draft=draft)
 
 
 def parse_conversation_replay_get_chunk_params(

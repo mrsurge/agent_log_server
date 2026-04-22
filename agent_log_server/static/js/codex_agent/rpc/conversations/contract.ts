@@ -11,8 +11,10 @@ export const CONVERSATIONS_RPC_METHODS = {
   list: 'conversation.list',
   create: 'conversation.create',
   select: 'conversation.select',
+  update: 'conversation.update',
   delete: 'conversation.delete',
   pinsSet: 'conversation.pins.set',
+  draftSet: 'conversation.draft.set',
   send: 'conversation.send',
   interrupt: 'conversation.interrupt',
   compact: 'conversation.compact',
@@ -88,6 +90,15 @@ export interface ConversationSendResult extends JsonObject {
   stack?: string;
   turn_id?: string;
   code?: unknown;
+}
+
+export interface ConversationDraftResult extends JsonObject {
+  conversation_id: string | null;
+  status?: string;
+  draft_hash?: string;
+  transport: ConversationsRpcTransport;
+  ok?: boolean;
+  error?: string;
 }
 
 export interface ConversationControlResult extends JsonObject {
@@ -221,12 +232,22 @@ export const CONVERSATIONS_RPC_METHOD_DESCRIPTORS: readonly RpcMethodDescriptor<
     status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
   },
   {
+    name: CONVERSATIONS_RPC_METHODS.update,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
     name: CONVERSATIONS_RPC_METHODS.delete,
     namespace: CONVERSATIONS_RPC_NAMESPACE,
     status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
   },
   {
     name: CONVERSATIONS_RPC_METHODS.pinsSet,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.draftSet,
     namespace: CONVERSATIONS_RPC_NAMESPACE,
     status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
   },

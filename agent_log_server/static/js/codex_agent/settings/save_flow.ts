@@ -1,3 +1,5 @@
+import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
+
 type CodexAgentHelpers = {
   getSchemaParsedValues?: () => unknown;
   getSchemaValues?: () => unknown;
@@ -107,6 +109,9 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
     setDrawerOpen,
     updateConversationHeaderLabel,
   } = ctx;
+  const conversationsRpcClient = createConversationsRpcClient({
+    windowRef: typeof window !== 'undefined' ? window : null,
+  });
 
   async function saveSettings() {
     const codexWindow = window as CodexAgentWindow;
@@ -261,7 +266,7 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
     let nextState = getState();
     const isNewConversation = nextState.pendingNewConversation || !nextState.conversationMeta?.conversation_id;
     if (isNewConversation) {
-      const meta = await sioCall('conversation_create', {});
+      const meta = await conversationsRpcClient.createConversation();
       if (meta?.conversation_id) {
         setState({
           clientConversationId: meta.conversation_id,
@@ -274,9 +279,10 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
     }
 
     nextState = getState();
-      await sioCall('conversation_update', {
-        conversation_id: nextState.conversationMeta?.conversation_id, settings,
-      });
+    await conversationsRpcClient.updateConversation({
+      conversationId: nextState.conversationMeta?.conversation_id || null,
+      settings,
+    });
 
     closeSettingsModal();
     await fetchConversation(getState().conversationMeta?.conversation_id);

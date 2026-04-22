@@ -1,3 +1,4 @@
+import { createConversationsRpcClient } from './rpc/conversations/client.ts';
 import type { JsonObject } from './rpc/conversations/contract.ts';
 
 type RuntimeOptionKind = string;
@@ -63,6 +64,9 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
     toggleDropdownMenu,
     sioCall,
   } = ctx;
+  const conversationsRpcClient = createConversationsRpcClient({
+    windowRef: typeof window !== 'undefined' ? window : null,
+  });
 
   function normalizeApprovalValue(value: string | undefined): string | undefined {
     if (!value) return value;
@@ -299,8 +303,8 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
         : (typeof metaSettings?.agent === 'string' && metaSettings.agent.trim()
           ? metaSettings.agent.trim()
           : ''));
-    await sioCall('conversation_update', {
-      conversation_id: conversationId,
+    await conversationsRpcClient.updateConversation({
+      conversationId: typeof conversationId === 'string' ? conversationId : null,
       settings: { [settingKey]: nextValue },
     });
     let nextRuntimeOptions = updateRuntimeOptionsCurrent(state.runtimeOptions, kind, settingKey, nextValue);

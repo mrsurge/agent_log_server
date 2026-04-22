@@ -2,11 +2,11 @@ import { getRpcRegistry } from '../registry.ts';
 import {
   callRpcNamespace,
   type JsonRpcNotificationEnvelope,
-  readRpcTransportEnabledPreference,
   type RpcWindowRef,
   subscribeRpcNamespaceNotifications,
 } from '../transport.ts';
 import {
+  type ConversationDraftResult,
   type ConversationListResult,
   type ConversationMetaRecord,
   type ConversationMetaResult,
@@ -33,7 +33,7 @@ export interface ConversationsRpcClientDescriptor {
 }
 
 interface ConversationsRpcClientDeps {
-  sioCall: (event: string, payload?: JsonObject, options?: JsonObject) => Promise<unknown>;
+  sioCall?: (event: string, payload?: JsonObject, options?: JsonObject) => Promise<unknown>;
   windowRef?: RpcWindowRef;
 }
 
@@ -180,36 +180,6 @@ function normalizeLiveNotificationEvent(
     };
 }
 
-function toLegacyReplayResult(data: unknown): ReplayChunkResult {
-  const payload = asObject(data) ?? {};
-  const items = Array.isArray(payload.items)
-    ? payload.items
-      .map((item) => asObject(item))
-      .filter((item): item is JsonObject => Boolean(item))
-    : [];
-  const offset = Number.isFinite(payload.offset) ? Number(payload.offset) : 0;
-  const totalCount = Number.isFinite(payload.total) ? Number(payload.total) : items.length;
-  const jsonl = items.map((item) => JSON.stringify(item)).join('\n');
-  const nextOffset = offset + items.length;
-  const complete = nextOffset >= totalCount;
-  return {
-    conversation_id: typeof payload.conversation_id === 'string' ? payload.conversation_id : null,
-    replay_id: `legacy-replay-${offset}`,
-    frame: {
-      format: 'jsonl',
-      offset,
-      item_count: items.length,
-      total_count: totalCount,
-      chunk_index: 0,
-      complete,
-      next_cursor: complete ? null : { offset: nextOffset },
-      jsonl: jsonl ? `${jsonl}\n` : '',
-    },
-    items,
-    transport: 'legacy',
-  };
-}
-
 function normalizeReplayChunkResult(result: unknown): ReplayChunkResult {
   const payload = asObject(result);
   const frame = asObject(payload?.frame);
@@ -342,8 +312,8 @@ async function fetchReplayChunkRpcAccumulated(
 export function createConversationsRpcClient(
   deps: ConversationsRpcClientDeps,
 ) {
-  function rpcEnabled(): boolean {
-    return readRpcTransportEnabledPreference(deps.windowRef ?? (typeof window !== 'undefined' ? window : null));
+  function getWindowRef(): RpcWindowRef {
+    return deps.windowRef ?? (typeof window !== 'undefined' ? window : null);
   }
 
   async function getConversation(options: {
@@ -354,10 +324,6 @@ export function createConversationsRpcClient(
       ? options.conversationId
       : null;
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('conversation_get', { conversation_id: conversationId }, { timeoutMs });
-      return normalizeConversationMetaResult(legacy, 'legacy');
-    }
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.get,
@@ -365,7 +331,7 @@ export function createConversationsRpcClient(
         conversation_id: conversationId,
       },
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
     });
     return normalizeConversationMetaResult(result, 'rpc');
   }
@@ -374,16 +340,12 @@ export function createConversationsRpcClient(
     timeoutMs?: number;
   } = {}): Promise<ConversationListResult> {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('conversations_list', {}, { timeoutMs });
-      return normalizeConversationListResult(legacy, 'legacy');
-    }
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.list,
       params: {},
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
     });
     return normalizeConversationListResult(result, 'rpc');
   }
@@ -394,16 +356,12 @@ export function createConversationsRpcClient(
   } = {}): Promise<ConversationMetaResult> {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
     const payload = options.settings ? { settings: options.settings } : {};
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('conversation_create', payload, { timeoutMs });
-      return normalizeConversationMetaResult(legacy, 'legacy');
-    }
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.create,
       params: payload,
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
     });
     return normalizeConversationMetaResult(result, 'rpc');
   }
@@ -420,16 +378,39 @@ export function createConversationsRpcClient(
     if (typeof options.view === 'string' && options.view.trim()) {
       payload.view = options.view.trim();
     }
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('conversation_select', payload, { timeoutMs });
-      return normalizeConversationMetaResult(legacy, 'legacy');
-    }
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.select,
       params: payload,
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
+    });
+    return normalizeConversationMetaResult(result, 'rpc');
+  }
+
+  async function updateConversation(options: {
+    conversationId?: string | null;
+    settings?: JsonObject | null;
+    threadId?: string | null;
+    timeoutMs?: number;
+  }): Promise<ConversationMetaResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const payload: JsonObject = {};
+    if (typeof options.conversationId === 'string' && options.conversationId.trim()) {
+      payload.conversation_id = options.conversationId.trim();
+    }
+    if (options.settings && typeof options.settings === 'object') {
+      payload.settings = options.settings;
+    }
+    if (typeof options.threadId === 'string' && options.threadId.trim()) {
+      payload.thread_id = options.threadId.trim();
+    }
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.update,
+      params: payload,
+      timeoutMs,
+      windowRef: getWindowRef(),
     });
     return normalizeConversationMetaResult(result, 'rpc');
   }
@@ -440,16 +421,12 @@ export function createConversationsRpcClient(
   }): Promise<ConversationControlResult> {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
     const payload = { conversation_id: options.conversationId };
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('conversation_delete', payload, { timeoutMs });
-      return normalizeConversationControlResult(legacy, 'legacy');
-    }
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.delete,
       params: payload,
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
     });
     return normalizeConversationControlResult(result, 'rpc');
   }
@@ -460,18 +437,41 @@ export function createConversationsRpcClient(
   }): Promise<ConversationControlResult> {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
     const payload = { pinned_conversations: options.pinnedConversationIds };
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('conversation_pins_update', payload, { timeoutMs });
-      return normalizeConversationControlResult(legacy, 'legacy');
-    }
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.pinsSet,
       params: payload,
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
     });
     return normalizeConversationControlResult(result, 'rpc');
+  }
+
+  async function setDraft(options: {
+    conversationId?: string | null;
+    draft: string;
+    timeoutMs?: number;
+  }): Promise<ConversationDraftResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const payload: JsonObject = {
+      draft: typeof options.draft === 'string' ? options.draft : '',
+    };
+    if (typeof options.conversationId === 'string' && options.conversationId.trim()) {
+      payload.conversation_id = options.conversationId.trim();
+    }
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.draftSet,
+      params: payload,
+      timeoutMs,
+      windowRef: getWindowRef(),
+    });
+    const normalized = asObject(result) ?? {};
+    return {
+      ...normalized,
+      conversation_id: typeof normalized.conversation_id === 'string' ? normalized.conversation_id : null,
+      transport: 'rpc',
+    };
   }
 
   async function fetchReplayChunk(options: {
@@ -488,27 +488,13 @@ export function createConversationsRpcClient(
       maxBytes = 524288,
       timeoutMs = 10000,
     } = options;
-
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('get_transcript_range', {
-        conversation_id: conversationId,
-        offset,
-        limit: maxEntries,
-      }, { timeoutMs });
-      const legacyPayload = asObject(legacy);
-      if (!legacyPayload || legacyPayload.ok === false) {
-        throw new Error(`get_transcript_range failed: ${legacyPayload?.error || 'no data'}`);
-      }
-      return toLegacyReplayResult(legacyPayload);
-    }
-
     return fetchReplayChunkRpcAccumulated({
       conversationId,
       offset,
       maxEntries,
       maxBytes,
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
     });
   }
 
@@ -522,14 +508,6 @@ export function createConversationsRpcClient(
       ? options.conversationId
       : null;
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('send_message', {
-        conversation_id: conversationId,
-        text: options.text,
-      }, { timeoutMs });
-      return normalizeConversationSendResult(legacy, 'legacy', conversationId);
-    }
-
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.send,
@@ -539,7 +517,7 @@ export function createConversationsRpcClient(
         toast_context: options.toastContext ?? undefined,
       },
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
     });
     return normalizeConversationSendResult(result, 'rpc', conversationId);
   }
@@ -552,11 +530,6 @@ export function createConversationsRpcClient(
       ? options.conversationId
       : null;
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('interrupt', conversationId ? { conversation_id: conversationId } : {}, { timeoutMs });
-      return normalizeConversationControlResult(legacy, 'legacy');
-    }
-
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.interrupt,
@@ -564,7 +537,7 @@ export function createConversationsRpcClient(
         conversation_id: conversationId,
       },
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
     });
     return normalizeConversationControlResult(result, 'rpc');
   }
@@ -577,11 +550,6 @@ export function createConversationsRpcClient(
       ? options.conversationId
       : null;
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
-    if (!rpcEnabled()) {
-      const legacy = await deps.sioCall('compact', conversationId ? { conversation_id: conversationId } : {}, { timeoutMs });
-      return normalizeConversationControlResult(legacy, 'legacy');
-    }
-
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.compact,
@@ -589,7 +557,7 @@ export function createConversationsRpcClient(
         conversation_id: conversationId,
       },
       timeoutMs,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
     });
     return normalizeConversationControlResult(result, 'rpc');
   }
@@ -598,19 +566,14 @@ export function createConversationsRpcClient(
     onEvent: (event: ConversationsLiveEvent, notification: JsonRpcNotificationEnvelope<unknown>) => void;
     onError?: (error: unknown) => void;
     onConnectionChange?: (connected: boolean) => void;
-    enabled?: () => boolean;
   }): () => void {
-    const enabled = typeof options.enabled === 'function' ? options.enabled : rpcEnabled;
     return subscribeRpcNamespaceNotifications({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
-      windowRef: deps.windowRef ?? (typeof window !== 'undefined' ? window : null),
+      windowRef: getWindowRef(),
       onConnectionChange: (connected) => {
         options.onConnectionChange?.(connected);
       },
       onNotification: (notification) => {
-        if (!enabled()) {
-          return;
-        }
         try {
           const event = normalizeLiveNotificationEvent(notification);
           if (!event) {
@@ -636,8 +599,10 @@ export function createConversationsRpcClient(
     listConversations,
     createConversation,
     selectConversation,
+    updateConversation,
     deleteConversation,
     setConversationPins,
+    setDraft,
     fetchReplayChunk,
     sendMessage,
     interruptConversation,

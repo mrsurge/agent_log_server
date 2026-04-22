@@ -122,9 +122,6 @@ class _AppserverRelay(socketio.AsyncNamespace):
     async def on_rpc(self, sid, data):
         return await self._relay("rpc", sid, data)
 
-    async def on_set_conversations_live_transport(self, sid, data):
-        return await self._relay("set_conversations_live_transport", sid, data)
-
     async def on_interrupt(self, sid, data):
         return await self._relay("interrupt", sid, data)
 

@@ -36,7 +36,6 @@ from agent_log_server.appserver_socketio import (
     APPSERVER_NAMESPACE,
     AppserverSocketioDeps,
     CONVERSATIONS_RPC_NAMESPACE,
-    get_appserver_event_targets,
     register_appserver_socketio_handlers,
 )
 from agent_log_server.appserver_routes import (
@@ -1604,10 +1603,9 @@ async def _broadcast_appserver_ui(event: ObjectMap) -> None:
                     )
     _store_conversation_preview_from_event(evt)
     rpc_method = _conversation_rpc_notification_method(evt_type)
-    appserver_targets = get_appserver_event_targets(suppress_rpc_owned=(rpc_method is not None))
-    for sid in appserver_targets:
+    if rpc_method is None:
         try:
-            await socketio_server.emit("appserver_event", evt, namespace=APPSERVER_NAMESPACE, to=sid)
+            await socketio_server.emit("appserver_event", evt, namespace=APPSERVER_NAMESPACE)
         except Exception:
             pass
     if rpc_method:

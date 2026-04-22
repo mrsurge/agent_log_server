@@ -28,20 +28,24 @@ from agent_log_server.conversations_rpc_contract import (
     CONVERSATION_DELETE_METHOD,
     CONVERSATION_GET_METHOD,
     CONVERSATION_COMPACT_METHOD,
+    CONVERSATION_DRAFT_SET_METHOD,
     CONVERSATION_INTERRUPT_METHOD,
     CONVERSATION_LIST_METHOD,
     CONVERSATION_PINS_SET_METHOD,
     CONVERSATION_REPLAY_GET_CHUNK_METHOD,
     CONVERSATION_SEND_METHOD,
     CONVERSATION_SELECT_METHOD,
+    CONVERSATION_UPDATE_METHOD,
     ConversationControlParams,
     ConversationCreateParams,
+    ConversationDraftSetParams,
     ConversationDeleteParams,
     ConversationGetParams,
     ConversationPinsSetParams,
     ConversationReplayGetChunkParams,
     ConversationSendParams,
     ConversationSelectParams,
+    ConversationUpdateParams,
     ConversationsRpcProtocolError,
     build_empty_replay_chunk_result,
     build_jsonrpc_error_response,
@@ -54,12 +58,14 @@ from agent_log_server.conversations_rpc_contract import (
     normalize_replay_range_data,
     parse_conversation_create_params,
     parse_conversation_delete_params,
+    parse_conversation_draft_set_params,
     parse_conversation_get_params,
     parse_conversation_pins_set_params,
     parse_conversation_control_params,
     parse_conversation_replay_get_chunk_params,
     parse_conversation_send_params,
     parse_conversation_select_params,
+    parse_conversation_update_params,
     parse_conversations_rpc_request,
 )
 from agent_log_server.prompt_context import load_repo_memory_snapshot
@@ -1263,6 +1269,12 @@ class AppserverRoutes:
     ) -> ObjectMap:
         return await self.api_appserver_conversation_select(params.to_json())
 
+    async def _rpc_conversation_update(
+        self,
+        params: ConversationUpdateParams,
+    ) -> ObjectMap:
+        return await self.api_appserver_conversation_update(params.to_json())
+
     async def _rpc_conversation_delete(
         self,
         params: ConversationDeleteParams,
@@ -1274,6 +1286,12 @@ class AppserverRoutes:
         params: ConversationPinsSetParams,
     ) -> ObjectMap:
         return await self.api_appserver_conversation_pins(params.to_json())
+
+    async def _rpc_conversation_draft_set(
+        self,
+        params: ConversationDraftSetParams,
+    ) -> ObjectMap:
+        return await self.api_appserver_conversation_draft(params.to_json())
 
     async def _get_active_rpc_conversation_id(self) -> str | None:
         async with self._deps.config_lock:
@@ -1348,6 +1366,12 @@ class AppserverRoutes:
                     sanitize_conversation_id=self._deps.sanitize_conversation_id,
                 )
                 result = await self._rpc_conversation_select(select_params)
+            elif request.method == CONVERSATION_UPDATE_METHOD:
+                update_params = parse_conversation_update_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                )
+                result = await self._rpc_conversation_update(update_params)
             elif request.method == CONVERSATION_DELETE_METHOD:
                 delete_params = parse_conversation_delete_params(
                     request.params,
@@ -1360,6 +1384,12 @@ class AppserverRoutes:
                     sanitize_conversation_id=self._deps.sanitize_conversation_id,
                 )
                 result = await self._rpc_conversation_pins_set(pins_params)
+            elif request.method == CONVERSATION_DRAFT_SET_METHOD:
+                draft_params = parse_conversation_draft_set_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                )
+                result = await self._rpc_conversation_draft_set(draft_params)
             elif request.method == CONVERSATION_SEND_METHOD:
                 send_params = parse_conversation_send_params(
                     request.params,
@@ -1378,13 +1408,15 @@ class AppserverRoutes:
                     sanitize_conversation_id=self._deps.sanitize_conversation_id,
                 )
                 result = await self._rpc_conversation_compact(control_params)
-            else:
+            elif request.method == CONVERSATION_REPLAY_GET_CHUNK_METHOD:
                 replay_params = parse_conversation_replay_get_chunk_params(
                     request.params,
                     sanitize_conversation_id=self._deps.sanitize_conversation_id,
                     active_conversation_id=await self._get_active_rpc_conversation_id(),
                 )
                 result = await self._rpc_conversation_replay_get_chunk(replay_params)
+            else:
+                raise HTTPException(status_code=404, detail=f"Unknown conversations RPC method: {request.method}")
         except HTTPException as exc:
             return build_jsonrpc_error_response_from_http_exception(
                 request.request_id,

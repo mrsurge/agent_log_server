@@ -1,5 +1,6 @@
 import { bindPlanOverlay } from '../plan_overlay.ts';
 import { bindPlanModal } from '../plan_modal.ts';
+import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 import type { JsonObject } from '../rpc/conversations/contract.ts';
 
 type PlanRuntimeRecord = JsonObject;
@@ -85,6 +86,9 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     renderMarkdownInto,
     highlightCode,
   } = ctx;
+  const conversationsRpcClient = createConversationsRpcClient({
+    windowRef: typeof window !== 'undefined' ? window : null,
+  });
 
   function createEmptyPlanDocumentState(hasPlan = Boolean(getState().runtimeOptions?.has_plan)) {
     return {
@@ -199,11 +203,13 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
       conversationSettings: nextConversationSettings,
       conversationMeta: nextConversationMeta,
     });
-    const convoId = conversationMeta?.conversation_id || null;
+    const convoId = typeof conversationMeta?.conversation_id === 'string'
+      ? conversationMeta.conversation_id
+      : null;
     if (!convoId) return;
     try {
-      await sioCall('conversation_update', {
-        conversation_id: convoId,
+      await conversationsRpcClient.updateConversation({
+        conversationId: convoId,
         settings: {
           planOverlayCollapsed: nextPlanCollapsed,
         },

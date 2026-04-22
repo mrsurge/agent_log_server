@@ -1,3 +1,4 @@
+import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 import { createUiRpcClient } from '../rpc/ui/client.ts';
 
 declare const Tribute: any;
@@ -64,6 +65,9 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
   } = ctx;
   const uiRpcClient = createUiRpcClient({
     sioCall,
+    windowRef,
+  });
+  const conversationsRpcClient = createConversationsRpcClient({
     windowRef,
   });
 
@@ -428,8 +432,8 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       return Promise.resolve();
     }
     setState({ lastDraftHash: hash });
-    return sioCall('conversation_draft', {
-      conversation_id: convoId,
+    return conversationsRpcClient.setDraft({
+      conversationId: convoId,
       draft: text,
     }).then(() => {
       const latestState = getState();
@@ -466,8 +470,8 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       if (hash === currentState.lastDraftHash) return;
       setState({ lastDraftHash: hash });
       try {
-        await sioCall('conversation_draft', {
-          conversation_id: convoId,
+        await conversationsRpcClient.setDraft({
+          conversationId: convoId,
           draft: text,
         });
         const latestState = getState();
@@ -521,8 +525,8 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     });
     const convoId = getState().conversationMeta?.conversation_id;
     if (convoId) {
-      sioCall('conversation_draft', {
-        conversation_id: convoId,
+      conversationsRpcClient.setDraft({
+        conversationId: convoId,
         draft: '',
       }).catch(() => {});
     }
@@ -532,7 +536,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     if (!convoId || !promptEl) return;
     if (getState().draftDirty) return;
     try {
-      const meta = await sioCall('conversation_get', { conversation_id: convoId });
+      const meta = await conversationsRpcClient.getConversation({ conversationId: convoId });
       if (!meta || meta.ok === false || meta.conversation_id !== convoId) return;
       const serverDraft = meta.draft;
       if (typeof serverDraft !== 'string') return;

@@ -234,6 +234,11 @@ UNDER NO CIRCUMSTANCES WILL I EVER USE `resolve()` or ANY SYMLINK RESOLOVING MET
 - In this Copilot harness, do **not** mix a Python heredoc command with other chained scripts/commands in the same Bash invocation when validating or debugging.
 - Run the heredoc in its own Bash call, or use `python -c` for mixed validation chains, because combined heredoc + additional scripts can hang and hide otherwise-finished command output.
 
+## Basedpyright invocation
+
+- For this repo, run `basedpyright` from `PATH` directly.
+- Do **not** use `npx --no-install basedpyright` here.
+
 # Agent Log
 
 - The agent log is to be used to check to see if there are other agents working, and to communicate with other agents. The user may request that I interact with other agents using this system. (I will use the mcp tool if it is available to me, if it is, disregard the following agent log information)

@@ -54,48 +54,6 @@ from agent_log_server.typing_helpers import (
 )
 
 APPSERVER_NAMESPACE = "/appserver"
-ConversationsLiveTransport = Literal["legacy", "rpc"]
-
-_APPSERVER_CONNECTED_SIDS: set[str] = set()
-_APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID: dict[str, ConversationsLiveTransport] = {}
-
-
-def _normalize_conversations_live_transport(value: object) -> ConversationsLiveTransport:
-    if isinstance(value, str) and value.strip().lower() == "rpc":
-        return "rpc"
-    return "legacy"
-
-
-def register_appserver_sid(sid: str) -> None:
-    _APPSERVER_CONNECTED_SIDS.add(sid)
-    _APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID[sid] = "legacy"
-
-
-def unregister_appserver_sid(sid: str) -> None:
-    _APPSERVER_CONNECTED_SIDS.discard(sid)
-    _APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID.pop(sid, None)
-
-
-def set_appserver_conversations_live_transport(
-    sid: str,
-    transport: object,
-) -> ConversationsLiveTransport:
-    normalized = _normalize_conversations_live_transport(transport)
-    _APPSERVER_CONNECTED_SIDS.add(sid)
-    _APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID[sid] = normalized
-    return normalized
-
-
-def get_appserver_event_targets(*, suppress_rpc_owned: bool) -> tuple[str, ...]:
-    if not suppress_rpc_owned:
-        return tuple(_APPSERVER_CONNECTED_SIDS)
-    return tuple(
-        sid
-        for sid in _APPSERVER_CONNECTED_SIDS
-        if _APPSERVER_CONVERSATIONS_LIVE_TRANSPORT_BY_SID.get(sid, "legacy") != "rpc"
-    )
-
-
 @dataclass(frozen=True)
 class AppserverSocketioDeps:
     make_appserver_message_in: Callable[[str, str], object]
@@ -295,11 +253,9 @@ def register_appserver_socketio_handlers(
         return False, message or f"xdg-open exited with {proc.returncode}"
 
     async def _appserver_connect(sid: str, environ: ObjectMap) -> object:
-        register_appserver_sid(sid)
         return None
 
     async def _appserver_disconnect(sid: str) -> object:
-        unregister_appserver_sid(sid)
         return None
 
     async def _conversations_rpc_connect(sid: str, environ: ObjectMap) -> object:
@@ -539,17 +495,6 @@ def register_appserver_socketio_handlers(
             return await deps.api_appserver_compact(_payload(data))
         except HTTPException as exc:
             return _sio_error(exc.detail)
-        except Exception as exc:
-            return _sio_error(exc)
-
-    async def _sio_set_conversations_live_transport(sid: str, data: object) -> object:
-        try:
-            payload = _payload(data)
-            transport = set_appserver_conversations_live_transport(
-                sid,
-                payload.get("transport"),
-            )
-            return {"ok": True, "transport": transport}
         except Exception as exc:
             return _sio_error(exc)
 
@@ -1129,21 +1074,8 @@ def register_appserver_socketio_handlers(
     registrations: list[tuple[str, Callable[..., Awaitable[object]]]] = [
         ("connect", _appserver_connect),
         ("disconnect", _appserver_disconnect),
-        ("send_message", _sio_send_message),
         ("shell_exec", _sio_shell_exec),
         ("rpc", _sio_rpc),
-        ("set_conversations_live_transport", _sio_set_conversations_live_transport),
-        ("interrupt", _sio_interrupt),
-        ("compact", _sio_compact),
-        ("conversation_get", _sio_conversation_get),
-        ("conversation_meta", _sio_conversation_meta),
-        ("conversation_update", _sio_conversation_update),
-        ("conversation_draft", _sio_conversation_draft),
-        ("conversations_list", _sio_conversations_list),
-        ("conversation_create", _sio_conversation_create),
-        ("conversation_select", _sio_conversation_select),
-        ("conversation_delete", _sio_conversation_delete),
-        ("conversation_pins_update", _sio_conversation_pins_update),
         ("set_view", _sio_set_view),
         ("get_config", _sio_get_config),
         ("update_config", _sio_update_config),
@@ -1175,8 +1107,6 @@ def register_appserver_socketio_handlers(
         ("approval_response", _sio_approval_response),
         ("fs_list", _sio_fs_list),
         ("fs_search", _sio_fs_search),
-        ("get_transcript", _sio_get_transcript),
-        ("get_transcript_range", _sio_get_transcript_range),
         ("get_extension_models", _sio_get_extension_models),
         ("te2_agent_open", _sio_te2_agent_open),
         ("open_external_url", _sio_open_external_url),

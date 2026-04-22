@@ -1,4 +1,5 @@
 import { TRANSCRIPT_PRELOAD_ROWS } from '../transcript_config.ts';
+import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 
 type TextValueElement = HTMLElement & { value: string };
 
@@ -133,6 +134,9 @@ export function bindInputFlow(ctx: InputFlowContext) {
     documentRef,
     windowRef,
   } = ctx;
+  const conversationsRpcClient = createConversationsRpcClient({
+    windowRef,
+  });
 
   const {
     sendBtn,
@@ -296,8 +300,8 @@ export function bindInputFlow(ctx: InputFlowContext) {
       state.conversationSettings.markdown = enabled;
     }
     if (state.conversationMeta?.conversation_id) {
-      await sioCall('conversation_update', {
-        conversation_id: state.conversationMeta.conversation_id,
+      await conversationsRpcClient.updateConversation({
+        conversationId: state.conversationMeta.conversation_id,
         settings: { ...state.conversationSettings, markdown: enabled },
       });
       await fetchConversation(state.conversationMeta.conversation_id);
@@ -316,8 +320,8 @@ export function bindInputFlow(ctx: InputFlowContext) {
       state.conversationSettings.trackEdits = enabled;
     }
     if (state.conversationMeta?.conversation_id) {
-      await sioCall('conversation_update', {
-        conversation_id: state.conversationMeta.conversation_id,
+      await conversationsRpcClient.updateConversation({
+        conversationId: state.conversationMeta.conversation_id,
         settings: { ...state.conversationSettings, trackEdits: enabled },
       });
     }
@@ -330,8 +334,8 @@ export function bindInputFlow(ctx: InputFlowContext) {
       state.conversationSettings.lineNumbers = enabled;
     }
     if (state.conversationMeta?.conversation_id) {
-      await sioCall('conversation_update', {
-        conversation_id: state.conversationMeta.conversation_id,
+      await conversationsRpcClient.updateConversation({
+        conversationId: state.conversationMeta.conversation_id,
         settings: { ...state.conversationSettings, lineNumbers: enabled },
       });
       await fetchConversation(state.conversationMeta.conversation_id);
