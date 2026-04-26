@@ -5,8 +5,53 @@ import {
   applyTranscriptCardMetadata,
   type TranscriptCardMetadata,
 } from '../transcript_card_metadata.ts';
+import type { UnknownRecord } from '../shared_types.ts';
 
-type AnyRecord = Record<string, any>;
+type AssistantRows = Parameters<typeof bindAssistantStream>[0]['assistantRows'];
+type ApprovalBinding = ReturnType<typeof bindApprovalUi>;
+type ApprovalEvent = Parameters<ApprovalBinding['renderApproval']>[0];
+type ApprovalRenderOptions = Parameters<ApprovalBinding['renderApproval']>[1];
+type RequestCardRuntime = Parameters<typeof bindApprovalUi>[0]['requestCardRuntime'];
+
+interface ReasoningRowEntry {
+  row: HTMLElement;
+  body: HTMLElement;
+  pre: HTMLPreElement;
+}
+
+interface DiffRowEntry {
+  block: HTMLElement;
+  row: HTMLElement;
+}
+
+interface SubagentContainerRecord {
+  body?: HTMLElement | null;
+  [key: string]: unknown;
+}
+
+interface AgentBlockRowEntry {
+  row: HTMLElement;
+  cmdRibbon: HTMLElement;
+  termEl: HTMLElement;
+  text: string;
+  screenRows: string[] | null;
+  renderMode: 'raw' | 'screen';
+  hasRawStream: boolean;
+  buf?: string;
+  term?: { reset(): void } | null;
+}
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function asFiniteNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
 
 interface LiveItemsState {
   lastEventType?: string | null;
@@ -16,17 +61,17 @@ interface LiveItemsState {
 interface LiveItemsContext {
   getState(): LiveItemsState;
   setState(patch: Partial<LiveItemsState>): void;
-  assistantRows: Map<any, any>;
-  reasoningRows: Map<any, any>;
-  diffRows: Map<any, any>;
-  agentBlockRows: Map<any, any>;
+  assistantRows: AssistantRows;
+  reasoningRows: Map<string, ReasoningRowEntry>;
+  diffRows: Map<string, DiffRowEntry>;
+  agentBlockRows: Map<string, AgentBlockRowEntry>;
   timelineEl: HTMLElement | null;
   buildMessageCard(role: string, text?: string): { row: HTMLElement; body: HTMLElement };
   updateMessageCardHeader(row: HTMLElement, role: string, text: string): void;
   insertRow(row: HTMLElement, beforeEl?: ChildNode | null): void;
   createRow(kind: string, title: string, beforeEl?: ChildNode | null, parentEl?: HTMLElement | null): { row: HTMLElement; body: HTMLElement };
   buildRow(kind: string, title: string): { row: HTMLElement; body: HTMLElement };
-  makeCollapsible(row: HTMLElement, cardId: string, startExpanded: boolean, options?: AnyRecord): void;
+  makeCollapsible(row: HTMLElement, cardId: string, startExpanded: boolean, options?: UnknownRecord): void;
   clearPlaceholder(): void;
   setActivity(label: string, active: boolean): void;
   setStatusDot(status: string | null): void;
@@ -49,13 +94,13 @@ interface LiveItemsContext {
   resolveHljsLanguage(lang: string): string;
   detectLangFromCommand(command: string): string;
   isDiffSyntaxEnabled(): boolean;
-  sioCall(event: string, data?: Record<string, unknown>): Promise<any>;
+  sioCall(event: string, data?: Record<string, unknown>): Promise<unknown>;
   getConversationId(): string | null;
-  getConversationMeta(): AnyRecord;
-  setConversationMeta(nextMeta: AnyRecord): void;
+  getConversationMeta(): UnknownRecord;
+  setConversationMeta(nextMeta: UnknownRecord): void;
   getCurrentExtensionId(): string;
-  getSubagentContainer(id: string, name: string, intent: string): AnyRecord;
-  requestCardRuntime: AnyRecord;
+  getSubagentContainer(id: string, name: string, intent: string): SubagentContainerRecord;
+  requestCardRuntime: RequestCardRuntime;
   onAfterRender(): void;
 }
 
@@ -318,10 +363,10 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     return entry;
   }
 
-  function renderAgentBlockBegin(evt: AnyRecord) {
-    const block = evt.block || {};
-    const blockId = evt.block_id || block.block_id || evt.blockId || 'agent';
-    const cmd = block.cmd || '';
+  function renderAgentBlockBegin(evt: UnknownRecord) {
+    const block = isRecord(evt.block) ? evt.block : {};
+    const blockId = asString(evt.block_id, asString(block.block_id, asString(evt.blockId, 'agent')));
+    const cmd = asString(block.cmd);
     const label = cmd ? `$ ${cmd}` : 'agent pty';
     const entry = getAgentBlockRow(blockId, label, evt);
     entry.cmdRibbon.textContent = cmd ? `$ ${cmd}` : '';
@@ -337,12 +382,12 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     maybeAutoScroll();
   }
 
-  function renderAgentBlockDelta(evt: AnyRecord) {
-    const blockId = evt.block_id || evt.blockId || 'agent';
+  function renderAgentBlockDelta(evt: UnknownRecord) {
+    const blockId = asString(evt.block_id, asString(evt.blockId, 'agent'));
     const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty', evt);
     applyTranscriptCardMetadata(entry.row, evt);
     if (entry.renderMode === 'screen' || entry.hasRawStream) return;
-    const delta = evt.delta || '';
+    const delta = asString(evt.delta);
     if (!delta) return;
     entry.text += delta;
     entry.termEl.textContent = entry.text;
@@ -350,8 +395,8 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     maybeAutoScroll();
   }
 
-  function renderScreenDelta(evt: AnyRecord) {
-    const blockId = evt.block_id || evt.blockId;
+  function renderScreenDelta(evt: UnknownRecord) {
+    const blockId = asString(evt.block_id, asString(evt.blockId));
     if (!blockId) return;
     const entry = agentBlockRows.get(blockId) || getAgentBlockRow(blockId, 'agent pty', evt);
     applyTranscriptCardMetadata(entry.row, evt);
@@ -364,26 +409,27 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
         entry.term.reset();
       }
     }
-    const rowCount = Number.isFinite(evt.rows_count) ? evt.rows_count : 40;
-    if (!entry.screenRows || entry.screenRows.length !== rowCount) {
-      entry.screenRows = new Array(rowCount).fill('');
-    }
+    const rowCount = asFiniteNumber(evt.rows_count, 40);
+    const screenRows = entry.screenRows && entry.screenRows.length === rowCount
+      ? entry.screenRows
+      : new Array(rowCount).fill('');
+    entry.screenRows = screenRows;
     const rows = Array.isArray(evt.rows) ? evt.rows : [];
     rows.forEach((rowData) => {
-      if (!rowData || !Number.isFinite(rowData.row)) return;
-      const idx = rowData.row;
-      if (idx >= 0 && idx < entry.screenRows.length) {
-        entry.screenRows[idx] = rowData.text || '';
+      if (!isRecord(rowData)) return;
+      const idx = asFiniteNumber(rowData.row, -1);
+      if (idx >= 0 && idx < screenRows.length) {
+        screenRows[idx] = asString(rowData.text);
       }
     });
-    entry.termEl.textContent = entry.screenRows.join('\n');
+    entry.termEl.textContent = screenRows.join('\n');
     setLastEventType('shell');
     maybeAutoScroll();
   }
 
-  function renderAgentBlockEnd(evt: AnyRecord) {
-    const block = evt.block || {};
-    const blockId = evt.block_id || block.block_id || evt.blockId || 'agent';
+  function renderAgentBlockEnd(evt: UnknownRecord) {
+    const block = isRecord(evt.block) ? evt.block : {};
+    const blockId = asString(evt.block_id, asString(block.block_id, asString(evt.blockId, 'agent')));
     const entry = agentBlockRows.get(blockId);
     if (!entry) return;
     applyTranscriptCardMetadata(entry.row, evt);
@@ -407,7 +453,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
   }
 
   function renderPlanCard(
-    steps: AnyRecord[],
+    steps: UnknownRecord[],
     parentEl: HTMLElement | null = null,
     metadata: TranscriptCardMetadata | null = null,
   ) {
@@ -434,14 +480,16 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     list.className = 'plan-list';
 
     steps.forEach((item) => {
+      const status = typeof item.status === 'string' ? item.status : 'pending';
+      const stepText = typeof item.step === 'string' ? item.step : '';
       const stepEl = document.createElement('div');
-      stepEl.className = `plan-item ${item.status || 'pending'}`;
+      stepEl.className = `plan-item ${status}`;
 
       const checkbox = document.createElement('span');
       checkbox.className = 'plan-checkbox';
-      if (item.status === 'completed') {
+      if (status === 'completed') {
         checkbox.textContent = '☑';
-      } else if (item.status === 'in_progress') {
+      } else if (status === 'in_progress') {
         checkbox.textContent = '◐';
       } else {
         checkbox.textContent = '☐';
@@ -449,7 +497,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
 
       const textEl = document.createElement('span');
       textEl.className = 'plan-text';
-      textEl.textContent = item.step || '';
+      textEl.textContent = stepText;
 
       stepEl.append(checkbox, textEl);
       list.appendChild(stepEl);
@@ -485,7 +533,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     onAfterRender,
   });
 
-  function renderApproval(evt: AnyRecord, options: AnyRecord = {}) {
+  function renderApproval(evt: ApprovalEvent, options: ApprovalRenderOptions = {}) {
     return approvalUi.renderApproval(evt, options);
   }
 
@@ -493,7 +541,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     return approvalUi.respondApproval(requestId, decision);
   }
 
-  function handoffApproval(evt: AnyRecord) {
+  function handoffApproval(evt: ApprovalEvent) {
     return approvalUi.handoffApproval(evt);
   }
 

@@ -21,6 +21,8 @@ CONVERSATION_SEND_METHOD = "conversation.send"
 CONVERSATION_INTERRUPT_METHOD = "conversation.interrupt"
 CONVERSATION_COMPACT_METHOD = "conversation.compact"
 CONVERSATION_REPLAY_GET_CHUNK_METHOD = "conversation.replay.getChunk"
+CONVERSATION_APPROVAL_RESPONSE_METHOD = "conversation.approval.respond"
+CONVERSATION_SHELL_EXEC_METHOD = "conversation.shell.exec"
 CONVERSATION_GET_METHOD = "conversation.get"
 CONVERSATION_LIST_METHOD = "conversation.list"
 CONVERSATION_CREATE_METHOD = "conversation.create"
@@ -62,9 +64,12 @@ CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE: dict[str, str] = {
     "thought": "conversation.thought",
     "toast": "conversation.toast",
     "token_count": "conversation.token.updated",
+    "tool_interaction": "conversation.tool.interaction",
     "tool_begin": "conversation.tool.begin",
     "tool_delta": "conversation.tool.delta",
     "tool_end": "conversation.tool.end",
+    "search": "conversation.search",
+    "view": "conversation.view",
     "warning": "conversation.warning",
 }
 
@@ -81,6 +86,8 @@ ConversationsRpcMethod: TypeAlias = Literal[
     "conversation.interrupt",
     "conversation.compact",
     "conversation.replay.getChunk",
+    "conversation.approval.respond",
+    "conversation.shell.exec",
 ]
 SanitizeConversationId: TypeAlias = Callable[[str], str]
 
@@ -224,6 +231,16 @@ class ConversationControlParams:
 
     def to_json(self) -> ObjectMap:
         return {"conversation_id": self.conversation_id}
+
+
+@dataclass(frozen=True)
+class ConversationApprovalResponseParams:
+    payload: ObjectMap
+
+
+@dataclass(frozen=True)
+class ConversationShellExecParams:
+    payload: ObjectMap
 
 
 @dataclass(frozen=True)
@@ -455,6 +472,10 @@ def parse_conversations_rpc_request(payload: object) -> ParsedConversationsRpcRe
         parsed_method = CONVERSATION_COMPACT_METHOD
     elif method == CONVERSATION_REPLAY_GET_CHUNK_METHOD:
         parsed_method = CONVERSATION_REPLAY_GET_CHUNK_METHOD
+    elif method == CONVERSATION_APPROVAL_RESPONSE_METHOD:
+        parsed_method = CONVERSATION_APPROVAL_RESPONSE_METHOD
+    elif method == CONVERSATION_SHELL_EXEC_METHOD:
+        parsed_method = CONVERSATION_SHELL_EXEC_METHOD
     else:
         raise ConversationsRpcProtocolError(
             request_id,
@@ -516,6 +537,35 @@ def parse_conversation_get_params(
             conversation_id=sanitize_conversation_id(active_conversation_id.strip()),
         )
     return ConversationGetParams(conversation_id=None)
+
+
+def parse_conversation_approval_response_params(
+    params: ObjectMap,
+) -> ConversationApprovalResponseParams:
+    request_id_value = params.get("request_id", params.get("requestId", params.get("id")))
+    request_id = str(request_id_value or "").strip()
+    if not request_id:
+        raise HTTPException(status_code=400, detail="Missing request_id")
+    return ConversationApprovalResponseParams(payload=dict(params))
+
+
+def parse_conversation_shell_exec_params(
+    params: ObjectMap,
+    *,
+    sanitize_conversation_id: SanitizeConversationId,
+) -> ConversationShellExecParams:
+    conversation_id = _require_sanitized_conversation_id(
+        params.get("conversation_id"),
+        sanitize_conversation_id=sanitize_conversation_id,
+        detail="Missing required field: conversation_id",
+    )
+    command = params.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise HTTPException(status_code=400, detail="No command provided")
+    payload = dict(params)
+    payload["conversation_id"] = conversation_id
+    payload["command"] = command
+    return ConversationShellExecParams(payload=payload)
 
 
 def parse_conversation_create_params(params: ObjectMap) -> ConversationCreateParams:

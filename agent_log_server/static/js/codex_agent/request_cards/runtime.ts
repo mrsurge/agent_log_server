@@ -1,3 +1,5 @@
+import { createSettingsRpcClient } from '../rpc/settings/client.ts';
+
 type JsonObject = Record<string, unknown>;
 
 interface RequestCardMatchEntry {
@@ -49,7 +51,7 @@ interface RequestCardModule {
 }
 
 interface RequestCardRuntimeContext {
-  sioCall(event: string, payload: Record<string, unknown>): Promise<unknown>;
+  sioCall(event: string, payload?: Record<string, unknown>, options?: Record<string, unknown>): Promise<unknown>;
 }
 
 interface RequestCardRuntimeBinding {
@@ -108,6 +110,7 @@ function normalizeConfigResponse(extensionId: string, data: unknown): RequestCar
 
 export function bindRequestCardRuntime(ctx: RequestCardRuntimeContext): RequestCardRuntimeBinding {
   const { sioCall } = ctx;
+  const settingsRpcClient = createSettingsRpcClient({ sioCall });
   const configCache = new Map<string, Promise<RequestCardConfig>>();
   const moduleCache = new Map<string, Promise<RequestCardModule | null>>();
 
@@ -120,8 +123,8 @@ export function bindRequestCardRuntime(ctx: RequestCardRuntimeContext): RequestC
     }
     const promise = (async () => {
       try {
-        const data = await sioCall('get_extension_request_cards', {
-          extension_id: normalizedId,
+        const data = await settingsRpcClient.getExtensionRequestCards({
+          extensionId: normalizedId,
         });
         return normalizeConfigResponse(normalizedId, data);
       } catch {

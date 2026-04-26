@@ -19,6 +19,8 @@ export const CONVERSATIONS_RPC_METHODS = {
   interrupt: 'conversation.interrupt',
   compact: 'conversation.compact',
   replayGetChunk: 'conversation.replay.getChunk',
+  approvalRespond: 'conversation.approval.respond',
+  shellExec: 'conversation.shell.exec',
 } as const;
 
 export type ConversationsRpcMethod =
@@ -143,9 +145,12 @@ export const CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE = {
   thought: 'conversation.thought',
   toast: 'conversation.toast',
   token_count: 'conversation.token.updated',
+  tool_interaction: 'conversation.tool.interaction',
   tool_begin: 'conversation.tool.begin',
   tool_delta: 'conversation.tool.delta',
   tool_end: 'conversation.tool.end',
+  search: 'conversation.search',
+  view: 'conversation.view',
   warning: 'conversation.warning',
 } as const;
 
@@ -185,10 +190,13 @@ export const CONVERSATIONS_RPC_CANONICAL_EVENT_TYPE_BY_METHOD = {
   'conversation.thought': 'thought',
   'conversation.toast': 'toast',
   'conversation.token.updated': 'token_count',
+  'conversation.tool.interaction': 'tool_interaction',
   'conversation.tool.begin': 'tool_begin',
   'conversation.tool.delta': 'tool_delta',
   'conversation.tool.end': 'tool_end',
+  'conversation.search': 'search',
   'conversation.user.message': 'message',
+  'conversation.view': 'view',
   'conversation.warning': 'warning',
 } as const;
 
@@ -268,6 +276,16 @@ export const CONVERSATIONS_RPC_METHOD_DESCRIPTORS: readonly RpcMethodDescriptor<
   },
   {
     name: CONVERSATIONS_RPC_METHODS.replayGetChunk,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.approvalRespond,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.shellExec,
     namespace: CONVERSATIONS_RPC_NAMESPACE,
     status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
   },

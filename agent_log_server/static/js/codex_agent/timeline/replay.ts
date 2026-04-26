@@ -3,12 +3,46 @@ import {
   findTranscriptCardRow,
 } from '../transcript_card_metadata.ts';
 import { buildShellCommandPreview } from '../shell_render.ts';
+import type { UnknownRecord } from '../shared_types.ts';
 
-type AnyRecord = Record<string, any>;
+interface AgentPtyReplayRecord {
+  row: HTMLElement;
+  termEl: HTMLDivElement;
+  cmdRibbon: HTMLDivElement;
+  cmd: string;
+  buf: string;
+  text: string;
+  screenRows: string[] | null;
+  renderMode: 'raw' | 'screen';
+  hasRawStream: boolean;
+}
+
+interface ReplaySubagentRecord {
+  row?: HTMLElement;
+  body?: HTMLElement | null;
+  statusEl?: HTMLElement | null;
+  label?: HTMLElement | null;
+}
+
+type TranscriptEntry = UnknownRecord;
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function asNumber(value: unknown, fallback: number): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
 
 interface TimelineReplayState {
-  conversationSettings?: AnyRecord;
-  runtimeOptions?: AnyRecord;
+  conversationSettings?: UnknownRecord;
+  runtimeOptions?: UnknownRecord;
   planOverlayEl?: HTMLElement | null;
   topSpacerEl?: HTMLElement | null;
   bottomSpacerEl?: HTMLElement | null;
@@ -27,12 +61,12 @@ interface TimelineReplayContext {
   counterMessagesEl: HTMLElement | null;
   counterTokensEl: HTMLElement | null;
   contextRemainingEl: HTMLElement | null;
-  assistantRows: Map<any, any>;
-  reasoningRows: Map<any, any>;
-  diffRows: Map<any, any>;
-  toolRows: Map<any, any>;
-  shellRows: Map<any, any>;
-  agentBlockRows: Map<any, any>;
+  assistantRows: Map<string, unknown>;
+  reasoningRows: Map<string, unknown>;
+  diffRows: Map<string, unknown>;
+  toolRows: Map<string, unknown>;
+  shellRows: Map<string, unknown>;
+  agentBlockRows: Map<string, AgentPtyReplayRecord>;
   documentRef: Document;
   clearPlaceholder(): void;
   setPlaceholderCleared(value: boolean): void;
@@ -49,23 +83,23 @@ interface TimelineReplayContext {
   timelineStickyUpdate(): void;
   currentExtensionId(): string;
   buildRow(kind: string, title: string): { row: HTMLElement; body: HTMLElement };
-  appendErrorContent(body: HTMLElement, entry: AnyRecord): void;
-  renderCommandResult(entry: AnyRecord, parentEl: HTMLElement, options?: AnyRecord): void;
-  renderViewCard(entry: AnyRecord, parentEl: HTMLElement): void;
-  renderSearchCard(entry: AnyRecord, parentEl: HTMLElement): void;
-  renderApproval(entry: AnyRecord, options?: AnyRecord): void;
-  buildReplayToolRow(entry: AnyRecord): HTMLElement;
+  appendErrorContent(body: HTMLElement, entry: TranscriptEntry): void;
+  renderCommandResult(entry: TranscriptEntry, parentEl: HTMLElement, options?: UnknownRecord): void;
+  renderViewCard(entry: TranscriptEntry, parentEl: HTMLElement): void;
+  renderSearchCard(entry: TranscriptEntry, parentEl: HTMLElement): void;
+  renderApproval(entry: TranscriptEntry, options?: UnknownRecord): void;
+  buildReplayToolRow(entry: TranscriptEntry): HTMLElement;
   renderShellCmdRibbon(el: HTMLElement, cmd: string, options?: { promptPrefix?: string }): void;
   highlightCodeAlways(text: string, lang: string): string;
   detectLangFromCommand(command: string): string;
   escapeHtml(text: string): string;
   toRelativePath(path: string): string;
   postTe2OpenRequest(target: { path?: unknown; line?: unknown; column?: unknown }): unknown;
-  makeCollapsible(row: HTMLElement, cardId: string, startExpanded: boolean, options?: AnyRecord): void;
-  addMessage(role: string, text: string, parentEl?: HTMLElement | null, metadata?: AnyRecord | null): void;
-  finalizeReasoning(id: string | null | undefined, text: string, parentEl?: HTMLElement | null, metadata?: AnyRecord | null): void;
-  addDiff(id: string, text: string, path: string, parentEl?: HTMLElement | null, metadata?: AnyRecord | null): void;
-  renderPlanCard(steps: AnyRecord[], parentEl?: HTMLElement | null, metadata?: AnyRecord | null): void;
+  makeCollapsible(row: HTMLElement, cardId: string, startExpanded: boolean, options?: UnknownRecord): void;
+  addMessage(role: string, text: string, parentEl?: HTMLElement | null, metadata?: UnknownRecord | null): void;
+  finalizeReasoning(id: string | null | undefined, text: string, parentEl?: HTMLElement | null, metadata?: UnknownRecord | null): void;
+  addDiff(id: string, text: string, path: string, parentEl?: HTMLElement | null, metadata?: UnknownRecord | null): void;
+  renderPlanCard(steps: UnknownRecord[], parentEl?: HTMLElement | null, metadata?: UnknownRecord | null): void;
   updateTokens(total: number): void;
   updateContextRemaining(total: number, windowSize: number): void;
   applyRuntimeMode(kind: string): void;
@@ -152,7 +186,6 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       lastEventType: null,
       contextWindow: null,
       transcriptHistoryMode: false,
-      transcriptLiveDirty: false,
     };
     if (options.bumpGeneration) {
       nextState.transcriptTotal = 0;
@@ -185,8 +218,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     initializeReplayWindow({ bumpGeneration: false, showPlaceholder: false });
   }
 
-  function isInternalTranscriptItem(entry: AnyRecord) {
-    if (!entry || typeof entry !== 'object') return false;
+  function isInternalTranscriptItem(entry: TranscriptEntry) {
     if (entry.internal === true) return true;
     if (typeof entry.internal === 'string' && ['1', 'true', 'yes', 'on'].includes(entry.internal.trim().toLowerCase())) {
       return true;
@@ -194,13 +226,13 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     return typeof entry.visibility === 'string' && entry.visibility.trim().toLowerCase() === 'internal';
   }
 
-  function renderTranscriptEntries(items: AnyRecord[], opts: AnyRecord = {}) {
+  function renderTranscriptEntries(items: TranscriptEntry[], opts: UnknownRecord = {}) {
     if (!items || !items.length || !timelineEl) return;
     const state = getState();
     const fragment = documentRef.createDocumentFragment();
-    const pendingAgentPtyTerms: AnyRecord[] = [];
-    const agentPtyByBlock = new Map();
-    const replaySubagents = new Map();
+    const pendingAgentPtyTerms: AgentPtyReplayRecord[] = [];
+    const agentPtyByBlock = new Map<string, AgentPtyReplayRecord>();
+    const replaySubagents = new Map<string, ReplaySubagentRecord>();
 
     items.forEach((entry) => {
       if (isInternalTranscriptItem(entry)) return;
@@ -217,11 +249,12 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         }
         const row = documentRef.createElement('div');
         row.className = 'timeline-row subagent-card';
-        row.dataset.subagentId = entry.id;
+        const subagentId = asString(entry.id);
+        row.dataset.subagentId = subagentId;
         const header = documentRef.createElement('div');
         header.className = 'subagent-header command-ribbon';
         const label = documentRef.createElement('span');
-        label.textContent = `${entry.name || 'subagent'}: ${entry.intent || 'working'}`;
+        label.textContent = `${asString(entry.name, 'subagent')}: ${asString(entry.intent, 'working')}`;
         const statusEl = documentRef.createElement('span');
         statusEl.className = 'subagent-status';
         statusEl.textContent = '⏳ running';
@@ -230,24 +263,26 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         const body = documentRef.createElement('div');
         body.className = 'subagent-body';
         row.appendChild(body);
-        makeCollapsible(row, `subagent:${entry.id}`, false, {
+        makeCollapsible(row, `subagent:${subagentId}`, false, {
           headerEl: header,
           fullHeaderToggle: true,
         });
         applyTranscriptCardMetadata(row, entry);
-        replaySubagents.set(entry.id, { row, body, statusEl, label });
+        replaySubagents.set(subagentId, { row, body, statusEl, label });
         fragment.appendChild(row);
         return;
       }
 
       if (entry.role === 'subagent_end') {
-        let subagent = replaySubagents.get(entry.id);
+        const subagentId = asString(entry.id);
+        let subagent = replaySubagents.get(subagentId);
         if (!subagent) {
-          const existing = timelineEl.querySelector(`.subagent-card[data-subagent-id="${entry.id}"]`);
+          const existing = timelineEl.querySelector(`.subagent-card[data-subagent-id="${subagentId}"]`);
           if (existing instanceof HTMLElement) {
             subagent = {
-              statusEl: existing.querySelector('.subagent-status'),
-              body: existing.querySelector('.subagent-body'),
+              row: existing,
+              statusEl: existing.querySelector('.subagent-status') as HTMLElement | null,
+              body: existing.querySelector('.subagent-body') as HTMLElement | null,
             };
           }
         }
@@ -255,11 +290,12 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
           if (subagent.statusEl instanceof HTMLElement) {
             subagent.statusEl.textContent = entry.success !== false ? '✓ done' : '✗ failed';
           }
-          if (entry.summary) {
+          const summary = asString(entry.summary);
+          if (summary) {
             const summaryEl = documentRef.createElement('div');
             summaryEl.className = 'subagent-summary';
             summaryEl.style.cssText = 'padding: 4px 14px; font-size: 0.85em; opacity: 0.7; font-style: italic;';
-            summaryEl.textContent = entry.summary;
+            summaryEl.textContent = summary;
             if (subagent.body instanceof HTMLElement) subagent.body.appendChild(summaryEl);
           }
         }
@@ -271,14 +307,15 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       }
 
       function getTarget(): HTMLElement {
-        if (entry.subagent_id) {
-          if (state.debugEnabled) console.log('[SUBAGENT-REPLAY] entry has subagent_id:', entry.subagent_id, 'role:', entry.role, 'map has:', replaySubagents.has(entry.subagent_id));
-          let subagent = replaySubagents.get(entry.subagent_id);
+        const subagentId = asString(entry.subagent_id);
+        if (subagentId) {
+          if (state.debugEnabled) console.log('[SUBAGENT-REPLAY] entry has subagent_id:', subagentId, 'role:', entry.role, 'map has:', replaySubagents.has(subagentId));
+          let subagent = replaySubagents.get(subagentId);
           if (!subagent) {
-            if (state.debugEnabled) console.log('[SUBAGENT-REPLAY] Creating synthetic container for:', entry.subagent_id);
+            if (state.debugEnabled) console.log('[SUBAGENT-REPLAY] Creating synthetic container for:', subagentId);
             const row = documentRef.createElement('div');
             row.className = 'timeline-row subagent-card';
-            row.dataset.subagentId = entry.subagent_id;
+            row.dataset.subagentId = subagentId;
             const header = documentRef.createElement('div');
             header.className = 'subagent-header command-ribbon';
             const label = documentRef.createElement('span');
@@ -291,32 +328,33 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
             const body = documentRef.createElement('div');
             body.className = 'subagent-body';
             row.appendChild(body);
-            makeCollapsible(row, `subagent:${entry.subagent_id}`, true, {
+            makeCollapsible(row, `subagent:${subagentId}`, true, {
               headerEl: header,
               fullHeaderToggle: true,
             });
             applyTranscriptCardMetadata(row, entry);
             subagent = { row, body, statusEl, label };
-            replaySubagents.set(entry.subagent_id, subagent);
+            replaySubagents.set(subagentId, subagent);
             fragment.appendChild(row);
           }
-          return subagent.body;
+          return subagent.body instanceof HTMLElement ? subagent.body : fragment as unknown as HTMLElement;
         }
         return fragment as unknown as HTMLElement;
       }
 
       if (entry.role === 'reasoning') {
-        finalizeReasoning(entry.id || entry.item_id || 'reasoning', entry.text || '', getTarget(), entry);
+        finalizeReasoning(asString(entry.id, asString(entry.item_id, 'reasoning')), asString(entry.text), getTarget(), entry);
         return;
       }
 
       if (entry.role === 'diff') {
-        let diffPath = entry.path || '';
-        if (!diffPath && entry.text) {
-          const match = entry.text.match(/^diff --git a\/.+ b\/(.+)$/m);
+        const diffText = asString(entry.text);
+        let diffPath = asString(entry.path);
+        if (!diffPath && diffText) {
+          const match = diffText.match(/^diff --git a\/.+ b\/(.+)$/m);
           if (match) diffPath = match[1];
         }
-        addDiff(entry.id || entry.item_id || diffPath || 'diff', entry.text || '', diffPath, getTarget(), entry);
+        addDiff(asString(entry.id, asString(entry.item_id, diffPath || 'diff')), diffText, diffPath, getTarget(), entry);
         return;
       }
 
@@ -355,18 +393,20 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       }
 
       if (entry.role === 'plan') {
-        renderPlanCard(entry.steps || [], getTarget(), entry);
+        renderPlanCard(Array.isArray(entry.steps) ? entry.steps.filter(isRecord) : [], getTarget(), entry);
         return;
       }
 
       if (entry.role === 'token_usage') {
-        if (Number.isFinite(entry.total)) {
-          setState({ tokenCount: Number(entry.total) });
-          updateTokens(Number(entry.total));
+        const total = asNumber(entry.total, Number.NaN);
+        if (Number.isFinite(total)) {
+          setState({ tokenCount: total });
+          updateTokens(total);
         }
-        if (Number.isFinite(entry.context_window)) {
-          setState({ contextWindow: Number(entry.context_window) });
-          updateContextRemaining(entry.total, entry.context_window);
+        const contextWindow = asNumber(entry.context_window, Number.NaN);
+        if (Number.isFinite(contextWindow)) {
+          setState({ contextWindow });
+          updateContextRemaining(total, contextWindow);
         }
         return;
       }
@@ -379,7 +419,8 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       }
 
       if (entry.role === 'status') {
-        if (entry.status) setStatusDot(entry.status);
+        const status = asString(entry.status);
+        if (status) setStatusDot(status);
         return;
       }
 
@@ -402,7 +443,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       }
 
       if (entry.role === 'shell') {
-        const exitCode = entry.exit_code || 0;
+        const exitCode = asNumber(entry.exit_code, 0);
         const row = documentRef.createElement('div');
         row.className = 'timeline-row command-result terminal-card shell-card';
         applyTranscriptCardMetadata(row, entry);
@@ -412,7 +453,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         summaryRibbon.className = 'command-ribbon shell-card-summary';
         const summaryTextEl = documentRef.createElement('span');
         summaryTextEl.className = 'shell-card-summary-text';
-        const shellCmd = String(entry.command || '');
+        const shellCmd = asString(entry.command);
         summaryTextEl.textContent = buildShellCommandPreview(shellCmd);
         summaryRibbon.appendChild(summaryTextEl);
         body.appendChild(summaryRibbon);
@@ -423,7 +464,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         renderShellCmdRibbon(cmdRibbon, shellCmd, { promptPrefix: '' });
         if (typeof entry.path === 'string' && entry.path) {
           const path = entry.path;
-          const line = Number.isFinite(Number(entry.line)) ? Number(entry.line) : 1;
+          const line = asNumber(entry.line, 1);
           cmdRibbon.style.cursor = 'pointer';
           cmdRibbon.title = path;
           cmdRibbon.dataset.hasClickHandler = 'true';
@@ -435,8 +476,8 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         detailEl.appendChild(cmdRibbon);
         const pre = documentRef.createElement('pre');
         pre.className = 'command-output';
-        const stdout = String(entry.stdout || '');
-        const stderr = String(entry.stderr || '');
+        const stdout = asString(entry.stdout);
+        const stderr = asString(entry.stderr);
         const outLang = detectLangFromCommand(shellCmd);
         if (stdout) {
           if (outLang) {
@@ -445,7 +486,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
             pre.appendChild(documentRef.createTextNode(stdout));
           }
         }
-        if (entry.stderr) {
+        if (stderr) {
           const stderrEl = documentRef.createElement('span');
           stderrEl.className = 'shell-stderr';
           stderrEl.textContent = stderr;
@@ -463,18 +504,18 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         }
         body.appendChild(detailEl);
         row.appendChild(body);
-        makeCollapsible(row, `shell:${entry.card_id || entry.id || shellCmd.slice(0, 40)}`, false, { headerEl: summaryRibbon });
+        makeCollapsible(row, `shell:${asString(entry.card_id, asString(entry.id, shellCmd.slice(0, 40)))}`, false, { headerEl: summaryRibbon });
         getTarget().appendChild(row);
         setStatusDot(exitCode === 0 ? 'success' : 'error');
         return;
       }
 
       if (entry.role === 'agent_pty') {
-        const eventType = entry.event || entry.type;
-        const block = entry.block || {};
-        const blockId = entry.block_id || block.block_id || entry.blockId || 'agent';
+        const eventType = asString(entry.event, asString(entry.type));
+        const block = isRecord(entry.block) ? entry.block : {};
+        const blockId = asString(entry.block_id, asString(block.block_id, asString(entry.blockId, 'agent')));
         if (eventType === 'agent_block_begin') {
-          const cmd = block.cmd || '';
+          const cmd = asString(block.cmd);
           const row = documentRef.createElement('div');
           row.className = 'timeline-row command-result terminal-card';
           row.dataset.agentBlockId = blockId;
@@ -494,14 +535,14 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
 
           row.appendChild(body);
           getTarget().appendChild(row);
-          const rec = { row, termEl, cmdRibbon, cmd, buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
+          const rec: AgentPtyReplayRecord = { row, termEl, cmdRibbon, cmd, buf: '', text: '', screenRows: null, renderMode: 'raw', hasRawStream: false };
           agentPtyByBlock.set(blockId, rec);
           agentBlockRows.set(blockId, rec);
           pendingAgentPtyTerms.push(rec);
           return;
         }
         if (eventType === 'agent_block_delta') {
-          const delta = entry.delta || '';
+          const delta = asString(entry.delta);
           if (!delta) return;
           let rec = agentPtyByBlock.get(blockId) || agentBlockRows.get(blockId);
           if (!rec) {
@@ -530,8 +571,9 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         }
         if (eventType === 'agent_block_end') {
           const rec = agentPtyByBlock.get(blockId) || agentBlockRows.get(blockId);
-          if (rec && !rec.cmd && (block.cmd || '')) {
-            rec.cmd = block.cmd || '';
+          const command = asString(block.cmd);
+          if (rec && !rec.cmd && command) {
+            rec.cmd = command;
             if (rec.cmdRibbon) {
               rec.cmdRibbon.textContent = `$ ${rec.cmd}`;
             }
@@ -574,11 +616,11 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         body.appendChild(header);
         if (entry.query) {
           const queryPre = documentRef.createElement('pre');
-          queryPre.textContent = entry.query;
+          queryPre.textContent = asString(entry.query);
           body.appendChild(queryPre);
         }
         row.appendChild(body);
-        makeCollapsible(row, `web:${entry.call_id || entry.id || entry.query || 'search'}`, false);
+        makeCollapsible(row, `web:${asString(entry.call_id, asString(entry.id, asString(entry.query, 'search')))}`, false);
         getTarget().appendChild(row);
         return;
       }
@@ -607,7 +649,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         return;
       }
 
-      addMessage(entry.role, entry.text || '', getTarget(), entry);
+      addMessage(asString(entry.role), asString(entry.text), getTarget(), entry);
     });
 
     clearWaitingForEvents();

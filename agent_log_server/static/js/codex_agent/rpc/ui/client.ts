@@ -2,6 +2,8 @@ import { getRpcRegistry } from '../registry.ts';
 import {
   callRpcNamespace,
   readRpcTransportEnabledPreference,
+  subscribeRpcNamespaceNotifications,
+  type JsonRpcNotificationEnvelope,
   type RpcWindowRef,
 } from '../transport.ts';
 import {
@@ -9,6 +11,7 @@ import {
   UI_RPC_IMPLEMENTATION_STATUS,
   UI_RPC_METHODS,
   UI_RPC_NAMESPACE,
+  UI_RPC_NOTIFICATION_METHODS,
   type JsonObject,
 } from './contract.ts';
 
@@ -73,6 +76,11 @@ function listFromKey(result: unknown, key: string): JsonObject[] {
 
 function getWindowRef(windowRef?: RpcWindowRef): RpcWindowRef {
   return windowRef ?? (typeof window !== 'undefined' ? window : null);
+}
+
+function normalizeNotificationMethod(method: unknown): typeof UI_RPC_NOTIFICATION_METHODS[number] | null {
+  if (typeof method !== 'string') return null;
+  return UI_RPC_NOTIFICATION_METHODS.find((candidate) => candidate === method) ?? null;
 }
 
 export function createUiRpcClient(deps: UiRpcClientDeps) {
@@ -236,6 +244,33 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  function subscribeLiveNotifications(options: {
+    onNotification: (
+      method: typeof UI_RPC_NOTIFICATION_METHODS[number],
+      params: JsonObject,
+      notification: JsonRpcNotificationEnvelope<unknown>,
+    ) => void;
+    onError?: (error: unknown) => void;
+    onConnectionChange?: (connected: boolean) => void;
+  }): () => void {
+    return subscribeRpcNamespaceNotifications({
+      namespace: UI_RPC_NAMESPACE,
+      windowRef: getWindowRef(deps.windowRef),
+      onConnectionChange: (connected) => {
+        options.onConnectionChange?.(connected);
+      },
+      onNotification: (notification) => {
+        try {
+          const method = normalizeNotificationMethod(notification.method);
+          if (!method) return;
+          options.onNotification(method, asObject(notification.params) ?? {}, notification);
+        } catch (error) {
+          options.onError?.(error);
+        }
+      },
+    });
+  }
+
   return {
     rpcEnabled,
     getView,
@@ -246,5 +281,6 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     searchFilesystem,
     openFile,
     openUrl,
+    subscribeLiveNotifications,
   };
 }

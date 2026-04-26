@@ -5,9 +5,7 @@ import {
   type TranscriptCardMetadata,
 } from './transcript_card_metadata.ts';
 
-declare const hljs: any;
-
-type ShellRowEntry = {
+export type ShellRowEntry = {
   row: HTMLDivElement;
   summaryTextEl: HTMLSpanElement;
   detailEl: HTMLDivElement;
@@ -253,7 +251,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
     const stderr = String(evt.stderr || '');
     const lang = detectLangFromCommand(cmd);
     if (stdout || stderr) {
-      if (lang && typeof hljs !== 'undefined') {
+      if (lang) {
         try {
           entry.termEl.innerHTML = highlightCodeAlways(stdout, lang);
         } catch {
@@ -321,7 +319,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
     const stderr = String(evt.stderr || '');
     const lang = detectLangFromCommand(cmd);
     if (stdout || stderr) {
-      if (lang && typeof hljs !== 'undefined') {
+      if (lang) {
         try {
           termEl.innerHTML = highlightCodeAlways(stdout, lang);
         } catch {

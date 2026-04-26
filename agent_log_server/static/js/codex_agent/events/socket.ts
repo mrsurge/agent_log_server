@@ -1,16 +1,8 @@
 import type { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 
-type IoEventHandler = (...args: unknown[]) => void;
-
 interface AppserverSocket {
   connected?: boolean;
-  emit(event: string, payload?: unknown, ack?: (response: unknown) => void): void;
-  on(event: string, handler: IoEventHandler): void;
 }
-
-type IoFactory = (namespace: string, options: Record<string, unknown>) => AppserverSocket;
-
-declare const io: IoFactory | undefined;
 
 interface WsState {
   wsOpen: boolean;
@@ -22,7 +14,7 @@ interface WsState {
 interface BindSocketEventsContext {
   getWsState: () => WsState;
   setWsState: (patch: Partial<WsState>) => void;
-  setSocket: (socket: AppserverSocket) => void;
+  setSocket: (socket: AppserverSocket | null) => void;
   wsStatusEl?: HTMLElement | null;
   setPill: (element: HTMLElement | null, label: string, tone?: string) => void;
   syncDraftFromServer: (conversationId: string | null | undefined) => void;
@@ -81,62 +73,41 @@ export function bindSocketEvents(ctx: BindSocketEventsContext) {
     return Boolean(ok);
   }
 
-  function socketIoPath() {
-    const win = getWindow();
-    const m = win.location.pathname.match(/^(\/api\/app\/[^/]+\/proxy)\//);
-    if (m && m[1]) return `${m[1]}/socket.io`;
-    return '/socket.io';
-  }
-
   function connectWS(onEvent?: (event: unknown) => void) {
-    if (typeof io === 'undefined') {
-      setPill(wsStatusEl ?? null, 'no-io', 'err');
+    if (!conversationsRpcClient || typeof conversationsRpcClient.subscribeLiveNotifications !== 'function') {
+      setPill(wsStatusEl ?? null, 'no-rpc', 'err');
       return;
     }
     if (typeof unsubscribeRpcNotifications === 'function') {
       unsubscribeRpcNotifications();
       unsubscribeRpcNotifications = null;
     }
-    if (conversationsRpcClient && typeof conversationsRpcClient.subscribeLiveNotifications === 'function') {
-      try {
-        unsubscribeRpcNotifications = conversationsRpcClient.subscribeLiveNotifications({
-          onError: (error) => {
-            console.warn('conversation rpc notify error', error);
-          },
-          onEvent: (event) => {
-            if (typeof onEvent === 'function') onEvent(event);
-          },
-        });
-      } catch (error) {
-        console.warn('conversation rpc notify subscribe failed', error);
-      }
-    }
     setPill(wsStatusEl ?? null, '…', 'warn');
-    const sock = io('/appserver', {
-      path: socketIoPath(),
-      transports: ['websocket'],
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 500,
-      reconnectionDelayMax: 5000,
-    });
-    setSocket(sock);
-    sock.on('connect', () => {
-      markWsOpen();
-      setPill(wsStatusEl ?? null, '👍', 'ok');
-      syncDraftFromServer(getConversationId());
-    });
-    sock.on('disconnect', () => {
+    setSocket(null);
+    try {
+      unsubscribeRpcNotifications = conversationsRpcClient.subscribeLiveNotifications({
+        onConnectionChange: (connected) => {
+          if (connected) {
+            markWsOpen();
+            setPill(wsStatusEl ?? null, '👍', 'ok');
+            syncDraftFromServer(getConversationId());
+            return;
+          }
+          resetWsReady();
+          setPill(wsStatusEl ?? null, '👎', 'err');
+        },
+        onError: (error) => {
+          console.warn('conversation rpc notify error', error);
+        },
+        onEvent: (event) => {
+          if (typeof onEvent === 'function') onEvent(event);
+        },
+      });
+    } catch (error) {
+      console.warn('conversation rpc notify subscribe failed', error);
       resetWsReady();
       setPill(wsStatusEl ?? null, '👎', 'err');
-    });
-    sock.on('connect_error', () => {
-      resetWsReady();
-      setPill(wsStatusEl ?? null, '👎', 'err');
-    });
-    sock.on('appserver_event', (data) => {
-      if (typeof onEvent === 'function') onEvent(data);
-    });
+    }
   }
 
   return {

@@ -1,4 +1,5 @@
 import { applyTranscriptCardMetadata, type TranscriptCardMetadata } from '../transcript_card_metadata.ts';
+import type { MessageCardRow } from '../shared_types.ts';
 
 interface TimelineRowsState {
   bottomSpacerEl?: HTMLElement | null;
@@ -94,7 +95,7 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     return role || 'message';
   }
 
-  function updateMessageCardHeader(row: any, role: string, text: string) {
+  function updateMessageCardHeader(row: MessageCardRow | null | undefined, role: string, text: string) {
     if (!row) return;
     row.dataset.messageRole = role || 'message';
     row._messageText = text || '';
@@ -108,7 +109,7 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
   function refreshMessageCardHeaders() {
     if (!timelineEl) return;
     timelineEl.querySelectorAll('.message-card').forEach((row) => {
-      const messageRow = row as any;
+      const messageRow = row as MessageCardRow;
       updateMessageCardHeader(
         messageRow,
         messageRow.dataset.messageRole || messageRow._messageRole || 'message',
@@ -118,7 +119,7 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
   }
 
   function buildMessageCard(role: string, text = '') {
-    const row = documentRef.createElement('div');
+    const row = documentRef.createElement('div') as MessageCardRow;
     row.className = `timeline-row message message-card ${role === 'user' ? 'user' : ''}`.trim();
 
     const header = documentRef.createElement('div');
@@ -131,7 +132,7 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     body.className = 'body message-body';
 
     row.append(header, body);
-    (row as any)._messageRole = role || 'message';
+    row._messageRole = role || 'message';
     updateMessageCardHeader(row, role, text);
     return { row, body, header, title };
   }

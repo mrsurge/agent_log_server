@@ -782,8 +782,12 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
   }
 
   const eventsWindow = (getWindow ? getWindow() : window) as CodexAgentWindow;
-  eventsWindow.addEventListener?.('codexagent:extensions-updated', () => {
-    void loadAgentOptions();
+  settingsRpcClient.subscribeLiveNotifications({
+    onNotification: (method) => {
+      if (method === 'extensions.updated') {
+        void loadAgentOptions();
+      }
+    },
   });
 
   async function onAgentSelectionChange(agentId: string | null | undefined): Promise<void> {

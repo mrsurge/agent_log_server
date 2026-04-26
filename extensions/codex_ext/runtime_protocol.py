@@ -1519,6 +1519,12 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Schem
                 "type": "checkbox",
                 "label": "400k Context",
                 "default": False,
+                "model_gate": {
+                    "family": "gpt",
+                    "min_major": 5,
+                    "min_minor": 4,
+                    "label": "GPT-5.4 or newer",
+                },
             },
             {
                 "id": "reasoning_effort",

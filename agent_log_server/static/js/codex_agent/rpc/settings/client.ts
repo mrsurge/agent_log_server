@@ -3,6 +3,8 @@ import {
   callRpcNamespace,
   JsonRpcCallError,
   readRpcTransportEnabledPreference,
+  subscribeRpcNamespaceNotifications,
+  type JsonRpcNotificationEnvelope,
   type RpcWindowRef,
 } from '../transport.ts';
 import {
@@ -10,6 +12,7 @@ import {
   SETTINGS_RPC_IMPLEMENTATION_STATUS,
   SETTINGS_RPC_METHODS,
   SETTINGS_RPC_NAMESPACE,
+  SETTINGS_RPC_NOTIFICATION_METHODS,
   type JsonObject,
 } from './contract.ts';
 
@@ -76,6 +79,11 @@ function getWindowRef(windowRef?: RpcWindowRef): RpcWindowRef {
   return windowRef ?? (typeof window !== 'undefined' ? window : null);
 }
 
+function normalizeNotificationMethod(method: unknown): typeof SETTINGS_RPC_NOTIFICATION_METHODS[number] | null {
+  if (typeof method !== 'string') return null;
+  return SETTINGS_RPC_NOTIFICATION_METHODS.find((candidate) => candidate === method) ?? null;
+}
+
 export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
   function rpcEnabled(): boolean {
     return readRpcTransportEnabledPreference(getWindowRef(deps.windowRef));
@@ -106,6 +114,19 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
       namespace: SETTINGS_RPC_NAMESPACE,
       method: SETTINGS_RPC_METHODS.configUpdate,
       params: patch,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function getStatus(): Promise<JsonObject & { transport: TransportTag }> {
+    if (!rpcEnabled()) {
+      return normalizeTransport(await callLegacy('get_status', {}), 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.statusGet,
+      params: {},
       windowRef: getWindowRef(deps.windowRef),
     });
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
@@ -178,6 +199,64 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     const result = await callRpcNamespace<JsonObject>({
       namespace: SETTINGS_RPC_NAMESPACE,
       method: SETTINGS_RPC_METHODS.extensionRuntimeOptionsGet,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function getExtensionRequestCards(options: {
+    extensionId: string;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const params = { extension_id: options.extensionId };
+    if (!rpcEnabled()) {
+      return normalizeTransport(await callLegacy('get_extension_request_cards', params), 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionRequestCardsGet,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function getExtensionUiFeatures(options: {
+    extensionId: string;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const params = { extension_id: options.extensionId };
+    if (!rpcEnabled()) {
+      return normalizeTransport(await callLegacy('get_extension_ui_features', params), 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionUiFeaturesGet,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function getExtensionPlan(options: {
+    extensionId: string;
+    conversationId?: string | null;
+    force?: boolean;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const params: JsonObject = {
+      extension_id: options.extensionId,
+    };
+    if (typeof options.conversationId === 'string' && options.conversationId.trim()) {
+      params.conversation_id = options.conversationId.trim();
+    }
+    if (options.force === true) {
+      params.force = true;
+    }
+    if (!rpcEnabled()) {
+      return normalizeTransport(await callLegacy('get_extension_plan', params), 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionPlanGet,
       params,
       windowRef: getWindowRef(deps.windowRef),
     });
@@ -288,17 +367,49 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  function subscribeLiveNotifications(options: {
+    onNotification: (
+      method: typeof SETTINGS_RPC_NOTIFICATION_METHODS[number],
+      params: JsonObject,
+      notification: JsonRpcNotificationEnvelope<unknown>,
+    ) => void;
+    onError?: (error: unknown) => void;
+    onConnectionChange?: (connected: boolean) => void;
+  }): () => void {
+    return subscribeRpcNamespaceNotifications({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      windowRef: getWindowRef(deps.windowRef),
+      onConnectionChange: (connected) => {
+        options.onConnectionChange?.(connected);
+      },
+      onNotification: (notification) => {
+        try {
+          const method = normalizeNotificationMethod(notification.method);
+          if (!method) return;
+          options.onNotification(method, asObject(notification.params) ?? {}, notification);
+        } catch (error) {
+          options.onError?.(error);
+        }
+      },
+    });
+  }
+
   return {
     rpcEnabled,
     getConfig,
     updateConfig,
+    getStatus,
     listExtensions,
     reloadExtensions,
     getExtensionSettingsSchema,
     getRuntimeOptions,
+    getExtensionRequestCards,
+    getExtensionUiFeatures,
+    getExtensionPlan,
     listExtensionModels,
     listExtensionSessions,
     bindExtensionSession,
+    subscribeLiveNotifications,
     JsonRpcCallError,
   };
 }

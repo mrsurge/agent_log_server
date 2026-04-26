@@ -124,8 +124,8 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
       return;
     }
     try {
-      const resp = normalizeShellExecResponse(await sioCall('shell_exec', {
-        conversation_id: state.conversationMeta?.conversation_id,
+      const resp = normalizeShellExecResponse(await activeConversationsRpcClient.executeShellCommand({
+        conversationId: String(state.conversationMeta?.conversation_id),
         command,
       }));
       const callId = typeof resp.callId === 'string' ? resp.callId : null;

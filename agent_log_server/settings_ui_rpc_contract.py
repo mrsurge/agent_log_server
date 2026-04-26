@@ -16,9 +16,13 @@ SETTINGS_EXTENSIONS_LIST_METHOD = "extensions.list"
 SETTINGS_EXTENSIONS_RELOAD_METHOD = "extensions.reload"
 SETTINGS_EXTENSION_SETTINGS_SCHEMA_GET_METHOD = "extension.settingsSchema.get"
 SETTINGS_EXTENSION_RUNTIME_OPTIONS_GET_METHOD = "extension.runtimeOptions.get"
+SETTINGS_EXTENSION_REQUEST_CARDS_GET_METHOD = "extension.requestCards.get"
+SETTINGS_EXTENSION_UI_FEATURES_GET_METHOD = "extension.uiFeatures.get"
+SETTINGS_EXTENSION_PLAN_GET_METHOD = "extension.plan.get"
 SETTINGS_EXTENSION_MODELS_LIST_METHOD = "extension.models.list"
 SETTINGS_EXTENSION_SESSIONS_LIST_METHOD = "extension.sessions.list"
 SETTINGS_EXTENSION_SESSION_BIND_METHOD = "extension.session.bind"
+SETTINGS_STATUS_GET_METHOD = "status.get"
 
 SETTINGS_EXTENSIONS_UPDATED_NOTIFICATION = "extensions.updated"
 SETTINGS_CONFIG_UPDATED_NOTIFICATION = "config.updated"
@@ -35,7 +39,9 @@ UI_URL_OPEN_METHOD = "url.open"
 UI_VIEW_CHANGED_NOTIFICATION = "view.changed"
 UI_HOST_UI_UPDATED_NOTIFICATION = "hostUi.updated"
 
-SETTINGS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE: dict[str, str] = {}
+SETTINGS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE: dict[str, str] = {
+    "extensions_updated": SETTINGS_EXTENSIONS_UPDATED_NOTIFICATION,
+}
 UI_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE: dict[str, str] = {
     "host_ui": UI_HOST_UI_UPDATED_NOTIFICATION,
 }
@@ -47,9 +53,13 @@ SettingsRpcMethod: TypeAlias = Literal[
     "extensions.reload",
     "extension.settingsSchema.get",
     "extension.runtimeOptions.get",
+    "extension.requestCards.get",
+    "extension.uiFeatures.get",
+    "extension.plan.get",
     "extension.models.list",
     "extension.sessions.list",
     "extension.session.bind",
+    "status.get",
 ]
 
 UiRpcMethod: TypeAlias = Literal[
@@ -252,9 +262,13 @@ def parse_settings_rpc_request(payload: object) -> ParsedSettingsRpcRequest:
             SETTINGS_EXTENSIONS_RELOAD_METHOD,
             SETTINGS_EXTENSION_SETTINGS_SCHEMA_GET_METHOD,
             SETTINGS_EXTENSION_RUNTIME_OPTIONS_GET_METHOD,
+            SETTINGS_EXTENSION_REQUEST_CARDS_GET_METHOD,
+            SETTINGS_EXTENSION_UI_FEATURES_GET_METHOD,
+            SETTINGS_EXTENSION_PLAN_GET_METHOD,
             SETTINGS_EXTENSION_MODELS_LIST_METHOD,
             SETTINGS_EXTENSION_SESSIONS_LIST_METHOD,
             SETTINGS_EXTENSION_SESSION_BIND_METHOD,
+            SETTINGS_STATUS_GET_METHOD,
         },
     )
     return ParsedSettingsRpcRequest(

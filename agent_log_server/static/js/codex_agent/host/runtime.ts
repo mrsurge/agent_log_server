@@ -1,20 +1,48 @@
 import { createSettingsRpcClient } from '../rpc/settings/client.ts';
 import { createUiRpcClient } from '../rpc/ui/client.ts';
+import type { UnknownRecord } from '../shared_types.ts';
 
-type AnyRecord = Record<string, any>;
+interface HostUiState {
+  showClose?: boolean;
+  ideMode?: boolean;
+  parentOrigin?: string | null;
+  projectRoot?: string | null;
+}
+
+interface ConversationMetaState {
+  conversation_id?: string | null;
+}
+
+interface ConversationSettingsState {
+  cwd?: string;
+  alias?: string;
+  label?: string;
+}
+
+interface AppConfigState {
+  user_name?: string;
+  te2_mcp_integration?: boolean;
+}
+
+interface HostUiPayload {
+  show_close?: unknown;
+  parent_origin?: unknown;
+  ide_mode?: unknown;
+  project_root?: unknown;
+}
 
 interface HostRuntimeState {
-  hostUi?: AnyRecord;
-  conversationMeta?: AnyRecord;
-  conversationSettings?: AnyRecord;
+  hostUi?: HostUiState;
+  conversationMeta?: ConversationMetaState;
+  conversationSettings?: ConversationSettingsState;
   activeView?: string | null;
-  appConfig?: AnyRecord;
+  appConfig?: AppConfigState;
 }
 
 interface HostRuntimeContext {
   getState(): HostRuntimeState;
   setState(patch: Partial<HostRuntimeState>): void;
-  sioCall(event: string, data?: Record<string, unknown>): Promise<any>;
+  sioCall(event: string, data?: Record<string, unknown>): Promise<unknown>;
   refreshMessageCardHeaders(): void;
   hostCloseTopEl: HTMLElement | null;
   hostCloseDrawerEl: HTMLElement | null;
@@ -53,6 +81,21 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     sioCall,
     windowRef,
   });
+  uiRpcClient.subscribeLiveNotifications({
+    onNotification: (method, params) => {
+      if (method !== 'hostUi.updated') return;
+      const ui = (params?.host_ui && typeof params.host_ui === 'object' ? params.host_ui : params) as HostUiPayload;
+      setState({
+        hostUi: {
+          showClose: Boolean(ui.show_close),
+          parentOrigin: typeof ui.parent_origin === 'string' && ui.parent_origin ? ui.parent_origin : null,
+          ideMode: Boolean(ui.ide_mode),
+          projectRoot: typeof ui.project_root === 'string' && ui.project_root ? ui.project_root : null,
+        },
+      });
+      applyHostUi();
+    },
+  });
 
   function applyHostUi() {
     const { hostUi, activeView } = getState();
@@ -89,7 +132,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     try {
       const data = await uiRpcClient.getHostUi();
       if (!data || data.ok === false) return;
-      const ui = (data?.host_ui && typeof data.host_ui === 'object' ? data.host_ui : {}) as AnyRecord;
+      const ui = (data?.host_ui && typeof data.host_ui === 'object' ? data.host_ui : {}) as HostUiPayload;
       setState({
         hostUi: {
           showClose: Boolean(ui.show_close),
@@ -114,10 +157,10 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
 
   async function postTe2OpenRequest({ path, line, column }: { path?: unknown; line?: unknown; column?: unknown }) {
     const { conversationMeta, conversationSettings } = getState();
-    const payload: AnyRecord = {
-      source: 'codex-agent',
-      conversation_id: conversationMeta?.conversation_id || null,
-    };
+      const payload: UnknownRecord = {
+        source: 'codex-agent',
+        conversation_id: conversationMeta?.conversation_id || null,
+      };
     if (typeof path === 'string' && path) {
       let nextPath = path;
       if (!nextPath.startsWith('/') && /^(?:data|home|tmp|usr|var|etc|storage)\//.test(nextPath)) {
@@ -194,13 +237,13 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
   }
 
   function applyAppConfig(cfg: unknown) {
-    const appConfig = cfg && typeof cfg === 'object' ? cfg : {};
-    setState({ appConfig: appConfig as AnyRecord });
+    const appConfig = cfg && typeof cfg === 'object' ? cfg as AppConfigState : {};
+    setState({ appConfig });
     if (splashSettingsUserNameEl) {
-      splashSettingsUserNameEl.value = typeof (appConfig as AnyRecord)?.user_name === 'string' ? (appConfig as AnyRecord).user_name : '';
+      splashSettingsUserNameEl.value = typeof appConfig.user_name === 'string' ? appConfig.user_name : '';
     }
     if (splashSettingsTe2McpIntegrationEl) {
-      splashSettingsTe2McpIntegrationEl.checked = (appConfig as AnyRecord)?.te2_mcp_integration === true;
+      splashSettingsTe2McpIntegrationEl.checked = appConfig.te2_mcp_integration === true;
     }
     refreshMessageCardHeaders();
   }

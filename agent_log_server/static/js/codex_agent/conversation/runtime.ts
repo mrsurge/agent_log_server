@@ -1,30 +1,70 @@
-type AnyRecord = Record<string, any>;
+import { createSettingsRpcClient } from '../rpc/settings/client.ts';
+import type { SocketLike, UnknownRecord } from '../shared_types.ts';
+
+interface ConversationSettingsState {
+  agent?: string;
+  markdown?: boolean;
+  trackEdits?: boolean;
+  lineNumbers?: boolean;
+  viewWrap?: boolean;
+  diffSyntax?: boolean;
+  semanticShellRibbon?: boolean;
+  planOverlayCollapsed?: boolean;
+  alias?: string;
+  label?: string;
+}
+
+interface ConversationMetaState {
+  conversation_id?: string | null;
+  active_view?: string | null;
+  settings?: ConversationSettingsState;
+}
+
+interface RuntimeOptionsState {
+  agent?: string;
+  has_plan?: boolean;
+  has_todo?: boolean;
+  [key: string]: unknown;
+}
+
+interface HostUiState {
+  ideMode?: boolean;
+}
+
+interface ConversationsRpcClientLike {
+  getConversation(options?: { conversationId?: string | null; timeoutMs?: number }): Promise<unknown>;
+  compactConversation(options?: { conversationId?: string | null; timeoutMs?: number }): Promise<unknown>;
+}
+
+interface RequestCardRuntimeLike {
+  preload(extensionId: string): Promise<unknown>;
+}
 
 interface ConversationRuntimeState {
-  conversationMeta?: AnyRecord;
-  conversationSettings?: AnyRecord;
+  conversationMeta?: ConversationMetaState;
+  conversationSettings?: ConversationSettingsState;
   clientConversationId?: string | null;
   clientActiveView?: string | null;
   activeView?: string | null;
-  activeRuntimeOptionValues?: AnyRecord;
+  activeRuntimeOptionValues?: UnknownRecord;
   miniConversationDrawerOpen?: boolean;
-  runtimeOptions?: AnyRecord;
-  hostUi?: AnyRecord;
+  runtimeOptions?: RuntimeOptionsState;
+  hostUi?: HostUiState;
   planCollapsed?: boolean;
 }
 
 interface ConversationRuntimeContext {
   getState(): ConversationRuntimeState;
   setState(patch: Partial<ConversationRuntimeState>): void;
-  getSocket(): AnyRecord;
+  getSocket(): SocketLike | null;
   waitForWs(timeoutMs?: number): Promise<boolean>;
   statusEl: HTMLElement | null;
   setPill(el: HTMLElement | null, text: string, cls?: string): void;
-  loadRuntimeOptions(extensionId: string | null, conversationId?: string | null): Promise<any>;
-  requestCardRuntime: AnyRecord;
+  loadRuntimeOptions(extensionId: string | null, conversationId?: string | null): Promise<unknown>;
+  requestCardRuntime: RequestCardRuntimeLike;
   closePlanModal(): void;
-  createEmptyPlanState(hasPlan?: boolean, hasTodo?: boolean): AnyRecord;
-  applyAuthoritativePlanState(nextState: AnyRecord): unknown;
+  createEmptyPlanState(hasPlan?: boolean, hasTodo?: boolean): UnknownRecord;
+  applyAuthoritativePlanState(nextState: UnknownRecord): unknown;
   syncPlanOverlayUi(): void;
   setDrawerOpen(open: boolean): void;
   applyHostUi(): void;
@@ -41,7 +81,11 @@ interface ConversationRuntimeContext {
   updateConversationHeaderLabel(): void;
   setSemanticShellQuoteParsingEnabled(enabled: boolean): void;
   setActiveToolRenderPolicy(policy: unknown): void;
-  conversationsRpcClient: AnyRecord;
+  conversationsRpcClient: ConversationsRpcClientLike;
+}
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
@@ -75,6 +119,7 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     setActiveToolRenderPolicy,
     conversationsRpcClient,
   } = ctx;
+  const settingsRpcClient = createSettingsRpcClient({ sioCall });
 
   function currentExtensionId() {
     const { conversationSettings = {}, conversationMeta = {}, runtimeOptions = {} } = getState();
@@ -83,7 +128,11 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     return resolved === 'codex' ? '' : resolved;
   }
 
-  async function sioCall(event: string, data: AnyRecord = {}, options: AnyRecord = {}): Promise<AnyRecord> {
+  async function sioCall(
+    event: string,
+    data: UnknownRecord = {},
+    options: UnknownRecord = {},
+  ): Promise<UnknownRecord> {
     if (
       options
       && (
@@ -95,24 +144,24 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     }
     const hasExplicitTimeout = Boolean(options) && Object.prototype.hasOwnProperty.call(options, 'timeoutMs');
     const timeoutMs = hasExplicitTimeout
-      ? (options.timeoutMs === null ? null : (Number.isFinite(options.timeoutMs) ? options.timeoutMs : 10000))
+      ? (options.timeoutMs === null ? null : (Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000))
       : 10000;
     const socket = getSocket();
     if (socket && socket.connected) {
-      return new Promise<AnyRecord>((resolve, reject) => {
+      return new Promise<UnknownRecord>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | null = null;
-        if (Number.isFinite(timeoutMs)) {
+        if (typeof timeoutMs === 'number' && Number.isFinite(timeoutMs)) {
           timer = setTimeout(() => {
             reject(new Error(`sioCall timeout: ${event}`));
           }, timeoutMs);
         }
-        socket.emit(event, data, (ack: AnyRecord) => {
+        socket.emit(event, data, (ack: unknown) => {
           if (timer) clearTimeout(timer);
-          if (ack && ack.__error) {
+          if (isRecord(ack) && typeof ack.__error === 'string') {
             resolve({ ok: false, error: ack.__error });
-          } else {
-            resolve(ack);
+            return;
           }
+          resolve(isRecord(ack) ? ack : {});
         });
       });
     }
@@ -124,7 +173,7 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     return { ok: false, error: 'Socket.IO not connected' };
   }
 
-  async function loadExtensionUiFeatures(extensionId = ''): Promise<AnyRecord> {
+  async function loadExtensionUiFeatures(extensionId = ''): Promise<UnknownRecord> {
     const resolvedExtensionId = typeof extensionId === 'string' && extensionId.trim()
       ? extensionId.trim()
       : currentExtensionId();
@@ -134,13 +183,13 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
       return {};
     }
     try {
-      const data: AnyRecord = await sioCall('get_extension_ui_features', {
-        extension_id: resolvedExtensionId,
+      const data = await settingsRpcClient.getExtensionUiFeatures({
+        extensionId: resolvedExtensionId,
       });
-      const uiFeatures = data?.ui_features && typeof data.ui_features === 'object' ? data.ui_features : {};
-      const semanticShellRibbon = uiFeatures.semanticShellRibbon;
+      const uiFeatures = isRecord(data.ui_features) ? data.ui_features : {};
+      const semanticShellRibbon = isRecord(uiFeatures.semanticShellRibbon) ? uiFeatures.semanticShellRibbon : null;
       setSemanticShellQuoteParsingEnabled(semanticShellRibbon?.quoteParsing === true);
-      setActiveToolRenderPolicy(uiFeatures.toolRenderPolicy);
+      setActiveToolRenderPolicy(uiFeatures.toolRenderPolicy ?? null);
       return uiFeatures;
     } catch {
       setSemanticShellQuoteParsingEnabled(false);
@@ -153,13 +202,15 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     try {
       const state = getState();
       const cid = conversationId || state.clientConversationId;
-      const data: AnyRecord = await conversationsRpcClient.getConversation({
+      const result = await conversationsRpcClient.getConversation({
         conversationId: cid || null,
       });
-      if (!data || data.ok === false) return;
+      if (!isRecord(result) || result.ok === false) return;
 
-      const nextConversationMeta = data;
-      const nextConversationSettings = nextConversationMeta?.settings || {};
+      const nextConversationMeta: ConversationMetaState = result;
+      const nextConversationSettings = isRecord(nextConversationMeta.settings)
+        ? nextConversationMeta.settings as ConversationSettingsState
+        : {};
       const nextPlanCollapsed = nextConversationSettings?.planOverlayCollapsed === true;
       const nextClientConversationId = state.clientConversationId || nextConversationMeta?.conversation_id || null;
       const nextClientActiveView = state.clientActiveView || nextConversationMeta?.active_view || null;
@@ -212,7 +263,7 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
 
   async function fetchStatus() {
     try {
-      const data: AnyRecord = await sioCall('get_status', {});
+      const data = await settingsRpcClient.getStatus();
       if (data.running) {
         setPill(statusEl, 'running', 'ok');
       } else {
@@ -227,7 +278,7 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     try {
       const convoId = getState().conversationMeta?.conversation_id || null;
       const result = await conversationsRpcClient.compactConversation({ conversationId: convoId });
-      if (result && result.ok === false) {
+      if (isRecord(result) && result.ok === false) {
         throw new Error(String(result.error || 'compact failed'));
       }
     } catch (err) {

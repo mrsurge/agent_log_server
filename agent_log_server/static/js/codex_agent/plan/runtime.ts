@@ -2,6 +2,7 @@ import { bindPlanOverlay } from '../plan_overlay.ts';
 import { bindPlanModal } from '../plan_modal.ts';
 import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 import type { JsonObject } from '../rpc/conversations/contract.ts';
+import { createSettingsRpcClient } from '../rpc/settings/client.ts';
 
 type PlanRuntimeRecord = JsonObject;
 
@@ -87,6 +88,10 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     highlightCode,
   } = ctx;
   const conversationsRpcClient = createConversationsRpcClient({
+    windowRef: typeof window !== 'undefined' ? window : null,
+  });
+  const settingsRpcClient = createSettingsRpcClient({
+    sioCall,
     windowRef: typeof window !== 'undefined' ? window : null,
   });
 
@@ -368,7 +373,9 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
 
   async function fetchPlanState(force = false) {
     const { conversationMeta = {}, runtimeOptions = {} } = getState();
-    const convoId = conversationMeta?.conversation_id || null;
+    const convoId = typeof conversationMeta?.conversation_id === 'string'
+      ? conversationMeta.conversation_id
+      : null;
     const extensionId = currentExtensionId();
     const hasPlanCapability = Boolean(runtimeOptions?.has_plan);
     const hasTodoCapability = Boolean(runtimeOptions?.has_todo);
@@ -381,9 +388,9 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
     setState({ planFetchSerial: requestSerial });
 
     try {
-      const data = asObject(await sioCall('get_extension_plan', {
-        extension_id: extensionId,
-        conversation_id: convoId,
+      const data = asObject(await settingsRpcClient.getExtensionPlan({
+        extensionId,
+        conversationId: convoId,
         force,
       }));
       if (requestSerial !== getState().planFetchSerial) return currentPlanState();

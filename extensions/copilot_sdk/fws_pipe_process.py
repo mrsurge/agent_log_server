@@ -18,6 +18,7 @@ class _PipeState(Protocol):
 
 _SubscriptionChunk: TypeAlias = bytes | str | None
 _OutputSubscription: TypeAlias = "asyncio.Queue[_SubscriptionChunk]"
+_QueuedWrite: TypeAlias = bytes | None
 
 
 class _PipeShellManager(Protocol):
@@ -118,19 +119,20 @@ class _AsyncPipeWriter:
     def write(self, data: bytes | str) -> int:
         if self._closed:
             raise ValueError("I/O operation on closed pipe writer")
+        self._owner.raise_if_write_failed()
         payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
         with self._lock:
             self._buffer.extend(payload)
         return len(payload)
 
     def flush(self) -> None:
+        self._owner.raise_if_write_failed()
         with self._lock:
             if not self._buffer:
                 return
             payload = bytes(self._buffer)
             self._buffer.clear()
-        future = asyncio.run_coroutine_threadsafe(self._owner.write_bytes(payload), self._loop)
-        future.result()
+        self._owner.enqueue_write(payload)
 
     def close(self) -> None:
         if self._closed:
@@ -146,10 +148,13 @@ class FrameworkShellPipeProcess:
         self._mgr = mgr
         self._shell_id = shell_id
         self._loop = loop
+        self._write_queue: "asyncio.Queue[_QueuedWrite]" = asyncio.Queue()
+        self._writer_task: Optional[asyncio.Task[None]] = None
         self._subscription: _OutputSubscription | None = None
         self._pump_task: Optional[asyncio.Task[None]] = None
         self._closed = False
         self.returncode: Optional[int] = None
+        self._write_error: BaseException | None = None
         self.stdin = _AsyncPipeWriter(self, loop)
         self.stdout = _BlockingBytesReader()
         self.stderr = None
@@ -170,10 +175,41 @@ class FrameworkShellPipeProcess:
         if not state or not state.process.stdin:
             raise RuntimeError("copilot sdk pipe not available")
         self._subscription = await self._mgr.subscribe_output_bytes(self._shell_id)
+        self._writer_task = asyncio.create_task(
+            self._drain_writes(),
+            name=f"copilot-sdk-pipe-writer:{self._shell_id}",
+        )
         self._pump_task = asyncio.create_task(
             self._pump_output(),
             name=f"copilot-sdk-pipe:{self._shell_id}",
         )
+
+    def raise_if_write_failed(self) -> None:
+        exc = self._write_error
+        if exc is not None:
+            raise RuntimeError("copilot sdk pipe write failed") from exc
+
+    def _enqueue_write(self, payload: _QueuedWrite) -> None:
+        self._write_queue.put_nowait(payload)
+
+    def enqueue_write(self, payload: bytes) -> None:
+        self.raise_if_write_failed()
+        with contextlib.suppress(RuntimeError):
+            if asyncio.get_running_loop() is self._loop:
+                self._enqueue_write(payload)
+                return
+        self._loop.call_soon_threadsafe(self._enqueue_write, payload)
+
+    async def _drain_writes(self) -> None:
+        try:
+            while True:
+                payload = await self._write_queue.get()
+                if payload is None:
+                    return
+                await self.write_bytes(payload)
+        except Exception as exc:
+            self._write_error = exc
+            self.stdout.close()
 
     async def write_bytes(self, data: bytes) -> None:
         text = data.decode("utf-8")
@@ -248,11 +284,24 @@ class FrameworkShellPipeProcess:
         )
         future.result()
 
+    async def _stop_writer(self) -> None:
+        task = self._writer_task
+        self._writer_task = None
+        if task is None:
+            return
+        self._enqueue_write(None)
+        await task
+
     async def close_streams(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self.stdin.close()
+        close_error: BaseException | None = None
+        try:
+            self.stdin.close()
+        except Exception as exc:
+            close_error = exc
+        await self._stop_writer()
         task = self._pump_task
         self._pump_task = None
         if task and not task.done():
@@ -260,6 +309,8 @@ class FrameworkShellPipeProcess:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self.stdout.close()
+        if close_error is not None:
+            raise RuntimeError("copilot sdk pipe close failed") from close_error
 
     async def aclose(self) -> None:
         await self.close_streams()

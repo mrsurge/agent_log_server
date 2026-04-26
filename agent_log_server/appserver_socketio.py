@@ -17,15 +17,19 @@ from agent_log_server.settings_ui_rpc_contract import (
     SETTINGS_CONFIG_GET_METHOD,
     SETTINGS_CONFIG_UPDATE_METHOD,
     SETTINGS_CONFIG_UPDATED_NOTIFICATION,
+    SETTINGS_EXTENSION_PLAN_GET_METHOD,
     SETTINGS_EXTENSION_MODELS_LIST_METHOD,
+    SETTINGS_EXTENSION_REQUEST_CARDS_GET_METHOD,
     SETTINGS_EXTENSION_RUNTIME_OPTIONS_GET_METHOD,
     SETTINGS_EXTENSION_SESSION_BIND_METHOD,
     SETTINGS_EXTENSION_SESSIONS_LIST_METHOD,
     SETTINGS_EXTENSION_SETTINGS_SCHEMA_GET_METHOD,
+    SETTINGS_EXTENSION_UI_FEATURES_GET_METHOD,
     SETTINGS_EXTENSIONS_LIST_METHOD,
     SETTINGS_EXTENSIONS_RELOAD_METHOD,
     SETTINGS_EXTENSIONS_UPDATED_NOTIFICATION,
     SETTINGS_RPC_NAMESPACE,
+    SETTINGS_STATUS_GET_METHOD,
     UI_FILE_OPEN_METHOD,
     UI_FILESYSTEM_LIST_METHOD,
     UI_FILESYSTEM_SEARCH_METHOD,
@@ -351,6 +355,33 @@ def register_appserver_socketio_handlers(
                         agent=request.params.get("agent"),
                     )
                 )
+            elif request.method == SETTINGS_EXTENSION_REQUEST_CARDS_GET_METHOD:
+                extension_id = _require_extension_id(request.params)
+                request_cards = await deps.api_extension_request_cards(extension_id)
+                if isinstance(request_cards, JSONResponse):
+                    raise _http_exception_from_json_response(request_cards, "Extension request-card config unavailable")
+                result = coerce_object_map(request_cards)
+            elif request.method == SETTINGS_EXTENSION_UI_FEATURES_GET_METHOD:
+                extension_id = _require_extension_id(request.params)
+                info = ext_loader.get_extension_info(extension_id)
+                if not isinstance(info, dict):
+                    raise HTTPException(status_code=404, detail=f"Extension not found: {extension_id}")
+                result = coerce_object_map(
+                    {
+                        "ok": True,
+                        "extension_id": extension_id,
+                        "ui_features": ext_loader.get_extension_ui_features(extension_id),
+                    }
+                )
+            elif request.method == SETTINGS_EXTENSION_PLAN_GET_METHOD:
+                extension_id = _require_extension_id(request.params)
+                plan_result = await deps.api_extension_plan(
+                    extension_id=extension_id,
+                    conversation_id=_optional_str(request.params, "conversation_id"),
+                )
+                if isinstance(plan_result, JSONResponse):
+                    raise _http_exception_from_json_response(plan_result, "Failed to read extension plan")
+                result = coerce_object_map(plan_result)
             elif request.method == SETTINGS_EXTENSION_MODELS_LIST_METHOD:
                 extension_id = _require_extension_id(request.params)
                 result = coerce_object_map(
@@ -370,6 +401,8 @@ def register_appserver_socketio_handlers(
                 )
             elif request.method == SETTINGS_EXTENSION_SESSION_BIND_METHOD:
                 result = await _resume_extension_session(request.params)
+            elif request.method == SETTINGS_STATUS_GET_METHOD:
+                result = coerce_object_map(await deps.api_appserver_status())
             else:
                 raise HTTPException(status_code=404, detail=f"Unknown method: {request.method}")
             return build_jsonrpc_success_response(request.request_id, result).to_json()

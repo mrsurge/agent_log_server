@@ -6,7 +6,7 @@ import {
   parseTranscriptOrderId,
   type TranscriptAnchor,
 } from './transcript_card_metadata.ts';
-import { DEFAULT_TRANSCRIPT_LIMIT, isTranscriptTailRange } from './transcript_config.ts';
+import { DEFAULT_TRANSCRIPT_LIMIT } from './transcript_config.ts';
 
 const _conversationsReplayRpcPlaceholder = createConversationsRpcClientPlaceholder;
 void _conversationsReplayRpcPlaceholder;
@@ -19,7 +19,6 @@ interface TranscriptLoaderState {
   transcriptEnd: number;
   transcriptGeneration?: number;
   transcriptHistoryMode?: boolean;
-  transcriptLiveDirty?: boolean;
 }
 
 interface TranscriptRangeResponse {
@@ -178,8 +177,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
       transcriptTotal: nextState.total,
       transcriptStart: nextState.start,
       transcriptEnd: nextState.end,
-      transcriptHistoryMode: !isTranscriptTailRange(nextState.end, nextState.total),
-      transcriptLiveDirty: false,
+      transcriptHistoryMode: false,
     });
     renderTranscriptEntries(items, { prepend: false });
     restorePendingApprovals?.();
@@ -222,41 +220,6 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => maybeAutoScroll(true));
     });
-    return true;
-  }
-
-  async function resumeLiveTail(
-    requestConversationId: string | null,
-    requestGeneration: number,
-  ): Promise<boolean> {
-    const state = getTranscriptState();
-    const currentEnd = Math.max(0, Number(state.transcriptEnd) || 0);
-    const currentTotal = Math.max(0, Number(state.transcriptTotal) || 0);
-    const gapSize = Math.max(0, currentTotal - currentEnd);
-
-    if (gapSize > 0) {
-      const windowLimit = Math.max(1, Number(state.transcriptLimit) || DEFAULT_TRANSCRIPT_LIMIT);
-      if (gapSize > windowLimit) {
-        return loadLatestTranscriptWindow(requestConversationId, requestGeneration);
-      }
-      const data = await fetchTranscriptRange(currentEnd, gapSize);
-      if (isStaleTranscriptResponse(requestConversationId, requestGeneration, data.conversation_id)) {
-        return false;
-      }
-      if (data && Array.isArray(data.items) && data.items.length) {
-        renderTranscriptEntries(data.items, { prepend: false });
-        setTranscriptState({
-          transcriptEnd: currentEnd + data.items.length,
-          transcriptTotal: Math.max(currentTotal, data.total || 0),
-        });
-      }
-    }
-
-    setTranscriptState({
-      transcriptHistoryMode: false,
-      transcriptLiveDirty: false,
-    });
-    restorePendingApprovals?.();
     return true;
   }
 
@@ -311,7 +274,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
           renderTranscriptEntries(itemsToPrepend, { prepend: true });
           setTranscriptState({
             transcriptStart,
-            transcriptEnd: currentEnd + itemsToPrepend.length,
+            transcriptEnd: currentEnd,
             transcriptTotal: data.total || currentState.transcriptTotal,
           });
           requestAnimationFrame(() => {
@@ -326,55 +289,14 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     }
   }
 
-  async function loadNewerTranscript() {
+  async function collapseTranscriptToPinned(): Promise<boolean> {
     const state = getTranscriptState();
-    if (state.transcriptLoading) return;
+    if (state.transcriptLoading) return false;
     const requestConversationId = getConversationId?.() || null;
     const requestGeneration = Number(state.transcriptGeneration) || 0;
-    if ((state.transcriptEnd ?? 0) >= (state.transcriptTotal ?? 0)) {
-      if (state.transcriptHistoryMode === true && state.transcriptLiveDirty === true) {
-        setTranscriptState({ transcriptLoading: true });
-        try {
-          await resumeLiveTail(requestConversationId, requestGeneration);
-        } finally {
-          if ((Number(getTranscriptState().transcriptGeneration) || 0) === requestGeneration) {
-            setTranscriptState({ transcriptLoading: false });
-          }
-        }
-      }
-      return;
-    }
-    const anchor = captureTranscriptAnchor('end');
     setTranscriptState({ transcriptLoading: true });
     try {
-      const windowSize = Math.max(1, Number(state.transcriptLimit) || 0);
-      const shift = shiftChunkSize(windowSize);
-      const total = Math.max(0, Number(state.transcriptTotal) || 0);
-      const maxStart = Math.max(0, total - windowSize);
-      const nextOffset = Math.min(maxStart, Math.max(0, (state.transcriptStart ?? 0) + shift));
-      const count = Math.min(windowSize, Math.max(0, total - nextOffset));
-      if (count <= 0) return;
-      const data = await fetchTranscriptRange(nextOffset, count);
-      if (isStaleTranscriptResponse(requestConversationId, requestGeneration, data.conversation_id)) {
-        return;
-      }
-      if (data && Array.isArray(data.items) && data.items.length) {
-        const transcriptStart = data.offset ?? nextOffset;
-        const transcriptEnd = transcriptStart + (data.items?.length || 0);
-        const nextTotal = data.total || total;
-        replaceTranscriptWindow(
-          data.items,
-          {
-            total: nextTotal,
-            start: transcriptStart,
-            end: transcriptEnd,
-          },
-          anchor,
-        );
-        if (isTranscriptTailRange(transcriptEnd, nextTotal)) {
-          await resumeLiveTail(requestConversationId, requestGeneration);
-        }
-      }
+      return await loadLatestTranscriptWindow(requestConversationId, requestGeneration);
     } finally {
       if ((Number(getTranscriptState().transcriptGeneration) || 0) === requestGeneration) {
         setTranscriptState({ transcriptLoading: false });
@@ -409,8 +331,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
   return {
     fetchTranscriptRange,
     loadOlderTranscript,
-    loadNewerTranscript,
     replayTranscript,
-    resumeLiveTail,
+    collapseTranscriptToPinned,
   };
 }

@@ -1,5 +1,6 @@
 import { createConversationsRpcClient } from './rpc/conversations/client.ts';
 import type { JsonObject } from './rpc/conversations/contract.ts';
+import { createSettingsRpcClient } from './rpc/settings/client.ts';
 
 type RuntimeOptionKind = string;
 
@@ -65,6 +66,10 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
     sioCall,
   } = ctx;
   const conversationsRpcClient = createConversationsRpcClient({
+    windowRef: typeof window !== 'undefined' ? window : null,
+  });
+  const settingsRpcClient = createSettingsRpcClient({
+    sioCall,
     windowRef: typeof window !== 'undefined' ? window : null,
   });
 
@@ -294,7 +299,9 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
     }
     if (!nextValue) return;
     const settingKey = getRuntimeSettingKey(kind, fallbackKey || kind);
-    const conversationId = state.conversationMeta?.conversation_id;
+    const conversationId = typeof state.conversationMeta?.conversation_id === 'string'
+      ? state.conversationMeta.conversation_id
+      : null;
     const metaSettings = asObject(state.conversationMeta?.settings);
     const agentId = typeof state.runtimeOptions?.agent === 'string' && state.runtimeOptions.agent.trim()
       ? state.runtimeOptions.agent.trim()
@@ -310,8 +317,8 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
     let nextRuntimeOptions = updateRuntimeOptionsCurrent(state.runtimeOptions, kind, settingKey, nextValue);
     let persistedSettingValue = nextValue;
     try {
-      const refreshed = await sioCall('get_runtime_options', {
-        conversation_id: conversationId,
+      const refreshed = await settingsRpcClient.getRuntimeOptions({
+        conversationId,
         agent: agentId || null,
       });
       const refreshedPayload = asObject(refreshed);

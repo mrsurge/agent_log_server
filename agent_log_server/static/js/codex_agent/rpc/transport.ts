@@ -211,14 +211,6 @@ function isJsonRpcSuccessEnvelope<TResult = unknown>(
 }
 
 export function normalizeRpcTransportEnabled(value: unknown): boolean {
-  if (value === false) return false;
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (!normalized) return true;
-    if (normalized === '0' || normalized === 'false' || normalized === 'legacy' || normalized === 'off') {
-      return false;
-    }
-  }
   return true;
 }
 
@@ -238,11 +230,11 @@ export function writeRpcTransportEnabledPreference(
   enabled: unknown,
   win: SessionStorageWindow = getDefaultWindowRef(),
 ): boolean {
-  const normalized = normalizeRpcTransportEnabled(enabled);
+  const normalized = true;
   const storage = getSessionStorage(win);
   if (!storage) return normalized;
   try {
-    storage.setItem(RPC_TRANSPORT_SESSION_STORAGE_KEY, normalized ? '1' : '0');
+    storage.setItem(RPC_TRANSPORT_SESSION_STORAGE_KEY, '1');
   } catch {
     // Ignore storage failures; the in-memory UI state still works.
   }
@@ -409,7 +401,7 @@ export function subscribeRpcNamespaceNotifications(
 export function describeRpcTransportPlaceholder(): RpcTransportPlaceholderDescriptor {
   return {
     status: 'placeholder',
-    compatibilityNamespace: RPC_NAMESPACES.legacyAppserver,
+    compatibilityNamespace: '',
     requestEvent: RPC_REQUEST_EVENT,
     notificationEvent: RPC_NOTIFICATION_EVENT,
     defaultRpcEnabled: true,

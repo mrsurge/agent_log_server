@@ -1603,11 +1603,6 @@ async def _broadcast_appserver_ui(event: ObjectMap) -> None:
                     )
     _store_conversation_preview_from_event(evt)
     rpc_method = _conversation_rpc_notification_method(evt_type)
-    if rpc_method is None:
-        try:
-            await socketio_server.emit("appserver_event", evt, namespace=APPSERVER_NAMESPACE)
-        except Exception:
-            pass
     if rpc_method:
         try:
             await socketio_server.emit(

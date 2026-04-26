@@ -376,6 +376,32 @@ window.CodexAgentModules.push((ctx) => {
       return values;
     };
 
+    const parseModelVersion = (modelId) => {
+      if (typeof modelId !== 'string') return null;
+      const match = modelId.trim().toLowerCase().match(/^([a-z][a-z0-9]*)-(\d+)(?:\.(\d+))?(?:$|[-_])/);
+      if (!match) return null;
+      return {
+        family: match[1],
+        major: Number.parseInt(match[2], 10),
+        minor: match[3] ? Number.parseInt(match[3], 10) : 0,
+      };
+    };
+
+    const modelMatchesGate = (modelId, gate) => {
+      if (!gate || typeof gate !== 'object') return true;
+      const version = parseModelVersion(modelId);
+      if (!version) return false;
+      const family = typeof gate.family === 'string' ? gate.family.trim().toLowerCase() : '';
+      if (family && version.family !== family) return false;
+      const minMajor = Number.isFinite(gate.min_major) ? gate.min_major : gate.minMajor;
+      const minMinor = Number.isFinite(gate.min_minor) ? gate.min_minor : gate.minMinor;
+      const requiredMajor = Number.isFinite(minMajor) ? minMajor : 0;
+      const requiredMinor = Number.isFinite(minMinor) ? minMinor : 0;
+      if (version.major > requiredMajor) return true;
+      if (version.major < requiredMajor) return false;
+      return version.minor >= requiredMinor;
+    };
+
     const normalizeDynamicSelectOptions = (field, data) => {
       if (!data) return { items: [], options: [], current: '', defaultValue: '' };
       if (field.dynamic_options_key && typeof data === 'object' && !Array.isArray(data)) {
@@ -438,32 +464,46 @@ window.CodexAgentModules.push((ctx) => {
       control.listDiv.appendChild(messageRow);
     };
 
-    const syncHighContextCheckbox = () => {
-      const checkboxEntry = currentSchemaValues.high_context_400k;
+    const resetModelGatedInput = (input, type) => {
+      if (type === 'checkbox') {
+        input.checked = false;
+        return;
+      }
+      input.value = '';
+    };
+
+    const syncModelGatedFields = () => {
       const modelControl = selectControls.model;
-      if (!checkboxEntry?.input || !modelControl?.input) return;
-      const checkbox = checkboxEntry.input;
-      const checkboxLabel = checkbox.closest('label');
+      if (!modelControl?.input) return;
       const selectedModelId = modelControl.input.value || '';
-      const enabled = selectedModelId === 'gpt-5.4';
-      const hint = enabled ? '' : 'Available only when Model is gpt-5.4';
-      checkbox.disabled = !enabled;
-      if (!enabled) {
-        checkbox.checked = false;
-      }
-      if (checkboxLabel) {
-        checkboxLabel.classList.toggle('is-disabled', !enabled);
-        if (hint) {
-          checkboxLabel.title = hint;
-        } else {
-          checkboxLabel.removeAttribute('title');
+      Object.values(currentSchemaValues).forEach((entry) => {
+        const modelGate = entry?.field?.model_gate;
+        if (!modelGate || typeof modelGate !== 'object' || !entry?.input) return;
+        const input = entry.input;
+        const label = input.closest('label');
+        const enabled = modelMatchesGate(selectedModelId, modelGate);
+        const gateLabel = typeof modelGate.label === 'string' && modelGate.label.trim()
+          ? modelGate.label.trim()
+          : 'a supported model';
+        const hint = enabled ? '' : `Available only when Model is ${gateLabel}`;
+        input.disabled = !enabled;
+        if (!enabled) {
+          resetModelGatedInput(input, entry.type);
         }
-      }
-      if (hint) {
-        checkbox.title = hint;
-      } else {
-        checkbox.removeAttribute('title');
-      }
+        if (label) {
+          label.classList.toggle('is-disabled', !enabled);
+          if (hint) {
+            label.title = hint;
+          } else {
+            label.removeAttribute('title');
+          }
+        }
+        if (hint) {
+          input.title = hint;
+        } else {
+          input.removeAttribute('title');
+        }
+      });
     };
 
     const syncReasoningEffortOptions = () => {
@@ -514,7 +554,7 @@ window.CodexAgentModules.push((ctx) => {
 
     const syncModelDependentFields = () => {
       syncReasoningEffortOptions();
-      syncHighContextCheckbox();
+      syncModelGatedFields();
     };
     
     renderFields.forEach(field => {

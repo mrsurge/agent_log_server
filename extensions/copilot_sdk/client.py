@@ -1599,89 +1599,6 @@ async def _stop_copilot_shell() -> None:
     _copilot_shell_id = None
 
 
-async def _copilot_shell_liveness() -> tuple[bool, Optional[int], str]:
-    exit_code: Optional[int] = None
-    process = _copilot_fws_process
-    if process is not None:
-        with contextlib.suppress(Exception):
-            exit_code = process.poll()
-        if exit_code is not None:
-            return True, exit_code, f"pipe_returncode={exit_code}"
-
-    if _fws_getter is None:
-        return False, exit_code, ""
-
-    shell_id = _copilot_shell_id
-    if not shell_id:
-        return False, exit_code, ""
-
-    try:
-        mgr = await _fws_getter()
-        shell = await mgr.get_shell(shell_id)
-    except Exception:
-        return False, exit_code, ""
-
-    if shell is None:
-        return True, exit_code, "shell_missing"
-    if getattr(shell, "spec_id", "") != _COPILOT_SHELL_SPEC_ID:
-        return True, exit_code, f"shell_spec={getattr(shell, 'spec_id', '')}"
-    if shell.status != "running":
-        return True, exit_code, f"shell_status={shell.status}"
-    return False, exit_code, ""
-
-
-async def _reset_copilot_client_state(
-    *,
-    reason: str,
-    exit_code: Optional[int] = None,
-    conversation_id: Optional[str] = None,
-) -> None:
-    global _client, _copilot_fws_process, _copilot_shell_id, _ready_event
-
-    client = _client
-    process = _copilot_fws_process
-    _client = None
-    _copilot_fws_process = None
-    _copilot_shell_id = None
-    _ready_event = None
-
-    if conversation_id:
-        detail = reason or "reset"
-        if exit_code is not None:
-            detail = f"{detail} exit={exit_code}"
-        _add_to_raw_buffer("out", conversation_id, f"copilot_client_reset {detail}")
-
-    if client is not None:
-        with contextlib.suppress(Exception):
-            errors = await client.stop()
-            if errors:
-                print(f"[CopilotSDK] Reset stop errors: {errors}")
-    if process is not None:
-        with contextlib.suppress(Exception):
-            await process.aclose()
-
-
-async def _warm_up_copilot_transport(
-    conversation_id: str,
-    *,
-    timeout: float = 60.0,
-) -> bool:
-    shell_exited, exit_code, reason = await _copilot_shell_liveness()
-    if shell_exited:
-        await _reset_copilot_client_state(
-            reason=reason or "shell_exited",
-            exit_code=exit_code,
-            conversation_id=conversation_id,
-        )
-
-    ready = await warm_up_extension("copilot-sdk", timeout=timeout)
-    if ready:
-        _add_to_raw_buffer("out", conversation_id, "copilot_shell_warmup_ready")
-    else:
-        _add_to_raw_buffer("err", conversation_id, "copilot_shell_warmup_failed")
-    return ready
-
-
 def _runtime_signature_payload(
     conversation_id: str,
     settings: Optional[SettingsDict] = None,
@@ -1909,23 +1826,10 @@ async def _complete_deferred_cold_send(
     cwd: Optional[str],
     model: Optional[str],
     settings: SettingsDict,
-    warm_up_shell: bool = False,
 ) -> None:
     preserved_router = _routers.get(conversation_id)
     preserved_turn_id = getattr(preserved_router, "current_turn_id", None)
     try:
-        if warm_up_shell:
-            ready = await _warm_up_copilot_transport(conversation_id)
-            if not ready:
-                await _emit_deferred_send_error(
-                    conversation_id,
-                    "Copilot shell warm-up failed",
-                    error_type="shell_warmup_failed",
-                    router=preserved_router,
-                    turn_id=preserved_turn_id,
-                )
-                return
-
         async with _get_session_lock(conversation_id):
             result = await _recover_evicted_session(
                 conversation_id,
@@ -1998,7 +1902,6 @@ def _schedule_deferred_cold_send(
     cwd: Optional[str],
     model: Optional[str],
     settings: SettingsDict,
-    warm_up_shell: bool = False,
 ) -> PayloadDict:
     task = asyncio.create_task(
         _complete_deferred_cold_send(
@@ -2007,21 +1910,17 @@ def _schedule_deferred_cold_send(
             cwd=cwd,
             model=model,
             settings=settings,
-            warm_up_shell=warm_up_shell,
         ),
         name=f"copilot-deferred-send-{conversation_id[:8]}",
     )
     _deferred_send_tasks[conversation_id] = task
-    reason = "shell_warmup" if warm_up_shell else "session_resume"
-    _add_to_raw_buffer("out", conversation_id, f"deferred_send_scheduled reason={reason}")
+    _add_to_raw_buffer("out", conversation_id, "deferred_send_scheduled reason=session_resume")
     result: PayloadDict = {
         "ok": True,
         "session_id": conversation_id,
         "deferred": True,
         "resume_ack": "session.resume",
     }
-    if warm_up_shell:
-        result["warmup_ack"] = "shell.warmup"
     return result
 
 
@@ -2978,16 +2877,6 @@ async def _ensure_client() -> CopilotClient:
     """Get or create the global CopilotClient singleton."""
     global _client, _copilot_fws_process
     async with _get_client_lock():
-        shell_exited = False
-        exit_code: Optional[int] = None
-        shell_reason = ""
-        if _fws_getter is not None:
-            shell_exited, exit_code, shell_reason = await _copilot_shell_liveness()
-        if _client is not None and shell_exited:
-            await _reset_copilot_client_state(
-                reason=shell_reason or "shell_exited",
-                exit_code=exit_code,
-            )
         if _client is None:
             client_config = SubprocessConfig(
                 use_stdio=True,
@@ -3034,13 +2923,6 @@ async def warm_up_extension(
     Much faster than ACP warm-up since SDK manages the process itself.
     """
     global _ready_event
-
-    shell_exited, exit_code, shell_reason = await _copilot_shell_liveness()
-    if shell_exited:
-        await _reset_copilot_client_state(
-            reason=shell_reason or "shell_exited",
-            exit_code=exit_code,
-        )
 
     if _ready_event and _ready_event.is_set() and _client is not None:
         return True
@@ -3441,44 +3323,12 @@ async def handle_message(
         if known_mode is None:
             known_mode = desired_mode or _DEFAULT_MODE
             _session_modes[conversation_id] = known_mode
-        shell_exited, exit_code, shell_reason = await _copilot_shell_liveness()
-        if shell_exited:
-            turn_token = uuid4().hex
-            await router.on_turn_start(text, turn_token=turn_token)
-            detail = shell_reason or "shell_exited"
-            if exit_code is not None:
-                detail = f"{detail} exit={exit_code}"
-            _add_to_raw_buffer("out", conversation_id, f"pre_send_shell_exit {detail}")
-            return _schedule_deferred_cold_send(
-                conversation_id,
-                text,
-                cwd=cwd,
-                model=model,
-                settings=dict(settings),
-                warm_up_shell=True,
-            )
         applied_mode = None
         if desired_mode and desired_mode != known_mode and not cold_bound_session:
             try:
                 applied_mode = await _apply_session_mode(session, settings=settings)
             except Exception as e:
                 if not _is_session_not_found_error(e):
-                    shell_exited, exit_code, shell_reason = await _copilot_shell_liveness()
-                    if shell_exited:
-                        turn_token = uuid4().hex
-                        await router.on_turn_start(text, turn_token=turn_token)
-                        detail = shell_reason or "mode_set_shell_exit"
-                        if exit_code is not None:
-                            detail = f"{detail} exit={exit_code}"
-                        _add_to_raw_buffer("out", conversation_id, f"mode_set_shell_exit {detail}")
-                        return _schedule_deferred_cold_send(
-                            conversation_id,
-                            text,
-                            cwd=cwd,
-                            model=model,
-                            settings=dict(settings),
-                            warm_up_shell=True,
-                        )
                     print(f"[CopilotSDK] mode.set failed: {e}")
                     _add_to_raw_buffer("out", conversation_id, f"mode_set_error: {e}")
                     return {"ok": False, "error": str(e)}
@@ -3535,21 +3385,6 @@ async def handle_message(
                     cwd=cwd,
                     model=model,
                     settings=dict(settings),
-                )
-
-            shell_exited, exit_code, shell_reason = await _copilot_shell_liveness()
-            if shell_exited:
-                detail = shell_reason or "send_shell_exit"
-                if exit_code is not None:
-                    detail = f"{detail} exit={exit_code}"
-                _add_to_raw_buffer("out", conversation_id, f"send_shell_exit {detail}")
-                return _schedule_deferred_cold_send(
-                    conversation_id,
-                    text,
-                    cwd=cwd,
-                    model=model,
-                    settings=dict(settings),
-                    warm_up_shell=True,
                 )
 
             print(f"[CopilotSDK] send failed: {e}")

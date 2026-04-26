@@ -162,6 +162,10 @@ function normalizeConversationControlResult(
   };
 }
 
+function normalizeRpcObjectResult(result: unknown): JsonObject {
+  return asObject(result) ?? {};
+}
+
 function normalizeLiveNotificationEvent(
   notification: JsonRpcNotificationEnvelope<unknown>,
 ): ConversationsLiveEvent | null {
@@ -562,6 +566,55 @@ export function createConversationsRpcClient(
     return normalizeConversationControlResult(result, 'rpc');
   }
 
+  async function respondApproval(options: {
+    requestId: string;
+    conversationId?: string | null;
+    result?: JsonObject | null;
+    decision?: string | null;
+    timeoutMs?: number | null;
+  }): Promise<JsonObject> {
+    const payload: JsonObject = {
+      request_id: options.requestId,
+      conversation_id: options.conversationId ?? null,
+    };
+    if (options.result && typeof options.result === 'object') {
+      payload.result = options.result;
+    }
+    if (typeof options.decision === 'string' && options.decision.trim()) {
+      payload.decision = options.decision.trim();
+    }
+    const timeoutMs = options.timeoutMs === null
+      ? 30000
+      : (Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000);
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.approvalRespond,
+      params: payload,
+      timeoutMs,
+      windowRef: getWindowRef(),
+    });
+    return normalizeRpcObjectResult(result);
+  }
+
+  async function executeShellCommand(options: {
+    conversationId: string;
+    command: string;
+    timeoutMs?: number;
+  }): Promise<JsonObject> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.shellExec,
+      params: {
+        conversation_id: options.conversationId,
+        command: options.command,
+      },
+      timeoutMs,
+      windowRef: getWindowRef(),
+    });
+    return normalizeRpcObjectResult(result);
+  }
+
   function subscribeLiveNotifications(options: {
     onEvent: (event: ConversationsLiveEvent, notification: JsonRpcNotificationEnvelope<unknown>) => void;
     onError?: (error: unknown) => void;
@@ -607,6 +660,8 @@ export function createConversationsRpcClient(
     sendMessage,
     interruptConversation,
     compactConversation,
+    respondApproval,
+    executeShellCommand,
     subscribeLiveNotifications,
     isRpcBackedLiveEvent,
   };

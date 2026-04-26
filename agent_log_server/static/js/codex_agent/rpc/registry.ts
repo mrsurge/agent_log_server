@@ -44,8 +44,8 @@ export interface RpcRegistry {
 }
 
 export const RPC_REGISTRY: RpcRegistry = {
-  status: 'partial',
-  compatibilityNamespace: RPC_NAMESPACES.legacyAppserver,
+  status: 'implemented',
+  compatibilityNamespace: '',
   namespaces: {
     conversations: {
       status: 'implemented',
@@ -59,10 +59,14 @@ export const RPC_REGISTRY: RpcRegistry = {
       methods: [
         { name: SETTINGS_RPC_METHODS.configGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
         { name: SETTINGS_RPC_METHODS.configUpdate, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.statusGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
         { name: SETTINGS_RPC_METHODS.extensionsList, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
         { name: SETTINGS_RPC_METHODS.extensionsReload, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
         { name: SETTINGS_RPC_METHODS.extensionSettingsSchemaGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
         { name: SETTINGS_RPC_METHODS.extensionRuntimeOptionsGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionRequestCardsGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionUiFeaturesGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
+        { name: SETTINGS_RPC_METHODS.extensionPlanGet, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
         { name: SETTINGS_RPC_METHODS.extensionModelsList, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
         { name: SETTINGS_RPC_METHODS.extensionSessionsList, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },
         { name: SETTINGS_RPC_METHODS.extensionSessionBind, namespace: SETTINGS_RPC_NAMESPACE, status: 'implemented' },

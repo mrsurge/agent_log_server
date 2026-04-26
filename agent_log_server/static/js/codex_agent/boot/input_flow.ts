@@ -24,7 +24,6 @@ type InputFlowState = {
   transcriptEnd?: number;
   transcriptTotal?: number;
   transcriptHistoryMode?: boolean;
-  transcriptLiveDirty?: boolean;
   topSpacerEl?: HTMLElement | null;
   bottomSpacerEl?: HTMLElement | null;
   estimatedRowHeight?: number;
@@ -86,7 +85,7 @@ interface InputFlowContext {
   maybeAutoScroll: (force?: boolean) => void;
   isNearBottom: () => boolean;
   loadOlderTranscript: () => void;
-  loadNewerTranscript: () => void;
+  snapTranscriptToLive?: () => Promise<unknown>;
   fetchConversation: (conversationId: string) => Promise<unknown>;
   restorePendingApprovals: () => void;
   refreshPlanSurface?: () => Promise<unknown> | unknown;
@@ -121,7 +120,7 @@ export function bindInputFlow(ctx: InputFlowContext) {
     maybeAutoScroll,
     isNearBottom,
     loadOlderTranscript,
-    loadNewerTranscript,
+    snapTranscriptToLive,
     fetchConversation,
     restorePendingApprovals,
     refreshPlanSurface,
@@ -241,34 +240,52 @@ export function bindInputFlow(ctx: InputFlowContext) {
         loadOlderTranscript();
       }
     }
-    if (
-      !state.transcriptLoading
-      && (
-        (state.transcriptEnd ?? 0) < (state.transcriptTotal ?? 0)
-        || (state.transcriptHistoryMode === true && state.transcriptLiveDirty === true)
-      )
-    ) {
-      const bottomSpacerHeight = state.bottomSpacerEl ? state.bottomSpacerEl.getBoundingClientRect().height : 0;
-      const preloadPx = Math.max(120, (Number(state.estimatedRowHeight) || 0) * TRANSCRIPT_PRELOAD_ROWS);
-      const distanceFromBottom = scrollContainer.scrollHeight - (scrollContainer.scrollTop + scrollContainer.clientHeight);
-      if (distanceFromBottom <= bottomSpacerHeight + preloadPx) {
-        loadNewerTranscript();
-      }
-    }
     if (!state.scrollProgrammatic && state.autoScroll && !isNearBottom()) {
-      setState({ autoScroll: false });
+      setState({
+        autoScroll: false,
+        transcriptHistoryMode: true,
+      });
       updateScrollButton();
     }
-    if (!state.scrollProgrammatic && !state.autoScroll && isNearBottom()) {
-      setState({ autoScroll: true });
-      updateScrollButton();
+    if (!state.transcriptLoading && !state.scrollProgrammatic && !state.autoScroll && isNearBottom()) {
+      repinTranscript(state);
     }
   }
 
-  function handleScrollToggle() {
-    setState({ autoScroll: !getState().autoScroll });
+  function repinTranscript(state: InputFlowState = getState()) {
+    setState({ autoScroll: true });
     updateScrollButton();
-    if (getState().autoScroll) maybeAutoScroll(true);
+    maybeAutoScroll(true);
+    if (state.transcriptHistoryMode === true && typeof snapTranscriptToLive === 'function') {
+      void snapTranscriptToLive()
+        .then(() => {
+          maybeAutoScroll(true);
+        })
+        .catch((error) => {
+          console.warn('failed to repin transcript', error);
+          setState({
+            autoScroll: false,
+            transcriptHistoryMode: true,
+          });
+          updateScrollButton();
+        });
+      return;
+    }
+    maybeAutoScroll(true);
+  }
+
+  function handleScrollToggle() {
+    const state = getState();
+    const nextAutoScroll = !(state.autoScroll === true);
+    if (!nextAutoScroll) {
+      setState({
+        autoScroll: false,
+        transcriptHistoryMode: true,
+      });
+      updateScrollButton();
+      return;
+    }
+    repinTranscript(state);
   }
 
   function handleResize() {

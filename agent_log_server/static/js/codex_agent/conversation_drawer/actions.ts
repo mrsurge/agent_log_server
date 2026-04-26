@@ -1,4 +1,5 @@
 import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
+import type { JsonObject } from '../rpc/conversations/contract.ts';
 import { createSettingsRpcClient } from '../rpc/settings/client.ts';
 import { createUiRpcClient } from '../rpc/ui/client.ts';
 
@@ -41,7 +42,7 @@ type ConversationCreateResponse = Omit<ConversationMeta, 'conversation_id' | 'se
 };
 
 interface ConversationDrawerActionsContext {
-  sioCall(event: string, payload: Record<string, unknown>): Promise<unknown>;
+  sioCall(event: string, payload?: JsonObject, options?: JsonObject): Promise<unknown>;
   getState(): DrawerState;
   setState(nextState: Partial<DrawerState>): void;
   resetTimeline(): void;
@@ -401,14 +402,17 @@ export function createConversationDrawerActions(
       setMiniDrawerOpen(false);
     });
 
-    windowRef?.addEventListener?.('codexagent:extensions-updated', async () => {
-      await fetchConversations();
-      await fetchConversation();
-      const state = getState();
-      if (!state.conversationMeta?.conversation_id) {
-        setDrawerOpen(false);
-        await setActiveView('splash');
-      }
+    settingsRpcClient.subscribeLiveNotifications({
+      onNotification: async (method) => {
+        if (method !== 'extensions.updated') return;
+        await fetchConversations();
+        await fetchConversation();
+        const state = getState();
+        if (!state.conversationMeta?.conversation_id) {
+          setDrawerOpen(false);
+          await setActiveView('splash');
+        }
+      },
     });
 
     syncMiniDrawerUi();
@@ -418,7 +422,6 @@ export function createConversationDrawerActions(
     const doc = documentRef || document;
     const splashTabAllBtn = doc.getElementById('splash-tab-all');
     const splashTabProjectBtn = doc.getElementById('splash-tab-project');
-    const splashRpcToggleEl = doc.getElementById('splash-rpc-toggle');
     const splashGoConversationBtn = doc.getElementById('splash-go-conversation');
     splashTabAllBtn?.addEventListener('click', () => {
       setState({ splashTab: 'all' });
@@ -432,12 +435,6 @@ export function createConversationDrawerActions(
       renderSplashTabs();
       renderConversationList(state.conversationList || [], state.conversationMeta?.conversation_id || null);
     });
-    if (splashRpcToggleEl instanceof HTMLInputElement) {
-      splashRpcToggleEl.addEventListener('change', () => {
-        setState({ rpcTransportEnabled: splashRpcToggleEl.checked });
-        renderSplashTabs();
-      });
-    }
     splashGoConversationBtn?.addEventListener('click', async () => {
       const activeConversationId = getActiveConversationId();
       if (!activeConversationId) return;

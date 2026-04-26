@@ -1,13 +1,48 @@
 import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 import { createUiRpcClient } from '../rpc/ui/client.ts';
+import type {
+  ClipboardWindow,
+  TributeConstructor,
+  TributeInstance,
+  TributeItemOriginal,
+  TributeLookupItem,
+  UnknownRecord,
+} from '../shared_types.ts';
 
-declare const Tribute: any;
+declare const Tribute: TributeConstructor | undefined;
 
-type AnyRecord = Record<string, any>;
+interface ComposerConversationMeta {
+  conversation_id?: string | null;
+  draft?: string;
+  cwd?: string;
+}
+
+interface ComposerConversationSettings {
+  cwd?: string;
+}
+
+interface DraftMentionOptions {
+  line?: unknown;
+  lineNo?: unknown;
+  endLine?: unknown;
+  endLineNo?: unknown;
+  col?: unknown;
+  endCol?: unknown;
+  content?: unknown;
+}
+
+interface DraftMentionPayload {
+  path: string;
+  line?: string;
+  endLine?: string;
+  col?: string;
+  endCol?: string;
+  content?: string;
+}
 
 interface ComposerRuntimeState {
-  conversationMeta?: AnyRecord;
-  conversationSettings?: AnyRecord;
+  conversationMeta?: ComposerConversationMeta;
+  conversationSettings?: ComposerConversationSettings;
   draftSaveTimer?: ReturnType<typeof setTimeout> | null;
   lastDraftHash?: string | null;
   draftDirty?: boolean;
@@ -21,7 +56,7 @@ interface ComposerRuntimeContext {
   mentionPillEl: HTMLElement | null;
   documentRef: Document;
   windowRef: Window;
-  sioCall(event: string, data?: Record<string, unknown>): Promise<any>;
+  sioCall(event: string, data?: Record<string, unknown>): Promise<unknown>;
   escapeHtml(text: string): string;
 }
 
@@ -71,7 +106,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     windowRef,
   });
 
-  let tributeInstance: any = null;
+  let tributeInstance: TributeInstance | null = null;
   let explicitMentionSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastComposerSelectionRange: Range | null = null;
   let lastComposerSelectionConversationId: string | null = null;
@@ -85,7 +120,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     });
   }
 
-  function buildDraftMentionPayload(rawPath: unknown, opts: AnyRecord = {}) {
+  function buildDraftMentionPayload(rawPath: unknown, opts: DraftMentionOptions = {}) {
     const resolvedOpts = opts || {};
     let pathOnly = String(rawPath || '').trim();
     let line = resolvedOpts.line ?? resolvedOpts.lineNo ?? null;
@@ -100,7 +135,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       if (endLine == null) endLine = lineMatch[3] || null;
     }
     if (!pathOnly) return null;
-    const payload: AnyRecord = { path: pathOnly };
+    const payload: DraftMentionPayload = { path: pathOnly };
     if (line != null && String(line).trim()) payload.line = String(line);
     if (endLine != null && String(endLine).trim()) payload.endLine = String(endLine);
     if (col != null && String(col).trim()) payload.col = String(col);
@@ -109,7 +144,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     return payload;
   }
 
-  function encodeDraftMentionToken(rawPath: unknown, opts: AnyRecord = {}) {
+  function encodeDraftMentionToken(rawPath: unknown, opts: DraftMentionOptions = {}) {
     const payload = buildDraftMentionPayload(rawPath, opts);
     if (!payload) return '';
     return DRAFT_MENTION_ENVELOPE_START + JSON.stringify(payload) + DRAFT_MENTION_ENVELOPE_END;
@@ -117,11 +152,11 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
 
   function decodeDraftMentionPayload(payloadText: string) {
     try {
-      const parsed: AnyRecord = JSON.parse(payloadText);
+      const parsed = JSON.parse(payloadText) as UnknownRecord;
       if (!parsed || typeof parsed !== 'object') return null;
       const path = typeof parsed.path === 'string' ? parsed.path.trim() : '';
       if (!path) return null;
-      const payload: AnyRecord = { path };
+      const payload: DraftMentionPayload = { path };
       if (parsed.line != null && String(parsed.line).trim()) payload.line = String(parsed.line);
       if (parsed.endLine != null && String(parsed.endLine).trim()) payload.endLine = String(parsed.endLine);
       if (parsed.col != null && String(parsed.col).trim()) payload.col = String(parsed.col);
@@ -215,7 +250,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     return { absPath, bestPath };
   }
 
-  function createMentionToken(rawPath: unknown, opts: AnyRecord = {}) {
+  function createMentionToken(rawPath: unknown, opts: DraftMentionOptions = {}) {
     let pathOnly = String(rawPath || '');
     let parsedLine: string | null = null;
     let parsedEndLine: string | null = null;
@@ -248,7 +283,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       if (endLine && endLine !== line) displayText += `-${endLine}`;
     }
 
-    const content = opts.content || '';
+    const content = typeof opts.content === 'string' ? opts.content : '';
     if (content) {
       span.dataset.content = content;
       span.appendChild(documentRef.createTextNode(displayText));
@@ -565,17 +600,18 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       allowSpaces: false,
       menuShowMinLength: 1,
       noMatchTemplate: '<li class="tribute-no-match">No files found</li>',
-      selectTemplate(item: any) {
+      selectTemplate(item: TributeLookupItem | null) {
         if (!item) return '';
         const absPath = item.original.path || '';
         queueExplicitMentionDraftSave();
         return createMentionToken(absPath).outerHTML;
       },
-      menuItemTemplate(item: any) {
+      menuItemTemplate(item: TributeLookupItem) {
         const icon = item.original.type === 'directory' ? '📁' : '📄';
         const typeClass = item.original.type === 'directory' ? 'tribute-dir' : 'tribute-file';
         const cwd = getState().conversationSettings?.cwd || '';
-        const relPath = getRelativePath(item.original.path, cwd) || item.original.path || '';
+        const originalPath = item.original.path || '';
+        const relPath = getRelativePath(originalPath, cwd) || originalPath;
         const safeName = escapeHtml(item.original.name || '');
         const safePath = escapeHtml(relPath);
         return '<div class="' + typeClass + '">' +
@@ -583,7 +619,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
           '<div class="tribute-item-path">' + safePath + '</div>' +
           '</div>';
       },
-      values: async (text: string, cb: (items: any[]) => void) => {
+      values: async (text: string, cb: (items: TributeItemOriginal[]) => void) => {
         if (!text || !text.trim()) {
           cb([]);
           return;
@@ -595,7 +631,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
             cb([]);
             return;
           }
-          cb(data.items || []);
+          cb(Array.isArray(data.items) ? data.items as TributeItemOriginal[] : []);
         } catch (err) {
           console.warn('Tribute fetch error:', err);
           cb([]);
@@ -633,7 +669,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
 
     promptEl.addEventListener('paste', (evt: ClipboardEvent) => {
       evt.preventDefault();
-      const clipboardData = evt.clipboardData || (windowRef as any).clipboardData;
+      const clipboardData = evt.clipboardData || (windowRef as ClipboardWindow).clipboardData;
       const text = clipboardData?.getData?.('text/plain');
       if (!text) return;
       const selection = windowRef.getSelection?.();
@@ -645,7 +681,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     });
   }
 
-  function insertMention(path: string, opts: AnyRecord = {}) {
+  function insertMention(path: string, opts: DraftMentionOptions = {}) {
     if (!promptEl || !path) return;
     const token = createMentionToken(path, {
       line: opts.lineNo,

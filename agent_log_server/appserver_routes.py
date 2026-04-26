@@ -31,11 +31,14 @@ from agent_log_server.conversations_rpc_contract import (
     CONVERSATION_DRAFT_SET_METHOD,
     CONVERSATION_INTERRUPT_METHOD,
     CONVERSATION_LIST_METHOD,
+    CONVERSATION_APPROVAL_RESPONSE_METHOD,
     CONVERSATION_PINS_SET_METHOD,
     CONVERSATION_REPLAY_GET_CHUNK_METHOD,
     CONVERSATION_SEND_METHOD,
     CONVERSATION_SELECT_METHOD,
+    CONVERSATION_SHELL_EXEC_METHOD,
     CONVERSATION_UPDATE_METHOD,
+    ConversationApprovalResponseParams,
     ConversationControlParams,
     ConversationCreateParams,
     ConversationDraftSetParams,
@@ -45,6 +48,7 @@ from agent_log_server.conversations_rpc_contract import (
     ConversationReplayGetChunkParams,
     ConversationSendParams,
     ConversationSelectParams,
+    ConversationShellExecParams,
     ConversationUpdateParams,
     ConversationsRpcProtocolError,
     build_empty_replay_chunk_result,
@@ -61,10 +65,12 @@ from agent_log_server.conversations_rpc_contract import (
     parse_conversation_draft_set_params,
     parse_conversation_get_params,
     parse_conversation_pins_set_params,
+    parse_conversation_approval_response_params,
     parse_conversation_control_params,
     parse_conversation_replay_get_chunk_params,
     parse_conversation_send_params,
     parse_conversation_select_params,
+    parse_conversation_shell_exec_params,
     parse_conversation_update_params,
     parse_conversations_rpc_request,
 )
@@ -1325,6 +1331,18 @@ class AppserverRoutes:
             jsonl_chunk=jsonl_chunk,
         ).to_json()
 
+    async def _rpc_conversation_approval_response(
+        self,
+        params: ConversationApprovalResponseParams,
+    ) -> ObjectMap:
+        return await self.api_appserver_approval_response(params.payload)
+
+    async def _rpc_conversation_shell_exec(
+        self,
+        params: ConversationShellExecParams,
+    ) -> ObjectMap:
+        return await self.api_appserver_shell_exec(params.payload)
+
     async def api_appserver_rpc(
         self,
         payload: Annotated[ObjectMap, Body(...)],
@@ -1415,6 +1433,15 @@ class AppserverRoutes:
                     active_conversation_id=await self._get_active_rpc_conversation_id(),
                 )
                 result = await self._rpc_conversation_replay_get_chunk(replay_params)
+            elif request.method == CONVERSATION_APPROVAL_RESPONSE_METHOD:
+                approval_params = parse_conversation_approval_response_params(request.params)
+                result = await self._rpc_conversation_approval_response(approval_params)
+            elif request.method == CONVERSATION_SHELL_EXEC_METHOD:
+                shell_exec_params = parse_conversation_shell_exec_params(
+                    request.params,
+                    sanitize_conversation_id=self._deps.sanitize_conversation_id,
+                )
+                result = await self._rpc_conversation_shell_exec(shell_exec_params)
             else:
                 raise HTTPException(status_code=404, detail=f"Unknown conversations RPC method: {request.method}")
         except HTTPException as exc:

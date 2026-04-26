@@ -3,13 +3,17 @@
   "private": true,
   "type": "module",
   "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.59.0",
+    "@typescript-eslint/parser": "^8.59.0",
     "esbuild": "^0.25.0",
+    "eslint": "^10.2.1",
     "typescript": "^5.7.3"
   },
   "scripts": {
     "build": "node build.mjs",
     "build:watch": "node build.mjs --watch",
-    "typecheck": "tsc --noEmit"
+    "lint:types": "eslint --max-warnings=0 \"agent_log_server/static/**/*.ts\"",
+    "typecheck": "tsc --noEmit && npm run lint:types --silent"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.2.8",

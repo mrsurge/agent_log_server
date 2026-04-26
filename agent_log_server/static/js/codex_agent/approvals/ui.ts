@@ -1,4 +1,5 @@
 import { applyTranscriptCardMetadata } from '../transcript_card_metadata.ts';
+import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 
 type ApprovalDecisionObject = {
   acceptWithExecpolicyAmendment?: boolean;
@@ -252,6 +253,7 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     timelineEl,
     onAfterRender,
   } = ctx;
+  const conversationsRpcClient = createConversationsRpcClient({ sioCall });
 
   function approvalRowSource(options: ApprovalRowOptions = {}, evt: ApprovalData = {}) {
     if (typeof options.source === 'string' && options.source.trim()) return options.source.trim();
@@ -495,7 +497,13 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
       if (Object.prototype.hasOwnProperty.call(options, 'timeoutMs')) {
         sioOptions.timeoutMs = options.timeoutMs;
       }
-      return asApprovalResponse(await sioCall('approval_response', payload, sioOptions))
+      return asApprovalResponse(await conversationsRpcClient.respondApproval({
+        requestId: String(requestId),
+        conversationId: getConversationId() || null,
+        result: payload.result && typeof payload.result === 'object' ? payload.result as Record<string, unknown> : null,
+        decision: typeof payload.decision === 'string' ? payload.decision : null,
+        timeoutMs: sioOptions.timeoutMs,
+      }))
         ?? { ok: false, error: 'approval failed' };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error || 'approval failed') };

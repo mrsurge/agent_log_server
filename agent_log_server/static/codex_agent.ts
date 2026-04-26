@@ -21,7 +21,6 @@ import {
 } from './js/codex_agent/transcript_card_metadata.ts';
 import {
   DEFAULT_TRANSCRIPT_LIMIT,
-  isTranscriptTailRange,
 } from './js/codex_agent/transcript_config.ts';
 import { bindSocketEvents } from './js/codex_agent/events/socket.ts';
 import { bindEventRouter } from './js/codex_agent/events/router.ts';
@@ -50,25 +49,115 @@ import { bindTimelineReplay } from './js/codex_agent/timeline/replay.ts';
 import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations/client.ts';
 import { createSettingsRpcClient } from './js/codex_agent/rpc/settings/client.ts';
 import { createUiRpcClient } from './js/codex_agent/rpc/ui/client.ts';
-import {
-  readRpcTransportEnabledPreference,
-  writeRpcTransportEnabledPreference,
-} from './js/codex_agent/rpc/transport.ts';
+import type { SocketLike, ToggleableRow, UnknownRecord } from './js/codex_agent/shared_types.ts';
 
-declare const hljs: any;
+type AnyRecord = Record<string, unknown>;
+type TextValueElement = HTMLInputElement | HTMLTextAreaElement;
 
-type AnyRecord = Record<string, any>;
+type SettingsUiBinding = ReturnType<typeof bindSettingsUiFlow>;
+type SettingsUiContext = Parameters<typeof bindSettingsUiFlow>[0];
+type SettingsUiState = ReturnType<SettingsUiContext['getState']>;
+type SettingsUiPatch = Parameters<SettingsUiContext['setState']>[0];
+type SettingsUiElements = SettingsUiContext['elements'];
+
+type RuntimeFooterContext = Parameters<typeof bindRuntimeFooter>[0];
+type RuntimeFooterPatch = Parameters<RuntimeFooterContext['setState']>[0];
+
+type HostRuntimeContext = Parameters<typeof bindHostRuntime>[0];
+type HostRuntimePatch = Parameters<HostRuntimeContext['setState']>[0];
+
+type ConversationDrawerContext = Parameters<typeof bindConversationDrawer>[0];
+type ConversationDrawerPatch = Parameters<ConversationDrawerContext['setState']>[0];
+type ConversationDrawerState = ReturnType<ConversationDrawerContext['getState']>;
+
+type TranscriptMetricsContext = Parameters<typeof bindTranscriptMetrics>[0];
+type TranscriptMetricsPatch = Parameters<TranscriptMetricsContext['setTranscriptState']>[0];
+
+type TimelineLiveItemsContext = Parameters<typeof bindTimelineLiveItems>[0];
+type TimelineLiveItemsPatch = Parameters<TimelineLiveItemsContext['setState']>[0];
+
+type SaveFlowContext = Parameters<typeof bindSettingsSaveFlow>[0];
+type SaveFlowState = ReturnType<SaveFlowContext['getState']>;
+type SaveFlowPatch = Parameters<SaveFlowContext['setState']>[0];
+
+type SocketEventsContext = Parameters<typeof bindSocketEvents>[0];
+type SocketEventsPatch = Parameters<SocketEventsContext['setWsState']>[0];
+type AppserverSocket = Parameters<SocketEventsContext['setSocket']>[0];
+
+type ConversationRuntimeContext = Parameters<typeof bindConversationRuntime>[0];
+type ConversationRuntimeState = ReturnType<ConversationRuntimeContext['getState']>;
+type ConversationRuntimePatch = Parameters<ConversationRuntimeContext['setState']>[0];
+
+type SessionFlowContext = Parameters<typeof bindSessionFlow>[0];
+type SessionFlowPatch = Parameters<SessionFlowContext['setState']>[0];
+
+type TranscriptLoaderContext = Parameters<typeof bindTranscriptLoader>[0];
+type TranscriptLoaderPatch = Parameters<TranscriptLoaderContext['setTranscriptState']>[0];
+
+type EventRouterContext = Parameters<typeof bindEventRouter>[0];
+type EventRouterPatch = Parameters<EventRouterContext['setState']>[0];
+
+type BootInitContext = Parameters<typeof bindBootInitFlow>[0];
+type BootInitState = ReturnType<BootInitContext['getState']>;
+type BootInitPatch = Parameters<BootInitContext['setState']>[0];
+
+type InputFlowContext = Parameters<typeof bindInputFlow>[0];
+type InputFlowState = ReturnType<InputFlowContext['getState']>;
+type InputFlowPatch = Parameters<InputFlowContext['setState']>[0];
+
+type SubagentsBinding = ReturnType<typeof bindSubagentsCollapsible>;
+type GetSubagentContainer = SubagentsBinding['getSubagentContainer'];
+
+interface RootConversationSettings {
+  cwd?: string | null;
+  alias?: string | null;
+  label?: string | null;
+  agent?: string | null;
+  [key: string]: unknown;
+}
+
+interface RootConversationMeta {
+  conversation_id?: string | null;
+  settings?: RootConversationSettings | null;
+  draft?: string | null;
+  thread_id?: string | null;
+  cwd?: string | null;
+  [key: string]: unknown;
+}
+
+interface RootHostUi {
+  showClose?: boolean;
+  parentOrigin?: string | null;
+  ideMode?: boolean;
+  projectRoot?: string | null;
+  [key: string]: unknown;
+}
+
+interface RootAppConfig {
+  user_name?: string;
+  te2_mcp_integration?: boolean;
+  [key: string]: unknown;
+}
+
+type ConversationPreviewEntry = {
+  type?: string;
+  text?: string;
+  source_id?: string;
+  raw_text?: string;
+};
+type ConversationPreviewCache = Record<string, ConversationPreviewEntry | null>;
+type RootRuntimeOptions = UnknownRecord & { quickControls?: unknown[]; fields?: Record<string, unknown> };
 
 document.addEventListener('DOMContentLoaded', () => {
   const getById = document.getElementById.bind(document);
   const queryOne = document.querySelector.bind(document);
-  const byId = (id: string) => getById(id) as any;
-  const query = (selector: string) => queryOne(selector) as any;
+  const byId = <T extends HTMLElement = HTMLElement>(id: string): T | null => getById(id) as T | null;
+  const query = <T extends Element = Element>(selector: string): T | null => queryOne(selector) as T | null;
 
   const statusEl = byId('agent-status');
   const wsStatusEl = byId('agent-ws');
   const timelineEl = byId('agent-timeline');
-  const timelineWrapEl = timelineEl?.closest('.timeline-wrap');
+  const timelineWrapEl = timelineEl?.closest('.timeline-wrap') as HTMLElement | null;
   const scrollContainer = timelineWrapEl || timelineEl;
   const statusRibbonEl = byId('status-ribbon');
   const statusLabelEl = byId('status-label');
@@ -76,7 +165,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const statusDotEl = byId('status-dot');
   const startBtn = byId('agent-start');
   const stopBtn = byId('agent-stop');
-  const promptEl = byId('agent-prompt');
+  const promptEl = byId<TextValueElement>('agent-prompt');
   const footerEl = query('.composer');
   const footerRuntimeControlsEl = byId('footer-runtime-controls');
   const sendBtn = byId('agent-send');
@@ -99,41 +188,41 @@ document.addEventListener('DOMContentLoaded', () => {
   const conversationBackBtn = byId('conversation-back');
   const conversationSettingsBtn = byId('conversation-settings');
   const splashSettingsModalEl = byId('splash-settings-modal');
-  const splashSettingsUserNameEl = byId('splash-settings-user-name');
-  const splashSettingsTe2McpIntegrationEl = byId('splash-settings-te2-mcp-integration');
+  const splashSettingsUserNameEl = byId<HTMLInputElement>('splash-settings-user-name');
+  const splashSettingsTe2McpIntegrationEl = byId<HTMLInputElement>('splash-settings-te2-mcp-integration');
   const settingsModalEl = byId('settings-modal');
   const settingsCloseBtn = byId('settings-close');
   const settingsCancelBtn = byId('settings-cancel');
   const settingsSaveBtn = byId('settings-save');
-  const settingsCwdEl = byId('settings-cwd');
-  const settingsApprovalEl = byId('settings-approval');
-  const settingsSandboxEl = byId('settings-sandbox');
-  const settingsModelEl = byId('settings-model');
-  const settingsEffortEl = byId('settings-effort');
-  const settingsSummaryEl = byId('settings-summary');
-  const settingsDeveloperInstructionsEl = byId('settings-developer-instructions');
-  const settingsLabelEl = byId('settings-label');
-  const settingsAliasEl = byId('settings-alias');
-  const settingsCommandLinesEl = byId('settings-command-lines');
-  const settingsViewWrapEl = byId('settings-view-wrap');
-  const settingsMarkdownEl = byId('settings-markdown');
-  const settingsDiffSyntaxEl = byId('settings-diff-syntax');
-  const settingsSemanticShellRibbonEl = byId('settings-semantic-shell-ribbon');
-  const settingsTe2McpIntegrationEl = byId('settings-te2-mcp-integration');
-  const markdownToggleEl = byId('markdown-toggle');
-  const trackEditsToggleEl = byId('track-edits-toggle');
-  const lineNumbersToggleEl = byId('line-numbers-toggle');
-  const settingsAgentEl = byId('settings-agent');
-  const settingsAgentToggle = byId('settings-agent-toggle');
+  const settingsCwdEl = byId<TextValueElement>('settings-cwd');
+  const settingsApprovalEl = byId<TextValueElement>('settings-approval');
+  const settingsSandboxEl = byId<TextValueElement>('settings-sandbox');
+  const settingsModelEl = byId<TextValueElement>('settings-model');
+  const settingsEffortEl = byId<TextValueElement>('settings-effort');
+  const settingsSummaryEl = byId<TextValueElement>('settings-summary');
+  const settingsDeveloperInstructionsEl = byId<TextValueElement>('settings-developer-instructions');
+  const settingsLabelEl = byId<TextValueElement>('settings-label');
+  const settingsAliasEl = byId<TextValueElement>('settings-alias');
+  const settingsCommandLinesEl = byId<TextValueElement>('settings-command-lines');
+  const settingsViewWrapEl = byId<HTMLInputElement>('settings-view-wrap');
+  const settingsMarkdownEl = byId<HTMLInputElement>('settings-markdown');
+  const settingsDiffSyntaxEl = byId<HTMLInputElement>('settings-diff-syntax');
+  const settingsSemanticShellRibbonEl = byId<HTMLInputElement>('settings-semantic-shell-ribbon');
+  const settingsTe2McpIntegrationEl = byId<HTMLInputElement>('settings-te2-mcp-integration');
+  const markdownToggleEl = byId<HTMLInputElement>('markdown-toggle');
+  const trackEditsToggleEl = byId<HTMLInputElement>('track-edits-toggle');
+  const lineNumbersToggleEl = byId<HTMLInputElement>('line-numbers-toggle');
+  const settingsAgentEl = byId<TextValueElement>('settings-agent');
+  const settingsAgentToggle = byId<HTMLInputElement>('settings-agent-toggle');
   const settingsAgentOptions = byId('settings-agent-options');
   const settingsAgentRowEl = byId('settings-agent-row');
-  const settingsRolloutEl = byId('settings-rollout');
+  const settingsRolloutEl = byId<TextValueElement>('settings-rollout');
   const settingsRolloutRowEl = byId('settings-rollout-row');
-  const settingsApprovalToggle = byId('settings-approval-toggle');
-  const settingsSandboxToggle = byId('settings-sandbox-toggle');
-  const settingsModelToggle = byId('settings-model-toggle');
-  const settingsEffortToggle = byId('settings-effort-toggle');
-  const settingsSummaryToggle = byId('settings-summary-toggle');
+  const settingsApprovalToggle = byId<HTMLInputElement>('settings-approval-toggle');
+  const settingsSandboxToggle = byId<HTMLInputElement>('settings-sandbox-toggle');
+  const settingsModelToggle = byId<HTMLInputElement>('settings-model-toggle');
+  const settingsEffortToggle = byId<HTMLInputElement>('settings-effort-toggle');
+  const settingsSummaryToggle = byId<HTMLInputElement>('settings-summary-toggle');
   const settingsApprovalOptions = byId('settings-approval-options');
   const settingsSandboxOptions = byId('settings-sandbox-options');
   const settingsModelOptions = byId('settings-model-options');
@@ -143,12 +232,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsRolloutBrowseBtn = byId('settings-rollout-browse');
   const pickerOverlayEl = byId('cwd-picker');
   const pickerCloseBtn = byId('picker-close');
-  const pickerPathEl = byId('picker-path');
+  const pickerPathEl = byId<TextValueElement>('picker-path');
   const pickerListEl = byId('picker-list');
   const pickerUpBtn = byId('picker-up');
   const pickerSelectBtn = byId('picker-select');
   const pickerTitleEl = byId('picker-title');
-  const pickerFilterEl = byId('picker-filter');
+  const pickerFilterEl = byId<HTMLInputElement>('picker-filter');
   const rolloutOverlayEl = byId('rollout-picker');
 	  const rolloutCloseBtn = byId('rollout-close');
 	  const rolloutListEl = byId('rollout-list');
@@ -172,17 +261,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const enableMobileScale = storedMobile === '1';
   document.body.classList.toggle('mobile-scale', enableMobileScale);
 
-  let conversationMeta: AnyRecord = {};
-  let conversationSettings: AnyRecord = {};
-  let conversationList: AnyRecord[] = [];
-  let conversationPreviewCache: AnyRecord = {};
-  let appConfig: AnyRecord = {};
+  let conversationMeta: RootConversationMeta = {};
+  let conversationSettings: RootConversationSettings = {};
+  let conversationList: NonNullable<ConversationDrawerState['conversationList']> = [];
+  let conversationPreviewCache: ConversationPreviewCache = {};
+  let appConfig: RootAppConfig = {};
   let activeView = 'splash';
-		  // Client-local selection (do not treat SSOT active conversation as an authority after boot).
-		  let clientConversationId: string | null = null;
-		  let clientActiveView: string | null = null;
-      let miniConversationDrawerOpen = false;
-		  let hostUi: AnyRecord = { showClose: false, parentOrigin: null };
+  // Client-local selection (do not treat SSOT active conversation as an authority after boot).
+  let clientConversationId: string | null = null;
+  let clientActiveView: string | null = null;
+  let miniConversationDrawerOpen = false;
+  let hostUi: RootHostUi = { showClose: false, parentOrigin: null };
   const SPLASH_TAB_STORAGE_KEY = 'codex_splash_tab';
   function normalizeSplashTab(value: unknown): 'all' | 'project' {
     return value === 'project' ? 'project' : 'all';
@@ -202,13 +291,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 		  let splashTab = readSplashTabPreference(); // 'all' | 'project'
-  let rpcTransportEnabled = readRpcTransportEnabledPreference(window);
+  let rpcTransportEnabled = true;
   let pendingNewConversation = false;
-  let pendingRollout: AnyRecord | null = null;
+  let pendingRollout: UnknownRecord | null = null;
   let lastEventType: string | null = null;
   let pickerPath: string | null = null;
   let pickerMode = 'cwd';
-  let pickerItems: AnyRecord[] = [];
+  let pickerItems: UnknownRecord[] = [];
   let filterTimer: ReturnType<typeof setTimeout> | null = null;
   let openDropdownEl: HTMLElement | null = null;
   let initialized = false;
@@ -216,15 +305,15 @@ document.addEventListener('DOMContentLoaded', () => {
   let wsReadyResolve: ((value: boolean) => void) | null = null;
   let wsReadyPromise: Promise<boolean> = new Promise((resolve) => { wsReadyResolve = resolve; });
   let wsReconnectDelay = 1000;
-  let _socket: any = null; // Socket.IO instance (set in connectWS)
-  let modelList: AnyRecord[] = []; // Cached model list with supportedReasoningEfforts
-  let runtimeOptions: AnyRecord = {};
-  let activeRuntimeOptionValues: AnyRecord = {};
+  let _socket: SocketLike | null = null; // Socket.IO instance (set in connectWS)
+  let modelList: UnknownRecord[] = []; // Cached model list with supportedReasoningEfforts
+  let runtimeOptions: RootRuntimeOptions = {};
+  let activeRuntimeOptionValues: Record<string, string> = {};
   let planDocState: AnyRecord = { has_plan: false, plan_exists: false, plan_content: '', plan_path: null, plan_source: null };
   let todoState: AnyRecord = { has_todo: false, plan_steps: [] };
   let planDocDirty = false;
   let planFetchSerial = 0;
-  let settingsUi: any = null;
+  let settingsUi: SettingsUiBinding | null = null;
   let markdownEnabled = true; // Toggle for markdown rendering
   let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
   let lineNumbersEnabled = false; // Toggle for transcript gutter line numbers
@@ -268,19 +357,17 @@ document.addEventListener('DOMContentLoaded', () => {
   let _scrollProgrammatic = false; // Guard: prevent programmatic scroll from unpinning
   let normalizeTimer: ReturnType<typeof setTimeout> | null = null;
   let isNormalizing = false;
-  let tributeInstance: any = null;
   let transcriptTotal = 0;
   let planOverlayEl: HTMLDivElement | null = null;
   let planListEl: HTMLDivElement | null = null;
   let planCollapsed = false;
-  let timelineStickyHeaders: AnyRecord | null = null;
+  let timelineStickyHeaders: ReturnType<typeof bindTimelineStickyHeaders> | null = null;
   const planItems = new Map();
   let transcriptStart = 0;
   let transcriptEnd = 0;
   let transcriptLimit = DEFAULT_TRANSCRIPT_LIMIT;
   let transcriptLoading = false;
   let transcriptHistoryMode = false;
-  let transcriptLiveDirty = false;
   let estimatedRowHeight = 28;
   let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastDraftHash: string | null = null;
@@ -288,7 +375,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let applyingDraft = false;
   let currentExtensionIdImpl: () => string = () => '';
   let loadExtensionUiFeaturesImpl: (_extensionId?: string) => Promise<AnyRecord> = async (_extensionId = '') => ({});
-  let sioCallImpl: (event: string, data?: AnyRecord, options?: AnyRecord) => Promise<any> = async (
+  let sioCallImpl: (event: string, data?: AnyRecord, options?: AnyRecord) => Promise<unknown> = async (
     _event: string,
     _data: AnyRecord = {},
     _options: AnyRecord = {},
@@ -305,7 +392,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return loadExtensionUiFeaturesImpl(extensionId);
   }
 
-  async function sioCall(event: string, data: AnyRecord = {}, options: AnyRecord = {}): Promise<any> {
+  async function sioCall(event: string, data: AnyRecord = {}, options: AnyRecord = {}): Promise<unknown> {
     return sioCallImpl(event, data, options);
   }
 
@@ -372,12 +459,19 @@ document.addEventListener('DOMContentLoaded', () => {
     bindWidescreenResizer,
   } = widescreenLayoutUi;
 
-  let getSubagentContainer = (
-    _id: string,
-    _name: string,
-    _intent: string,
-    _metadata?: AnyRecord | null,
-  ): AnyRecord => ({ body: null });
+  let getSubagentContainer: GetSubagentContainer = (
+    _id,
+    _name,
+    _intent,
+    _metadata,
+  ) => {
+    const row = document.createElement('div') as ToggleableRow;
+    const header = document.createElement('div');
+    const body = document.createElement('div');
+    const statusEl = document.createElement('span');
+    const label = document.createElement('span');
+    return { row, body, header, statusEl, label, items: [] };
+  };
   let getLiveEventParent = (_evt: AnyRecord | null | undefined): HTMLElement | null => null;
   let finalizeSubagent = (_id: string, _summary: string, _success: boolean): void => {};
   let makeCollapsible = (_row: HTMLElement | null, _cardId: string, _startExpanded: boolean, _options: AnyRecord = {}): void => {};
@@ -387,8 +481,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const renderUtils = bindRenderUtils({
     getState: () => ({
-      conversationSettings,
-      conversationMeta,
+      conversationSettings: {
+        cwd: typeof conversationSettings.cwd === 'string' ? conversationSettings.cwd : undefined,
+      },
+      conversationMeta: {
+        cwd: typeof conversationMeta.cwd === 'string' ? conversationMeta.cwd : undefined,
+      },
       viewWrapEnabled,
     }),
     documentRef: document,
@@ -473,8 +571,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const composerRuntime = bindComposerRuntime({
     getState: () => ({
-      conversationMeta,
-      conversationSettings,
+      conversationMeta: {
+        conversation_id: conversationMeta.conversation_id ?? null,
+        draft: typeof conversationMeta.draft === 'string' ? conversationMeta.draft : undefined,
+        cwd: typeof conversationMeta.cwd === 'string' ? conversationMeta.cwd : undefined,
+      },
+      conversationSettings: {
+        cwd: typeof conversationSettings.cwd === 'string' ? conversationSettings.cwd : undefined,
+      },
       draftSaveTimer,
       lastDraftHash,
       draftDirty,
@@ -584,18 +688,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const hostRuntime = bindHostRuntime({
     getState: () => ({
-      hostUi,
-      conversationMeta,
-      conversationSettings,
+      hostUi: {
+        showClose: hostUi.showClose === true,
+        ideMode: hostUi.ideMode === true,
+        parentOrigin: typeof hostUi.parentOrigin === 'string' ? hostUi.parentOrigin : null,
+        projectRoot: typeof hostUi.projectRoot === 'string' ? hostUi.projectRoot : null,
+      },
+      conversationMeta: {
+        conversation_id: conversationMeta.conversation_id ?? null,
+      },
+      conversationSettings: {
+        cwd: typeof conversationSettings.cwd === 'string' ? conversationSettings.cwd : undefined,
+        alias: typeof conversationSettings.alias === 'string' ? conversationSettings.alias : undefined,
+        label: typeof conversationSettings.label === 'string' ? conversationSettings.label : undefined,
+      },
       activeView,
       appConfig,
     }),
-    setState: (patch) => {
-      if (patch.hostUi !== undefined) hostUi = patch.hostUi;
-      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
-      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
+    setState: (patch: HostRuntimePatch) => {
+      if (patch.hostUi !== undefined) hostUi = patch.hostUi as RootHostUi;
+      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta as RootConversationMeta;
+      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings as RootConversationSettings;
       if (patch.activeView !== undefined) activeView = patch.activeView || activeView;
-      if (patch.appConfig !== undefined) appConfig = patch.appConfig;
+      if (patch.appConfig !== undefined) appConfig = patch.appConfig as RootAppConfig;
     },
     sioCall,
     refreshMessageCardHeaders,
@@ -633,7 +748,6 @@ document.addEventListener('DOMContentLoaded', () => {
   getAssistantDisplayName = getAssistantDisplayNameImpl;
 
   const {
-    isConversationInProject,
     renderSplashTabs,
     renderConversationList,
     renderMiniConversationList,
@@ -654,7 +768,9 @@ document.addEventListener('DOMContentLoaded', () => {
     conversationBodyEl,
     conversationMiniDrawerEl,
     conversationMiniCloseBtn,
-    getHostUi: () => hostUi,
+    getHostUi: () => ({
+      projectRoot: typeof hostUi.projectRoot === 'string' ? hostUi.projectRoot : undefined,
+    }),
     getSplashTab: () => splashTab,
     getConversationPreview: (conversationId) => {
       if (!conversationId) return null;
@@ -666,10 +782,17 @@ document.addEventListener('DOMContentLoaded', () => {
       conversationPreviewCache,
       appConfig,
       clientConversationId,
-      conversationMeta,
+      conversationMeta: {
+        conversation_id: typeof conversationMeta.conversation_id === 'string' ? conversationMeta.conversation_id : undefined,
+        settings: {
+          cwd: typeof conversationSettings.cwd === 'string' ? conversationSettings.cwd : undefined,
+          label: typeof conversationSettings.label === 'string' ? conversationSettings.label : undefined,
+          alias: typeof conversationSettings.alias === 'string' ? conversationSettings.alias : undefined,
+          agent: typeof conversationSettings.agent === 'string' ? conversationSettings.agent : undefined,
+        },
+      },
       clientActiveView,
       activeView,
-      conversationSettings,
       draftSaveTimer,
       lastDraftHash,
       splashTab,
@@ -677,15 +800,12 @@ document.addEventListener('DOMContentLoaded', () => {
       pendingNewConversation,
       miniConversationDrawerOpen,
     }),
-    setState: (patch: AnyRecord) => {
+    setState: (patch: ConversationDrawerPatch) => {
       if (patch.conversationList !== undefined) conversationList = patch.conversationList;
-      if (patch.conversationPreviewCache !== undefined) conversationPreviewCache = patch.conversationPreviewCache;
-      if (patch.appConfig !== undefined) appConfig = patch.appConfig;
       if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
-      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
+      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta as RootConversationMeta;
       if (patch.clientActiveView !== undefined) clientActiveView = patch.clientActiveView;
-      if (patch.activeView !== undefined) activeView = patch.activeView;
-      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
+      if (patch.activeView !== undefined && patch.activeView !== null) activeView = patch.activeView;
       if (patch.draftSaveTimer !== undefined) draftSaveTimer = patch.draftSaveTimer;
       if (patch.lastDraftHash !== undefined) lastDraftHash = patch.lastDraftHash;
       if (patch.splashTab !== undefined) {
@@ -693,7 +813,7 @@ document.addEventListener('DOMContentLoaded', () => {
         writeSplashTabPreference(splashTab);
       }
       if (patch.rpcTransportEnabled !== undefined) {
-        rpcTransportEnabled = writeRpcTransportEnabledPreference(patch.rpcTransportEnabled, window);
+        rpcTransportEnabled = true;
       }
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
       if (patch.miniConversationDrawerOpen !== undefined) miniConversationDrawerOpen = patch.miniConversationDrawerOpen;
@@ -712,7 +832,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateActiveConversationLabel,
     documentRef: document,
     windowRef: window,
-  }) as any;
+  });
 
   function toProjectRelativePath(path: string | null | undefined): string | null {
 	    if (!path || typeof path !== 'string') return null;
@@ -745,31 +865,32 @@ document.addEventListener('DOMContentLoaded', () => {
     },
   });
 
-  async function openSettingsModal(...args: unknown[]) {
-    return settingsUi?.openSettingsModal(...args);
+  async function openSettingsModal(...args: Parameters<SettingsUiBinding['openSettingsModal']>) {
+    if (!settingsUi) return;
+    return settingsUi.openSettingsModal(...args);
   }
 
-  function closeSettingsModal(...args: unknown[]) {
-    return settingsUi?.closeSettingsModal(...args);
+  function closeSettingsModal(...args: Parameters<SettingsUiBinding['closeSettingsModal']>) {
+    settingsUi?.closeSettingsModal(...args);
   }
 
   const runtimeFooter = bindRuntimeFooter({
     getState: () => ({
       conversationMeta,
       conversationSettings,
-      runtimeOptions,
+      runtimeOptions: runtimeOptions as RuntimeFooterContext['getState'] extends () => infer S ? S extends { runtimeOptions?: infer T } ? T : never : never,
       activeRuntimeOptionValues,
       openDropdownEl,
     }),
-    setState: (patch: AnyRecord) => {
+    setState: (patch: RuntimeFooterPatch) => {
       if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
       if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
       if (patch.activeRuntimeOptionValues !== undefined) activeRuntimeOptionValues = patch.activeRuntimeOptionValues || {};
       if (patch.openDropdownEl !== undefined) openDropdownEl = patch.openDropdownEl || null;
     },
     footerRuntimeControlsEl,
-    closeDropdownMenu: (...args: unknown[]) => closeDropdownMenu(...args),
-    toggleDropdownMenu: (...args: unknown[]) => toggleDropdownMenu(...args),
+    closeDropdownMenu: (element) => closeDropdownMenu(element),
+    toggleDropdownMenu: (element) => toggleDropdownMenu(element),
     sioCall,
   });
 
@@ -781,111 +902,120 @@ document.addEventListener('DOMContentLoaded', () => {
     resetRuntimeFooterState,
   } = runtimeFooter;
 
-  function openPicker(...args: unknown[]) {
-    return settingsUi?.openPicker(...args);
+  function openPicker(...args: Parameters<SettingsUiBinding['openPicker']>) {
+    settingsUi?.openPicker(...args);
   }
 
-  function closePicker(...args: unknown[]) {
-    return settingsUi?.closePicker(...args);
+  function closePicker(...args: Parameters<SettingsUiBinding['closePicker']>) {
+    settingsUi?.closePicker(...args);
   }
 
-  function bindPickerFilter(...args: unknown[]) {
-    return settingsUi?.bindPickerFilter(...args);
+  function bindPickerFilter(...args: Parameters<SettingsUiBinding['bindPickerFilter']>) {
+    settingsUi?.bindPickerFilter(...args);
   }
 
-  function openRolloutPicker(...args: unknown[]) {
-    return settingsUi?.openRolloutPicker(...args);
+  function openRolloutPicker(...args: Parameters<SettingsUiBinding['openRolloutPicker']>) {
+    settingsUi?.openRolloutPicker(...args);
   }
 
-  function closeRolloutPicker(...args: unknown[]) {
-    return settingsUi?.closeRolloutPicker(...args);
+  function closeRolloutPicker(...args: Parameters<SettingsUiBinding['closeRolloutPicker']>) {
+    settingsUi?.closeRolloutPicker(...args);
   }
 
-  async function loadRolloutPreview(...args: unknown[]) {
-    return settingsUi?.loadRolloutPreview(...args);
+  async function loadRolloutPreview(...args: Parameters<SettingsUiBinding['loadRolloutPreview']>) {
+    if (!settingsUi) return;
+    return settingsUi.loadRolloutPreview(...args);
   }
 
-  async function fetchRollouts(...args: unknown[]) {
-    return settingsUi?.fetchRollouts(...args);
+  async function fetchRollouts(...args: Parameters<SettingsUiBinding['fetchRollouts']>) {
+    if (!settingsUi) return;
+    return settingsUi.fetchRollouts(...args);
   }
 
-  function buildDropdown(...args: unknown[]) {
-    return settingsUi?.buildDropdown(...args);
+  function buildDropdown(...args: Parameters<SettingsUiBinding['buildDropdown']>) {
+    if (!settingsUi) return null;
+    return settingsUi.buildDropdown(...args);
   }
 
-  function updateDropdownOptions(...args: unknown[]) {
-    return settingsUi?.updateDropdownOptions(...args);
+  function updateDropdownOptions(...args: Parameters<SettingsUiBinding['updateDropdownOptions']>) {
+    settingsUi?.updateDropdownOptions(...args);
   }
 
-  async function loadModelOptions(...args: unknown[]) {
-    return settingsUi?.loadModelOptions(...args);
+  async function loadModelOptions(...args: Parameters<SettingsUiBinding['loadModelOptions']>) {
+    if (!settingsUi) return;
+    return settingsUi.loadModelOptions(...args);
   }
 
-  async function loadRuntimeOptions(...args: unknown[]) {
-    return settingsUi?.loadRuntimeOptions(...args);
+  async function loadRuntimeOptions(...args: Parameters<SettingsUiBinding['loadRuntimeOptions']>) {
+    if (!settingsUi) return {};
+    return settingsUi.loadRuntimeOptions(...args);
   }
 
-  async function loadAgentOptions(...args: unknown[]) {
-    return settingsUi?.loadAgentOptions(...args);
+  async function loadAgentOptions(...args: Parameters<SettingsUiBinding['loadAgentOptions']>) {
+    if (!settingsUi) return;
+    return settingsUi.loadAgentOptions(...args);
   }
 
-  async function onAgentSelectionChange(...args: unknown[]) {
-    return settingsUi?.onAgentSelectionChange(...args);
+  async function onAgentSelectionChange(...args: Parameters<SettingsUiBinding['onAgentSelectionChange']>) {
+    if (!settingsUi) return;
+    return settingsUi.onAgentSelectionChange(...args);
   }
 
-  function updateEffortOptionsForModel(...args: unknown[]) {
-    return settingsUi?.updateEffortOptionsForModel(...args);
+  function updateEffortOptionsForModel(...args: Parameters<SettingsUiBinding['updateEffortOptionsForModel']>) {
+    settingsUi?.updateEffortOptionsForModel(...args);
   }
 
-  function openDropdownMenu(...args: unknown[]) {
-    return settingsUi?.openDropdownMenu(...args);
+  function openDropdownMenu(...args: Parameters<SettingsUiBinding['openDropdownMenu']>) {
+    settingsUi?.openDropdownMenu(...args);
   }
 
-  function closeDropdownMenu(...args: unknown[]) {
-    return settingsUi?.closeDropdownMenu(...args);
+  function closeDropdownMenu(...args: Parameters<SettingsUiBinding['closeDropdownMenu']>) {
+    settingsUi?.closeDropdownMenu(...args);
   }
 
-  function toggleDropdownMenu(...args: unknown[]) {
-    return settingsUi?.toggleDropdownMenu(...args);
+  function toggleDropdownMenu(...args: Parameters<SettingsUiBinding['toggleDropdownMenu']>) {
+    settingsUi?.toggleDropdownMenu(...args);
   }
 
-  function setupDropdown(...args: unknown[]) {
-    return settingsUi?.setupDropdown(...args);
+  function setupDropdown(...args: Parameters<SettingsUiBinding['setupDropdown']>) {
+    settingsUi?.setupDropdown(...args);
   }
 
-  async function fetchPicker(...args: unknown[]) {
-    return settingsUi?.fetchPicker(...args);
+  async function fetchPicker(...args: Parameters<SettingsUiBinding['fetchPicker']>) {
+    if (!settingsUi) return;
+    return settingsUi.fetchPicker(...args);
   }
 
-  async function fetchPickerSearch(...args: unknown[]) {
-    return settingsUi?.fetchPickerSearch(...args);
+  async function fetchPickerSearch(...args: Parameters<SettingsUiBinding['fetchPickerSearch']>) {
+    if (!settingsUi) return [];
+    return settingsUi.fetchPickerSearch(...args);
   }
 
-  function applyPickerFilter(...args: unknown[]) {
-    return settingsUi?.applyPickerFilter(...args);
+  function applyPickerFilter(...args: Parameters<SettingsUiBinding['applyPickerFilter']>) {
+    settingsUi?.applyPickerFilter(...args);
   }
 
   settingsUi = bindSettingsUiFlow({
     getState: () => ({
-      conversationMeta,
-      conversationSettings,
+      conversationMeta: conversationMeta as SettingsUiState['conversationMeta'],
+      conversationSettings: conversationSettings as SettingsUiState['conversationSettings'],
       pendingNewConversation,
       pendingRollout,
-      hostUi,
+      hostUi: hostUi as SettingsUiState['hostUi'],
       splashTab,
       pickerPath,
-      pickerMode,
+      pickerMode: pickerMode || 'cwd',
       pickerItems,
       filterTimer,
       openDropdownEl,
       modelList,
-      runtimeOptions,
+      runtimeOptions: runtimeOptions as SettingsUiState['runtimeOptions'],
     }),
-    setState: (patch: AnyRecord) => {
+    setState: (patch: SettingsUiPatch) => {
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
       if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
       if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
-      if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode;
+      if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode || 'cwd';
       if (patch.pickerItems !== undefined) pickerItems = patch.pickerItems;
       if (patch.filterTimer !== undefined) filterTimer = patch.filterTimer;
       if (patch.openDropdownEl !== undefined) openDropdownEl = patch.openDropdownEl;
@@ -981,6 +1111,7 @@ document.addEventListener('DOMContentLoaded', () => {
     scrollContainer.scrollTop += delta;
     if (clearPinned) {
       autoScroll = false;
+      transcriptHistoryMode = true;
       updateScrollButton();
     }
     requestAnimationFrame(() => {
@@ -997,7 +1128,7 @@ document.addEventListener('DOMContentLoaded', () => {
       scrollRowToTop(row, { clearPinned: true });
     },
     onCollapsibleHeaderClick: (row) => {
-      (row as any)?._toggleCollapse?.();
+      (row as ToggleableRow | null)?. _toggleCollapse?.();
     },
     documentRef: document,
     windowRef: window,
@@ -1102,7 +1233,7 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptEnd,
       estimatedRowHeight,
     }),
-    setTranscriptState: (patch: AnyRecord) => {
+    setTranscriptState: (patch: TranscriptMetricsPatch) => {
       if (patch.estimatedRowHeight !== undefined) estimatedRowHeight = patch.estimatedRowHeight;
     },
   });
@@ -1113,7 +1244,7 @@ document.addEventListener('DOMContentLoaded', () => {
       lastEventType,
       activeAgentPtyBlockId,
     }),
-    setState: (patch: AnyRecord) => {
+    setState: (patch: TimelineLiveItemsPatch) => {
       if (patch.lastEventType !== undefined) lastEventType = patch.lastEventType || null;
       if (patch.activeAgentPtyBlockId !== undefined) activeAgentPtyBlockId = patch.activeAgentPtyBlockId || null;
     },
@@ -1152,10 +1283,10 @@ document.addEventListener('DOMContentLoaded', () => {
     isDiffSyntaxEnabled,
     sioCall,
     getConversationId: () => conversationMeta?.conversation_id || null,
-    getConversationMeta: () => conversationMeta,
-    setConversationMeta: (nextMeta) => { conversationMeta = nextMeta; },
+    getConversationMeta: () => conversationMeta as Parameters<typeof bindTimelineLiveItems>[0]['getConversationMeta'] extends () => infer T ? T : never,
+    setConversationMeta: (nextMeta) => { conversationMeta = nextMeta as RootConversationMeta; },
     getCurrentExtensionId: () => currentExtensionId(),
-    getSubagentContainer,
+    getSubagentContainer: (id, name, intent) => ({ ...getSubagentContainer(id, name, intent) }),
     requestCardRuntime,
     onAfterRender: () => {
       timelineStickyHeaders?.update?.();
@@ -1202,7 +1333,7 @@ document.addEventListener('DOMContentLoaded', () => {
     clearPlaceholder,
     insertRow,
     makeCollapsible,
-    getSubagentContainer,
+    getSubagentContainer: (id, name, intent) => ({ ...getSubagentContainer(id, name, intent) }),
     renderShellCmdRibbon,
     postTe2OpenRequest,
     detectLangFromCommand,
@@ -1252,7 +1383,6 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptLoading,
       transcriptGeneration,
       transcriptHistoryMode,
-      transcriptLiveDirty,
       debugEnabled: _dbg,
     }),
     setState: (patch) => {
@@ -1266,7 +1396,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.transcriptLoading !== undefined) transcriptLoading = patch.transcriptLoading === true;
       if (patch.transcriptGeneration !== undefined) transcriptGeneration = Number(patch.transcriptGeneration || 0);
       if (patch.transcriptHistoryMode !== undefined) transcriptHistoryMode = patch.transcriptHistoryMode === true;
-      if (patch.transcriptLiveDirty !== undefined) transcriptLiveDirty = patch.transcriptLiveDirty === true;
       if (patch.lastEventType !== undefined) lastEventType = patch.lastEventType as string | null;
       if (patch.contextWindow !== undefined) {
         contextWindow = typeof patch.contextWindow === 'number' && Number.isFinite(patch.contextWindow)
@@ -1354,6 +1483,13 @@ document.addEventListener('DOMContentLoaded', () => {
     getConversationId: () => conversationMeta?.conversation_id || null,
   });
 
+  const saveSettingsSioCall: SaveFlowContext['sioCall'] = async (event, payload) => {
+    const result = await sioCall(event, payload || {});
+    return result && typeof result === 'object' && !Array.isArray(result)
+      ? (result as RootConversationMeta)
+      : null;
+  };
+
   const { saveSettings } = bindSettingsSaveFlow({
     getState: () => ({
       conversationSettings,
@@ -1362,15 +1498,14 @@ document.addEventListener('DOMContentLoaded', () => {
       pendingRollout,
       trackEditsEnabled,
       lineNumbersEnabled,
-      runtimeOptions,
+      runtimeOptions: runtimeOptions as SaveFlowState['runtimeOptions'],
     }),
-    setState: (patch: AnyRecord) => {
-      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
-      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
+    setState: (patch: SaveFlowPatch) => {
+      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings as RootConversationSettings;
+      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta as RootConversationMeta;
       if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
       if (patch.clientActiveView !== undefined) clientActiveView = patch.clientActiveView;
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
-      if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
     },
     elements: {
       settingsAgentEl,
@@ -1397,7 +1532,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setDiffSyntaxEnabled,
     setSemanticShellRibbonEnabled,
     ensureTreeSitterRibbonReady,
-    sioCall,
+    sioCall: saveSettingsSioCall,
     closeSettingsModal,
     fetchConversation,
     fetchConversations,
@@ -1432,13 +1567,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
     getWsState: () => ({ wsOpen, wsReadyResolve, wsReadyPromise, wsReconnectDelay }),
-    setWsState: (patch: AnyRecord) => {
+    setWsState: (patch: SocketEventsPatch) => {
       if (patch.wsOpen !== undefined) wsOpen = patch.wsOpen;
       if (patch.wsReadyResolve !== undefined) wsReadyResolve = patch.wsReadyResolve;
       if (patch.wsReadyPromise !== undefined) wsReadyPromise = patch.wsReadyPromise;
       if (patch.wsReconnectDelay !== undefined) wsReconnectDelay = patch.wsReconnectDelay;
     },
-    setSocket: (sock: AnyRecord) => { _socket = sock; },
+    setSocket: (sock: AppserverSocket) => { _socket = sock as unknown as SocketLike | null; },
     wsStatusEl,
     setPill,
     syncDraftFromServer,
@@ -1450,29 +1585,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const conversationRuntime = bindConversationRuntime({
     getState: () => ({
-      conversationMeta,
-      conversationSettings,
+      conversationMeta: conversationMeta as ConversationRuntimeState['conversationMeta'],
+      conversationSettings: conversationSettings as ConversationRuntimeState['conversationSettings'],
       clientConversationId,
       clientActiveView,
       activeView,
       activeRuntimeOptionValues,
       miniConversationDrawerOpen,
-      runtimeOptions,
-      hostUi,
+      runtimeOptions: runtimeOptions as ConversationRuntimeState['runtimeOptions'],
+      hostUi: hostUi as ConversationRuntimeState['hostUi'],
       planCollapsed,
     }),
-    setState: (patch: AnyRecord) => {
-      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta;
-      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings;
+    setState: (patch: ConversationRuntimePatch) => {
+      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta as RootConversationMeta;
+      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings as RootConversationSettings;
       if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
       if (patch.clientActiveView !== undefined) clientActiveView = patch.clientActiveView;
       if (patch.activeView !== undefined) activeView = patch.activeView || activeView;
-      if (patch.activeRuntimeOptionValues !== undefined) activeRuntimeOptionValues = patch.activeRuntimeOptionValues || {};
+      if (patch.activeRuntimeOptionValues !== undefined) activeRuntimeOptionValues = patch.activeRuntimeOptionValues as Record<string, string>;
       if (patch.miniConversationDrawerOpen !== undefined) {
         miniConversationDrawerOpen = patch.miniConversationDrawerOpen === true;
       }
-      if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
-      if (patch.hostUi !== undefined) hostUi = patch.hostUi;
+      if (patch.runtimeOptions !== undefined) runtimeOptions = (patch.runtimeOptions || {}) as RootRuntimeOptions;
+      if (patch.hostUi !== undefined) hostUi = patch.hostUi as RootHostUi;
       if (patch.planCollapsed !== undefined) planCollapsed = patch.planCollapsed === true;
     },
     getSocket: () => _socket,
@@ -1518,13 +1653,13 @@ document.addEventListener('DOMContentLoaded', () => {
   } = bindSessionFlow({
     getState: () => ({
       initialized,
-      conversationSettings,
-      conversationMeta,
+      conversationSettings: conversationSettings as SessionFlowContext['getState'] extends () => infer S ? S extends { conversationSettings?: infer T } ? T : never : never,
+      conversationMeta: conversationMeta as SessionFlowContext['getState'] extends () => infer S ? S extends { conversationMeta?: infer T } ? T : never : never,
       autoScroll,
       rpcTransportEnabled,
       transcriptHistoryMode,
     }),
-    setState: (patch: AnyRecord) => {
+    setState: (patch: SessionFlowPatch) => {
       if (patch.initialized !== undefined) initialized = patch.initialized;
       if (patch.autoScroll !== undefined) autoScroll = patch.autoScroll;
     },
@@ -1537,19 +1672,13 @@ document.addEventListener('DOMContentLoaded', () => {
     renderShellBatchResult,
     setStatusDot,
     shellRows,
-    snapTranscriptToLive: async () => {
-      const cid = clientConversationId || conversationMeta?.conversation_id || null;
-      const gen = transcriptGeneration || 0;
-      await resumeLiveTail(cid, gen);
-    },
+    snapTranscriptToLive,
   });
 
   const {
     fetchTranscriptRange,
     loadOlderTranscript,
-    loadNewerTranscript,
     replayTranscript,
-    resumeLiveTail,
   } = bindTranscriptLoader({
     getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
     sioCall,
@@ -1561,9 +1690,8 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptLoading,
       transcriptGeneration,
       transcriptHistoryMode,
-      transcriptLiveDirty,
     }),
-    setTranscriptState: (patch: AnyRecord) => {
+    setTranscriptState: (patch: TranscriptLoaderPatch) => {
       if (patch.transcriptTotal !== undefined) transcriptTotal = patch.transcriptTotal;
       if (patch.transcriptStart !== undefined) transcriptStart = patch.transcriptStart;
       if (patch.transcriptEnd !== undefined) transcriptEnd = patch.transcriptEnd;
@@ -1571,7 +1699,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.transcriptLoading !== undefined) transcriptLoading = patch.transcriptLoading;
       if (patch.transcriptGeneration !== undefined) transcriptGeneration = patch.transcriptGeneration;
       if (patch.transcriptHistoryMode !== undefined) transcriptHistoryMode = patch.transcriptHistoryMode === true;
-      if (patch.transcriptLiveDirty !== undefined) transcriptLiveDirty = patch.transcriptLiveDirty === true;
     },
     renderTranscriptEntries,
     prepareTranscriptWindow: timelineReplay.prepareTranscriptWindow,
@@ -1589,20 +1716,20 @@ document.addEventListener('DOMContentLoaded', () => {
   const { handleEvent } = bindEventRouter({
     getState: () => ({
       clientConversationId,
-      conversationMeta,
-      hostUi,
+      conversationMeta: conversationMeta as EventRouterContext['getState'] extends () => infer S ? S extends { conversationMeta?: infer T } ? T : never : never,
+      hostUi: hostUi as EventRouterContext['getState'] extends () => infer S ? S extends { hostUi?: infer T } ? T : never : never,
       activeView,
       splashTab,
       conversationList,
-      conversationPreviewCache,
-      appConfig,
+      conversationPreviewCache: conversationPreviewCache as EventRouterContext['getState'] extends () => infer S ? S extends { conversationPreviewCache?: infer T } ? T : never : never,
+      appConfig: appConfig as EventRouterContext['getState'] extends () => infer S ? S extends { appConfig?: infer T } ? T : never : never,
       lastDraftHash,
       draftDirty,
     }),
-    setState: (patch: AnyRecord) => {
-      if (patch.hostUi !== undefined) hostUi = patch.hostUi;
-      if (patch.conversationPreviewCache !== undefined) conversationPreviewCache = patch.conversationPreviewCache;
-      if (patch.appConfig !== undefined) appConfig = patch.appConfig;
+    setState: (patch: EventRouterPatch) => {
+      if (patch.hostUi !== undefined) hostUi = patch.hostUi as RootHostUi;
+      if (patch.conversationPreviewCache !== undefined) conversationPreviewCache = patch.conversationPreviewCache as ConversationPreviewCache;
+      if (patch.appConfig !== undefined) appConfig = patch.appConfig as RootAppConfig;
       if (patch.contextWindow !== undefined) contextWindow = patch.contextWindow;
       if (patch.lastDraftHash !== undefined) lastDraftHash = patch.lastDraftHash;
       if (patch.draftDirty !== undefined) draftDirty = patch.draftDirty;
@@ -1620,15 +1747,26 @@ document.addEventListener('DOMContentLoaded', () => {
     clearReasoningRibbon,
     setReasoningRibbon,
     addMessage,
-    getSubagentContainer,
+    getSubagentContainer: (id, name, intent, metadata) => ({
+      ...getSubagentContainer(
+        id,
+        name,
+        intent,
+        (metadata ?? null) as Parameters<GetSubagentContainer>[3],
+      ),
+    }),
     appendAssistantDelta,
     finalizeAssistant,
     appendReasoningDelta,
     finalizeReasoning,
     addDiff,
     addDeclinedDiff,
-    renderApproval,
-    handoffApproval,
+    renderApproval: (event) => {
+      renderApproval(event as Parameters<typeof renderApproval>[0]);
+    },
+    handoffApproval: (event) => {
+      handoffApproval(event as Parameters<typeof handoffApproval>[0]);
+    },
     renderCommandResult,
     renderViewCard,
     renderSearchCard,
@@ -1655,8 +1793,18 @@ document.addEventListener('DOMContentLoaded', () => {
     renderMetaEnvelopeInjected,
     applyHostUi,
     renderSplashTabs,
-    renderConversationList,
-    renderMiniConversationList,
+    renderConversationList: (conversations, activeConversationId) => {
+      renderConversationList(
+        (Array.isArray(conversations) ? conversations : []) as NonNullable<ConversationDrawerState['conversationList']>,
+        activeConversationId,
+      );
+    },
+    renderMiniConversationList: (conversations, activeConversationId) => {
+      renderMiniConversationList(
+        (Array.isArray(conversations) ? conversations : []) as NonNullable<ConversationDrawerState['conversationList']>,
+        activeConversationId,
+      );
+    },
     insertMention,
     renderPromptFromText,
     applyRuntimeMode,
@@ -1696,11 +1844,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const nextOrder = orderId + 1;
     transcriptTotal = Math.max(Number(transcriptTotal) || 0, nextOrder);
-    if (!transcriptHistoryMode) {
-      transcriptEnd = Math.max(Number(transcriptEnd) || 0, nextOrder);
-      transcriptLiveDirty = false;
-      transcriptHistoryMode = !isTranscriptTailRange(transcriptEnd, transcriptTotal);
-    }
+    transcriptEnd = Math.max(Number(transcriptEnd) || 0, nextOrder);
   }
 
   function trimTranscriptHead(): void {
@@ -1716,27 +1860,21 @@ document.addEventListener('DOMContentLoaded', () => {
     updateSpacerHeights();
   }
 
+  async function snapTranscriptToLive(): Promise<void> {
+    trimTranscriptHead();
+    transcriptHistoryMode = false;
+  }
+
   function handleSocketEvent(event: unknown): void {
     const evt = event && typeof event === 'object' ? event as AnyRecord : null;
     let isTranscriptMutation = false;
     if (isCurrentConversationEvent(evt) && isTranscriptMutationLiveEvent(evt)) {
       isTranscriptMutation = true;
       recordLiveTranscriptOrder(evt as AnyRecord);
-      if (transcriptHistoryMode) {
-        transcriptLiveDirty = true;
-        if (isVisibleTranscriptCardRecord(evt)) {
-          return;
-        }
-      }
     }
     handleEvent(event);
-    if (isTranscriptMutation && !transcriptHistoryMode) {
-      if (autoScroll) {
-        trimTranscriptHead();
-      } else {
-        transcriptHistoryMode = true;
-        transcriptLiveDirty = true;
-      }
+    if (isTranscriptMutation && autoScroll) {
+      trimTranscriptHead();
     }
   }
 
@@ -1754,24 +1892,26 @@ document.addEventListener('DOMContentLoaded', () => {
       activeView,
       pendingNewConversation,
       pendingRollout,
-      conversationMeta,
-      conversationSettings,
-      appConfig,
+      conversationMeta: conversationMeta as BootInitState['conversationMeta'],
+      conversationSettings: conversationSettings as BootInitState['conversationSettings'],
+      appConfig: appConfig as BootInitState['appConfig'],
       splashTab,
-      hostUi,
+      hostUi: hostUi as BootInitState['hostUi'],
       pickerPath,
-      pickerMode,
+      pickerMode: pickerMode || 'cwd',
       openDropdownEl,
-      runtimeOptions,
     }),
-    setState: (patch: AnyRecord) => {
+    setState: (patch: BootInitPatch) => {
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
-      if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
-      if (patch.appConfig !== undefined) appConfig = patch.appConfig;
+      if (patch.pendingRollout !== undefined) {
+        pendingRollout = patch.pendingRollout && typeof patch.pendingRollout === 'object' && !Array.isArray(patch.pendingRollout)
+          ? patch.pendingRollout as UnknownRecord
+          : null;
+      }
+      if (patch.appConfig !== undefined) appConfig = patch.appConfig as RootAppConfig;
       if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
-      if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode;
+      if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode || 'cwd';
       if (patch.openDropdownEl !== undefined) openDropdownEl = patch.openDropdownEl;
-      if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
     },
     elements: {
       statusEl,
@@ -1818,11 +1958,18 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     ensureActivityRow,
     fetchStatus,
-    setupDropdown,
-    loadAgentOptions,
-    loadModelOptions,
-    loadRuntimeOptions,
-    updateEffortOptionsForModel,
+    setupDropdown: (inputEl, toggleEl, optionsEl, items) => {
+      setupDropdown(
+        inputEl as Parameters<SettingsUiBinding['setupDropdown']>[0],
+        toggleEl,
+        optionsEl,
+        items,
+      );
+    },
+    loadAgentOptions: () => { void loadAgentOptions(); },
+    loadModelOptions: () => { void loadModelOptions(); },
+    loadRuntimeOptions: (agentId, conversationId) => { void loadRuntimeOptions(agentId, conversationId); },
+    updateEffortOptionsForModel: (model) => { updateEffortOptionsForModel(model); },
     helperFns: {
       openSettingsModal,
       closeSettingsModal,
@@ -1883,20 +2030,16 @@ document.addEventListener('DOMContentLoaded', () => {
       transcriptEnd,
       transcriptTotal,
       transcriptHistoryMode,
-      transcriptLiveDirty,
       topSpacerEl,
       bottomSpacerEl,
       estimatedRowHeight,
       scrollProgrammatic: _scrollProgrammatic,
       autoScroll,
     }),
-    setState: (patch: AnyRecord) => {
+    setState: (patch: InputFlowPatch) => {
       if (patch.draftDirty !== undefined) draftDirty = patch.draftDirty;
       if (patch.autoScroll !== undefined) autoScroll = patch.autoScroll;
-      if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
-      if (patch.pendingRollout !== undefined) pendingRollout = patch.pendingRollout;
-      if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
-      if (patch.pickerMode !== undefined) pickerMode = patch.pickerMode;
+      if (patch.transcriptHistoryMode !== undefined) transcriptHistoryMode = patch.transcriptHistoryMode === true;
     },
     elements: {
       sendBtn,
@@ -1920,7 +2063,9 @@ document.addEventListener('DOMContentLoaded', () => {
     clearPrompt,
     clearDraft,
     saveDraftDebounced,
-    openPicker,
+    openPicker: (startPath: string, mode: string) => {
+      openPicker(startPath, mode as Parameters<SettingsUiBinding['openPicker']>[1]);
+    },
     sendHostCloseMessage,
     bindSplashTabHandlers,
     initTribute,
@@ -1930,7 +2075,7 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     isNearBottom,
     loadOlderTranscript,
-    loadNewerTranscript,
+    snapTranscriptToLive,
     fetchConversation,
     restorePendingApprovals,
     refreshPlanSurface,

@@ -426,19 +426,13 @@ try {{
                             Div(
                                 Div(
 	                                Div(
-	                                    H1("CodexAS-Extension"),
-	                                    Small("Unified Timeline"),
-	                                    cls="brand"
-	                                ),
-	                                Div(
-	                                    Button("Project", id="splash-tab-project", cls="btn tiny toggle"),
-	                                    Button("All", id="splash-tab-all", cls="btn tiny toggle active"),
-                                        Label(
-                                            Input(type="checkbox", id="splash-rpc-toggle", checked=True),
-                                            Span("Use RPC"),
-                                            cls="toggle-label splash-rpc-toggle-label",
-                                            title="Disable to keep migrated frontend slices on the legacy /appserver transport for this tab",
-                                        ),
+                                    H1("CodexAS-Extension"),
+                                    Small("Unified Timeline"),
+                                    cls="brand"
+                                ),
+                                Div(
+                                    Button("Project", id="splash-tab-project", cls="btn tiny toggle"),
+                                    Button("All", id="splash-tab-all", cls="btn tiny toggle active"),
                                         Button(
                                             Img(
                                                 src=_asset(package_root, "/static/images/green-right-arrow.png"),

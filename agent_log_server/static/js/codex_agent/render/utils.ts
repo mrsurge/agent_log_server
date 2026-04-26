@@ -1,6 +1,6 @@
-declare const hljs: any;
+import type { HighlightJsLike, UnknownRecord } from '../shared_types.ts';
 
-type AnyRecord = Record<string, any>;
+declare const hljs: HighlightJsLike | undefined;
 
 export type StructuredViewLine = {
   line_no: number;
@@ -8,8 +8,8 @@ export type StructuredViewLine = {
 };
 
 interface RenderUtilsState {
-  conversationSettings?: AnyRecord;
-  conversationMeta?: AnyRecord;
+  conversationSettings?: { cwd?: string };
+  conversationMeta?: { cwd?: string };
   viewWrapEnabled?: boolean;
 }
 
@@ -91,7 +91,7 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
     };
     const candidates = fallbackMap[requested] || [requested];
     for (const candidate of candidates) {
-      if (candidate && hljs.getLanguage(candidate)) return candidate;
+      if (candidate && hljs?.getLanguage?.(candidate)) return candidate;
     }
     return null;
   }
@@ -180,11 +180,11 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
     }
     try {
       const resolvedLang = resolveHljsLanguage(lang);
-      if (resolvedLang) {
+      if (resolvedLang && hljs.highlight) {
         return hljs.highlight(text, { language: resolvedLang, ignoreIllegals: true }).value;
       }
-      const result = hljs.highlightAuto(text);
-      if (result.relevance > 5) {
+      const result = hljs.highlightAuto?.(text);
+      if (result && result.relevance > 5) {
         return result.value;
       }
     } catch {
@@ -198,14 +198,15 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
     const normalized: StructuredViewLine[] = [];
     for (const entry of lines) {
       if (!entry || typeof entry !== 'object') return null;
-      const rawLineNo = (entry as AnyRecord).line_no ?? (entry as AnyRecord).lineNo;
+      const record = entry as UnknownRecord;
+      const rawLineNo = record.line_no ?? record.lineNo;
       const lineNo = Number(rawLineNo);
       if (!Number.isFinite(lineNo)) return null;
       normalized.push({
         line_no: lineNo,
-        content: (entry as AnyRecord).content === null || (entry as AnyRecord).content === undefined
+        content: record.content === null || record.content === undefined
           ? ''
-          : String((entry as AnyRecord).content),
+          : String(record.content),
       });
     }
     return normalized;
@@ -364,7 +365,7 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
       pre.appendChild(codeEl);
       container.appendChild(pre);
 
-      if (typeof hljs !== 'undefined') {
+      if (hljs?.highlightElement) {
         hljs.highlightElement(codeEl);
       }
 
