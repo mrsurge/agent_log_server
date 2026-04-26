@@ -1422,6 +1422,20 @@ async def handle_message(
 
     try:
         if thread_id:
+            persisted_signature = meta.get("thread_runtime_signature")
+            if persisted_signature != current_signature:
+                _debug_log(
+                    f"[codex-ext-exp] turn/start runtime-resume convo={conversation_id[:8]} "
+                    f"thread={thread_id[:8]}"
+                )
+                await _resume_thread_for_rpc_server(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    transport=transport,
+                    protocol=protocol,
+                    merged_settings=merged_settings,
+                    meta=meta,
+                )
             pending_update, queued_changed = _stage_repo_memory_update_for_turn(conversation_id, meta)
             if queued_changed:
                 _save_meta(conversation_id, meta)
@@ -1454,6 +1468,7 @@ async def handle_message(
                 transport.mark_thread_ready(thread_id)
                 meta["status"] = "active"
                 meta["settings"] = merged_settings
+                meta["thread_runtime_signature"] = current_signature
                 if used_pending_update:
                     _clear_queued_repo_memory_updates(meta)
                 _save_meta(conversation_id, meta)

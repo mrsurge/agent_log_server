@@ -1208,14 +1208,21 @@ def _build_agent_pty_blocks_mcp_server(
     if isinstance(conversation_id, str) and conversation_id.strip():
         env["CONVERSATION_ID"] = conversation_id.strip()
 
-    return {
-        **merged,
+    merged_without_copilot_keys: JSONDict = {
+        key: value for key, value in merged.items() if key not in {"tools", "type"}
+    }
+    tools = merged.get("tools")
+    server: JSONDict = {
+        **merged_without_copilot_keys,
         "command": command,
         "args": [str(_agent_pty_mcp_server_script_path())],
         "cwd": launch_cwd,
         "env": env,
         "tool_timeout_sec": tool_timeout_sec,
     }
+    if isinstance(tools, dict):
+        server["tools"] = dict(tools)
+    return server
 
 
 def _build_codex_ext_thread_config(

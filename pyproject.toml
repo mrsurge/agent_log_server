@@ -32,7 +32,20 @@ agent_log_server = [
   "te2_assets/*",
   "te2_assets/**/*",
 ]
-extensions = ["*.json", "*/*.json"]
+extensions = [
+  "*.json",
+  "*/*.json",
+  "*/*/*.json",
+  "*/*/*/*.json",
+  "*/*.js",
+  "*/*/*.js",
+  "*/*/*/*.js",
+  "*/*/*/*/*.js",
+  "*/*.mjs",
+  "*/*/*.mjs",
+  "*/*/*/*.mjs",
+  "*/*/*/*/*.mjs",
+]
 "extensions.codex_ext" = ["*.json"]
 "extensions.codex_ext_exp" = ["*.json", "schemas/*", "schemas/**/*"]
 "extensions.copilot_sdk" = ["*.json", "shellspec/*", "shellspec/**/*", "schemas/*"]
