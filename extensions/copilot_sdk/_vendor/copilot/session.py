@@ -24,13 +24,11 @@ from ._telemetry import get_trace_context, trace_context
 from .generated.rpc import (
     ClientSessionApiHandlers,
     CommandsHandlePendingCommandRequest,
-    Kind,
     LogRequest,
     ModelSwitchToRequest,
     PermissionDecision,
+    PermissionDecisionKind,
     PermissionDecisionRequest,
-    RequestedSchemaType,
-    SessionFsHandler,
     SessionLogLevel,
     SessionRpc,
     ToolCallResult,
@@ -40,10 +38,11 @@ from .generated.rpc import (
     UIElicitationResponseAction,
     UIElicitationSchema,
     UIElicitationSchemaProperty,
-    UIElicitationSchemaPropertyNumberType,
+    UIElicitationSchemaPropertyType,
+    UIElicitationSchemaType,
     UIHandlePendingElicitationRequest,
 )
-from .generated.rpc import ModelCapabilitiesClass as _RpcModelCapabilitiesOverride
+from .generated.rpc import ModelCapabilitiesOverride as _RpcModelCapabilitiesOverride
 from .generated.session_events import (
     AssistantMessageData,
     CapabilitiesChangedData,
@@ -61,6 +60,7 @@ from .tools import Tool, ToolHandler, ToolInvocation, ToolResult
 
 if TYPE_CHECKING:
     from .client import ModelCapabilitiesOverride
+    from .session_fs_provider import SessionFsProvider
 
 # Re-export SessionEvent under an alias used internally
 SessionEventTypeAlias = SessionEvent
@@ -221,11 +221,9 @@ SystemMessageConfig = (
 # ============================================================================
 
 PermissionRequestResultKind = Literal[
-    "approved",
-    "denied-by-rules",
-    "denied-by-content-exclusion-policy",
-    "denied-no-approval-rule-and-could-not-request-from-user",
-    "denied-interactively-by-user",
+    "approve-once",
+    "reject",
+    "user-not-available",
     "no-result",
 ]
 
@@ -234,11 +232,7 @@ PermissionRequestResultKind = Literal[
 class PermissionRequestResult:
     """Result of a permission request."""
 
-    kind: PermissionRequestResultKind = "denied-no-approval-rule-and-could-not-request-from-user"
-    rules: list[Any] | None = None
-    feedback: str | None = None
-    message: str | None = None
-    path: str | None = None
+    kind: PermissionRequestResultKind = "user-not-available"
 
 
 _PermissionHandlerFn = Callable[
@@ -252,7 +246,7 @@ class PermissionHandler:
     def approve_all(
         request: PermissionRequest, invocation: dict[str, str]
     ) -> PermissionRequestResult:
-        return PermissionRequestResult(kind="approved")
+        return PermissionRequestResult(kind="approve-once")
 
 
 # ============================================================================
@@ -410,7 +404,7 @@ ElicitationHandler = Callable[
 ]
 """Handler invoked when the server dispatches an elicitation request to this client."""
 
-CreateSessionFsHandler = Callable[["CopilotSession"], SessionFsHandler]
+CreateSessionFsHandler = Callable[["CopilotSession"], "SessionFsProvider"]
 
 
 # ============================================================================
@@ -471,10 +465,10 @@ class SessionUiApi:
             UIElicitationRequest(
                 message=message,
                 requested_schema=UIElicitationSchema(
-                    type=RequestedSchemaType.OBJECT,
+                    type=UIElicitationSchemaType.OBJECT,
                     properties={
                         "confirmed": UIElicitationSchemaProperty(
-                            type=UIElicitationSchemaPropertyNumberType.BOOLEAN,
+                            type=UIElicitationSchemaPropertyType.BOOLEAN,
                             default=True,
                         ),
                     },
@@ -506,10 +500,10 @@ class SessionUiApi:
             UIElicitationRequest(
                 message=message,
                 requested_schema=UIElicitationSchema(
-                    type=RequestedSchemaType.OBJECT,
+                    type=UIElicitationSchemaType.OBJECT,
                     properties={
                         "selection": UIElicitationSchemaProperty(
-                            type=UIElicitationSchemaPropertyNumberType.STRING,
+                            type=UIElicitationSchemaPropertyType.STRING,
                             enum=options,
                         ),
                     },
@@ -781,6 +775,18 @@ class CustomAgentConfig(TypedDict, total=False):
     skills: NotRequired[list[str]]
 
 
+class DefaultAgentConfig(TypedDict, total=False):
+    """Configuration for the default agent.
+
+    The default agent is the built-in agent that handles turns
+    when no custom agent is selected.
+    """
+
+    # List of tool names to exclude from the default agent.
+    # These tools remain available to custom sub-agents that reference them.
+    excluded_tools: list[str]
+
+
 class InfiniteSessionConfig(TypedDict, total=False):
     """
     Configuration for infinite sessions with automatic context compaction
@@ -870,6 +876,10 @@ class SessionConfig(TypedDict, total=False):
     mcp_servers: dict[str, MCPServerConfig]
     # Custom agent configurations for the session
     custom_agents: list[CustomAgentConfig]
+    # Configuration for the default agent.
+    # Use excluded_tools to hide tools from the default agent
+    # while keeping them available to sub-agents.
+    default_agent: DefaultAgentConfig
     # Name of the custom agent to activate when the session starts.
     # Must match the name of one of the agents in custom_agents.
     agent: str
@@ -938,6 +948,8 @@ class ResumeSessionConfig(TypedDict, total=False):
     mcp_servers: dict[str, MCPServerConfig]
     # Custom agent configurations for the session
     custom_agents: list[CustomAgentConfig]
+    # Configuration for the default agent.
+    default_agent: DefaultAgentConfig
     # Name of the custom agent to activate when the session starts.
     # Must match the name of one of the agents in custom_agents.
     agent: str
@@ -1436,11 +1448,7 @@ class CopilotSession:
                 return
 
             perm_result = PermissionDecision(
-                kind=Kind(result.kind),
-                rules=result.rules,
-                feedback=result.feedback,
-                message=result.message,
-                path=result.path,
+                kind=PermissionDecisionKind(result.kind),
             )
 
             await self.rpc.permissions.handle_pending_permission_request(
@@ -1455,7 +1463,7 @@ class CopilotSession:
                     PermissionDecisionRequest(
                         request_id=request_id,
                         result=PermissionDecision(
-                            kind=Kind.DENIED_NO_APPROVAL_RULE_AND_COULD_NOT_REQUEST_FROM_USER,
+                            kind=PermissionDecisionKind.USER_NOT_AVAILABLE,
                         ),
                     )
                 )

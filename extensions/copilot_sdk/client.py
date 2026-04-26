@@ -827,17 +827,19 @@ def _coerce_permission_result_kind(
     decision_text: str,
 ) -> PermissionRequestResultKind:
     kind_text = str(kind or "").strip()
-    if kind_text not in _PERMISSION_RESULT_KIND_VALUES:
-        kind_text = "approved" if decision_text == "accept" else "denied-interactively-by-user"
-    if kind_text == "approved":
-        return "approved"
-    if kind_text == "denied-by-rules":
-        return "denied-by-rules"
-    if kind_text == "denied-by-content-exclusion-policy":
-        return "denied-by-content-exclusion-policy"
-    if kind_text == "denied-no-approval-rule-and-could-not-request-from-user":
-        return "denied-no-approval-rule-and-could-not-request-from-user"
-    return "denied-interactively-by-user"
+    if kind_text in _PERMISSION_RESULT_KIND_VALUES:
+        return cast(PermissionRequestResultKind, kind_text)
+    if kind_text in {"approved", "approved-for-session", "approved-for-location"}:
+        return "approve-once"
+    if kind_text in {
+        "denied-by-rules",
+        "denied-by-content-exclusion-policy",
+        "denied-no-approval-rule-and-could-not-request-from-user",
+        "denied-interactively-by-user",
+        "reject",
+    }:
+        return "reject"
+    return "approve-once" if decision_text == "accept" else "reject"
 
 
 def _get_conversation_settings(conversation_id: str) -> SettingsDict:
@@ -1355,8 +1357,8 @@ def _extract_permission_request_fields(request: PermissionRequest) -> PayloadDic
 def _decision_to_permission_result(decision: object) -> PermissionRequestResult:
     decision_text = str(decision or "").strip().lower()
     if decision_text == "accept":
-        return PermissionRequestResult(kind="approved", rules=[])
-    return PermissionRequestResult(kind="denied-interactively-by-user", rules=[])
+        return PermissionRequestResult(kind="approve-once")
+    return PermissionRequestResult(kind="reject")
 
 
 def _normalize_permission_resolution(resolution: object) -> PermissionRequestResult:
@@ -1380,26 +1382,7 @@ def _normalize_permission_resolution(resolution: object) -> PermissionRequestRes
         decision_text=decision_text,
     )
 
-    rules = result_payload.get("rules")
-    if not isinstance(rules, list):
-        rules = []
-    feedback = result_payload.get("feedback")
-    if feedback is not None and not isinstance(feedback, str):
-        feedback = str(feedback)
-    message = result_payload.get("message")
-    if message is not None and not isinstance(message, str):
-        message = str(message)
-    path = result_payload.get("path")
-    if path is not None and not isinstance(path, str):
-        path = str(path)
-
-    return PermissionRequestResult(
-        kind=kind_value,
-        rules=rules,
-        feedback=feedback,
-        message=message,
-        path=path,
-    )
+    return PermissionRequestResult(kind=kind_value)
 
 
 def _build_permission_request_params(
@@ -2394,7 +2377,7 @@ def _make_permission_handler(conversation_id: str) -> _PermissionHandlerFn:
         # Auto-approve: no user interaction needed
         if policy == "auto-approve":
             print(f"[CopilotSDK] Auto-approving {kind} tool={tool_call_id} convo={conversation_id[:8]}")
-            return PermissionRequestResult(kind="approved", rules=[])
+            return PermissionRequestResult(kind="approve-once")
 
         print(f"[CopilotSDK] Permission request: kind={kind} tool={tool_call_id} policy={policy} convo={conversation_id[:8]}")
 
@@ -2506,7 +2489,7 @@ def _make_permission_handler(conversation_id: str) -> _PermissionHandlerFn:
                 _pending_request_specs.pop(request_id, None)
                 _remove_pending_approval(conversation_id, request_id)
                 print(f"[CopilotSDK] Approval timeout for {request_id}, auto-approving")
-                permission_result = PermissionRequestResult(kind="approved", rules=[])
+                permission_result = PermissionRequestResult(kind="approve-once")
 
         return _normalize_permission_resolution(permission_result)
 

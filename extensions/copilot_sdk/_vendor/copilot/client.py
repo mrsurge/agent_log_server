@@ -47,6 +47,7 @@ from .session import (
     CopilotSession,
     CreateSessionFsHandler,
     CustomAgentConfig,
+    DefaultAgentConfig,
     ElicitationHandler,
     InfiniteSessionConfig,
     MCPServerConfig,
@@ -59,6 +60,7 @@ from .session import (
     UserInputHandler,
     _PermissionHandlerFn,
 )
+from .session_fs_provider import create_session_fs_adapter
 from .tools import Tool, ToolInvocation, ToolResult
 
 # ============================================================================
@@ -155,6 +157,14 @@ class SubprocessConfig:
 
     session_fs: SessionFsConfig | None = None
     """Connection-level session filesystem provider configuration."""
+
+    session_idle_timeout_seconds: int | None = None
+    """Server-wide session idle timeout in seconds.
+
+    Sessions without activity for this duration are automatically cleaned up.
+    Set to ``None`` or ``0`` to disable (sessions live indefinitely).
+    This option is only used when the SDK spawns the CLI process.
+    """
 
 
 @dataclass
@@ -533,19 +543,6 @@ class ModelInfo:
 
     @staticmethod
     def from_dict(obj: Any) -> ModelInfo:
-        def _collect_reasoning_efforts(raw: Any) -> list[str]:
-            if not isinstance(raw, list):
-                return []
-            values: list[str] = []
-            for item in raw:
-                if not isinstance(item, str):
-                    continue
-                value = item.strip()
-                if not value or value in values:
-                    continue
-                values.append(value)
-            return values
-
         assert isinstance(obj, dict)
         id = obj.get("id")
         name = obj.get("name")
@@ -560,19 +557,7 @@ class ModelInfo:
         policy = ModelPolicy.from_dict(policy_dict) if policy_dict else None
         billing_dict = obj.get("billing")
         billing = ModelBilling.from_dict(billing_dict) if billing_dict else None
-        supported_reasoning_efforts = _collect_reasoning_efforts(
-            obj.get("supportedReasoningEfforts")
-        )
-        supports_dict = (
-            capabilities_dict.get("supports")
-            if isinstance(capabilities_dict, dict)
-            else None
-        )
-        if isinstance(supports_dict, dict):
-            for key in ("reasoning_effort", "reasoningEffort"):
-                for effort in _collect_reasoning_efforts(supports_dict.get(key)):
-                    if effort not in supported_reasoning_efforts:
-                        supported_reasoning_efforts.append(effort)
+        supported_reasoning_efforts = obj.get("supportedReasoningEfforts")
         default_reasoning_effort = obj.get("defaultReasoningEffort")
         return ModelInfo(
             id=str(id),
@@ -580,7 +565,7 @@ class ModelInfo:
             capabilities=capabilities,
             policy=policy,
             billing=billing,
-            supported_reasoning_efforts=supported_reasoning_efforts or None,
+            supported_reasoning_efforts=supported_reasoning_efforts,
             default_reasoning_effort=default_reasoning_effort,
         )
 
@@ -1253,6 +1238,7 @@ class CopilotClient:
         include_sub_agent_streaming_events: bool | None = None,
         mcp_servers: dict[str, MCPServerConfig] | None = None,
         custom_agents: list[CustomAgentConfig] | None = None,
+        default_agent: DefaultAgentConfig | dict[str, Any] | None = None,
         agent: str | None = None,
         config_dir: str | None = None,
         enable_config_discovery: bool | None = None,
@@ -1263,6 +1249,7 @@ class CopilotClient:
         commands: list[CommandDefinition] | None = None,
         on_elicitation_request: ElicitationHandler | None = None,
         create_session_fs_handler: CreateSessionFsHandler | None = None,
+        github_token: str | None = None,
     ) -> CopilotSession:
         """
         Create a new conversation session with the Copilot CLI.
@@ -1295,6 +1282,8 @@ class CopilotClient:
                 ``subagent.*`` lifecycle events are forwarded. Defaults to True.
             mcp_servers: MCP server configurations.
             custom_agents: Custom agent configurations.
+            default_agent: Configuration for the default agent,
+                including tool visibility controls.
             agent: Agent to use for the session.
             config_dir: Override for the configuration directory.
             enable_config_discovery: When True, automatically discovers MCP server
@@ -1393,6 +1382,10 @@ class CopilotClient:
         if hooks and any(hooks.values()):
             payload["hooks"] = True
 
+        # Add GitHub token for per-session authentication
+        if github_token is not None:
+            payload["gitHubToken"] = github_token
+
         # Add working directory if provided
         if working_directory:
             payload["workingDirectory"] = working_directory
@@ -1426,6 +1419,10 @@ class CopilotClient:
             payload["customAgents"] = [
                 self._convert_custom_agent_to_wire_format(agent) for agent in custom_agents
             ]
+
+        # Add default agent configuration if provided
+        if default_agent:
+            payload["defaultAgent"] = self._convert_default_agent_to_wire_format(default_agent)
 
         # Add agent selection if provided
         if agent:
@@ -1481,7 +1478,9 @@ class CopilotClient:
                     "create_session_fs_handler is required in session config when "
                     "session_fs is enabled in client options."
                 )
-            session._client_session_apis.session_fs = create_session_fs_handler(session)
+            session._client_session_apis.session_fs = create_session_fs_adapter(
+                create_session_fs_handler(session)
+            )
         session._register_tools(tools)
         session._register_commands(commands)
         session._register_permission_handler(on_permission_request)
@@ -1531,6 +1530,7 @@ class CopilotClient:
         include_sub_agent_streaming_events: bool | None = None,
         mcp_servers: dict[str, MCPServerConfig] | None = None,
         custom_agents: list[CustomAgentConfig] | None = None,
+        default_agent: DefaultAgentConfig | dict[str, Any] | None = None,
         agent: str | None = None,
         config_dir: str | None = None,
         enable_config_discovery: bool | None = None,
@@ -1541,6 +1541,7 @@ class CopilotClient:
         commands: list[CommandDefinition] | None = None,
         on_elicitation_request: ElicitationHandler | None = None,
         create_session_fs_handler: CreateSessionFsHandler | None = None,
+        github_token: str | None = None,
     ) -> CopilotSession:
         """
         Resume an existing conversation session by its ID.
@@ -1573,6 +1574,8 @@ class CopilotClient:
                 ``subagent.*`` lifecycle events are forwarded. Defaults to True.
             mcp_servers: MCP server configurations.
             custom_agents: Custom agent configurations.
+            default_agent: Configuration for the default agent,
+                including tool visibility controls.
             agent: Agent to use for the session.
             config_dir: Override for the configuration directory.
             enable_config_discovery: When True, automatically discovers MCP server
@@ -1682,6 +1685,10 @@ class CopilotClient:
         if hooks and any(hooks.values()):
             payload["hooks"] = True
 
+        # Add GitHub token for per-session authentication
+        if github_token is not None:
+            payload["gitHubToken"] = github_token
+
         if working_directory:
             payload["workingDirectory"] = working_directory
         if config_dir:
@@ -1698,6 +1705,10 @@ class CopilotClient:
             payload["customAgents"] = [
                 self._convert_custom_agent_to_wire_format(a) for a in custom_agents
             ]
+
+        # Add default agent configuration if provided
+        if default_agent:
+            payload["defaultAgent"] = self._convert_default_agent_to_wire_format(default_agent)
 
         if agent:
             payload["agent"] = agent
@@ -1736,7 +1747,9 @@ class CopilotClient:
                     "create_session_fs_handler is required in session config when "
                     "session_fs is enabled in client options."
                 )
-            session._client_session_apis.session_fs = create_session_fs_handler(session)
+            session._client_session_apis.session_fs = create_session_fs_adapter(
+                create_session_fs_handler(session)
+            )
         session._register_tools(tools)
         session._register_commands(commands)
         session._register_permission_handler(on_permission_request)
@@ -2242,6 +2255,23 @@ class CopilotClient:
             wire_agent["skills"] = agent["skills"]
         return wire_agent
 
+    def _convert_default_agent_to_wire_format(
+        self, config: DefaultAgentConfig | dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Convert default agent config from snake_case to camelCase wire format.
+
+        Args:
+            config: The default agent configuration in snake_case format.
+
+        Returns:
+            The default agent configuration in camelCase wire format.
+        """
+        wire: dict[str, Any] = {}
+        if "excluded_tools" in config:
+            wire["excludedTools"] = config["excluded_tools"]
+        return wire
+
     async def _start_cli_server(self) -> None:
         """
         Start the CLI server process.
@@ -2277,6 +2307,9 @@ class CopilotClient:
             args.extend(["--auth-token-env", "COPILOT_SDK_AUTH_TOKEN"])
         if not cfg.use_logged_in_user:
             args.append("--no-auto-login")
+
+        if cfg.session_idle_timeout_seconds is not None and cfg.session_idle_timeout_seconds > 0:
+            args.extend(["--session-idle-timeout", str(cfg.session_idle_timeout_seconds)])
 
         # If cli_path is a .js file, run it with node
         # Note that we can't rely on the shebang as Windows doesn't support it
@@ -2721,27 +2754,18 @@ class CopilotClient:
             result = await session._handle_permission_request(perm_request)
             if result.kind == "no-result":
                 raise ValueError(NO_RESULT_PERMISSION_V2_ERROR)
-            result_payload: dict = {"kind": result.kind}
-            if result.rules is not None:
-                result_payload["rules"] = result.rules
-            if result.feedback is not None:
-                result_payload["feedback"] = result.feedback
-            if result.message is not None:
-                result_payload["message"] = result.message
-            if result.path is not None:
-                result_payload["path"] = result.path
-            return {"result": result_payload}
+            return {"result": {"kind": result.kind}}
         except ValueError as exc:
             if str(exc) == NO_RESULT_PERMISSION_V2_ERROR:
                 raise
             return {
                 "result": {
-                    "kind": "denied-no-approval-rule-and-could-not-request-from-user",
+                    "kind": "user-not-available",
                 }
             }
         except Exception:  # pylint: disable=broad-except
             return {
                 "result": {
-                    "kind": "denied-no-approval-rule-and-could-not-request-from-user",
+                    "kind": "user-not-available",
                 }
             }
