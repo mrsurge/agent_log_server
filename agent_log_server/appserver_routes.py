@@ -139,7 +139,6 @@ class AppserverRoutesDeps:
     rg_list_files: Callable[[Path], list[str]]
     get_host_project_root: Callable[[], Optional[str]]
     utc_ts: Callable[[], str]
-    write_codex_te2_mcp_config: Callable[[bool], None]
     get_debug_mode: Callable[[], bool]
     get_debug_raw_log_path: Callable[[], Optional[Path]]
     set_debug_mode: Callable[[bool], Optional[Path]]
@@ -1104,13 +1103,10 @@ class AppserverRoutes:
                 payload["user_name"] = user_name.strip() or None
             else:
                 raise HTTPException(status_code=400, detail="user_name must be a string or null")
-        if "te2_mcp_integration" in payload:
-            payload["te2_mcp_integration"] = payload.get("te2_mcp_integration") is True
+        payload.pop("te2_mcp_integration", None)
         async with self._deps.config_lock:
             cfg = self._deps.load_appserver_config()
             cfg.update(payload)
-            if "te2_mcp_integration" in payload:
-                self._deps.write_codex_te2_mcp_config(cfg.get("te2_mcp_integration") is True)
             self._deps.save_appserver_config(cfg)
             return cfg
 

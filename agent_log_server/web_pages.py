@@ -630,11 +630,6 @@ try {{
                                     Span("User Name"),
                                     Input(type="text", id="splash-settings-user-name", placeholder="User"),
                                 ),
-                                Label(
-                                    Span("TE2 MCP Integration"),
-                                    Input(type="checkbox", id="splash-settings-te2-mcp-integration", checked=False),
-                                    cls="settings-checkbox-row"
-                                ),
                                 Div(
                                     H3("Extensions", cls="settings-subheading"),
                                     Small("Enable, disable, or install extension dependencies."),

@@ -14,6 +14,10 @@ SETTINGS_CONFIG_GET_METHOD = "config.get"
 SETTINGS_CONFIG_UPDATE_METHOD = "config.update"
 SETTINGS_EXTENSIONS_LIST_METHOD = "extensions.list"
 SETTINGS_EXTENSIONS_RELOAD_METHOD = "extensions.reload"
+SETTINGS_EXTENSION_ENABLED_SET_METHOD = "extension.enabled.set"
+SETTINGS_EXTENSION_INSTALL_METHOD = "extension.install"
+SETTINGS_EXTENSION_SPLASH_SCHEMA_GET_METHOD = "extension.splashSchema.get"
+SETTINGS_EXTENSION_SPLASH_ACTION_RUN_METHOD = "extension.splashAction.run"
 SETTINGS_EXTENSION_SETTINGS_SCHEMA_GET_METHOD = "extension.settingsSchema.get"
 SETTINGS_EXTENSION_RUNTIME_OPTIONS_GET_METHOD = "extension.runtimeOptions.get"
 SETTINGS_EXTENSION_REQUEST_CARDS_GET_METHOD = "extension.requestCards.get"
@@ -51,6 +55,10 @@ SettingsRpcMethod: TypeAlias = Literal[
     "config.update",
     "extensions.list",
     "extensions.reload",
+    "extension.enabled.set",
+    "extension.install",
+    "extension.splashSchema.get",
+    "extension.splashAction.run",
     "extension.settingsSchema.get",
     "extension.runtimeOptions.get",
     "extension.requestCards.get",
@@ -260,6 +268,10 @@ def parse_settings_rpc_request(payload: object) -> ParsedSettingsRpcRequest:
             SETTINGS_CONFIG_UPDATE_METHOD,
             SETTINGS_EXTENSIONS_LIST_METHOD,
             SETTINGS_EXTENSIONS_RELOAD_METHOD,
+            SETTINGS_EXTENSION_ENABLED_SET_METHOD,
+            SETTINGS_EXTENSION_INSTALL_METHOD,
+            SETTINGS_EXTENSION_SPLASH_SCHEMA_GET_METHOD,
+            SETTINGS_EXTENSION_SPLASH_ACTION_RUN_METHOD,
             SETTINGS_EXTENSION_SETTINGS_SCHEMA_GET_METHOD,
             SETTINGS_EXTENSION_RUNTIME_OPTIONS_GET_METHOD,
             SETTINGS_EXTENSION_REQUEST_CARDS_GET_METHOD,

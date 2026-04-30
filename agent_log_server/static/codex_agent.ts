@@ -135,7 +135,6 @@ interface RootHostUi {
 
 interface RootAppConfig {
   user_name?: string;
-  te2_mcp_integration?: boolean;
   [key: string]: unknown;
 }
 
@@ -189,7 +188,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const conversationSettingsBtn = byId('conversation-settings');
   const splashSettingsModalEl = byId('splash-settings-modal');
   const splashSettingsUserNameEl = byId<HTMLInputElement>('splash-settings-user-name');
-  const splashSettingsTe2McpIntegrationEl = byId<HTMLInputElement>('splash-settings-te2-mcp-integration');
   const settingsModalEl = byId('settings-modal');
   const settingsCloseBtn = byId('settings-close');
   const settingsCancelBtn = byId('settings-cancel');
@@ -720,7 +718,6 @@ document.addEventListener('DOMContentLoaded', () => {
     conversationTitleEl,
     splashSettingsModalEl,
     splashSettingsUserNameEl,
-    splashSettingsTe2McpIntegrationEl,
     documentRef: document,
     windowRef: window,
     getSocketConnected: () => Boolean(_socket && _socket.connected),

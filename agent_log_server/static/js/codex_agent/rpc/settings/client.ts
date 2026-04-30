@@ -171,6 +171,80 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function setExtensionEnabled(options: {
+    extensionId: string;
+    enabled: boolean;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const params = {
+      extension_id: options.extensionId,
+      enabled: options.enabled === true,
+    };
+    if (!rpcEnabled()) {
+      return normalizeTransport(await callLegacy('extension_set_enabled', params), 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionEnabledSet,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function installExtension(options: {
+    extensionId: string;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const params = { extension_id: options.extensionId };
+    if (!rpcEnabled()) {
+      return normalizeTransport(await callLegacy('extension_install', params), 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionInstall,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function getExtensionSplashSchema(options: {
+    extensionId: string;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const params = { extension_id: options.extensionId };
+    if (!rpcEnabled()) {
+      return normalizeTransport(await callLegacy('get_extension_splash_schema', params), 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionSplashSchemaGet,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function runExtensionSplashAction(options: {
+    extensionId: string;
+    actionId: string;
+    payload?: JsonObject;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const params = {
+      extension_id: options.extensionId,
+      action_id: options.actionId,
+      payload: options.payload ?? {},
+    };
+    if (!rpcEnabled()) {
+      return normalizeTransport(await callLegacy('run_extension_splash_action', params), 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionSplashActionRun,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function getExtensionSettingsSchema(extensionId: string): Promise<JsonObject & { transport: TransportTag }> {
     const params = { extension_id: extensionId };
     if (!rpcEnabled()) {
@@ -401,6 +475,10 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     getStatus,
     listExtensions,
     reloadExtensions,
+    setExtensionEnabled,
+    installExtension,
+    getExtensionSplashSchema,
+    runExtensionSplashAction,
     getExtensionSettingsSchema,
     getRuntimeOptions,
     getExtensionRequestCards,

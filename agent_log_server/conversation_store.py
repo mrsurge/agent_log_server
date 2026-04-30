@@ -98,7 +98,6 @@ class ConversationStore:
             "app_server_command": None,
             "shell_id": None,
             "user_name": None,
-            "te2_mcp_integration": False,
             "extensions": {},
         }
 

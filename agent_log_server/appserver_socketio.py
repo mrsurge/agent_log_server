@@ -17,6 +17,8 @@ from agent_log_server.settings_ui_rpc_contract import (
     SETTINGS_CONFIG_GET_METHOD,
     SETTINGS_CONFIG_UPDATE_METHOD,
     SETTINGS_CONFIG_UPDATED_NOTIFICATION,
+    SETTINGS_EXTENSION_ENABLED_SET_METHOD,
+    SETTINGS_EXTENSION_INSTALL_METHOD,
     SETTINGS_EXTENSION_PLAN_GET_METHOD,
     SETTINGS_EXTENSION_MODELS_LIST_METHOD,
     SETTINGS_EXTENSION_REQUEST_CARDS_GET_METHOD,
@@ -24,6 +26,8 @@ from agent_log_server.settings_ui_rpc_contract import (
     SETTINGS_EXTENSION_SESSION_BIND_METHOD,
     SETTINGS_EXTENSION_SESSIONS_LIST_METHOD,
     SETTINGS_EXTENSION_SETTINGS_SCHEMA_GET_METHOD,
+    SETTINGS_EXTENSION_SPLASH_ACTION_RUN_METHOD,
+    SETTINGS_EXTENSION_SPLASH_SCHEMA_GET_METHOD,
     SETTINGS_EXTENSION_UI_FEATURES_GET_METHOD,
     SETTINGS_EXTENSIONS_LIST_METHOD,
     SETTINGS_EXTENSIONS_RELOAD_METHOD,
@@ -337,6 +341,44 @@ def register_appserver_socketio_handlers(
                 result = coerce_object_map(await deps.api_extensions_list())
             elif request.method == SETTINGS_EXTENSIONS_RELOAD_METHOD:
                 result = coerce_object_map(await deps.api_extensions_reload(request.params))
+                await _emit_rpc_notification(
+                    SETTINGS_RPC_NAMESPACE,
+                    SETTINGS_EXTENSIONS_UPDATED_NOTIFICATION,
+                    result or {"ok": True},
+                )
+            elif request.method == SETTINGS_EXTENSION_ENABLED_SET_METHOD:
+                extension_id = _require_extension_id(request.params)
+                result = coerce_object_map(
+                    await deps.api_extension_enabled(
+                        extension_id,
+                        {"enabled": request.params.get("enabled")},
+                    )
+                )
+                await _emit_rpc_notification(
+                    SETTINGS_RPC_NAMESPACE,
+                    SETTINGS_EXTENSIONS_UPDATED_NOTIFICATION,
+                    result or {"ok": True},
+                )
+            elif request.method == SETTINGS_EXTENSION_INSTALL_METHOD:
+                extension_id = _require_extension_id(request.params)
+                result = coerce_object_map(await deps.api_extension_install(extension_id))
+                await _emit_rpc_notification(
+                    SETTINGS_RPC_NAMESPACE,
+                    SETTINGS_EXTENSIONS_UPDATED_NOTIFICATION,
+                    result or {"ok": True},
+                )
+            elif request.method == SETTINGS_EXTENSION_SPLASH_SCHEMA_GET_METHOD:
+                extension_id = _require_extension_id(request.params)
+                schema = await deps.api_extension_splash_schema(extension_id)
+                if isinstance(schema, JSONResponse):
+                    raise _http_exception_from_json_response(schema, "Extension splash schema unavailable")
+                result = coerce_object_map(schema)
+            elif request.method == SETTINGS_EXTENSION_SPLASH_ACTION_RUN_METHOD:
+                extension_id = _require_extension_id(request.params)
+                action_result = await deps.api_extension_splash_action(extension_id, request.params)
+                if isinstance(action_result, JSONResponse):
+                    raise _http_exception_from_json_response(action_result, "Extension splash action failed")
+                result = coerce_object_map(action_result)
                 await _emit_rpc_notification(
                     SETTINGS_RPC_NAMESPACE,
                     SETTINGS_EXTENSIONS_UPDATED_NOTIFICATION,

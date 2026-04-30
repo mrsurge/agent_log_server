@@ -1271,21 +1271,6 @@ async def handle_message(
 
     try:
         if thread_id:
-            persisted_signature = meta.get("thread_runtime_signature")
-            if persisted_signature != current_signature:
-                _add_to_raw_buffer(
-                    "out",
-                    conversation_id,
-                    f"turn_start_runtime_resume thread={thread_id[:8]}",
-                )
-                await _resume_thread_for_rpc_server(
-                    conversation_id=conversation_id,
-                    thread_id=thread_id,
-                    transport=transport,
-                    protocol=protocol,
-                    merged_settings=merged_settings,
-                    meta=meta,
-                )
             turn_params = build_request_params(
                 protocol,
                 "turn/start",
@@ -1293,8 +1278,6 @@ async def handle_message(
                 thread_id=thread_id,
                 text=text,
             )
-            turn_params.pop("developerInstructions", None)
-            turn_params.pop("baseInstructions", None)
             try:
                 await transport.rpc_request(
                     "turn/start",
@@ -1305,7 +1288,6 @@ async def handle_message(
                 transport.mark_thread_ready(thread_id)
                 meta["status"] = "active"
                 meta["settings"] = merged_settings
-                meta["thread_runtime_signature"] = current_signature
                 _save_meta(conversation_id, meta)
             except Exception as exc:
                 if not _looks_like_thread_not_loaded_error(exc):
@@ -1330,8 +1312,6 @@ async def handle_message(
                     thread_id=thread_id,
                     text=text,
                 )
-                retry_turn_params.pop("developerInstructions", None)
-                retry_turn_params.pop("baseInstructions", None)
                 await transport.rpc_request(
                     "turn/start",
                     params=retry_turn_params,
@@ -1370,8 +1350,6 @@ async def handle_message(
                 thread_id=thread_id,
                 text=text,
             )
-            turn_params.pop("developerInstructions", None)
-            turn_params.pop("baseInstructions", None)
             await transport.rpc_request(
                 "turn/start",
                 params=turn_params,

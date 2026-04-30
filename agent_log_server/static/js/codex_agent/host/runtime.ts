@@ -21,7 +21,6 @@ interface ConversationSettingsState {
 
 interface AppConfigState {
   user_name?: string;
-  te2_mcp_integration?: boolean;
 }
 
 interface HostUiPayload {
@@ -50,7 +49,6 @@ interface HostRuntimeContext {
   conversationTitleEl: HTMLElement | null;
   splashSettingsModalEl: HTMLElement | null;
   splashSettingsUserNameEl: HTMLInputElement | null;
-  splashSettingsTe2McpIntegrationEl: HTMLInputElement | null;
   documentRef: Document;
   windowRef: Window;
   getSocketConnected(): boolean;
@@ -68,7 +66,6 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     conversationTitleEl,
     splashSettingsModalEl,
     splashSettingsUserNameEl,
-    splashSettingsTe2McpIntegrationEl,
     documentRef,
     windowRef,
     getSocketConnected,
@@ -242,9 +239,6 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     if (splashSettingsUserNameEl) {
       splashSettingsUserNameEl.value = typeof appConfig.user_name === 'string' ? appConfig.user_name : '';
     }
-    if (splashSettingsTe2McpIntegrationEl) {
-      splashSettingsTe2McpIntegrationEl.checked = appConfig.te2_mcp_integration === true;
-    }
     refreshMessageCardHeaders();
   }
 
@@ -265,9 +259,6 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     if (splashSettingsUserNameEl) {
       splashSettingsUserNameEl.value = typeof appConfig?.user_name === 'string' ? appConfig.user_name : '';
     }
-    if (splashSettingsTe2McpIntegrationEl) {
-      splashSettingsTe2McpIntegrationEl.checked = appConfig?.te2_mcp_integration === true;
-    }
     splashSettingsModalEl.classList.remove('hidden');
   }
 
@@ -280,7 +271,6 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     try {
       const data = await settingsRpcClient.updateConfig({
         user_name: splashSettingsUserNameEl?.value?.trim() || null,
-        te2_mcp_integration: splashSettingsTe2McpIntegrationEl?.checked === true,
       });
       if (!data || data.ok === false) return;
       applyAppConfig(data);

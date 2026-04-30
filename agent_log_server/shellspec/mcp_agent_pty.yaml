@@ -15,6 +15,20 @@ shells:
       - mcp_agent_pty_server.py
     labels:
       app: "mcp-agent-pty"
+  agent_pty_http_shim:
+    backend: proc
+    cwd: ${CWD}
+    subgroups: ["codex_agent", "mcp", "agent-pty", "http-shim"]
+    env:
+      FRAMEWORK_SHELLS_RUN_ID: "app-server"
+      AGENT_PTY_HTTP_SHIM_HOST: ${SHIM_HOST}
+      AGENT_PTY_HTTP_SHIM_PORT: ${SHIM_PORT}
+    command:
+      - python
+      - -m
+      - agent_log_server.mcp_agent_pty_http_shim
+    labels:
+      app: "agent-pty-blocks-http-shim"
   agent_pty_shell:
     backend: dtach
     cwd: ${ctx:CWD}

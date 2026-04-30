@@ -1,10 +1,11 @@
+import ast
 import asyncio
 import contextlib
 import json
 import os
 import re
-import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, cast
 
@@ -24,6 +25,8 @@ _runtime_lock: Optional[asyncio.Lock] = None
 _runtime_protocol: Optional["RuntimeProtocol"] = None
 _AGENT_PTY_BLOCKS_MCP_SERVER_NAME = "agent-pty-blocks"
 _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC = 3600
+_AGENT_PTY_BLOCKS_HTTP_SHIM_URL_ENV = "AGENT_PTY_HTTP_SHIM_URL"
+_AGENT_PTY_BLOCKS_HTTP_SHIM_DEFAULT_URL = "http://127.0.0.1:8765/mcp"
 _VENDORED_SCHEMA_VERSION = "0.118.0"
 
 
@@ -1183,6 +1186,43 @@ def _agent_pty_mcp_server_script_path() -> Path:
     return Path(os.path.abspath(__file__)).parents[2] / "mcp_agent_pty_server.py"
 
 
+@lru_cache(maxsize=1)
+def _agent_pty_blocks_tool_names() -> Tuple[str, ...]:
+    script_path = _agent_pty_mcp_server_script_path()
+    try:
+        tree = ast.parse(script_path.read_text(encoding="utf-8"), filename=str(script_path))
+    except OSError as exc:
+        raise RuntimeError(f"failed to read {script_path} for agent-pty-blocks tool list") from exc
+
+    names: List[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            call = decorator if isinstance(decorator, ast.Call) else None
+            if not isinstance(call, ast.Call):
+                continue
+            if not isinstance(call.func, ast.Attribute) or call.func.attr != "tool":
+                continue
+            tool_name = node.name
+            for keyword in call.keywords:
+                value = keyword.value
+                if (
+                    keyword.arg == "name"
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                    and value.value.strip()
+                ):
+                    tool_name = value.value.strip()
+                    break
+            names.append(tool_name)
+            break
+
+    if not names:
+        raise RuntimeError(f"no agent-pty-blocks MCP tools found in {script_path}")
+    return tuple(dict.fromkeys(names))
+
+
 def _build_agent_pty_blocks_mcp_server(
     *,
     cwd: object,
@@ -1192,10 +1232,10 @@ def _build_agent_pty_blocks_mcp_server(
     launch_cwd = _expand_path(cwd)
     if not launch_cwd:
         return None
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        return None
 
-    command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
     merged: JSONDict = dict(existing_server) if isinstance(existing_server, dict) else {}
-    env = _dict_value(merged.get("env"))
     existing_timeout = merged.get("tool_timeout_sec")
     tool_timeout_sec = (
         existing_timeout
@@ -1204,25 +1244,30 @@ def _build_agent_pty_blocks_mcp_server(
         and existing_timeout > _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC
         else _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC
     )
-    env["PWD"] = launch_cwd
-    if isinstance(conversation_id, str) and conversation_id.strip():
-        env["CONVERSATION_ID"] = conversation_id.strip()
+    http_headers = _dict_value(merged.get("http_headers"))
+    http_headers["conversation-id"] = conversation_id.strip()
+    http_headers["x-agent-cwd"] = launch_cwd
 
-    merged_without_copilot_keys: JSONDict = {
-        key: value for key, value in merged.items() if key not in {"tools", "type"}
+    merged_without_transport_keys: JSONDict = {
+        key: value
+        for key, value in merged.items()
+        if key not in {"args", "command", "cwd", "disabled_tools", "env", "tools", "type"}
     }
-    tools = merged.get("tools")
     server: JSONDict = {
-        **merged_without_copilot_keys,
-        "command": command,
-        "args": [str(_agent_pty_mcp_server_script_path())],
-        "cwd": launch_cwd,
-        "env": env,
+        **merged_without_transport_keys,
+        "url": _agent_pty_blocks_http_shim_url(),
+        "http_headers": http_headers,
         "tool_timeout_sec": tool_timeout_sec,
+        "enabled_tools": list(_agent_pty_blocks_tool_names()),
     }
-    if isinstance(tools, dict):
-        server["tools"] = dict(tools)
     return server
+
+
+def _agent_pty_blocks_http_shim_url() -> str:
+    configured = os.environ.get(_AGENT_PTY_BLOCKS_HTTP_SHIM_URL_ENV)
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    return _AGENT_PTY_BLOCKS_HTTP_SHIM_DEFAULT_URL
 
 
 def _build_codex_ext_thread_config(
@@ -1313,7 +1358,7 @@ def build_request_params(
     if collaboration_mode is not None:
         params["collaborationMode"] = collaboration_mode
 
-    if "config" in props:
+    if "config" in props or method == "turn/start":
         te2_base_url = normalized_settings.get("te2_base_url")
         config = _build_codex_ext_thread_config(
             normalized_settings.get("config"),

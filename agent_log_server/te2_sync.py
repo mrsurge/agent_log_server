@@ -1,26 +1,14 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-import tomlkit
-
-from agent_log_server.te2_mcp_config import (
-    TE2_MCP_SERVER_NAME,
-    build_te2_mcp_streamable_http_url,
-)
 
 
 @dataclass(frozen=True)
 class Te2SyncHelpers:
     package_root: Path
     config_path: Path
-    codex_config_path: Path
-    te2_base_url: Callable[[], str]
-    load_appserver_config: Callable[[], dict[str, Any]]
 
     @property
     def cache_dir(self) -> Path:
@@ -88,31 +76,3 @@ class Te2SyncHelpers:
             self.te2_proxy_shell_readme_source_path,
             self.te2_proxy_shell_readme_cache_path,
         )
-
-    def write_codex_te2_mcp_config(self, enabled: bool) -> None:
-        self.codex_config_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.codex_config_path.exists():
-            raw = self.codex_config_path.read_text(encoding="utf-8")
-            doc = tomlkit.parse(raw) if raw.strip() else tomlkit.document()
-        else:
-            doc = tomlkit.document()
-
-        mcp_servers: Any = doc.get("mcp_servers")
-        if not isinstance(mcp_servers, dict):
-            mcp_servers = tomlkit.table()
-            doc["mcp_servers"] = mcp_servers
-
-        if enabled:
-            te2_table = tomlkit.table()
-            te2_table["url"] = build_te2_mcp_streamable_http_url(self.te2_base_url())
-            mcp_servers[TE2_MCP_SERVER_NAME] = te2_table
-        else:
-            mcp_servers.pop(TE2_MCP_SERVER_NAME, None)
-            if not list(mcp_servers):
-                doc.pop("mcp_servers", None)
-
-        self.codex_config_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
-
-    def sync_codex_te2_mcp_from_app_config(self) -> None:
-        cfg = self.load_appserver_config()
-        self.write_codex_te2_mcp_config(cfg.get("te2_mcp_integration") is True)

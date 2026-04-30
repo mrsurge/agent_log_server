@@ -10,6 +10,10 @@ export const SETTINGS_RPC_METHODS = {
   statusGet: 'status.get',
   extensionsList: 'extensions.list',
   extensionsReload: 'extensions.reload',
+  extensionEnabledSet: 'extension.enabled.set',
+  extensionInstall: 'extension.install',
+  extensionSplashSchemaGet: 'extension.splashSchema.get',
+  extensionSplashActionRun: 'extension.splashAction.run',
   extensionSettingsSchemaGet: 'extension.settingsSchema.get',
   extensionRuntimeOptionsGet: 'extension.runtimeOptions.get',
   extensionRequestCardsGet: 'extension.requestCards.get',
@@ -35,5 +39,6 @@ export const SETTINGS_RPC_ANCHOR_MODULES = [
   'settings/ui_flow.ts',
   'host/runtime.ts',
   'conversation_drawer/actions.ts',
+  'extension_settings.js',
   'settings_schema.js',
 ] as const;

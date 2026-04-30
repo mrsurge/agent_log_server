@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Protocol, TypedDict, cast
 
 from agent_log_server import ask_user_interactions
+from agent_log_server.agent_pty_http_shim_lifecycle import ensure_agent_pty_http_shim_ready
 
 from .router import CodexEventRouter
 from .runtime_protocol import (
@@ -220,6 +221,10 @@ class CodexAppServerTransport:
 
     async def ensure_ready(self) -> None:
         async with self._lock:
+            await ensure_agent_pty_http_shim_ready(
+                self._fws_getter,
+                cwd=self._shell_cwd(),
+            )
             shell_id = await self._get_or_start_shell()
             if not await self._pipe_available(shell_id):
                 shell_id = await self._restart_shell(shell_id)

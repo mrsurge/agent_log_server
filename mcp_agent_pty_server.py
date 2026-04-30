@@ -396,6 +396,20 @@ _ASK_USER_ANSWER_FIELD = "answer"
 # Diagnostic markers for stdio MCP process lifetime
 print(f"MCP SERVER STARTED pid={os.getpid()}", file=sys.stderr)
 
+
+def _configure_http_transport_from_env() -> None:
+    host = os.environ.get("MCP_HTTP_HOST") or os.environ.get("FASTMCP_HOST")
+    port = _coerce_optional_int(os.environ.get("MCP_HTTP_PORT") or os.environ.get("FASTMCP_PORT"))
+    streamable_http_path = (
+        os.environ.get("MCP_STREAMABLE_HTTP_PATH") or os.environ.get("FASTMCP_STREAMABLE_HTTP_PATH")
+    )
+    if host and host.strip():
+        mcp.settings.host = host.strip()
+    if isinstance(port, int):
+        mcp.settings.port = port
+    if streamable_http_path and streamable_http_path.strip():
+        mcp.settings.streamable_http_path = streamable_http_path.strip()
+
 @mcp.tool(name="ping", description="Return MCP server pid (diagnostic).")
 async def ping() -> ObjectMap:
     return {"ok": True, "pid": os.getpid()}
@@ -2093,9 +2107,11 @@ async def agent_send_message_await(
 async def _main() -> None:
     transport = os.environ.get("MCP_TRANSPORT", "").strip().lower()
     if transport in ("streamable-http", "streamable_http", "http"):
+        _configure_http_transport_from_env()
         await mcp.run_streamable_http_async()
         return
     if transport == "sse":
+        _configure_http_transport_from_env()
         mount_path = os.environ.get("MCP_MOUNT_PATH") or None
         await mcp.run_sse_async(mount_path=mount_path)
         return

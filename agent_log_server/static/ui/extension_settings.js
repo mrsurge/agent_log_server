@@ -15,12 +15,27 @@ window.CodexAgentModules.push((agent) => {
     return sioCall;
   }
 
+  function getSettingsRpc() {
+    return agent?.helpers?.settingsRpc || window.CodexAgent?.helpers?.settingsRpc || null;
+  }
+
   async function fetchExtensions() {
+    const settingsRpc = getSettingsRpc();
+    if (settingsRpc && typeof settingsRpc.listExtensions === 'function') {
+      const data = await settingsRpc.listExtensions();
+      return Array.isArray(data?.extensions) ? data.extensions : [];
+    }
     const data = await getSioCall()('get_extensions', {});
     return Array.isArray(data?.extensions) ? data.extensions : [];
   }
 
   async function fetchSplashSchema(extensionId) {
+    const settingsRpc = getSettingsRpc();
+    if (settingsRpc && typeof settingsRpc.getExtensionSplashSchema === 'function') {
+      const result = await settingsRpc.getExtensionSplashSchema({ extensionId });
+      if (!result || result.ok === false) return null;
+      return result;
+    }
     const result = await getSioCall()('get_extension_splash_schema', { extension_id: extensionId });
     if (!result || result.ok === false) return null;
     return result;
@@ -71,7 +86,10 @@ window.CodexAgentModules.push((agent) => {
   }
 
   async function setEnabled(extensionId, enabled) {
-    const result = await getSioCall()('extension_set_enabled', { extension_id: extensionId, enabled });
+    const settingsRpc = getSettingsRpc();
+    const result = settingsRpc && typeof settingsRpc.setExtensionEnabled === 'function'
+      ? await settingsRpc.setExtensionEnabled({ extensionId, enabled })
+      : await getSioCall()('extension_set_enabled', { extension_id: extensionId, enabled });
     if (!result || result.ok === false) {
       throw new Error(result?.error || 'Failed to update extension state');
     }
@@ -80,7 +98,10 @@ window.CodexAgentModules.push((agent) => {
   }
 
   async function install(extensionId) {
-    const result = await getSioCall()('extension_install', { extension_id: extensionId });
+    const settingsRpc = getSettingsRpc();
+    const result = settingsRpc && typeof settingsRpc.installExtension === 'function'
+      ? await settingsRpc.installExtension({ extensionId })
+      : await getSioCall()('extension_install', { extension_id: extensionId });
     if (!result || result.ok === false) {
       throw new Error(result?.error || 'Install failed');
     }
@@ -128,11 +149,18 @@ window.CodexAgentModules.push((agent) => {
       }
     }
     try {
-      const response = await getSioCall()('run_extension_splash_action', {
-        extension_id: ext.id,
-        action_id: actionId,
-        payload: {},
-      });
+      const settingsRpc = getSettingsRpc();
+      const response = settingsRpc && typeof settingsRpc.runExtensionSplashAction === 'function'
+        ? await settingsRpc.runExtensionSplashAction({
+          extensionId: ext.id,
+          actionId,
+          payload: {},
+        })
+        : await getSioCall()('run_extension_splash_action', {
+          extension_id: ext.id,
+          action_id: actionId,
+          payload: {},
+        });
       if (!response || response.ok === false) {
         const errorText = response?.result?.error || response?.error || 'Extension action failed';
         throw new Error(errorText);

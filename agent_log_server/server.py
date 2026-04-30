@@ -91,10 +91,6 @@ async def _lifespan(app: FastAPI):
         _sync_te2_fws_readme_cache()
         _sync_te2_proxy_shell_readme_cache()
         try:
-            _sync_codex_te2_mcp_from_app_config()
-        except Exception as e:
-            print(f"[Startup] Codex TE2 MCP config sync error: {e}")
-        try:
             await _refresh_extension_runtime_state()
         except Exception as e:
             print(f"[Startup] Extension dependency sync error: {e}")
@@ -414,7 +410,6 @@ def _set_debug_mode(enabled: bool) -> Optional[Path]:
 CONFIG_PATH = conversation_store.config_path
 APP_SERVER_DATA_PATH = conversation_store.app_server_data_path
 USER_EXTENSIONS_DIR = conversation_store.user_extensions_dir
-CODEX_CONFIG_PATH = Path(os.path.expanduser("~/.codex/config.toml"))
 LEGACY_TRANSCRIPT_DIR = conversation_store.legacy_transcript_dir
 CONVERSATION_DIR = conversation_store.conversations_dir
 conversation_store.set_meta_save_callback(_pending_ctx.refresh_conversation)
@@ -440,15 +435,10 @@ _latest_legacy_transcript = conversation_store.latest_legacy_transcript
 _te2_sync_helpers = Te2SyncHelpers(
     package_root=PACKAGE_ROOT,
     config_path=CONFIG_PATH,
-    codex_config_path=CODEX_CONFIG_PATH,
-    te2_base_url=_host_routes_state.te2_base_url,
-    load_appserver_config=_load_appserver_config,
 )
 _sync_te2_console_bridge_cache = _te2_sync_helpers.sync_te2_console_bridge_cache
 _sync_te2_fws_readme_cache = _te2_sync_helpers.sync_te2_fws_readme_cache
 _sync_te2_proxy_shell_readme_cache = _te2_sync_helpers.sync_te2_proxy_shell_readme_cache
-_write_codex_te2_mcp_config = _te2_sync_helpers.write_codex_te2_mcp_config
-_sync_codex_te2_mcp_from_app_config = _te2_sync_helpers.sync_codex_te2_mcp_from_app_config
 _transcript_lock = asyncio.Lock()
 _transcript_seen: set[tuple[str, str, str]] = set()
 _transcript_next_order: dict[str, int] = {}
@@ -1871,7 +1861,6 @@ appserver_routes = AppserverRoutes(
         rg_list_files=_rg_list_files,
         get_host_project_root=lambda: _host_routes_state.project_root,
         utc_ts=utc_ts,
-        write_codex_te2_mcp_config=_write_codex_te2_mcp_config,
         get_debug_mode=_get_debug_mode,
         get_debug_raw_log_path=_get_debug_raw_log_path,
         set_debug_mode=_set_debug_mode,
