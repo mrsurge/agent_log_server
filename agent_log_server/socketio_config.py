@@ -3,19 +3,19 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import orjson
+import msgspec
 
 SOCKETIO_SERIALIZER_ENV = "AGENT_LOG_SOCKETIO_SERIALIZER"
 
 
-class SocketIoOrjson:
+class SocketIoMsgspecJson:
     @staticmethod
     def dumps(obj: Any, *args: Any, **kwargs: Any) -> str:
-        return orjson.dumps(obj, option=orjson.OPT_NON_STR_KEYS).decode("utf-8")
+        return msgspec.json.encode(obj).decode("utf-8")
 
     @staticmethod
     def loads(data: Any, *args: Any, **kwargs: Any) -> Any:
-        return orjson.loads(data)
+        return msgspec.json.decode(data)
 
 
 def socketio_serializer_mode() -> str:
@@ -37,6 +37,5 @@ def socketio_server_kwargs() -> dict[str, Any]:
             ) from exc
         kwargs["serializer"] = "msgpack"
         return kwargs
-    kwargs["json"] = SocketIoOrjson
+    kwargs["json"] = SocketIoMsgspecJson
     return kwargs
-
