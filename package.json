@@ -19,6 +19,7 @@
     "@fontsource/jetbrains-mono": "^5.2.8",
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.1.1",
+    "socket.io-msgpack-parser": "^3.0.2",
     "streaming-markdown": "^0.2.15"
   }
 }

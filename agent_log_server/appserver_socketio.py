@@ -260,25 +260,25 @@ def register_appserver_socketio_handlers(
         message = stderr.decode("utf-8", errors="replace").strip() if isinstance(stderr, (bytes, bytearray)) else ""
         return False, message or f"xdg-open exited with {proc.returncode}"
 
-    async def _appserver_connect(sid: str, environ: ObjectMap) -> object:
+    async def _appserver_connect(sid: str, environ: ObjectMap, auth: object = None) -> object:
         return None
 
     async def _appserver_disconnect(sid: str) -> object:
         return None
 
-    async def _conversations_rpc_connect(sid: str, environ: ObjectMap) -> object:
+    async def _conversations_rpc_connect(sid: str, environ: ObjectMap, auth: object = None) -> object:
         return None
 
     async def _conversations_rpc_disconnect(sid: str) -> object:
         return None
 
-    async def _settings_rpc_connect(sid: str, environ: ObjectMap) -> object:
+    async def _settings_rpc_connect(sid: str, environ: ObjectMap, auth: object = None) -> object:
         return None
 
     async def _settings_rpc_disconnect(sid: str) -> object:
         return None
 
-    async def _ui_rpc_connect(sid: str, environ: ObjectMap) -> object:
+    async def _ui_rpc_connect(sid: str, environ: ObjectMap, auth: object = None) -> object:
         return None
 
     async def _ui_rpc_disconnect(sid: str) -> object:

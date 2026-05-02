@@ -84,7 +84,10 @@ async function fetchHistory() {
 }
 
 function connectSocket() {
-  socket = io('/appserver');
+  const socketOptions = window.agentLogSocketIoOptions || ((options) => options);
+  socket = io('/appserver', socketOptions({
+    transports: ['websocket'],
+  }));
 
   socket.on('connect', () => {
     setStatus('connected');

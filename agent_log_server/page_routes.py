@@ -13,6 +13,7 @@ from agent_log_server.web_pages import (
     render_appserver_ui,
     render_codex_agent_ui,
 )
+from agent_log_server.socketio_config import socketio_serializer_mode
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,13 @@ def register_page_routes(app: FastAPI, deps: PageRoutesDeps) -> None:
     @app.get('/agent-log', response_class=HTMLResponse)
     @app.get('/agent-log/', response_class=HTMLResponse)
     async def get_index(request: Request):
-        return templates.TemplateResponse('template.html', {'request': request})
+        return templates.TemplateResponse(
+            'template.html',
+            {
+                'request': request,
+                'socketio_serializer': socketio_serializer_mode(),
+            },
+        )
 
     @app.get('/appserver')
     async def appserver_ui() -> HTMLResponse:

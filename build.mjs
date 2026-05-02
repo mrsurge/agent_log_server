@@ -32,6 +32,7 @@ function resetManagedVendorAssets() {
     join(vendorDir, 'fonts', 'jetbrains-mono.css'),
     join(vendorDir, 'highlight.js'),
     join(vendorDir, 'markdown-it'),
+    join(vendorDir, 'socket.io-msgpack-parser'),
     join(vendorDir, 'streaming-markdown'),
     join(vendorDir, 'xterm'),
   ];
@@ -86,6 +87,27 @@ function copyStreamingMarkdownAsset() {
 
 function copyMarkdownItAsset() {
   copyFile('node_modules/markdown-it/dist/markdown-it.min.js', join(vendorDir, 'markdown-it', 'markdown-it.min.js'));
+}
+
+async function buildSocketIoMsgpackParserAsset() {
+  await esbuild.build({
+    bundle: true,
+    format: 'iife',
+    logLevel: 'info',
+    minify: !isWatch,
+    outfile: join(vendorDir, 'socket.io-msgpack-parser', 'socket.io-msgpack-parser.js'),
+    platform: 'browser',
+    sourcemap: true,
+    stdin: {
+      contents: `
+import * as parser from 'socket.io-msgpack-parser';
+globalThis.SocketIoMsgpackParser = parser;
+`,
+      loader: 'js',
+      resolveDir: process.cwd(),
+      sourcefile: 'socketio-msgpack-parser.vendor.js',
+    },
+  });
 }
 
 async function buildHighlightBundle() {
@@ -153,6 +175,7 @@ async function prepareVendorAssets() {
   buildJetBrainsMonoCss();
   copyStreamingMarkdownAsset();
   copyMarkdownItAsset();
+  await buildSocketIoMsgpackParserAsset();
   await buildHighlightBundle();
 }
 

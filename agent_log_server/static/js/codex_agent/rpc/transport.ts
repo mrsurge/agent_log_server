@@ -23,7 +23,13 @@ export interface RpcTransportPlaceholderDescriptor {
 
 type SessionStorageWindow = Pick<Window, 'sessionStorage'> | null | undefined;
 type LocationWindow = Pick<Window, 'location'> | null | undefined;
-export type RpcWindowRef = (Pick<Window, 'location' | 'sessionStorage'> & { io?: IoFactory }) | null | undefined;
+export type RpcWindowRef = (
+  Pick<Window, 'location' | 'sessionStorage'>
+  & {
+    agentLogSocketIoOptions?: (options: Readonly<Record<string, unknown>>) => Record<string, unknown>;
+    io?: IoFactory;
+  }
+) | null | undefined;
 
 interface SocketEventHandlerMap {
   connect: () => void;
@@ -136,14 +142,18 @@ function getNamespaceSocket(namespace: string, win: RpcWindowRef): SocketLike {
   const existing = namespaceSockets.get(namespace);
   if (existing) return existing;
   const ioFactory = getIoFactory(win);
-  const socket = ioFactory(namespace, {
+  const baseOptions = {
     path: resolveSocketIoPath(win),
     transports: ['websocket'],
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 500,
     reconnectionDelayMax: 5000,
-  });
+  };
+  const socketOptions = typeof win?.agentLogSocketIoOptions === 'function'
+    ? win.agentLogSocketIoOptions(baseOptions)
+    : baseOptions;
+  const socket = ioFactory(namespace, socketOptions);
   namespaceSockets.set(namespace, socket);
   return socket;
 }

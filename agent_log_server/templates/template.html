@@ -37,7 +37,10 @@
     </footer>
   </div>
 
+  <script>window.AGENT_LOG_SOCKETIO_SERIALIZER = "{{ socketio_serializer|default('json') }}";</script>
   <script src="/static/vendor/socket.io/socket.io.min.js"></script>
+  <script src="/static/vendor/socket.io-msgpack-parser/socket.io-msgpack-parser.js"></script>
+  <script src="/static/js/socketio_runtime.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

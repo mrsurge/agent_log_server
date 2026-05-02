@@ -139,7 +139,10 @@
   }
 
   function bindSocket() {
-    socket = io('/appserver');
+    const socketOptions = window.agentLogSocketIoOptions || ((options) => options);
+    socket = io('/appserver', socketOptions({
+      transports: ['websocket'],
+    }));
     setPill(wsStatusEl, 'connecting', 'warn');
 
     socket.on('connect', () => {

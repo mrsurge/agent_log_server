@@ -6,6 +6,8 @@ fastcore>=1.7
 framework-shells @ git+https://github.com/mrsurge/framework-shells
 pyte>=0.8.0
 fastmcp
+orjson>=3.10
+msgpack>=1.0
 python-dateutil>=2.9.0.post0
 pydantic>=2.0
 tomlkit>=0.13

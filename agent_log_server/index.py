@@ -4,6 +4,8 @@ from typing import Any
 import socketio
 from fastapi import FastAPI
 
+from agent_log_server.socketio_config import socketio_server_kwargs
+
 
 @dataclass(frozen=True)
 class AppIndex:
@@ -18,6 +20,7 @@ def create_app_index(*, lifespan: Any) -> AppIndex:
         async_mode='asgi',
         cors_allowed_origins='*',
         max_http_buffer_size=64 * 1024 * 1024,
+        **socketio_server_kwargs(),
     )
     socketio_app = socketio.ASGIApp(socketio_server, other_asgi_app=app)
     return AppIndex(

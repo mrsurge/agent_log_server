@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List
 import hashlib
+import json
 
 from fastapi.responses import HTMLResponse
 from fastcore.xml import (
@@ -8,6 +9,8 @@ from fastcore.xml import (
     Span, Input, Textarea, Label, Small, Script, Link, Meta, Ul, Li, Img, to_xml,
     NotStr,
 )
+
+from agent_log_server.socketio_config import socketio_serializer_mode
 
 CODEX_AGENT_THEME_COLOR = "#0d0f13"
 CODEX_AGENT_ICON_PATH = "/static/codexas-icon.svg"
@@ -34,7 +37,10 @@ def render_appserver_ui(package_root: Path) -> HTMLResponse:
             Html(
             Head(
                 Link(rel="stylesheet", href=_asset(package_root, "/static/appserver.css")),
+                Script(NotStr(f"window.AGENT_LOG_SOCKETIO_SERIALIZER = {json.dumps(socketio_serializer_mode())};")),
                 Script(src=_asset(package_root, "/static/vendor/socket.io/socket.io.min.js"), defer=True),
+                Script(src=_asset(package_root, "/static/vendor/socket.io-msgpack-parser/socket.io-msgpack-parser.js"), defer=True),
+                Script(src=_asset(package_root, "/static/js/socketio_runtime.js"), defer=True),
                 Script(src=_asset(package_root, "/static/appserver.js"), defer=True),
             ),
             Body(
@@ -397,7 +403,10 @@ def render_codex_agent_ui(package_root: Path) -> HTMLResponse:
                 Link(rel="stylesheet", href=_asset(package_root, "/static/codex_agent.css")),
                 Script(src=_asset(package_root, "/static/vendor/highlight.js/highlight.bundle.js")),
                 Script(src=_asset(package_root, "/static/vendor/markdown-it/markdown-it.min.js")),
+                Script(NotStr(f"window.AGENT_LOG_SOCKETIO_SERIALIZER = {json.dumps(socketio_serializer_mode())};")),
                 Script(src=_asset(package_root, "/static/vendor/socket.io/socket.io.min.js")),
+                Script(src=_asset(package_root, "/static/vendor/socket.io-msgpack-parser/socket.io-msgpack-parser.js")),
+                Script(src=_asset(package_root, "/static/js/socketio_runtime.js")),
                 Script(src=_asset(package_root, "/static/vendor/tribute.min.js")),
                 Script(NotStr("window.addEventListener('load', () => console.log('socket.io', typeof io));"), defer=True),
                 Script(src=_asset(package_root, "/static/modals/settings_modal.js"), defer=True),
