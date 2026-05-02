@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import TypedDict
 
 REPO_MEMORY_FILENAME = ".repo_memory.md"
-_DEFAULT_TEMPLATE_PATH = Path(os.path.abspath(__file__)).parent.parent / "DEVELOPER_MESSAGE_TEMPLATE.md"
+_PACKAGE_TEMPLATE_PATH = Path(os.path.abspath(__file__)).parent / "DEVELOPER_MESSAGE_TEMPLATE.md"
+_CHECKOUT_TEMPLATE_PATH = Path(os.path.abspath(__file__)).parent.parent / "DEVELOPER_MESSAGE_TEMPLATE.md"
 
 
 class RepoMemorySnapshot(TypedDict):
@@ -25,7 +26,9 @@ def _template_path(template_path: str | None = None) -> Path:
         raw = os.environ.get("TE2_DEVELOPER_MESSAGE_TEMPLATE_PATH")
     if isinstance(raw, str) and raw.strip():
         return Path(os.path.expanduser(raw.strip()))
-    return _DEFAULT_TEMPLATE_PATH
+    if _PACKAGE_TEMPLATE_PATH.exists():
+        return _PACKAGE_TEMPLATE_PATH
+    return _CHECKOUT_TEMPLATE_PATH
 
 
 @lru_cache(maxsize=8)
