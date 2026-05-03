@@ -14,7 +14,16 @@ const common = {
   sourcemap: true,
   minify: !isWatch,
   logLevel: 'info',
-  external: ['/static/vendor/*', 'https://*'],
+  external: ['https://*'],
+  alias: {
+    'streaming-markdown': './node_modules/streaming-markdown/smd.min.js',
+  },
+  loader: {
+    '.css': 'text',
+  },
+  supported: {
+    'template-literal': false,
+  },
 };
 
 function ensureDir(path) {
@@ -34,6 +43,8 @@ function resetManagedVendorAssets() {
     join(vendorDir, 'markdown-it'),
     join(vendorDir, 'socket.io-msgpack-parser'),
     join(vendorDir, 'streaming-markdown'),
+    join(vendorDir, 'tribute.css'),
+    join(vendorDir, 'tribute.min.js'),
     join(vendorDir, 'xterm'),
   ];
   for (const path of managedPaths) {
@@ -81,14 +92,6 @@ function buildJetBrainsMonoCss() {
   );
 }
 
-function copyStreamingMarkdownAsset() {
-  copyFile('node_modules/streaming-markdown/smd.min.js', join(vendorDir, 'streaming-markdown', 'smd.min.js'));
-}
-
-function copyMarkdownItAsset() {
-  copyFile('node_modules/markdown-it/dist/markdown-it.min.js', join(vendorDir, 'markdown-it', 'markdown-it.min.js'));
-}
-
 async function buildSocketIoMsgpackParserAsset() {
   await esbuild.build({
     bundle: true,
@@ -110,73 +113,10 @@ globalThis.SocketIoMsgpackParser = parser;
   });
 }
 
-async function buildHighlightBundle() {
-  copyFile(
-    'node_modules/highlight.js/styles/github-dark.min.css',
-    join(vendorDir, 'highlight.js', 'github-dark.min.css'),
-  );
-
-  await esbuild.build({
-    bundle: true,
-    format: 'iife',
-    logLevel: 'info',
-    minify: !isWatch,
-    outfile: join(vendorDir, 'highlight.js', 'highlight.bundle.js'),
-    platform: 'browser',
-    sourcemap: true,
-    stdin: {
-      contents: `
-import hljs from 'highlight.js/lib/core';
-import python from 'highlight.js/lib/languages/python';
-import bash from 'highlight.js/lib/languages/bash';
-import javascript from 'highlight.js/lib/languages/javascript';
-import typescript from 'highlight.js/lib/languages/typescript';
-import rust from 'highlight.js/lib/languages/rust';
-import go from 'highlight.js/lib/languages/go';
-import json from 'highlight.js/lib/languages/json';
-import kotlin from 'highlight.js/lib/languages/kotlin';
-import css from 'highlight.js/lib/languages/css';
-import scss from 'highlight.js/lib/languages/scss';
-import markdown from 'highlight.js/lib/languages/markdown';
-import xml from 'highlight.js/lib/languages/xml';
-import ini from 'highlight.js/lib/languages/ini';
-import yaml from 'highlight.js/lib/languages/yaml';
-import sql from 'highlight.js/lib/languages/sql';
-import dockerfile from 'highlight.js/lib/languages/dockerfile';
-
-hljs.registerLanguage('python', python);
-hljs.registerLanguage('bash', bash);
-hljs.registerLanguage('javascript', javascript);
-hljs.registerLanguage('typescript', typescript);
-hljs.registerLanguage('rust', rust);
-hljs.registerLanguage('go', go);
-hljs.registerLanguage('json', json);
-hljs.registerLanguage('kotlin', kotlin);
-hljs.registerLanguage('css', css);
-hljs.registerLanguage('scss', scss);
-hljs.registerLanguage('markdown', markdown);
-hljs.registerLanguage('xml', xml);
-hljs.registerLanguage('ini', ini);
-hljs.registerLanguage('yaml', yaml);
-hljs.registerLanguage('sql', sql);
-hljs.registerLanguage('dockerfile', dockerfile);
-
-window.hljs = hljs;
-`,
-      loader: 'js',
-      resolveDir: process.cwd(),
-      sourcefile: 'highlight.vendor.js',
-    },
-  });
-}
-
 async function prepareVendorAssets() {
   resetManagedVendorAssets();
   buildJetBrainsMonoCss();
-  copyStreamingMarkdownAsset();
-  copyMarkdownItAsset();
   await buildSocketIoMsgpackParserAsset();
-  await buildHighlightBundle();
 }
 
 const codexAgent = {

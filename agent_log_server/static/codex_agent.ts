@@ -1,3 +1,4 @@
+import './js/codex_agent/vendor_runtime.ts';
 import {
   createStreamingParser,
   renderEventMarkdownInto,

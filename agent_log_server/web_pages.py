@@ -398,17 +398,8 @@ def render_codex_agent_ui(package_root: Path) -> HTMLResponse:
                 Meta(name="theme-color", content=CODEX_AGENT_THEME_COLOR),
                 Link(rel="icon", type="image/svg+xml", href=_asset(package_root, CODEX_AGENT_ICON_PATH)),
                 Link(rel="stylesheet", href=_asset(package_root, "/static/vendor/fonts/jetbrains-mono.css")),
-                Link(rel="stylesheet", href=_asset(package_root, "/static/vendor/highlight.js/github-dark.min.css")),
-                Link(rel="stylesheet", href=_asset(package_root, "/static/vendor/tribute.css")),
                 Link(rel="stylesheet", href=_asset(package_root, "/static/codex_agent.css")),
-                Script(src=_asset(package_root, "/static/vendor/highlight.js/highlight.bundle.js")),
-                Script(src=_asset(package_root, "/static/vendor/markdown-it/markdown-it.min.js")),
                 Script(NotStr(f"window.AGENT_LOG_SOCKETIO_SERIALIZER = {json.dumps(socketio_serializer_mode())};")),
-                Script(src=_asset(package_root, "/static/vendor/socket.io/socket.io.min.js")),
-                Script(src=_asset(package_root, "/static/vendor/socket.io-msgpack-parser/socket.io-msgpack-parser.js")),
-                Script(src=_asset(package_root, "/static/js/socketio_runtime.js")),
-                Script(src=_asset(package_root, "/static/vendor/tribute.min.js")),
-                Script(NotStr("window.addEventListener('load', () => console.log('socket.io', typeof io));"), defer=True),
                 Script(src=_asset(package_root, "/static/dist/codex_agent.js"), type="module"),
                 Script(NotStr(f"""import {{ initConsoleBridge }} from '{_asset(package_root, "/static/js/console_bridge.js")}';
 try {{

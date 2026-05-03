@@ -1,5 +1,4 @@
-// @ts-expect-error vendored runtime module without published typings
-import * as smd from '/static/vendor/streaming-markdown/smd.min.js';
+import * as smd from 'streaming-markdown';
 import { createUiRpcClientPlaceholder } from './rpc/ui/client.ts';
 
 const _uiRpcClientPlaceholder = createUiRpcClientPlaceholder;
