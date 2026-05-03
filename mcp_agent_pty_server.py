@@ -24,6 +24,7 @@ from agent_log_server.markdown_sections import SectionNode, normalize_heading as
 from agent_log_server.ipc_auth import load_or_create_ipc_secret
 from agent_log_server.prompt_context import REPO_MEMORY_FILENAME
 from agent_log_server.repo_memory_delta import build_repo_memory_delta
+from agent_log_server.socketio_config import socketio_client_kwargs
 from agent_log_server import conversation_todos as _conv_todos
 from agent_log_server.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
 
@@ -205,7 +206,11 @@ async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
                 await _appserver_ipc_sio.disconnect()
             _appserver_ipc_sio = None
 
-        client = socketio.AsyncClient(reconnection=True, reconnection_attempts=3)
+        client = socketio.AsyncClient(
+            reconnection=True,
+            reconnection_attempts=3,
+            **socketio_client_kwargs(),
+        )
 
         async def _on_ask_user_response(data: object) -> None:
             data_map = coerce_object_map(data)

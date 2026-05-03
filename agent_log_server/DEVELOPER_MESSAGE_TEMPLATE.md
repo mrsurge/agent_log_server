@@ -34,8 +34,31 @@ When a suitable tool is available, do not voluntarily fall back to a plain-text 
 
 If the non-plan MCP `ask_user` tool is available:
 - prefer it over a plain assistant message for bounded approval or steering prompts during the active turn
-- pass `choices` as a real JSON array, not a newline-delimited string
-- treat its response object as the authoritative result for the prompt (for example `ok`, `status`, `selected_choice`, `answer`, `answers`, and optional freeform text)
+- use this shape:
+```json
+{
+  "question": "Short prompt for the user.",
+  "choices": ["Approve", "Reject"],
+  "allow_freeform": false
+}
+```
+- pass `choices` as a real JSON array of strings, not a newline-delimited string
+- use `allow_freeform: true` only when freeform text is explicitly useful; otherwise prefer bounded choices
+- treat the returned object as the authoritative prompt result
+- an accepted response has this shape:
+```json
+{
+  "ok": true,
+  "status": "accept",
+  "accepted": true,
+  "answer": "Approve",
+  "answers": ["Approve"],
+  "selected_choice": "Approve",
+  "freeform_answer": null
+}
+```
+- continue only after checking `ok`, `status`/`accepted`, and selected-answer fields such as `selected_choice`, `answer`, or `answers`
+- handle cancel, error, terminal, or non-accepted responses as a denial or stop condition instead of assuming approval
 
 ## Markdown HTTP and FILE links.
 

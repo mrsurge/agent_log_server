@@ -39,3 +39,15 @@ def socketio_server_kwargs() -> dict[str, Any]:
         return kwargs
     kwargs["json"] = SocketIoMsgspecJson
     return kwargs
+
+
+def socketio_client_kwargs() -> dict[str, Any]:
+    if socketio_serializer_mode() == "msgpack":
+        try:
+            import msgpack  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                f"{SOCKETIO_SERIALIZER_ENV}=msgpack requires the msgpack package"
+            ) from exc
+        return {"serializer": "msgpack"}
+    return {"json": SocketIoMsgspecJson}

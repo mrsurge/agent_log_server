@@ -24,6 +24,7 @@ from socketio.exceptions import ConnectionRefusedError as SocketIOConnectionRefu
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from agent_log_server.conversations_rpc_contract import CONVERSATIONS_RPC_NAMESPACE
+from agent_log_server.socketio_config import socketio_client_kwargs
 from agent_log_server.settings_ui_rpc_contract import SETTINGS_RPC_NAMESPACE, UI_RPC_NAMESPACE
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,11 @@ class _AppserverRelay(socketio.AsyncNamespace):
         if sid in self._backends:
             return self._backends[sid]
 
-        client = socketio.AsyncClient(reconnection=True, reconnection_attempts=5)
+        client = socketio.AsyncClient(
+            reconnection=True,
+            reconnection_attempts=5,
+            **socketio_client_kwargs(),
+        )
 
         # Forward broadcast events from appserver back to this specific TE2 client
         async def _on_event(data):
@@ -217,7 +222,11 @@ class _RpcNamespaceRelay(socketio.AsyncNamespace):
         if sid in self._backends:
             return self._backends[sid]
 
-        client = socketio.AsyncClient(reconnection=True, reconnection_attempts=5)
+        client = socketio.AsyncClient(
+            reconnection=True,
+            reconnection_attempts=5,
+            **socketio_client_kwargs(),
+        )
 
         async def _on_rpc_notify(data):
             try:
