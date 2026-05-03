@@ -4,56 +4,278 @@
  * Handles dynamic rendering of extension settings based on JSON schemas.
  * Each extension can define a settings_schema.json with field definitions.
  */
+type JsonRecord = Record<string, unknown>;
+type JsonValue = unknown;
+type SchemaInput = HTMLInputElement | HTMLTextAreaElement;
+
+type CodexAgentModuleApi = {
+  helpers: Record<string, unknown>;
+  state: Record<string, unknown>;
+};
+
+type SettingsRpcClient = {
+  getExtensionSettingsSchema: (extensionId: string) => Promise<unknown>;
+  listExtensionSessions: (options: { extensionId: string; cwd: string | null }) => Promise<unknown>;
+  listExtensionModels: (options: { extensionId: string }) => Promise<unknown>;
+  getRuntimeOptions: (options: { conversationId: string | null; agent: string | null }) => Promise<unknown>;
+};
+
+type SchemaField = {
+  id: string;
+  type?: string;
+  label?: string;
+  description?: string;
+  detail?: string;
+  text?: string;
+  tone?: string;
+  placeholder?: string;
+  default?: JsonValue;
+  options?: unknown[];
+  dynamic_source?: string;
+  dynamic_options_key?: string;
+  value_keys?: unknown[];
+  model_gate?: JsonRecord;
+  source?: string;
+  browse?: boolean;
+  min?: number;
+  max?: number;
+  rows?: number;
+  json_kind?: string;
+};
+
+type SettingsSchema = {
+  fields?: SchemaField[];
+  cache?: string;
+  useBuiltin?: boolean;
+};
+
+type SessionPickerTarget = {
+  input: HTMLInputElement;
+  field: SchemaField;
+};
+
+type SchemaValueEntry = {
+  input: SchemaInput;
+  type?: string;
+  field: SchemaField;
+};
+
+type SelectOption = {
+  value: string;
+  label: string;
+};
+
+type ModelVersion = {
+  family: string;
+  major: number;
+  minor: number;
+};
+
+type DynamicSelectOptions = {
+  items: JsonRecord[];
+  options: SelectOption[];
+  current: string;
+  defaultValue: string;
+};
+
+type SelectControl = {
+  field: SchemaField;
+  input: HTMLInputElement;
+  listDiv: HTMLDivElement;
+  initialValue: string;
+  initialValueApplied: boolean;
+};
+
+type DynamicSourceOptions = {
+  cwd?: string | null;
+  conversationId?: string | null;
+  agent?: string | null;
+};
+
+type ConversationMeta = {
+  conversation_id?: unknown;
+  thread_id?: unknown;
+  status?: unknown;
+};
+
+type HostUiState = {
+  ideMode?: unknown;
+  projectRoot?: unknown;
+};
+
+type CodexAgentState = {
+  pendingNewConversation?: unknown;
+  conversationMeta?: ConversationMeta | null;
+  conversationSettings?: JsonRecord | null;
+  hostUi?: HostUiState | null;
+  splashTab?: unknown;
+};
+
+declare global {
+  interface Window {
+    CodexAgentModules?: Array<(ctx: CodexAgentModuleApi | undefined) => void>;
+    CodexAgent?: CodexAgentModuleApi;
+  }
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asRecord(value: unknown): JsonRecord {
+  return isRecord(value) ? value : {};
+}
+
+function asCodexAgentState(value: unknown): CodexAgentState {
+  return isRecord(value) ? value as CodexAgentState : {};
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function trimString(value: unknown): string {
+  return stringValue(value).trim();
+}
+
+function boolValue(value: unknown): boolean {
+  return value === true;
+}
+
+function schemaFieldId(field: SchemaField): string {
+  return trimString(field.id);
+}
+
+function normalizeSchemaField(value: unknown): SchemaField | null {
+  if (!isRecord(value)) return null;
+  const id = trimString(value.id);
+  if (!id) return null;
+  return {
+    ...value,
+    id,
+    type: trimString(value.type) || undefined,
+    label: typeof value.label === 'string' ? value.label : undefined,
+    description: typeof value.description === 'string' ? value.description : undefined,
+    detail: typeof value.detail === 'string' ? value.detail : undefined,
+    text: typeof value.text === 'string' ? value.text : undefined,
+    tone: typeof value.tone === 'string' ? value.tone : undefined,
+    placeholder: typeof value.placeholder === 'string' ? value.placeholder : undefined,
+    dynamic_source: typeof value.dynamic_source === 'string' ? value.dynamic_source : undefined,
+    dynamic_options_key: typeof value.dynamic_options_key === 'string' ? value.dynamic_options_key : undefined,
+    source: typeof value.source === 'string' ? value.source : undefined,
+    browse: value.browse === true,
+    min: typeof value.min === 'number' ? value.min : undefined,
+    max: typeof value.max === 'number' ? value.max : undefined,
+    rows: typeof value.rows === 'number' ? value.rows : undefined,
+    json_kind: typeof value.json_kind === 'string' ? value.json_kind : undefined,
+  };
+}
+
+function normalizeSchema(value: unknown): SettingsSchema | null {
+  if (!isRecord(value)) return null;
+  const fields = Array.isArray(value.fields)
+    ? value.fields.map(normalizeSchemaField).filter((field): field is SchemaField => Boolean(field))
+    : [];
+  return {
+    ...value,
+    fields,
+    cache: typeof value.cache === 'string' ? value.cache : undefined,
+    useBuiltin: value.useBuiltin === true,
+  };
+}
+
+function getHelper(ctx: CodexAgentModuleApi | undefined, helperName: string): unknown {
+  return ctx?.helpers?.[helperName];
+}
+
+function getCodexAgentState(): CodexAgentState {
+  return asCodexAgentState(window.CodexAgent?.state);
+}
+
+function callCtxHelper(ctx: CodexAgentModuleApi | undefined, helperName: string, ...args: unknown[]): unknown {
+  const helper = getHelper(ctx, helperName);
+  if (typeof helper === 'function') {
+    return helper(...args);
+  }
+  return undefined;
+}
+
+function formatJsonSetting(ctx: CodexAgentModuleApi | undefined, value: unknown): string {
+  const result = callCtxHelper(ctx, 'formatJsonSetting', value);
+  return typeof result === 'string' ? result : JSON.stringify(value, null, 2);
+}
+
+function parseJsonSetting(ctx: CodexAgentModuleApi | undefined, value: string, label: string): unknown {
+  const helper = getHelper(ctx, 'parseJsonSetting');
+  if (typeof helper === 'function') {
+    return helper(value, label);
+  }
+  return JSON.parse(value || 'null');
+}
+
+function normalizeStaticOptions(options: unknown[] | undefined): SelectOption[] {
+  if (!Array.isArray(options)) return [];
+  return options.map((item: unknown): SelectOption | null => {
+    if (typeof item === 'string') return { value: item, label: item };
+    const itemMap = asRecord(item);
+    const value = trimString(itemMap.value || itemMap.id);
+    if (!value) return null;
+    return { value, label: trimString(itemMap.label || itemMap.name || itemMap.value || itemMap.id) || value };
+  }).filter((option): option is SelectOption => Boolean(option));
+}
+
 window.CodexAgentModules = window.CodexAgentModules || [];
-window.CodexAgentModules.push((ctx) => {
+window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
+  if (!ctx) return;
   const settingsCodexFields = document.getElementById('settings-codex-fields');
   const settingsExtensionFields = document.getElementById('settings-extension-fields');
-  const settingsAgentEl = document.getElementById('settings-agent');
-  
+  const settingsAgentEl = document.getElementById('settings-agent') as HTMLInputElement | null;
+   
   // Cache for loaded schemas
-  const schemaCache = {};
-  
+  const schemaCache: Record<string, SettingsSchema> = {};
+   
   // Current schema field values (for save)
-  let currentSchemaValues = {};
-  
+  let currentSchemaValues: Record<string, SchemaValueEntry> = {};
+   
   // Session picker overlay elements (reuse HTML already in template)
   const sessionPickerOverlay = document.getElementById('session-picker');
   const sessionPickerCloseBtn = document.getElementById('session-picker-close');
   const sessionPickerListEl = document.getElementById('session-picker-list');
-  
+   
   // Track which input field the session picker is serving
-  let _sessionPickerTarget = null;  // { input, field }
+  let _sessionPickerTarget: SessionPickerTarget | null = null;
 
-  function requireSioCall() {
-    const sioCall = ctx.helpers?.sioCall;
+  function requireSioCall(): (event: string, payload?: JsonRecord) => Promise<unknown> {
+    const sioCall = getHelper(ctx, 'sioCall');
     if (typeof sioCall !== 'function') {
       throw new Error('Socket.IO helper unavailable');
     }
-    return sioCall;
+    return sioCall as (event: string, payload?: JsonRecord) => Promise<unknown>;
   }
 
-  function requireSettingsRpc() {
-    const client = ctx.helpers?.settingsRpc;
+  function requireSettingsRpc(): SettingsRpcClient {
+    const client = getHelper(ctx, 'settingsRpc');
     if (!client || typeof client !== 'object') {
       throw new Error('Settings RPC helper unavailable');
     }
-    return client;
+    return client as SettingsRpcClient;
   }
 
-  function dynamicSourceErrorMessage(err) {
+  function dynamicSourceErrorMessage(err: unknown): string {
     if (typeof err === 'string' && err) return err;
-    if (err && typeof err === 'object') {
+    if (isRecord(err)) {
       if (typeof err.message === 'string' && err.message) return err.message;
       if (typeof err.error === 'string' && err.error) return err.error;
-      if (err.error && typeof err.error === 'object' && typeof err.error.message === 'string' && err.error.message) {
-        return err.error.message;
+      const nestedError = err.error;
+      if (isRecord(nestedError) && typeof nestedError.message === 'string' && nestedError.message) {
+        return nestedError.message;
       }
     }
     return 'Dynamic source request failed';
   }
 
-  function unwrapDynamicSourceResult(result) {
-    if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+  function unwrapDynamicSourceResult(result: unknown): unknown {
+    if (!isRecord(result)) return result;
     if (result.ok === false) {
       throw new Error(dynamicSourceErrorMessage(result));
     }
@@ -63,8 +285,8 @@ window.CodexAgentModules.push((ctx) => {
     return result;
   }
 
-  async function waitForDynamicSourceSocket() {
-    const waitForWs = ctx.helpers?.waitForWs;
+  async function waitForDynamicSourceSocket(): Promise<void> {
+    const waitForWs = getHelper(ctx, 'waitForWs');
     if (typeof waitForWs !== 'function') return;
     const ready = await waitForWs(10000);
     if (!ready) {
@@ -72,7 +294,7 @@ window.CodexAgentModules.push((ctx) => {
     }
   }
 
-  function sourcePathname(sourceUrl) {
+  function sourcePathname(sourceUrl: unknown): string {
     if (typeof sourceUrl !== 'string') return '';
     const raw = sourceUrl.trim();
     if (!raw) return '';
@@ -83,12 +305,12 @@ window.CodexAgentModules.push((ctx) => {
     }
   }
 
-  function isRuntimeOptionsSource(sourceUrl) {
+  function isRuntimeOptionsSource(sourceUrl: unknown): boolean {
     const pathname = sourcePathname(sourceUrl);
     return pathname.endsWith('/runtime_options') && pathname.includes('/appserver/');
   }
 
-  function extensionIdFromApiPath(sourceUrl, suffix) {
+  function extensionIdFromApiPath(sourceUrl: unknown, suffix: string): string {
     const pathname = sourcePathname(sourceUrl).replace(/\/+$/, '');
     const escapedSuffix = String(suffix || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const match = pathname
@@ -97,9 +319,9 @@ window.CodexAgentModules.push((ctx) => {
     return match?.[1] ? decodeURIComponent(match[1]) : '';
   }
 
-  async function fetchDynamicSource(sourceUrl, options = {}) {
+  async function fetchDynamicSource(sourceUrl: unknown, options: DynamicSourceOptions = {}): Promise<unknown> {
     const settingsRpc = requireSettingsRpc();
-    const request = async () => {
+    const request = async (): Promise<unknown> => {
       const extensionIdForSessions = extensionIdFromApiPath(sourceUrl, 'sessions');
       if (extensionIdForSessions) {
         return unwrapDynamicSourceResult(await settingsRpc.listExtensionSessions({
@@ -132,25 +354,26 @@ window.CodexAgentModules.push((ctx) => {
     }
   }
   
-  function openSessionPicker(field, input) {
+  function openSessionPicker(field: SchemaField, input: HTMLInputElement): void {
     if (!sessionPickerOverlay) return;
     _sessionPickerTarget = { input, field };
     sessionPickerOverlay.classList.remove('hidden');
     fetchAndRenderSessions(field.source || '');
   }
   
-  function closeSessionPicker() {
+  function closeSessionPicker(): void {
     if (!sessionPickerOverlay) return;
     sessionPickerOverlay.classList.add('hidden');
     _sessionPickerTarget = null;
   }
   
-  async function fetchAndRenderSessions(sourceUrl) {
+  async function fetchAndRenderSessions(sourceUrl: string): Promise<void> {
     if (!sessionPickerListEl) return;
     sessionPickerListEl.innerHTML = '<div class="picker-item">Loading…</div>';
     try {
       const data = await fetchDynamicSource(sourceUrl);
-      const items = Array.isArray(data?.sessions) ? data.sessions
+      const dataMap = asRecord(data);
+      const items = Array.isArray(dataMap.sessions) ? dataMap.sessions
         : Array.isArray(data) ? data : [];
       renderSessionList(items);
     } catch (err) {
@@ -159,7 +382,7 @@ window.CodexAgentModules.push((ctx) => {
     }
   }
   
-  function renderSessionList(items, errorMessage = '') {
+  function renderSessionList(items: unknown[], errorMessage = ''): void {
     if (!sessionPickerListEl) return;
     sessionPickerListEl.innerHTML = '';
     if (!items.length) {
@@ -170,10 +393,11 @@ window.CodexAgentModules.push((ctx) => {
       sessionPickerListEl.appendChild(empty);
       return;
     }
-    items.forEach(item => {
-      const sid = item?.sessionId || item?.session_id || item?.id || '';
-      const summary = item?.summary || '';
-      const modified = item?.modifiedTime || item?.modified_time || '';
+    items.forEach((item: unknown) => {
+      const itemMap = asRecord(item);
+      const sid = trimString(itemMap.sessionId || itemMap.session_id || itemMap.id);
+      const summary = trimString(itemMap.summary);
+      const modified = trimString(itemMap.modifiedTime || itemMap.modified_time);
       
       const row = document.createElement('div');
       row.className = 'picker-item rollout-item';
@@ -208,7 +432,7 @@ window.CodexAgentModules.push((ctx) => {
   /**
    * Load settings schema for an extension
    */
-  async function loadSettingsSchema(extensionId) {
+  async function loadSettingsSchema(extensionId: string): Promise<SettingsSchema | null> {
     const cachedSchema = schemaCache[extensionId];
     if (cachedSchema && cachedSchema.cache !== 'none') {
       console.log(`[schema] cache hit for ${extensionId}`);
@@ -216,8 +440,8 @@ window.CodexAgentModules.push((ctx) => {
     }
     
     try {
-      console.log(`[schema] loading schema for ${extensionId} sioCall=${!!ctx.helpers?.sioCall}`);
-      const schema = await requireSettingsRpc().getExtensionSettingsSchema(extensionId);
+      console.log(`[schema] loading schema for ${extensionId} sioCall=${typeof getHelper(ctx, 'sioCall') === 'function'}`);
+      const schema = normalizeSchema(await requireSettingsRpc().getExtensionSettingsSchema(extensionId));
       console.log(`[schema] loaded schema for ${extensionId}`, schema ? Object.keys(schema) : null);
       if (schema && schema.cache !== 'none') {
         schemaCache[extensionId] = schema;
@@ -233,17 +457,17 @@ window.CodexAgentModules.push((ctx) => {
   /**
    * Render schema fields into the extension fields container
    */
-  function renderSchemaFields(schema, values = {}) {
+  function renderSchemaFields(schema: SettingsSchema | null, values: JsonRecord = {}): void {
     if (!settingsExtensionFields) return;
     settingsExtensionFields.innerHTML = '';
     currentSchemaValues = {};
     
     if (!schema || !Array.isArray(schema.fields)) return;
-    const getConversationInfoFields = () => {
-      const state = window.CodexAgent?.state;
+    const getConversationInfoFields = (): SchemaField[] => {
+      const state = getCodexAgentState();
       if (state?.pendingNewConversation) return [];
 
-      const meta = state?.conversationMeta;
+      const meta = state.conversationMeta;
       if (!meta || typeof meta !== 'object') return [];
 
       const conversationId = typeof meta.conversation_id === 'string' ? meta.conversation_id.trim() : '';
@@ -275,7 +499,7 @@ window.CodexAgentModules.push((ctx) => {
       ];
     };
 
-    const moveFieldAfterIndex = (fields, fieldIndex, afterIndex) => {
+    const moveFieldAfterIndex = (fields: SchemaField[], fieldIndex: number, afterIndex: number): SchemaField[] => {
       if (!Array.isArray(fields) || fieldIndex < 0 || afterIndex < 0 || fieldIndex === afterIndex + 1) {
         return fields;
       }
@@ -289,7 +513,7 @@ window.CodexAgentModules.push((ctx) => {
       return reordered;
     };
 
-    const getRenderFields = () => {
+    const getRenderFields = (): SchemaField[] => {
       const fields = Array.isArray(schema.fields) ? schema.fields.slice() : [];
       const conversationInfoFields = getConversationInfoFields();
       if (!conversationInfoFields.length) return fields;
@@ -331,20 +555,20 @@ window.CodexAgentModules.push((ctx) => {
 
     const renderFields = getRenderFields();
     if (!renderFields.length) return;
-    const selectControls = {};
-    let modelItems = [];
+    const selectControls: Record<string, SelectControl> = {};
+    let modelItems: JsonRecord[] = [];
 
-    const fieldValueKeys = (field) => {
+    const fieldValueKeys = (field: SchemaField): string[] => {
       const extraKeys = Array.isArray(field?.value_keys)
         ? field.value_keys
             .map((key) => (typeof key === 'string' ? key.trim() : ''))
             .filter(Boolean)
         : [];
-      return [field?.id, ...extraKeys].filter((key, index, items) => key && items.indexOf(key) === index);
+      return [field.id, ...extraKeys].filter((key, index, items): key is string => Boolean(key) && items.indexOf(key) === index);
     };
 
-    const getFieldValue = (field, sourceValues) => {
-      const resolvedValues = sourceValues && typeof sourceValues === 'object' ? sourceValues : {};
+    const getFieldValue = (field: SchemaField, sourceValues: JsonRecord): JsonValue => {
+      const resolvedValues = asRecord(sourceValues);
       for (const key of fieldValueKeys(field)) {
         if (Object.prototype.hasOwnProperty.call(resolvedValues, key)) {
           return resolvedValues[key];
@@ -353,21 +577,24 @@ window.CodexAgentModules.push((ctx) => {
       return field.default ?? '';
     };
 
-    const normalizeEffortList = (model) => {
+    const normalizeEffortList = (model: unknown): string[] => {
+      const modelMap = asRecord(model);
+      const capabilities = asRecord(modelMap.capabilities);
+      const supports = asRecord(capabilities.supports);
       const candidates = [
-        model?.supported_reasoning_efforts,
-        model?.supportedReasoningEfforts,
-        model?.capabilities?.supports?.reasoning_effort,
-        model?.capabilities?.supports?.reasoningEffort,
+        modelMap.supported_reasoning_efforts,
+        modelMap.supportedReasoningEfforts,
+        supports.reasoning_effort,
+        supports.reasoningEffort,
       ];
-      const values = [];
+      const values: string[] = [];
       candidates.forEach((raw) => {
         if (!Array.isArray(raw)) return;
         raw.forEach((item) => {
           const value = typeof item === 'string'
             ? item
-            : (item && typeof item === 'object'
-              ? (item.reasoning_effort || item.reasoningEffort || item.value || '')
+            : (isRecord(item)
+              ? stringValue(item.reasoning_effort || item.reasoningEffort || item.value)
               : '');
           if (!value || values.includes(value)) return;
           values.push(value);
@@ -376,7 +603,7 @@ window.CodexAgentModules.push((ctx) => {
       return values;
     };
 
-    const parseModelVersion = (modelId) => {
+    const parseModelVersion = (modelId: unknown): ModelVersion | null => {
       if (typeof modelId !== 'string') return null;
       const match = modelId.trim().toLowerCase().match(/^([a-z][a-z0-9]*)-(\d+)(?:\.(\d+))?(?:$|[-_])/);
       if (!match) return null;
@@ -387,54 +614,61 @@ window.CodexAgentModules.push((ctx) => {
       };
     };
 
-    const modelMatchesGate = (modelId, gate) => {
-      if (!gate || typeof gate !== 'object') return true;
+    const modelMatchesGate = (modelId: unknown, gate: unknown): boolean => {
+      if (!isRecord(gate)) return true;
       const version = parseModelVersion(modelId);
       if (!version) return false;
       const family = typeof gate.family === 'string' ? gate.family.trim().toLowerCase() : '';
       if (family && version.family !== family) return false;
-      const minMajor = Number.isFinite(gate.min_major) ? gate.min_major : gate.minMajor;
-      const minMinor = Number.isFinite(gate.min_minor) ? gate.min_minor : gate.minMinor;
-      const requiredMajor = Number.isFinite(minMajor) ? minMajor : 0;
-      const requiredMinor = Number.isFinite(minMinor) ? minMinor : 0;
+      const minMajor = Number.isFinite(gate.min_major) ? Number(gate.min_major) : gate.minMajor;
+      const minMinor = Number.isFinite(gate.min_minor) ? Number(gate.min_minor) : gate.minMinor;
+      const requiredMajor = Number.isFinite(minMajor) ? Number(minMajor) : 0;
+      const requiredMinor = Number.isFinite(minMinor) ? Number(minMinor) : 0;
       if (version.major > requiredMajor) return true;
       if (version.major < requiredMajor) return false;
       return version.minor >= requiredMinor;
     };
 
-    const normalizeDynamicSelectOptions = (field, data) => {
+    const normalizeDynamicSelectOptions = (field: SchemaField, data: unknown): DynamicSelectOptions => {
       if (!data) return { items: [], options: [], current: '', defaultValue: '' };
-      if (field.dynamic_options_key && typeof data === 'object' && !Array.isArray(data)) {
-        const descriptor = data[field.dynamic_options_key];
-        const items = Array.isArray(descriptor?.options) ? descriptor.options : [];
-        const options = items.map((item) => {
+      const dataMap = asRecord(data);
+      if (field.dynamic_options_key && isRecord(data)) {
+        const descriptor = asRecord(dataMap[field.dynamic_options_key]);
+        const items = Array.isArray(descriptor.options) ? descriptor.options : [];
+        const options = items.map((item: unknown): SelectOption | null => {
           if (typeof item === 'string') return { value: item, label: item };
-          if (!item || typeof item !== 'object') return null;
-          const value = typeof item.value === 'string' ? item.value : '';
+          const itemMap = asRecord(item);
+          const value = trimString(itemMap.value);
           if (!value) return null;
           return {
             value,
-            label: (typeof item.label === 'string' && item.label) ? item.label : value,
+            label: trimString(itemMap.label) || value,
           };
-        }).filter(Boolean);
+        }).filter((option): option is SelectOption => Boolean(option));
         return {
-          items,
+          items: items.filter(isRecord),
           options,
-          current: typeof descriptor?.current === 'string' ? descriptor.current : '',
-          defaultValue: typeof descriptor?.default === 'string' ? descriptor.default : '',
+          current: trimString(descriptor.current),
+          defaultValue: trimString(descriptor.default),
         };
       }
-      const items = Array.isArray(data) ? data : data.models || data.options || [];
-      const options = items.map((item) => typeof item === 'object'
-        ? { value: item.id || item.value, label: item.name || item.label || item.id || item.value }
-        : { value: item, label: item });
-      return { items, options, current: '', defaultValue: '' };
+      const rawItems = Array.isArray(data) ? data : dataMap.models || dataMap.options || [];
+      const items = Array.isArray(rawItems) ? rawItems : [];
+      const options = items.map((item: unknown): SelectOption => {
+        if (isRecord(item)) {
+          const value = trimString(item.id || item.value);
+          return { value, label: trimString(item.name || item.label || item.id || item.value) || value };
+        }
+        const value = String(item ?? '');
+        return { value, label: value };
+      }).filter((option) => option.value);
+      return { items: items.filter(isRecord), options, current: '', defaultValue: '' };
     };
 
-    const setSelectOptions = (control, options) => {
+    const setSelectOptions = (control: SelectControl | undefined, options: SelectOption[] | string[] | undefined): void => {
       if (!control?.listDiv || !control?.input) return;
       control.listDiv.innerHTML = '';
-      (options || []).forEach((opt) => {
+      (options || []).forEach((opt: SelectOption | string) => {
         const optValue = typeof opt === 'object' ? opt.value : opt;
         const optLabel = typeof opt === 'object' ? (opt.label || opt.value) : opt;
         if (!optValue) return;
@@ -444,8 +678,9 @@ window.CodexAgentModules.push((ctx) => {
         optBtn.textContent = optLabel;
         optBtn.addEventListener('click', () => {
           control.input.value = optValue;
-          if (ctx.helpers?.closeDropdownMenu) {
-            ctx.helpers.closeDropdownMenu(control.listDiv);
+          const closeDropdownMenu = getHelper(ctx, 'closeDropdownMenu');
+          if (typeof closeDropdownMenu === 'function') {
+            closeDropdownMenu(control.listDiv);
           } else {
             control.listDiv.classList.remove('open');
           }
@@ -455,7 +690,7 @@ window.CodexAgentModules.push((ctx) => {
       });
     };
 
-    const setSelectMessage = (control, message) => {
+    const setSelectMessage = (control: SelectControl, message: string): void => {
       if (!control?.listDiv) return;
       control.listDiv.innerHTML = '';
       const messageRow = document.createElement('div');
@@ -464,21 +699,21 @@ window.CodexAgentModules.push((ctx) => {
       control.listDiv.appendChild(messageRow);
     };
 
-    const resetModelGatedInput = (input, type) => {
+    const resetModelGatedInput = (input: SchemaInput, type: string | undefined): void => {
       if (type === 'checkbox') {
-        input.checked = false;
+        if (input instanceof HTMLInputElement) input.checked = false;
         return;
       }
       input.value = '';
     };
 
-    const syncModelGatedFields = () => {
+    const syncModelGatedFields = (): void => {
       const modelControl = selectControls.model;
       if (!modelControl?.input) return;
       const selectedModelId = modelControl.input.value || '';
       Object.values(currentSchemaValues).forEach((entry) => {
         const modelGate = entry?.field?.model_gate;
-        if (!modelGate || typeof modelGate !== 'object' || !entry?.input) return;
+        if (!isRecord(modelGate) || !entry?.input) return;
         const input = entry.input;
         const label = input.closest('label');
         const enabled = modelMatchesGate(selectedModelId, modelGate);
@@ -506,7 +741,7 @@ window.CodexAgentModules.push((ctx) => {
       });
     };
 
-    const syncReasoningEffortOptions = () => {
+    const syncReasoningEffortOptions = (): void => {
       const modelControl = selectControls.model;
       const effortControl = selectControls.reasoning_effort;
       if (!modelControl || !effortControl) return;
@@ -517,10 +752,7 @@ window.CodexAgentModules.push((ctx) => {
         effortControl.input.placeholder = 'Select model first';
         return;
       }
-      const model = modelItems.find((item) => {
-        if (!item || typeof item !== 'object') return false;
-        return (item.id || item.value) === selectedModelId;
-      });
+      const model = modelItems.find((item) => trimString(item.id || item.value) === selectedModelId);
       if (!model) {
         if (!modelItems.length) return;
         setSelectOptions(effortControl, []);
@@ -534,7 +766,7 @@ window.CodexAgentModules.push((ctx) => {
       const currentValue = effortControl.input.value;
       const initialValue = effortControl.initialValue || '';
       const initialModelId = modelControl.initialValue || '';
-      const defaultEffort = model.default_reasoning_effort || model.defaultReasoningEffort || options[0] || '';
+      const defaultEffort = trimString(model.default_reasoning_effort || model.defaultReasoningEffort) || options[0] || '';
       setSelectOptions(effortControl, options.map((v) => ({ value: v, label: v })));
       if (!supportsReasoningEffort) {
         effortControl.input.value = '';
@@ -552,12 +784,12 @@ window.CodexAgentModules.push((ctx) => {
       effortControl.input.value = nextValue;
     };
 
-    const syncModelDependentFields = () => {
+    const syncModelDependentFields = (): void => {
       syncReasoningEffortOptions();
       syncModelGatedFields();
     };
     
-    renderFields.forEach(field => {
+    renderFields.forEach((field: SchemaField) => {
       if (field.type === 'section') {
         const section = document.createElement('div');
         section.className = 'settings-schema-section';
@@ -613,7 +845,7 @@ window.CodexAgentModules.push((ctx) => {
       span.textContent = field.label || field.id;
       label.appendChild(span);
       
-      let input;
+      let input: SchemaInput | null = null;
       const value = getFieldValue(field, values);
       
       switch (field.type) {
@@ -623,11 +855,12 @@ window.CodexAgentModules.push((ctx) => {
           pathDiv.className = 'settings-row';
           
           input = document.createElement('input');
-          input.type = 'text';
-          input.id = `settings-ext-${field.id}`;
-          input.placeholder = field.placeholder || '';
-          input.value = value;
-          pathDiv.appendChild(input);
+          const pathInput = input;
+          pathInput.type = 'text';
+          pathInput.id = `settings-ext-${field.id}`;
+          pathInput.placeholder = field.placeholder || '';
+          pathInput.value = String(value ?? '');
+          pathDiv.appendChild(pathInput);
           
           if (field.browse) {
             const browseBtn = document.createElement('button');
@@ -636,8 +869,9 @@ window.CodexAgentModules.push((ctx) => {
             browseBtn.textContent = 'Browse';
             browseBtn.addEventListener('click', () => {
               // Use the existing picker if available
-              if (ctx.helpers?.openPicker) {
-                ctx.helpers.openPicker(input.value || '~', 'cwd', { input });
+              const openPicker = getHelper(ctx, 'openPicker');
+              if (typeof openPicker === 'function') {
+                openPicker(pathInput.value || '~', 'cwd', { input: pathInput });
               }
             });
             pathDiv.appendChild(browseBtn);
@@ -649,30 +883,31 @@ window.CodexAgentModules.push((ctx) => {
         case 'session_picker':
           // Session picker: only shown for NEW conversations (no thread_id yet).
           // Once a conversation is bound to a session, this field disappears.
-          const hasThread = !window.CodexAgent?.state?.pendingNewConversation
-            && window.CodexAgent?.state?.conversationMeta?.thread_id;
+          const state = getCodexAgentState();
+          const hasThread = !state.pendingNewConversation && Boolean(state.conversationMeta?.thread_id);
           if (hasThread) break; // Already bound — hide picker
 
           const sessionDiv = document.createElement('div');
           sessionDiv.className = 'settings-row';
           
           input = document.createElement('input');
-          input.type = 'text';
-          input.id = `settings-ext-${field.id}`;
-          input.placeholder = field.placeholder || '(new session)';
-          input.value = value || '';
-          input.dataset.sessionId = value || '';
-          input.addEventListener('input', () => {
-            input.dataset.sessionId = input.value || '';
+          const sessionInput = input;
+          sessionInput.type = 'text';
+          sessionInput.id = `settings-ext-${field.id}`;
+          sessionInput.placeholder = field.placeholder || '(new session)';
+          sessionInput.value = String(value || '');
+          sessionInput.dataset.sessionId = String(value || '');
+          sessionInput.addEventListener('input', () => {
+            sessionInput.dataset.sessionId = sessionInput.value || '';
           });
-          sessionDiv.appendChild(input);
+          sessionDiv.appendChild(sessionInput);
           
           const resumeBtn = document.createElement('button');
           resumeBtn.type = 'button';
           resumeBtn.className = 'btn ghost';
           resumeBtn.textContent = 'Browse';
           resumeBtn.addEventListener('click', () => {
-            openSessionPicker(field, input);
+            openSessionPicker(field, sessionInput);
           });
           sessionDiv.appendChild(resumeBtn);
           
@@ -685,12 +920,13 @@ window.CodexAgentModules.push((ctx) => {
           selectDiv.className = 'dropdown-field';
           
           input = document.createElement('input');
-          input.type = 'text';
-          input.id = `settings-ext-${field.id}`;
-          input.placeholder = field.placeholder || '';
-          input.value = value;
-          input.readOnly = true;
-          selectDiv.appendChild(input);
+          const selectInput = input;
+          selectInput.type = 'text';
+          selectInput.id = `settings-ext-${field.id}`;
+          selectInput.placeholder = field.placeholder || '';
+          selectInput.value = String(value ?? '');
+          selectInput.readOnly = true;
+          selectDiv.appendChild(selectInput);
           
           const toggleBtn = document.createElement('button');
           toggleBtn.type = 'button';
@@ -701,54 +937,60 @@ window.CodexAgentModules.push((ctx) => {
           const listDiv = document.createElement('div');
           listDiv.className = 'dropdown-list';
           listDiv.id = `settings-ext-${field.id}-options`;
-          const selectControl = { field, input, listDiv, initialValue: value, initialValueApplied: false };
+          const selectControl: SelectControl = {
+            field,
+            input: selectInput,
+            listDiv,
+            initialValue: selectInput.value,
+            initialValueApplied: false,
+          };
           selectControls[field.id] = selectControl;
           
           // Build options (static or dynamic)
-          const buildOptions = (options) => {
+          const buildOptions = (options: SelectOption[] | string[] | undefined): void => {
             setSelectOptions(selectControl, options);
           };
           
           if (field.id === 'reasoning_effort') {
             buildOptions([]);
-            input.placeholder = 'Select model first';
+            selectInput.placeholder = 'Select model first';
           } else {
-            buildOptions(field.options);
+            buildOptions(normalizeStaticOptions(field.options));
           }
           
           // Fetch dynamic options if configured
           if (field.dynamic_source) {
-            const loadOpts = (data) => {
+            const loadOpts = (data: unknown): void => {
               if (!data) return;
               const { items, options: opts, current, defaultValue } = normalizeDynamicSelectOptions(field, data);
-              input.removeAttribute('title');
+              selectInput.removeAttribute('title');
               if (field.id === 'model') {
-                modelItems = items.filter((item) => item && typeof item === 'object');
-                if (!input.value) {
-                  input.placeholder = field.placeholder || 'Use server default';
+                modelItems = items;
+                if (!selectInput.value) {
+                  selectInput.placeholder = field.placeholder || 'Use server default';
                 }
-              } else if (!input.value) {
-                input.placeholder = defaultValue || field.placeholder || '';
-                if (current) input.value = current;
+              } else if (!selectInput.value) {
+                selectInput.placeholder = defaultValue || field.placeholder || '';
+                if (current) selectInput.value = current;
               }
               if (opts.length) buildOptions(opts);
               if (field.id === 'model') syncModelDependentFields();
             };
             const selectedAgent = settingsAgentEl?.value?.trim() || '';
-            const conversationId = window.CodexAgent?.state?.conversationMeta?.conversation_id || '';
+            const conversationId = stringValue(getCodexAgentState().conversationMeta?.conversation_id);
             const dynamicSource = typeof field.dynamic_source === 'string' ? field.dynamic_source : '';
             const runtimeOptionsSource = isRuntimeOptionsSource(dynamicSource);
-            const srcMatch = field.dynamic_source.match(/\/api\/extensions\/([^/]+)\/models/);
+            const srcMatch = dynamicSource.match(/\/api\/extensions\/([^/]+)\/models/);
             if (runtimeOptionsSource || srcMatch) {
-              fetchDynamicSource(field.dynamic_source, {
+              fetchDynamicSource(dynamicSource, {
                 conversationId,
                 agent: selectedAgent,
               }).then(loadOpts).catch((e) => {
                 console.error('[schema] dynamic Socket.IO load failed', e);
                 const errorMessage = dynamicSourceErrorMessage(e);
-                input.title = errorMessage;
-                if (!input.value) {
-                  input.placeholder = 'Unable to load options';
+                selectInput.title = errorMessage;
+                if (!selectInput.value) {
+                  selectInput.placeholder = 'Unable to load options';
                 }
                 setSelectMessage(selectControl, 'Unable to load options');
               });
@@ -763,10 +1005,11 @@ window.CodexAgentModules.push((ctx) => {
             }
           }
           
-          toggleBtn.addEventListener('click', (e) => {
+          toggleBtn.addEventListener('click', (e: MouseEvent) => {
             e.preventDefault();
-            if (ctx.helpers?.toggleDropdownMenu) {
-              ctx.helpers.toggleDropdownMenu(listDiv);
+            const toggleDropdownMenu = getHelper(ctx, 'toggleDropdownMenu');
+            if (typeof toggleDropdownMenu === 'function') {
+              toggleDropdownMenu(listDiv);
             } else {
               listDiv.classList.toggle('open');
             }
@@ -790,9 +1033,9 @@ window.CodexAgentModules.push((ctx) => {
           input.type = 'number';
           input.id = `settings-ext-${field.id}`;
           input.placeholder = field.placeholder || '';
-          input.value = value;
-          if (field.min !== undefined) input.min = field.min;
-          if (field.max !== undefined) input.max = field.max;
+          input.value = String(value ?? '');
+          if (field.min !== undefined) input.min = String(field.min);
+          if (field.max !== undefined) input.max = String(field.max);
           label.appendChild(input);
           break;
 
@@ -812,8 +1055,8 @@ window.CodexAgentModules.push((ctx) => {
           input.className = 'settings-textarea settings-json-input';
           input.placeholder = field.placeholder || '';
           input.rows = field.rows || 8;
-          if (ctx.helpers?.formatJsonSetting) {
-            input.value = ctx.helpers.formatJsonSetting(value);
+          if (typeof getHelper(ctx, 'formatJsonSetting') === 'function') {
+            input.value = formatJsonSetting(ctx, value);
           } else if (typeof value === 'string') {
             input.value = value;
           } else if (value == null || value === '') {
@@ -830,7 +1073,7 @@ window.CodexAgentModules.push((ctx) => {
           input.type = 'text';
           input.id = `settings-ext-${field.id}`;
           input.placeholder = field.placeholder || '';
-          input.value = value;
+          input.value = String(value ?? '');
           label.appendChild(input);
           break;
       }
@@ -849,8 +1092,8 @@ window.CodexAgentModules.push((ctx) => {
   /**
    * Get current values from schema fields
    */
-  function collectSchemaValues(parseStructured = false) {
-    const values = {};
+  function collectSchemaValues(parseStructured = false): JsonRecord {
+    const values: JsonRecord = {};
     Object.entries(currentSchemaValues).forEach(([id, { input, type, field }]) => {
       if (!input) return;
       if (type === 'session_picker') {
@@ -858,11 +1101,9 @@ window.CodexAgentModules.push((ctx) => {
         return;
       }
       if (type === 'checkbox') {
-        values[id] = input.checked;
+        values[id] = input instanceof HTMLInputElement ? input.checked : false;
       } else if (parseStructured && type === 'json') {
-        const parsed = ctx.helpers?.parseJsonSetting
-          ? ctx.helpers.parseJsonSetting(input.value, field?.label || field?.id || id)
-          : JSON.parse(input.value || 'null');
+        const parsed = parseJsonSetting(ctx, input.value, field?.label || field?.id || id);
         if (field?.json_kind === 'object' && parsed != null && (Array.isArray(parsed) || typeof parsed !== 'object')) {
           throw new Error(`${field.label || field.id || id} must be a JSON object`);
         }
@@ -874,26 +1115,26 @@ window.CodexAgentModules.push((ctx) => {
     return values;
   }
 
-  function getSchemaRawValues() {
+  function getSchemaRawValues(): JsonRecord {
     return collectSchemaValues(false);
   }
 
-  function getSchemaParsedValues() {
+  function getSchemaParsedValues(): JsonRecord {
     return collectSchemaValues(true);
   }
 
-  function getSchemaValues() {
+  function getSchemaValues(): JsonRecord {
     return getSchemaRawValues();
   }
 
-  function getSchemaFieldInput(fieldId) {
+  function getSchemaFieldInput(fieldId: string): SchemaInput | null {
     return currentSchemaValues[fieldId]?.input || null;
   }
   
   /**
    * Update settings modal based on selected agent
    */
-  async function onAgentChange(agentId) {
+  async function onAgentChange(agentId: string): Promise<void> {
     const isCodex = agentId === 'codex';
     
     // Show/hide Codex-specific fields
@@ -912,13 +1153,14 @@ window.CodexAgentModules.push((ctx) => {
       const schema = await loadSettingsSchema(agentId);
       if (schema && !schema.useBuiltin) {
         // For new conversations, use empty values; for existing, use saved settings
-        const isPending = window.CodexAgent?.state?.pendingNewConversation;
-        let settings = isPending ? {} : (window.CodexAgent?.state?.conversationSettings || {});
+        const state = getCodexAgentState();
+        const isPending = Boolean(state.pendingNewConversation);
+        let settings: JsonRecord = isPending ? {} : asRecord(state.conversationSettings);
         // Prefill CWD from project root when starting from the project tab
         if (isPending) {
-          const st = window.CodexAgent?.state;
-          const hu = st?.hostUi;
-          if (hu?.ideMode && st?.splashTab === 'project' && typeof hu?.projectRoot === 'string' && hu.projectRoot) {
+          const st = getCodexAgentState();
+          const hu = st.hostUi;
+          if (hu?.ideMode && st.splashTab === 'project' && typeof hu.projectRoot === 'string' && hu.projectRoot) {
             settings = { cwd: hu.projectRoot };
           }
         }
@@ -937,3 +1179,5 @@ window.CodexAgentModules.push((ctx) => {
   ctx.helpers.getSchemaFieldInput = getSchemaFieldInput;
   ctx.helpers.onAgentChange = onAgentChange;
 });
+
+export {};

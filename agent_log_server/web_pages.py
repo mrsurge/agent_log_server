@@ -409,13 +409,6 @@ def render_codex_agent_ui(package_root: Path) -> HTMLResponse:
                 Script(src=_asset(package_root, "/static/js/socketio_runtime.js")),
                 Script(src=_asset(package_root, "/static/vendor/tribute.min.js")),
                 Script(NotStr("window.addEventListener('load', () => console.log('socket.io', typeof io));"), defer=True),
-                Script(src=_asset(package_root, "/static/modals/settings_modal.js"), defer=True),
-                Script(src=_asset(package_root, "/static/modals/settings_schema.js"), defer=True),
-                Script(src=_asset(package_root, "/static/modals/cwd_picker.js"), defer=True),
-                Script(src=_asset(package_root, "/static/modals/rollout_picker.js"), defer=True),
-                Script(src=_asset(package_root, "/static/modals/warning_modal.js"), defer=True),
-                Script(src=_asset(package_root, "/static/ui/splash_settings.js"), defer=True),
-                Script(src=_asset(package_root, "/static/ui/extension_settings.js"), defer=True),
                 Script(src=_asset(package_root, "/static/dist/codex_agent.js"), type="module"),
                 Script(NotStr(f"""import {{ initConsoleBridge }} from '{_asset(package_root, "/static/js/console_bridge.js")}';
 try {{

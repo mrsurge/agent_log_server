@@ -50,6 +50,13 @@ import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations
 import { createSettingsRpcClient } from './js/codex_agent/rpc/settings/client.ts';
 import { createUiRpcClient } from './js/codex_agent/rpc/ui/client.ts';
 import type { SocketLike, ToggleableRow, UnknownRecord } from './js/codex_agent/shared_types.ts';
+import './modals/settings_modal.ts';
+import './modals/settings_schema.ts';
+import './modals/cwd_picker.ts';
+import './modals/rollout_picker.ts';
+import './modals/warning_modal.ts';
+import './ui/splash_settings.ts';
+import './ui/extension_settings.ts';
 
 type AnyRecord = Record<string, unknown>;
 type TextValueElement = HTMLInputElement | HTMLTextAreaElement;

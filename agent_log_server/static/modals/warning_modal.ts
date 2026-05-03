@@ -1,5 +1,24 @@
+type CodexAgentModuleApi = {
+  helpers: Record<string, unknown>;
+  state: Record<string, unknown>;
+};
+
+type WarningOptions = {
+  title?: string;
+  body?: string;
+  confirmText?: string;
+  onConfirm?: () => Promise<unknown> | unknown;
+  onCancel?: () => void;
+};
+
+declare global {
+  interface Window {
+    CodexAgentModules?: Array<(ctx: CodexAgentModuleApi | undefined) => void>;
+  }
+}
+
 window.CodexAgentModules = window.CodexAgentModules || [];
-window.CodexAgentModules.push((ctx) => {
+window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   const modalEl = document.getElementById('warning-modal');
   const closeBtn = document.getElementById('warning-close');
   const cancelBtn = document.getElementById('warning-cancel');
@@ -7,10 +26,10 @@ window.CodexAgentModules.push((ctx) => {
   const bodyEl = document.getElementById('warning-body');
   const titleEl = modalEl?.querySelector('h3');
 
-  let onConfirm = null;
-  let onCancel = null;
+  let onConfirm: (() => Promise<unknown> | unknown) | null = null;
+  let onCancel: (() => void) | null = null;
 
-  function close(reason = 'cancel') {
+  function close(reason = 'cancel'): void {
     if (!modalEl) return;
     modalEl.classList.add('hidden');
     const cancelHandler = reason === 'confirm' ? null : onCancel;
@@ -19,7 +38,7 @@ window.CodexAgentModules.push((ctx) => {
     if (typeof cancelHandler === 'function') cancelHandler();
   }
 
-  function open(opts) {
+  function open(opts: WarningOptions = {}): void {
     if (!modalEl) return;
     if (titleEl && opts?.title) titleEl.textContent = opts.title;
     if (bodyEl && opts?.body) bodyEl.textContent = opts.body;
@@ -29,14 +48,18 @@ window.CodexAgentModules.push((ctx) => {
     modalEl.classList.remove('hidden');
   }
 
-  closeBtn?.addEventListener('click', close);
-  cancelBtn?.addEventListener('click', close);
+  closeBtn?.addEventListener('click', () => close());
+  cancelBtn?.addEventListener('click', () => close());
   confirmBtn?.addEventListener('click', async () => {
     const handler = onConfirm;
     close('confirm');
     if (handler) await handler();
   });
 
-  ctx.helpers.openWarningModal = open;
-  ctx.helpers.closeWarningModal = close;
+  if (ctx?.helpers) {
+    ctx.helpers.openWarningModal = open;
+    ctx.helpers.closeWarningModal = close;
+  }
 });
+
+export {};

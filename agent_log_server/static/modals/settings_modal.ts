@@ -1,32 +1,54 @@
+type CodexAgentModuleApi = {
+  helpers: Record<string, unknown>;
+  state: Record<string, unknown>;
+};
+
+type TextValueElement = HTMLElement & { value: string };
+type PickerOptions = { input: TextValueElement | null };
+
+declare global {
+  interface Window {
+    CodexAgentModules?: Array<(ctx: CodexAgentModuleApi | undefined) => void>;
+  }
+}
+
+function callHelper(ctx: CodexAgentModuleApi | undefined, helperName: string, ...args: unknown[]): unknown {
+  const helper = ctx?.helpers?.[helperName];
+  if (typeof helper === 'function') {
+    return helper(...args);
+  }
+  return undefined;
+}
+
 window.CodexAgentModules = window.CodexAgentModules || [];
-window.CodexAgentModules.push((ctx) => {
+window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   const settingsModalEl = document.getElementById('settings-modal');
   const settingsCloseBtn = document.getElementById('settings-close');
   const settingsCancelBtn = document.getElementById('settings-cancel');
   const settingsSaveBtn = document.getElementById('settings-save');
-  const settingsCwdEl = document.getElementById('settings-cwd');
+  const settingsCwdEl = document.getElementById('settings-cwd') as TextValueElement | null;
   const settingsCwdBrowseBtn = document.getElementById('settings-cwd-browse');
   const settingsRolloutBrowseBtn = document.getElementById('settings-rollout-browse');
 
-  settingsCloseBtn?.addEventListener('click', () => ctx.helpers.closeSettingsModal());
+  settingsCloseBtn?.addEventListener('click', () => callHelper(ctx, 'closeSettingsModal'));
   settingsCancelBtn?.addEventListener('click', () => {
     if (settingsModalEl) settingsModalEl.classList.add('hidden');
-    ctx.helpers.setPendingNewConversation(false);
-    ctx.helpers.setPendingRollout(null);
+    callHelper(ctx, 'setPendingNewConversation', false);
+    callHelper(ctx, 'setPendingRollout', null);
   });
   settingsSaveBtn?.addEventListener('click', async () => {
-    await ctx.helpers.saveSettings();
+    await callHelper(ctx, 'saveSettings');
   });
   settingsCwdBrowseBtn?.addEventListener('click', () => {
-    ctx.helpers.openPicker(settingsCwdEl?.value || '~', 'cwd', { input: settingsCwdEl || null });
+    callHelper(ctx, 'openPicker', settingsCwdEl?.value || '~', 'cwd', { input: settingsCwdEl || null } satisfies PickerOptions);
   });
   settingsRolloutBrowseBtn?.addEventListener('click', () => {
-    ctx.helpers.openRolloutPicker();
+    callHelper(ctx, 'openRolloutPicker');
   });
 
   const footerApprovalValue = document.getElementById('footer-approval-value');
   const footerApprovalOptions = document.getElementById('footer-approval-options');
-  const toggleFooterApproval = (evt) => {
+  const toggleFooterApproval = (evt: Event) => {
     evt?.preventDefault();
     footerApprovalOptions?.classList.toggle('open');
   };
@@ -39,6 +61,8 @@ window.CodexAgentModules.push((ctx) => {
     if (!value) return;
     if (footerApprovalValue) footerApprovalValue.textContent = value;
     footerApprovalOptions.classList.remove('open');
-    ctx.helpers.saveApprovalQuick(value);
+    callHelper(ctx, 'saveApprovalQuick', value);
   });
 });
+
+export {};

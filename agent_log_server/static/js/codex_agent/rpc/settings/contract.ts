@@ -39,6 +39,6 @@ export const SETTINGS_RPC_ANCHOR_MODULES = [
   'settings/ui_flow.ts',
   'host/runtime.ts',
   'conversation_drawer/actions.ts',
-  'extension_settings.js',
-  'settings_schema.js',
+  'extension_settings.ts',
+  'settings_schema.ts',
 ] as const;
