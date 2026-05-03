@@ -197,8 +197,17 @@ export function createConversationDrawerActions(
       const ssotActiveId = data.activeConversationId;
       const highlightId = state.clientConversationId || state.conversationMeta?.conversation_id || ssotActiveId;
       const patch: Partial<DrawerState> = { conversationList, extensionCatalog };
-      if (!state.clientActiveView && data.activeView) patch.clientActiveView = data.activeView;
+      let appliedSsotActiveView: string | null = null;
+      if (!state.clientActiveView && data.activeView) {
+        patch.clientActiveView = data.activeView;
+        patch.activeView = data.activeView;
+        appliedSsotActiveView = data.activeView;
+      }
       setState(patch);
+      if (appliedSsotActiveView) {
+        setDrawerOpen(appliedSsotActiveView === 'conversation');
+        applyHostUi();
+      }
       renderConversationList(conversationList, highlightId);
       renderSplashTabs();
       updateActiveConversationLabel();

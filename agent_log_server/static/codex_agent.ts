@@ -462,6 +462,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const {
     setDrawerOpen,
     updateWidescreenLayout,
+    isWidescreenLayout,
     bindWidescreenResizer,
   } = widescreenLayoutUi;
 
@@ -1954,6 +1955,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchAppConfig,
     bindPickerFilter,
     setDrawerOpen,
+    isWidescreenLayout,
     fetchConversation,
     fetchConversations,
     resetTimeline,

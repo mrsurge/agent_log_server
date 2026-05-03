@@ -104,6 +104,10 @@ export function bindWidescreenLayout(ctx: WidescreenLayoutContext) {
     setDrawerOpen(getActiveView() === 'conversation');
   }
 
+  function isWidescreenLayout() {
+    return widescreenLayout;
+  }
+
   function handleWidescreenResizeMove(event: PointerEvent) {
     if (!widescreenResizing) return;
     applyWidescreenResizeFromClientX(event.clientX);
@@ -158,6 +162,7 @@ export function bindWidescreenLayout(ctx: WidescreenLayoutContext) {
   return {
     setDrawerOpen,
     updateWidescreenLayout,
+    isWidescreenLayout,
     bindWidescreenResizer,
   };
 }

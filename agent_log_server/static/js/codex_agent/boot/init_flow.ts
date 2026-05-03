@@ -80,6 +80,7 @@ interface BootInitFlowContext {
   fetchAppConfig: () => Promise<unknown>;
   bindPickerFilter: () => void;
   setDrawerOpen: (open: boolean) => void;
+  isWidescreenLayout?: () => boolean;
   fetchConversation: () => Promise<unknown>;
   fetchConversations: () => Promise<unknown>;
   resetTimeline: () => void;
@@ -122,6 +123,7 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
     fetchAppConfig,
     bindPickerFilter,
     setDrawerOpen,
+    isWidescreenLayout,
     fetchConversation,
     fetchConversations,
     resetTimeline,
@@ -191,13 +193,19 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
       await fetchAppConfig();
       await fetchConversation();
       await fetchConversations();
-      if (getState().activeView === 'conversation') {
+      const hydratedState = getState();
+      const hasConversationId = typeof hydratedState.conversationMeta?.conversation_id === 'string'
+        && hydratedState.conversationMeta.conversation_id.trim();
+      const activeConversationView = hydratedState.activeView === 'conversation';
+      const shouldHydrateTranscript = activeConversationView
+        || (Boolean(hasConversationId) && isWidescreenLayout?.() === true);
+      if (shouldHydrateTranscript) {
         resetTimeline();
         await replayTranscript();
         await refreshPlanSurface?.();
         restorePendingApprovals();
         setTimeout(() => {
-          setDrawerOpen(true);
+          if (activeConversationView) setDrawerOpen(true);
           maybeAutoScroll(true);
         }, 50);
       } else {
