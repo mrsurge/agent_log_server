@@ -26,6 +26,11 @@ use tracing::{debug, error, warn};
 
 const EVENT_BUFFER_LIMIT: usize = 512;
 const EVENT_STREAM_LIMIT: usize = 1024;
+const FRAMEWORK_SHELL_ENV_KEYS: &[&str] = &[
+    "FRAMEWORK_SHELLS_BASE_DIR",
+    "FRAMEWORK_SHELLS_SECRET",
+    "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID",
+];
 
 type PendingSender = oneshot::Sender<Result<Value, RpcError>>;
 type PendingMap = Arc<Mutex<HashMap<RequestId, PendingSender>>>;
@@ -119,9 +124,10 @@ impl AdapterClient {
                 command.env("PYTHONPATH", pythonpath);
             }
         }
+        apply_framework_shell_env(&mut command);
         let mut child = command
             .spawn()
-            .with_context(|| format!("failed to spawn Copilot adapter via {python}"))?;
+            .with_context(|| format!("failed to spawn extension adapter via {python}"))?;
 
         let stdin = child.stdin.take().context("adapter stdin is unavailable")?;
         let stdout = child
@@ -195,6 +201,33 @@ fn pythonpath_with_root(root: &Path, existing: Option<OsString>) -> Option<OsStr
         paths.extend(env::split_paths(&existing));
     }
     env::join_paths(paths).ok()
+}
+
+fn apply_framework_shell_env(command: &mut Command) {
+    for (key, value) in framework_shell_env_overrides() {
+        command.env(key, value);
+    }
+}
+
+fn framework_shell_env_overrides() -> Vec<(&'static str, OsString)> {
+    framework_shell_env_overrides_from(|key| env::var_os(key))
+}
+
+fn framework_shell_env_overrides_from(
+    get_env: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(&'static str, OsString)> {
+    let mut values = Vec::new();
+    for key in FRAMEWORK_SHELL_ENV_KEYS {
+        if let Some(value) = get_env(key) {
+            values.push((*key, value));
+        }
+    }
+    if let Some(value) = get_env("FRAMEWORK_SHELLS_REPO_FINGERPRINT")
+        .or_else(|| get_env("FRAMEWORK_SHELLS_SECRET_FINGERPRINT"))
+    {
+        values.push(("FRAMEWORK_SHELLS_SECRET_FINGERPRINT", value));
+    }
+    values
 }
 
 async fn read_adapter_stdout(
@@ -429,5 +462,44 @@ mod tests {
             }
             other => panic!("unexpected adapter event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn framework_shell_env_maps_repo_fingerprint_to_secret_fingerprint() {
+        let values = HashMap::from([
+            (
+                "FRAMEWORK_SHELLS_BASE_DIR",
+                OsString::from("/example/framework_shells"),
+            ),
+            ("FRAMEWORK_SHELLS_SECRET", OsString::from("secret")),
+            (
+                "FRAMEWORK_SHELLS_REPO_FINGERPRINT",
+                OsString::from("repo-fingerprint"),
+            ),
+            (
+                "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID",
+                OsString::from("123"),
+            ),
+        ]);
+        let overrides = framework_shell_env_overrides_from(|key| values.get(key).cloned());
+
+        assert_eq!(
+            overrides,
+            vec![
+                (
+                    "FRAMEWORK_SHELLS_BASE_DIR",
+                    OsString::from("/example/framework_shells")
+                ),
+                ("FRAMEWORK_SHELLS_SECRET", OsString::from("secret")),
+                (
+                    "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID",
+                    OsString::from("123")
+                ),
+                (
+                    "FRAMEWORK_SHELLS_SECRET_FINGERPRINT",
+                    OsString::from("repo-fingerprint")
+                ),
+            ]
+        );
     }
 }
