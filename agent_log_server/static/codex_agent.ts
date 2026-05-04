@@ -1976,11 +1976,11 @@ document.addEventListener('DOMContentLoaded', () => {
     loadAgentOptions: () => { void loadAgentOptions(); },
     loadModelOptions: () => { void loadModelOptions(); },
     loadRuntimeOptions: (agentId, conversationId) => { void loadRuntimeOptions(agentId, conversationId); },
-    updateEffortOptionsForModel: (model) => { updateEffortOptionsForModel(model); },
-    helperFns: {
-      openSettingsModal,
-      closeSettingsModal,
-      saveSettings,
+      updateEffortOptionsForModel: (model) => { updateEffortOptionsForModel(model); },
+      helperFns: {
+        openSettingsModal,
+        closeSettingsModal,
+        saveSettings,
       onAgentChange: async (agentId: string) => { await loadExtensionUiFeatures(agentId); },
       openSplashSettingsModal,
       closeSplashSettingsModal,
@@ -2004,6 +2004,34 @@ document.addEventListener('DOMContentLoaded', () => {
       uiRpc: uiRpcClient,
       waitForWs,
       fetchAppConfig,
+      listSplashConversations: () => conversationList.map((item) => ({ ...item })),
+      refreshSplashConversations: async () => {
+        await fetchConversations();
+        return conversationList.map((item) => ({ ...item }));
+      },
+      getActiveConversation: () => ({
+        conversation_id: clientConversationId || conversationMeta.conversation_id || null,
+        active_view: activeView,
+        meta: { ...conversationMeta },
+      }),
+      openSplashConversation: async (conversationId: string, view = 'conversation') => {
+        if (typeof conversationId !== 'string' || !conversationId.trim()) {
+          throw new Error('conversationId is required');
+        }
+        const targetView = typeof view === 'string' && view.trim() ? view.trim() : 'conversation';
+        await selectConversationWithView(conversationId.trim(), targetView);
+        return {
+          conversation_id: clientConversationId || conversationMeta.conversation_id || conversationId.trim(),
+          active_view: activeView,
+        };
+      },
+      getSplashConversationRows: () => Array.from(
+        conversationListEl?.querySelectorAll<HTMLElement>('.conversation-row') || [],
+      ).map((row) => ({
+        text: row.textContent?.trim().replace(/\s+/g, ' ') || '',
+        active: row.classList.contains('active'),
+        pinned: row.classList.contains('pinned'),
+      })),
       formatJsonSetting,
       parseJsonSetting,
         openDropdownMenu,

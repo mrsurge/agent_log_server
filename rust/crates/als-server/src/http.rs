@@ -1,4 +1,5 @@
 use crate::adapter_routes;
+use crate::conversation_routes;
 use crate::socketio::register_socket_namespaces;
 use crate::state::AppState;
 use crate::static_assets;
@@ -8,12 +9,13 @@ use socketioxide::SocketIo;
 use tower_http::trace::TraceLayer;
 
 pub fn build_router(state: AppState) -> Router {
-    let (socket_layer, io) = SocketIo::new_layer();
+    let (socket_layer, io) = SocketIo::builder().with_state(state.clone()).build_layer();
     register_socket_namespaces(&io);
 
     Router::new()
         .merge(static_assets::routes(&state.config.roots.static_dir))
         .merge(adapter_routes::routes())
+        .merge(conversation_routes::routes())
         .route("/api/health", get(health))
         .with_state(state)
         .layer(socket_layer)

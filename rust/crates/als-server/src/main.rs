@@ -1,10 +1,15 @@
 mod adapter_process;
 mod adapter_routes;
 mod config;
+mod conversation_routes;
+mod conversation_rpc;
+mod conversation_store;
 mod http;
+mod settings_rpc;
 mod socketio;
 mod state;
 mod static_assets;
+mod ui_rpc;
 
 use crate::config::ServerConfig;
 use crate::http::build_router;
