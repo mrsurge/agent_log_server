@@ -9,6 +9,8 @@ pub const ADAPTER_PROTOCOL_VERSION: &str = "0.1.0";
 pub mod methods {
     pub const EXTENSION_INITIALIZE: &str = "extension.initialize";
     pub const EXTENSION_SHUTDOWN: &str = "extension.shutdown";
+    pub const EXTENSION_GET_SETTINGS_SCHEMA: &str = "extension.get_settings_schema";
+    pub const EXTENSION_GET_SPLASH_SCHEMA: &str = "extension.get_splash_schema";
     pub const EXTENSION_LIST_MODELS: &str = "extension.list_models";
     pub const EXTENSION_LIST_SESSIONS: &str = "extension.list_sessions";
     pub const CONVERSATION_START: &str = "conversation.start";

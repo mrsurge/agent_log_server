@@ -58,6 +58,14 @@ class ExtensionLoaderModule(Protocol):
 
     def list_extensions(self) -> list[JsonMap]: ...
 
+    def get_static_settings_schema(self, extension_id: str) -> JsonMap | None: ...
+
+    async def list_models(self, extension_id: str) -> object: ...
+
+    async def get_settings_schema(self, extension_id: str) -> JsonMap | None: ...
+
+    async def get_splash_schema(self, extension_id: str) -> JsonMap | None: ...
+
 
 @dataclass
 class AdapterState:
@@ -135,6 +143,10 @@ class ExtensionJsonRpcAdapter:
         if method == AdapterMethod.EXTENSION_SHUTDOWN:
             await self._stop_supported_handlers()
             return {"ok": True}
+        if method == AdapterMethod.EXTENSION_GET_SETTINGS_SCHEMA:
+            return await self._settings_schema(params)
+        if method == AdapterMethod.EXTENSION_GET_SPLASH_SCHEMA:
+            return await self._splash_schema(params)
         if method == AdapterMethod.EXTENSION_LIST_MODELS:
             return await self._list_models(params)
         if method == AdapterMethod.CONVERSATION_START:
@@ -185,14 +197,13 @@ class ExtensionJsonRpcAdapter:
 
     async def _list_models(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
-        handler = self._supported_handler(extension_id)
-        list_models = getattr(handler, "list_models", None)
-        if not callable(list_models):
-            raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support model listing")
-        result = list_models()
-        if hasattr(result, "__await__"):
-            result = await cast(Awaitable[object], result)
-        models = result if isinstance(result, list) else []
+        self._extension_info(extension_id)
+        result = await self._loader.list_models(extension_id)
+        if isinstance(result, dict):
+            raw_models = result.get("models")
+            models = raw_models if isinstance(raw_models, list) else []
+        else:
+            models = result if isinstance(result, list) else []
         return {
             "models": [
                 _adapter_model(cast(JsonMap, model)).to_json()
@@ -200,6 +211,26 @@ class ExtensionJsonRpcAdapter:
                 if isinstance(model, dict) and isinstance(model.get("id"), str)
             ]
         }
+
+    async def _settings_schema(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        self._extension_info(extension_id)
+        schema = await self._loader.get_settings_schema(extension_id)
+        if not isinstance(schema, dict) or not schema:
+            schema = self._loader.get_static_settings_schema(extension_id)
+        if isinstance(schema, dict) and schema:
+            return dict(schema)
+        return {"version": "1", "fields": []}
+
+    async def _splash_schema(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        self._extension_info(extension_id)
+        schema = await self._loader.get_splash_schema(extension_id)
+        if isinstance(schema, dict) and schema:
+            result = dict(schema)
+            result.setdefault("extension_id", extension_id)
+            return result
+        return {"version": "1", "extension_id": extension_id, "fields": []}
 
     async def _conversation_start(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)

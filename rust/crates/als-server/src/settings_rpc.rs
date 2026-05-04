@@ -1,6 +1,6 @@
 use crate::extension_registry::ExtensionRegistryEntry;
 use crate::state::AppState;
-use als_adapter_protocol::JsonMap;
+use als_adapter_protocol::{JsonMap, methods};
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -27,14 +27,14 @@ async fn handle_rpc_request(
     ack: AckSender,
 ) {
     let id = request.id.clone();
-    let response = match dispatch_rpc(&state, request) {
+    let response = match dispatch_rpc(&state, request).await {
         Ok(result) => RpcAck::Success(SuccessResponse::new(id, result)),
         Err(error) => RpcAck::Error(ErrorResponse::new(id, error)),
     };
     let _ = ack.send(&response);
 }
 
-fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value, RpcError> {
+async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value, RpcError> {
     if request.jsonrpc != JSONRPC_VERSION {
         return Err(rpc_error(-32600, "Invalid JSON-RPC version"));
     }
@@ -50,8 +50,23 @@ fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value, RpcE
         "extension.enabled.set" | "extension.install" | "extension.session.bind" => Ok(
             json!({"ok": false, "error": format!("{} is not implemented in ALS-RS yet", request.method), "transport": "rpc"}),
         ),
-        "extension.splashSchema.get" | "extension.settingsSchema.get" => {
-            Ok(json!({"schema": {}, "transport": "rpc"}))
+        "extension.settingsSchema.get" => {
+            extension_schema(
+                state,
+                &request.params,
+                methods::EXTENSION_GET_SETTINGS_SCHEMA,
+                SchemaKind::Settings,
+            )
+            .await
+        }
+        "extension.splashSchema.get" => {
+            extension_schema(
+                state,
+                &request.params,
+                methods::EXTENSION_GET_SPLASH_SCHEMA,
+                SchemaKind::Splash,
+            )
+            .await
         }
         "extension.splashAction.run" => Ok(json!({"ok": false, "transport": "rpc"})),
         "extension.runtimeOptions.get" => Ok(json!({
@@ -95,7 +110,7 @@ fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value, RpcE
             "plan_steps": [],
             "transport": "rpc"
         })),
-        "extension.models.list" => Ok(json!({"models": [], "transport": "rpc"})),
+        "extension.models.list" => extension_models(state, &request.params).await,
         "extension.sessions.list" => Ok(json!({"sessions": [], "transport": "rpc"})),
         _ => Err(rpc_error(
             -32601,
@@ -112,6 +127,92 @@ fn extension_id_param(params: &JsonMap) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+async fn extension_schema(
+    state: &AppState,
+    params: &JsonMap,
+    adapter_method: &str,
+    kind: SchemaKind,
+) -> Result<Value, RpcError> {
+    let extension_id = require_extension_id(params)?;
+    ensure_registered_extension(state, &extension_id)?;
+    let mut schema = adapter_extension_request(state, &extension_id, adapter_method).await?;
+    if let Value::Object(ref mut object) = schema {
+        if matches!(kind, SchemaKind::Splash) {
+            object
+                .entry("extension_id")
+                .or_insert_with(|| Value::String(extension_id.clone()));
+        }
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        return Ok(schema);
+    }
+    match kind {
+        SchemaKind::Settings => Ok(json!({"version": "1", "fields": [], "transport": "rpc"})),
+        SchemaKind::Splash => Ok(
+            json!({"version": "1", "extension_id": extension_id, "fields": [], "transport": "rpc"}),
+        ),
+    }
+}
+
+async fn extension_models(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let extension_id = require_extension_id(params)?;
+    ensure_registered_extension(state, &extension_id)?;
+    let mut result =
+        adapter_extension_request(state, &extension_id, methods::EXTENSION_LIST_MODELS).await?;
+    if let Value::Object(ref mut object) = result {
+        object
+            .entry("models")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        return Ok(result);
+    }
+    Ok(json!({"models": [], "transport": "rpc"}))
+}
+
+async fn adapter_extension_request(
+    state: &AppState,
+    extension_id: &str,
+    method: &str,
+) -> Result<Value, RpcError> {
+    state
+        .adapter
+        .initialize_extension(extension_id)
+        .await
+        .map_err(internal_rpc_error)?;
+    state
+        .adapter
+        .client()
+        .await
+        .map_err(internal_rpc_error)?
+        .request_value(method, json!({ "extension_id": extension_id }))
+        .await
+        .map_err(internal_rpc_error)
+}
+
+fn require_extension_id(params: &JsonMap) -> Result<String, RpcError> {
+    extension_id_param(params).ok_or_else(|| rpc_error(-32602, "extension_id is required"))
+}
+
+fn ensure_registered_extension(state: &AppState, extension_id: &str) -> Result<(), RpcError> {
+    if state.extensions.get(extension_id).is_some() {
+        Ok(())
+    } else {
+        Err(rpc_error(
+            -32602,
+            format!("Extension not found: {extension_id}"),
+        ))
+    }
+}
+
+fn internal_rpc_error(error: impl std::fmt::Display) -> RpcError {
+    rpc_error(-32603, error.to_string())
+}
+
+#[derive(Copy, Clone)]
+enum SchemaKind {
+    Settings,
+    Splash,
 }
 
 fn request_cards_for_entry(extension_id: &str, entry: &ExtensionRegistryEntry) -> Vec<Value> {
