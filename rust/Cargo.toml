@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "crates/als-adapter-protocol",
+    "crates/als-dto",
+    "crates/als-jsonrpc",
+    "crates/als-server",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/mrsurge/agent_log_server"
+rust-version = "1.93"
+
+[workspace.dependencies]
+als-adapter-protocol = { path = "crates/als-adapter-protocol" }
+als-dto = { path = "crates/als-dto" }
+als-jsonrpc = { path = "crates/als-jsonrpc" }
+anyhow = "1"
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socketioxide = "0.18"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

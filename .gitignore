@@ -16,3 +16,4 @@ scripts
 node_modules/
 static/dist/
 .tmp/
+rust/target/
