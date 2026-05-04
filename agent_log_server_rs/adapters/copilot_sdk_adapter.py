@@ -391,8 +391,10 @@ def _rpc_id(value: object) -> RpcId:
 
 async def amain() -> int:
     adapter = CopilotSdkJsonRpcAdapter()
+    protocol_stdout = sys.stdout
+    sys.stdout = sys.stderr
     try:
-        return await adapter.run_stdio()
+        return await adapter.run_stdio(sys.stdin, protocol_stdout)
     finally:
         await adapter._client.stop_client()
 

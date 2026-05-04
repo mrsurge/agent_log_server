@@ -87,6 +87,7 @@ def _build_env(args: BootstrapArgs) -> dict[str, str]:
     env["ALS_RS_CACHE_DIR"] = str(cache_dir)
     env["ALS_RS_CONFIG_DIR"] = str(config_dir)
     env["ALS_RS_STATIC_DIR"] = str(static_dir)
+    env["ALS_RS_PYTHON_BIN"] = sys.executable
     return env
 
 

@@ -10,6 +10,12 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub roots: RuntimeRoots,
+    pub adapters: AdapterConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct AdapterConfig {
+    pub copilot_python: String,
 }
 
 impl ServerConfig {
@@ -31,6 +37,10 @@ impl ServerConfig {
                 cache_dir: env_path_or_default("ALS_RS_CACHE_DIR", default_cache_dir),
                 config_dir: env_path_or_default("ALS_RS_CONFIG_DIR", default_data_dir),
                 static_dir: env_path_or_default("ALS_RS_STATIC_DIR", default_static_dir),
+            },
+            adapters: AdapterConfig {
+                copilot_python: env::var("ALS_RS_PYTHON_BIN")
+                    .unwrap_or_else(|_| "python".to_owned()),
             },
         };
         config.ensure_roots()?;

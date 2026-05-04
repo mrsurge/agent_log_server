@@ -1,3 +1,4 @@
+use crate::adapter_routes;
 use crate::socketio::register_socket_namespaces;
 use crate::state::AppState;
 use crate::static_assets;
@@ -12,6 +13,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .merge(static_assets::routes(&state.config.roots.static_dir))
+        .merge(adapter_routes::routes())
         .route("/api/health", get(health))
         .with_state(state)
         .layer(socket_layer)

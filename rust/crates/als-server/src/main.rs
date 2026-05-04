@@ -1,3 +1,5 @@
+mod adapter_process;
+mod adapter_routes;
 mod config;
 mod http;
 mod socketio;
