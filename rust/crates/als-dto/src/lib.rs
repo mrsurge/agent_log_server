@@ -10,6 +10,7 @@ pub struct RuntimeRoots {
     pub data_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub config_dir: PathBuf,
+    pub static_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

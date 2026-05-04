@@ -11,7 +11,7 @@ pub fn build_router(state: AppState) -> Router {
     register_socket_namespaces(&io);
 
     Router::new()
-        .merge(static_assets::routes())
+        .merge(static_assets::routes(&state.config.roots.static_dir))
         .route("/api/health", get(health))
         .with_state(state)
         .layer(socket_layer)

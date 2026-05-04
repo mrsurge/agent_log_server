@@ -30,6 +30,7 @@ impl ServerConfig {
                 data_dir: env_path_or_default("ALS_RS_DATA_DIR", default_data_dir),
                 cache_dir: env_path_or_default("ALS_RS_CACHE_DIR", default_cache_dir),
                 config_dir: env_path_or_default("ALS_RS_CONFIG_DIR", default_data_dir),
+                static_dir: env_path_or_default("ALS_RS_STATIC_DIR", default_static_dir),
             },
         };
         config.ensure_roots()?;
@@ -73,6 +74,15 @@ fn default_cache_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(default_home_cache)
         .join(APP_ID)
+}
+
+fn default_static_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("agent_log_server")
+        .join("static")
 }
 
 fn default_home_local_share() -> PathBuf {
