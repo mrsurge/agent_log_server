@@ -43,6 +43,8 @@ pub mod events {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ExtensionInitializeParams {
     pub extension_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions_dir: Option<PathBuf>,
     pub cwd: PathBuf,
     pub data_dir: PathBuf,
     pub cache_dir: PathBuf,
@@ -132,6 +134,7 @@ pub struct AdapterSessionInfo {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ConversationStartParams {
+    pub extension_id: String,
     pub conversation_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
@@ -141,6 +144,7 @@ pub struct ConversationStartParams {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ConversationResumeParams {
+    pub extension_id: String,
     pub conversation_id: String,
     pub provider_session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,6 +155,7 @@ pub struct ConversationResumeParams {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ConversationSendParams {
+    pub extension_id: String,
     pub conversation_id: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

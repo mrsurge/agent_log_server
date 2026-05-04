@@ -139,6 +139,7 @@ class ExtensionInitializeParams:
     data_dir: Path
     cache_dir: Path
     config_dir: Path
+    extensions_dir: Path | None = None
     settings: JsonMap = field(default_factory=dict)
 
     def to_json(self) -> JsonMap:
@@ -149,6 +150,8 @@ class ExtensionInitializeParams:
             "cache_dir": str(self.cache_dir),
             "config_dir": str(self.config_dir),
         }
+        if self.extensions_dir:
+            payload["extensions_dir"] = str(self.extensions_dir)
         if self.settings:
             payload["settings"] = dict(self.settings)
         return payload
@@ -198,6 +201,7 @@ class AdapterModelInfo:
 
 @dataclass(frozen=True)
 class ConversationSendParams:
+    extension_id: str
     conversation_id: str
     text: str
     turn_id: str | None = None
@@ -207,7 +211,11 @@ class ConversationSendParams:
     settings: JsonMap = field(default_factory=dict)
 
     def to_json(self) -> JsonMap:
-        payload: JsonMap = {"conversation_id": self.conversation_id, "text": self.text}
+        payload: JsonMap = {
+            "extension_id": self.extension_id,
+            "conversation_id": self.conversation_id,
+            "text": self.text,
+        }
         if self.turn_id:
             payload["turn_id"] = self.turn_id
         if self.cwd:

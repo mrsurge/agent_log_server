@@ -4,6 +4,7 @@ mod config;
 mod conversation_routes;
 mod conversation_rpc;
 mod conversation_store;
+mod extension_registry;
 mod http;
 mod settings_rpc;
 mod socketio;

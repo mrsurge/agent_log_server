@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-log-server"
-version = "0.2.29"
+version = "0.2.30"
 description = "FastAPI server for Codex Agent UI, agent log, and TE2-hosted orchestration."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,6 +13,7 @@ dynamic = ["dependencies"]
 [project.scripts]
 als-rs = "agent_log_server_rs.bootstrap:main"
 als-rs-copilot-adapter = "agent_log_server_rs.adapters.copilot_sdk_adapter:main"
+als-rs-extension-adapter = "agent_log_server_rs.adapters.extension_adapter:main"
 codex-agent = "agent_log_server.server:main"
 
 [tool.setuptools]

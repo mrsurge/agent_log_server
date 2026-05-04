@@ -267,6 +267,14 @@ async fn conversation_send(
             meta.conversation_id
         }
     };
+    let meta = state
+        .conversations
+        .load_meta(&conversation_id)
+        .map_err(internal_error)?;
+    let extension_id = optional_str(&params, "extension_id")
+        .or(meta.agent_type.as_deref())
+        .unwrap_or("copilot-sdk")
+        .to_owned();
 
     let user_event = json!({
         "type": "message",
@@ -281,21 +289,18 @@ async fn conversation_send(
     emit_rpc_notification(&socket, "conversation.user.message", transcript.clone());
 
     let adapter_params = ConversationSendParams {
+        extension_id: extension_id.clone(),
         conversation_id: conversation_id.clone(),
         text,
         turn_id: optional_str(&params, "turn_id").map(ToOwned::to_owned),
         cwd: None,
         attachments: Vec::new(),
         toast_context: None,
-        settings: state
-            .conversations
-            .load_meta(&conversation_id)
-            .map_err(internal_error)?
-            .settings,
+        settings: meta.settings,
     };
     state
         .adapter
-        .initialize_copilot()
+        .initialize_extension(&extension_id)
         .await
         .map_err(internal_error)?;
     let adapter_result = state
@@ -571,6 +576,7 @@ mod tests {
         let state = AppState::new(ServerConfig {
             host: "127.0.0.1".to_owned(),
             port: 0,
+            extensions_dir: root.join("extensions"),
             roots: RuntimeRoots {
                 data_dir: root.join("data"),
                 cache_dir: root.join("cache"),

@@ -54,6 +54,7 @@ async fn start_copilot_conversation(
 ) -> Result<Json<ConversationAckResult>, AdapterRouteError> {
     state.adapter.initialize_copilot().await?;
     let params = ConversationStartParams {
+        extension_id: "copilot-sdk".to_owned(),
         conversation_id,
         cwd: body.cwd.map(Into::into),
         settings: body.settings.unwrap_or_default(),
@@ -74,6 +75,7 @@ async fn send_copilot_message(
 ) -> Result<Json<ConversationAckResult>, AdapterRouteError> {
     state.adapter.initialize_copilot().await?;
     let params = ConversationSendParams {
+        extension_id: "copilot-sdk".to_owned(),
         conversation_id,
         text: body.text,
         turn_id: body.turn_id,

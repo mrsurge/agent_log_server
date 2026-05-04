@@ -8,6 +8,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
+    env,
+    ffi::OsString,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc,
@@ -55,16 +58,25 @@ impl AdapterSupervisor {
 
         let client = Arc::new(AdapterClient::spawn(
             self.config.adapters.copilot_python.clone(),
+            self.config.extensions_dir.parent().map(Path::to_path_buf),
             self.events.clone(),
         )?);
         *guard = Some(client.clone());
         Ok(client)
     }
 
-    pub async fn initialize_copilot(&self) -> Result<Value> {
+    pub async fn initialize_extension(&self, extension_id: &str) -> Result<Value> {
         let params = ExtensionInitializeParams {
-            extension_id: "copilot-sdk".to_owned(),
-            cwd: std::env::current_dir().unwrap_or_else(|_| self.config.roots.data_dir.clone()),
+            extension_id: extension_id.to_owned(),
+            extensions_dir: Some(self.config.extensions_dir.clone()),
+            cwd: self
+                .config
+                .extensions_dir
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| self.config.roots.data_dir.clone())
+                }),
             data_dir: self.config.roots.data_dir.clone(),
             cache_dir: self.config.roots.cache_dir.clone(),
             config_dir: self.config.roots.config_dir.clone(),
@@ -74,6 +86,10 @@ impl AdapterSupervisor {
             .await?
             .request_value(methods::EXTENSION_INITIALIZE, params)
             .await
+    }
+
+    pub async fn initialize_copilot(&self) -> Result<Value> {
+        self.initialize_extension("copilot-sdk").await
     }
 }
 
@@ -85,15 +101,24 @@ pub struct AdapterClient {
 }
 
 impl AdapterClient {
-    pub fn spawn(python: String, events: AdapterEventSink) -> Result<Self> {
+    pub fn spawn(
+        python: String,
+        python_path_root: Option<PathBuf>,
+        events: AdapterEventSink,
+    ) -> Result<Self> {
         let mut command = Command::new(&python);
         command
             .arg("-m")
-            .arg("agent_log_server_rs.adapters.copilot_sdk_adapter")
+            .arg("agent_log_server_rs.adapters.extension_adapter")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
+        if let Some(root) = python_path_root.as_deref() {
+            if let Some(pythonpath) = pythonpath_with_root(root, env::var_os("PYTHONPATH")) {
+                command.env("PYTHONPATH", pythonpath);
+            }
+        }
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn Copilot adapter via {python}"))?;
@@ -162,6 +187,14 @@ impl AdapterClient {
         stdin.flush().await?;
         Ok(())
     }
+}
+
+fn pythonpath_with_root(root: &Path, existing: Option<OsString>) -> Option<OsString> {
+    let mut paths = vec![root.to_path_buf()];
+    if let Some(existing) = existing {
+        paths.extend(env::split_paths(&existing));
+    }
+    env::join_paths(paths).ok()
 }
 
 async fn read_adapter_stdout(

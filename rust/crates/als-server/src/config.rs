@@ -9,6 +9,7 @@ use std::path::PathBuf;
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    pub extensions_dir: PathBuf,
     pub roots: RuntimeRoots,
     pub adapters: AdapterConfig,
 }
@@ -32,6 +33,7 @@ impl ServerConfig {
         let config = Self {
             host,
             port,
+            extensions_dir: env_path_or_default("ALS_RS_EXTENSIONS_DIR", default_extensions_dir),
             roots: RuntimeRoots {
                 data_dir: env_path_or_default("ALS_RS_DATA_DIR", default_data_dir),
                 cache_dir: env_path_or_default("ALS_RS_CACHE_DIR", default_cache_dir),
@@ -87,12 +89,18 @@ fn default_cache_dir() -> PathBuf {
 }
 
 fn default_static_dir() -> PathBuf {
+    default_repo_root().join("agent_log_server").join("static")
+}
+
+fn default_extensions_dir() -> PathBuf {
+    default_repo_root().join("extensions")
+}
+
+fn default_repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("..")
-        .join("agent_log_server")
-        .join("static")
 }
 
 fn default_home_local_share() -> PathBuf {
