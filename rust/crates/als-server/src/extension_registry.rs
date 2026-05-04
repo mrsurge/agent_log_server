@@ -1,34 +1,125 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
+
+const EXTENSIONS_STATE_FILE: &str = "extensions_state.json";
 
 #[derive(Clone, Debug)]
 pub struct ExtensionRegistry {
+    inner: Arc<RwLock<ExtensionRegistryInner>>,
+}
+
+#[derive(Debug)]
+struct ExtensionRegistryInner {
+    extensions_dir: PathBuf,
+    config_dir: Option<PathBuf>,
     entries: Vec<ExtensionRegistryEntry>,
 }
 
 impl ExtensionRegistry {
-    pub fn load(extensions_dir: PathBuf) -> Result<Self> {
+    pub fn load_with_config(extensions_dir: PathBuf, config_dir: Option<PathBuf>) -> Result<Self> {
         let entries = discover_extensions(&extensions_dir)?;
-        Ok(Self { entries })
+        let mut entries = entries;
+        apply_enabled_overrides(&mut entries, config_dir.as_ref())?;
+        Ok(Self::from_parts(extensions_dir, config_dir, entries))
     }
 
-    pub fn load_empty(_extensions_dir: PathBuf) -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+    pub fn load_empty_with_config(extensions_dir: PathBuf, config_dir: Option<PathBuf>) -> Self {
+        Self::from_parts(extensions_dir, config_dir, Vec::new())
+    }
+
+    pub fn reload(&self) -> Result<Vec<ExtensionRegistryEntry>> {
+        let extensions_dir = self.extensions_dir();
+        let config_dir = self.config_dir();
+        let mut entries = discover_extensions(&extensions_dir)?;
+        apply_enabled_overrides(&mut entries, config_dir.as_ref())?;
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.entries = entries.clone();
+        Ok(entries)
     }
 
     pub fn list(&self) -> Vec<ExtensionRegistryEntry> {
-        self.entries.clone()
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries
+            .clone()
     }
 
     pub fn get(&self, extension_id: &str) -> Option<ExtensionRegistryEntry> {
-        self.entries
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries
             .iter()
             .find(|entry| entry.id == extension_id)
             .cloned()
+    }
+
+    pub fn set_enabled(
+        &self,
+        extension_id: &str,
+        enabled: bool,
+    ) -> Result<Option<ExtensionRegistryEntry>> {
+        if self.get(extension_id).is_none() {
+            return Ok(None);
+        }
+        let config_dir = self.config_dir().ok_or_else(|| {
+            anyhow!("ALS-RS extension enablement requires a configured config dir")
+        })?;
+        write_enabled_override(&config_dir, extension_id, enabled)?;
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = guard
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == extension_id)
+        else {
+            return Ok(None);
+        };
+        entry.enabled = enabled;
+        entry.active = enabled && entry.dependency_ok;
+        Ok(Some(entry.clone()))
+    }
+
+    fn from_parts(
+        extensions_dir: PathBuf,
+        config_dir: Option<PathBuf>,
+        entries: Vec<ExtensionRegistryEntry>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(ExtensionRegistryInner {
+                extensions_dir,
+                config_dir,
+                entries,
+            })),
+        }
+    }
+
+    fn extensions_dir(&self) -> PathBuf {
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extensions_dir
+            .clone()
+    }
+
+    fn config_dir(&self) -> Option<PathBuf> {
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .config_dir
+            .clone()
     }
 }
 
@@ -181,6 +272,68 @@ fn read_json_object(path: &PathBuf) -> Result<Map<String, Value>> {
     Ok(object_or_empty(&value))
 }
 
+fn apply_enabled_overrides(
+    entries: &mut [ExtensionRegistryEntry],
+    config_dir: Option<&PathBuf>,
+) -> Result<()> {
+    let Some(config_dir) = config_dir else {
+        return Ok(());
+    };
+    let state_path = config_dir.join(EXTENSIONS_STATE_FILE);
+    if !state_path.is_file() {
+        return Ok(());
+    }
+    let state = read_json_object(&state_path)?;
+    let Some(extensions) = state.get("extensions").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let Some(enabled) = extensions
+            .get(&entry.id)
+            .and_then(Value::as_object)
+            .and_then(|item| item.get("enabled"))
+            .and_then(Value::as_bool)
+        else {
+            continue;
+        };
+        entry.enabled = enabled;
+        entry.active = enabled && entry.dependency_ok;
+    }
+    Ok(())
+}
+
+fn write_enabled_override(config_dir: &PathBuf, extension_id: &str, enabled: bool) -> Result<()> {
+    fs::create_dir_all(config_dir).with_context(|| {
+        format!(
+            "failed to create ALS-RS config dir {}",
+            config_dir.display()
+        )
+    })?;
+    let state_path = config_dir.join(EXTENSIONS_STATE_FILE);
+    let mut state = if state_path.is_file() {
+        read_json_object(&state_path)?
+    } else {
+        Map::new()
+    };
+    let extensions_value = state
+        .entry("extensions".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !extensions_value.is_object() {
+        *extensions_value = Value::Object(Map::new());
+    }
+    let extensions = extensions_value
+        .as_object_mut()
+        .expect("extensions state should be an object after normalization");
+    let mut extension_state = object_or_empty(extensions.get(extension_id).unwrap_or(&Value::Null));
+    extension_state.insert("enabled".to_owned(), Value::Bool(enabled));
+    extensions.insert(extension_id.to_owned(), Value::Object(extension_state));
+
+    let raw = serde_json::to_string_pretty(&Value::Object(state))?;
+    fs::write(&state_path, format!("{raw}\n"))
+        .with_context(|| format!("failed to write extension state {}", state_path.display()))?;
+    Ok(())
+}
+
 fn object_or_empty(value: &Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
@@ -217,7 +370,7 @@ mod tests {
         )
         .unwrap();
 
-        let registry = ExtensionRegistry::load(ext_dir).unwrap();
+        let registry = ExtensionRegistry::load_with_config(ext_dir, None).unwrap();
         let entries = registry.list();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "copilot-sdk");
@@ -230,6 +383,75 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(true)
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reload_refreshes_registry_entries_from_disk() {
+        let root = std::env::temp_dir().join(format!("als-rs-ext-reg-reload-{}", unix_millis()));
+        let ext_dir = root.join("extensions");
+        fs::create_dir_all(ext_dir.join("copilot_sdk")).unwrap();
+        fs::create_dir_all(ext_dir.join("codex_ext")).unwrap();
+        fs::write(
+            ext_dir.join("extensions.json"),
+            r#"{"version":"1.0","extensions":[{"id":"copilot-sdk","name":"GitHub Copilot","type":"copilot_sdk","path":"copilot_sdk","enabled":true}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            ext_dir.join("copilot_sdk").join("manifest.json"),
+            r#"{"id":"copilot-sdk","name":"GitHub Copilot","version":"1.0.0","type":"copilot_sdk"}"#,
+        )
+        .unwrap();
+        fs::write(
+            ext_dir.join("codex_ext").join("manifest.json"),
+            r#"{"id":"codex-ext","name":"Codex","version":"1.0.0","type":"codex_ext"}"#,
+        )
+        .unwrap();
+
+        let registry = ExtensionRegistry::load_with_config(ext_dir.clone(), None).unwrap();
+        assert_eq!(registry.list().len(), 1);
+        fs::write(
+            ext_dir.join("extensions.json"),
+            r#"{"version":"1.0","extensions":[{"id":"copilot-sdk","name":"GitHub Copilot","type":"copilot_sdk","path":"copilot_sdk","enabled":true},{"id":"codex-ext","name":"Codex","type":"codex_ext","path":"codex_ext","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        let entries = registry.reload().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(registry.get("codex-ext").is_some());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn set_enabled_persists_overlay_and_updates_active_state() {
+        let root = std::env::temp_dir().join(format!("als-rs-ext-reg-enabled-{}", unix_millis()));
+        let ext_dir = root.join("extensions");
+        let config_dir = root.join("config");
+        fs::create_dir_all(ext_dir.join("copilot_sdk")).unwrap();
+        fs::write(
+            ext_dir.join("extensions.json"),
+            r#"{"version":"1.0","extensions":[{"id":"copilot-sdk","name":"GitHub Copilot","type":"copilot_sdk","path":"copilot_sdk","enabled":true}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            ext_dir.join("copilot_sdk").join("manifest.json"),
+            r#"{"id":"copilot-sdk","name":"GitHub Copilot","version":"1.0.0","type":"copilot_sdk"}"#,
+        )
+        .unwrap();
+
+        let registry =
+            ExtensionRegistry::load_with_config(ext_dir.clone(), Some(config_dir.clone())).unwrap();
+        let updated = registry.set_enabled("copilot-sdk", false).unwrap().unwrap();
+        assert!(!updated.enabled);
+        assert!(!updated.active);
+        assert!(!registry.get("copilot-sdk").unwrap().active);
+
+        let reloaded = ExtensionRegistry::load_with_config(ext_dir, Some(config_dir)).unwrap();
+        let entry = reloaded.get("copilot-sdk").unwrap();
+        assert!(!entry.enabled);
+        assert!(!entry.active);
 
         let _ = fs::remove_dir_all(root);
     }

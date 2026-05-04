@@ -18,6 +18,7 @@ def _put_optional(payload: JsonMap, key: str, value: object | None) -> None:
 class AdapterMethod(StrEnum):
     EXTENSION_INITIALIZE = "extension.initialize"
     EXTENSION_SHUTDOWN = "extension.shutdown"
+    EXTENSION_RELOAD = "extension.reload"
     EXTENSION_GET_SETTINGS_SCHEMA = "extension.get_settings_schema"
     EXTENSION_GET_SPLASH_SCHEMA = "extension.get_splash_schema"
     EXTENSION_LIST_MODELS = "extension.list_models"

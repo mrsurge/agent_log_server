@@ -5,7 +5,7 @@ use als_jsonrpc::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
     env,
@@ -95,6 +95,17 @@ impl AdapterSupervisor {
 
     pub async fn initialize_copilot(&self) -> Result<Value> {
         self.initialize_extension("copilot-sdk").await
+    }
+
+    pub async fn reload_extensions_if_running(&self) -> Result<Option<Value>> {
+        let client = self.client.lock().await.clone();
+        let Some(client) = client else {
+            return Ok(None);
+        };
+        let result = client
+            .request_value(methods::EXTENSION_RELOAD, json!({ "force": true }))
+            .await?;
+        Ok(Some(result))
     }
 }
 

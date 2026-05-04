@@ -45,9 +45,21 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
         "status.get" => Ok(json!({"running": true, "transport": "rpc"})),
         "extensions.list" => Ok(json!({"extensions": state.extensions.list(), "transport": "rpc"})),
         "extensions.reload" => {
-            Ok(json!({"ok": true, "extensions": state.extensions.list(), "transport": "rpc"}))
+            let extensions = state.extensions.reload().map_err(internal_rpc_error)?;
+            let adapter = state
+                .adapter
+                .reload_extensions_if_running()
+                .await
+                .map_err(internal_rpc_error)?;
+            Ok(json!({
+                "ok": true,
+                "extensions": extensions,
+                "adapter": adapter,
+                "transport": "rpc"
+            }))
         }
-        "extension.enabled.set" | "extension.install" | "extension.session.bind" => Ok(
+        "extension.enabled.set" => extension_enabled_set(state, &request.params).await,
+        "extension.install" | "extension.session.bind" => Ok(
             json!({"ok": false, "error": format!("{} is not implemented in ALS-RS yet", request.method), "transport": "rpc"}),
         ),
         "extension.settingsSchema.get" => {
@@ -127,6 +139,30 @@ fn extension_id_param(params: &JsonMap) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+async fn extension_enabled_set(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let extension_id = require_extension_id(params)?;
+    let enabled = params
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| rpc_error(-32602, "enabled boolean is required"))?;
+    let extension = state
+        .extensions
+        .set_enabled(&extension_id, enabled)
+        .map_err(internal_rpc_error)?
+        .ok_or_else(|| rpc_error(-32602, format!("Extension not found: {extension_id}")))?;
+    let adapter = state
+        .adapter
+        .reload_extensions_if_running()
+        .await
+        .map_err(internal_rpc_error)?;
+    Ok(json!({
+        "ok": true,
+        "extension": extension,
+        "adapter": adapter,
+        "transport": "rpc"
+    }))
 }
 
 async fn extension_schema(

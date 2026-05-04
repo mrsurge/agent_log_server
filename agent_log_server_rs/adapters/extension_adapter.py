@@ -33,6 +33,7 @@ from agent_log_server_rs.adapters.copilot_sdk_adapter import (
     _params_map,
     _required_string,
     _rpc_id,
+    _string_list,
     _string,
 )
 
@@ -57,6 +58,13 @@ class ExtensionLoaderModule(Protocol):
     def get_handler(self, extension_id: str) -> object | None: ...
 
     def list_extensions(self) -> list[JsonMap]: ...
+
+    def reload_extensions(
+        self,
+        changed_extension_ids: list[str] | None = None,
+        *,
+        force: bool = False,
+    ) -> list[JsonMap]: ...
 
     def get_static_settings_schema(self, extension_id: str) -> JsonMap | None: ...
 
@@ -143,6 +151,8 @@ class ExtensionJsonRpcAdapter:
         if method == AdapterMethod.EXTENSION_SHUTDOWN:
             await self._stop_supported_handlers()
             return {"ok": True}
+        if method == AdapterMethod.EXTENSION_RELOAD:
+            return self._reload(params)
         if method == AdapterMethod.EXTENSION_GET_SETTINGS_SCHEMA:
             return await self._settings_schema(params)
         if method == AdapterMethod.EXTENSION_GET_SPLASH_SCHEMA:
@@ -194,6 +204,13 @@ class ExtensionJsonRpcAdapter:
                 },
             ),
         ).to_json()
+
+    def _reload(self, params: JsonMap) -> JsonMap:
+        self._ensure_loader_initialized()
+        force = params.get("force") is True
+        changed_extension_ids = _string_list(params.get("changed_extension_ids"))
+        extensions = self._loader.reload_extensions(changed_extension_ids, force=force)
+        return {"ok": True, "extensions": list(extensions)}
 
     async def _list_models(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
