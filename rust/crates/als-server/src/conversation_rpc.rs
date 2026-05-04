@@ -1,4 +1,5 @@
 use crate::{
+    adapter_process::AdapterCapturedEvent,
     conversation_store::{
         ConversationMeta, ConversationMetaUpdate, CreateConversationRequest, TranscriptOffset,
     },
@@ -12,6 +13,8 @@ use socketioxide::{
     SocketIo,
     extract::{AckSender, Data, SocketRef, State},
 };
+use tokio::sync::broadcast::error::RecvError;
+use tracing::warn;
 
 const RPC_EVENT: &str = "rpc";
 const RPC_NOTIFY_EVENT: &str = "rpc.notify";
@@ -39,6 +42,25 @@ pub fn register_conversations_rpc_namespace(io: &SocketIo) {
             socket.on(RPC_EVENT, handle_rpc_request);
         },
     );
+}
+
+pub fn start_adapter_event_fanout(io: SocketIo, state: AppState) {
+    let mut adapter_events = state.adapter.events().subscribe();
+    tokio::spawn(async move {
+        loop {
+            match adapter_events.recv().await {
+                Ok(event) => {
+                    if let Err(error) = handle_adapter_event(&io, &state, event).await {
+                        warn!(error = %error.message, "failed to fan out adapter event");
+                    }
+                }
+                Err(RecvError::Lagged(count)) => {
+                    warn!(count, "ALS-RS adapter event fanout lagged");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 async fn handle_rpc_request(
@@ -290,6 +312,135 @@ async fn conversation_send(
     Ok(Value::Object(result))
 }
 
+async fn handle_adapter_event(
+    io: &SocketIo,
+    state: &AppState,
+    event: AdapterCapturedEvent,
+) -> Result<(), RpcError> {
+    match event {
+        AdapterCapturedEvent::Live(value) => forward_adapter_live_event(io, value).await,
+        AdapterCapturedEvent::Transcript(value) => persist_adapter_transcript(state, value),
+        AdapterCapturedEvent::Other(other) => {
+            let _ = (&other.method, &other.params);
+            Ok(())
+        }
+    }
+}
+
+async fn forward_adapter_live_event(io: &SocketIo, value: Value) -> Result<(), RpcError> {
+    let Some((_, event)) = adapter_conversation_object(value) else {
+        return Ok(());
+    };
+    let event_type = event
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| rpc_error(-32603, "adapter live event is missing type"))?;
+    if should_skip_adapter_event_type(event_type) {
+        return Ok(());
+    }
+    let Some(method) = notification_method_for_event_type(event_type) else {
+        return Ok(());
+    };
+    emit_rpc_notification_to_namespace(io, method, event).await;
+    Ok(())
+}
+
+fn persist_adapter_transcript(state: &AppState, value: Value) -> Result<(), RpcError> {
+    let Some((conversation_id, entry)) = adapter_conversation_object(value) else {
+        return Ok(());
+    };
+    if should_skip_adapter_transcript_entry(&entry) {
+        return Ok(());
+    }
+    state
+        .conversations
+        .append_transcript(&conversation_id, entry)
+        .map(|_| ())
+        .map_err(internal_error)
+}
+
+async fn emit_rpc_notification_to_namespace(io: &SocketIo, method: &str, params: Value) {
+    let notification = json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params
+    });
+    let Some(namespace) = io.of("/rpc/conversations") else {
+        warn!("conversation RPC namespace is unavailable for adapter event fanout");
+        return;
+    };
+    if let Err(error) = namespace.emit(RPC_NOTIFY_EVENT, &notification).await {
+        warn!(error = %error, "failed to emit adapter event over conversations RPC");
+    }
+}
+
+fn adapter_conversation_object(value: Value) -> Option<(String, Value)> {
+    let conversation_id = value
+        .as_object()?
+        .get("conversation_id")
+        .and_then(Value::as_str)?
+        .trim()
+        .to_owned();
+    if conversation_id.is_empty() {
+        return None;
+    }
+    Some((conversation_id, value))
+}
+
+fn should_skip_adapter_event_type(event_type: &str) -> bool {
+    event_type.trim().eq_ignore_ascii_case("message")
+}
+
+fn should_skip_adapter_transcript_entry(entry: &Value) -> bool {
+    entry
+        .get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role.trim().eq_ignore_ascii_case("user"))
+}
+
+fn notification_method_for_event_type(event_type: &str) -> Option<&'static str> {
+    match event_type.trim().to_ascii_lowercase().as_str() {
+        "activity" => Some("conversation.activity"),
+        "approval" => Some("conversation.approval.request"),
+        "approval_handoff" => Some("conversation.approval.handoff"),
+        "assistant_delta" => Some("conversation.message.delta"),
+        "assistant_end" | "assistant_finalize" => Some("conversation.message.final"),
+        "command_result" => Some("conversation.command.result"),
+        "context_compacted" => Some("conversation.context.compacted"),
+        "diff" => Some("conversation.diff"),
+        "diff_declined" => Some("conversation.diff.declined"),
+        "draft_update" => Some("conversation.draft.updated"),
+        "error" => Some("conversation.error"),
+        "mention_insert" => Some("conversation.mention.inserted"),
+        "message" => Some("conversation.user.message"),
+        "meta_updated" => Some("conversation.meta.updated"),
+        "mode" => Some("conversation.mode.changed"),
+        "plan" => Some("conversation.plan"),
+        "plan_state" => Some("conversation.plan.state"),
+        "plan_update" => Some("conversation.plan.update"),
+        "preview_updated" => Some("conversation.preview.updated"),
+        "reasoning_delta" => Some("conversation.reasoning.delta"),
+        "reasoning_end" | "reasoning_finalize" => Some("conversation.reasoning.final"),
+        "shell_begin" => Some("conversation.command.begin"),
+        "shell_delta" => Some("conversation.command.delta"),
+        "shell_end" => Some("conversation.command.end"),
+        "status" => Some("conversation.status"),
+        "subagent_end" => Some("conversation.subagent.end"),
+        "subagent_start" => Some("conversation.subagent.start"),
+        "thought" => Some("conversation.thought"),
+        "toast" => Some("conversation.toast"),
+        "token_count" => Some("conversation.token.updated"),
+        "tool_interaction" => Some("conversation.tool.interaction"),
+        "tool_begin" => Some("conversation.tool.begin"),
+        "tool_delta" => Some("conversation.tool.delta"),
+        "tool_end" => Some("conversation.tool.end"),
+        "search" => Some("conversation.search"),
+        "view" => Some("conversation.view"),
+        "warning" => Some("conversation.warning"),
+        _ => None,
+    }
+}
+
 fn meta_result(meta: ConversationMeta) -> Result<Value, RpcError> {
     meta_json(meta)
 }
@@ -355,4 +506,112 @@ struct JsonRpcRequest {
 enum RpcAck {
     Success(SuccessResponse),
     Error(ErrorResponse),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AdapterConfig, ServerConfig};
+    use als_dto::RuntimeRoots;
+    use serde_json::json;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn maps_adapter_event_types_to_conversation_notifications() {
+        assert_eq!(
+            notification_method_for_event_type("assistant_delta"),
+            Some("conversation.message.delta")
+        );
+        assert_eq!(
+            notification_method_for_event_type("assistant_finalize"),
+            Some("conversation.message.final")
+        );
+        assert_eq!(
+            notification_method_for_event_type("shell_begin"),
+            Some("conversation.command.begin")
+        );
+        assert_eq!(
+            notification_method_for_event_type("token_count"),
+            Some("conversation.token.updated")
+        );
+        assert_eq!(notification_method_for_event_type("debug_trace"), None);
+    }
+
+    #[test]
+    fn extracts_conversation_scoped_adapter_payloads() {
+        let (conversation_id, value) = adapter_conversation_object(
+            json!({"type": "assistant_delta", "conversation_id": "conv-a"}),
+        )
+        .expect("conversation_id should be extracted");
+        assert_eq!(conversation_id, "conv-a");
+        assert_eq!(value["conversation_id"], "conv-a");
+
+        assert!(adapter_conversation_object(json!({"type": "assistant_delta"})).is_none());
+        assert!(adapter_conversation_object(json!("not an object")).is_none());
+    }
+
+    #[test]
+    fn skips_rust_owned_adapter_user_events() {
+        assert!(should_skip_adapter_event_type("message"));
+        assert!(!should_skip_adapter_event_type("assistant_finalize"));
+        assert!(should_skip_adapter_transcript_entry(
+            &json!({"role": "user", "conversation_id": "conv-a", "text": "skip"})
+        ));
+        assert!(!should_skip_adapter_transcript_entry(
+            &json!({"role": "assistant", "conversation_id": "conv-a", "text": "keep"})
+        ));
+    }
+
+    #[test]
+    fn persists_scoped_adapter_transcript_records() {
+        let root = std::env::temp_dir().join(format!("als-rs-rpc-test-{}", unix_millis()));
+        let state = AppState::new(ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                copilot_python: "python".to_owned(),
+            },
+        });
+
+        persist_adapter_transcript(
+            &state,
+            json!({"role": "assistant", "conversation_id": "conv-a", "text": "pong"}),
+        )
+        .unwrap();
+        persist_adapter_transcript(
+            &state,
+            json!({"role": "user", "conversation_id": "conv-a", "text": "skip"}),
+        )
+        .unwrap();
+        persist_adapter_transcript(
+            &state,
+            json!({"role": "assistant", "text": "missing conversation"}),
+        )
+        .unwrap();
+
+        let rows = state.conversations.read_transcript("conv-a").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["conversation_id"], "conv-a");
+        assert_eq!(rows[0]["role"], "assistant");
+        assert_eq!(rows[0]["text"], "pong");
+        assert_eq!(rows[0]["order_id"], 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn unix_millis() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_millis()
+    }
 }

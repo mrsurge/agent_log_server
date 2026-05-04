@@ -17,11 +17,12 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{Mutex, oneshot},
+    sync::{Mutex, broadcast, oneshot},
 };
 use tracing::{debug, error, warn};
 
 const EVENT_BUFFER_LIMIT: usize = 512;
+const EVENT_STREAM_LIMIT: usize = 1024;
 
 type PendingSender = oneshot::Sender<Result<Value, RpcError>>;
 type PendingMap = Arc<Mutex<HashMap<RequestId, PendingSender>>>;
@@ -237,9 +238,20 @@ async fn fail_all_pending(pending: &PendingMap, message: &str) {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AdapterEventSink {
     inner: Arc<Mutex<AdapterEventSinkInner>>,
+    stream: broadcast::Sender<AdapterCapturedEvent>,
+}
+
+impl Default for AdapterEventSink {
+    fn default() -> Self {
+        let (stream, _) = broadcast::channel(EVENT_STREAM_LIMIT);
+        Self {
+            inner: Arc::new(Mutex::new(AdapterEventSinkInner::default())),
+            stream,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -262,20 +274,37 @@ pub struct AdapterOtherEvent {
     pub params: Value,
 }
 
+#[derive(Clone, Debug)]
+pub enum AdapterCapturedEvent {
+    Live(Value),
+    Transcript(Value),
+    Other(AdapterOtherEvent),
+}
+
 impl AdapterEventSink {
     async fn push_live(&self, value: Value) {
-        let mut guard = self.inner.lock().await;
-        push_capped(&mut guard.live, value);
+        {
+            let mut guard = self.inner.lock().await;
+            push_capped(&mut guard.live, value.clone());
+        }
+        let _ = self.stream.send(AdapterCapturedEvent::Live(value));
     }
 
     async fn push_transcript(&self, value: Value) {
-        let mut guard = self.inner.lock().await;
-        push_capped(&mut guard.transcript, value);
+        {
+            let mut guard = self.inner.lock().await;
+            push_capped(&mut guard.transcript, value.clone());
+        }
+        let _ = self.stream.send(AdapterCapturedEvent::Transcript(value));
     }
 
     async fn push_other(&self, method: String, params: Value) {
-        let mut guard = self.inner.lock().await;
-        push_capped(&mut guard.other, AdapterOtherEvent { method, params });
+        let event = AdapterOtherEvent { method, params };
+        {
+            let mut guard = self.inner.lock().await;
+            push_capped(&mut guard.other, event.clone());
+        }
+        let _ = self.stream.send(AdapterCapturedEvent::Other(event));
     }
 
     pub async fn snapshot(&self) -> AdapterEventSnapshot {
@@ -285,6 +314,10 @@ impl AdapterEventSink {
             transcript: guard.transcript.iter().cloned().collect(),
             other: guard.other.iter().cloned().collect(),
         }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<AdapterCapturedEvent> {
+        self.stream.subscribe()
     }
 }
 
@@ -323,6 +356,7 @@ mod tests {
     async fn captures_live_and_transcript_notifications() {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let sink = AdapterEventSink::default();
+        let mut stream = sink.subscribe();
 
         handle_adapter_line(
             r#"{"jsonrpc":"2.0","method":"event.live","params":{"type":"assistant_delta","delta":"pong"}}"#,
@@ -349,5 +383,18 @@ mod tests {
             vec![json!({"role": "assistant", "text": "pong"})]
         );
         assert!(snapshot.other.is_empty());
+
+        match stream.recv().await.unwrap() {
+            AdapterCapturedEvent::Live(value) => {
+                assert_eq!(value, json!({"type": "assistant_delta", "delta": "pong"}));
+            }
+            other => panic!("unexpected adapter event: {other:?}"),
+        }
+        match stream.recv().await.unwrap() {
+            AdapterCapturedEvent::Transcript(value) => {
+                assert_eq!(value, json!({"role": "assistant", "text": "pong"}));
+            }
+            other => panic!("unexpected adapter event: {other:?}"),
+        }
     }
 }

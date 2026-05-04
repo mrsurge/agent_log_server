@@ -1,8 +1,8 @@
 use crate::adapter_routes;
-use crate::conversation_routes;
 use crate::socketio::register_socket_namespaces;
 use crate::state::AppState;
 use crate::static_assets;
+use crate::{conversation_routes, conversation_rpc};
 use als_dto::{APP_ID, HealthResponse, HealthStatus};
 use axum::{Json, Router, routing::get};
 use socketioxide::SocketIo;
@@ -11,6 +11,7 @@ use tower_http::trace::TraceLayer;
 pub fn build_router(state: AppState) -> Router {
     let (socket_layer, io) = SocketIo::builder().with_state(state.clone()).build_layer();
     register_socket_namespaces(&io);
+    conversation_rpc::start_adapter_event_fanout(io.clone(), state.clone());
 
     Router::new()
         .merge(static_assets::routes(&state.config.roots.static_dir))
