@@ -171,9 +171,7 @@ class FrameworkShellPipeProcess:
         return process
 
     async def _start(self) -> None:
-        state = self._mgr.get_pipe_state(self._shell_id)
-        if not state or not state.process.stdin:
-            raise RuntimeError("copilot sdk pipe not available")
+        await self._wait_for_pipe_state()
         self._subscription = await self._mgr.subscribe_output_bytes(self._shell_id)
         self._writer_task = asyncio.create_task(
             self._drain_writes(),
@@ -182,6 +180,37 @@ class FrameworkShellPipeProcess:
         self._pump_task = asyncio.create_task(
             self._pump_output(),
             name=f"copilot-sdk-pipe:{self._shell_id}",
+        )
+
+    async def _wait_for_pipe_state(self) -> _PipeState:
+        deadline = time.monotonic() + 5.0
+        state: _PipeState | None = None
+        while True:
+            state = self._mgr.get_pipe_state(self._shell_id)
+            if state and state.process.stdin:
+                return state
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "copilot sdk pipe not available "
+                    f"({self._pipe_state_error_detail(state)})"
+                )
+            await asyncio.sleep(0.05)
+
+    def _pipe_state_error_detail(self, state: object | None) -> str:
+        if state is None:
+            return f"shell_id={self._shell_id} state=missing"
+        process = cast(object | None, getattr(state, "process", None))
+        stdin = cast(object | None, getattr(process, "stdin", None)) if process is not None else None
+        returncode = (
+            cast(object | None, getattr(process, "returncode", None))
+            if process is not None
+            else None
+        )
+        process_status = "present" if process is not None else "missing"
+        stdin_status = "present" if stdin is not None else "missing"
+        return (
+            f"shell_id={self._shell_id} state=present "
+            f"process={process_status} stdin={stdin_status} returncode={returncode!r}"
         )
 
     def raise_if_write_failed(self) -> None:

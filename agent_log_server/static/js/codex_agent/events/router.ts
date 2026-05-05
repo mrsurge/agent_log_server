@@ -345,12 +345,48 @@ export function bindEventRouter(ctx: EventRouterContext) {
     renderMiniConversationList(state.conversationList, activeConversationId);
   }
 
+  function patchConversationMeta(conversationId: string, patch: JsonObject): void {
+    if (!conversationId) return;
+    const state = getState();
+    const nextList = Array.isArray(state.conversationList)
+      ? state.conversationList.map((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+        const meta = item as JsonObject;
+        return meta.conversation_id === conversationId ? { ...meta, ...patch } : item;
+      })
+      : [];
+    const currentMeta = state.conversationMeta && typeof state.conversationMeta === 'object'
+      ? state.conversationMeta
+      : null;
+    const activeConversationId = state.clientConversationId || currentMeta?.conversation_id || null;
+    const nextState: Partial<RouterState> = { conversationList: nextList };
+    if (currentMeta?.conversation_id === conversationId) {
+      nextState.conversationMeta = { ...currentMeta, ...patch };
+    }
+    setState(nextState);
+    renderConversationList(nextList, activeConversationId);
+    renderMiniConversationList(nextList, activeConversationId);
+  }
+
+  function updateConversationMetaFromEvent(evt: RouterEvent): void {
+    const conversationId = typeof evt?.conversation_id === 'string' ? evt.conversation_id.trim() : '';
+    if (!conversationId) return;
+    if (evt.type === 'meta_updated') {
+      patchConversationMeta(conversationId, evt);
+      return;
+    }
+    if (evt.type === 'status' && typeof evt.status === 'string' && evt.status.trim()) {
+      patchConversationMeta(conversationId, { status: evt.status.trim() });
+    }
+  }
+
   function handleEvent(evt: unknown): void {
     const event = asRouterEvent(evt);
     if (!event) return;
     if (isInternalEvent(event)) return;
     const state = getState();
     updateConversationPreview(event);
+    updateConversationMetaFromEvent(event);
 
     // Filter events by conversation_id - only render events for active conversation
     const activeConvoId = state.clientConversationId || state.conversationMeta?.conversation_id || null;

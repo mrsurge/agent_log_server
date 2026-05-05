@@ -10,6 +10,9 @@ pub mod methods {
     pub const EXTENSION_INITIALIZE: &str = "extension.initialize";
     pub const EXTENSION_SHUTDOWN: &str = "extension.shutdown";
     pub const EXTENSION_RELOAD: &str = "extension.reload";
+    pub const EXTENSION_INSTALL_DEPENDENCIES: &str = "extension.install_dependencies";
+    pub const EXTENSION_DEBUG_PROBE: &str = "extension.debug_probe";
+    pub const EXTENSION_WARM_UP: &str = "extension.warm_up";
     pub const EXTENSION_GET_SETTINGS_SCHEMA: &str = "extension.get_settings_schema";
     pub const EXTENSION_GET_SPLASH_SCHEMA: &str = "extension.get_splash_schema";
     pub const EXTENSION_LIST_MODELS: &str = "extension.list_models";
@@ -161,6 +164,10 @@ pub struct ConversationSendParams {
     pub extension_id: String,
     pub conversation_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -28,6 +28,12 @@ class BootstrapArgs:
     static_dir: str | None
     server_bin: str | None
     cargo_manifest: str | None
+    framework_shells_base_dir: str | None
+    framework_shells_secret: str | None
+    framework_shells_repo_fingerprint: str | None
+    framework_shells_secret_fingerprint: str | None
+    framework_shells_fws_socketio_server_pid: str | None
+    framework_shells_run_id: str | None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -58,6 +64,30 @@ def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
         default=os.environ.get("ALS_RS_CARGO_MANIFEST"),
         help="Path to rust/Cargo.toml for development launches.",
     )
+    parser.add_argument(
+        "--framework-shells-base-dir",
+        default=os.environ.get("FRAMEWORK_SHELLS_BASE_DIR"),
+    )
+    parser.add_argument(
+        "--framework-shells-secret",
+        default=os.environ.get("FRAMEWORK_SHELLS_SECRET"),
+    )
+    parser.add_argument(
+        "--framework-shells-repo-fingerprint",
+        default=os.environ.get("FRAMEWORK_SHELLS_REPO_FINGERPRINT"),
+    )
+    parser.add_argument(
+        "--framework-shells-secret-fingerprint",
+        default=os.environ.get("FRAMEWORK_SHELLS_SECRET_FINGERPRINT"),
+    )
+    parser.add_argument(
+        "--framework-shells-fws-socketio-server-pid",
+        default=os.environ.get("FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID"),
+    )
+    parser.add_argument(
+        "--framework-shells-run-id",
+        default=os.environ.get("FRAMEWORK_SHELLS_RUN_ID"),
+    )
     raw = parser.parse_args(argv)
     return BootstrapArgs(
         host=cast(str, raw.host),
@@ -68,6 +98,15 @@ def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
         static_dir=cast(str | None, raw.static_dir),
         server_bin=cast(str | None, raw.server_bin),
         cargo_manifest=cast(str | None, raw.cargo_manifest),
+        framework_shells_base_dir=cast(str | None, raw.framework_shells_base_dir),
+        framework_shells_secret=cast(str | None, raw.framework_shells_secret),
+        framework_shells_repo_fingerprint=cast(str | None, raw.framework_shells_repo_fingerprint),
+        framework_shells_secret_fingerprint=cast(str | None, raw.framework_shells_secret_fingerprint),
+        framework_shells_fws_socketio_server_pid=cast(
+            str | None,
+            raw.framework_shells_fws_socketio_server_pid,
+        ),
+        framework_shells_run_id=cast(str | None, raw.framework_shells_run_id),
     )
 
 
@@ -88,12 +127,34 @@ def _build_env(args: BootstrapArgs) -> dict[str, str]:
     env["ALS_RS_CONFIG_DIR"] = str(config_dir)
     env["ALS_RS_STATIC_DIR"] = str(static_dir)
     env["ALS_RS_PYTHON_BIN"] = sys.executable
+    if _ferrous_framework_enabled(args):
+        env.pop("PYO3_CONFIG_FILE", None)
+        env["PYO3_PYTHON"] = sys.executable
+    _set_if_present(env, "FRAMEWORK_SHELLS_BASE_DIR", args.framework_shells_base_dir)
+    _set_if_present(env, "FRAMEWORK_SHELLS_SECRET", args.framework_shells_secret)
+    _set_if_present(
+        env,
+        "FRAMEWORK_SHELLS_REPO_FINGERPRINT",
+        args.framework_shells_repo_fingerprint,
+    )
+    _set_if_present(
+        env,
+        "FRAMEWORK_SHELLS_SECRET_FINGERPRINT",
+        args.framework_shells_secret_fingerprint or args.framework_shells_repo_fingerprint,
+    )
+    _set_if_present(
+        env,
+        "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID",
+        args.framework_shells_fws_socketio_server_pid,
+    )
+    _set_if_present(env, "FRAMEWORK_SHELLS_RUN_ID", args.framework_shells_run_id)
     return env
 
 
 def _server_command(args: BootstrapArgs) -> list[str]:
+    framework_shell_args = _framework_shell_args(args)
     if args.server_bin:
-        return [str(Path(args.server_bin))]
+        return [str(Path(args.server_bin)), *framework_shell_args]
 
     manifest = (
         Path(args.cargo_manifest)
@@ -101,18 +162,65 @@ def _server_command(args: BootstrapArgs) -> list[str]:
         else _source_root() / "rust" / "Cargo.toml"
     )
     debug_binary = manifest.parent / "target" / "debug" / "als-server"
-    if debug_binary.exists():
-        return [str(debug_binary)]
+    use_ferrous_framework = _ferrous_framework_enabled(args)
+    if debug_binary.exists() and not use_ferrous_framework:
+        return [str(debug_binary), *framework_shell_args]
 
-    return [
+    command = [
         "cargo",
         "run",
         "--manifest-path",
         str(manifest),
         "-p",
         "als-server",
-        "--",
     ]
+    if use_ferrous_framework:
+        command.extend(["--features", "ferrous-framework-pyo3"])
+    command.extend(["--", *framework_shell_args])
+    return command
+
+
+def _framework_shell_args(args: BootstrapArgs) -> list[str]:
+    values = [
+        ("--framework-shells-base-dir", args.framework_shells_base_dir),
+        ("--framework-shells-secret", args.framework_shells_secret),
+        ("--framework-shells-repo-fingerprint", args.framework_shells_repo_fingerprint),
+        (
+            "--framework-shells-secret-fingerprint",
+            args.framework_shells_secret_fingerprint or args.framework_shells_repo_fingerprint,
+        ),
+        (
+            "--framework-shells-fws-socketio-server-pid",
+            args.framework_shells_fws_socketio_server_pid,
+        ),
+        ("--framework-shells-run-id", args.framework_shells_run_id),
+    ]
+    rendered: list[str] = []
+    for flag, value in values:
+        if value:
+            rendered.extend((flag, value))
+    return rendered
+
+
+def _ferrous_framework_enabled(args: BootstrapArgs) -> bool:
+    disabled = os.environ.get("ALS_RS_DISABLE_FERROUS_FRAMEWORK", "").lower()
+    if disabled in {"1", "true", "yes", "on"}:
+        return False
+    return any(
+        (
+            args.framework_shells_base_dir,
+            args.framework_shells_secret,
+            args.framework_shells_repo_fingerprint,
+            args.framework_shells_secret_fingerprint,
+            args.framework_shells_fws_socketio_server_pid,
+            args.framework_shells_run_id,
+        )
+    )
+
+
+def _set_if_present(env: dict[str, str], key: str, value: str | None) -> None:
+    if value:
+        env[key] = value
 
 
 def _run_child(command: Sequence[str], env: dict[str, str]) -> int:

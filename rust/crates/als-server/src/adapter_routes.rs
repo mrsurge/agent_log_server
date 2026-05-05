@@ -78,6 +78,8 @@ async fn send_copilot_message(
         extension_id: "copilot-sdk".to_owned(),
         conversation_id,
         text: body.text,
+        thread_id: None,
+        provider_session_id: None,
         turn_id: body.turn_id,
         cwd: body.cwd.map(Into::into),
         attachments: Vec::new(),

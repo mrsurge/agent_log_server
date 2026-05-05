@@ -19,6 +19,9 @@ class AdapterMethod(StrEnum):
     EXTENSION_INITIALIZE = "extension.initialize"
     EXTENSION_SHUTDOWN = "extension.shutdown"
     EXTENSION_RELOAD = "extension.reload"
+    EXTENSION_INSTALL_DEPENDENCIES = "extension.install_dependencies"
+    EXTENSION_DEBUG_PROBE = "extension.debug_probe"
+    EXTENSION_WARM_UP = "extension.warm_up"
     EXTENSION_GET_SETTINGS_SCHEMA = "extension.get_settings_schema"
     EXTENSION_GET_SPLASH_SCHEMA = "extension.get_splash_schema"
     EXTENSION_LIST_MODELS = "extension.list_models"
@@ -207,6 +210,8 @@ class ConversationSendParams:
     extension_id: str
     conversation_id: str
     text: str
+    thread_id: str | None = None
+    provider_session_id: str | None = None
     turn_id: str | None = None
     cwd: Path | None = None
     attachments: list[JsonMap] = field(default_factory=list)
@@ -219,6 +224,10 @@ class ConversationSendParams:
             "conversation_id": self.conversation_id,
             "text": self.text,
         }
+        if self.thread_id:
+            payload["thread_id"] = self.thread_id
+        if self.provider_session_id:
+            payload["provider_session_id"] = self.provider_session_id
         if self.turn_id:
             payload["turn_id"] = self.turn_id
         if self.cwd:

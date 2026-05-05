@@ -4,6 +4,7 @@ members = [
     "crates/als-dto",
     "crates/als-jsonrpc",
     "crates/als-server",
+    "crates/ferrous_framework",
 ]
 resolver = "3"
 
@@ -19,6 +20,9 @@ als-dto = { path = "crates/als-dto" }
 als-jsonrpc = { path = "crates/als-jsonrpc" }
 anyhow = "1"
 axum = "0.8"
+ferrous_framework = { path = "crates/ferrous_framework" }
+pyo3 = { version = "0.27", features = ["abi3-py311"] }
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 socketioxide = { version = "0.18", features = ["state"] }

@@ -1,31 +1,48 @@
+use crate::state::AppState;
 use als_adapter_protocol::JsonMap;
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use socketioxide::{
     SocketIo,
-    extract::{AckSender, Data, SocketRef},
+    extract::{AckSender, Data, SocketRef, State},
+};
+use std::{
+    collections::HashSet,
+    env, fs, io,
+    path::{Path, PathBuf},
+    process::Command,
 };
 
 const RPC_EVENT: &str = "rpc";
 const JSONRPC_VERSION: &str = "2.0";
+const DEFAULT_SEARCH_LIMIT: usize = 200;
+const MAX_SEARCH_LIMIT: usize = 1000;
 
 pub fn register_ui_rpc_namespace(io: &SocketIo) {
-    io.ns("/rpc/ui", async |socket: SocketRef| {
-        socket.on(RPC_EVENT, handle_rpc_request);
-    });
+    io.ns(
+        "/rpc/ui",
+        async |socket: SocketRef, State(_state): State<AppState>| {
+            socket.on(RPC_EVENT, handle_rpc_request);
+        },
+    );
 }
 
-async fn handle_rpc_request(Data(request): Data<JsonRpcRequest>, ack: AckSender) {
+async fn handle_rpc_request(
+    State(state): State<AppState>,
+    Data(request): Data<JsonRpcRequest>,
+    ack: AckSender,
+) {
     let id = request.id.clone();
-    let response = match dispatch_rpc(request) {
+    let response = match dispatch_rpc(&state, request).await {
         Ok(result) => RpcAck::Success(SuccessResponse::new(id, result)),
         Err(error) => RpcAck::Error(ErrorResponse::new(id, error)),
     };
     let _ = ack.send(&response);
 }
 
-fn dispatch_rpc(request: JsonRpcRequest) -> Result<Value, RpcError> {
+async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value, RpcError> {
     if request.jsonrpc != JSONRPC_VERSION {
         return Err(rpc_error(-32600, "Invalid JSON-RPC version"));
     }
@@ -45,8 +62,8 @@ fn dispatch_rpc(request: JsonRpcRequest) -> Result<Value, RpcError> {
             "projectRoot": Value::Null,
             "transport": "rpc"
         })),
-        "filesystem.list" => Ok(json!({"items": [], "transport": "rpc"})),
-        "filesystem.search" => Ok(json!({"items": [], "transport": "rpc"})),
+        "filesystem.list" => filesystem_list(request.params).await,
+        "filesystem.search" => filesystem_search(state, request.params).await,
         "file.open" | "url.open" => Ok(json!({
             "ok": false,
             "error": format!("{} is not implemented in ALS-RS yet", request.method),
@@ -59,8 +76,329 @@ fn dispatch_rpc(request: JsonRpcRequest) -> Result<Value, RpcError> {
     }
 }
 
+async fn filesystem_list(params: JsonMap) -> Result<Value, RpcError> {
+    tokio::task::spawn_blocking(move || filesystem_list_sync(&params))
+        .await
+        .map_err(internal_rpc_error)?
+}
+
+fn filesystem_list_sync(params: &JsonMap) -> Result<Value, RpcError> {
+    let logical = logical_absolute_path(params.get("path").and_then(Value::as_str), "~")
+        .map_err(internal_rpc_error)?;
+    let metadata = fs::metadata(&logical).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => rpc_error(-32044, "Path not found"),
+        _ => internal_rpc_error(error),
+    })?;
+    if !metadata.is_dir() {
+        return Err(rpc_error(-32602, "Path is not a directory"));
+    }
+
+    let mut items = Vec::new();
+    let entries = fs::read_dir(&logical).map_err(internal_rpc_error)?;
+    for entry in entries {
+        let entry = entry.map_err(internal_rpc_error)?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_symlink = entry
+            .file_type()
+            .map(|file_type| file_type.is_symlink())
+            .unwrap_or(false);
+        let target_metadata = fs::metadata(&path).ok();
+        let symlink_metadata = fs::symlink_metadata(&path).ok();
+        let item_type = if target_metadata
+            .as_ref()
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false)
+        {
+            "directory"
+        } else if target_metadata
+            .as_ref()
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            "file"
+        } else if is_symlink {
+            "symlink"
+        } else if symlink_metadata
+            .as_ref()
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            "symlink"
+        } else {
+            "other"
+        };
+        items.push(FilesystemItem {
+            name,
+            path: path_to_string(&path),
+            item_type: item_type.to_owned(),
+            is_symlink,
+        });
+    }
+    sort_items(&mut items);
+    let parent = lexical_parent(&logical).map(|path| path_to_string(&path));
+    Ok(json!({
+        "ok": true,
+        "path": path_to_string(&logical),
+        "parent": parent,
+        "items": items,
+        "transport": "rpc",
+    }))
+}
+
+async fn filesystem_search(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let config_dir = state.config.roots.config_dir.clone();
+    tokio::task::spawn_blocking(move || filesystem_search_sync(&config_dir, &params))
+        .await
+        .map_err(internal_rpc_error)?
+}
+
+fn filesystem_search_sync(config_dir: &Path, params: &JsonMap) -> Result<Value, RpcError> {
+    let query = params
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if query.is_empty() {
+        return Ok(json!({"ok": true, "root": Value::Null, "items": [], "transport": "rpc"}));
+    }
+    let pattern = RegexBuilder::new(query)
+        .case_insensitive(true)
+        .build()
+        .map_err(|error| rpc_error(-32602, format!("Invalid regex: {error}")))?;
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_SEARCH_LIMIT)
+        .clamp(1, MAX_SEARCH_LIMIT);
+    let root = params.get("root").and_then(Value::as_str);
+    let fallback = config_dir.to_string_lossy();
+    let logical_base =
+        logical_absolute_path(root, fallback.as_ref()).map_err(internal_rpc_error)?;
+    let metadata = fs::metadata(&logical_base).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => rpc_error(-32044, "Root not found"),
+        _ => internal_rpc_error(error),
+    })?;
+    if !metadata.is_dir() {
+        return Err(rpc_error(-32602, "Root is not a directory"));
+    }
+
+    let repo_root = detect_repo_root(&logical_base);
+    let rels = rg_list_files(&repo_root).or_else(|_| walk_files(&repo_root, limit * 8));
+    let rels = rels.map_err(internal_rpc_error)?;
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    for rel in rels {
+        let full_path = repo_root.join(&rel);
+        let full_text = path_to_string(&full_path);
+        if pattern.is_match(&rel) || pattern.is_match(&full_text) {
+            push_search_item(&mut items, &mut seen, &full_path, "file");
+            if items.len() >= limit {
+                break;
+            }
+        }
+        for parent in Path::new(&rel).ancestors().skip(1) {
+            if parent.as_os_str().is_empty() || parent == Path::new(".") {
+                continue;
+            }
+            let parent_rel = parent.to_string_lossy();
+            let parent_path = repo_root.join(parent);
+            let parent_text = path_to_string(&parent_path);
+            if pattern.is_match(&parent_rel) || pattern.is_match(&parent_text) {
+                push_search_item(&mut items, &mut seen, &parent_path, "directory");
+                if items.len() >= limit {
+                    break;
+                }
+            }
+        }
+        if items.len() >= limit {
+            break;
+        }
+    }
+    sort_items(&mut items);
+    Ok(json!({
+        "ok": true,
+        "root": path_to_string(&repo_root),
+        "items": items,
+        "transport": "rpc",
+    }))
+}
+
+fn push_search_item(
+    items: &mut Vec<FilesystemItem>,
+    seen: &mut HashSet<String>,
+    path: &Path,
+    item_type: &str,
+) {
+    let key = path_to_string(path);
+    if !seen.insert(key.clone()) {
+        return;
+    }
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| key.clone());
+    items.push(FilesystemItem {
+        name,
+        path: key,
+        item_type: item_type.to_owned(),
+        is_symlink: fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false),
+    });
+}
+
+fn logical_absolute_path(raw_path: Option<&str>, fallback: &str) -> Result<PathBuf, io::Error> {
+    let raw = raw_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback);
+    let expanded = expand_home(raw);
+    let path = PathBuf::from(expanded);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(env::current_dir()?.join(path))
+    }
+}
+
+fn expand_home(raw: &str) -> String {
+    if raw == "~" {
+        return home_dir().to_string_lossy().into_owned();
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return home_dir().join(rest).to_string_lossy().into_owned();
+    }
+    raw.to_owned()
+}
+
+fn home_dir() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn lexical_parent(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    if parent == path {
+        None
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+fn detect_repo_root(start: &Path) -> PathBuf {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let root = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !root.is_empty() {
+                return PathBuf::from(root);
+            }
+        }
+    }
+    start.to_path_buf()
+}
+
+fn rg_list_files(root: &Path) -> Result<Vec<String>, io::Error> {
+    let output = Command::new("rg")
+        .arg("--files")
+        .arg("--glob")
+        .arg("!.git/*")
+        .current_dir(root)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("rg --files failed"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        })
+        .collect())
+}
+
+fn walk_files(root: &Path, limit: usize) -> Result<Vec<String>, io::Error> {
+    let mut out = Vec::new();
+    walk_files_inner(root, root, limit, &mut out)?;
+    Ok(out)
+}
+
+fn walk_files_inner(
+    root: &Path,
+    dir: &Path,
+    limit: usize,
+    out: &mut Vec<String>,
+) -> Result<(), io::Error> {
+    if out.len() >= limit {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let metadata = fs::metadata(&path).ok();
+        if metadata
+            .as_ref()
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false)
+        {
+            walk_files_inner(root, &path, limit, out)?;
+        } else if metadata
+            .as_ref()
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().into_owned());
+            }
+        }
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn sort_items(items: &mut [FilesystemItem]) {
+    items.sort_by(|left, right| {
+        let left_rank = usize::from(left.item_type != "directory");
+        let right_rank = usize::from(right.item_type != "directory");
+        left_rank
+            .cmp(&right_rank)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct FilesystemItem {
+    name: String,
+    path: String,
+    #[serde(rename = "type")]
+    item_type: String,
+    is_symlink: bool,
+}
+
 fn rpc_error(code: i64, message: impl Into<String>) -> RpcError {
     RpcError::new(code, message, None)
+}
+
+fn internal_rpc_error(error: impl std::fmt::Display) -> RpcError {
+    rpc_error(-32603, error.to_string())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -77,4 +415,43 @@ struct JsonRpcRequest {
 enum RpcAck {
     Success(SuccessResponse),
     Error(ErrorResponse),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn expands_home_without_resolving_symlinks() {
+        let path = logical_absolute_path(Some("~/project"), "~").unwrap();
+        assert!(path_to_string(&path).ends_with("/project"));
+    }
+
+    #[test]
+    fn sorts_directories_before_files() {
+        let mut items = vec![
+            FilesystemItem {
+                name: "z.txt".to_owned(),
+                path: "/z.txt".to_owned(),
+                item_type: "file".to_owned(),
+                is_symlink: false,
+            },
+            FilesystemItem {
+                name: "a-dir".to_owned(),
+                path: "/a-dir".to_owned(),
+                item_type: "directory".to_owned(),
+                is_symlink: false,
+            },
+        ];
+        sort_items(&mut items);
+        assert_eq!(items[0].name, "a-dir");
+    }
+
+    #[tokio::test]
+    async fn empty_search_returns_ok_payload() {
+        let value = filesystem_search_sync(Path::new("."), &JsonMap::new()).unwrap();
+        assert_eq!(value["ok"], json!(true));
+        assert_eq!(value["items"], json!([]));
+    }
 }

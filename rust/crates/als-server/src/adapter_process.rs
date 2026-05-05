@@ -1,9 +1,10 @@
-use crate::config::ServerConfig;
+use crate::config::{FrameworkShellConfig, ServerConfig};
 use als_adapter_protocol::{ExtensionInitializeParams, JsonMap, events, methods};
 use als_jsonrpc::{
     ErrorResponse, Notification, Request, RequestId, Response, RpcError, SuccessResponse,
 };
 use anyhow::{Context, Result, anyhow, bail};
+use ferrous_framework::{FerrousFrameworkPipe, FerrousPipeConfig, pyo3_embed_enabled};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -26,12 +27,7 @@ use tracing::{debug, error, warn};
 
 const EVENT_BUFFER_LIMIT: usize = 512;
 const EVENT_STREAM_LIMIT: usize = 1024;
-const FRAMEWORK_SHELL_ENV_KEYS: &[&str] = &[
-    "FRAMEWORK_SHELLS_BASE_DIR",
-    "FRAMEWORK_SHELLS_SECRET",
-    "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID",
-];
-
+const LOG_LINE_LIMIT: usize = 4 * 1024;
 type PendingSender = oneshot::Sender<Result<Value, RpcError>>;
 type PendingMap = Arc<Mutex<HashMap<RequestId, PendingSender>>>;
 
@@ -64,6 +60,7 @@ impl AdapterSupervisor {
         let client = Arc::new(AdapterClient::spawn(
             self.config.adapters.copilot_python.clone(),
             self.config.extensions_dir.parent().map(Path::to_path_buf),
+            self.config.framework_shells.clone(),
             self.events.clone(),
         )?);
         *guard = Some(client.clone());
@@ -97,29 +94,166 @@ impl AdapterSupervisor {
         self.initialize_extension("copilot-sdk").await
     }
 
-    pub async fn reload_extensions_if_running(&self) -> Result<Option<Value>> {
+    pub async fn reload_extensions_if_running(
+        &self,
+        enabled_overrides: JsonMap,
+        wait_ready_extension_id: Option<String>,
+    ) -> Result<Option<Value>> {
         let client = self.client.lock().await.clone();
         let Some(client) = client else {
             return Ok(None);
         };
+        let mut params = json!({
+            "force": true,
+            "enabled_overrides": enabled_overrides,
+        });
+        if let (Some(extension_id), Value::Object(object)) = (wait_ready_extension_id, &mut params)
+        {
+            object.insert(
+                "wait_ready_extension_id".to_owned(),
+                Value::String(extension_id),
+            );
+        }
         let result = client
-            .request_value(methods::EXTENSION_RELOAD, json!({ "force": true }))
+            .request_value(methods::EXTENSION_RELOAD, params)
             .await?;
         Ok(Some(result))
+    }
+
+    pub async fn warm_up_extensions(
+        &self,
+        enabled_overrides: JsonMap,
+        init_extension_id: String,
+    ) -> Result<Value> {
+        self.initialize_extension(&init_extension_id).await?;
+        let result = self
+            .client()
+            .await?
+            .request_value(
+                methods::EXTENSION_WARM_UP,
+                json!({
+                    "enabled_overrides": enabled_overrides,
+                    "timeout": 60.0,
+                }),
+            )
+            .await?;
+        Ok(result)
     }
 }
 
 pub struct AdapterClient {
-    stdin: Arc<Mutex<ChildStdin>>,
+    writer: AdapterWriter,
     pending: PendingMap,
     next_id: AtomicI64,
-    _child: Child,
+    _child: Option<Child>,
+}
+
+#[derive(Clone)]
+enum AdapterWriter {
+    Direct(Arc<Mutex<ChildStdin>>),
+    Ferrous(FerrousFrameworkPipe),
 }
 
 impl AdapterClient {
     pub fn spawn(
         python: String,
         python_path_root: Option<PathBuf>,
+        framework_shells: FrameworkShellConfig,
+        events: AdapterEventSink,
+    ) -> Result<Self> {
+        if framework_shells.is_configured() && pyo3_embed_enabled() {
+            match Self::spawn_ferrous(
+                python.clone(),
+                python_path_root.clone(),
+                &framework_shells,
+                events.clone(),
+            ) {
+                Ok(client) => return Ok(client),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "falling back to direct extension adapter child after ferrous_framework spawn failed"
+                    );
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        events
+                            .push_other(
+                                "adapter.transport.fallback".to_owned(),
+                                json!({
+                                    "from": "ferrous_framework",
+                                    "to": "direct_child",
+                                    "error": err.to_string(),
+                                }),
+                            )
+                            .await;
+                    });
+                }
+            }
+        }
+        Self::spawn_direct(python, python_path_root, &framework_shells, events)
+    }
+
+    fn spawn_ferrous(
+        python: String,
+        python_path_root: Option<PathBuf>,
+        framework_shells: &FrameworkShellConfig,
+        events: AdapterEventSink,
+    ) -> Result<Self> {
+        let cwd = python_path_root.clone();
+        let shellspec_path = python_path_root
+            .as_ref()
+            .map(|root| root.join("agent_log_server_rs/shellspec/extension_adapter.yaml"));
+        let env = adapter_env_overrides(python_path_root.as_deref(), framework_shells);
+        let pipe = FerrousFrameworkPipe::spawn(FerrousPipeConfig {
+            command: vec![
+                python,
+                "-m".to_owned(),
+                "agent_log_server_rs.adapters.extension_adapter".to_owned(),
+            ],
+            cwd,
+            env,
+            label: "als-rs-extension-adapter".to_owned(),
+            spec_id: "als-rs-extension-adapter".to_owned(),
+            subgroups: vec![
+                "als-rs".to_owned(),
+                "extension-adapter".to_owned(),
+                "jsonrpc".to_owned(),
+                "observed".to_owned(),
+            ],
+            shellspec_path,
+        })?;
+        let shell_id = pipe.shell_id().ok();
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        tokio::spawn(read_ferrous_adapter_stdout(
+            pipe.clone(),
+            pending.clone(),
+            events.clone(),
+        ));
+        tokio::spawn(async move {
+            events
+                .push_other(
+                    "adapter.transport.started".to_owned(),
+                    json!({
+                        "transport": "ferrous_framework",
+                        "shell_id": shell_id,
+                        "label": "als-rs-extension-adapter",
+                        "spec_id": "als-rs-extension-adapter",
+                    }),
+                )
+                .await;
+        });
+        Ok(Self {
+            writer: AdapterWriter::Ferrous(pipe),
+            pending,
+            next_id: AtomicI64::new(1),
+            _child: None,
+        })
+    }
+
+    fn spawn_direct(
+        python: String,
+        python_path_root: Option<PathBuf>,
+        framework_shells: &FrameworkShellConfig,
         events: AdapterEventSink,
     ) -> Result<Self> {
         let mut command = Command::new(&python);
@@ -128,14 +262,11 @@ impl AdapterClient {
             .arg("agent_log_server_rs.adapters.extension_adapter")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
-        if let Some(root) = python_path_root.as_deref() {
-            if let Some(pythonpath) = pythonpath_with_root(root, env::var_os("PYTHONPATH")) {
-                command.env("PYTHONPATH", pythonpath);
-            }
+        for (key, value) in adapter_env_overrides(python_path_root.as_deref(), framework_shells) {
+            command.env(key, value);
         }
-        apply_framework_shell_env(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn extension adapter via {python}"))?;
@@ -145,14 +276,19 @@ impl AdapterClient {
             .stdout
             .take()
             .context("adapter stdout is unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("adapter stderr is unavailable")?;
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        tokio::spawn(read_adapter_stdout(stdout, pending.clone(), events));
+        tokio::spawn(read_adapter_stdout(stdout, pending.clone(), events.clone()));
+        tokio::spawn(read_adapter_stderr(stderr, events));
 
         Ok(Self {
-            stdin: Arc::new(Mutex::new(stdin)),
+            writer: AdapterWriter::Direct(Arc::new(Mutex::new(stdin))),
             pending,
             next_id: AtomicI64::new(1),
-            _child: child,
+            _child: Some(child),
         })
     }
 
@@ -198,11 +334,22 @@ impl AdapterClient {
     }
 
     async fn write_line(&self, line: &str) -> Result<()> {
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(line.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
-        Ok(())
+        match &self.writer {
+            AdapterWriter::Direct(stdin) => {
+                let mut stdin = stdin.lock().await;
+                stdin.write_all(line.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
+                Ok(())
+            }
+            AdapterWriter::Ferrous(pipe) => {
+                let pipe = pipe.clone();
+                let line = line.to_owned();
+                tokio::task::spawn_blocking(move || pipe.write_line_blocking(&line))
+                    .await
+                    .context("ferrous_framework write task failed")?
+            }
+        }
     }
 }
 
@@ -214,31 +361,77 @@ fn pythonpath_with_root(root: &Path, existing: Option<OsString>) -> Option<OsStr
     env::join_paths(paths).ok()
 }
 
-fn apply_framework_shell_env(command: &mut Command) {
-    for (key, value) in framework_shell_env_overrides() {
-        command.env(key, value);
-    }
-}
-
-fn framework_shell_env_overrides() -> Vec<(&'static str, OsString)> {
-    framework_shell_env_overrides_from(|key| env::var_os(key))
-}
-
-fn framework_shell_env_overrides_from(
-    get_env: impl Fn(&str) -> Option<OsString>,
-) -> Vec<(&'static str, OsString)> {
-    let mut values = Vec::new();
-    for key in FRAMEWORK_SHELL_ENV_KEYS {
-        if let Some(value) = get_env(key) {
-            values.push((*key, value));
+fn adapter_env_overrides(
+    python_path_root: Option<&Path>,
+    framework_shells: &FrameworkShellConfig,
+) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    if let Some(root) = python_path_root {
+        if let Some(pythonpath) = pythonpath_with_root(root, env::var_os("PYTHONPATH")) {
+            if let Ok(value) = pythonpath.into_string() {
+                env.insert("PYTHONPATH".to_owned(), value);
+            }
         }
     }
-    if let Some(value) = get_env("FRAMEWORK_SHELLS_REPO_FINGERPRINT")
-        .or_else(|| get_env("FRAMEWORK_SHELLS_SECRET_FINGERPRINT"))
-    {
-        values.push(("FRAMEWORK_SHELLS_SECRET_FINGERPRINT", value));
+    for (key, value) in framework_shells.env_overrides() {
+        env.insert(key.to_owned(), value);
     }
-    values
+    env
+}
+
+async fn read_ferrous_adapter_stdout(
+    pipe: FerrousFrameworkPipe,
+    pending: PendingMap,
+    events: AdapterEventSink,
+) {
+    loop {
+        let reader = pipe.clone();
+        let line = match tokio::task::spawn_blocking(move || reader.read_line_blocking()).await {
+            Ok(Ok(line)) => line,
+            Ok(Err(err)) => {
+                error!(error = %err, "ferrous_framework adapter pipe read failed");
+                events
+                    .push_other(
+                        "adapter.ferrous_framework.read_failed".to_owned(),
+                        json!({"error": err.to_string()}),
+                    )
+                    .await;
+                fail_all_pending(&pending, "ferrous_framework adapter pipe read failed").await;
+                break;
+            }
+            Err(err) => {
+                error!(error = %err, "ferrous_framework adapter pipe task failed");
+                events
+                    .push_other(
+                        "adapter.ferrous_framework.task_failed".to_owned(),
+                        json!({"error": err.to_string()}),
+                    )
+                    .await;
+                fail_all_pending(&pending, "ferrous_framework adapter pipe task failed").await;
+                break;
+            }
+        };
+
+        let Some(line) = line else {
+            events
+                .push_other("adapter.ferrous_framework.closed".to_owned(), json!({}))
+                .await;
+            fail_all_pending(&pending, "ferrous_framework adapter pipe closed").await;
+            break;
+        };
+        if let Err(err) = handle_adapter_line(&line, &pending, &events).await {
+            warn!(error = %err, "failed to handle ferrous_framework adapter JSON-RPC line");
+            events
+                .push_other(
+                    "adapter.ferrous_framework.invalid_json".to_owned(),
+                    json!({
+                        "error": err.to_string(),
+                        "line": truncate_log_line(&line),
+                    }),
+                )
+                .await;
+        }
+    }
 }
 
 async fn read_adapter_stdout(
@@ -252,15 +445,66 @@ async fn read_adapter_stdout(
             Ok(Some(line)) => {
                 if let Err(err) = handle_adapter_line(&line, &pending, &events).await {
                     warn!(error = %err, "failed to handle adapter JSON-RPC line");
+                    events
+                        .push_other(
+                            "adapter.stdout.invalid_json".to_owned(),
+                            json!({
+                                "error": err.to_string(),
+                                "line": truncate_log_line(&line),
+                            }),
+                        )
+                        .await;
                 }
             }
             Ok(None) => {
+                events
+                    .push_other("adapter.stdout.closed".to_owned(), json!({}))
+                    .await;
                 fail_all_pending(&pending, "adapter stdout closed").await;
                 break;
             }
             Err(err) => {
                 error!(error = %err, "adapter stdout read failed");
+                events
+                    .push_other(
+                        "adapter.stdout.read_failed".to_owned(),
+                        json!({"error": err.to_string()}),
+                    )
+                    .await;
                 fail_all_pending(&pending, "adapter stdout read failed").await;
+                break;
+            }
+        }
+    }
+}
+
+async fn read_adapter_stderr(stderr: tokio::process::ChildStderr, events: AdapterEventSink) {
+    let mut lines = BufReader::new(stderr).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                eprintln!("[extension-adapter] {line}");
+                events
+                    .push_other(
+                        "adapter.stderr".to_owned(),
+                        json!({"line": truncate_log_line(&line)}),
+                    )
+                    .await;
+            }
+            Ok(None) => {
+                events
+                    .push_other("adapter.stderr.closed".to_owned(), json!({}))
+                    .await;
+                break;
+            }
+            Err(err) => {
+                error!(error = %err, "adapter stderr read failed");
+                events
+                    .push_other(
+                        "adapter.stderr.read_failed".to_owned(),
+                        json!({"error": err.to_string()}),
+                    )
+                    .await;
                 break;
             }
         }
@@ -405,6 +649,10 @@ fn push_capped<T>(items: &mut VecDeque<T>, item: T) {
     items.push_back(item);
 }
 
+fn truncate_log_line(line: &str) -> String {
+    line.chars().take(LOG_LINE_LIMIT).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,44 +721,5 @@ mod tests {
             }
             other => panic!("unexpected adapter event: {other:?}"),
         }
-    }
-
-    #[test]
-    fn framework_shell_env_maps_repo_fingerprint_to_secret_fingerprint() {
-        let values = HashMap::from([
-            (
-                "FRAMEWORK_SHELLS_BASE_DIR",
-                OsString::from("/example/framework_shells"),
-            ),
-            ("FRAMEWORK_SHELLS_SECRET", OsString::from("secret")),
-            (
-                "FRAMEWORK_SHELLS_REPO_FINGERPRINT",
-                OsString::from("repo-fingerprint"),
-            ),
-            (
-                "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID",
-                OsString::from("123"),
-            ),
-        ]);
-        let overrides = framework_shell_env_overrides_from(|key| values.get(key).cloned());
-
-        assert_eq!(
-            overrides,
-            vec![
-                (
-                    "FRAMEWORK_SHELLS_BASE_DIR",
-                    OsString::from("/example/framework_shells")
-                ),
-                ("FRAMEWORK_SHELLS_SECRET", OsString::from("secret")),
-                (
-                    "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID",
-                    OsString::from("123")
-                ),
-                (
-                    "FRAMEWORK_SHELLS_SECRET_FINGERPRINT",
-                    OsString::from("repo-fingerprint")
-                ),
-            ]
-        );
     }
 }

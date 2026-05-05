@@ -46,6 +46,37 @@ impl ExtensionRegistry {
         Ok(entries)
     }
 
+    pub fn apply_runtime_extensions(&self, value: &Value) -> Vec<ExtensionRegistryEntry> {
+        let Some(extensions) = value
+            .as_object()
+            .and_then(|object| object.get("extensions"))
+            .and_then(Value::as_array)
+        else {
+            return self.list();
+        };
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for runtime in extensions {
+            let Some(runtime_map) = runtime.as_object() else {
+                continue;
+            };
+            let Some(extension_id) = string_field(runtime_map, "id") else {
+                continue;
+            };
+            let Some(entry) = guard
+                .entries
+                .iter_mut()
+                .find(|entry| entry.id == extension_id)
+            else {
+                continue;
+            };
+            apply_runtime_fields(entry, runtime_map);
+        }
+        guard.entries.clone()
+    }
+
     pub fn list(&self) -> Vec<ExtensionRegistryEntry> {
         self.inner
             .read()
@@ -92,6 +123,16 @@ impl ExtensionRegistry {
         Ok(Some(entry.clone()))
     }
 
+    pub fn enabled_overrides(&self) -> Map<String, Value> {
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries
+            .iter()
+            .map(|entry| (entry.id.clone(), Value::Bool(entry.enabled)))
+            .collect()
+    }
+
     fn from_parts(
         extensions_dir: PathBuf,
         config_dir: Option<PathBuf>,
@@ -136,6 +177,9 @@ pub struct ExtensionRegistryEntry {
     pub dependency_ok: bool,
     pub dependency_status: String,
     pub dependency_message: String,
+    pub dependency_details: Map<String, Value>,
+    pub has_dependency_check: bool,
+    pub has_dependency_install: bool,
     pub manifest: Map<String, Value>,
     pub capabilities: Map<String, Value>,
     pub ui: Map<String, Value>,
@@ -238,6 +282,15 @@ fn entry_from_parts(
     };
     let capabilities = object_or_empty(manifest.get("capabilities").unwrap_or(&Value::Null));
     let ui = object_or_empty(manifest.get("ui").unwrap_or(&Value::Null));
+    let dependencies = object_or_empty(manifest.get("dependencies").unwrap_or(&Value::Null));
+    let has_dependency_check = dependencies
+        .get("has_check")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let has_dependency_install = dependencies
+        .get("has_install")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     Ok(ExtensionRegistryEntry {
         id,
@@ -250,10 +303,41 @@ fn entry_from_parts(
         dependency_ok,
         dependency_status,
         dependency_message,
+        dependency_details: Map::new(),
+        has_dependency_check,
+        has_dependency_install,
         manifest,
         capabilities,
         ui,
     })
+}
+
+fn apply_runtime_fields(entry: &mut ExtensionRegistryEntry, runtime: &Map<String, Value>) {
+    if let Some(enabled) = runtime.get("enabled").and_then(Value::as_bool) {
+        entry.enabled = enabled;
+    }
+    if let Some(dependency_ok) = runtime.get("dependency_ok").and_then(Value::as_bool) {
+        entry.dependency_ok = dependency_ok;
+    }
+    if let Some(status) = string_field(runtime, "dependency_status") {
+        entry.dependency_status = status;
+    }
+    if let Some(message) = runtime.get("dependency_message").and_then(Value::as_str) {
+        entry.dependency_message = message.to_owned();
+    }
+    if let Some(details) = runtime.get("dependency_details").and_then(Value::as_object) {
+        entry.dependency_details = details.clone();
+    }
+    if let Some(has_check) = runtime.get("has_dependency_check").and_then(Value::as_bool) {
+        entry.has_dependency_check = has_check;
+    }
+    if let Some(has_install) = runtime
+        .get("has_dependency_install")
+        .and_then(Value::as_bool)
+    {
+        entry.has_dependency_install = has_install;
+    }
+    entry.active = entry.enabled && entry.dependency_ok;
 }
 
 fn read_manifest(extensions_dir: &PathBuf, folder: &str) -> Result<Map<String, Value>> {
@@ -452,6 +536,46 @@ mod tests {
         let entry = reloaded.get("copilot-sdk").unwrap();
         assert!(!entry.enabled);
         assert!(!entry.active);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_dependency_fields_update_active_state() {
+        let root = std::env::temp_dir().join(format!("als-rs-ext-reg-runtime-{}", unix_millis()));
+        let ext_dir = root.join("extensions");
+        fs::create_dir_all(ext_dir.join("copilot_sdk")).unwrap();
+        fs::write(
+            ext_dir.join("extensions.json"),
+            r#"{"version":"1.0","extensions":[{"id":"copilot-sdk","name":"GitHub Copilot","type":"copilot_sdk","path":"copilot_sdk","enabled":true}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            ext_dir.join("copilot_sdk").join("manifest.json"),
+            r#"{"id":"copilot-sdk","name":"GitHub Copilot","version":"1.0.0","type":"copilot_sdk","dependencies":{"has_check":true,"has_install":true}}"#,
+        )
+        .unwrap();
+
+        let registry = ExtensionRegistry::load_with_config(ext_dir, None).unwrap();
+        assert!(registry.get("copilot-sdk").unwrap().active);
+        registry.apply_runtime_extensions(&serde_json::json!({
+            "extensions": [{
+                "id": "copilot-sdk",
+                "dependency_ok": false,
+                "dependency_status": "unmet",
+                "dependency_message": "copilot missing",
+                "dependency_details": {"binary": null},
+                "has_dependency_check": true,
+                "has_dependency_install": true
+            }]
+        }));
+        let entry = registry.get("copilot-sdk").unwrap();
+        assert!(!entry.dependency_ok);
+        assert!(!entry.active);
+        assert_eq!(entry.dependency_status, "unmet");
+        assert_eq!(entry.dependency_message, "copilot missing");
+        assert!(entry.has_dependency_check);
+        assert!(entry.has_dependency_install);
 
         let _ = fs::remove_dir_all(root);
     }

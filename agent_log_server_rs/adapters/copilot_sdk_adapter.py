@@ -323,7 +323,8 @@ def _ack_from_result(conversation_id: str, result: JsonMap) -> ConversationAckRe
     return ConversationAckResult(
         conversation_id=conversation_id,
         accepted=ok,
-        provider_session_id=_optional_string(result.get("session_id")),
+        provider_session_id=_optional_string(result.get("session_id"))
+        or _optional_string(result.get("thread_id")),
         provider_call_id=_optional_string(result.get("provider_call_id")),
         turn_id=_optional_string(result.get("turn_id")),
         restore_draft=result.get("restore_draft") is True,

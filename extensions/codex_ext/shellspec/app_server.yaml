@@ -5,7 +5,7 @@ shells:
     pipe:
       mode: native_pipe_testing
     cwd: ${CWD}
-    subgroups: ["codex_agent", "app_server", "codex", "observed"]
+    subgroups: ["als-rs", "app_server", "codex", "observed"]
     inspect_hints:
       - json
       - jsonrpc

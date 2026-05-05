@@ -1,7 +1,7 @@
 use als_adapter_protocol::JsonMap;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -35,8 +35,31 @@ impl ConversationStore {
             .unwrap_or_else(new_conversation_id);
         let mut meta = self.default_meta(&conversation_id);
         meta.title = request.title;
-        meta.agent_type = request.agent_type;
         meta.settings = request.settings;
+        if let Some(value) = request.extension_id.or(request.agent_type) {
+            set_conversation_extension(&mut meta, value);
+        }
+        if let Some(value) = request.thread_id {
+            meta.thread_id = Some(value.clone());
+            meta.provider_session_id = Some(value);
+            meta.status = "active".to_owned();
+        }
+        if let Some(value) = request.cwd {
+            meta.cwd = Some(value.clone());
+            set_string_setting(&mut meta.settings, "cwd", value);
+        }
+        if let Some(value) = request.label {
+            meta.label = Some(value.clone());
+            set_string_setting(&mut meta.settings, "label", value);
+        }
+        if let Some(value) = request.alias {
+            meta.alias = Some(value.clone());
+            set_string_setting(&mut meta.settings, "alias", value);
+        }
+        if request.pinned {
+            meta.pinned = true;
+        }
+        sync_meta_from_settings(&mut meta);
         self.write_meta_unlocked(&meta)?;
         Ok(meta)
     }
@@ -63,7 +86,7 @@ impl ConversationStore {
             let meta = read_meta(&meta_path)?;
             summaries.push(ConversationSummary::from(meta));
         }
-        summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        summaries.sort_by(compare_summaries_for_display);
         Ok(summaries)
     }
 
@@ -93,10 +116,12 @@ impl ConversationStore {
             .map_err(|_| anyhow!("conversation store lock poisoned"))?;
         let mut meta = self.load_or_default_meta_unlocked(conversation_id)?;
         if let Some(settings) = update.settings {
-            meta.settings = settings;
+            merge_settings_patch(&mut meta.settings, settings);
         }
         if let Some(thread_id) = update.thread_id {
-            meta.thread_id = Some(thread_id);
+            meta.thread_id = Some(thread_id.clone());
+            meta.provider_session_id = Some(thread_id);
+            meta.status = "active".to_owned();
         }
         if let Some(title) = update.title {
             meta.title = Some(title);
@@ -104,9 +129,78 @@ impl ConversationStore {
         if let Some(draft) = update.draft {
             meta.draft = Some(draft);
         }
+        if let Some(extension_id) = update.extension_id.or(update.agent_type) {
+            set_conversation_extension(&mut meta, extension_id);
+        }
+        if let Some(cwd) = update.cwd {
+            meta.cwd = Some(cwd.clone());
+            set_string_setting(&mut meta.settings, "cwd", cwd);
+        }
+        if let Some(label) = update.label {
+            meta.label = Some(label.clone());
+            set_string_setting(&mut meta.settings, "label", label);
+        }
+        if let Some(alias) = update.alias {
+            meta.alias = Some(alias.clone());
+            set_string_setting(&mut meta.settings, "alias", alias);
+        }
+        if let Some(pinned) = update.pinned {
+            meta.pinned = pinned;
+            if !pinned {
+                meta.pinned_order = None;
+            }
+        }
+        sync_meta_from_settings(&mut meta);
         meta.updated_at = utc_ts();
         self.write_meta_unlocked(&meta)?;
         Ok(meta)
+    }
+
+    pub fn set_pinned_conversations(&self, requested: Vec<String>) -> Result<Vec<String>> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        if !self.root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut metas = Vec::new();
+        for entry in fs::read_dir(&self.root).context("failed to read conversations directory")? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let meta_path = entry.path().join("meta.json");
+            if meta_path.exists() {
+                metas.push(read_meta(&meta_path)?);
+            }
+        }
+        let valid_ids = metas
+            .iter()
+            .map(|meta| meta.conversation_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut pinned = Vec::new();
+        for item in requested {
+            let safe_id = sanitize_conversation_id(&item);
+            if valid_ids.contains(&safe_id) && !pinned.contains(&safe_id) {
+                pinned.push(safe_id);
+            }
+        }
+
+        let now = utc_ts();
+        for mut meta in metas {
+            if let Some(index) = pinned.iter().position(|id| id == &meta.conversation_id) {
+                meta.pinned = true;
+                meta.pinned_order = Some(index as u64);
+            } else {
+                meta.pinned = false;
+                meta.pinned_order = None;
+            }
+            meta.updated_at = now.clone();
+            self.write_meta_unlocked(&meta)?;
+        }
+        Ok(pinned)
     }
 
     pub fn delete(&self, conversation_id: &str) -> Result<bool> {
@@ -156,6 +250,7 @@ impl ConversationStore {
         object
             .entry("ts")
             .or_insert_with(|| Value::String(utc_ts()));
+        update_meta_from_transcript_entry(&mut meta, &entry);
 
         let dir = self.conversation_dir_unlocked(&meta.conversation_id);
         fs::create_dir_all(&dir)
@@ -263,7 +358,16 @@ impl ConversationStore {
             conversation_id: conversation_id.to_owned(),
             title: None,
             agent_type: None,
+            extension_id: None,
             thread_id: None,
+            provider_session_id: None,
+            cwd: None,
+            label: None,
+            alias: None,
+            pinned: false,
+            pinned_order: None,
+            pending_approvals: JsonMap::new(),
+            last_preview: None,
             status: "draft".to_owned(),
             created_at: now.clone(),
             updated_at: now,
@@ -281,6 +385,18 @@ pub struct CreateConversationRequest {
     pub title: Option<String>,
     pub agent_type: Option<String>,
     #[serde(default)]
+    pub extension_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
     pub settings: JsonMap,
 }
 
@@ -292,7 +408,25 @@ pub struct ConversationMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_order: Option<u64>,
+    #[serde(default)]
+    pub pending_approvals: JsonMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_preview: Option<Value>,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
@@ -313,9 +447,21 @@ pub struct ConversationMetaUpdate {
     #[serde(default)]
     pub thread_id: Option<String>,
     #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+    #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub draft: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -325,9 +471,37 @@ pub struct ConversationSummary {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_order: Option<u64>,
+    #[serde(default)]
+    pub pending_approvals: JsonMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_preview: Option<Value>,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub settings: JsonMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<String>,
+    #[serde(default)]
+    pub next_transcript_order_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_line_count: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,11 +523,169 @@ impl From<ConversationMeta> for ConversationSummary {
             conversation_id: meta.conversation_id,
             title: meta.title,
             agent_type: meta.agent_type,
+            extension_id: meta.extension_id,
+            thread_id: meta.thread_id,
+            provider_session_id: meta.provider_session_id,
+            cwd: meta.cwd,
+            label: meta.label,
+            alias: meta.alias,
+            pinned: meta.pinned,
+            pinned_order: meta.pinned_order,
+            pending_approvals: meta.pending_approvals,
+            last_preview: meta.last_preview,
             status: meta.status,
             created_at: meta.created_at,
             updated_at: meta.updated_at,
+            settings: meta.settings,
+            draft: meta.draft,
+            next_transcript_order_id: meta.next_transcript_order_id,
+            transcript_line_count: meta.transcript_line_count,
         }
     }
+}
+
+fn compare_summaries_for_display(
+    left: &ConversationSummary,
+    right: &ConversationSummary,
+) -> std::cmp::Ordering {
+    match (left.pinned, right.pinned) {
+        (true, false) => return std::cmp::Ordering::Less,
+        (false, true) => return std::cmp::Ordering::Greater,
+        _ => {}
+    }
+    if left.pinned && right.pinned {
+        let left_order = left.pinned_order.unwrap_or(u64::MAX);
+        let right_order = right.pinned_order.unwrap_or(u64::MAX);
+        let order = left_order.cmp(&right_order);
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+    }
+    right.updated_at.cmp(&left.updated_at)
+}
+
+fn merge_settings_patch(settings: &mut JsonMap, patch: JsonMap) {
+    for (key, value) in patch {
+        if value.is_null() || value.as_str().is_some_and(str::is_empty) {
+            settings.remove(&key);
+        } else {
+            settings.insert(key, value);
+        }
+    }
+}
+
+fn set_conversation_extension(meta: &mut ConversationMeta, extension_id: String) {
+    if let Some(extension_id) = nonempty_owned(extension_id) {
+        meta.extension_id = Some(extension_id.clone());
+        meta.agent_type = Some(extension_id.clone());
+        set_string_setting(&mut meta.settings, "agent", extension_id);
+    }
+}
+
+fn sync_meta_from_settings(meta: &mut ConversationMeta) {
+    if let Some(agent) = string_setting(&meta.settings, "agent") {
+        meta.extension_id = Some(agent.clone());
+        meta.agent_type = Some(agent);
+    }
+    meta.cwd = string_setting(&meta.settings, "cwd");
+    meta.label = string_setting(&meta.settings, "label");
+    meta.alias = string_setting(&meta.settings, "alias");
+}
+
+fn update_meta_from_transcript_entry(meta: &mut ConversationMeta, entry: &Value) {
+    let Some(object) = entry.as_object() else {
+        return;
+    };
+    if let Some(thread_id) = first_nonempty_string(
+        object,
+        &["thread_id", "threadId", "provider_session_id", "session_id"],
+    ) {
+        meta.thread_id = Some(thread_id.clone());
+        meta.provider_session_id = Some(thread_id);
+    }
+
+    let role = object
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let event_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    if let Some(status) = first_nonempty_string(object, &["status"]) {
+        meta.status = status;
+    } else if role == "error" || event_type == "error" {
+        meta.status = "error".to_owned();
+    } else if role != "debug_raw" && event_type != "debug_raw" {
+        meta.status = "active".to_owned();
+    }
+
+    if let Some(text) = preview_text_from_entry(object, &role, &event_type) {
+        let source_id = first_nonempty_string(object, &["id", "item_id", "card_id"]);
+        let preview_type = if role == "assistant"
+            || event_type == "assistant_finalize"
+            || event_type == "assistant_end"
+        {
+            "assistant"
+        } else {
+            "message"
+        };
+        let mut preview = Map::new();
+        preview.insert("type".to_owned(), Value::String(preview_type.to_owned()));
+        preview.insert("text".to_owned(), Value::String(truncate_chars(&text, 400)));
+        if let Some(source_id) = source_id {
+            preview.insert("source_id".to_owned(), Value::String(source_id));
+        }
+        meta.last_preview = Some(Value::Object(preview));
+    }
+}
+
+fn preview_text_from_entry(
+    object: &Map<String, Value>,
+    role: &str,
+    event_type: &str,
+) -> Option<String> {
+    match (role, event_type) {
+        ("assistant", _) | (_, "assistant_finalize" | "assistant_end") => {}
+        ("user", _) | (_, "message") => {}
+        _ => return None,
+    }
+    first_nonempty_string(object, &["text", "message"])
+}
+
+fn first_nonempty_string(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+fn set_string_setting(settings: &mut JsonMap, key: &str, value: String) {
+    if let Some(value) = nonempty_owned(value) {
+        settings.insert(key.to_owned(), Value::String(value));
+    }
+}
+
+fn string_setting(settings: &JsonMap, key: &str) -> Option<String> {
+    settings
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|value| nonempty_owned(value.to_owned()))
+}
+
+fn nonempty_owned(value: String) -> Option<String> {
+    let value = value.trim().to_owned();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn read_meta(path: &PathBuf) -> Result<ConversationMeta> {
@@ -525,6 +857,7 @@ mod tests {
                 title: Some("Test".to_owned()),
                 agent_type: Some("copilot-sdk".to_owned()),
                 settings: JsonMap::new(),
+                ..CreateConversationRequest::default()
             })
             .unwrap();
 
@@ -593,6 +926,95 @@ mod tests {
         assert_eq!(middle.rows.len(), 2);
         assert!(middle.rows[0].contains("\"text\":\"row 1\""));
         assert!(middle.rows[1].contains("\"text\":\"row 2\""));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persists_card_metadata_and_pin_order() {
+        let root = std::env::temp_dir().join(format!("als-rs-store-meta-test-{}", unix_millis()));
+        let store = ConversationStore::new(root.clone());
+        let mut settings = JsonMap::new();
+        settings.insert("agent".to_owned(), json!("codex-ext"));
+        settings.insert("cwd".to_owned(), json!("/repo/project"));
+        settings.insert("label".to_owned(), json!("Project chat"));
+        settings.insert("alias".to_owned(), json!("agent one"));
+
+        let meta = store
+            .create(CreateConversationRequest {
+                conversation_id: Some("meta-a".to_owned()),
+                settings,
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+        assert_eq!(meta.extension_id.as_deref(), Some("codex-ext"));
+        assert_eq!(meta.agent_type.as_deref(), Some("codex-ext"));
+        assert_eq!(meta.cwd.as_deref(), Some("/repo/project"));
+        assert_eq!(meta.label.as_deref(), Some("Project chat"));
+        assert_eq!(meta.alias.as_deref(), Some("agent one"));
+
+        store
+            .create(CreateConversationRequest {
+                conversation_id: Some("meta-b".to_owned()),
+                extension_id: Some("copilot-sdk".to_owned()),
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+        let pinned = store
+            .set_pinned_conversations(vec![
+                "meta-b".to_owned(),
+                "missing".to_owned(),
+                "meta-a".to_owned(),
+                "meta-b".to_owned(),
+            ])
+            .unwrap();
+        assert_eq!(pinned, vec!["meta-b", "meta-a"]);
+
+        let list = store.list().unwrap();
+        assert_eq!(list[0].conversation_id, "meta-b");
+        assert_eq!(list[0].pinned_order, Some(0));
+        assert_eq!(list[1].conversation_id, "meta-a");
+        assert_eq!(list[1].pinned_order, Some(1));
+        assert_eq!(list[1].settings["agent"], "codex-ext");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn append_transcript_updates_card_state() {
+        let root = std::env::temp_dir().join(format!("als-rs-store-card-test-{}", unix_millis()));
+        let store = ConversationStore::new(root.clone());
+        store
+            .create(CreateConversationRequest {
+                conversation_id: Some("card-state".to_owned()),
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+
+        store
+            .append_transcript(
+                "card-state",
+                json!({
+                    "role": "assistant",
+                    "text": "Final answer preview",
+                    "thread_id": "thread-123"
+                }),
+            )
+            .unwrap();
+        let meta = store.load_meta("card-state").unwrap();
+        assert_eq!(meta.status, "active");
+        assert_eq!(meta.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(meta.provider_session_id.as_deref(), Some("thread-123"));
+        assert_eq!(
+            meta.last_preview.as_ref().unwrap()["text"],
+            "Final answer preview"
+        );
+
+        store
+            .append_transcript("card-state", json!({"role": "status", "status": "success"}))
+            .unwrap();
+        let meta = store.load_meta("card-state").unwrap();
+        assert_eq!(meta.status, "success");
 
         let _ = fs::remove_dir_all(root);
     }

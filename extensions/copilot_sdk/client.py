@@ -355,6 +355,39 @@ _COPILOT_SHELL_LABEL = "copilot-sdk:cli"
 _COPILOT_SHELL_SPEC_ID = "copilot_cli"
 
 
+def _current_fws_app_id() -> Optional[str]:
+    value = os.environ.get("TE_APP_ID")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _shell_record_subgroups(record: object) -> set[str]:
+    raw_subgroups = getattr(record, "subgroups", None)
+    if not isinstance(raw_subgroups, (list, tuple, set)):
+        return set()
+    return {
+        subgroup.strip()
+        for subgroup in raw_subgroups
+        if isinstance(subgroup, str) and subgroup.strip()
+    }
+
+
+def _shell_record_matches_current_app(record: object) -> bool:
+    expected_app_id = _current_fws_app_id()
+    if not expected_app_id:
+        return True
+    record_app_id = getattr(record, "app_id", None)
+    if record_app_id == expected_app_id or expected_app_id in _shell_record_subgroups(record):
+        return True
+    shell_id = getattr(record, "id", None)
+    print(
+        "[CopilotSDK] Ignoring Copilot shell "
+        f"{shell_id if isinstance(shell_id, str) and shell_id else '<unknown>'} "
+        f"from app_id={record_app_id if isinstance(record_app_id, str) and record_app_id else '<none>'}; "
+        f"expected {expected_app_id}"
+    )
+    return False
+
+
 def _next_debug_raw_entry_index(conversation_id: str) -> int:
     next_value = _debug_raw_entry_counters.get(conversation_id, 0) + 1
     _debug_raw_entry_counters[conversation_id] = next_value
@@ -1528,6 +1561,8 @@ async def _adopt_existing_copilot_shell(mgr: _FrameworkShellManager) -> Optional
         if (rec.label or "") != _COPILOT_SHELL_LABEL:
             continue
         if getattr(rec, "spec_id", "") != _COPILOT_SHELL_SPEC_ID:
+            continue
+        if not _shell_record_matches_current_app(rec):
             continue
         return rec.id
     return None

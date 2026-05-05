@@ -1,3 +1,4 @@
+use crate::config::FrameworkShellConfig;
 use crate::extension_registry::ExtensionRegistryEntry;
 use crate::state::AppState;
 use als_adapter_protocol::{JsonMap, methods};
@@ -48,9 +49,13 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
             let extensions = state.extensions.reload().map_err(internal_rpc_error)?;
             let adapter = state
                 .adapter
-                .reload_extensions_if_running()
+                .reload_extensions_if_running(state.extensions.enabled_overrides(), None)
                 .await
                 .map_err(internal_rpc_error)?;
+            let extensions = adapter
+                .as_ref()
+                .map(|value| state.extensions.apply_runtime_extensions(value))
+                .unwrap_or(extensions);
             Ok(json!({
                 "ok": true,
                 "extensions": extensions,
@@ -59,7 +64,9 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
             }))
         }
         "extension.enabled.set" => extension_enabled_set(state, &request.params).await,
-        "extension.install" | "extension.session.bind" => Ok(
+        "extension.install" => extension_install(state, &request.params).await,
+        "extension.debug.probe" => extension_debug_probe(state, &request.params).await,
+        "extension.session.bind" => Ok(
             json!({"ok": false, "error": format!("{} is not implemented in ALS-RS yet", request.method), "transport": "rpc"}),
         ),
         "extension.settingsSchema.get" => {
@@ -154,14 +161,87 @@ async fn extension_enabled_set(state: &AppState, params: &JsonMap) -> Result<Val
         .ok_or_else(|| rpc_error(-32602, format!("Extension not found: {extension_id}")))?;
     let adapter = state
         .adapter
-        .reload_extensions_if_running()
+        .reload_extensions_if_running(
+            state.extensions.enabled_overrides(),
+            enabled.then(|| extension_id.clone()),
+        )
         .await
         .map_err(internal_rpc_error)?;
+    let extension = adapter
+        .as_ref()
+        .map(|value| state.extensions.apply_runtime_extensions(value))
+        .and_then(|_| state.extensions.get(&extension_id))
+        .unwrap_or(extension);
     Ok(json!({
         "ok": true,
         "extension": extension,
         "adapter": adapter,
         "transport": "rpc"
+    }))
+}
+
+async fn extension_install(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let extension_id = require_extension_id(params)?;
+    ensure_registered_extension(state, &extension_id)?;
+    state
+        .adapter
+        .initialize_extension(&extension_id)
+        .await
+        .map_err(internal_rpc_error)?;
+    let mut result = state
+        .adapter
+        .client()
+        .await
+        .map_err(internal_rpc_error)?
+        .request_value(
+            methods::EXTENSION_INSTALL_DEPENDENCIES,
+            json!({ "extension_id": extension_id }),
+        )
+        .await
+        .map_err(internal_rpc_error)?;
+    state.extensions.apply_runtime_extensions(&result);
+    if let Value::Object(ref mut object) = result {
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+    }
+    Ok(result)
+}
+
+async fn extension_debug_probe(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let extension_id = require_extension_id(params)?;
+    ensure_registered_extension(state, &extension_id)?;
+    state
+        .adapter
+        .initialize_extension(&extension_id)
+        .await
+        .map_err(internal_rpc_error)?;
+    let ensure_manager = params
+        .get("ensure_manager")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let adapter = state
+        .adapter
+        .client()
+        .await
+        .map_err(internal_rpc_error)?
+        .request_value(
+            methods::EXTENSION_DEBUG_PROBE,
+            json!({
+                "extension_id": extension_id,
+                "ensure_manager": ensure_manager,
+            }),
+        )
+        .await
+        .map_err(internal_rpc_error)?;
+    let adapter_events = state.adapter.events().snapshot().await;
+    Ok(json!({
+        "ok": true,
+        "transport": "rpc",
+        "rust": {
+            "pid": std::process::id(),
+            "framework_shells": framework_shell_config_probe(&state.config.framework_shells),
+        },
+        "adapter": adapter,
+        "adapter_events": adapter_events,
     }))
 }
 
@@ -243,6 +323,31 @@ fn ensure_registered_extension(state: &AppState, extension_id: &str) -> Result<(
 
 fn internal_rpc_error(error: impl std::fmt::Display) -> RpcError {
     rpc_error(-32603, error.to_string())
+}
+
+fn framework_shell_config_probe(config: &FrameworkShellConfig) -> Value {
+    json!({
+        "FRAMEWORK_SHELLS_BASE_DIR": value_probe(config.base_dir.as_deref()),
+        "FRAMEWORK_SHELLS_SECRET": secret_probe(config.secret.as_deref()),
+        "FRAMEWORK_SHELLS_REPO_FINGERPRINT": value_probe(config.repo_fingerprint.as_deref()),
+        "FRAMEWORK_SHELLS_SECRET_FINGERPRINT": value_probe(config.secret_fingerprint.as_deref().or(config.repo_fingerprint.as_deref())),
+        "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID": value_probe(config.fws_socketio_server_pid.as_deref()),
+        "FRAMEWORK_SHELLS_RUN_ID": value_probe(config.run_id.as_deref()),
+    })
+}
+
+fn value_probe(value: Option<&str>) -> Value {
+    json!({
+        "present": value.is_some_and(|value| !value.is_empty()),
+        "value": value,
+    })
+}
+
+fn secret_probe(value: Option<&str>) -> Value {
+    json!({
+        "present": value.is_some_and(|value| !value.is_empty()),
+        "length": value.map(str::len).unwrap_or(0),
+    })
 }
 
 #[derive(Copy, Clone)]

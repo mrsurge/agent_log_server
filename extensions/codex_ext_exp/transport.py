@@ -129,6 +129,26 @@ def _strip_meta_envelope(text: str) -> str:
     return text
 
 
+def _shell_record_subgroups(record: object) -> set[str]:
+    raw_subgroups = getattr(record, "subgroups", None)
+    if not isinstance(raw_subgroups, (list, tuple, set)):
+        return set()
+    return {
+        subgroup.strip()
+        for subgroup in raw_subgroups
+        if isinstance(subgroup, str) and subgroup.strip()
+    }
+
+
+def _shell_record_matches_current_app(record: object) -> bool:
+    expected_app_id = os.environ.get("TE_APP_ID")
+    expected = expected_app_id.strip() if isinstance(expected_app_id, str) else ""
+    if not expected:
+        return True
+    record_app_id = getattr(record, "app_id", None)
+    return record_app_id == expected or expected in _shell_record_subgroups(record)
+
+
 def _extract_item_text(item: JSONDict) -> Optional[Dict[str, str]]:
     raw_type = str(item.get("type") or "")
     item_type = raw_type.lower()
@@ -470,7 +490,12 @@ class CodexAppServerTransport:
 
         if self._shell_id:
             shell = await mgr.get_shell(self._shell_id)
-            if shell and shell.status == "running" and getattr(shell, "spec_id", "") == "app_server_exp_observed":
+            if (
+                shell
+                and shell.status == "running"
+                and getattr(shell, "spec_id", "") == "app_server_exp_observed"
+                and _shell_record_matches_current_app(shell)
+            ):
                 return self._shell_id
             self._shell_id = None
 
@@ -494,6 +519,8 @@ class CodexAppServerTransport:
             if (rec.label or "") != _TRANSPORT_LABEL:
                 continue
             if getattr(rec, "spec_id", "") != "app_server_exp_observed":
+                continue
+            if not _shell_record_matches_current_app(rec):
                 continue
             return rec.id
         return None

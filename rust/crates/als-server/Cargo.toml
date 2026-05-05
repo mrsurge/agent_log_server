@@ -6,12 +6,18 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+ferrous-framework-pyo3 = ["ferrous_framework/pyo3-embed"]
+
 [dependencies]
 als-adapter-protocol.workspace = true
 als-dto.workspace = true
 als-jsonrpc.workspace = true
 anyhow.workspace = true
 axum.workspace = true
+ferrous_framework.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 socketioxide.workspace = true
