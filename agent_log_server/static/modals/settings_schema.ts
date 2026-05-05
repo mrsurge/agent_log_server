@@ -33,6 +33,7 @@ type SchemaField = {
   options?: unknown[];
   dynamic_source?: string;
   dynamic_options_key?: string;
+  dynamic_options_from?: JsonRecord;
   value_keys?: unknown[];
   model_gate?: JsonRecord;
   source?: string;
@@ -84,6 +85,7 @@ type SelectControl = {
   listDiv: HTMLDivElement;
   initialValue: string;
   initialValueApplied: boolean;
+  dynamicItems: JsonRecord[];
 };
 
 type DynamicSourceOptions = {
@@ -95,6 +97,7 @@ type DynamicSourceOptions = {
 type ConversationMeta = {
   conversation_id?: unknown;
   thread_id?: unknown;
+  provider_session_id?: unknown;
   status?: unknown;
 };
 
@@ -162,6 +165,7 @@ function normalizeSchemaField(value: unknown): SchemaField | null {
     placeholder: typeof value.placeholder === 'string' ? value.placeholder : undefined,
     dynamic_source: typeof value.dynamic_source === 'string' ? value.dynamic_source : undefined,
     dynamic_options_key: typeof value.dynamic_options_key === 'string' ? value.dynamic_options_key : undefined,
+    dynamic_options_from: isRecord(value.dynamic_options_from) ? value.dynamic_options_from : undefined,
     source: typeof value.source === 'string' ? value.source : undefined,
     browse: value.browse === true,
     min: typeof value.min === 'number' ? value.min : undefined,
@@ -472,8 +476,11 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
 
       const conversationId = typeof meta.conversation_id === 'string' ? meta.conversation_id.trim() : '';
       const threadId = typeof meta.thread_id === 'string' ? meta.thread_id.trim() : '';
-      const status = typeof meta.status === 'string' ? meta.status.trim().toLowerCase() : '';
-      if (!conversationId || !threadId || status !== 'active') return [];
+      const providerSessionId = typeof meta.provider_session_id === 'string'
+        ? meta.provider_session_id.trim()
+        : '';
+      const bindingId = threadId || providerSessionId;
+      if (!conversationId || !bindingId) return [];
 
       return [
         {
@@ -493,7 +500,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
           id: '__conversation_info_provider_thread_id',
           type: 'info',
           label: 'Provider Session / Thread ID',
-          text: threadId,
+          text: bindingId,
           detail: 'Bound provider session or thread identifier.',
         },
       ];
@@ -577,30 +584,78 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       return field.default ?? '';
     };
 
-    const normalizeEffortList = (model: unknown): string[] => {
-      const modelMap = asRecord(model);
-      const capabilities = asRecord(modelMap.capabilities);
-      const supports = asRecord(capabilities.supports);
-      const candidates = [
-        modelMap.supported_reasoning_efforts,
-        modelMap.supportedReasoningEfforts,
-        supports.reasoning_effort,
-        supports.reasoningEffort,
-      ];
-      const values: string[] = [];
-      candidates.forEach((raw) => {
-        if (!Array.isArray(raw)) return;
-        raw.forEach((item) => {
-          const value = typeof item === 'string'
-            ? item
-            : (isRecord(item)
-              ? stringValue(item.reasoning_effort || item.reasoningEffort || item.value)
-              : '');
-          if (!value || values.includes(value)) return;
-          values.push(value);
-        });
-      });
-      return values;
+    const readPath = (source: unknown, path: unknown): unknown => {
+      if (typeof path !== 'string' || !path.trim()) return undefined;
+      return path
+        .trim()
+        .split('.')
+        .filter(Boolean)
+        .reduce<unknown>((current, part) => {
+          if (!isRecord(current)) return undefined;
+          return current[part];
+        }, source);
+    };
+
+    const firstPathValue = (source: unknown, paths: unknown): unknown => {
+      const candidates = Array.isArray(paths) ? paths : [paths];
+      for (const path of candidates) {
+        const value = readPath(source, path);
+        if (value !== undefined && value !== null && value !== '') return value;
+      }
+      return undefined;
+    };
+
+    const optionFromDynamicItem = (
+      item: unknown,
+      valuePath: unknown,
+      labelPath: unknown,
+    ): SelectOption | null => {
+      if (typeof item === 'string') {
+        return item ? { value: item, label: item } : null;
+      }
+      const value = trimString(firstPathValue(item, valuePath) ?? (isRecord(item) ? item.value : ''));
+      if (!value) return null;
+      const label = trimString(firstPathValue(item, labelPath) ?? value) || value;
+      return { value, label };
+    };
+
+    const selectedDependencyValue = (field: SchemaField): string => {
+      const dynamicOptions = asRecord(field.dynamic_options_from);
+      const sourceField = trimString(dynamicOptions.source_field);
+      if (!sourceField) return '';
+      return selectControls[sourceField]?.input?.value || '';
+    };
+
+    const findDependentSourceItem = (field: SchemaField): JsonRecord | null => {
+      const dynamicOptions = asRecord(field.dynamic_options_from);
+      const sourceValue = selectedDependencyValue(field);
+      if (!sourceValue) return null;
+      const matchPath = trimString(dynamicOptions.match_path) || 'id';
+      const sourceControl = selectControls[trimString(dynamicOptions.source_field)];
+      const ownControl = selectControls[field.id];
+      const items = sourceControl?.dynamicItems?.length
+        ? sourceControl.dynamicItems
+        : (ownControl?.dynamicItems?.length ? ownControl.dynamicItems : modelItems);
+      return items.find((item) => trimString(firstPathValue(item, matchPath)) === sourceValue) || null;
+    };
+
+    const optionsFromDependentSource = (field: SchemaField): DynamicSelectOptions => {
+      const dynamicOptions = asRecord(field.dynamic_options_from);
+      const sourceItem = findDependentSourceItem(field);
+      if (!sourceItem) return { items: [], options: [], current: '', defaultValue: '' };
+      const rawOptions = firstPathValue(sourceItem, dynamicOptions.options_path);
+      const optionItems = Array.isArray(rawOptions) ? rawOptions : [];
+      const valuePath = dynamicOptions.option_value_path || 'value';
+      const labelPath = dynamicOptions.option_label_path || dynamicOptions.option_value_path || 'label';
+      const options = optionItems
+        .map((item) => optionFromDynamicItem(item, valuePath, labelPath))
+        .filter((option): option is SelectOption => Boolean(option));
+      return {
+        items: optionItems.filter(isRecord),
+        options,
+        current: '',
+        defaultValue: trimString(firstPathValue(sourceItem, dynamicOptions.default_path)),
+      };
     };
 
     const parseModelVersion = (modelId: unknown): ModelVersion | null => {
@@ -742,43 +797,44 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     };
 
     const syncReasoningEffortOptions = (): void => {
-      const modelControl = selectControls.model;
       const effortControl = selectControls.reasoning_effort;
-      if (!modelControl || !effortControl) return;
-      const selectedModelId = modelControl.input?.value || '';
-      if (!selectedModelId) {
+      if (!effortControl) return;
+      const dynamicOptions = asRecord(effortControl.field.dynamic_options_from);
+      const sourceField = trimString(dynamicOptions.source_field);
+      if (!sourceField) return;
+      if (!selectedDependencyValue(effortControl.field)) {
         setSelectOptions(effortControl, []);
         effortControl.input.value = '';
-        effortControl.input.placeholder = 'Select model first';
+        effortControl.input.placeholder = trimString(dynamicOptions.missing_source_placeholder)
+          || 'Select source first';
         return;
       }
-      const model = modelItems.find((item) => trimString(item.id || item.value) === selectedModelId);
-      if (!model) {
-        if (!modelItems.length) return;
+      const { options, defaultValue } = optionsFromDependentSource(effortControl.field);
+      if (!options.length) {
         setSelectOptions(effortControl, []);
         effortControl.input.value = '';
-        effortControl.input.placeholder = 'Model capabilities unavailable';
+        effortControl.input.placeholder = trimString(dynamicOptions.empty_placeholder)
+          || 'No options available';
         return;
       }
-      const modelEfforts = normalizeEffortList(model);
-      const supportsReasoningEffort = modelEfforts.length > 0;
-      const options = supportsReasoningEffort ? modelEfforts : [];
       const currentValue = effortControl.input.value;
       const initialValue = effortControl.initialValue || '';
-      const initialModelId = modelControl.initialValue || '';
-      const defaultEffort = trimString(model.default_reasoning_effort || model.defaultReasoningEffort) || options[0] || '';
-      setSelectOptions(effortControl, options.map((v) => ({ value: v, label: v })));
-      if (!supportsReasoningEffort) {
-        effortControl.input.value = '';
-        effortControl.input.placeholder = 'Not supported by selected model';
-        return;
-      }
+      const initialSourceValue = selectControls[sourceField]?.initialValue || '';
+      const selectedSourceValue = selectedDependencyValue(effortControl.field);
+      const optionValues = options.map((option) => option.value);
+      const defaultEffort = defaultValue || optionValues[0] || '';
+      setSelectOptions(effortControl, options);
       effortControl.input.placeholder = effortControl.field?.placeholder || '';
       let nextValue = defaultEffort;
-      if (!effortControl.initialValueApplied && selectedModelId === initialModelId && initialValue && options.includes(initialValue)) {
+      if (
+        !effortControl.initialValueApplied
+        && selectedSourceValue === initialSourceValue
+        && initialValue
+        && optionValues.includes(initialValue)
+      ) {
         nextValue = initialValue;
         effortControl.initialValueApplied = true;
-      } else if (currentValue && options.includes(currentValue)) {
+      } else if (currentValue && optionValues.includes(currentValue)) {
         nextValue = currentValue;
       }
       effortControl.input.value = nextValue;
@@ -943,6 +999,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
             listDiv,
             initialValue: selectInput.value,
             initialValueApplied: false,
+            dynamicItems: [],
           };
           selectControls[field.id] = selectControl;
           
@@ -951,9 +1008,12 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
             setSelectOptions(selectControl, options);
           };
           
-          if (field.id === 'reasoning_effort') {
+          if (field.dynamic_options_from) {
             buildOptions([]);
-            selectInput.placeholder = 'Select model first';
+            const dynamicOptions = asRecord(field.dynamic_options_from);
+            selectInput.placeholder = trimString(dynamicOptions.missing_source_placeholder)
+              || field.placeholder
+              || 'Select source first';
           } else {
             buildOptions(normalizeStaticOptions(field.options));
           }
@@ -963,17 +1023,25 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
             const loadOpts = (data: unknown): void => {
               if (!data) return;
               const { items, options: opts, current, defaultValue } = normalizeDynamicSelectOptions(field, data);
+              selectControl.dynamicItems = items;
               selectInput.removeAttribute('title');
               if (field.id === 'model') {
                 modelItems = items;
                 if (!selectInput.value) {
                   selectInput.placeholder = field.placeholder || 'Use server default';
                 }
+              } else if (field.dynamic_options_from) {
+                const dependent = optionsFromDependentSource(field);
+                buildOptions(dependent.options);
+                if (!selectInput.value) {
+                  selectInput.placeholder = dependent.defaultValue || field.placeholder || '';
+                  if (dependent.defaultValue) selectInput.value = dependent.defaultValue;
+                }
               } else if (!selectInput.value) {
                 selectInput.placeholder = defaultValue || field.placeholder || '';
                 if (current) selectInput.value = current;
               }
-              if (opts.length) buildOptions(opts);
+              if (!field.dynamic_options_from && opts.length) buildOptions(opts);
               if (field.id === 'model') syncModelDependentFields();
             };
             const selectedAgent = settingsAgentEl?.value?.trim() || '';

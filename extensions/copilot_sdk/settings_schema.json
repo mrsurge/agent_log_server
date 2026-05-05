@@ -31,12 +31,29 @@
       "id": "reasoning_effort",
       "type": "select",
       "label": "Reasoning Effort",
-      "options": [
-        {"value": "low", "label": "Low"},
-        {"value": "medium", "label": "Medium"},
-        {"value": "high", "label": "High"}
-      ],
-      "default": "medium"
+      "options": [],
+      "dynamic_source": "/api/extensions/copilot-sdk/models",
+      "dynamic_options_from": {
+        "source_field": "model",
+        "match_path": "id",
+        "options_path": [
+          "supported_reasoning_efforts",
+          "supportedReasoningEfforts",
+          "raw.supported_reasoning_efforts",
+          "raw.supportedReasoningEfforts"
+        ],
+        "option_value_path": "value",
+        "option_label_path": "label",
+        "default_path": [
+          "default_reasoning_effort",
+          "defaultReasoningEffort",
+          "raw.default_reasoning_effort",
+          "raw.defaultReasoningEffort"
+        ],
+        "missing_source_placeholder": "Select model first",
+        "empty_placeholder": "Not supported by selected model"
+      },
+      "default": ""
     },
     {
       "id": "developer_instructions",
