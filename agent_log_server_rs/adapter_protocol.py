@@ -278,6 +278,7 @@ class ConversationAckResult:
     def to_json(self) -> JsonMap:
         payload: JsonMap = {
             "conversation_id": self.conversation_id,
+            "ok": self.accepted,
             "accepted": self.accepted,
             "restore_draft": self.restore_draft,
         }

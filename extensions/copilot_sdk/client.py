@@ -3007,7 +3007,12 @@ async def _init_session_unlocked(
     # Already has session?
     if conversation_id in _sessions:
         session = _sessions[conversation_id]
-        return {"ok": True, "session_id": session.session_id, "already_initialized": True}
+        return {
+            "ok": True,
+            "provider_session_id": session.session_id,
+            "session_id": session.session_id,
+            "already_initialized": True,
+        }
 
     try:
         client = await _ensure_client()
@@ -3070,7 +3075,7 @@ async def _init_session_unlocked(
         resolved_cwd = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd).get("cwd")
         print(f"[CopilotSDK] Session created: convo={conversation_id[:8]} sdk_session={sdk_session_id[:8]} cwd={resolved_cwd}")
         _add_to_raw_buffer("out", conversation_id, f"session_created sdk={sdk_session_id[:8]} cwd={resolved_cwd}")
-        return {"ok": True, "session_id": sdk_session_id}
+        return {"ok": True, "provider_session_id": sdk_session_id, "session_id": sdk_session_id}
 
     except Exception as e:
         print(f"[CopilotSDK] init_session failed: {e}")
@@ -3112,7 +3117,12 @@ async def _resume_session_unlocked(
     # Already active in memory?
     if conversation_id in _sessions:
         s = _sessions[conversation_id]
-        return {"ok": True, "session_id": s.session_id, "already_active": True}
+        return {
+            "ok": True,
+            "provider_session_id": s.session_id,
+            "session_id": s.session_id,
+            "already_active": True,
+        }
 
     # Look up SDK session ID from conversation meta
     sdk_session_id = None
@@ -3175,7 +3185,7 @@ async def _resume_session_unlocked(
 
         print(f"[CopilotSDK] Session resumed: convo={conversation_id[:8]} sdk_session={sdk_session_id[:8]}")
         _add_to_raw_buffer("out", conversation_id, f"session_resumed sdk={sdk_session_id[:8]}")
-        return {"ok": True, "session_id": sdk_session_id}
+        return {"ok": True, "provider_session_id": sdk_session_id, "session_id": sdk_session_id}
 
     except Exception as e:
         print(f"[CopilotSDK] resume_session failed: {e}")
@@ -3391,7 +3401,13 @@ async def handle_message(
                 attachments=[],
             )
 
-            return {"ok": True, "session_id": conversation_id}
+            sdk_session_id = getattr(session, "session_id", None)
+            provider_session_id = sdk_session_id if isinstance(sdk_session_id, str) and sdk_session_id else None
+            return {
+                "ok": True,
+                "provider_session_id": provider_session_id,
+                "session_id": provider_session_id,
+            }
 
         except Exception as e:
             err_msg = str(e)
@@ -3613,6 +3629,7 @@ async def resume_session_with_history(
     print(f"[CopilotSDK] Bound session {session_id[:8]} to convo {conversation_id[:8]}")
     return {
         "ok": True,
+        "provider_session_id": session_id,
         "session_id": session_id,
         "conversation_id": conversation_id,
     }

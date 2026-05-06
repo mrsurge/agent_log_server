@@ -1277,7 +1277,7 @@ async def resume_session(
             meta=meta,
         )
         _add_to_raw_buffer("out", conversation_id, f"thread_resumed {thread_id[:8]}")
-        return {"ok": True, "session_id": thread_id}
+        return {"ok": True, "provider_session_id": thread_id, "session_id": thread_id}
     except Exception as exc:
         if _looks_like_auth_required_error(exc):
             settings_dict = _object_dict(meta.get("settings"))
@@ -1408,7 +1408,12 @@ async def handle_message(
         if not isinstance(thread_id, str) or not thread_id:
             return {"ok": False, "error": "Failed to resolve thread_id after message send"}
         _add_to_raw_buffer("out", conversation_id, f"turn_start thread={thread_id[:8]} text={text[:120]}")
-        return {"ok": True, "thread_id": thread_id, "conversation_id": conversation_id}
+        return {
+            "ok": True,
+            "provider_session_id": thread_id,
+            "thread_id": thread_id,
+            "conversation_id": conversation_id,
+        }
     except Exception as exc:
         if _looks_like_auth_required_error(exc):
             await _handle_auth_failure(conversation_id, agent_type or "codex-ext", str(exc))
@@ -1456,7 +1461,12 @@ async def resume_session_with_history(
     )
     if not result.get("ok"):
         return result
-    return {"ok": True, "session_id": session_id, "conversation_id": conversation_id}
+    return {
+        "ok": True,
+        "provider_session_id": session_id,
+        "session_id": session_id,
+        "conversation_id": conversation_id,
+    }
 
 
 async def hydrate_transcript(

@@ -771,14 +771,19 @@ fn take_session_binding(settings: &mut Map<String, Value>) -> Option<String> {
 }
 
 fn adapter_provider_session_id(adapter_result: &Value) -> Option<String> {
-    adapter_result
-        .as_object()
-        .and_then(|object| {
-            object
-                .get("provider_session_id")
-                .or_else(|| object.get("thread_id"))
-                .or_else(|| object.get("session_id"))
-        })
+    let object = adapter_result.as_object()?;
+    let accepted = object
+        .get("ok")
+        .and_then(Value::as_bool)
+        .or_else(|| object.get("accepted").and_then(Value::as_bool))
+        .unwrap_or(false);
+    if !accepted {
+        return None;
+    }
+    object
+        .get("provider_session_id")
+        .or_else(|| object.get("thread_id"))
+        .or_else(|| object.get("session_id"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -948,14 +953,24 @@ mod tests {
     #[test]
     fn normalizes_adapter_provider_binding_ack() {
         assert_eq!(
-            adapter_provider_session_id(&json!({"provider_session_id": "provider-123"})),
+            adapter_provider_session_id(&json!({"ok": true, "provider_session_id": "provider-123"})),
             Some("provider-123".to_owned())
         );
         assert_eq!(
-            adapter_provider_session_id(&json!({"session_id": "session-456"})),
+            adapter_provider_session_id(&json!({"accepted": true, "session_id": "session-456"})),
             Some("session-456".to_owned())
         );
+        assert_eq!(
+            adapter_provider_session_id(
+                &json!({"ok": true, "provider_session_id": "provider-123", "session_id": "legacy-456"})
+            ),
+            Some("provider-123".to_owned())
+        );
         assert_eq!(adapter_provider_session_id(&json!({"ok": true})), None);
+        assert_eq!(
+            adapter_provider_session_id(&json!({"ok": false, "provider_session_id": "provider-123"})),
+            None
+        );
     }
 
     #[test]
