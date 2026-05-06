@@ -17,7 +17,15 @@
       "label": "Session",
       "placeholder": "(new session) or type/paste session ID",
       "source": "/api/extensions/copilot-sdk/sessions",
-      "resume_endpoint": "/api/extensions/copilot-sdk/sessions/resume"
+      "resume_endpoint": "/api/extensions/copilot-sdk/sessions/resume",
+      "picker_sort": {
+        "param": "sort",
+        "default": "updated_at",
+        "options": [
+          { "value": "updated_at", "label": "MRU" },
+          { "value": "created_at", "label": "Created" }
+        ]
+      }
     },
     {
       "id": "model",

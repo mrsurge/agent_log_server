@@ -14,13 +14,6 @@
       "type": "codex_ext",
       "path": "codex_ext",
       "enabled": true
-    },
-    {
-      "id": "codex-ext-exp",
-      "name": "Codex Extension (Experimental)",
-      "type": "codex_ext_exp",
-      "path": "codex_ext_exp",
-      "enabled": true
     }
   ]
 }

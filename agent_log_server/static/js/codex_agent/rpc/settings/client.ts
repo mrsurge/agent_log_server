@@ -375,12 +375,21 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
   async function listExtensionSessions(options: {
     extensionId: string;
     cwd?: string | null;
+    extraParams?: JsonObject | null;
   }): Promise<{ sessions: JsonObject[]; transport: TransportTag } & JsonObject> {
     const params: JsonObject = {
       extension_id: options.extensionId,
     };
     if (typeof options.cwd === 'string' && options.cwd.trim()) {
       params.cwd = options.cwd.trim();
+    }
+    const extraParams = asObject(options.extraParams);
+    if (extraParams) {
+      Object.entries(extraParams).forEach(([key, value]) => {
+        if (value !== undefined) {
+          params[key] = value;
+        }
+      });
     }
     if (!rpcEnabled()) {
       const rawLegacy = await deps.sioCall('get_sessions', params);

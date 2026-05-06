@@ -95,8 +95,8 @@ async def _lifespan(app: FastAPI):
         except Exception as e:
             print(f"[Startup] Extension dependency sync error: {e}")
         # DEPRECATED: Legacy builtin codex app-server auto-start is disabled.
-        # All codex conversations should use codex-ext or codex-ext-exp extensions,
-        # which manage their own runtime through the generic extension transport.
+        # All codex conversations should use codex-ext through the generic
+        # extension transport.
         # Warm up extensions in background (SDK client start, model listing, etc.)
         # Don't block server startup - first message will wait if needed
         async def _warmup_background():
@@ -326,23 +326,12 @@ async def _ipc_conversation_todo_changed(sid: str, data: object):
     meta = _load_conversation_meta(conversation_id)
     settings_raw = meta.get("settings") if isinstance(meta, dict) else None
     settings = _coerce_json_object(settings_raw)
-    extension_id = str(data.get("extension_id") or settings.get("agent") or "").strip()
-    if extension_id != "codex-ext-exp":
-        return {"ok": True, "ignored": True, "reason": "not experimental codex", "conversation_id": conversation_id}
-
-    try:
-        result = await ext_loader.read_plan(extension_id, conversation_id)
-    except Exception as exc:
-        return _ipc_error(exc)
-    if not isinstance(result, dict):
-        return _ipc_error("extension plan result must be an object")
-
-    event = dict(result)
-    event["type"] = "plan_state"
-    event["conversation_id"] = conversation_id
-    event["extension_id"] = extension_id
-    await _broadcast_appserver_ui(event)
-    return {"ok": True, "conversation_id": conversation_id, "extension_id": extension_id}
+    return {
+        "ok": True,
+        "ignored": True,
+        "reason": "experimental codex extension removed",
+        "conversation_id": conversation_id,
+    }
 
 
 async def _ipc_ask_user_ack(sid: str, data: object):
@@ -1095,7 +1084,7 @@ def _remove_pending_approval(conversation_id: str, request_id: RequestId) -> boo
 def _legacy_builtin_codex_disabled_detail() -> str:
     return (
         "Legacy builtin Codex runtime is disabled. "
-        "Use codex-ext or codex-ext-exp through the generic extension path."
+        "Use codex-ext through the generic extension path."
     )
 
 

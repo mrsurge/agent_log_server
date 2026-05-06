@@ -9,6 +9,7 @@ export const UI_RPC_METHODS = {
   viewSet: 'view.set',
   hostUiGet: 'hostUi.get',
   hostUiRecheck: 'hostUi.recheck',
+  filesystemHome: 'filesystem.home',
   filesystemList: 'filesystem.list',
   filesystemSearch: 'filesystem.search',
   fileOpen: 'file.open',

@@ -15,7 +15,7 @@ type CodexAgentModuleApi = {
 
 type SettingsRpcClient = {
   getExtensionSettingsSchema: (extensionId: string) => Promise<unknown>;
-  listExtensionSessions: (options: { extensionId: string; cwd: string | null }) => Promise<unknown>;
+  listExtensionSessions: (options: { extensionId: string; cwd: string | null; extraParams?: JsonRecord | null }) => Promise<unknown>;
   listExtensionModels: (options: { extensionId: string }) => Promise<unknown>;
   getRuntimeOptions: (options: { conversationId: string | null; agent: string | null }) => Promise<unknown>;
 };
@@ -37,6 +37,7 @@ type SchemaField = {
   value_keys?: unknown[];
   model_gate?: JsonRecord;
   source?: string;
+  picker_sort?: JsonRecord;
   browse?: boolean;
   min?: number;
   max?: number;
@@ -92,6 +93,7 @@ type DynamicSourceOptions = {
   cwd?: string | null;
   conversationId?: string | null;
   agent?: string | null;
+  extraParams?: JsonRecord | null;
 };
 
 type ConversationMeta = {
@@ -111,6 +113,7 @@ type CodexAgentState = {
   conversationMeta?: ConversationMeta | null;
   conversationSettings?: JsonRecord | null;
   hostUi?: HostUiState | null;
+  homePrefix?: unknown;
   splashTab?: unknown;
 };
 
@@ -141,6 +144,20 @@ function trimString(value: unknown): string {
   return stringValue(value).trim();
 }
 
+function normalizeSelectOption(value: unknown): SelectOption | null {
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    return normalized ? { value: normalized, label: normalized } : null;
+  }
+  const item = asRecord(value);
+  const optionValue = trimString(item.value || item.id);
+  if (!optionValue) return null;
+  return {
+    value: optionValue,
+    label: trimString(item.label || item.name || optionValue) || optionValue,
+  };
+}
+
 function boolValue(value: unknown): boolean {
   return value === true;
 }
@@ -167,6 +184,7 @@ function normalizeSchemaField(value: unknown): SchemaField | null {
     dynamic_options_key: typeof value.dynamic_options_key === 'string' ? value.dynamic_options_key : undefined,
     dynamic_options_from: isRecord(value.dynamic_options_from) ? value.dynamic_options_from : undefined,
     source: typeof value.source === 'string' ? value.source : undefined,
+    picker_sort: isRecord(value.picker_sort) ? value.picker_sort : undefined,
     browse: value.browse === true,
     min: typeof value.min === 'number' ? value.min : undefined,
     max: typeof value.max === 'number' ? value.max : undefined,
@@ -244,10 +262,14 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   // Session picker overlay elements (reuse HTML already in template)
   const sessionPickerOverlay = document.getElementById('session-picker');
   const sessionPickerCloseBtn = document.getElementById('session-picker-close');
+  const sessionPickerSortEl = document.getElementById('session-picker-sort');
   const sessionPickerListEl = document.getElementById('session-picker-list');
    
   // Track which input field the session picker is serving
   let _sessionPickerTarget: SessionPickerTarget | null = null;
+  let _sessionPickerSortValue = '';
+  let _sessionPickerFilterEnabled = false;
+  let _sessionPickerItems: JsonRecord[] = [];
 
   function requireSioCall(): (event: string, payload?: JsonRecord) => Promise<unknown> {
     const sioCall = getHelper(ctx, 'sioCall');
@@ -323,6 +345,191 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     return match?.[1] ? decodeURIComponent(match[1]) : '';
   }
 
+  function sessionPickerSortConfig(field: SchemaField | null | undefined): JsonRecord {
+    return asRecord(field?.picker_sort);
+  }
+
+  function sessionPickerSortOptions(field: SchemaField | null | undefined): SelectOption[] {
+    const rawOptions = sessionPickerSortConfig(field).options;
+    if (!Array.isArray(rawOptions)) return [];
+    return rawOptions
+      .map((item) => normalizeSelectOption(item))
+      .filter((item): item is SelectOption => Boolean(item));
+  }
+
+  function sessionPickerSortDefault(field: SchemaField | null | undefined): string {
+    const configured = trimString(sessionPickerSortConfig(field).default);
+    if (configured) return configured;
+    return sessionPickerSortOptions(field)[0]?.value || '';
+  }
+
+  function sessionPickerSortParam(field: SchemaField | null | undefined): string {
+    return trimString(sessionPickerSortConfig(field).param) || 'sort';
+  }
+
+  function getSessionPickerActiveCwd(): string {
+    const schemaCwd = currentSchemaValues.cwd?.input?.value;
+    if (typeof schemaCwd === 'string' && schemaCwd.trim()) return schemaCwd.trim();
+    const stateCwd = getCodexAgentState().conversationSettings?.cwd;
+    return trimString(stateCwd);
+  }
+
+  function normalizePickerPath(value: string): string {
+    const normalized = value.replace(/\/+/g, '/').replace(/\/+$/, '');
+    return normalized || '/';
+  }
+
+  function sessionPickerHomePrefix(): string {
+    return trimString(getCodexAgentState().homePrefix);
+  }
+
+  function sessionPickerRelativeHomePath(pathValue: unknown): string {
+    const rawPath = trimString(pathValue);
+    if (!rawPath) return '—';
+    const homePrefix = sessionPickerHomePrefix();
+    if (!homePrefix) return rawPath;
+    const normalizedPath = normalizePickerPath(rawPath);
+    const normalizedHome = normalizePickerPath(homePrefix);
+    if (normalizedPath === normalizedHome) return '~';
+    if (normalizedPath.startsWith(`${normalizedHome}/`)) {
+      return `~/${normalizedPath.slice(normalizedHome.length + 1)}`;
+    }
+    return rawPath;
+  }
+
+  function sessionPickerMatchesCwdScope(pathValue: unknown, cwdValue: unknown): boolean {
+    const sessionPath = trimString(pathValue);
+    const selectedCwd = trimString(cwdValue);
+    if (!selectedCwd) return true;
+    if (!sessionPath) return false;
+    const normalizedSession = normalizePickerPath(sessionPath);
+    const normalizedCwd = normalizePickerPath(selectedCwd);
+    return normalizedSession === normalizedCwd
+      || normalizedSession.startsWith(`${normalizedCwd}/`)
+      || normalizedCwd.startsWith(`${normalizedSession}/`);
+  }
+
+  function sessionPickerFormatTimestamp(value: unknown): string {
+    const raw = trimString(value);
+    if (!raw) return '—';
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) {
+      return new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'short',
+        timeStyle: 'short',
+      }).format(parsed);
+    }
+    return raw;
+  }
+
+  function sessionPickerShortId(value: unknown): string {
+    const sid = trimString(value);
+    if (!sid) return '—';
+    return sid.length > 12 ? `${sid.slice(0, 8)}…` : sid;
+  }
+
+  function sessionPickerSummary(itemMap: JsonRecord, metadata: JsonRecord): string {
+    return trimString(
+      itemMap.summary
+        || itemMap.preview
+        || metadata.summary
+        || metadata.preview
+        || itemMap.label
+        || metadata.label
+        || itemMap.title
+        || itemMap.name,
+    );
+  }
+
+  function sessionPickerCwd(itemMap: JsonRecord, metadata: JsonRecord): string {
+    const context = asRecord(itemMap.context);
+    const metadataContext = asRecord(metadata.context);
+    return trimString(
+      itemMap.cwd
+        || metadata.cwd
+        || context.cwd
+        || metadataContext.cwd,
+    );
+  }
+
+  function sessionPickerUpdatedAt(itemMap: JsonRecord, metadata: JsonRecord): string {
+    return trimString(
+      itemMap.updated_at
+        || itemMap.updatedAt
+        || itemMap.modifiedTime
+        || itemMap.modified_time
+        || metadata.updated_at
+        || metadata.updatedAt
+        || metadata.modifiedTime
+        || metadata.modified_time,
+    );
+  }
+
+  function sessionPickerCreatedAt(itemMap: JsonRecord, metadata: JsonRecord): string {
+    return trimString(
+      itemMap.created_at
+        || itemMap.createdAt
+        || itemMap.start_time
+        || itemMap.startTime
+        || metadata.created_at
+        || metadata.createdAt
+        || metadata.start_time
+        || metadata.startTime,
+    );
+  }
+
+  function renderSessionPickerSort(field: SchemaField | null | undefined): void {
+    if (!sessionPickerSortEl) return;
+    sessionPickerSortEl.innerHTML = '';
+    const options = sessionPickerSortOptions(field);
+    const activeCwd = getSessionPickerActiveCwd();
+    const sortGroup = document.createElement('div');
+    sortGroup.className = 'picker-sort-group';
+    if (options.length) {
+      const label = document.createElement('span');
+      label.className = 'picker-sort-label';
+      label.textContent = 'Order';
+      sortGroup.appendChild(label);
+
+      options.forEach((option) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn ghost picker-sort-btn';
+        button.dataset.selected = option.value === _sessionPickerSortValue ? 'true' : 'false';
+        button.textContent = option.label;
+        button.addEventListener('click', () => {
+          if (!_sessionPickerTarget || option.value === _sessionPickerSortValue) return;
+          _sessionPickerSortValue = option.value;
+          renderSessionPickerSort(_sessionPickerTarget.field);
+          void fetchAndRenderSessions(_sessionPickerTarget.field.source || '', _sessionPickerTarget.field);
+        });
+        sortGroup.appendChild(button);
+      });
+    }
+
+    const filterGroup = document.createElement('div');
+    filterGroup.className = 'picker-filter-group';
+    if (activeCwd) {
+      const filterButton = document.createElement('button');
+      filterButton.type = 'button';
+      filterButton.className = 'btn ghost picker-sort-btn picker-filter-btn';
+      filterButton.dataset.selected = _sessionPickerFilterEnabled ? 'true' : 'false';
+      filterButton.textContent = sessionPickerRelativeHomePath(activeCwd);
+      filterButton.title = activeCwd;
+      filterButton.addEventListener('click', () => {
+        _sessionPickerFilterEnabled = !_sessionPickerFilterEnabled;
+        renderSessionPickerSort(_sessionPickerTarget?.field);
+        renderSessionList(_sessionPickerItems);
+      });
+      filterGroup.appendChild(filterButton);
+    }
+
+    sessionPickerSortEl.hidden = options.length === 0 && !activeCwd;
+    if (sessionPickerSortEl.hidden) return;
+    if (options.length) sessionPickerSortEl.appendChild(sortGroup);
+    if (activeCwd) sessionPickerSortEl.appendChild(filterGroup);
+  }
+
   async function fetchDynamicSource(sourceUrl: unknown, options: DynamicSourceOptions = {}): Promise<unknown> {
     const settingsRpc = requireSettingsRpc();
     const request = async (): Promise<unknown> => {
@@ -331,6 +538,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
         return unwrapDynamicSourceResult(await settingsRpc.listExtensionSessions({
           extensionId: extensionIdForSessions,
           cwd: options.cwd || null,
+          extraParams: options.extraParams || null,
         }));
       }
       const extensionIdForModels = extensionIdFromApiPath(sourceUrl, 'models');
@@ -361,27 +569,49 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   function openSessionPicker(field: SchemaField, input: HTMLInputElement): void {
     if (!sessionPickerOverlay) return;
     _sessionPickerTarget = { input, field };
+    _sessionPickerSortValue = sessionPickerSortDefault(field);
+    _sessionPickerFilterEnabled = Boolean(getSessionPickerActiveCwd());
+    _sessionPickerItems = [];
+    renderSessionPickerSort(field);
     sessionPickerOverlay.classList.remove('hidden');
-    fetchAndRenderSessions(field.source || '');
+    fetchAndRenderSessions(field.source || '', field);
   }
   
   function closeSessionPicker(): void {
     if (!sessionPickerOverlay) return;
     sessionPickerOverlay.classList.add('hidden');
     _sessionPickerTarget = null;
+    _sessionPickerSortValue = '';
+    _sessionPickerFilterEnabled = false;
+    _sessionPickerItems = [];
+    if (sessionPickerSortEl) {
+      sessionPickerSortEl.hidden = true;
+      sessionPickerSortEl.innerHTML = '';
+    }
   }
   
-  async function fetchAndRenderSessions(sourceUrl: string): Promise<void> {
+  async function fetchAndRenderSessions(sourceUrl: string, field: SchemaField | null = null): Promise<void> {
     if (!sessionPickerListEl) return;
     sessionPickerListEl.innerHTML = '<div class="picker-item">Loading…</div>';
     try {
-      const data = await fetchDynamicSource(sourceUrl);
+      const extraParams: JsonRecord = {};
+      const sortParam = sessionPickerSortParam(field);
+      if (sortParam && _sessionPickerSortValue) {
+        extraParams[sortParam] = _sessionPickerSortValue;
+      }
+      const data = await fetchDynamicSource(sourceUrl, {
+        cwd: getSessionPickerActiveCwd() || null,
+        extraParams: Object.keys(extraParams).length ? extraParams : null,
+      });
       const dataMap = asRecord(data);
       const items = Array.isArray(dataMap.sessions) ? dataMap.sessions
         : Array.isArray(data) ? data : [];
-      renderSessionList(items);
+      _sessionPickerItems = items.map((item) => asRecord(item)).filter((item) => Object.keys(item).length > 0);
+      renderSessionPickerSort(field);
+      renderSessionList(_sessionPickerItems);
     } catch (err) {
       console.warn('[schema] session list failed', err);
+      _sessionPickerItems = [];
       renderSessionList([], dynamicSourceErrorMessage(err));
     }
   }
@@ -389,34 +619,80 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   function renderSessionList(items: unknown[], errorMessage = ''): void {
     if (!sessionPickerListEl) return;
     sessionPickerListEl.innerHTML = '';
-    if (!items.length) {
+    const selectedCwd = getSessionPickerActiveCwd();
+    const renderedItems = items
+      .map((item) => asRecord(item))
+      .filter((item) => {
+        if (!_sessionPickerFilterEnabled || !selectedCwd) return true;
+        return sessionPickerMatchesCwdScope(sessionPickerCwd(item, asRecord(item.metadata)), selectedCwd);
+      });
+    if (!renderedItems.length) {
       const empty = document.createElement('div');
       empty.className = 'picker-item';
-      empty.textContent = errorMessage ? 'Session list unavailable' : 'No sessions found';
+      empty.textContent = errorMessage
+        ? 'Session list unavailable'
+        : (_sessionPickerFilterEnabled && selectedCwd ? 'No sessions match selected CWD' : 'No sessions found');
       if (errorMessage) empty.title = errorMessage;
       sessionPickerListEl.appendChild(empty);
       return;
     }
-    items.forEach((item: unknown) => {
+    renderedItems.forEach((item: unknown) => {
       const itemMap = asRecord(item);
+      const metadata = asRecord(itemMap.metadata);
       const sid = trimString(itemMap.sessionId || itemMap.session_id || itemMap.id);
-      const summary = trimString(itemMap.summary);
-      const modified = trimString(itemMap.modifiedTime || itemMap.modified_time);
-      
+      const summary = sessionPickerSummary(itemMap, metadata);
+      const modified = sessionPickerUpdatedAt(itemMap, metadata);
+      const created = sessionPickerCreatedAt(itemMap, metadata);
+      const cwd = sessionPickerCwd(itemMap, metadata);
+
       const row = document.createElement('div');
-      row.className = 'picker-item rollout-item';
+      row.className = 'picker-item session-item';
       row.dataset.sessionId = sid;
       row.style.cursor = 'pointer';
-      
+      if (_sessionPickerTarget) {
+        const selectedId = trimString(_sessionPickerTarget.input.dataset.sessionId || _sessionPickerTarget.input.value);
+        if (selectedId && selectedId === sid) {
+          row.classList.add('selected');
+        }
+      }
+      if (boolValue(itemMap.active) || boolValue(metadata.active)) {
+        row.classList.add('active');
+      }
+
+      const header = document.createElement('div');
+      header.className = 'session-header';
+
       const idSpan = document.createElement('span');
-      idSpan.className = 'rollout-id';
-      idSpan.textContent = sid.length > 12 ? sid.slice(0, 8) + '…' : sid;
-      
-      const previewSpan = document.createElement('span');
-      previewSpan.className = 'rollout-preview';
-      previewSpan.textContent = summary || (modified ? `Modified: ${modified}` : '');
-      
-      row.append(idSpan, previewSpan);
+      idSpan.className = 'session-cell';
+      idSpan.textContent = sessionPickerShortId(sid);
+
+      const usedSpan = document.createElement('span');
+      usedSpan.className = 'session-cell';
+      usedSpan.textContent = sessionPickerFormatTimestamp(modified);
+
+      const createdSpan = document.createElement('span');
+      createdSpan.className = 'session-cell';
+      createdSpan.textContent = sessionPickerFormatTimestamp(created);
+
+      header.append(idSpan, usedSpan, createdSpan);
+      row.appendChild(header);
+
+      if (summary) {
+        const previewSpan = document.createElement('div');
+        previewSpan.className = 'session-summary';
+        previewSpan.textContent = summary;
+        row.appendChild(previewSpan);
+      }
+
+      const footer = document.createElement('div');
+      footer.className = 'session-footer';
+      const cwdSpan = document.createElement('span');
+      cwdSpan.className = 'session-cell session-meta';
+      cwdSpan.textContent = sessionPickerRelativeHomePath(cwd);
+      cwdSpan.title = cwd || '';
+      footer.appendChild(cwdSpan);
+      row.appendChild(footer);
+
       row.addEventListener('click', () => {
         if (_sessionPickerTarget) {
           _sessionPickerTarget.input.value = sid;

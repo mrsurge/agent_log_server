@@ -206,6 +206,30 @@ class AdapterModelInfo:
 
 
 @dataclass(frozen=True)
+class AdapterSessionInfo:
+    id: str
+    label: str | None = None
+    cwd: Path | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    metadata: JsonMap = field(default_factory=dict)
+
+    def to_json(self) -> JsonMap:
+        payload: JsonMap = {"id": self.id}
+        if self.label:
+            payload["label"] = self.label
+        if self.cwd is not None:
+            payload["cwd"] = str(self.cwd)
+        if self.created_at:
+            payload["created_at"] = self.created_at
+        if self.updated_at:
+            payload["updated_at"] = self.updated_at
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
+
+
+@dataclass(frozen=True)
 class ConversationSendParams:
     extension_id: str
     conversation_id: str

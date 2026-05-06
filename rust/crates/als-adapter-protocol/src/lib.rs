@@ -133,6 +133,8 @@ pub struct AdapterSessionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
     pub metadata: JsonMap,

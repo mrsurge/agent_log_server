@@ -6,8 +6,10 @@ import os
 import platform
 import re
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, cast
@@ -27,8 +29,6 @@ _runtime_lock: Optional[asyncio.Lock] = None
 _runtime_protocol: Optional["RuntimeProtocol"] = None
 _AGENT_PTY_BLOCKS_MCP_SERVER_NAME = "agent-pty-blocks"
 _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC = 3600
-_AGENT_PTY_BLOCKS_HTTP_SHIM_URL_ENV = "AGENT_PTY_HTTP_SHIM_URL"
-_AGENT_PTY_BLOCKS_HTTP_SHIM_DEFAULT_URL = "http://127.0.0.1:8765/mcp"
 
 SchemaDict = Dict[str, object]
 SchemaRegistry = Dict[str, SchemaDict]
@@ -1183,6 +1183,50 @@ def _schema_properties(spec: object) -> Dict[str, object]:
     return {}
 
 
+def _schema_path(spec: object, definitions: SchemaDict, path: Iterable[str]) -> SchemaDict:
+    current: object = spec
+    for segment in path:
+        resolved = _resolve_schema(current, definitions)
+        if not isinstance(resolved, dict):
+            return {}
+        if segment == "items":
+            current = resolved.get("items")
+            continue
+        current = _schema_properties(resolved).get(segment)
+    resolved = _resolve_schema(current, definitions)
+    return resolved if isinstance(resolved, dict) else {}
+
+
+def build_thread_list_params(protocol: RuntimeProtocol, limit: int = 200) -> SchemaDict:
+    schema = protocol.request_schema("thread/list")
+    if not isinstance(schema, dict):
+        raise RuntimeError("runtime protocol missing request schema for thread/list")
+    props = _schema_properties(schema)
+    params: SchemaDict = {}
+    if "limit" in props:
+        params["limit"] = limit
+    return params
+
+
+def normalize_thread_list_timestamp(protocol: RuntimeProtocol, field_name: str, value: object) -> Optional[str]:
+    schema = protocol.response_schema("thread/list")
+    field_schema = _schema_path(schema or {}, protocol.definitions, ("data", "items", field_name))
+    field_type = field_schema.get("type")
+    field_types = field_type if isinstance(field_type, list) else [field_type]
+    description = field_schema.get("description")
+    is_unix_timestamp = (
+        "integer" in field_types
+        and field_schema.get("format") in {"int64", "uint64", "int32", "uint32"}
+        and isinstance(description, str)
+        and "unix timestamp" in description.lower()
+    )
+    if is_unix_timestamp and isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
+    if "string" in field_types and isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def _build_collaboration_mode_setting(
     props: SchemaDict,
     definitions: SchemaDict,
@@ -1345,7 +1389,9 @@ def _build_agent_pty_blocks_mcp_server(
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         return None
 
+    command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
     merged: SchemaDict = dict(existing_server) if isinstance(existing_server, dict) else {}
+    env = _dict_value(merged.get("env"))
     existing_timeout = merged.get("tool_timeout_sec")
     tool_timeout_sec = (
         existing_timeout
@@ -1354,30 +1400,24 @@ def _build_agent_pty_blocks_mcp_server(
         and existing_timeout > _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC
         else _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC
     )
-    http_headers = _dict_value(merged.get("http_headers"))
-    http_headers["conversation-id"] = conversation_id.strip()
-    http_headers["x-agent-cwd"] = launch_cwd
+    env["PWD"] = launch_cwd
+    env["CONVERSATION_ID"] = conversation_id.strip()
 
     merged_without_transport_keys: SchemaDict = {
         key: value
         for key, value in merged.items()
-        if key not in {"args", "command", "cwd", "disabled_tools", "env", "tools", "type"}
+        if key not in {"args", "command", "cwd", "disabled_tools", "env", "http_headers", "tools", "type", "url"}
     }
     server: SchemaDict = {
         **merged_without_transport_keys,
-        "url": _agent_pty_blocks_http_shim_url(),
-        "http_headers": http_headers,
+        "command": command,
+        "args": [str(_agent_pty_mcp_server_script_path())],
+        "cwd": launch_cwd,
+        "env": env,
         "tool_timeout_sec": tool_timeout_sec,
         "enabled_tools": list(_agent_pty_blocks_tool_names()),
     }
     return server
-
-
-def _agent_pty_blocks_http_shim_url() -> str:
-    configured = os.environ.get(_AGENT_PTY_BLOCKS_HTTP_SHIM_URL_ENV)
-    if isinstance(configured, str) and configured.strip():
-        return configured.strip()
-    return _AGENT_PTY_BLOCKS_HTTP_SHIM_DEFAULT_URL
 
 
 def _build_codex_ext_thread_config(
@@ -1556,6 +1596,14 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Schem
                 "placeholder": "(new session) or type/paste session ID",
                 "source": f"/api/extensions/{extension_id}/sessions",
                 "resume_endpoint": f"/api/extensions/{extension_id}/sessions/resume",
+                "picker_sort": {
+                    "param": "sort",
+                    "default": "updated_at",
+                    "options": [
+                        {"value": "updated_at", "label": "MRU"},
+                        {"value": "created_at", "label": "Created"},
+                    ],
+                },
             },
             {
                 "id": "model",

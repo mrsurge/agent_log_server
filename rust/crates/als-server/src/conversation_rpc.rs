@@ -133,10 +133,11 @@ fn conversation_list(state: &AppState) -> Result<Value, RpcError> {
                 .map(ToOwned::to_owned)
         })
         .collect::<Vec<_>>();
+    let selection = state.ui_selection.snapshot().map_err(internal_error)?;
     Ok(json!({
         "items": items,
-        "active_conversation_id": Value::Null,
-        "active_view": "splash",
+        "active_conversation_id": selection.active_conversation_id,
+        "active_view": selection.active_view,
         "pinned_conversations": pinned_conversations,
         "transport": "rpc"
     }))
@@ -185,7 +186,15 @@ async fn conversation_create(
         .conversations
         .create(request)
         .map_err(internal_error)?;
+    state
+        .ui_selection
+        .select(
+            Some(meta.conversation_id.clone()),
+            Some("conversation".to_owned()),
+        )
+        .map_err(internal_error)?;
     let mut value = meta_json(meta.clone())?;
+    value["active_view"] = json!("conversation");
     if let Some(session_id) = picked_session {
         let extension_id = extension_id
             .or_else(|| meta.extension_id.clone())
@@ -226,19 +235,27 @@ async fn conversation_create(
             }
         }
     }
+    value["active_view"] = json!("conversation");
     Ok(value)
 }
 
 fn conversation_select(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
     let conversation_id = optional_str(&params, "conversation_id")
         .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
+    let requested_view = optional_str(params, "view")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "conversation".to_owned());
+    let selection = state
+        .ui_selection
+        .select(Some(conversation_id.to_owned()), Some(requested_view))
+        .map_err(internal_error)?;
     let mut value = meta_json(
         state
             .conversations
             .load_meta(conversation_id)
             .map_err(internal_error)?,
     )?;
-    value["active_view"] = json!(optional_str(params, "view").unwrap_or("conversation"));
+    value["active_view"] = Value::String(selection.active_view);
     Ok(value)
 }
 
@@ -337,6 +354,15 @@ fn conversation_delete(state: &AppState, params: &JsonMap) -> Result<Value, RpcE
         .conversations
         .delete(conversation_id)
         .map_err(internal_error)?;
+    if deleted {
+        let selection = state.ui_selection.snapshot().map_err(internal_error)?;
+        if selection.active_conversation_id.as_deref() == Some(conversation_id) {
+            state
+                .ui_selection
+                .select(None, Some("splash".to_owned()))
+                .map_err(internal_error)?;
+        }
+    }
     Ok(
         json!({"ok": true, "deleted": deleted, "conversation_id": conversation_id, "transport": "rpc"}),
     )
@@ -407,6 +433,13 @@ async fn conversation_send(
             let meta = state
                 .conversations
                 .create(CreateConversationRequest::default())
+                .map_err(internal_error)?;
+            state
+                .ui_selection
+                .select(
+                    Some(meta.conversation_id.clone()),
+                    Some("conversation".to_owned()),
+                )
                 .map_err(internal_error)?;
             meta.conversation_id
         }
@@ -1015,6 +1048,58 @@ mod tests {
             resolve_extension_id(&state, &params, &meta),
             Some("copilot-sdk".to_owned())
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn conversation_list_uses_shared_selection_state() {
+        let root =
+            std::env::temp_dir().join(format!("als-rs-rpc-selection-test-{}", unix_millis()));
+        let state = AppState::new(ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                copilot_python: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        });
+        state
+            .conversations
+            .create(CreateConversationRequest {
+                conversation_id: Some("conv-select".to_owned()),
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+        state
+            .ui_selection
+            .select(
+                Some("conv-select".to_owned()),
+                Some("conversation".to_owned()),
+            )
+            .unwrap();
+
+        let listed = conversation_list(&state).unwrap();
+        assert_eq!(listed["active_conversation_id"], "conv-select");
+        assert_eq!(listed["active_view"], "conversation");
+
+        let mut params = JsonMap::new();
+        params.insert("conversation_id".to_owned(), json!("conv-select"));
+        assert_eq!(
+            conversation_delete(&state, &params).unwrap()["deleted"],
+            json!(true)
+        );
+
+        let after_delete = conversation_list(&state).unwrap();
+        assert_eq!(after_delete["active_conversation_id"], Value::Null);
+        assert_eq!(after_delete["active_view"], "splash");
 
         let _ = fs::remove_dir_all(root);
     }

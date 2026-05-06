@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import json
 import os
 import sys
@@ -13,6 +14,7 @@ from typing import Protocol, TextIO, TypeAlias, cast
 from agent_log_server_rs.adapter_protocol import (
     AdapterCapabilities,
     AdapterEventMethod,
+    AdapterSessionInfo,
     AdapterMethod,
     ExtensionInitializeResult,
     JsonMap,
@@ -40,7 +42,7 @@ from agent_log_server_rs.adapters.copilot_sdk_adapter import (
 
 RpcId: TypeAlias = str | int | None
 
-SUPPORTED_RUNTIME_TYPES = {"copilot_sdk", "codex_ext", "codex_ext_exp"}
+SUPPORTED_RUNTIME_TYPES = {"copilot_sdk", "codex_ext"}
 SUPPORTED_MODEL_TYPES = SUPPORTED_RUNTIME_TYPES
 
 
@@ -321,6 +323,8 @@ class ExtensionJsonRpcAdapter:
             return await self._splash_schema(params)
         if method == AdapterMethod.EXTENSION_LIST_MODELS:
             return await self._list_models(params)
+        if method == AdapterMethod.EXTENSION_LIST_SESSIONS:
+            return await self._list_sessions(params)
         if method == AdapterMethod.CONVERSATION_START:
             return await self._conversation_start(params)
         if method == AdapterMethod.CONVERSATION_RESUME:
@@ -359,6 +363,7 @@ class ExtensionJsonRpcAdapter:
             capabilities=AdapterCapabilities(
                 conversations=supported,
                 models=supported,
+                sessions=supported,
                 live_events=supported,
                 transcript_records=supported,
                 extra={
@@ -520,6 +525,108 @@ class ExtensionJsonRpcAdapter:
                 if isinstance(model, dict) and isinstance(model.get("id"), str)
             ]
         }
+
+    async def _list_sessions(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        handler = self._supported_handler(extension_id)
+        list_sessions = getattr(handler, "list_sessions", None)
+        if not callable(list_sessions):
+            raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support session listing")
+        cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
+        limit_value = params.get("limit")
+        limit = limit_value if isinstance(limit_value, int) and limit_value > 0 else None
+        signature = inspect.signature(list_sessions)
+        allows_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        call_kwargs: JsonMap = {"cwd": cwd}
+        for key, value in params.items():
+            if key in {"extension_id", "cwd", "limit"}:
+                continue
+            if allows_kwargs or key in signature.parameters:
+                call_kwargs[key] = value
+        result = list_sessions(**call_kwargs)
+        if hasattr(result, "__await__"):
+            result = await cast(Awaitable[object], result)
+        if isinstance(result, dict):
+            raw_sessions = result.get("sessions")
+            sessions = raw_sessions if isinstance(raw_sessions, list) else []
+        else:
+            sessions = result if isinstance(result, list) else []
+        normalized: list[JsonMap] = []
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            session_id = (
+                _optional_string(session.get("id"))
+                or _optional_string(session.get("session_id"))
+                or _optional_string(session.get("thread_id"))
+            )
+            if not session_id:
+                continue
+            label = (
+                _optional_string(session.get("label"))
+                or _optional_string(session.get("title"))
+                or _optional_string(session.get("name"))
+            )
+            session_cwd = _optional_path(session.get("cwd"))
+            if session_cwd is None:
+                raw_context = session.get("context")
+                if isinstance(raw_context, dict):
+                    session_cwd = _optional_path(raw_context.get("cwd"))
+            created_at = (
+                _optional_string(session.get("created_at"))
+                or _optional_string(session.get("createdAt"))
+                or _optional_string(session.get("start_time"))
+                or _optional_string(session.get("startTime"))
+            )
+            updated_at = (
+                _optional_string(session.get("updated_at"))
+                or _optional_string(session.get("updatedAt"))
+                or _optional_string(session.get("modified_time"))
+                or _optional_string(session.get("modifiedTime"))
+            )
+            metadata: JsonMap = {}
+            raw_metadata = session.get("metadata")
+            if isinstance(raw_metadata, dict):
+                for raw_key, raw_value in raw_metadata.items():
+                    if isinstance(raw_key, str):
+                        metadata[raw_key] = raw_value
+            for key, value in session.items():
+                if key in {
+                    "id",
+                    "session_id",
+                    "thread_id",
+                    "label",
+                    "title",
+                    "name",
+                    "cwd",
+                    "created_at",
+                    "createdAt",
+                    "start_time",
+                    "startTime",
+                    "updated_at",
+                    "updatedAt",
+                    "modified_time",
+                    "modifiedTime",
+                    "metadata",
+                }:
+                    continue
+                metadata[key] = value
+            normalized.append(
+                AdapterSessionInfo(
+                    id=session_id,
+                    label=label,
+                    cwd=session_cwd,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    metadata=metadata,
+                ).to_json()
+            )
+            if limit is not None and len(normalized) >= limit:
+                break
+        return {"sessions": normalized}
 
     async def _settings_schema(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)

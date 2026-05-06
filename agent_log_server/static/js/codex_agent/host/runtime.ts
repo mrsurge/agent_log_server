@@ -34,6 +34,7 @@ interface HostRuntimeState {
   hostUi?: HostUiState;
   conversationMeta?: ConversationMetaState;
   conversationSettings?: ConversationSettingsState;
+  homePrefix?: string | null;
   activeView?: string | null;
   appConfig?: AppConfigState;
 }
@@ -141,6 +142,17 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
       applyHostUi();
     } catch {
       // ignore
+    }
+  }
+
+  async function fetchHomePrefix() {
+    try {
+      const data = await uiRpcClient.getFilesystemHome();
+      const homePrefix = typeof data?.home === 'string' && data.home.trim() ? data.home.trim() : null;
+      setState({ homePrefix });
+      return homePrefix;
+    } catch {
+      return null;
     }
   }
 
@@ -284,6 +296,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     applyHostUi,
     sendHostCloseMessage,
     fetchHostUi,
+    fetchHomePrefix,
     recheckSidebarConnection,
     postTe2OpenRequest,
     postExternalUrlOpenRequest,

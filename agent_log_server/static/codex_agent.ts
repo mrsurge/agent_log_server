@@ -278,6 +278,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let clientActiveView: string | null = null;
   let miniConversationDrawerOpen = false;
   let hostUi: RootHostUi = { showClose: false, parentOrigin: null };
+  let homePrefix: string | null = null;
   const SPLASH_TAB_STORAGE_KEY = 'codex_splash_tab';
   function normalizeSplashTab(value: unknown): 'all' | 'project' {
     return value === 'project' ? 'project' : 'all';
@@ -701,6 +702,7 @@ document.addEventListener('DOMContentLoaded', () => {
         parentOrigin: typeof hostUi.parentOrigin === 'string' ? hostUi.parentOrigin : null,
         projectRoot: typeof hostUi.projectRoot === 'string' ? hostUi.projectRoot : null,
       },
+      homePrefix,
       conversationMeta: {
         conversation_id: conversationMeta.conversation_id ?? null,
       },
@@ -714,6 +716,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }),
     setState: (patch: HostRuntimePatch) => {
       if (patch.hostUi !== undefined) hostUi = patch.hostUi as RootHostUi;
+      if (patch.homePrefix !== undefined) homePrefix = typeof patch.homePrefix === 'string' && patch.homePrefix ? patch.homePrefix : null;
       if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta as RootConversationMeta;
       if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings as RootConversationSettings;
       if (patch.activeView !== undefined) activeView = patch.activeView || activeView;
@@ -736,6 +739,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applyHostUi,
     sendHostCloseMessage,
     fetchHostUi,
+    fetchHomePrefix,
     recheckSidebarConnection,
     postTe2OpenRequest,
     postExternalUrlOpenRequest,
@@ -1900,6 +1904,7 @@ document.addEventListener('DOMContentLoaded', () => {
       pendingRollout,
       conversationMeta: conversationMeta as BootInitState['conversationMeta'],
       conversationSettings: conversationSettings as BootInitState['conversationSettings'],
+      homePrefix,
       appConfig: appConfig as BootInitState['appConfig'],
       splashTab,
       hostUi: hostUi as BootInitState['hostUi'],
@@ -1913,6 +1918,9 @@ document.addEventListener('DOMContentLoaded', () => {
         pendingRollout = patch.pendingRollout && typeof patch.pendingRollout === 'object' && !Array.isArray(patch.pendingRollout)
           ? patch.pendingRollout as UnknownRecord
           : null;
+      }
+      if (patch.homePrefix !== undefined) {
+        homePrefix = typeof patch.homePrefix === 'string' && patch.homePrefix ? patch.homePrefix : null;
       }
       if (patch.appConfig !== undefined) appConfig = patch.appConfig as RootAppConfig;
       if (patch.pickerPath !== undefined) pickerPath = patch.pickerPath;
@@ -1952,6 +1960,7 @@ document.addEventListener('DOMContentLoaded', () => {
     waitForWs,
     recheckSidebarConnection,
     fetchHostUi,
+    fetchHomePrefix,
     fetchAppConfig,
     bindPickerFilter,
     setDrawerOpen,

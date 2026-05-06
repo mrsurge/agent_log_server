@@ -176,6 +176,27 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function getFilesystemHome(): Promise<JsonObject & { transport: TransportTag }> {
+    if (!rpcEnabled()) {
+      const listed = await callLegacy('fs_list', { path: '~' });
+      const path = typeof listed.path === 'string' && listed.path.trim() ? listed.path.trim() : null;
+      return normalizeTransport(
+        {
+          ok: Boolean(path),
+          home: path,
+        },
+        'legacy',
+      );
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.filesystemHome,
+      params: {},
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function searchFilesystem(options: {
     query: string;
     root?: string | null;
@@ -277,6 +298,7 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     setView,
     getHostUi,
     recheckHostUi,
+    getFilesystemHome,
     listFilesystem,
     searchFilesystem,
     openFile,

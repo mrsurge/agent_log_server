@@ -20,11 +20,13 @@ from .plan_utils import normalize_plan_steps, render_plan_markdown
 from .rollout_import import find_rollout_path, preview_entries
 from .runtime_protocol import (
     RuntimeProtocol,
+    build_thread_list_params,
     build_request_params,
     build_settings_schema,
     build_thread_runtime_signature_payload,
     configure_runtime_protocol,
     get_runtime_protocol,
+    normalize_thread_list_timestamp,
 )
 from .transport import CodexAppServerTransport, _MetaFns
 from agent_log_server.te2_mcp_config import te2_mcp_integration_enabled
@@ -909,12 +911,34 @@ async def run_splash_action(
         return {"ok": False, "error": str(exc)}
 
 
-def _sort_session_entries(entries: List[Dict[str, object]], cwd: Optional[str]) -> List[Dict[str, object]]:
-    if not cwd:
-        return entries
-    resolved_cwd = os.path.realpath(os.path.expanduser(cwd))
+def _normalize_session_sort_key(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"created", "created_at"}:
+        return "created_at"
+    return "updated_at"
+
+
+def _session_sort_marker(value: object) -> tuple[int, float, str]:
+    raw = value.strip() if isinstance(value, str) else ""
+    if not raw:
+        return (1, 0.0, "")
+    normalized = f"{raw[:-1]}+00:00" if raw.endswith("Z") else raw
+    with contextlib.suppress(ValueError):
+        return (0, -datetime.fromisoformat(normalized).timestamp(), raw)
+    return (0, 0.0, raw)
+
+
+def _sort_session_entries(
+    entries: List[Dict[str, object]],
+    cwd: Optional[str],
+    sort_key: str = "updated_at",
+) -> List[Dict[str, object]]:
+    resolved_cwd = os.path.realpath(os.path.expanduser(cwd)) if cwd else ""
+    normalized_sort_key = _normalize_session_sort_key(sort_key)
 
     def relevance(entry: Dict[str, object]) -> int:
+        if not resolved_cwd:
+            return 9
         ctx = _object_dict(entry.get("context"))
         session_cwd_value = ctx.get("cwd")
         session_cwd = session_cwd_value if isinstance(session_cwd_value, str) else ""
@@ -927,7 +951,17 @@ def _sort_session_entries(entries: List[Dict[str, object]], cwd: Optional[str]) 
             return 1
         return 9
 
-    return sorted(entries, key=relevance)
+    ordered = sorted(entries, key=lambda entry: str(entry.get("session_id") or entry.get("id") or ""))
+    ordered.sort(
+        key=lambda entry: (
+            _session_sort_marker(
+                entry.get(normalized_sort_key) or entry.get("updated_at") or entry.get("created_at") or ""
+            ),
+            str(entry.get("session_id") or entry.get("id") or ""),
+        ),
+    )
+    ordered.sort(key=relevance)
+    return ordered
 
 
 def _build_plan_state(
@@ -1107,9 +1141,15 @@ async def list_models() -> List[Dict[str, object]]:
     return models
 
 
-async def list_sessions(cwd: Optional[str] = None) -> List[Dict[str, object]]:
+async def list_sessions(cwd: Optional[str] = None, sort: Optional[str] = None) -> List[Dict[str, object]]:
+    protocol = await get_runtime_protocol()
     transport = await _ensure_transport_ready()
-    result = await transport.rpc_request("thread/list", params={"limit": 200}, timeout=15.0)
+    sort_key = _normalize_session_sort_key(sort)
+    result = await transport.rpc_request(
+        "thread/list",
+        params=build_thread_list_params(protocol, limit=200),
+        timeout=15.0,
+    )
     items_raw = result.get("data", []) if isinstance(result, dict) else []
     sessions: List[Dict[str, object]] = []
     if not isinstance(items_raw, list):
@@ -1125,11 +1165,19 @@ async def list_sessions(cwd: Optional[str] = None) -> List[Dict[str, object]]:
             "summary": item.get("preview") or "",
             "active": False,
         }
+        created_at = normalize_thread_list_timestamp(protocol, "createdAt", item.get("createdAt"))
+        if created_at:
+            entry["created_at"] = created_at
+        updated_at = normalize_thread_list_timestamp(protocol, "updatedAt", item.get("updatedAt"))
+        if updated_at:
+            entry["updated_at"] = updated_at
+        elif created_at:
+            entry["updated_at"] = created_at
         session_cwd = item.get("cwd")
         if isinstance(session_cwd, str) and session_cwd:
             entry["context"] = {"cwd": session_cwd}
         sessions.append(entry)
-    return _sort_session_entries(sessions, cwd)
+    return _sort_session_entries(sessions, cwd, sort_key)
 
 
 async def route_event(

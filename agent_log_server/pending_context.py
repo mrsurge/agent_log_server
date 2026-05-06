@@ -30,7 +30,7 @@ from .typing_helpers import ObjectMap, coerce_object_map
 
 # -- Configuration -----------------------------------------------------
 
-TARGETED_AGENT_TYPES = frozenset({"codex-ext-exp"})
+TARGETED_AGENT_TYPES = frozenset()
 
 # inotify event masks
 IN_MODIFY = 0x00000002

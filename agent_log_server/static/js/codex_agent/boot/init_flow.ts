@@ -18,6 +18,7 @@ type BootInitState = {
   activeView?: string;
   conversationSettings?: ConversationSettingsState | null;
   conversationMeta?: ConversationMetaState | null;
+  homePrefix?: string | null;
   pendingNewConversation?: boolean;
   pendingRollout?: unknown;
   rolloutPickerProvider?: unknown;
@@ -77,6 +78,7 @@ interface BootInitFlowContext {
   waitForWs: (timeoutMs: number) => Promise<boolean>;
   recheckSidebarConnection?: () => Promise<unknown> | unknown;
   fetchHostUi: () => Promise<unknown>;
+  fetchHomePrefix?: () => Promise<unknown> | unknown;
   fetchAppConfig: () => Promise<unknown>;
   bindPickerFilter: () => void;
   setDrawerOpen: (open: boolean) => void;
@@ -120,6 +122,7 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
     waitForWs,
     recheckSidebarConnection,
     fetchHostUi,
+    fetchHomePrefix,
     fetchAppConfig,
     bindPickerFilter,
     setDrawerOpen,
@@ -190,6 +193,7 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
       }
       await recheckSidebarConnection?.();
       await fetchHostUi();
+      await fetchHomePrefix?.();
       await fetchAppConfig();
       await fetchConversation();
       await fetchConversations();
@@ -267,6 +271,7 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
         get conversationSettings() { return getState().conversationSettings; },
         get splashTab() { return getState().splashTab; },
         get hostUi() { return getState().hostUi; },
+        get homePrefix() { return getState().homePrefix; },
         get appConfig() { return getState().appConfig; },
       },
     };

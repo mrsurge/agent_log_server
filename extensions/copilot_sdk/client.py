@@ -3453,7 +3453,24 @@ async def list_models() -> list[PayloadDict]:
 
 # ── Session listing ─────────────────────────────────────────────────
 
-async def list_sessions(cwd: Optional[str] = None) -> list[PayloadDict]:
+def _normalize_session_sort_key(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"created", "created_at"}:
+        return "created_at"
+    return "updated_at"
+
+
+def _session_sort_marker(value: object) -> tuple[int, float, str]:
+    raw = value.strip() if isinstance(value, str) else ""
+    if not raw:
+        return (1, 0.0, "")
+    normalized = f"{raw[:-1]}+00:00" if raw.endswith("Z") else raw
+    with contextlib.suppress(ValueError):
+        return (0, -datetime.fromisoformat(normalized).timestamp(), raw)
+    return (0, 0.0, raw)
+
+
+async def list_sessions(cwd: Optional[str] = None, sort: Optional[str] = None) -> list[PayloadDict]:
     """
     List all known sessions from the Copilot CLI.
     
@@ -3467,6 +3484,8 @@ async def list_sessions(cwd: Optional[str] = None) -> list[PayloadDict]:
         for s in sessions:
             entry: PayloadDict = {
                 "session_id": s.sessionId,
+                "created_at": s.startTime,
+                "updated_at": s.modifiedTime,
                 "start_time": s.startTime,
                 "modified_time": s.modifiedTime,
                 "is_remote": s.isRemote,
@@ -3484,53 +3503,49 @@ async def list_sessions(cwd: Optional[str] = None) -> list[PayloadDict]:
             # Check if this session is currently active in our server
             entry["active"] = s.sessionId in _sessions
             result.append(entry)
-        
-        # Sort: CWD-matching first, then by modified_time descending
+
+        normalized_sort_key = _normalize_session_sort_key(sort)
+        resolved_cwd = ""
+        git_root = ""
         if cwd:
             resolved_cwd = os.path.expanduser(cwd) if cwd.startswith("~") else cwd
             resolved_cwd = os.path.realpath(resolved_cwd)
-            
-            def relevance(entry):
-                ctx = entry.get("context") or {}
-                session_cwd = ctx.get("cwd") or ""
-                session_git = ctx.get("git_root") or ""
-                # Exact CWD match = highest priority
-                if session_cwd and os.path.realpath(session_cwd) == resolved_cwd:
-                    return 0
-                # Same git root = next priority
-                if session_git:
-                    try:
-                        import subprocess
-                        git_root = subprocess.run(
-                            ["git", "-C", resolved_cwd, "rev-parse", "--show-toplevel"],
-                            capture_output=True, text=True, timeout=2
-                        ).stdout.strip()
-                        if git_root and os.path.realpath(session_git) == os.path.realpath(git_root):
-                            return 1
-                    except Exception:
-                        pass
-                # Fallback: check if CWD is a parent/child of session CWD
-                if session_cwd:
-                    r = os.path.realpath(session_cwd)
-                    if r.startswith(resolved_cwd) or resolved_cwd.startswith(r):
-                        return 2
+            try:
+                import subprocess
+                git_root = subprocess.run(
+                    ["git", "-C", resolved_cwd, "rev-parse", "--show-toplevel"],
+                    capture_output=True, text=True, timeout=2
+                ).stdout.strip()
+            except Exception:
+                git_root = ""
+
+        def relevance(entry: PayloadDict) -> int:
+            if not resolved_cwd:
                 return 9
-            
-            for entry in result:
-                entry["_relevance"] = relevance(entry)
-            # Sort: relevance ascending, modified_time descending within group
-            from functools import cmp_to_key
-            def _session_cmp(a, b):
-                ra, rb = a["_relevance"], b["_relevance"]
-                if ra != rb:
-                    return -1 if ra < rb else 1
-                ma, mb = a.get("modified_time") or "", b.get("modified_time") or ""
-                if ma != mb:
-                    return 1 if ma < mb else -1
+            ctx = entry.get("context")
+            session_ctx = ctx if isinstance(ctx, dict) else {}
+            session_cwd = session_ctx.get("cwd") or ""
+            session_git = session_ctx.get("git_root") or ""
+            if session_cwd and os.path.realpath(session_cwd) == resolved_cwd:
                 return 0
-            result.sort(key=cmp_to_key(_session_cmp))
-            for entry in result:
-                entry.pop("_relevance", None)
+            if git_root and session_git and os.path.realpath(session_git) == os.path.realpath(git_root):
+                return 1
+            if session_cwd:
+                session_root = os.path.realpath(session_cwd)
+                if session_root.startswith(resolved_cwd) or resolved_cwd.startswith(session_root):
+                    return 2
+            return 9
+
+        result.sort(key=lambda entry: str(entry.get("session_id") or ""))
+        result.sort(
+            key=lambda entry: (
+                _session_sort_marker(
+                    entry.get(normalized_sort_key) or entry.get("updated_at") or entry.get("created_at") or ""
+                ),
+                str(entry.get("session_id") or ""),
+            ),
+        )
+        result.sort(key=relevance)
         
         return result
     except Exception as e:

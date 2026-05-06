@@ -48,20 +48,15 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
     }
 
     match request.method.as_str() {
-        "view.get" => {
-            Ok(json!({"active_view": "splash", "conversation_id": Value::Null, "transport": "rpc"}))
-        }
-        "view.set" => Ok(json!({
-            "active_view": request.params.get("view").and_then(Value::as_str).unwrap_or("splash"),
-            "conversation_id": Value::Null,
-            "transport": "rpc"
-        })),
+        "view.get" => view_get(state),
+        "view.set" => view_set(state, &request.params),
         "hostUi.get" | "hostUi.recheck" => Ok(json!({
             "showClose": false,
             "ideMode": false,
             "projectRoot": Value::Null,
             "transport": "rpc"
         })),
+        "filesystem.home" => Ok(filesystem_home()),
         "filesystem.list" => filesystem_list(request.params).await,
         "filesystem.search" => filesystem_search(state, request.params).await,
         "file.open" | "url.open" => Ok(json!({
@@ -74,6 +69,45 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
             format!("Unsupported method: {}", request.method),
         )),
     }
+}
+
+fn view_get(state: &AppState) -> Result<Value, RpcError> {
+    let selection = state.ui_selection.snapshot().map_err(internal_rpc_error)?;
+    Ok(view_response(&selection))
+}
+
+fn view_set(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let snapshot = state
+        .ui_selection
+        .set_view(
+            params
+                .get("view")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+        )
+        .map_err(internal_rpc_error)?;
+    Ok(view_response(&snapshot))
+}
+
+fn view_response(selection: &crate::state::UiSelectionSnapshot) -> Value {
+    let conversation_id = selection
+        .active_conversation_id
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or(Value::Null);
+    json!({
+        "active_view": selection.active_view,
+        "conversation_id": conversation_id,
+        "transport": "rpc"
+    })
+}
+
+fn filesystem_home() -> Value {
+    json!({
+        "ok": true,
+        "home": path_to_string(&home_dir()),
+        "transport": "rpc",
+    })
 }
 
 async fn filesystem_list(params: JsonMap) -> Result<Value, RpcError> {
@@ -420,7 +454,11 @@ enum RpcAck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AdapterConfig, FrameworkShellConfig, ServerConfig};
+    use crate::state::AppState;
+    use als_dto::RuntimeRoots;
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn expands_home_without_resolving_symlinks() {
@@ -453,5 +491,56 @@ mod tests {
         let value = filesystem_search_sync(Path::new("."), &JsonMap::new()).unwrap();
         assert_eq!(value["ok"], json!(true));
         assert_eq!(value["items"], json!([]));
+    }
+
+    #[test]
+    fn filesystem_home_returns_ok_payload() {
+        let value = filesystem_home();
+        assert_eq!(value["ok"], json!(true));
+        assert!(value["home"].as_str().is_some());
+    }
+
+    #[test]
+    fn view_get_and_set_use_shared_ui_selection_state() {
+        let root = std::env::temp_dir().join(format!("als-rs-ui-view-test-{}", unix_millis()));
+        let state = AppState::new(ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                copilot_python: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        });
+
+        state
+            .ui_selection
+            .select(Some("conv-ui".to_owned()), Some("conversation".to_owned()))
+            .unwrap();
+
+        let initial = view_get(&state).unwrap();
+        assert_eq!(initial["conversation_id"], "conv-ui");
+        assert_eq!(initial["active_view"], "conversation");
+
+        let mut params = JsonMap::new();
+        params.insert("view".to_owned(), json!("splash"));
+        let updated = view_set(&state, &params).unwrap();
+        assert_eq!(updated["conversation_id"], "conv-ui");
+        assert_eq!(updated["active_view"], "splash");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn unix_millis() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
     }
 }

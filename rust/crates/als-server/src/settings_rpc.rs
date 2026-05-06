@@ -130,7 +130,7 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
             "transport": "rpc"
         })),
         "extension.models.list" => extension_models(state, &request.params).await,
-        "extension.sessions.list" => Ok(json!({"sessions": [], "transport": "rpc"})),
+        "extension.sessions.list" => extension_sessions(state, &request.params).await,
         _ => Err(rpc_error(
             -32601,
             format!("Unsupported method: {}", request.method),
@@ -286,11 +286,58 @@ async fn extension_models(state: &AppState, params: &JsonMap) -> Result<Value, R
     Ok(json!({"models": [], "transport": "rpc"}))
 }
 
+async fn extension_sessions(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let extension_id = require_extension_id(params)?;
+    ensure_registered_extension(state, &extension_id)?;
+    let mut request_params = JsonMap::new();
+    for (key, value) in params {
+        if key == "extension_id" {
+            continue;
+        }
+        request_params.insert(key.clone(), value.clone());
+    }
+    request_params.insert(
+        "extension_id".to_owned(),
+        Value::String(extension_id.clone()),
+    );
+    let mut result = adapter_extension_request_with_params(
+        state,
+        methods::EXTENSION_LIST_SESSIONS,
+        request_params,
+    )
+    .await?;
+    if let Value::Object(ref mut object) = result {
+        object
+            .entry("sessions")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        return Ok(result);
+    }
+    Ok(json!({"sessions": [], "transport": "rpc"}))
+}
+
 async fn adapter_extension_request(
     state: &AppState,
     extension_id: &str,
     method: &str,
 ) -> Result<Value, RpcError> {
+    let mut params = JsonMap::new();
+    params.insert(
+        "extension_id".to_owned(),
+        Value::String(extension_id.to_owned()),
+    );
+    adapter_extension_request_with_params(state, method, params).await
+}
+
+async fn adapter_extension_request_with_params(
+    state: &AppState,
+    method: &str,
+    params: JsonMap,
+) -> Result<Value, RpcError> {
+    let extension_id = params
+        .get("extension_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| rpc_error(-32602, "extension_id is required"))?;
     state
         .adapter
         .initialize_extension(extension_id)
@@ -301,7 +348,7 @@ async fn adapter_extension_request(
         .client()
         .await
         .map_err(internal_rpc_error)?
-        .request_value(method, json!({ "extension_id": extension_id }))
+        .request_value(method, params)
         .await
         .map_err(internal_rpc_error)
 }
