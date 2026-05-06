@@ -354,6 +354,11 @@ Use it for:
 - log search
 - process/runtime inspection
 
+When investigating framework-shell logs, prefer this order:
+- use `te2_fws_log_inspect` first for structured first-pass triage, especially when logs contain JSON, JSON-RPC, mixed plain+structured output, or you need prefixes/signatures instead of raw substring matches
+- use `te2_fws_log_search` next for narrow substring/regex follow-up once you know the event family or error text you want
+- use `te2_fws_log_tail` for recent raw context after you already know which shell/stream matters
+
 For deeper framework-shells usage details, read the cached README at:
 - `~/.cache/app_server/framework_shells_README.md`
 

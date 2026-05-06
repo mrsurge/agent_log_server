@@ -226,8 +226,10 @@ UNDER NO CIRCUMSTANCES WILL I EVER USE `resolve()` or ANY SYMLINK RESOLOVING MET
   - `~/.cache/framework_shells/runtimes/**/logs/`
 - For those roots:
   - file-name listing and path discovery are fine
-  - targeted content inspection must use a Python heredoc heuristic/parser tailored to the file format and the question being asked
-  - prefer JSON-aware or line-scoped Python extraction over raw text grep so you do not drown in minified/noisy output or miss the real structured event boundary
+  - for framework-shell logs, prefer the TE2 MCP framework-shell tools over ad hoc parsing when they are available
+  - use `te2_fws_log_inspect` first for structured triage of JSON/JSON-RPC or mixed logs, `te2_fws_log_search` for targeted follow-up, and `te2_fws_log_tail` for recent raw context
+  - targeted conversation-transcript inspection should still use a Python heredoc heuristic/parser tailored to the file format and the question being asked
+  - when Python extraction is needed, prefer JSON-aware or line-scoped extraction over raw text grep so you do not drown in minified/noisy output or miss the real structured event boundary
 
 ## Copilot harness heredoc quirk
 

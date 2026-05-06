@@ -1935,7 +1935,6 @@ def _schedule_deferred_cold_send(
     _add_to_raw_buffer("out", conversation_id, "deferred_send_scheduled reason=session_resume")
     result: PayloadDict = {
         "ok": True,
-        "session_id": conversation_id,
         "deferred": True,
         "resume_ack": "session.resume",
     }

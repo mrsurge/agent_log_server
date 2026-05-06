@@ -217,7 +217,9 @@ async fn conversation_create(
             Some(extension_id) => {
                 let bind_result =
                     bind_provider_session(&state, &meta, &extension_id, session_id).await;
-                if let Some(bound_session_id) = adapter_provider_session_id(&bind_result) {
+                if let Some(bound_session_id) =
+                    adapter_provider_session_id(&bind_result, &meta.conversation_id)
+                {
                     let updated = state
                         .conversations
                         .update_meta(
@@ -301,7 +303,9 @@ async fn conversation_update(
             Some(extension_id) => {
                 let bind_result =
                     bind_provider_session(&state, &meta, &extension_id, session_id.clone()).await;
-                if let Some(bound_session_id) = adapter_provider_session_id(&bind_result) {
+                if let Some(bound_session_id) =
+                    adapter_provider_session_id(&bind_result, conversation_id)
+                {
                     let updated = state
                         .conversations
                         .update_meta(
@@ -500,7 +504,9 @@ async fn conversation_send(
         .request_value(methods::CONVERSATION_SEND, adapter_params)
         .await
         .map_err(internal_error)?;
-    if let Some(provider_session_id) = adapter_provider_session_id(&adapter_result) {
+    if let Some(provider_session_id) =
+        adapter_provider_session_id(&adapter_result, &conversation_id)
+    {
         let _ = state.conversations.update_meta(
             &conversation_id,
             ConversationMetaUpdate {
@@ -1257,7 +1263,7 @@ fn take_session_binding(settings: &mut Map<String, Value>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn adapter_provider_session_id(adapter_result: &Value) -> Option<String> {
+fn adapter_provider_session_id(adapter_result: &Value, conversation_id: &str) -> Option<String> {
     let object = adapter_result.as_object()?;
     let accepted = object
         .get("ok")
@@ -1274,6 +1280,7 @@ fn adapter_provider_session_id(adapter_result: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|value| *value != conversation_id)
         .map(ToOwned::to_owned)
 }
 
@@ -1440,22 +1447,39 @@ mod tests {
     #[test]
     fn normalizes_adapter_provider_binding_ack() {
         assert_eq!(
-            adapter_provider_session_id(&json!({"ok": true, "provider_session_id": "provider-123"})),
+            adapter_provider_session_id(
+                &json!({"ok": true, "provider_session_id": "provider-123"}),
+                "conv_123",
+            ),
             Some("provider-123".to_owned())
         );
         assert_eq!(
-            adapter_provider_session_id(&json!({"accepted": true, "session_id": "session-456"})),
+            adapter_provider_session_id(
+                &json!({"accepted": true, "session_id": "session-456"}),
+                "conv_123",
+            ),
             Some("session-456".to_owned())
         );
         assert_eq!(
             adapter_provider_session_id(
-                &json!({"ok": true, "provider_session_id": "provider-123", "session_id": "legacy-456"})
+                &json!({"ok": true, "provider_session_id": "provider-123", "session_id": "legacy-456"}),
+                "conv_123",
             ),
             Some("provider-123".to_owned())
         );
-        assert_eq!(adapter_provider_session_id(&json!({"ok": true})), None);
+        assert_eq!(adapter_provider_session_id(&json!({"ok": true}), "conv_123"), None);
         assert_eq!(
-            adapter_provider_session_id(&json!({"ok": false, "provider_session_id": "provider-123"})),
+            adapter_provider_session_id(
+                &json!({"ok": false, "provider_session_id": "provider-123"}),
+                "conv_123",
+            ),
+            None
+        );
+        assert_eq!(
+            adapter_provider_session_id(
+                &json!({"ok": true, "session_id": "conv_123"}),
+                "conv_123",
+            ),
             None
         );
     }

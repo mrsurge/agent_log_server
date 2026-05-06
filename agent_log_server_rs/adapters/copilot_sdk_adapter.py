@@ -325,6 +325,8 @@ def _ack_from_result(conversation_id: str, result: JsonMap) -> ConversationAckRe
         or _optional_string(result.get("thread_id"))
         or _optional_string(result.get("session_id"))
     )
+    if provider_session_id == conversation_id:
+        provider_session_id = None
     if not ok:
         provider_session_id = None
     return ConversationAckResult(
