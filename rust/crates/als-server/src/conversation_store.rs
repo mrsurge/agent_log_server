@@ -156,6 +156,108 @@ impl ConversationStore {
         Ok(meta)
     }
 
+    pub fn upsert_pending_approval(
+        &self,
+        conversation_id: &str,
+        request_id: &str,
+        mut descriptor: JsonMap,
+    ) -> Result<ConversationMeta> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let mut meta = self.load_or_default_meta_unlocked(conversation_id)?;
+        let request_id = request_id.trim();
+        if request_id.is_empty() {
+            bail!("request_id is required");
+        }
+        descriptor.insert(
+            "request_id".to_owned(),
+            Value::String(request_id.to_owned()),
+        );
+        descriptor
+            .entry("conversation_id".to_owned())
+            .or_insert_with(|| Value::String(meta.conversation_id.clone()));
+        descriptor
+            .entry("status".to_owned())
+            .or_insert_with(|| Value::String("pending".to_owned()));
+        descriptor
+            .entry("created_at".to_owned())
+            .or_insert_with(|| Value::String(utc_ts()));
+        descriptor.insert("updated_at".to_owned(), Value::String(utc_ts()));
+        meta.pending_approvals
+            .insert(request_id.to_owned(), Value::Object(descriptor));
+        meta.updated_at = utc_ts();
+        self.write_meta_unlocked(&meta)?;
+        Ok(meta)
+    }
+
+    pub fn remove_pending_approval(
+        &self,
+        conversation_id: &str,
+        request_id: &str,
+    ) -> Result<Option<JsonMap>> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let mut meta = self.load_or_default_meta_unlocked(conversation_id)?;
+        let removed = meta
+            .pending_approvals
+            .remove(request_id.trim())
+            .and_then(|value| value.as_object().cloned());
+        if removed.is_some() {
+            meta.updated_at = utc_ts();
+            self.write_meta_unlocked(&meta)?;
+        }
+        Ok(removed)
+    }
+
+    pub fn find_pending_approval(&self, request_id: &str) -> Result<Option<(String, JsonMap)>> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let request_id = request_id.trim();
+        if request_id.is_empty() || !self.root.exists() {
+            return Ok(None);
+        }
+        for entry in fs::read_dir(&self.root).context("failed to read conversations directory")? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let meta_path = entry.path().join("meta.json");
+            if !meta_path.exists() {
+                continue;
+            }
+            let meta = read_meta(&meta_path)?;
+            let Some(descriptor) = meta
+                .pending_approvals
+                .get(request_id)
+                .and_then(Value::as_object)
+                .cloned()
+            else {
+                continue;
+            };
+            return Ok(Some((meta.conversation_id, descriptor)));
+        }
+        Ok(None)
+    }
+
+    pub fn next_ask_user_msg_id(&self, conversation_id: &str) -> Result<u64> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let mut meta = self.load_or_default_meta_unlocked(conversation_id)?;
+        let current = meta.ask_user_msg_counter;
+        meta.ask_user_msg_counter += 1;
+        meta.updated_at = utc_ts();
+        self.write_meta_unlocked(&meta)?;
+        Ok(current)
+    }
+
     pub fn set_pinned_conversations(&self, requested: Vec<String>) -> Result<Vec<String>> {
         let _guard = self
             .lock
@@ -373,6 +475,7 @@ impl ConversationStore {
             updated_at: now,
             settings: JsonMap::new(),
             draft: None,
+            ask_user_msg_counter: 0,
             next_transcript_order_id: 0,
             transcript_line_count: Some(0),
         }
@@ -434,6 +537,8 @@ pub struct ConversationMeta {
     pub settings: JsonMap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<String>,
+    #[serde(default)]
+    pub ask_user_msg_counter: u64,
     #[serde(default)]
     pub next_transcript_order_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,6 +604,8 @@ pub struct ConversationSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<String>,
     #[serde(default)]
+    pub ask_user_msg_counter: u64,
+    #[serde(default)]
     pub next_transcript_order_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_line_count: Option<usize>,
@@ -538,6 +645,7 @@ impl From<ConversationMeta> for ConversationSummary {
             updated_at: meta.updated_at,
             settings: meta.settings,
             draft: meta.draft,
+            ask_user_msg_counter: meta.ask_user_msg_counter,
             next_transcript_order_id: meta.next_transcript_order_id,
             transcript_line_count: meta.transcript_line_count,
         }

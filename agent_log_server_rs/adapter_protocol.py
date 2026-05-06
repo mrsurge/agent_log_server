@@ -55,11 +55,6 @@ class AdapterEventMethod(StrEnum):
     WARNING = "event.warning"
 
 
-class ApprovalDecision(StrEnum):
-    APPROVE = "approve"
-    DENY = "deny"
-
-
 class AdapterLiveEventType(StrEnum):
     MESSAGE = "message"
     ASSISTANT_DELTA = "assistant_delta"

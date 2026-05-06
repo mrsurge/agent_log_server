@@ -13,7 +13,10 @@ use socketioxide::{
     SocketIo,
     extract::{AckSender, Data, SocketRef, State},
 };
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::warn;
 
@@ -35,6 +38,7 @@ const METHOD_COMPACT: &str = "conversation.compact";
 const METHOD_APPROVAL_RESPOND: &str = "conversation.approval.respond";
 const METHOD_SHELL_EXEC: &str = "conversation.shell.exec";
 const METHOD_PINS_SET: &str = "conversation.pins.set";
+const AGENT_PTY_ASK_USER_REQUEST_METHOD: &str = "agent-pty/ask-user";
 
 pub fn register_conversations_rpc_namespace(io: &SocketIo) {
     io.ns(
@@ -98,7 +102,8 @@ async fn dispatch_rpc(
         METHOD_REPLAY_GET_CHUNK => conversation_replay_get_chunk(&state, &request.params),
         METHOD_SEND => conversation_send(socket, state, request.params).await,
         METHOD_PINS_SET => conversation_pins_set(&state, &request.params),
-        METHOD_INTERRUPT | METHOD_COMPACT | METHOD_APPROVAL_RESPOND | METHOD_SHELL_EXEC => {
+        METHOD_APPROVAL_RESPOND => conversation_approval_respond(socket, state, request.params).await,
+        METHOD_INTERRUPT | METHOD_COMPACT | METHOD_SHELL_EXEC => {
             Ok(json!({
                 "ok": false,
                 "error": format!("{} is not implemented in ALS-RS yet", request.method),
@@ -517,7 +522,7 @@ async fn handle_adapter_event(
     event: AdapterCapturedEvent,
 ) -> Result<(), RpcError> {
     match event {
-        AdapterCapturedEvent::Live(value) => forward_adapter_live_event(io, value).await,
+        AdapterCapturedEvent::Live(value) => forward_adapter_live_event(io, state, value).await,
         AdapterCapturedEvent::Transcript(value) => {
             persist_adapter_transcript(io, state, value).await
         }
@@ -528,8 +533,12 @@ async fn handle_adapter_event(
     }
 }
 
-async fn forward_adapter_live_event(io: &SocketIo, value: Value) -> Result<(), RpcError> {
-    let Some((_, event)) = adapter_conversation_object(value) else {
+async fn forward_adapter_live_event(
+    io: &SocketIo,
+    state: &AppState,
+    value: Value,
+) -> Result<(), RpcError> {
+    let Some((conversation_id, event)) = adapter_conversation_object(value) else {
         return Ok(());
     };
     let event_type = event
@@ -542,8 +551,119 @@ async fn forward_adapter_live_event(io: &SocketIo, value: Value) -> Result<(), R
     let Some(method) = notification_method_for_event_type(event_type) else {
         return Ok(());
     };
+    if event_type.trim().eq_ignore_ascii_case("approval") {
+        persist_pending_approval_event(state, &conversation_id, &event)?;
+        emit_rpc_notification_to_namespace(io, method, event).await;
+        emit_meta_updated_to_namespace(io, state, &conversation_id).await;
+        return Ok(());
+    }
     emit_rpc_notification_to_namespace(io, method, event).await;
     Ok(())
+}
+
+async fn conversation_approval_respond(
+    socket: SocketRef,
+    state: AppState,
+    params: JsonMap,
+) -> Result<Value, RpcError> {
+    let request_id = optional_str(&params, "request_id")
+        .or_else(|| optional_str(&params, "requestId"))
+        .or_else(|| optional_str(&params, "id"))
+        .ok_or_else(|| rpc_error(-32602, "request_id is required"))?
+        .to_owned();
+    let requested_conversation_id = optional_str(&params, "conversation_id")
+        .or_else(|| optional_str(&params, "conversationId"))
+        .map(ToOwned::to_owned);
+
+    let (conversation_id, descriptor) = match requested_conversation_id {
+        Some(conversation_id) => {
+            let meta = state
+                .conversations
+                .load_meta(&conversation_id)
+                .map_err(internal_error)?;
+            let Some(descriptor) = meta
+                .pending_approvals
+                .get(&request_id)
+                .and_then(Value::as_object)
+                .cloned()
+            else {
+                return Err(rpc_error(-32009, "Approval is no longer pending"));
+            };
+            (meta.conversation_id, descriptor)
+        }
+        None => state
+            .conversations
+            .find_pending_approval(&request_id)
+            .map_err(internal_error)?
+            .ok_or_else(|| rpc_error(-32009, "Approval is no longer pending"))?,
+    };
+
+    let meta = state
+        .conversations
+        .load_meta(&conversation_id)
+        .map_err(internal_error)?;
+    let extension_id = string_from_map(&descriptor, "agent")
+        .or_else(|| string_from_map(&descriptor, "extension_id"))
+        .or_else(|| resolve_extension_id(&state, &JsonMap::new(), &meta))
+        .ok_or_else(|| rpc_error(-32603, "No approval resolver for conversation"))?;
+    let mut resolution = optional_map(&params, "result").unwrap_or_default();
+    if let Some(decision) = optional_str(&params, "decision") {
+        resolution
+            .entry("decision".to_owned())
+            .or_insert_with(|| Value::String(decision.to_owned()));
+    }
+
+    state
+        .adapter
+        .initialize_extension(&extension_id)
+        .await
+        .map_err(internal_error)?;
+    let adapter_result = state
+        .adapter
+        .client()
+        .await
+        .map_err(internal_error)?
+        .request_value(
+            methods::APPROVAL_RESPOND,
+            json!({
+                "extension_id": extension_id,
+                "conversation_id": conversation_id.clone(),
+                "request_id": request_id.clone(),
+                "decision": resolution.get("decision").cloned().unwrap_or(Value::Null),
+                "result": Value::Object(resolution.clone()),
+            }),
+        )
+        .await
+        .map_err(internal_error)?;
+    if !adapter_bool(&adapter_result, "ok") && !adapter_bool(&adapter_result, "resolved") {
+        let _ = state
+            .conversations
+            .remove_pending_approval(&conversation_id, &request_id);
+        emit_meta_updated_to_socket(&socket, &state, &conversation_id);
+        return Err(rpc_error(-32009, "Approval is stale or no longer actionable"));
+    }
+
+    let mut handoff_event =
+        build_approval_handoff_event(&state, &conversation_id, &descriptor, &resolution)?;
+    let recorded_entry =
+        append_approval_handoff_transcript_entry(&state, &conversation_id, &handoff_event)?;
+    merge_recorded_approval_fields(&mut handoff_event, &recorded_entry);
+    let _ = state
+        .conversations
+        .remove_pending_approval(&conversation_id, &request_id);
+    emit_meta_updated_to_socket(&socket, &state, &conversation_id);
+    emit_rpc_notification(&socket, "conversation.approval.handoff", Value::Object(handoff_event.clone()));
+    maybe_emit_diff_declined(&socket, &conversation_id, &handoff_event);
+
+    Ok(json!({
+        "ok": true,
+        "conversation_id": conversation_id,
+        "request_id": request_id,
+        "decision": resolution.get("decision").cloned().unwrap_or(Value::Null),
+        "result": resolution,
+        "handoff_event": handoff_event,
+        "transport": "rpc"
+    }))
 }
 
 async fn persist_adapter_transcript(
@@ -702,6 +822,373 @@ fn notification_method_for_event_type(event_type: &str) -> Option<&'static str> 
         "warning" => Some("conversation.warning"),
         _ => None,
     }
+}
+
+fn persist_pending_approval_event(
+    state: &AppState,
+    conversation_id: &str,
+    event: &Value,
+) -> Result<(), RpcError> {
+    let event_object = event
+        .as_object()
+        .ok_or_else(|| rpc_error(-32603, "approval event must be an object"))?;
+    let request_id = first_nonempty_event_string(event_object, &["request_id", "id"])
+        .ok_or_else(|| rpc_error(-32603, "approval event is missing request_id"))?;
+    let meta = state
+        .conversations
+        .load_meta(conversation_id)
+        .map_err(internal_error)?;
+    let request_method = first_nonempty_event_string(event_object, &["request_method"]);
+    let turn_id = first_nonempty_event_string(event_object, &["turn_id"]);
+    let mut render_event = event_object.clone();
+    if request_method.as_deref() == Some(AGENT_PTY_ASK_USER_REQUEST_METHOD)
+        && !render_event.contains_key("order_id")
+        && !render_event.contains_key("orderId")
+    {
+        render_event.insert("order_id".to_owned(), Value::Number((-1).into()));
+    }
+    let payload = event_object
+        .get("payload")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let request_params = event_object
+        .get("request_params")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut transcript_anchor = Map::new();
+    if let Some(turn_id) = turn_id.clone() {
+        transcript_anchor.insert("turn_id".to_owned(), Value::String(turn_id));
+    }
+    let agent = first_nonempty_event_string(event_object, &["agent", "extension_id"])
+        .or_else(|| meta.extension_id.clone())
+        .or_else(|| meta.agent_type.clone())
+        .or_else(|| string_from_map(&meta.settings, "agent"))
+        .unwrap_or_else(|| "codex-ext".to_owned());
+    let thread_id = first_nonempty_event_string(
+        event_object,
+        &["thread_id", "provider_session_id", "session_id"],
+    )
+    .or_else(|| meta.thread_id.clone())
+    .or_else(|| meta.provider_session_id.clone());
+    let created_at = first_nonempty_event_string(event_object, &["created_at"])
+        .unwrap_or_else(utc_ts_for_rpc);
+    let mut descriptor = Map::new();
+    descriptor.insert("request_id".to_owned(), Value::String(request_id.clone()));
+    descriptor.insert("agent".to_owned(), Value::String(agent));
+    descriptor.insert(
+        "kind".to_owned(),
+        Value::String(
+            first_nonempty_event_string(event_object, &["kind"])
+                .unwrap_or_else(|| "unknown".to_owned()),
+        ),
+    );
+    if let Some(request_method) = request_method {
+        descriptor.insert("request_method".to_owned(), Value::String(request_method));
+    }
+    descriptor.insert("request_params".to_owned(), Value::Object(request_params));
+    descriptor.insert("payload".to_owned(), Value::Object(payload));
+    descriptor.insert(
+        "conversation_id".to_owned(),
+        Value::String(conversation_id.to_owned()),
+    );
+    if let Some(thread_id) = thread_id {
+        descriptor.insert("thread_id".to_owned(), Value::String(thread_id));
+    }
+    if let Some(turn_id) = first_nonempty_event_string(event_object, &["turn_id"]) {
+        descriptor.insert("turn_id".to_owned(), Value::String(turn_id));
+    }
+    descriptor.insert(
+        "transcript_anchor".to_owned(),
+        Value::Object(transcript_anchor),
+    );
+    descriptor.insert("source".to_owned(), Value::String("live".to_owned()));
+    descriptor.insert("created_at".to_owned(), Value::String(created_at));
+    descriptor.insert("status".to_owned(), Value::String("pending".to_owned()));
+    descriptor.insert("render_event".to_owned(), Value::Object(render_event));
+    state
+        .conversations
+        .upsert_pending_approval(conversation_id, &request_id, descriptor)
+        .map_err(internal_error)?;
+    Ok(())
+}
+
+fn build_approval_handoff_event(
+    state: &AppState,
+    conversation_id: &str,
+    descriptor: &JsonMap,
+    resolution: &JsonMap,
+) -> Result<JsonMap, RpcError> {
+    let request_id = string_from_map(descriptor, "request_id")
+        .or_else(|| string_from_map(descriptor, "id"))
+        .ok_or_else(|| rpc_error(-32603, "pending approval descriptor is missing request_id"))?;
+    let render_event = descriptor
+        .get("render_event")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let payload = render_event
+        .get("payload")
+        .and_then(Value::as_object)
+        .cloned()
+        .or_else(|| descriptor.get("payload").and_then(Value::as_object).cloned())
+        .unwrap_or_default();
+    let request_params = render_event
+        .get("request_params")
+        .and_then(Value::as_object)
+        .cloned()
+        .or_else(|| {
+            descriptor
+                .get("request_params")
+                .and_then(Value::as_object)
+                .cloned()
+        })
+        .unwrap_or_default();
+    let request_method = string_from_map(&render_event, "request_method")
+        .or_else(|| string_from_map(descriptor, "request_method"));
+    let turn_id = string_from_map(&render_event, "turn_id")
+        .or_else(|| string_from_map(descriptor, "turn_id"));
+    let mut event = render_event;
+    event.insert(
+        "type".to_owned(),
+        Value::String("approval_handoff".to_owned()),
+    );
+    event.insert(
+        "conversation_id".to_owned(),
+        Value::String(conversation_id.to_owned()),
+    );
+    event.insert(
+        "id".to_owned(),
+        Value::String(
+            string_from_map(&event, "id").unwrap_or_else(|| request_id.clone()),
+        ),
+    );
+    event.insert("request_id".to_owned(), Value::String(request_id));
+    event.insert(
+        "kind".to_owned(),
+        Value::String(
+            string_from_map(&event, "kind")
+                .or_else(|| string_from_map(descriptor, "kind"))
+                .unwrap_or_else(|| "unknown".to_owned()),
+        ),
+    );
+    if let Some(request_method) = request_method.clone() {
+        event.insert("request_method".to_owned(), Value::String(request_method));
+    }
+    event.insert("request_params".to_owned(), Value::Object(request_params));
+    event.insert("payload".to_owned(), Value::Object(payload));
+    if let Some(turn_id) = turn_id {
+        event.insert("turn_id".to_owned(), Value::String(turn_id));
+    }
+    event.insert(
+        "created_at".to_owned(),
+        Value::String(
+            string_from_map(&event, "created_at")
+                .or_else(|| string_from_map(descriptor, "created_at"))
+                .unwrap_or_else(utc_ts_for_rpc),
+        ),
+    );
+    if let Some(card_id) =
+        string_from_map(&event, "card_id").or_else(|| string_from_map(descriptor, "card_id"))
+    {
+        event.insert("card_id".to_owned(), Value::String(card_id));
+    }
+    if request_method.as_deref() == Some(AGENT_PTY_ASK_USER_REQUEST_METHOD) {
+        let msg_id = state
+            .conversations
+            .next_ask_user_msg_id(conversation_id)
+            .map_err(internal_error)?;
+        event.insert("ask_user_msg_id".to_owned(), Value::Number(msg_id.into()));
+    }
+    event.insert(
+        "status".to_owned(),
+        Value::String(approval_status_from_resolution(resolution).to_owned()),
+    );
+    event.insert(
+        "decision".to_owned(),
+        resolution.get("decision").cloned().unwrap_or(Value::Null),
+    );
+    event.insert("result".to_owned(), Value::Object(resolution.clone()));
+    event.insert("resolved_at".to_owned(), Value::String(utc_ts_for_rpc()));
+    Ok(event)
+}
+
+fn append_approval_handoff_transcript_entry(
+    state: &AppState,
+    conversation_id: &str,
+    handoff_event: &JsonMap,
+) -> Result<Value, RpcError> {
+    let payload = handoff_event
+        .get("payload")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let request_id = handoff_event
+        .get("request_id")
+        .or_else(|| handoff_event.get("id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let card_id = handoff_event
+        .get("card_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let item_id = card_id
+        .as_ref()
+        .map(|value| Value::String(value.clone()))
+        .unwrap_or_else(|| request_id.clone());
+    let mut entry = Map::new();
+    entry.insert("role".to_owned(), Value::String("approval".to_owned()));
+    entry.insert(
+        "status".to_owned(),
+        handoff_event.get("status").cloned().unwrap_or(Value::Null),
+    );
+    entry.insert(
+        "decision".to_owned(),
+        handoff_event.get("decision").cloned().unwrap_or(Value::Null),
+    );
+    entry.insert(
+        "result".to_owned(),
+        handoff_event.get("result").cloned().unwrap_or(Value::Null),
+    );
+    entry.insert(
+        "request_method".to_owned(),
+        handoff_event
+            .get("request_method")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    entry.insert("payload".to_owned(), Value::Object(payload.clone()));
+    entry.insert(
+        "diff".to_owned(),
+        handoff_event
+            .get("diff")
+            .cloned()
+            .or_else(|| payload.get("diff").cloned())
+            .unwrap_or(Value::Null),
+    );
+    entry.insert(
+        "path".to_owned(),
+        handoff_event
+            .get("path")
+            .cloned()
+            .or_else(|| payload.get("path").cloned())
+            .unwrap_or(Value::Null),
+    );
+    entry.insert("request_id".to_owned(), request_id);
+    entry.insert("item_id".to_owned(), item_id);
+    if let Some(card_id) = card_id {
+        entry.insert("card_id".to_owned(), Value::String(card_id));
+    }
+    if let Some(value) = handoff_event.get("ask_user_msg_id") {
+        entry.insert("ask_user_msg_id".to_owned(), value.clone());
+    }
+    if let Some(value) = handoff_event.get("turn_id") {
+        entry.insert("turn_id".to_owned(), value.clone());
+    }
+    entry.insert(
+        "event".to_owned(),
+        Value::String("approval_decision".to_owned()),
+    );
+    state
+        .conversations
+        .append_transcript(conversation_id, Value::Object(entry))
+        .map_err(internal_error)
+}
+
+fn merge_recorded_approval_fields(handoff_event: &mut JsonMap, recorded_entry: &Value) {
+    let Some(recorded) = recorded_entry.as_object() else {
+        return;
+    };
+    for key in ["nid", "card_id", "order_id", "ask_user_msg_id"] {
+        if let Some(value) = recorded.get(key) {
+            handoff_event.insert(key.to_owned(), value.clone());
+        }
+    }
+}
+
+fn maybe_emit_diff_declined(socket: &SocketRef, conversation_id: &str, handoff_event: &JsonMap) {
+    if handoff_event.get("status").and_then(Value::as_str) != Some("declined") {
+        return;
+    }
+    let payload = handoff_event
+        .get("payload")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let diff = handoff_event
+        .get("diff")
+        .cloned()
+        .or_else(|| payload.get("diff").cloned());
+    let Some(diff) = diff.filter(|value| !value.is_null()) else {
+        return;
+    };
+    let path = handoff_event
+        .get("path")
+        .cloned()
+        .or_else(|| payload.get("path").cloned())
+        .unwrap_or(Value::Null);
+    emit_rpc_notification(
+        socket,
+        "conversation.diff.declined",
+        json!({
+            "type": "diff_declined",
+            "id": handoff_event.get("request_id").cloned().unwrap_or(Value::Null),
+            "text": diff,
+            "path": path,
+            "conversation_id": conversation_id,
+        }),
+    );
+}
+
+fn approval_status_from_resolution(resolution: &JsonMap) -> &'static str {
+    let decision = string_from_map(resolution, "decision")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        decision.as_str(),
+        "decline" | "deny" | "denied" | "reject" | "rejected"
+    ) {
+        return "declined";
+    }
+    if matches!(decision.as_str(), "cancel" | "cancelled" | "canceled") {
+        return "cancelled";
+    }
+    let action = string_from_map(resolution, "action")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(action.as_str(), "decline" | "deny" | "reject") {
+        return "declined";
+    }
+    if matches!(action.as_str(), "cancel" | "cancelled" | "canceled") {
+        return "cancelled";
+    }
+    if resolution.get("success").and_then(Value::as_bool) == Some(false) {
+        return "declined";
+    }
+    "accepted"
+}
+
+fn adapter_bool(value: &Value, key: &str) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn first_nonempty_event_string(object: &JsonMap, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| string_from_map(object, key))
+}
+
+fn utc_ts_for_rpc() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("unix_ms:{millis}")
 }
 
 fn meta_result(meta: ConversationMeta) -> Result<Value, RpcError> {
@@ -1115,6 +1602,96 @@ mod tests {
         let after_delete = conversation_list(&state).unwrap();
         assert_eq!(after_delete["active_conversation_id"], Value::Null);
         assert_eq!(after_delete["active_view"], "splash");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn approval_events_persist_and_handoff_records_match_legacy_shape() {
+        let root =
+            std::env::temp_dir().join(format!("als-rs-rpc-approval-test-{}", unix_millis()));
+        let state = AppState::new(ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                copilot_python: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        });
+        let mut settings = JsonMap::new();
+        settings.insert("agent".to_owned(), json!("codex-ext"));
+        state
+            .conversations
+            .create(CreateConversationRequest {
+                conversation_id: Some("conv-approval".to_owned()),
+                thread_id: Some("thread-123".to_owned()),
+                settings,
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+
+        persist_pending_approval_event(
+            &state,
+            "conv-approval",
+            &json!({
+                "type": "approval",
+                "conversation_id": "conv-approval",
+                "id": "req-1",
+                "request_id": "req-1",
+                "kind": "user_input",
+                "request_method": "agent-pty/ask-user",
+                "request_params": {"question": "Proceed?"},
+                "payload": {"question": "Proceed?"},
+                "turn_id": "turn-a",
+                "created_at": "created"
+            }),
+        )
+        .unwrap();
+
+        let meta = state.conversations.load_meta("conv-approval").unwrap();
+        let descriptor = meta.pending_approvals["req-1"]
+            .as_object()
+            .expect("pending descriptor should be persisted")
+            .clone();
+        assert_eq!(descriptor["agent"], "codex-ext");
+        assert_eq!(descriptor["thread_id"], "thread-123");
+        assert_eq!(descriptor["render_event"]["order_id"], -1);
+
+        let mut resolution = JsonMap::new();
+        resolution.insert("decision".to_owned(), json!("decline"));
+        let mut handoff =
+            build_approval_handoff_event(&state, "conv-approval", &descriptor, &resolution)
+                .unwrap();
+        let recorded =
+            append_approval_handoff_transcript_entry(&state, "conv-approval", &handoff).unwrap();
+        merge_recorded_approval_fields(&mut handoff, &recorded);
+        state
+            .conversations
+            .remove_pending_approval("conv-approval", "req-1")
+            .unwrap();
+
+        assert_eq!(handoff["type"], "approval_handoff");
+        assert_eq!(handoff["status"], "declined");
+        assert_eq!(handoff["ask_user_msg_id"], 0);
+        assert_eq!(recorded["role"], "approval");
+        assert_eq!(recorded["event"], "approval_decision");
+        assert_eq!(recorded["request_id"], "req-1");
+        assert_eq!(recorded["order_id"], 0);
+        assert!(
+            state
+                .conversations
+                .load_meta("conv-approval")
+                .unwrap()
+                .pending_approvals
+                .is_empty()
+        );
 
         let _ = fs::remove_dir_all(root);
     }

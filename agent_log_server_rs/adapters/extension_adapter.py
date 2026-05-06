@@ -331,6 +331,8 @@ class ExtensionJsonRpcAdapter:
             return await self._conversation_resume(params)
         if method == AdapterMethod.CONVERSATION_SEND:
             return await self._conversation_send(params)
+        if method == AdapterMethod.APPROVAL_RESPOND:
+            return await self._approval_respond(params)
 
         raise RpcAdapterError(METHOD_NOT_FOUND, f"Unsupported method: {method}")
 
@@ -762,6 +764,31 @@ class ExtensionJsonRpcAdapter:
         if not isinstance(result, dict):
             raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid send result")
         return _ack_from_result(conversation_id, cast(JsonMap, result)).to_json()
+
+    async def _approval_respond(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        handler = self._supported_handler(extension_id)
+        resolver = getattr(handler, "resolve_approval", None)
+        if not callable(resolver):
+            raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support approvals")
+
+        conversation_id = _required_string(params, "conversation_id")
+        request_id = _required_string(params, "request_id")
+        result_payload = params.get("result")
+        resolution: JsonMap = dict(result_payload) if isinstance(result_payload, dict) else {}
+        decision = _optional_string(params.get("decision"))
+        if decision and "decision" not in resolution:
+            resolution["decision"] = decision
+        result = resolver(request_id, resolution)
+        if hasattr(result, "__await__"):
+            result = await cast(Awaitable[object], result)
+        resolved = bool(result)
+        return {
+            "ok": resolved,
+            "resolved": resolved,
+            "conversation_id": conversation_id,
+            "request_id": request_id,
+        }
 
     def _ensure_loader_initialized(self) -> None:
         if self._loader_initialized:

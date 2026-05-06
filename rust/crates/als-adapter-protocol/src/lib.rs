@@ -238,17 +238,14 @@ pub struct ConversationControlResult {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ApprovalRespondParams {
     pub conversation_id: String,
+    pub extension_id: String,
     pub request_id: String,
-    pub decision: ApprovalDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
+    pub result: JsonMap,
     #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
     pub metadata: JsonMap,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalDecision {
-    Approve,
-    Deny,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
