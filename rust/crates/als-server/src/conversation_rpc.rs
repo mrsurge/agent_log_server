@@ -687,12 +687,13 @@ fn persist_adapter_transcript_entry(
     state: &AppState,
     value: Value,
 ) -> Result<Option<String>, RpcError> {
-    let Some((conversation_id, entry)) = adapter_conversation_object(value) else {
+    let Some((conversation_id, mut entry)) = adapter_conversation_object(value) else {
         return Ok(None);
     };
     if should_skip_adapter_transcript_entry(&entry) {
         return Ok(None);
     }
+    strip_internal_adapter_transcript_fields(&mut entry);
     state
         .conversations
         .append_transcript(&conversation_id, entry)
@@ -784,7 +785,23 @@ fn should_skip_adapter_transcript_entry(entry: &Value) -> bool {
     entry
         .get("role")
         .and_then(Value::as_str)
-        .is_some_and(|role| role.trim().eq_ignore_ascii_case("user"))
+        .is_some_and(|role| {
+            role.trim().eq_ignore_ascii_case("user") && !adapter_history_import_entry(entry)
+        })
+}
+
+fn adapter_history_import_entry(entry: &Value) -> bool {
+    entry
+        .get("_hydrated_history")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn strip_internal_adapter_transcript_fields(entry: &mut Value) {
+    let Some(object) = entry.as_object_mut() else {
+        return;
+    };
+    object.remove("_hydrated_history");
 }
 
 fn notification_method_for_event_type(event_type: &str) -> Option<&'static str> {
@@ -1420,6 +1437,9 @@ mod tests {
             &json!({"role": "user", "conversation_id": "conv-a", "text": "skip"})
         ));
         assert!(!should_skip_adapter_transcript_entry(
+            &json!({"role": "user", "conversation_id": "conv-a", "text": "keep", "_hydrated_history": true})
+        ));
+        assert!(!should_skip_adapter_transcript_entry(
             &json!({"role": "assistant", "conversation_id": "conv-a", "text": "keep"})
         ));
     }
@@ -1515,16 +1535,26 @@ mod tests {
         .unwrap();
         persist_adapter_transcript_entry(
             &state,
+            json!({"role": "user", "conversation_id": "conv-a", "text": "keep", "_hydrated_history": true}),
+        )
+        .unwrap();
+        persist_adapter_transcript_entry(
+            &state,
             json!({"role": "assistant", "text": "missing conversation"}),
         )
         .unwrap();
 
         let rows = state.conversations.read_transcript("conv-a").unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["conversation_id"], "conv-a");
         assert_eq!(rows[0]["role"], "assistant");
         assert_eq!(rows[0]["text"], "pong");
         assert_eq!(rows[0]["order_id"], 0);
+        assert_eq!(rows[1]["conversation_id"], "conv-a");
+        assert_eq!(rows[1]["role"], "user");
+        assert_eq!(rows[1]["text"], "keep");
+        assert_eq!(rows[1]["order_id"], 1);
+        assert!(rows[1].get("_hydrated_history").is_none());
 
         let _ = fs::remove_dir_all(root);
     }

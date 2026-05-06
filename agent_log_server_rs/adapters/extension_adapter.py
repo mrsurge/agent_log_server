@@ -726,7 +726,9 @@ class ExtensionJsonRpcAdapter:
                 if isinstance(items, list):
                     for item in items:
                         if isinstance(item, dict):
-                            await self._transcript(conversation_id, cast(JsonMap, item))
+                            hydrated_entry = dict(cast(JsonMap, item))
+                            hydrated_entry["_hydrated_history"] = True
+                            await self._transcript(conversation_id, hydrated_entry)
                             hydrated_count += 1
             except Exception as exc:
                 print(
