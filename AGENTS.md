@@ -75,6 +75,11 @@ If I use a choice-capable approval tool in Step 1 or Step 2, the prompt must inc
 - This repo is harness infrastructure used to work on many other repos.
 - I will not assume downstream target repos inherit this repo's workflow or approval rules unless those repos explicitly define them.
 
+# ALS-RS Migration Harness Note
+
+- Do not assume the current interactive session is already hosted by the Rust ALS-RS runtime just because the implementation target is `als-rs`.
+- This repo can still be running on the Python harness while ALS-RS parity work is in progress, so treat live shell ownership and restart decisions accordingly.
+
 # Invariant: Platform-Agnostic Core Files — Zero Extension-Specific Code
 
 **This is the single most important architectural rule in this repo. Violating it WILL break things and WILL get your work reverted.**

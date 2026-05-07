@@ -225,6 +225,70 @@ class AdapterSessionInfo:
 
 
 @dataclass(frozen=True)
+class McpContext:
+    conversation_id: str
+    cwd: Path | None = None
+    requested_servers: JsonMap = field(default_factory=dict)
+    defaults: JsonMap = field(default_factory=dict)
+
+    def to_json(self) -> JsonMap:
+        payload: JsonMap = {"conversation_id": self.conversation_id}
+        if self.cwd is not None:
+            payload["cwd"] = str(self.cwd)
+        if self.requested_servers:
+            payload["requested_servers"] = dict(self.requested_servers)
+        if self.defaults:
+            payload["defaults"] = dict(self.defaults)
+        return payload
+
+
+@dataclass(frozen=True)
+class ConversationStartParams:
+    extension_id: str
+    conversation_id: str
+    cwd: Path | None = None
+    settings: JsonMap = field(default_factory=dict)
+    mcp_context: McpContext | None = None
+
+    def to_json(self) -> JsonMap:
+        payload: JsonMap = {
+            "extension_id": self.extension_id,
+            "conversation_id": self.conversation_id,
+        }
+        if self.cwd is not None:
+            payload["cwd"] = str(self.cwd)
+        if self.settings:
+            payload["settings"] = dict(self.settings)
+        if self.mcp_context is not None:
+            payload["mcp_context"] = self.mcp_context.to_json()
+        return payload
+
+
+@dataclass(frozen=True)
+class ConversationResumeParams:
+    extension_id: str
+    conversation_id: str
+    provider_session_id: str
+    cwd: Path | None = None
+    settings: JsonMap = field(default_factory=dict)
+    mcp_context: McpContext | None = None
+
+    def to_json(self) -> JsonMap:
+        payload: JsonMap = {
+            "extension_id": self.extension_id,
+            "conversation_id": self.conversation_id,
+            "provider_session_id": self.provider_session_id,
+        }
+        if self.cwd is not None:
+            payload["cwd"] = str(self.cwd)
+        if self.settings:
+            payload["settings"] = dict(self.settings)
+        if self.mcp_context is not None:
+            payload["mcp_context"] = self.mcp_context.to_json()
+        return payload
+
+
+@dataclass(frozen=True)
 class ConversationSendParams:
     extension_id: str
     conversation_id: str
@@ -236,6 +300,7 @@ class ConversationSendParams:
     attachments: list[JsonMap] = field(default_factory=list)
     toast_context: JsonMap | None = None
     settings: JsonMap = field(default_factory=dict)
+    mcp_context: McpContext | None = None
 
     def to_json(self) -> JsonMap:
         payload: JsonMap = {
@@ -257,6 +322,8 @@ class ConversationSendParams:
             payload["toast_context"] = dict(self.toast_context)
         if self.settings:
             payload["settings"] = dict(self.settings)
+        if self.mcp_context is not None:
+            payload["mcp_context"] = self.mcp_context.to_json()
         return payload
 
 

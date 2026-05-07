@@ -5,7 +5,9 @@ use crate::{
     },
     state::AppState,
 };
-use als_adapter_protocol::{ConversationResumeParams, ConversationSendParams, JsonMap, methods};
+use als_adapter_protocol::{
+    ConversationResumeParams, ConversationSendParams, JsonMap, McpContext, methods,
+};
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -39,6 +41,8 @@ const METHOD_APPROVAL_RESPOND: &str = "conversation.approval.respond";
 const METHOD_SHELL_EXEC: &str = "conversation.shell.exec";
 const METHOD_PINS_SET: &str = "conversation.pins.set";
 const AGENT_PTY_ASK_USER_REQUEST_METHOD: &str = "agent-pty/ask-user";
+const AGENT_PTY_BLOCKS_MCP_SERVER_NAME: &str = "agent-pty-blocks";
+const TE2_MCP_SERVER_NAME: &str = "te2-mcp";
 
 pub fn register_conversations_rpc_namespace(io: &SocketIo) {
     io.ns(
@@ -489,6 +493,7 @@ async fn conversation_send(
         cwd,
         attachments: Vec::new(),
         toast_context: None,
+        mcp_context: build_mcp_context(&conversation_id, Some(&meta.settings), meta.cwd.as_deref()),
         settings: meta.settings,
     };
     state
@@ -727,6 +732,11 @@ async fn bind_provider_session(
                     conversation_id: conversation_id.clone(),
                     provider_session_id: session_id,
                     cwd: meta.cwd.clone().map(PathBuf::from),
+                    mcp_context: build_mcp_context(
+                        &conversation_id,
+                        Some(&meta.settings),
+                        meta.cwd.as_deref(),
+                    ),
                     settings: meta.settings.clone(),
                 },
             )
@@ -1314,6 +1324,10 @@ fn string_from_map(params: &JsonMap, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn bool_from_map(params: &JsonMap, key: &str) -> bool {
+    params.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
 fn resolve_extension_id(
     state: &AppState,
     params: &JsonMap,
@@ -1342,6 +1356,68 @@ fn resolve_cwd(params: &JsonMap, meta: &ConversationMeta) -> Option<PathBuf> {
         .or_else(|| meta.cwd.clone())
         .or_else(|| string_from_map(&meta.settings, "cwd"))
         .map(PathBuf::from)
+}
+
+fn build_mcp_context(
+    conversation_id: &str,
+    settings: Option<&JsonMap>,
+    cwd: Option<&str>,
+) -> Option<McpContext> {
+    let mut requested_servers = JsonMap::new();
+    if let Some(existing_servers) = settings
+        .and_then(|value| value.get("mcp_servers"))
+        .and_then(Value::as_object)
+    {
+        requested_servers.extend(existing_servers.clone());
+    }
+
+    let resolved_cwd = cwd
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            settings
+                .and_then(|value| string_from_map(value, "cwd"))
+                .map(PathBuf::from)
+        });
+
+    let mut defaults = JsonMap::new();
+    let mut agent_pty_defaults = JsonMap::new();
+    agent_pty_defaults.insert("enabled_by_default".to_owned(), Value::Bool(true));
+    agent_pty_defaults.insert("eager_load_tools".to_owned(), Value::Bool(true));
+    agent_pty_defaults.insert("transport".to_owned(), Value::String("stdio".to_owned()));
+    agent_pty_defaults.insert(
+        "conversation_id".to_owned(),
+        Value::String(conversation_id.to_owned()),
+    );
+    if let Some(path) = resolved_cwd.as_ref() {
+        agent_pty_defaults.insert(
+            "cwd".to_owned(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+    }
+    defaults.insert(
+        AGENT_PTY_BLOCKS_MCP_SERVER_NAME.to_owned(),
+        Value::Object(agent_pty_defaults),
+    );
+
+    let te2_enabled = settings.is_some_and(|value| bool_from_map(value, "te2_mcp_integration"));
+    if te2_enabled {
+        let mut te2_defaults = JsonMap::new();
+        te2_defaults.insert("enabled_by_default".to_owned(), Value::Bool(true));
+        te2_defaults.insert("transport".to_owned(), Value::String("http".to_owned()));
+        if let Some(base_url) = settings.and_then(|value| string_from_map(value, "te2_base_url")) {
+            te2_defaults.insert("base_url".to_owned(), Value::String(base_url));
+        }
+        defaults.insert(TE2_MCP_SERVER_NAME.to_owned(), Value::Object(te2_defaults));
+    }
+
+    Some(McpContext {
+        conversation_id: conversation_id.to_owned(),
+        cwd: resolved_cwd,
+        requested_servers,
+        defaults,
+    })
 }
 
 fn optional_map(params: &JsonMap, key: &str) -> Option<Map<String, Value>> {

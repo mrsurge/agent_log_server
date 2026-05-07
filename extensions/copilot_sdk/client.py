@@ -64,6 +64,7 @@ from ._vendor.copilot.generated.session_events import SessionEventType
 
 from .file_change_preview import build_file_change_preview
 from .fws_pipe_process import FrameworkShellPipeProcess
+from .mcp_contract import apply_mcp_context
 from .protocol_adapter import compact_sdk_session, resume_sdk_session
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from .te2_runtime import build_copilot_mcp_servers
@@ -1623,7 +1624,7 @@ def _runtime_signature_payload(
     cwd: Optional[str] = None,
     model: Optional[str] = None,
 ) -> PayloadDict:
-    merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
+    merged = apply_mcp_context(_merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model))
     payload = {
         "cwd": merged.get("cwd"),
         "model": merged.get("model"),
@@ -1637,12 +1638,15 @@ def _runtime_signature_payload(
         te2_enabled=te2_enabled,
         cwd=merged.get("cwd"),
     )
-    payload["mcp_servers"] = build_copilot_mcp_servers(
-        merged.get("mcp_servers"),
-        te2_enabled=te2_enabled,
-        base_url=_optional_string(merged.get("te2_base_url")),
-        cwd=_optional_string(merged.get("cwd")),
-    )
+    if isinstance(merged.get("mcp_context"), dict):
+        payload["mcp_servers"] = merged.get("mcp_servers")
+    else:
+        payload["mcp_servers"] = build_copilot_mcp_servers(
+            merged.get("mcp_servers"),
+            te2_enabled=te2_enabled,
+            base_url=_optional_string(merged.get("te2_base_url")),
+            cwd=_optional_string(merged.get("cwd")),
+        )
     return payload
 
 
@@ -1662,7 +1666,7 @@ def _build_session_runtime_config(
     cwd: Optional[str] = None,
     model: Optional[str] = None,
 ) -> SettingsDict:
-    merged = _merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model)
+    merged = apply_mcp_context(_merge_runtime_settings(conversation_id, settings=settings, cwd=cwd, model=model))
     config: SettingsDict = {
         "streaming": True,
         "include_sub_agent_streaming_events": True,
@@ -1698,13 +1702,16 @@ def _build_session_runtime_config(
             "content": developer_instructions,
         }
 
-    mcp_servers = build_copilot_mcp_servers(
-        merged.get("mcp_servers"),
-        te2_enabled=te2_mcp_integration_enabled(merged),
-        base_url=_optional_string(merged.get("te2_base_url")),
-        cwd=_optional_string(merged.get("cwd")),
-        conversation_id=conversation_id,
-    )
+    if isinstance(merged.get("mcp_context"), dict):
+        mcp_servers = _normalize_mcp_servers(merged.get("mcp_servers"))
+    else:
+        mcp_servers = build_copilot_mcp_servers(
+            merged.get("mcp_servers"),
+            te2_enabled=te2_mcp_integration_enabled(merged),
+            base_url=_optional_string(merged.get("te2_base_url")),
+            cwd=_optional_string(merged.get("cwd")),
+            conversation_id=conversation_id,
+        )
     if mcp_servers is not None:
         if mcp_servers:
             config["mcp_servers"] = mcp_servers

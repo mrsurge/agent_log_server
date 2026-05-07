@@ -19,6 +19,7 @@ from agent_log_server.te2_mcp_config import (
     build_codex_thread_config,
     te2_mcp_integration_enabled,
 )
+from .mcp_contract import apply_mcp_context as apply_codex_mcp_context
 from .dependencies import is_android_termux as _is_android_termux
 from .dependencies import recommended_codex_install_command as _recommended_codex_install_command
 from .dependencies import recommended_codex_package as _recommended_codex_package
@@ -1515,15 +1516,23 @@ def build_request_params(
         params["collaborationMode"] = collaboration_mode
 
     if "config" in props or method == "turn/start":
-        config = _build_codex_ext_thread_config(
-            normalized_settings.get("config"),
-            te2_enabled=te2_mcp_integration_enabled(normalized_settings),
-            base_url=base_url,
-            cwd=config_cwd,
-            force_te2_mcp_entry=force_te2_config,
-            enable_high_context_400k=high_context_400k,
-            conversation_id=conversation_id,
-        )
+        if isinstance(normalized_settings.get("mcp_context"), dict):
+            config = apply_codex_mcp_context(
+                normalized_settings.get("config"),
+                normalized_settings,
+                force_te2_mcp_entry=force_te2_config,
+                enable_high_context_400k=high_context_400k,
+            )
+        else:
+            config = _build_codex_ext_thread_config(
+                normalized_settings.get("config"),
+                te2_enabled=te2_mcp_integration_enabled(normalized_settings),
+                base_url=base_url,
+                cwd=config_cwd,
+                force_te2_mcp_entry=force_te2_config,
+                enable_high_context_400k=high_context_400k,
+                conversation_id=conversation_id,
+            )
         if config:
             params["config"] = config
     prompt_context = build_effective_prompt_context(

@@ -60,6 +60,12 @@ If the non-plan MCP `ask_user` tool is available:
 - continue only after checking `ok`, `status`/`accepted`, and selected-answer fields such as `selected_choice`, `answer`, or `answers`
 - handle cancel, error, terminal, or non-accepted responses as a denial or stop condition instead of assuming approval
 
+## ALS-RS Migration Harness Note
+
+- During the ALS-RS migration, do not assume the current agent session is already running on the Rust harness just because the work is targeting `als-rs`.
+- This repo can still be actively hosted by the Python harness while ALS-RS implementation and parity work happens in-tree.
+- Keep that distinction explicit when reasoning about live shell ownership, runtime behavior, or restart risk.
+
 ## Markdown HTTP and FILE links.
 
 When generating a response requires you to include citations:

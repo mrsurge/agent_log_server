@@ -180,6 +180,12 @@ def _shell_probe(shell: object) -> JsonMap:
     }
 
 
+def _apply_mcp_context(settings: JsonMap, params: JsonMap) -> None:
+    mcp_context = _optional_map(params.get("mcp_context"))
+    if mcp_context:
+        settings["mcp_context"] = mcp_context
+
+
 class ExtensionLoaderModule(Protocol):
     def load_extensions(
         self,
@@ -660,6 +666,7 @@ class ExtensionJsonRpcAdapter:
         conversation_id = _required_string(params, "conversation_id")
         cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
         settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
+        _apply_mcp_context(settings, params)
         settings["cwd"] = cwd
         settings.setdefault("agent", extension_id)
         result = init_session(conversation_id, extension_id, cwd, settings=settings)
@@ -683,6 +690,7 @@ class ExtensionJsonRpcAdapter:
 
         cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
         settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
+        _apply_mcp_context(settings, params)
         settings["cwd"] = cwd
         settings.setdefault("agent", extension_id)
         self._seed_conversation_meta(
@@ -751,6 +759,7 @@ class ExtensionJsonRpcAdapter:
         text = _required_string(params, "text")
         cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
         settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
+        _apply_mcp_context(settings, params)
         settings["cwd"] = cwd
         settings.setdefault("agent", extension_id)
         self._seed_conversation_meta(

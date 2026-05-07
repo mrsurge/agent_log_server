@@ -141,6 +141,17 @@ pub struct AdapterSessionInfo {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct McpContext {
+    pub conversation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
+    pub requested_servers: JsonMap,
+    #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
+    pub defaults: JsonMap,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ConversationStartParams {
     pub extension_id: String,
     pub conversation_id: String,
@@ -148,6 +159,8 @@ pub struct ConversationStartParams {
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
     pub settings: JsonMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_context: Option<McpContext>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -159,6 +172,8 @@ pub struct ConversationResumeParams {
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
     pub settings: JsonMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_context: Option<McpContext>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -180,6 +195,8 @@ pub struct ConversationSendParams {
     pub toast_context: Option<ToastContext>,
     #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
     pub settings: JsonMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_context: Option<McpContext>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

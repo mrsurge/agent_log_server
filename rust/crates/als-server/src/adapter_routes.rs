@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use als_adapter_protocol::{
     ConversationAckResult, ConversationSendParams, ConversationStartParams,
-    ExtensionListModelsResult, JsonMap, methods,
+    ExtensionListModelsResult, JsonMap, McpContext, methods,
 };
 use axum::{
     Json, Router,
@@ -53,11 +53,17 @@ async fn start_copilot_conversation(
     Json(body): Json<StartConversationBody>,
 ) -> Result<Json<ConversationAckResult>, AdapterRouteError> {
     state.adapter.initialize_copilot().await?;
+    let settings = body.settings.unwrap_or_default();
     let params = ConversationStartParams {
         extension_id: "copilot-sdk".to_owned(),
-        conversation_id,
-        cwd: body.cwd.map(Into::into),
-        settings: body.settings.unwrap_or_default(),
+        conversation_id: conversation_id.clone(),
+        cwd: body.cwd.clone().map(Into::into),
+        mcp_context: Some(adapter_mcp_context(
+            &conversation_id,
+            Some(&settings),
+            body.cwd.as_deref(),
+        )),
+        settings,
     };
     let result = state
         .adapter
@@ -74,17 +80,23 @@ async fn send_copilot_message(
     Json(body): Json<SendMessageBody>,
 ) -> Result<Json<ConversationAckResult>, AdapterRouteError> {
     state.adapter.initialize_copilot().await?;
+    let settings = body.settings.unwrap_or_default();
     let params = ConversationSendParams {
         extension_id: "copilot-sdk".to_owned(),
-        conversation_id,
+        conversation_id: conversation_id.clone(),
         text: body.text,
         thread_id: None,
         provider_session_id: None,
         turn_id: body.turn_id,
-        cwd: body.cwd.map(Into::into),
+        cwd: body.cwd.clone().map(Into::into),
         attachments: Vec::new(),
         toast_context: None,
-        settings: body.settings.unwrap_or_default(),
+        mcp_context: Some(adapter_mcp_context(
+            &conversation_id,
+            Some(&settings),
+            body.cwd.as_deref(),
+        )),
+        settings,
     };
     let result = state
         .adapter
@@ -115,6 +127,71 @@ struct SendMessageBody {
     cwd: Option<String>,
     #[serde(default)]
     settings: Option<JsonMap>,
+}
+
+fn adapter_mcp_context(
+    conversation_id: &str,
+    settings: Option<&JsonMap>,
+    cwd: Option<&str>,
+) -> McpContext {
+    let mut requested_servers = JsonMap::new();
+    if let Some(existing_servers) = settings
+        .and_then(|value| value.get("mcp_servers"))
+        .and_then(Value::as_object)
+    {
+        requested_servers.extend(existing_servers.clone());
+    }
+
+    let mut defaults = JsonMap::new();
+    let mut agent_pty_defaults = JsonMap::new();
+    agent_pty_defaults.insert("enabled_by_default".to_owned(), Value::Bool(true));
+    agent_pty_defaults.insert("eager_load_tools".to_owned(), Value::Bool(true));
+    agent_pty_defaults.insert("transport".to_owned(), Value::String("stdio".to_owned()));
+    agent_pty_defaults.insert(
+        "conversation_id".to_owned(),
+        Value::String(conversation_id.to_owned()),
+    );
+    if let Some(path) = cwd.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    }) {
+        agent_pty_defaults.insert("cwd".to_owned(), Value::String(path));
+    }
+    defaults.insert(
+        "agent-pty-blocks".to_owned(),
+        Value::Object(agent_pty_defaults),
+    );
+
+    let te2_enabled = settings
+        .and_then(|value| value.get("te2_mcp_integration"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if te2_enabled {
+        let mut te2_defaults = JsonMap::new();
+        te2_defaults.insert("enabled_by_default".to_owned(), Value::Bool(true));
+        te2_defaults.insert("transport".to_owned(), Value::String("http".to_owned()));
+        if let Some(base_url) = settings
+            .and_then(|value| value.get("te2_base_url"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            te2_defaults.insert("base_url".to_owned(), Value::String(base_url.to_owned()));
+        }
+        defaults.insert("te2-mcp".to_owned(), Value::Object(te2_defaults));
+    }
+
+    McpContext {
+        conversation_id: conversation_id.to_owned(),
+        cwd: cwd
+            .and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            })
+            .map(Into::into),
+        requested_servers,
+        defaults,
+    }
 }
 
 struct AdapterRouteError(anyhow::Error);
