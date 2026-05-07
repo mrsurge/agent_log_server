@@ -1,4 +1,5 @@
 use crate::adapter_routes;
+use crate::agent_log;
 use crate::sidebar_ipc;
 use crate::socketio::register_socket_namespaces;
 use crate::state::AppState;
@@ -14,11 +15,13 @@ pub fn build_router(state: AppState) -> Router {
     let (socket_layer, io) = SocketIo::builder().with_state(state.clone()).build_layer();
     register_socket_namespaces(&io);
     conversation_rpc::start_adapter_event_fanout(io.clone(), state.clone());
+    agent_log::start_socketio_fanout(io.clone(), state.clone());
     start_extension_warmup(state.clone());
     start_sidebar_cwd_fetch(io.clone(), state.clone());
 
     Router::new()
         .merge(static_assets::routes(&state.config.roots.static_dir))
+        .merge(agent_log::routes())
         .merge(adapter_routes::routes())
         .merge(conversation_routes::routes())
         .route("/api/health", get(health))

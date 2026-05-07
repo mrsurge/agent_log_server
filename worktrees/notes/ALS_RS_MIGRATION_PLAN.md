@@ -762,6 +762,16 @@ Current behavior:
   - Schema dynamic sources call the `/rpc/settings` client directly; they do not
     wait for the conversations live socket before loading provider models,
     sessions, or runtime options.
+- ALS-RS owns the repo namesake agent-log surface:
+  - JSONL path: `${ALS_RS_CACHE_DIR}/agent-log/agent_chat.log.jsonl`.
+  - HTTP parity routes: `GET/POST /api/messages`,
+    `GET/DELETE /api/messages/{msg_num}`, and `POST /api/messages/await`.
+  - WebSocket parity route: `/ws`, broadcasting appended records as JSON text.
+  - Socket.IO compatibility: `/appserver` handles `get_log_messages` and
+    `post_log_message`, and broadcasts `agent_log_message` when new rows append.
+  - The `agent-pty-blocks` MCP agent-log tools derive `/api/messages` from
+    `AGENT_LOG_SERVER_ORIGIN`, so ALS-RS conversations target the Rust origin
+    while non-ALS launches keep the legacy Python default.
 - `codex-ext` schema cache lookup now prefers
   `${ALS_RS_CACHE_DIR}/codex_app_server_schema` when that env var is present,
   falling back to the legacy Python harness cache at

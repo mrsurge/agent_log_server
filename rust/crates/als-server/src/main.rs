@@ -1,5 +1,6 @@
 mod adapter_process;
 mod adapter_routes;
+mod agent_log;
 mod config;
 mod conversation_routes;
 mod conversation_rpc;

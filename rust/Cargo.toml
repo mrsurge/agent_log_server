@@ -19,7 +19,7 @@ als-adapter-protocol = { path = "crates/als-adapter-protocol" }
 als-dto = { path = "crates/als-dto" }
 als-jsonrpc = { path = "crates/als-jsonrpc" }
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 ferrous_framework = { path = "crates/ferrous_framework" }
 futures-util = "0.3"
 getrandom = "0.3"

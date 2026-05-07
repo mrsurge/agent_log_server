@@ -842,7 +842,7 @@ async def todo_ready() -> ObjectMap:
 # These tools provide a plain-text interface to the agent log server,
 # abstracting away JSON escaping and HTTP details.
 
-_AGENT_LOG_URL = "http://127.0.0.1:12359/api/messages"
+_AGENT_LOG_URL = _APPSERVER_ORIGIN.rstrip("/") + "/api/messages"
 
 
 async def _agent_log_fetch(limit: int = 10) -> ObjectList:
