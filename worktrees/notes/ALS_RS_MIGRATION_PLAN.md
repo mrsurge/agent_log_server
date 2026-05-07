@@ -769,6 +769,12 @@ Current behavior:
   - WebSocket parity route: `/ws`, broadcasting appended records as JSON text.
   - Socket.IO compatibility: `/appserver` handles `get_log_messages` and
     `post_log_message`, and broadcasts `agent_log_message` when new rows append.
+  - Browser page parity: `/agent-log` and `/agent-log/` serve an ALS-RS page shell
+    using the existing `static/app.js` and `static/style.css`; the legacy Quit
+    Server control is omitted in the Rust page.
+  - `static/js/socketio_runtime.js` resolves proxy-aware Socket.IO paths for
+    legacy-style pages, so `/agent-log` works from both the direct ALS-RS origin
+    and the TE2 proxy mount.
   - The `agent-pty-blocks` MCP agent-log tools derive `/api/messages` from
     `AGENT_LOG_SERVER_ORIGIN`, so ALS-RS conversations target the Rust origin
     while non-ALS launches keep the legacy Python default.

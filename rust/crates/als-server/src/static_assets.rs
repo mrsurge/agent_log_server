@@ -15,6 +15,8 @@ use crate::state::AppState;
 pub fn routes(static_dir: &Path) -> Router<AppState> {
     Router::new()
         .route("/", get(index))
+        .route("/agent-log", get(agent_log))
+        .route("/agent-log/", get(agent_log))
         .route("/manifest.json", get(manifest))
         .route("/sw.js", get(service_worker))
         .route(
@@ -26,6 +28,10 @@ pub fn routes(static_dir: &Path) -> Router<AppState> {
 
 async fn index() -> Html<&'static str> {
     Html(include_str!("index.html"))
+}
+
+async fn agent_log() -> Html<&'static str> {
+    Html(include_str!("agent_log.html"))
 }
 
 async fn manifest() -> Json<serde_json::Value> {

@@ -15,6 +15,11 @@
 
   window.agentLogSocketIoOptions = function agentLogSocketIoOptions(options) {
     const next = Object.assign({}, options || {});
+    if (!next.path) {
+      const pathname = window.location && window.location.pathname ? window.location.pathname : '/';
+      const proxiedMatch = pathname.match(/^\/api\/app\/[^/]+\/proxy\b/);
+      next.path = proxiedMatch ? `${proxiedMatch[0]}/socket.io` : '/socket.io';
+    }
     const parser = msgpackParser();
     if (parser) next.parser = parser;
     return next;

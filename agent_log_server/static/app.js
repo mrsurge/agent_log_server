@@ -136,7 +136,7 @@ async function quitServer() {
 
 sendBtn.addEventListener('click', postMessage);
 refreshBtn.addEventListener('click', fetchHistory);
-quitBtn.addEventListener('click', quitServer);
+if (quitBtn) quitBtn.addEventListener('click', quitServer);
 
 msgEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
