@@ -75,8 +75,12 @@
       const startAlsRsConsoleBridge = (attempt = 0) => {
         try {
           const isProxied = window.location.pathname.startsWith('/api/app/') || window.location.pathname.startsWith('/app/');
-          if (!isProxied) return;
-          const bridge = initConsoleBridge({ workerLabel: 'als_rs', uniquePerWindow: true });
+          const directTe2Origin = `${window.location.protocol}//${window.location.hostname || '127.0.0.1'}:8089`;
+          const bridge = initConsoleBridge({
+            workerLabel: 'als_rs',
+            uniquePerWindow: true,
+            ...(isProxied ? {} : { socketOrigin: directTe2Origin }),
+          });
           if (!bridge && attempt < 40) {
             window.setTimeout(() => startAlsRsConsoleBridge(attempt + 1), 250);
           }
@@ -106,6 +110,7 @@
               </div>
             </div>
             <div class="splash-header-actions">
+              <span id="splash-console-worker-id" class="pill console-worker-pill" title="TE2 console worker ID" hidden></span>
               <button id="splash-settings" class="btn ghost" title="Splash settings">⚙</button>
               <button id="host-close-top" class="btn ghost host-close-btn">×</button>
             </div>
@@ -205,6 +210,7 @@
           <div class="settings-header"><h3>Splash Settings</h3><button id="splash-settings-close" class="btn ghost">×</button></div>
           <div class="settings-body">
             <label><span>User Name</span><input type="text" id="splash-settings-user-name" placeholder="User"></label>
+            <label class="settings-checkbox-row"><span>Show TE2 console worker ID</span><input type="checkbox" id="splash-settings-show-console-worker-id"></label>
             <div class="extension-settings-section"><h3 class="settings-subheading">Extensions</h3><small>Enable, disable, or install extension dependencies.</small><div id="splash-settings-extensions" class="extension-settings-list"></div></div>
           </div>
           <div class="settings-footer"><button id="splash-settings-cancel" class="btn ghost">Cancel</button><button id="splash-settings-save" class="btn primary">Save</button></div>

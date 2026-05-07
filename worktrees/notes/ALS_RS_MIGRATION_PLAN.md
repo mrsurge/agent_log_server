@@ -726,7 +726,8 @@ The persisted JSON intentionally stays smaller than legacy Python
 {
   "active_conversation": "conversation-id-or-null",
   "active_view": "splash-or-conversation",
-  "user_name": "optional splash display name"
+  "user_name": "optional splash display name",
+  "show_console_worker_id": false
 }
 ```
 
@@ -734,20 +735,33 @@ Current behavior:
 
 - `UiSelectionStore` loads this file during `AppState::new(...)` and writes it on
   conversation selection, active-view changes, active conversation deletion, and
-  splash `user_name` updates.
+  splash app-config updates.
 - `/rpc/settings` `config.get` / `config.update` read and write the same
-  persisted `user_name`, while also returning active-view/conversation fields for
-  compatibility.
+  persisted `user_name` and `show_console_worker_id`, while also returning
+  active-view/conversation fields for compatibility.
 - `/rpc/ui` `view.get` / `view.set`, `hostUi.get`, and `/rpc/conversations`
   list/get responses expose both `active_conversation` and the existing
   `active_conversation_id` / `conversation_id` compatibility names.
 - The Rust router starts a best-effort startup task that connects to TE2's legacy
   `/sidebar_ipc` namespace and calls `sidebar:cwd_get`, so `hostUi.projectRoot`
   can be available before the frontend waits for a lazy sidebar project change.
-  Startup retries the SIO CWD request briefly until a project root lands.
   `hostUi.recheck` remains the explicit recovery/update path and also reissues
   `sidebar:cwd_get` on an already-connected sidebar client instead of merely
-  reporting connected state.
+  reporting connected state. Rust Socket.IO ack payloads can arrive as arrays, so
+  the CWD ack parser unwraps the same response shape Python `client.call(...)`
+  returned directly.
+- The ALS-RS splash header can optionally show the TE2 console bridge worker ID
+  beside the settings gear. The toggle is stored as `show_console_worker_id` in
+  `app_state.json`, and the browser reads the worker ID published by
+  `console_bridge.js`.
+- Direct-port introspection must not depend on TE2 proxy path rewriting:
+  - ALS-RS `/rpc/*` frontend calls use `/socket.io` on the direct server origin
+    and the proxy mount's `/socket.io` path when hosted through TE2.
+  - The TE2 console bridge starts on direct ALS-RS pages by connecting to the TE2
+    console origin instead of skipping bridge init outside `/api/app/.../proxy`.
+  - Schema dynamic sources call the `/rpc/settings` client directly; they do not
+    wait for the conversations live socket before loading provider models,
+    sessions, or runtime options.
 - `codex-ext` schema cache lookup now prefers
   `${ALS_RS_CACHE_DIR}/codex_app_server_schema` when that env var is present,
   falling back to the legacy Python harness cache at

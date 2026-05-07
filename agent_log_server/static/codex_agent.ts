@@ -143,6 +143,7 @@ interface RootHostUi {
 
 interface RootAppConfig {
   user_name?: string;
+  show_console_worker_id?: boolean;
   [key: string]: unknown;
 }
 
@@ -196,6 +197,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const conversationSettingsBtn = byId('conversation-settings');
   const splashSettingsModalEl = byId('splash-settings-modal');
   const splashSettingsUserNameEl = byId<HTMLInputElement>('splash-settings-user-name');
+  const splashSettingsShowConsoleWorkerIdEl = byId<HTMLInputElement>('splash-settings-show-console-worker-id');
+  const splashConsoleWorkerIdEl = byId('splash-console-worker-id');
   const settingsModalEl = byId('settings-modal');
   const settingsCloseBtn = byId('settings-close');
   const settingsCancelBtn = byId('settings-cancel');
@@ -730,6 +733,8 @@ document.addEventListener('DOMContentLoaded', () => {
     conversationTitleEl,
     splashSettingsModalEl,
     splashSettingsUserNameEl,
+    splashSettingsShowConsoleWorkerIdEl,
+    splashConsoleWorkerIdEl,
     documentRef: document,
     windowRef: window,
     getSocketConnected: () => Boolean(_socket && _socket.connected),

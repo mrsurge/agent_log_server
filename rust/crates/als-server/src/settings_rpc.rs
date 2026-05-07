@@ -136,6 +136,7 @@ fn config_get(state: &AppState) -> Result<Value, RpcError> {
     Ok(json!({
         "ok": true,
         "user_name": selection.user_name,
+        "show_console_worker_id": selection.show_console_worker_id,
         "active_conversation": selection.active_conversation_id.clone(),
         "active_conversation_id": selection.active_conversation_id,
         "active_view": selection.active_view,
@@ -145,26 +146,35 @@ fn config_get(state: &AppState) -> Result<Value, RpcError> {
 
 fn config_update(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
     let user_name = if params.contains_key("user_name") {
-        params
-            .get("user_name")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
+        Some(
+            params
+                .get("user_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+        )
     } else {
-        state
-            .ui_selection
-            .snapshot()
-            .map_err(internal_rpc_error)?
-            .user_name
+        None
+    };
+    let show_console_worker_id = if params.contains_key("show_console_worker_id") {
+        Some(
+            params
+                .get("show_console_worker_id")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| rpc_error(-32602, "show_console_worker_id boolean is required"))?,
+        )
+    } else {
+        None
     };
     let selection = state
         .ui_selection
-        .set_user_name(user_name)
+        .update_app_config(user_name, show_console_worker_id)
         .map_err(internal_rpc_error)?;
     Ok(json!({
         "ok": true,
         "user_name": selection.user_name,
+        "show_console_worker_id": selection.show_console_worker_id,
         "active_conversation": selection.active_conversation_id.clone(),
         "active_conversation_id": selection.active_conversation_id,
         "active_view": selection.active_view,

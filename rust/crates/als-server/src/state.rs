@@ -117,6 +117,7 @@ pub struct UiSelectionSnapshot {
     pub active_conversation_id: Option<String>,
     pub active_view: String,
     pub user_name: Option<String>,
+    pub show_console_worker_id: bool,
 }
 
 impl Default for UiSelectionSnapshot {
@@ -125,6 +126,7 @@ impl Default for UiSelectionSnapshot {
             active_conversation_id: None,
             active_view: "splash".to_owned(),
             user_name: None,
+            show_console_worker_id: false,
         }
     }
 }
@@ -137,6 +139,8 @@ struct PersistedAppUiState {
     active_view: String,
     #[serde(default)]
     user_name: Option<String>,
+    #[serde(default)]
+    show_console_worker_id: bool,
 }
 
 impl From<UiSelectionSnapshot> for PersistedAppUiState {
@@ -145,6 +149,7 @@ impl From<UiSelectionSnapshot> for PersistedAppUiState {
             active_conversation: snapshot.active_conversation_id,
             active_view: snapshot.active_view,
             user_name: snapshot.user_name,
+            show_console_worker_id: snapshot.show_console_worker_id,
         }
     }
 }
@@ -156,6 +161,7 @@ impl From<PersistedAppUiState> for UiSelectionSnapshot {
             active_view: normalized_view(Some(&value.active_view))
                 .unwrap_or_else(default_active_view),
             user_name: normalized_nonempty(value.user_name),
+            show_console_worker_id: value.show_console_worker_id,
         }
     }
 }
@@ -238,13 +244,22 @@ impl UiSelectionStore {
         Ok(snapshot)
     }
 
-    pub fn set_user_name(&self, user_name: Option<String>) -> Result<UiSelectionSnapshot> {
+    pub fn update_app_config(
+        &self,
+        user_name: Option<Option<String>>,
+        show_console_worker_id: Option<bool>,
+    ) -> Result<UiSelectionSnapshot> {
         let snapshot = {
             let mut state = self
                 .inner
                 .lock()
                 .map_err(|_| anyhow!("ui selection lock poisoned"))?;
-            state.user_name = normalized_nonempty(user_name);
+            if let Some(user_name) = user_name {
+                state.user_name = normalized_nonempty(user_name);
+            }
+            if let Some(show_console_worker_id) = show_console_worker_id {
+                state.show_console_worker_id = show_console_worker_id;
+            }
             state.clone()
         };
         self.persist(&snapshot)?;
@@ -331,7 +346,9 @@ mod tests {
         store
             .select(Some("conv-a".to_owned()), Some("conversation".to_owned()))
             .unwrap();
-        store.set_user_name(Some("  Ada  ".to_owned())).unwrap();
+        store
+            .update_app_config(Some(Some("  Ada  ".to_owned())), None)
+            .unwrap();
 
         let reloaded = UiSelectionStore::with_cache_dir(root.clone())
             .snapshot()
@@ -339,10 +356,36 @@ mod tests {
         assert_eq!(reloaded.active_conversation_id.as_deref(), Some("conv-a"));
         assert_eq!(reloaded.active_view, "conversation");
         assert_eq!(reloaded.user_name.as_deref(), Some("Ada"));
+        assert!(!reloaded.show_console_worker_id);
 
         let raw = fs::read_to_string(root.join("app_state.json")).unwrap();
         assert!(raw.contains("\"active_conversation\""));
         assert!(!raw.contains("active_conversation_id"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ui_selection_persists_console_worker_id_display_setting() {
+        let root = std::env::temp_dir().join(format!(
+            "als-rs-ui-selection-console-worker-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let store = UiSelectionStore::with_cache_dir(root.clone());
+        store
+            .update_app_config(None, Some(true))
+            .expect("setting should persist");
+
+        let reloaded = UiSelectionStore::with_cache_dir(root.clone())
+            .snapshot()
+            .unwrap();
+        assert!(reloaded.show_console_worker_id);
+
+        let raw = fs::read_to_string(root.join("app_state.json")).unwrap();
+        assert!(raw.contains("\"show_console_worker_id\""));
 
         let _ = fs::remove_dir_all(root);
     }

@@ -149,6 +149,14 @@ body.drawer-open {
   flex-shrink: 0;
 }
 
+.console-worker-pill {
+  max-width: min(260px, 44vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
 .splash-tabs {
   display: none;
   gap: 8px;

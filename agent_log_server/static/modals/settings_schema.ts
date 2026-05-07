@@ -271,14 +271,6 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   let _sessionPickerFilterEnabled = false;
   let _sessionPickerItems: JsonRecord[] = [];
 
-  function requireSioCall(): (event: string, payload?: JsonRecord) => Promise<unknown> {
-    const sioCall = getHelper(ctx, 'sioCall');
-    if (typeof sioCall !== 'function') {
-      throw new Error('Socket.IO helper unavailable');
-    }
-    return sioCall as (event: string, payload?: JsonRecord) => Promise<unknown>;
-  }
-
   function requireSettingsRpc(): SettingsRpcClient {
     const client = getHelper(ctx, 'settingsRpc');
     if (!client || typeof client !== 'object') {
@@ -311,15 +303,6 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     return result;
   }
 
-  async function waitForDynamicSourceSocket(): Promise<void> {
-    const waitForWs = getHelper(ctx, 'waitForWs');
-    if (typeof waitForWs !== 'function') return;
-    const ready = await waitForWs(10000);
-    if (!ready) {
-      throw new Error('Socket.IO not connected');
-    }
-  }
-
   function sourcePathname(sourceUrl: unknown): string {
     if (typeof sourceUrl !== 'string') return '';
     const raw = sourceUrl.trim();
@@ -332,8 +315,8 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   }
 
   function isRuntimeOptionsSource(sourceUrl: unknown): boolean {
-    const pathname = sourcePathname(sourceUrl);
-    return pathname.endsWith('/runtime_options') && pathname.includes('/appserver/');
+    const pathname = sourcePathname(sourceUrl).replace(/\/+$/, '');
+    return /(?:^|\/)api\/appserver\/runtime_options$/.test(pathname);
   }
 
   function extensionIdFromApiPath(sourceUrl: unknown, suffix: string): string {
@@ -554,16 +537,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       throw new Error(`Unsupported Socket.IO schema source: ${sourceUrl || '(empty)'}`);
     };
 
-    await waitForDynamicSourceSocket();
-    try {
-      return await request();
-    } catch (err) {
-      if (!/Socket\.IO not connected/i.test(dynamicSourceErrorMessage(err))) {
-        throw err;
-      }
-      await waitForDynamicSourceSocket();
-      return await request();
-    }
+    return await request();
   }
   
   function openSessionPicker(field: SchemaField, input: HTMLInputElement): void {
@@ -1324,8 +1298,8 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
             const conversationId = stringValue(getCodexAgentState().conversationMeta?.conversation_id);
             const dynamicSource = typeof field.dynamic_source === 'string' ? field.dynamic_source : '';
             const runtimeOptionsSource = isRuntimeOptionsSource(dynamicSource);
-            const srcMatch = dynamicSource.match(/\/api\/extensions\/([^/]+)\/models/);
-            if (runtimeOptionsSource || srcMatch) {
+            const extensionModelsSource = Boolean(extensionIdFromApiPath(dynamicSource, 'models'));
+            if (runtimeOptionsSource || extensionModelsSource) {
               fetchDynamicSource(dynamicSource, {
                 conversationId,
                 agent: selectedAgent,

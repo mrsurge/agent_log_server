@@ -21,6 +21,16 @@ interface ConversationSettingsState {
 
 interface AppConfigState {
   user_name?: string;
+  show_console_worker_id?: boolean;
+}
+
+interface ConsoleWorkerInfo {
+  workerId?: string;
+  workerLabel?: string;
+}
+
+interface ConsoleWorkerWindow extends Window {
+  __TE2_CONSOLE_WORKER?: ConsoleWorkerInfo | null;
 }
 
 interface HostUiPayload {
@@ -50,6 +60,8 @@ interface HostRuntimeContext {
   conversationTitleEl: HTMLElement | null;
   splashSettingsModalEl: HTMLElement | null;
   splashSettingsUserNameEl: HTMLInputElement | null;
+  splashSettingsShowConsoleWorkerIdEl: HTMLInputElement | null;
+  splashConsoleWorkerIdEl: HTMLElement | null;
   documentRef: Document;
   windowRef: Window;
   getSocketConnected(): boolean;
@@ -67,6 +79,8 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     conversationTitleEl,
     splashSettingsModalEl,
     splashSettingsUserNameEl,
+    splashSettingsShowConsoleWorkerIdEl,
+    splashConsoleWorkerIdEl,
     documentRef,
     windowRef,
     getSocketConnected,
@@ -74,6 +88,11 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
   const settingsRpcClient = createSettingsRpcClient({
     sioCall,
     windowRef,
+  });
+  let consoleWorkerId: string | null = readConsoleWorkerId();
+  windowRef.addEventListener('te2-console-worker-ready', (event) => {
+    consoleWorkerId = readConsoleWorkerIdFromEvent(event) ?? readConsoleWorkerId();
+    renderConsoleWorkerId();
   });
   const uiRpcClient = createUiRpcClient({
     sioCall,
@@ -251,6 +270,10 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     if (splashSettingsUserNameEl) {
       splashSettingsUserNameEl.value = typeof appConfig.user_name === 'string' ? appConfig.user_name : '';
     }
+    if (splashSettingsShowConsoleWorkerIdEl) {
+      splashSettingsShowConsoleWorkerIdEl.checked = appConfig.show_console_worker_id === true;
+    }
+    renderConsoleWorkerId();
     refreshMessageCardHeaders();
   }
 
@@ -271,6 +294,9 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     if (splashSettingsUserNameEl) {
       splashSettingsUserNameEl.value = typeof appConfig?.user_name === 'string' ? appConfig.user_name : '';
     }
+    if (splashSettingsShowConsoleWorkerIdEl) {
+      splashSettingsShowConsoleWorkerIdEl.checked = appConfig?.show_console_worker_id === true;
+    }
     splashSettingsModalEl.classList.remove('hidden');
   }
 
@@ -283,6 +309,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     try {
       const data = await settingsRpcClient.updateConfig({
         user_name: splashSettingsUserNameEl?.value?.trim() || null,
+        show_console_worker_id: splashSettingsShowConsoleWorkerIdEl?.checked === true,
       });
       if (!data || data.ok === false) return;
       applyAppConfig(data);
@@ -290,6 +317,32 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     } catch {
       // ignore
     }
+  }
+
+  function readConsoleWorkerId(): string | null {
+    const source = (windowRef as ConsoleWorkerWindow).__TE2_CONSOLE_WORKER;
+    const workerId = source && typeof source.workerId === 'string' ? source.workerId.trim() : '';
+    return workerId || null;
+  }
+
+  function readConsoleWorkerIdFromEvent(event: Event): string | null {
+    if (!(event instanceof CustomEvent)) return null;
+    const detail = event.detail;
+    if (!detail || typeof detail !== 'object') return null;
+    const workerId = (detail as ConsoleWorkerInfo).workerId;
+    return typeof workerId === 'string' && workerId.trim() ? workerId.trim() : null;
+  }
+
+  function renderConsoleWorkerId() {
+    if (!splashConsoleWorkerIdEl) return;
+    const { appConfig } = getState();
+    const show = appConfig?.show_console_worker_id === true && Boolean(consoleWorkerId);
+    splashConsoleWorkerIdEl.hidden = !show;
+    if (!show) {
+      splashConsoleWorkerIdEl.textContent = '';
+      return;
+    }
+    splashConsoleWorkerIdEl.textContent = `console: ${consoleWorkerId}`;
   }
 
   return {

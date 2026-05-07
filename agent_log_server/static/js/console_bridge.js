@@ -26,6 +26,17 @@ let _workerId = null;
 let _workerLabel = null;
 let _originals = {};
 
+function _publishWorkerInfo() {
+  if (typeof window === 'undefined') return;
+  const detail = _workerId ? { workerId: _workerId, workerLabel: _workerLabel } : null;
+  window.__TE2_CONSOLE_WORKER = detail;
+  try {
+    window.dispatchEvent(new CustomEvent('te2-console-worker-ready', { detail }));
+  } catch (_) {
+    // Ignore event dispatch failures; callers can still read the global.
+  }
+}
+
 function _safeSerialize(x) {
   const seen = new WeakSet();
   return JSON.stringify(x, (_k, v) => {
@@ -139,12 +150,16 @@ function _hookEval() {
  * @param {string} [opts.workerId] Exact identifier for this frontend. Prefer this only when you intentionally want a fixed ID.
  * @param {string} [opts.workerLabel] Human-readable label/grouping for this frontend.
  * @param {boolean} [opts.uniquePerWindow] Generate a stable unique ID per browser window/tab from workerLabel. Recommended for multi-client hosted frontends.
+ * @param {string} [opts.socketOrigin] Absolute Socket.IO origin for direct-port pages that still need to connect to TE2.
  * @param {string} [opts.socketPath] Socket.IO path (default '/te2_console_ws/socket.io').
  * @param {string} [opts.namespace] Socket.IO namespace (default '/te2_console').
  * @returns {{ socket, workerId, destroy }}
  */
 export function initConsoleBridge(opts = {}) {
-  if (_bridgeActive) return { socket: _bridgeSocket, workerId: _workerId, destroy: destroyConsoleBridge };
+  if (_bridgeActive) {
+    _publishWorkerInfo();
+    return { socket: _bridgeSocket, workerId: _workerId, destroy: destroyConsoleBridge };
+  }
 
   _workerLabel = _sanitizeWorkerLabel(opts.workerLabel || opts.workerId || 'worker');
   if (opts.uniquePerWindow) {
@@ -165,7 +180,10 @@ export function initConsoleBridge(opts = {}) {
       console.warn('[console_bridge] window.io not available — bridge not started');
       return null;
     }
-    _bridgeSocket = io(opts.namespace || '/te2_console', {
+    const namespace = opts.namespace || '/te2_console';
+    const socketOrigin = typeof opts.socketOrigin === 'string' ? opts.socketOrigin.trim().replace(/\/+$/, '') : '';
+    const socketTarget = socketOrigin ? `${socketOrigin}${namespace.startsWith('/') ? namespace : `/${namespace}`}` : namespace;
+    _bridgeSocket = io(socketTarget, {
       path: opts.socketPath || '/te2_console_ws/socket.io',
       transports: ['websocket'],
       query: {
@@ -190,6 +208,7 @@ export function initConsoleBridge(opts = {}) {
   _hookErrors();
   _hookEval();
   _bridgeActive = true;
+  _publishWorkerInfo();
 
   return { socket: _bridgeSocket, workerId: _workerId, destroy: destroyConsoleBridge };
 }
@@ -204,5 +223,7 @@ export function destroyConsoleBridge() {
   }
   _originals = {};
   _bridgeActive = false;
+  _workerId = null;
   _workerLabel = null;
+  _publishWorkerInfo();
 }
