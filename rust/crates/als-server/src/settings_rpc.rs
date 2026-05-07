@@ -88,14 +88,7 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
             .await
         }
         "extension.splashAction.run" => Ok(json!({"ok": false, "transport": "rpc"})),
-        "extension.runtimeOptions.get" => Ok(json!({
-            "agent": request.params.get("agent").cloned().unwrap_or(Value::Null),
-            "has_plan": false,
-            "has_todo": false,
-            "quickControls": [],
-            "fields": {},
-            "transport": "rpc"
-        })),
+        "extension.runtimeOptions.get" => extension_runtime_options(state, &request.params).await,
         "extension.requestCards.get" => {
             let extension_id = extension_id_param(&request.params);
             let cards = extension_id
@@ -314,6 +307,115 @@ async fn extension_sessions(state: &AppState, params: &JsonMap) -> Result<Value,
         return Ok(result);
     }
     Ok(json!({"sessions": [], "transport": "rpc"}))
+}
+
+async fn extension_runtime_options(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let request = runtime_options_request(state, params)?;
+    ensure_registered_extension(state, &request.extension_id)?;
+    let mut result = adapter_extension_request_with_params(
+        state,
+        methods::EXTENSION_GET_RUNTIME_OPTIONS,
+        request.to_adapter_params(),
+    )
+    .await?;
+    if let Value::Object(ref mut object) = result {
+        object
+            .entry("agent")
+            .or_insert_with(|| Value::String(request.extension_id));
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        return Ok(result);
+    }
+    Ok(json!({
+        "agent": request.extension_id,
+        "fields": {},
+        "quickControls": [],
+        "transport": "rpc"
+    }))
+}
+
+struct RuntimeOptionsRequest {
+    extension_id: String,
+    conversation_id: Option<String>,
+    settings: JsonMap,
+}
+
+impl RuntimeOptionsRequest {
+    fn to_adapter_params(&self) -> JsonMap {
+        let mut params = JsonMap::new();
+        params.insert(
+            "extension_id".to_owned(),
+            Value::String(self.extension_id.clone()),
+        );
+        if let Some(conversation_id) = self.conversation_id.as_ref() {
+            params.insert(
+                "conversation_id".to_owned(),
+                Value::String(conversation_id.clone()),
+            );
+        }
+        params.insert("settings".to_owned(), Value::Object(self.settings.clone()));
+        params
+    }
+}
+
+fn runtime_options_request(
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<RuntimeOptionsRequest, RpcError> {
+    let conversation_id = params
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let meta = conversation_id
+        .as_deref()
+        .map(|id| {
+            state
+                .conversations
+                .load_meta_if_exists(id)
+                .map_err(internal_rpc_error)
+        })
+        .transpose()?
+        .flatten();
+    let extension_id = params
+        .get("agent")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            meta.as_ref()
+                .and_then(|meta| meta.extension_id.as_deref().or(meta.agent_type.as_deref()))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            meta.as_ref()
+                .and_then(|meta| meta.settings.get("agent"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            state
+                .extensions
+                .list()
+                .into_iter()
+                .find(|entry| entry.active)
+                .map(|entry| entry.id)
+        })
+        .ok_or_else(|| rpc_error(-32602, "extension_id or active extension is required"))?;
+    let settings = meta
+        .as_ref()
+        .map(|meta| meta.settings.clone())
+        .unwrap_or_default();
+    Ok(RuntimeOptionsRequest {
+        extension_id,
+        conversation_id,
+        settings,
+    })
 }
 
 async fn adapter_extension_request(

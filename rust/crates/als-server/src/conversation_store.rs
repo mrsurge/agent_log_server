@@ -105,6 +105,19 @@ impl ConversationStore {
         Ok(meta)
     }
 
+    pub fn load_meta_if_exists(&self, conversation_id: &str) -> Result<Option<ConversationMeta>> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let safe_id = sanitize_conversation_id(conversation_id);
+        let path = self.conversation_dir_unlocked(&safe_id).join("meta.json");
+        if path.exists() {
+            return read_meta(&path).map(Some);
+        }
+        Ok(None)
+    }
+
     pub fn update_meta(
         &self,
         conversation_id: &str,

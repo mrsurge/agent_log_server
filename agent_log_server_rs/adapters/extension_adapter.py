@@ -238,6 +238,13 @@ class ExtensionLoaderModule(Protocol):
 
     async def get_splash_schema(self, extension_id: str) -> JsonMap | None: ...
 
+    async def get_runtime_options(
+        self,
+        extension_id: str,
+        conversation_id: str | None = None,
+        settings: JsonMap | None = None,
+    ) -> JsonMap: ...
+
 
 @dataclass
 class AdapterState:
@@ -327,6 +334,8 @@ class ExtensionJsonRpcAdapter:
             return await self._settings_schema(params)
         if method == AdapterMethod.EXTENSION_GET_SPLASH_SCHEMA:
             return await self._splash_schema(params)
+        if method == AdapterMethod.EXTENSION_GET_RUNTIME_OPTIONS:
+            return await self._runtime_options(params)
         if method == AdapterMethod.EXTENSION_LIST_MODELS:
             return await self._list_models(params)
         if method == AdapterMethod.EXTENSION_LIST_SESSIONS:
@@ -655,6 +664,20 @@ class ExtensionJsonRpcAdapter:
             result.setdefault("extension_id", extension_id)
             return result
         return {"version": "1", "extension_id": extension_id, "fields": []}
+
+    async def _runtime_options(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        self._extension_info(extension_id)
+        conversation_id = _optional_string(params.get("conversation_id"))
+        settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
+        result = await self._loader.get_runtime_options(
+            extension_id,
+            conversation_id=conversation_id,
+            settings=settings,
+        )
+        if isinstance(result, dict):
+            return dict(result)
+        return {"agent": extension_id, "fields": {}, "quickControls": []}
 
     async def _conversation_start(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
