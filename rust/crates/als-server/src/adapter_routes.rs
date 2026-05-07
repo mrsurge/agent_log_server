@@ -59,6 +59,7 @@ async fn start_copilot_conversation(
         conversation_id: conversation_id.clone(),
         cwd: body.cwd.clone().map(Into::into),
         mcp_context: Some(adapter_mcp_context(
+            &state.config,
             &conversation_id,
             Some(&settings),
             body.cwd.as_deref(),
@@ -92,6 +93,7 @@ async fn send_copilot_message(
         attachments: Vec::new(),
         toast_context: None,
         mcp_context: Some(adapter_mcp_context(
+            &state.config,
             &conversation_id,
             Some(&settings),
             body.cwd.as_deref(),
@@ -130,6 +132,7 @@ struct SendMessageBody {
 }
 
 fn adapter_mcp_context(
+    config: &crate::config::ServerConfig,
     conversation_id: &str,
     settings: Option<&JsonMap>,
     cwd: Option<&str>,
@@ -147,6 +150,10 @@ fn adapter_mcp_context(
     agent_pty_defaults.insert("enabled_by_default".to_owned(), Value::Bool(true));
     agent_pty_defaults.insert("eager_load_tools".to_owned(), Value::Bool(true));
     agent_pty_defaults.insert("transport".to_owned(), Value::String("stdio".to_owned()));
+    agent_pty_defaults.insert(
+        "appserver_origin".to_owned(),
+        Value::String(appserver_origin(config)),
+    );
     agent_pty_defaults.insert(
         "conversation_id".to_owned(),
         Value::String(conversation_id.to_owned()),
@@ -192,6 +199,14 @@ fn adapter_mcp_context(
         requested_servers,
         defaults,
     }
+}
+
+fn appserver_origin(config: &crate::config::ServerConfig) -> String {
+    let host = match config.host.trim() {
+        "" | "0.0.0.0" | "::" => "127.0.0.1",
+        value => value,
+    };
+    format!("http://{}:{}", host, config.port)
 }
 
 struct AdapterRouteError(anyhow::Error);

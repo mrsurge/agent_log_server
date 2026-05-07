@@ -9,6 +9,7 @@ from agent_log_server.typing_helpers import ObjectMap, coerce_object_map
 
 AGENT_PTY_BLOCKS_MCP_SERVER_NAME = "agent-pty-blocks"
 _EAGER_LOAD_TOOLS_KEY = "eager_load_tools"
+_APPSERVER_ORIGIN_KEY = "appserver_origin"
 _CODEX_EAGER_MCP_FEATURES: ObjectMap = {
     "tool_search": False,
     "tool_search_always_defer_mcp_tools": False,
@@ -51,6 +52,7 @@ def _strip_contract_intents(mcp_servers: ObjectMap) -> ObjectMap:
         server_map = _optional_map(server)
         if server_map:
             server_map.pop(_EAGER_LOAD_TOOLS_KEY, None)
+            server_map.pop(_APPSERVER_ORIGIN_KEY, None)
             stripped[name] = server_map
         else:
             stripped[name] = server
@@ -93,6 +95,8 @@ def apply_mcp_context(
             existing_server=mcp_servers.get(AGENT_PTY_BLOCKS_MCP_SERVER_NAME),
             conversation_id=_optional_string(agent_defaults.get("conversation_id"))
             or _optional_string(context.get("conversation_id")),
+            appserver_origin=_optional_string(agent_defaults.get("appserver_origin"))
+            or _optional_string(context.get("appserver_origin")),
         )
         if agent_server is not None:
             mcp_servers[AGENT_PTY_BLOCKS_MCP_SERVER_NAME] = agent_server

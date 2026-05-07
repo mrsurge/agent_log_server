@@ -6,6 +6,7 @@ mod conversation_rpc;
 mod conversation_store;
 mod extension_registry;
 mod http;
+mod ipc;
 mod settings_rpc;
 mod socketio;
 mod state;

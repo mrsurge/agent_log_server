@@ -143,6 +143,8 @@ def build_effective_prompt_context(
         te2_enabled=te2_enabled,
         template_path=template_path,
     )
+    if not te2_enabled:
+        return developer_text
     snapshot = load_repo_memory_snapshot(cwd)
     repo_memory_text = snapshot["content"].strip()
     if not repo_memory_text:

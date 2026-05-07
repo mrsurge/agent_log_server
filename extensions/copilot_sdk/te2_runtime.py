@@ -13,7 +13,11 @@ _REPO_ROOT = Path(os.path.abspath(__file__)).parents[2]
 _AGENT_PTY_MCP_SERVER_PATH = _REPO_ROOT / "mcp_agent_pty_server.py"
 
 
-def build_agent_pty_blocks_local_mcp_server(cwd: Optional[str] = None, conversation_id: Optional[str] = None) -> ObjectMap:
+def build_agent_pty_blocks_local_mcp_server(
+    cwd: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    appserver_origin: Optional[str] = None,
+) -> ObjectMap:
     command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
     server: ObjectMap = {
         "type": "local",
@@ -21,11 +25,15 @@ def build_agent_pty_blocks_local_mcp_server(cwd: Optional[str] = None, conversat
         "args": [str(_AGENT_PTY_MCP_SERVER_PATH)],
         "tools": ["*"],
     }
+    env: dict[str, str] = {}
     if isinstance(cwd, str) and cwd.strip():
-        env: dict[str, str] = {"PWD": cwd}
-        if isinstance(conversation_id, str) and conversation_id.strip():
-            env["CONVERSATION_ID"] = conversation_id.strip()
+        env["PWD"] = cwd
         server["cwd"] = cwd
+    if isinstance(conversation_id, str) and conversation_id.strip():
+        env["CONVERSATION_ID"] = conversation_id.strip()
+    if isinstance(appserver_origin, str) and appserver_origin.strip():
+        env["AGENT_LOG_SERVER_ORIGIN"] = appserver_origin.strip()
+    if env:
         server["env"] = env
     return server
 

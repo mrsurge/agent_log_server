@@ -21,6 +21,7 @@ als-jsonrpc = { path = "crates/als-jsonrpc" }
 anyhow = "1"
 axum = "0.8"
 ferrous_framework = { path = "crates/ferrous_framework" }
+getrandom = "0.3"
 pyo3 = { version = "0.27", features = ["abi3-py311"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }

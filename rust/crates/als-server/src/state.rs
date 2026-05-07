@@ -2,6 +2,7 @@ use crate::adapter_process::{AdapterEventSink, AdapterSupervisor};
 use crate::config::ServerConfig;
 use crate::conversation_store::ConversationStore;
 use crate::extension_registry::ExtensionRegistry;
+use crate::ipc::IpcClientStore;
 use anyhow::{Result, anyhow};
 use std::sync::{Arc, Mutex};
 use tracing::warn;
@@ -12,6 +13,7 @@ pub struct AppState {
     pub config: ServerConfig,
     pub conversations: ConversationStore,
     pub extensions: ExtensionRegistry,
+    pub ipc_clients: IpcClientStore,
     pub ui_selection: UiSelectionStore,
 }
 
@@ -35,12 +37,14 @@ impl AppState {
                 Some(config.roots.config_dir.clone()),
             )
         });
+        let ipc_clients = IpcClientStore::default();
         let ui_selection = UiSelectionStore::default();
         Self {
             adapter,
             config,
             conversations,
             extensions,
+            ipc_clients,
             ui_selection,
         }
     }

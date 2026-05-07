@@ -47,6 +47,7 @@ dependencies = [
  "anyhow",
  "axum",
  "ferrous_framework",
+ "getrandom 0.3.4",
  "regex",
  "serde",
  "serde_json",

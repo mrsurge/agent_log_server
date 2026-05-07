@@ -3,6 +3,7 @@ use crate::{
     conversation_store::{
         ConversationMeta, ConversationMetaUpdate, CreateConversationRequest, TranscriptOffset,
     },
+    ipc,
     state::AppState,
 };
 use als_adapter_protocol::{
@@ -75,11 +76,12 @@ pub fn start_adapter_event_fanout(io: SocketIo, state: AppState) {
 async fn handle_rpc_request(
     socket: SocketRef,
     State(state): State<AppState>,
+    io: SocketIo,
     Data(request): Data<JsonRpcRequest>,
     ack: AckSender,
 ) {
     let id = request.id.clone();
-    let response = match dispatch_rpc(socket, state, request).await {
+    let response = match dispatch_rpc(socket, io, state, request).await {
         Ok(result) => RpcAck::Success(SuccessResponse::new(id, result)),
         Err(error) => RpcAck::Error(ErrorResponse::new(id, error)),
     };
@@ -88,6 +90,7 @@ async fn handle_rpc_request(
 
 async fn dispatch_rpc(
     socket: SocketRef,
+    io: SocketIo,
     state: AppState,
     request: JsonRpcRequest,
 ) -> Result<Value, RpcError> {
@@ -106,7 +109,9 @@ async fn dispatch_rpc(
         METHOD_REPLAY_GET_CHUNK => conversation_replay_get_chunk(&state, &request.params),
         METHOD_SEND => conversation_send(socket, state, request.params).await,
         METHOD_PINS_SET => conversation_pins_set(&state, &request.params),
-        METHOD_APPROVAL_RESPOND => conversation_approval_respond(socket, state, request.params).await,
+        METHOD_APPROVAL_RESPOND => {
+            conversation_approval_respond(socket, io, state, request.params).await
+        }
         METHOD_INTERRUPT | METHOD_COMPACT | METHOD_SHELL_EXEC => {
             Ok(json!({
                 "ok": false,
@@ -493,7 +498,12 @@ async fn conversation_send(
         cwd,
         attachments: Vec::new(),
         toast_context: None,
-        mcp_context: build_mcp_context(&conversation_id, Some(&meta.settings), meta.cwd.as_deref()),
+        mcp_context: build_mcp_context(
+            &state.config,
+            &conversation_id,
+            Some(&meta.settings),
+            meta.cwd.as_deref(),
+        ),
         settings: meta.settings,
     };
     state
@@ -574,6 +584,7 @@ async fn forward_adapter_live_event(
 
 async fn conversation_approval_respond(
     socket: SocketRef,
+    io: SocketIo,
     state: AppState,
     params: JsonMap,
 ) -> Result<Value, RpcError> {
@@ -622,6 +633,19 @@ async fn conversation_approval_respond(
         resolution
             .entry("decision".to_owned())
             .or_insert_with(|| Value::String(decision.to_owned()));
+    }
+
+    if is_agent_pty_ask_user_descriptor(&descriptor) {
+        submit_ask_user_response(&io, &state, &conversation_id, &request_id, &resolution).await?;
+        emit_meta_updated_to_socket(&socket, &state, &conversation_id);
+        return Ok(json!({
+            "ok": true,
+            "conversation_id": conversation_id,
+            "request_id": request_id,
+            "result": resolution,
+            "awaiting_harness_ack": true,
+            "transport": "ipc"
+        }));
     }
 
     state
@@ -675,6 +699,118 @@ async fn conversation_approval_respond(
         "handoff_event": handoff_event,
         "transport": "rpc"
     }))
+}
+
+async fn submit_ask_user_response(
+    io: &SocketIo,
+    state: &AppState,
+    conversation_id: &str,
+    request_id: &str,
+    resolution: &JsonMap,
+) -> Result<(), RpcError> {
+    let submitted = normalize_approval_resolution(resolution);
+    record_pending_approval_submission(state, conversation_id, request_id, &submitted)?;
+    ipc::emit_ask_user_response(io, request_id, &submitted).await;
+    Ok(())
+}
+
+pub async fn acknowledge_ask_user_interaction(
+    io: &SocketIo,
+    state: &AppState,
+    request_id: &str,
+) -> Result<bool, anyhow::Error> {
+    let Some((conversation_id, mut handoff_event, recorded_entry)) =
+        complete_submitted_ask_user_interaction(state, request_id).map_err(|error| {
+            anyhow::anyhow!("{} ({})", error.message, error.code)
+        })?
+    else {
+        return Ok(false);
+    };
+    merge_recorded_approval_fields(&mut handoff_event, &recorded_entry);
+    emit_meta_updated_to_namespace(io, state, &conversation_id).await;
+    emit_rpc_notification_to_namespace(
+        io,
+        "conversation.approval.handoff",
+        Value::Object(handoff_event),
+    )
+    .await;
+    Ok(true)
+}
+
+fn complete_submitted_ask_user_interaction(
+    state: &AppState,
+    request_id: &str,
+) -> Result<Option<(String, JsonMap, Value)>, RpcError> {
+    let Some((conversation_id, descriptor)) = state
+        .conversations
+        .find_pending_approval(request_id)
+        .map_err(internal_error)?
+    else {
+        return Ok(None);
+    };
+    if !is_agent_pty_ask_user_descriptor(&descriptor) {
+        return Ok(None);
+    }
+    let Some(submitted) = descriptor
+        .get("submitted_resolution")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let handoff_event =
+        build_approval_handoff_event(state, &conversation_id, &descriptor, &submitted)?;
+    let recorded_entry =
+        append_approval_handoff_transcript_entry(state, &conversation_id, &handoff_event)?;
+    state
+        .conversations
+        .remove_pending_approval(&conversation_id, request_id)
+        .map_err(internal_error)?;
+    Ok(Some((conversation_id, handoff_event, recorded_entry)))
+}
+
+fn record_pending_approval_submission(
+    state: &AppState,
+    conversation_id: &str,
+    request_id: &str,
+    resolution: &JsonMap,
+) -> Result<JsonMap, RpcError> {
+    let meta = state
+        .conversations
+        .load_meta(conversation_id)
+        .map_err(internal_error)?;
+    let Some(mut descriptor) = meta
+        .pending_approvals
+        .get(request_id)
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return Err(rpc_error(-32009, "Approval is no longer pending"));
+    };
+    descriptor.insert(
+        "submitted_resolution".to_owned(),
+        Value::Object(resolution.clone()),
+    );
+    descriptor.insert("submitted_at".to_owned(), Value::String(utc_ts_for_rpc()));
+    state
+        .conversations
+        .upsert_pending_approval(conversation_id, request_id, descriptor.clone())
+        .map_err(internal_error)?;
+    Ok(descriptor)
+}
+
+fn normalize_approval_resolution(resolution: &JsonMap) -> JsonMap {
+    resolution
+        .get("result")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_else(|| resolution.clone())
+}
+
+fn is_agent_pty_ask_user_descriptor(descriptor: &JsonMap) -> bool {
+    string_from_map(descriptor, "request_method")
+        .map(|method| method.eq_ignore_ascii_case(AGENT_PTY_ASK_USER_REQUEST_METHOD))
+        .unwrap_or(false)
 }
 
 async fn persist_adapter_transcript(
@@ -733,6 +869,7 @@ async fn bind_provider_session(
                     provider_session_id: session_id,
                     cwd: meta.cwd.clone().map(PathBuf::from),
                     mcp_context: build_mcp_context(
+                        &state.config,
                         &conversation_id,
                         Some(&meta.settings),
                         meta.cwd.as_deref(),
@@ -1359,6 +1496,7 @@ fn resolve_cwd(params: &JsonMap, meta: &ConversationMeta) -> Option<PathBuf> {
 }
 
 fn build_mcp_context(
+    config: &crate::config::ServerConfig,
     conversation_id: &str,
     settings: Option<&JsonMap>,
     cwd: Option<&str>,
@@ -1386,6 +1524,10 @@ fn build_mcp_context(
     agent_pty_defaults.insert("enabled_by_default".to_owned(), Value::Bool(true));
     agent_pty_defaults.insert("eager_load_tools".to_owned(), Value::Bool(true));
     agent_pty_defaults.insert("transport".to_owned(), Value::String("stdio".to_owned()));
+    agent_pty_defaults.insert(
+        "appserver_origin".to_owned(),
+        Value::String(appserver_origin(config)),
+    );
     agent_pty_defaults.insert(
         "conversation_id".to_owned(),
         Value::String(conversation_id.to_owned()),
@@ -1418,6 +1560,14 @@ fn build_mcp_context(
         requested_servers,
         defaults,
     })
+}
+
+fn appserver_origin(config: &crate::config::ServerConfig) -> String {
+    let host = match config.host.trim() {
+        "" | "0.0.0.0" | "::" => "127.0.0.1",
+        value => value,
+    };
+    format!("http://{}:{}", host, config.port)
 }
 
 fn optional_map(params: &JsonMap, key: &str) -> Option<Map<String, Value>> {
@@ -1822,6 +1972,122 @@ mod tests {
                 .pending_approvals
                 .is_empty()
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ask_user_submission_completes_on_ipc_ack() {
+        let root =
+            std::env::temp_dir().join(format!("als-rs-rpc-ask-user-ipc-test-{}", unix_millis()));
+        let state = AppState::new(ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 12459,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                copilot_python: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        });
+        let mut settings = JsonMap::new();
+        settings.insert("agent".to_owned(), json!("codex-ext"));
+        state
+            .conversations
+            .create(CreateConversationRequest {
+                conversation_id: Some("conv-ask-user".to_owned()),
+                thread_id: Some("thread-ask-user".to_owned()),
+                settings,
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+
+        persist_pending_approval_event(
+            &state,
+            "conv-ask-user",
+            &json!({
+                "type": "approval",
+                "conversation_id": "conv-ask-user",
+                "id": "conv-ask-user",
+                "request_id": "conv-ask-user",
+                "kind": "user_input",
+                "request_method": "agent-pty/ask-user",
+                "request_params": {"requestId": "conv-ask-user", "question": "Pick one"},
+                "payload": {"requestId": "conv-ask-user", "question": "Pick one"},
+                "turn_id": "turn-ask",
+                "created_at": "created"
+            }),
+        )
+        .unwrap();
+
+        let mut resolution = JsonMap::new();
+        resolution.insert("answer".to_owned(), json!("Approve"));
+        resolution.insert("accepted".to_owned(), json!(true));
+        record_pending_approval_submission(
+            &state,
+            "conv-ask-user",
+            "conv-ask-user",
+            &resolution,
+        )
+        .unwrap();
+        let pending_meta = state.conversations.load_meta("conv-ask-user").unwrap();
+        assert_eq!(
+            pending_meta.pending_approvals["conv-ask-user"]["submitted_resolution"]["answer"],
+            "Approve"
+        );
+
+        let completed = complete_submitted_ask_user_interaction(&state, "conv-ask-user")
+            .unwrap()
+            .expect("submitted ask_user should complete");
+        assert_eq!(completed.0, "conv-ask-user");
+        assert_eq!(completed.1["type"], "approval_handoff");
+        assert_eq!(completed.1["status"], "accepted");
+        assert_eq!(completed.2["role"], "approval");
+        assert!(
+            state
+                .conversations
+                .load_meta("conv-ask-user")
+                .unwrap()
+                .pending_approvals
+                .is_empty()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_context_includes_als_rs_origin_for_stdio_ipc() {
+        let root =
+            std::env::temp_dir().join(format!("als-rs-rpc-mcp-origin-test-{}", unix_millis()));
+        let config = ServerConfig {
+            host: "0.0.0.0".to_owned(),
+            port: 12459,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                copilot_python: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        };
+        let context = build_mcp_context(&config, "conv-origin", None, Some("/repo"))
+            .expect("mcp context should be built");
+        let agent_defaults = context
+            .defaults
+            .get(AGENT_PTY_BLOCKS_MCP_SERVER_NAME)
+            .and_then(Value::as_object)
+            .expect("agent-pty defaults should exist");
+        assert_eq!(agent_defaults["appserver_origin"], "http://127.0.0.1:12459");
+        assert_eq!(agent_defaults["conversation_id"], "conv-origin");
 
         let _ = fs::remove_dir_all(root);
     }
