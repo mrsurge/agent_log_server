@@ -41,8 +41,8 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
     }
 
     match request.method.as_str() {
-        "config.get" => Ok(json!({"transport": "rpc"})),
-        "config.update" => Ok(json!({"ok": true, "transport": "rpc"})),
+        "config.get" => config_get(state),
+        "config.update" => config_update(state, request.params),
         "status.get" => Ok(json!({"running": true, "transport": "rpc"})),
         "extensions.list" => Ok(json!({"extensions": state.extensions.list(), "transport": "rpc"})),
         "extensions.reload" => {
@@ -129,6 +129,47 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
             format!("Unsupported method: {}", request.method),
         )),
     }
+}
+
+fn config_get(state: &AppState) -> Result<Value, RpcError> {
+    let selection = state.ui_selection.snapshot().map_err(internal_rpc_error)?;
+    Ok(json!({
+        "ok": true,
+        "user_name": selection.user_name,
+        "active_conversation": selection.active_conversation_id.clone(),
+        "active_conversation_id": selection.active_conversation_id,
+        "active_view": selection.active_view,
+        "transport": "rpc",
+    }))
+}
+
+fn config_update(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let user_name = if params.contains_key("user_name") {
+        params
+            .get("user_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    } else {
+        state
+            .ui_selection
+            .snapshot()
+            .map_err(internal_rpc_error)?
+            .user_name
+    };
+    let selection = state
+        .ui_selection
+        .set_user_name(user_name)
+        .map_err(internal_rpc_error)?;
+    Ok(json!({
+        "ok": true,
+        "user_name": selection.user_name,
+        "active_conversation": selection.active_conversation_id.clone(),
+        "active_conversation_id": selection.active_conversation_id,
+        "active_view": selection.active_view,
+        "transport": "rpc",
+    }))
 }
 
 fn extension_id_param(params: &JsonMap) -> Option<String> {

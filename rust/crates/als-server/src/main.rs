@@ -8,6 +8,7 @@ mod extension_registry;
 mod http;
 mod ipc;
 mod settings_rpc;
+mod sidebar_ipc;
 mod socketio;
 mod state;
 mod static_assets;

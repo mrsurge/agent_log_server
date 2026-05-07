@@ -520,6 +520,10 @@ Runtime behavior:
 - Rust injects the repo root into `PYTHONPATH` when launching the adapter from a
   source checkout so direct `target/debug/als-server` launches can import the
   Python package.
+- Rust injects the resolved `ALS_RS_DATA_DIR`, `ALS_RS_CACHE_DIR`,
+  `ALS_RS_CONFIG_DIR`, and `ALS_RS_STATIC_DIR` into adapter children so Python
+  extension code sees the same isolated roots even when `als-server` was launched
+  directly rather than through the Python bootstrap.
 - Rust explicitly forwards the framework-shell environment used by the existing
   Python extension path:
   - `FRAMEWORK_SHELLS_BASE_DIR`
@@ -678,8 +682,8 @@ Implemented methods:
 | Method | Behavior |
 | --- | --- |
 | `conversation.create` | Creates Rust conversation metadata. |
-| `conversation.list` | Lists splash-card-ready Rust conversation metadata as `{ items, active_conversation_id, active_view, pinned_conversations, transport }`. Pinned conversations are ordered first from persisted metadata. |
-| `conversation.get` | Loads or creates metadata for a conversation ID. |
+| `conversation.list` | Lists splash-card-ready Rust conversation metadata as `{ items, active_conversation, active_conversation_id, active_view, pinned_conversations, transport }`. Pinned conversations are ordered first from persisted metadata. |
+| `conversation.get` | Loads or creates metadata for an explicit conversation ID; when called without an ID during boot, hydrates the persisted active conversation from app UI state and returns an explicit `ok: false` result instead of creating missing metadata when no active conversation exists. |
 | `conversation.select` | Loads metadata and returns `active_view`. |
 | `conversation.update` | Merges settings updates into `meta.json`, normalizes extension/cwd/label/alias card fields, and persists provider thread/session ids. |
 | `conversation.delete` | Deletes a Rust conversation directory. |
@@ -705,6 +709,49 @@ Known follow-up:
   extension from `meta.settings.agent`. ALS-RS streamlines this by keeping the
   same card-visible fields while storing pin order and routing state in the
   conversation metadata itself.
+
+## ALS-RS app UI state and TE2 sidebar IPC
+
+Rust owns the minimal app UI state required to restore the active view and active
+conversation across ALS-RS restarts:
+
+```text
+${ALS_RS_CACHE_DIR}/app_state.json
+```
+
+The persisted JSON intentionally stays smaller than legacy Python
+`app_server_config.json`:
+
+```json
+{
+  "active_conversation": "conversation-id-or-null",
+  "active_view": "splash-or-conversation",
+  "user_name": "optional splash display name"
+}
+```
+
+Current behavior:
+
+- `UiSelectionStore` loads this file during `AppState::new(...)` and writes it on
+  conversation selection, active-view changes, active conversation deletion, and
+  splash `user_name` updates.
+- `/rpc/settings` `config.get` / `config.update` read and write the same
+  persisted `user_name`, while also returning active-view/conversation fields for
+  compatibility.
+- `/rpc/ui` `view.get` / `view.set`, `hostUi.get`, and `/rpc/conversations`
+  list/get responses expose both `active_conversation` and the existing
+  `active_conversation_id` / `conversation_id` compatibility names.
+- The Rust router starts a best-effort startup task that connects to TE2's legacy
+  `/sidebar_ipc` namespace and calls `sidebar:cwd_get`, so `hostUi.projectRoot`
+  can be available before the frontend waits for a lazy sidebar project change.
+  Startup retries the SIO CWD request briefly until a project root lands.
+  `hostUi.recheck` remains the explicit recovery/update path and also reissues
+  `sidebar:cwd_get` on an already-connected sidebar client instead of merely
+  reporting connected state.
+- `codex-ext` schema cache lookup now prefers
+  `${ALS_RS_CACHE_DIR}/codex_app_server_schema` when that env var is present,
+  falling back to the legacy Python harness cache at
+  `~/.cache/app_server/codex_app_server_schema` outside ALS-RS.
 
 Validation currently covers:
 
@@ -1107,6 +1154,22 @@ Current status:
     option merger.
   - Footer controls remain a settings/runtime-options surface; saving quick
     footer selections still persists through the conversation update path.
+- Added the ALS-RS TE2 sidebar IPC client slice:
+  - Rust uses a best-effort Socket.IO client to the current TE2 legacy
+    `/sidebar_ipc` namespace at `/ui_ipc_ws/socket.io/`, matching the existing
+    Python host/sidebar lane while TE2's sidebar RPC transition is unfinished.
+  - `/rpc/ui` `hostUi.recheck` triggers connection if needed, calls
+    `sidebar:cwd_get`, and `sidebar:cwd_set` updates Rust host UI state; the
+    existing frontend project-tab filter and new-conversation CWD prefill consume
+    that `hostUi.projectRoot`.
+  - `/rpc/ui` `file.open` emits `sidebar:agent_open` for TE2 file/line/column
+    navigation.
+  - Incoming `sidebar:mention` events now use Rust conversation selection/meta
+    state: mentions for the active open conversation emit
+    `conversation.mention.inserted`, while mentions for inactive conversations
+    append the legacy draft mention token to `meta.draft`.
+  - Follow-up: live-smoke project CWD sync, incoming mentions, and file-open
+    navigation through the TE2 sidebar wrapper.
 
 Current session/rollout picker issues to investigate next:
 
@@ -1120,8 +1183,8 @@ Current session/rollout picker issues to investigate next:
   port-in/restored conversations. This is a blocker for treating Copilot picker
   display as complete and should be investigated against the old Python
   conversation create/update/resume paths.
-- `agent-pty-blocks` stdio injection no longer crashes/hangs Codex startup, but
-  ALS-RS has not yet taught Codex how to surface those MCP tools end-to-end.
+- `agent-pty-blocks` stdio injection and Codex eager tool exposure have passed
+  user smoke; keep them in the live regression set when touching MCP contracts.
 
 ### Milestone 6: dependency minimization
 
@@ -1211,17 +1274,17 @@ Acceptance:
    - real `extensions.reload` disk rescan and running-adapter loader reload:
      completed
    - enable/disable state: completed with an ALS-RS config overlay
-    - dependency/readiness status and dependency install: completed through the
-      Python adapter/loader contract
-    - Python adapter loader synchronization
-    - bounded adapter stderr/stdout-parse diagnostics exposed through
-      `extension.debug.probe`: completed
-    - Follow-up: reproduce the schema modal crash and inspect the adapter event
-      snapshot for the failing request/stdio trail.
+   - dependency/readiness status and dependency install: completed through the
+     Python adapter/loader contract
+   - Python adapter loader synchronization
+   - bounded adapter stderr/stdout-parse diagnostics exposed through
+     `extension.debug.probe`: completed
+   - Follow-up: reproduce the schema modal crash and inspect the adapter event
+     snapshot for the failing request/stdio trail.
 4. Continue live parity:
-    - approvals/ask-user: first approval contract slice is implemented and
-      documented in `APPROVAL_CONTRACT.md`. ALS-RS now persists
-      `pending_approvals` from live `type: "approval"` adapter events, routes
+   - approvals/ask-user: first approval contract slice is implemented and
+     documented in `APPROVAL_CONTRACT.md`. ALS-RS now persists
+     `pending_approvals` from live `type: "approval"` adapter events, routes
      frontend `conversation.approval.respond` through adapter
      `approval.respond`, appends legacy-shaped `role: "approval"` handoff
      transcript rows, removes stale/resolved pending descriptors, and emits
@@ -1230,49 +1293,54 @@ Acceptance:
      and Codex `item/tool/requestUserInput`, not only MCP ask-user. ALS-RS
      also now serves extension-local `ui/...` and `static/...` assets through
      `/api/extensions/{extension_id}/assets/{asset_path}` so custom approval
-      request-card modules declared in extension manifests can load. Live
-      approval fanout now persists the pending descriptor first, emits
-      `conversation.approval.request` as the first frontend-visible approval
-      signal, then follows with `conversation.meta.updated` for restore/list
-      state.
-    - provider binding / history hydration: verified for both Copilot and Codex.
-      ALS-RS now rejects any adapter/provider binding id that equals the harness
-      `conversation_id`, so cold-resume/send retries cannot poison
-      `provider_session_id` with a `conv_*` value.
-    - schema-modal port-in history import now preserves hydrated `role: "user"`
-      transcript rows while still suppressing normal live adapter user echoes.
-      Rust keeps ownership of user rows for live `conversation.send`, but
-      adapter-driven `conversation.resume` / `resume_session_with_history()`
-      imports mark hydrated history rows so they persist into transcript replay.
-    - generic MCP contract: implemented first ALS-RS-to-extension DTO slice.
-      `als-adapter-protocol` now carries a generic `mcp_context` on
-      conversation start/resume/send, Rust builds a provider-neutral default
-      context (`conversation_id`, `cwd`, requested `mcp_servers`, always-on
-      stdio `agent-pty-blocks` with eager tool exposure intent, and optional
-      `te2-mcp` intent when enabled),
-      the Python extension adapter passes that through as `settings.mcp_context`,
-      and extension-owned `mcp_contract.py` modules now map that generic DTO into
-      provider-native Copilot/Codex MCP config without adding provider-specific
-      logic to ALS-RS itself.
-    - ask-user IPC bridge: ALS-RS now owns the `/ipc` Socket.IO namespace used by
-      `mcp_agent_pty_server.py` when `agent-pty-blocks` runs over stdio. The MCP
-      process remains the Socket.IO client, authenticates with the shared
-      `~/.cache/app_server/ipc_secret`, receives `ask_user_response`, and acks
-      with `ask_user_ack`; Rust injects `AGENT_LOG_SERVER_ORIGIN` through
-      `mcp_context.defaults.agent-pty-blocks.appserver_origin` so the client
-      connects to the Rust server port instead of the legacy Python default.
-      `conversation.approval.respond` special-cases
-      `request_method == "agent-pty/ask-user"` to emit the submitted response
-      over IPC and only writes/removes the approval handoff after the MCP ack.
-    - repo-memory/dev-instruction refresh: ALS-RS does not implement the old
-      `pending_context` queue from the removed `codex-ext-exp` dynamic-devins
-      fork. `.repo_memory.md` is bundled through the TE2 integration prompt
-      context path at provider config boundaries instead: Codex rebuilds
-      `developerInstructions` on each `turn/start`, while Copilot recomputes its
-      runtime signature/config during `handle_message()` and re-resumes when the
-      effective prompt context changes. That gives next-turn/resume/compact
-      freshness without a mid-turn push.
-    - interrupt
-    - compact
-    - shell/tool card parity for the Copilot pilot
+     request-card modules declared in extension manifests can load. Live
+     approval fanout now persists the pending descriptor first, emits
+     `conversation.approval.request` as the first frontend-visible approval
+     signal, then follows with `conversation.meta.updated` for restore/list
+     state.
+   - provider binding / history hydration: verified for both Copilot and Codex.
+     ALS-RS now rejects any adapter/provider binding id that equals the harness
+     `conversation_id`, so cold-resume/send retries cannot poison
+     `provider_session_id` with a `conv_*` value.
+   - schema-modal port-in history import now preserves hydrated `role: "user"`
+     transcript rows while still suppressing normal live adapter user echoes.
+     Rust keeps ownership of user rows for live `conversation.send`, but
+     adapter-driven `conversation.resume` / `resume_session_with_history()`
+     imports mark hydrated history rows so they persist into transcript replay.
+   - generic MCP contract: implemented first ALS-RS-to-extension DTO slice.
+     `als-adapter-protocol` now carries a generic `mcp_context` on
+     conversation start/resume/send, Rust builds a provider-neutral default
+     context (`conversation_id`, `cwd`, requested `mcp_servers`, always-on
+     stdio `agent-pty-blocks` with eager tool exposure intent, and optional
+     `te2-mcp` intent when enabled),
+     the Python extension adapter passes that through as `settings.mcp_context`,
+     and extension-owned `mcp_contract.py` modules now map that generic DTO into
+     provider-native Copilot/Codex MCP config without adding provider-specific
+     logic to ALS-RS itself.
+   - ask-user IPC bridge: ALS-RS now owns the `/ipc` Socket.IO namespace used by
+     `mcp_agent_pty_server.py` when `agent-pty-blocks` runs over stdio. The MCP
+     process remains the Socket.IO client, authenticates with the shared
+     `~/.cache/app_server/ipc_secret`, receives `ask_user_response`, and acks
+     with `ask_user_ack`; Rust injects `AGENT_LOG_SERVER_ORIGIN` through
+     `mcp_context.defaults.agent-pty-blocks.appserver_origin` so the client
+     connects to the Rust server port instead of the legacy Python default.
+     `conversation.approval.respond` special-cases
+     `request_method == "agent-pty/ask-user"` to emit the submitted response
+     over IPC and only writes/removes the approval handoff after the MCP ack.
+   - repo-memory/dev-instruction refresh: ALS-RS does not implement the old
+     `pending_context` queue from the removed `codex-ext-exp` dynamic-devins
+     fork. `.repo_memory.md` is bundled through the TE2 integration prompt
+     context path at provider config boundaries instead: Codex rebuilds
+     `developerInstructions` on each `turn/start`, while Copilot recomputes its
+     runtime signature/config during `handle_message()` and re-resumes when the
+     effective prompt context changes. That gives next-turn/resume/compact
+     freshness without a mid-turn push.
+   - TE2 sidebar IPC: Rust owns the legacy-lane sidebar client for now. UI RPC
+     `hostUi.recheck` best-effort connects to TE2 `/sidebar_ipc` and syncs CWD,
+     `file.open` emits `sidebar:agent_open`, and `sidebar:mention` inserts live
+     mentions or queues legacy draft mention tokens depending on the active
+     conversation/view state.
+   - interrupt
+   - compact
+   - shell/tool card parity for the Copilot pilot
 5. Keep this migration plan current after each ALS-RS phase lands.

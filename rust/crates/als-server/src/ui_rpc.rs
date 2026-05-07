@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::{sidebar_ipc, state::AppState};
 use als_adapter_protocol::JsonMap;
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
 use regex::RegexBuilder;
@@ -31,18 +31,23 @@ pub fn register_ui_rpc_namespace(io: &SocketIo) {
 
 async fn handle_rpc_request(
     State(state): State<AppState>,
+    io: SocketIo,
     Data(request): Data<JsonRpcRequest>,
     ack: AckSender,
 ) {
     let id = request.id.clone();
-    let response = match dispatch_rpc(&state, request).await {
+    let response = match dispatch_rpc(&state, &io, request).await {
         Ok(result) => RpcAck::Success(SuccessResponse::new(id, result)),
         Err(error) => RpcAck::Error(ErrorResponse::new(id, error)),
     };
     let _ = ack.send(&response);
 }
 
-async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value, RpcError> {
+async fn dispatch_rpc(
+    state: &AppState,
+    io: &SocketIo,
+    request: JsonRpcRequest,
+) -> Result<Value, RpcError> {
     if request.jsonrpc != JSONRPC_VERSION {
         return Err(rpc_error(-32600, "Invalid JSON-RPC version"));
     }
@@ -50,16 +55,30 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
     match request.method.as_str() {
         "view.get" => view_get(state),
         "view.set" => view_set(state, &request.params),
-        "hostUi.get" | "hostUi.recheck" => Ok(json!({
-            "showClose": false,
-            "ideMode": false,
-            "projectRoot": Value::Null,
-            "transport": "rpc"
-        })),
+        "hostUi.get" => Ok(sidebar_ipc::host_ui_response(state)),
+        "hostUi.recheck" => {
+            let recheck = sidebar_ipc::recheck_status(io, state).await;
+            let mut result = sidebar_ipc::host_ui_response(state);
+            if let Some(object) = result.as_object_mut() {
+                object.insert("recheck".to_owned(), recheck);
+            }
+            Ok(result)
+        }
         "filesystem.home" => Ok(filesystem_home()),
         "filesystem.list" => filesystem_list(request.params).await,
         "filesystem.search" => filesystem_search(state, request.params).await,
-        "file.open" | "url.open" => Ok(json!({
+        "file.open" => {
+            let sent = sidebar_ipc::emit_agent_open(io, state, request.params.clone()).await;
+            Ok(json!({
+                "ok": true,
+                "sent": sent,
+                "path": request.params.get("path").cloned().unwrap_or(Value::Null),
+                "line": request.params.get("line").cloned().unwrap_or(Value::Null),
+                "column": request.params.get("column").cloned().unwrap_or(Value::Null),
+                "transport": "rpc"
+            }))
+        }
+        "url.open" => Ok(json!({
             "ok": false,
             "error": format!("{} is not implemented in ALS-RS yet", request.method),
             "transport": "rpc"
@@ -97,7 +116,10 @@ fn view_response(selection: &crate::state::UiSelectionSnapshot) -> Value {
         .unwrap_or(Value::Null);
     json!({
         "active_view": selection.active_view,
+        "active_conversation": conversation_id.clone(),
+        "active_conversation_id": conversation_id.clone(),
         "conversation_id": conversation_id,
+        "user_name": selection.user_name,
         "transport": "rpc"
     })
 }

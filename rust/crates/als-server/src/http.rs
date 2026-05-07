@@ -1,4 +1,5 @@
 use crate::adapter_routes;
+use crate::sidebar_ipc;
 use crate::socketio::register_socket_namespaces;
 use crate::state::AppState;
 use crate::static_assets;
@@ -14,6 +15,7 @@ pub fn build_router(state: AppState) -> Router {
     register_socket_namespaces(&io);
     conversation_rpc::start_adapter_event_fanout(io.clone(), state.clone());
     start_extension_warmup(state.clone());
+    start_sidebar_cwd_fetch(io.clone(), state.clone());
 
     Router::new()
         .merge(static_assets::routes(&state.config.roots.static_dir))
@@ -23,6 +25,22 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
         .layer(socket_layer)
         .layer(TraceLayer::new_for_http())
+}
+
+fn start_sidebar_cwd_fetch(io: SocketIo, state: AppState) {
+    tokio::spawn(async move {
+        let result = sidebar_ipc::recheck_status(&io, &state).await;
+        let project_root = state
+            .host_ui
+            .snapshot()
+            .ok()
+            .and_then(|snapshot| snapshot.project_root);
+        info!(
+            %result,
+            project_root = project_root.as_deref().unwrap_or(""),
+            "ALS-RS sidebar IPC startup CWD fetch completed"
+        );
+    });
 }
 
 fn start_extension_warmup(state: AppState) {

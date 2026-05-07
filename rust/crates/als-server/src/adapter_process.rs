@@ -1,5 +1,6 @@
 use crate::config::{FrameworkShellConfig, ServerConfig};
 use als_adapter_protocol::{ExtensionInitializeParams, JsonMap, events, methods};
+use als_dto::RuntimeRoots;
 use als_jsonrpc::{
     ErrorResponse, Notification, Request, RequestId, Response, RpcError, SuccessResponse,
 };
@@ -60,6 +61,7 @@ impl AdapterSupervisor {
         let client = Arc::new(AdapterClient::spawn(
             self.config.adapters.copilot_python.clone(),
             self.config.extensions_dir.parent().map(Path::to_path_buf),
+            self.config.roots.clone(),
             self.config.framework_shells.clone(),
             self.events.clone(),
         )?);
@@ -158,6 +160,7 @@ impl AdapterClient {
     pub fn spawn(
         python: String,
         python_path_root: Option<PathBuf>,
+        roots: RuntimeRoots,
         framework_shells: FrameworkShellConfig,
         events: AdapterEventSink,
     ) -> Result<Self> {
@@ -165,6 +168,7 @@ impl AdapterClient {
             match Self::spawn_ferrous(
                 python.clone(),
                 python_path_root.clone(),
+                &roots,
                 &framework_shells,
                 events.clone(),
             ) {
@@ -190,12 +194,13 @@ impl AdapterClient {
                 }
             }
         }
-        Self::spawn_direct(python, python_path_root, &framework_shells, events)
+        Self::spawn_direct(python, python_path_root, &roots, &framework_shells, events)
     }
 
     fn spawn_ferrous(
         python: String,
         python_path_root: Option<PathBuf>,
+        roots: &RuntimeRoots,
         framework_shells: &FrameworkShellConfig,
         events: AdapterEventSink,
     ) -> Result<Self> {
@@ -203,7 +208,7 @@ impl AdapterClient {
         let shellspec_path = python_path_root
             .as_ref()
             .map(|root| root.join("agent_log_server_rs/shellspec/extension_adapter.yaml"));
-        let env = adapter_env_overrides(python_path_root.as_deref(), framework_shells);
+        let env = adapter_env_overrides(python_path_root.as_deref(), roots, framework_shells);
         let pipe = FerrousFrameworkPipe::spawn(FerrousPipeConfig {
             command: vec![
                 python,
@@ -253,6 +258,7 @@ impl AdapterClient {
     fn spawn_direct(
         python: String,
         python_path_root: Option<PathBuf>,
+        roots: &RuntimeRoots,
         framework_shells: &FrameworkShellConfig,
         events: AdapterEventSink,
     ) -> Result<Self> {
@@ -264,7 +270,9 @@ impl AdapterClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        for (key, value) in adapter_env_overrides(python_path_root.as_deref(), framework_shells) {
+        for (key, value) in
+            adapter_env_overrides(python_path_root.as_deref(), roots, framework_shells)
+        {
             command.env(key, value);
         }
         let mut child = command
@@ -363,6 +371,7 @@ fn pythonpath_with_root(root: &Path, existing: Option<OsString>) -> Option<OsStr
 
 fn adapter_env_overrides(
     python_path_root: Option<&Path>,
+    roots: &RuntimeRoots,
     framework_shells: &FrameworkShellConfig,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
@@ -376,6 +385,22 @@ fn adapter_env_overrides(
     for (key, value) in framework_shells.env_overrides() {
         env.insert(key.to_owned(), value);
     }
+    env.insert(
+        "ALS_RS_DATA_DIR".to_owned(),
+        roots.data_dir.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "ALS_RS_CACHE_DIR".to_owned(),
+        roots.cache_dir.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "ALS_RS_CONFIG_DIR".to_owned(),
+        roots.config_dir.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "ALS_RS_STATIC_DIR".to_owned(),
+        roots.static_dir.to_string_lossy().into_owned(),
+    );
     env
 }
 

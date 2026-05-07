@@ -112,13 +112,11 @@ async fn dispatch_rpc(
         METHOD_APPROVAL_RESPOND => {
             conversation_approval_respond(socket, io, state, request.params).await
         }
-        METHOD_INTERRUPT | METHOD_COMPACT | METHOD_SHELL_EXEC => {
-            Ok(json!({
-                "ok": false,
-                "error": format!("{} is not implemented in ALS-RS yet", request.method),
-                "transport": "rpc"
-            }))
-        }
+        METHOD_INTERRUPT | METHOD_COMPACT | METHOD_SHELL_EXEC => Ok(json!({
+            "ok": false,
+            "error": format!("{} is not implemented in ALS-RS yet", request.method),
+            "transport": "rpc"
+        })),
         _ => Err(rpc_error(
             -32601,
             format!("Unsupported method: {}", request.method),
@@ -150,6 +148,7 @@ fn conversation_list(state: &AppState) -> Result<Value, RpcError> {
     let selection = state.ui_selection.snapshot().map_err(internal_error)?;
     Ok(json!({
         "items": items,
+        "active_conversation": selection.active_conversation_id.clone(),
         "active_conversation_id": selection.active_conversation_id,
         "active_view": selection.active_view,
         "pinned_conversations": pinned_conversations,
@@ -158,14 +157,49 @@ fn conversation_list(state: &AppState) -> Result<Value, RpcError> {
 }
 
 fn conversation_get(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
-    let conversation_id = optional_str(&params, "conversation_id")
-        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
-    meta_result(
+    let requested_id = optional_str(params, "conversation_id");
+    let selection = state.ui_selection.snapshot().map_err(internal_error)?;
+    let conversation_id = match requested_id {
+        Some(conversation_id) => conversation_id.to_owned(),
+        None => {
+            let Some(conversation_id) = selection.active_conversation_id.clone() else {
+                return Ok(json!({
+                    "ok": false,
+                    "error": "No active conversation",
+                    "transport": "rpc",
+                }));
+            };
+            conversation_id
+        }
+    };
+    let meta = if requested_id.is_some() {
         state
             .conversations
-            .load_meta(conversation_id)
-            .map_err(internal_error)?,
-    )
+            .load_meta(&conversation_id)
+            .map_err(internal_error)?
+    } else {
+        match state
+            .conversations
+            .load_meta_if_exists(&conversation_id)
+            .map_err(internal_error)?
+        {
+            Some(meta) => meta,
+            None => {
+                state
+                    .ui_selection
+                    .select(None, Some("splash".to_owned()))
+                    .map_err(internal_error)?;
+                return Ok(json!({
+                    "ok": false,
+                    "error": "Active conversation does not exist",
+                    "transport": "rpc",
+                }));
+            }
+        }
+    };
+    let mut value = meta_result(meta)?;
+    value["active_view"] = Value::String(selection.active_view);
+    Ok(value)
 }
 
 async fn conversation_create(
@@ -675,7 +709,10 @@ async fn conversation_approval_respond(
             .conversations
             .remove_pending_approval(&conversation_id, &request_id);
         emit_meta_updated_to_socket(&socket, &state, &conversation_id);
-        return Err(rpc_error(-32009, "Approval is stale or no longer actionable"));
+        return Err(rpc_error(
+            -32009,
+            "Approval is stale or no longer actionable",
+        ));
     }
 
     let mut handoff_event =
@@ -687,7 +724,11 @@ async fn conversation_approval_respond(
         .conversations
         .remove_pending_approval(&conversation_id, &request_id);
     emit_meta_updated_to_socket(&socket, &state, &conversation_id);
-    emit_rpc_notification(&socket, "conversation.approval.handoff", Value::Object(handoff_event.clone()));
+    emit_rpc_notification(
+        &socket,
+        "conversation.approval.handoff",
+        Value::Object(handoff_event.clone()),
+    );
     maybe_emit_diff_declined(&socket, &conversation_id, &handoff_event);
 
     Ok(json!({
@@ -720,9 +761,8 @@ pub async fn acknowledge_ask_user_interaction(
     request_id: &str,
 ) -> Result<bool, anyhow::Error> {
     let Some((conversation_id, mut handoff_event, recorded_entry)) =
-        complete_submitted_ask_user_interaction(state, request_id).map_err(|error| {
-            anyhow::anyhow!("{} ({})", error.message, error.code)
-        })?
+        complete_submitted_ask_user_interaction(state, request_id)
+            .map_err(|error| anyhow::anyhow!("{} ({})", error.message, error.code))?
     else {
         return Ok(false);
     };
@@ -1042,8 +1082,8 @@ fn persist_pending_approval_event(
     )
     .or_else(|| meta.thread_id.clone())
     .or_else(|| meta.provider_session_id.clone());
-    let created_at = first_nonempty_event_string(event_object, &["created_at"])
-        .unwrap_or_else(utc_ts_for_rpc);
+    let created_at =
+        first_nonempty_event_string(event_object, &["created_at"]).unwrap_or_else(utc_ts_for_rpc);
     let mut descriptor = Map::new();
     descriptor.insert("request_id".to_owned(), Value::String(request_id.clone()));
     descriptor.insert("agent".to_owned(), Value::String(agent));
@@ -1102,7 +1142,12 @@ fn build_approval_handoff_event(
         .get("payload")
         .and_then(Value::as_object)
         .cloned()
-        .or_else(|| descriptor.get("payload").and_then(Value::as_object).cloned())
+        .or_else(|| {
+            descriptor
+                .get("payload")
+                .and_then(Value::as_object)
+                .cloned()
+        })
         .unwrap_or_default();
     let request_params = render_event
         .get("request_params")
@@ -1130,9 +1175,7 @@ fn build_approval_handoff_event(
     );
     event.insert(
         "id".to_owned(),
-        Value::String(
-            string_from_map(&event, "id").unwrap_or_else(|| request_id.clone()),
-        ),
+        Value::String(string_from_map(&event, "id").unwrap_or_else(|| request_id.clone())),
     );
     event.insert("request_id".to_owned(), Value::String(request_id));
     event.insert(
@@ -1217,7 +1260,10 @@ fn append_approval_handoff_transcript_entry(
     );
     entry.insert(
         "decision".to_owned(),
-        handoff_event.get("decision").cloned().unwrap_or(Value::Null),
+        handoff_event
+            .get("decision")
+            .cloned()
+            .unwrap_or(Value::Null),
     );
     entry.insert(
         "result".to_owned(),
@@ -1713,7 +1759,10 @@ mod tests {
             ),
             Some("provider-123".to_owned())
         );
-        assert_eq!(adapter_provider_session_id(&json!({"ok": true}), "conv_123"), None);
+        assert_eq!(
+            adapter_provider_session_id(&json!({"ok": true}), "conv_123"),
+            None
+        );
         assert_eq!(
             adapter_provider_session_id(
                 &json!({"ok": false, "provider_session_id": "provider-123"}),
@@ -1722,10 +1771,7 @@ mod tests {
             None
         );
         assert_eq!(
-            adapter_provider_session_id(
-                &json!({"ok": true, "session_id": "conv_123"}),
-                "conv_123",
-            ),
+            adapter_provider_session_id(&json!({"ok": true, "session_id": "conv_123"}), "conv_123",),
             None
         );
     }
@@ -1887,9 +1933,51 @@ mod tests {
     }
 
     #[test]
-    fn approval_events_persist_and_handoff_records_match_legacy_shape() {
+    fn conversation_get_hydrates_persisted_active_conversation() {
         let root =
-            std::env::temp_dir().join(format!("als-rs-rpc-approval-test-{}", unix_millis()));
+            std::env::temp_dir().join(format!("als-rs-rpc-active-restore-test-{}", unix_millis()));
+        let config = ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                copilot_python: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        };
+        let state = AppState::new(config.clone());
+        state
+            .conversations
+            .create(CreateConversationRequest {
+                conversation_id: Some("conv-active".to_owned()),
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+        state
+            .ui_selection
+            .select(
+                Some("conv-active".to_owned()),
+                Some("conversation".to_owned()),
+            )
+            .unwrap();
+
+        let reloaded_state = AppState::new(config);
+        let restored = conversation_get(&reloaded_state, &JsonMap::new()).unwrap();
+        assert_eq!(restored["conversation_id"], "conv-active");
+        assert_eq!(restored["active_view"], "conversation");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn approval_events_persist_and_handoff_records_match_legacy_shape() {
+        let root = std::env::temp_dir().join(format!("als-rs-rpc-approval-test-{}", unix_millis()));
         let state = AppState::new(ServerConfig {
             host: "127.0.0.1".to_owned(),
             port: 0,
@@ -2028,13 +2116,8 @@ mod tests {
         let mut resolution = JsonMap::new();
         resolution.insert("answer".to_owned(), json!("Approve"));
         resolution.insert("accepted".to_owned(), json!(true));
-        record_pending_approval_submission(
-            &state,
-            "conv-ask-user",
-            "conv-ask-user",
-            &resolution,
-        )
-        .unwrap();
+        record_pending_approval_submission(&state, "conv-ask-user", "conv-ask-user", &resolution)
+            .unwrap();
         let pending_meta = state.conversations.load_meta("conv-ask-user").unwrap();
         assert_eq!(
             pending_meta.pending_approvals["conv-ask-user"]["submitted_resolution"]["answer"],

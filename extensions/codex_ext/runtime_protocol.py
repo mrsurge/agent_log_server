@@ -204,6 +204,9 @@ def _get_runtime_lock() -> asyncio.Lock:
 
 
 def _cache_root() -> Path:
+    als_rs_cache_dir = os.environ.get("ALS_RS_CACHE_DIR")
+    if als_rs_cache_dir:
+        return Path(als_rs_cache_dir) / "codex_app_server_schema"
     return Path.home() / ".cache" / "app_server" / "codex_app_server_schema"
 
 
