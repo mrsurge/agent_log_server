@@ -16,6 +16,7 @@ from agent_log_server_rs.adapter_protocol import (
     AdapterEventMethod,
     AdapterSessionInfo,
     AdapterMethod,
+    ConversationControlResult,
     ExtensionInitializeResult,
     JsonMap,
 )
@@ -245,6 +246,8 @@ class ExtensionLoaderModule(Protocol):
         settings: JsonMap | None = None,
     ) -> JsonMap: ...
 
+    async def interrupt_session(self, extension_id: str, conversation_id: str) -> JsonMap: ...
+
 
 @dataclass
 class AdapterState:
@@ -346,6 +349,8 @@ class ExtensionJsonRpcAdapter:
             return await self._conversation_resume(params)
         if method == AdapterMethod.CONVERSATION_SEND:
             return await self._conversation_send(params)
+        if method == AdapterMethod.CONVERSATION_INTERRUPT:
+            return await self._conversation_interrupt(params)
         if method == AdapterMethod.APPROVAL_RESPOND:
             return await self._approval_respond(params)
 
@@ -381,6 +386,7 @@ class ExtensionJsonRpcAdapter:
                 conversations=supported,
                 models=supported,
                 sessions=supported,
+                interruption=supported,
                 live_events=supported,
                 transcript_records=supported,
                 extra={
@@ -798,6 +804,29 @@ class ExtensionJsonRpcAdapter:
         if not isinstance(result, dict):
             raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid send result")
         return _ack_from_result(conversation_id, cast(JsonMap, result)).to_json()
+
+    async def _conversation_interrupt(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        self._supported_handler(extension_id)
+        conversation_id = _required_string(params, "conversation_id")
+        result = await self._loader.interrupt_session(extension_id, conversation_id)
+        if not isinstance(result, dict):
+            raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid interrupt result")
+        payload = dict(cast(JsonMap, result))
+        ok = bool(payload.get("ok"))
+        error = _optional_string(payload.get("error"))
+        metadata = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"ok", "conversation_id", "extension_id", "error"}
+        }
+        return ConversationControlResult(
+            extension_id=extension_id,
+            conversation_id=conversation_id,
+            ok=ok,
+            error=error,
+            metadata=metadata,
+        ).to_json()
 
     async def _approval_respond(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)

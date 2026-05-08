@@ -7,7 +7,8 @@ use crate::{
     state::AppState,
 };
 use als_adapter_protocol::{
-    ConversationResumeParams, ConversationSendParams, JsonMap, McpContext, methods,
+    ConversationControlParams, ConversationResumeParams, ConversationSendParams, JsonMap,
+    McpContext, methods,
 };
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
 use serde::{Deserialize, Serialize};
@@ -112,7 +113,8 @@ async fn dispatch_rpc(
         METHOD_APPROVAL_RESPOND => {
             conversation_approval_respond(socket, io, state, request.params).await
         }
-        METHOD_INTERRUPT | METHOD_COMPACT | METHOD_SHELL_EXEC => Ok(json!({
+        METHOD_INTERRUPT => conversation_interrupt(&state, &request.params).await,
+        METHOD_COMPACT | METHOD_SHELL_EXEC => Ok(json!({
             "ok": false,
             "error": format!("{} is not implemented in ALS-RS yet", request.method),
             "transport": "rpc"
@@ -566,6 +568,40 @@ async fn conversation_send(
         emit_meta_updated_to_socket(&socket, &state, &conversation_id);
     }
     let mut result = adapter_result.as_object().cloned().unwrap_or_default();
+    result.insert("conversation_id".to_owned(), Value::String(conversation_id));
+    result.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+    Ok(Value::Object(result))
+}
+
+async fn conversation_interrupt(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let conversation_id = optional_str(params, "conversation_id")
+        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?
+        .to_owned();
+    let meta = state
+        .conversations
+        .load_meta(&conversation_id)
+        .map_err(internal_error)?;
+    let extension_id = resolve_extension_id(state, params, &meta)
+        .ok_or_else(|| rpc_error(-32603, "No active extension available"))?;
+    let adapter_params = ConversationControlParams {
+        extension_id: extension_id.clone(),
+        conversation_id: conversation_id.clone(),
+    };
+    state
+        .adapter
+        .initialize_extension(&extension_id)
+        .await
+        .map_err(internal_error)?;
+    let adapter_result = state
+        .adapter
+        .client()
+        .await
+        .map_err(internal_error)?
+        .request_value(methods::CONVERSATION_INTERRUPT, adapter_params)
+        .await
+        .map_err(internal_error)?;
+    let mut result = adapter_result.as_object().cloned().unwrap_or_default();
+    result.insert("extension_id".to_owned(), Value::String(extension_id));
     result.insert("conversation_id".to_owned(), Value::String(conversation_id));
     result.insert("transport".to_owned(), Value::String("rpc".to_owned()));
     Ok(Value::Object(result))

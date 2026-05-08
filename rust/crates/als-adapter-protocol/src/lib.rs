@@ -240,6 +240,7 @@ pub struct ConversationAckResult {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConversationControlParams {
+    pub extension_id: String,
     pub conversation_id: String,
 }
 
@@ -474,6 +475,21 @@ mod tests {
                 "turn_id": "t1",
                 "text": "done",
                 "timestamp": "2026-05-04T00:00:00Z"
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_control_params_for_extension_routing() {
+        let params = ConversationControlParams {
+            extension_id: "codex-ext".to_owned(),
+            conversation_id: "conv-1".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(params).unwrap(),
+            json!({
+                "extension_id": "codex-ext",
+                "conversation_id": "conv-1"
             })
         );
     }

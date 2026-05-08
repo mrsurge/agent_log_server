@@ -357,6 +357,39 @@ class ConversationAckResult:
 
 
 @dataclass(frozen=True)
+class ConversationControlParams:
+    extension_id: str
+    conversation_id: str
+
+    def to_json(self) -> JsonMap:
+        return {
+            "extension_id": self.extension_id,
+            "conversation_id": self.conversation_id,
+        }
+
+
+@dataclass(frozen=True)
+class ConversationControlResult:
+    extension_id: str
+    conversation_id: str
+    ok: bool
+    error: str | None = None
+    metadata: JsonMap = field(default_factory=dict)
+
+    def to_json(self) -> JsonMap:
+        payload: JsonMap = {
+            "extension_id": self.extension_id,
+            "conversation_id": self.conversation_id,
+            "ok": self.ok,
+        }
+        if self.error:
+            payload["error"] = self.error
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
+
+
+@dataclass(frozen=True)
 class AdapterLiveEvent:
     type: AdapterLiveEventType
     conversation_id: str | None = None

@@ -1184,6 +1184,17 @@ Current status:
     option merger.
   - Footer controls remain a settings/runtime-options surface; saving quick
     footer selections still persists through the conversation update path.
+- Restored ALS-RS footer interrupt routing:
+  - `/rpc/conversations` `conversation.interrupt` now resolves the selected
+    extension from Rust-owned conversation metadata and calls the generic
+    adapter `conversation.interrupt` method.
+  - The Python extension adapter delegates to the extension loader's
+    `interrupt_session(extension_id, conversation_id)` hook, so Codex and Copilot
+    keep their provider-specific abort implementations inside their extension
+    clients.
+  - The frontend receives the same `{ ok, conversation_id, transport: "rpc" }`
+    control-result shape as other conversation controls; there is no
+    provider-specific frontend or Rust branch.
 - Added the ALS-RS TE2 sidebar IPC client slice:
   - Rust uses a best-effort Socket.IO client to the current TE2 legacy
     `/sidebar_ipc` namespace at `/ui_ipc_ws/socket.io/`, matching the existing
