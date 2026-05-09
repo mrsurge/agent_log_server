@@ -8,7 +8,7 @@ use crate::{
 };
 use als_adapter_protocol::{
     ConversationControlParams, ConversationResumeParams, ConversationSendParams, JsonMap,
-    McpContext, methods,
+    McpContext, events, methods,
 };
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,7 @@ const METHOD_PINS_SET: &str = "conversation.pins.set";
 const AGENT_PTY_ASK_USER_REQUEST_METHOD: &str = "agent-pty/ask-user";
 const AGENT_PTY_BLOCKS_MCP_SERVER_NAME: &str = "agent-pty-blocks";
 const TE2_MCP_SERVER_NAME: &str = "te2-mcp";
+const DEFAULT_TE2_BASE_URL: &str = "http://127.0.0.1:8089";
 
 pub fn register_conversations_rpc_namespace(io: &SocketIo) {
     io.ns(
@@ -617,11 +618,45 @@ async fn handle_adapter_event(
         AdapterCapturedEvent::Transcript(value) => {
             persist_adapter_transcript(io, state, value).await
         }
-        AdapterCapturedEvent::Other(other) => {
-            let _ = (&other.method, &other.params);
+        AdapterCapturedEvent::Other(other) => handle_adapter_other_event(io, state, other).await,
+    }
+}
+
+async fn handle_adapter_other_event(
+    io: &SocketIo,
+    state: &AppState,
+    other: crate::adapter_process::AdapterOtherEvent,
+) -> Result<(), RpcError> {
+    match other.method.as_str() {
+        events::IMPORT_STARTED => {
+            forward_import_event(io, "conversation.import.started", other.params).await
+        }
+        events::IMPORT_PROGRESS => {
+            forward_import_event(io, "conversation.import.progress", other.params).await
+        }
+        events::IMPORT_TRANSCRIPT_BATCH => {
+            persist_import_transcript_batch(state, other.params)?;
             Ok(())
         }
+        events::IMPORT_COMPLETED => {
+            if let Some(conversation_id) = conversation_id_from_value(&other.params) {
+                emit_meta_updated_to_namespace(io, state, &conversation_id).await;
+            }
+            forward_import_event(io, "conversation.import.completed", other.params).await
+        }
+        events::IMPORT_FAILED => {
+            if let Some(conversation_id) = conversation_id_from_value(&other.params) {
+                emit_meta_updated_to_namespace(io, state, &conversation_id).await;
+            }
+            forward_import_event(io, "conversation.import.failed", other.params).await
+        }
+        _ => Ok(()),
     }
+}
+
+async fn forward_import_event(io: &SocketIo, method: &str, params: Value) -> Result<(), RpcError> {
+    emit_rpc_notification_to_namespace(io, method, params).await;
+    Ok(())
 }
 
 async fn forward_adapter_live_event(
@@ -917,6 +952,48 @@ fn persist_adapter_transcript_entry(
         .map(|_| ())
         .map_err(internal_error)?;
     Ok(Some(conversation_id))
+}
+
+fn persist_import_transcript_batch(state: &AppState, value: Value) -> Result<(), RpcError> {
+    let conversation_id = conversation_id_from_value(&value)
+        .ok_or_else(|| rpc_error(-32603, "import transcript batch is missing conversation_id"))?;
+    let records = value
+        .get("records")
+        .and_then(Value::as_array)
+        .ok_or_else(|| rpc_error(-32603, "import transcript batch is missing records"))?;
+    let mut entries = Vec::with_capacity(records.len());
+    for record in records {
+        let mut entry = record.clone();
+        if !entry.is_object() {
+            continue;
+        }
+        if let Some(object) = entry.as_object_mut() {
+            object
+                .entry("conversation_id".to_owned())
+                .or_insert_with(|| Value::String(conversation_id.clone()));
+        }
+        if should_skip_adapter_transcript_entry(&entry) {
+            continue;
+        }
+        strip_internal_adapter_transcript_fields(&mut entry);
+        entries.push(entry);
+    }
+    state
+        .conversations
+        .append_transcript_batch(&conversation_id, entries)
+        .map(|_| ())
+        .map_err(internal_error)?;
+    Ok(())
+}
+
+fn conversation_id_from_value(value: &Value) -> Option<String> {
+    value
+        .as_object()?
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 async fn bind_provider_session(
@@ -1630,9 +1707,10 @@ fn build_mcp_context(
         let mut te2_defaults = JsonMap::new();
         te2_defaults.insert("enabled_by_default".to_owned(), Value::Bool(true));
         te2_defaults.insert("transport".to_owned(), Value::String("http".to_owned()));
-        if let Some(base_url) = settings.and_then(|value| string_from_map(value, "te2_base_url")) {
-            te2_defaults.insert("base_url".to_owned(), Value::String(base_url));
-        }
+        te2_defaults.insert(
+            "base_url".to_owned(),
+            Value::String(te2_base_url_from_settings(settings)),
+        );
         defaults.insert(TE2_MCP_SERVER_NAME.to_owned(), Value::Object(te2_defaults));
     }
 
@@ -1650,6 +1728,12 @@ fn appserver_origin(config: &crate::config::ServerConfig) -> String {
         value => value,
     };
     format!("http://{}:{}", host, config.port)
+}
+
+fn te2_base_url_from_settings(settings: Option<&JsonMap>) -> String {
+    settings
+        .and_then(|value| string_from_map(value, "te2_base_url"))
+        .unwrap_or_else(|| DEFAULT_TE2_BASE_URL.to_owned())
 }
 
 fn optional_map(params: &JsonMap, key: &str) -> Option<Map<String, Value>> {
@@ -1770,6 +1854,42 @@ mod tests {
         );
         assert!(!settings.contains_key("session"));
         assert_eq!(settings["cwd"], "/repo/project");
+    }
+
+    #[test]
+    fn mcp_context_includes_te2_base_url_when_enabled() {
+        let config = ServerConfig {
+            host: "0.0.0.0".to_owned(),
+            port: 12459,
+            extensions_dir: PathBuf::from("extensions"),
+            roots: RuntimeRoots {
+                data_dir: PathBuf::from("data"),
+                cache_dir: PathBuf::from("cache"),
+                config_dir: PathBuf::from("config"),
+                static_dir: PathBuf::from("static"),
+            },
+            adapters: AdapterConfig {
+                copilot_python: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        };
+
+        let mut settings = JsonMap::new();
+        settings.insert("te2_mcp_integration".to_owned(), json!(true));
+        let context = build_mcp_context(&config, "conv-te2", Some(&settings), Some("/repo"))
+            .expect("mcp context should be built");
+        assert_eq!(
+            context.defaults[TE2_MCP_SERVER_NAME]["base_url"],
+            DEFAULT_TE2_BASE_URL
+        );
+
+        settings.insert("te2_base_url".to_owned(), json!("http://127.0.0.1:9090/"));
+        let context = build_mcp_context(&config, "conv-te2", Some(&settings), Some("/repo"))
+            .expect("mcp context should be built");
+        assert_eq!(
+            context.defaults[TE2_MCP_SERVER_NAME]["base_url"],
+            "http://127.0.0.1:9090/"
+        );
     }
 
     #[test]

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
-import json
 import os
 import sys
 from collections.abc import Awaitable, Callable, Sequence
@@ -19,6 +18,11 @@ from agent_log_server_rs.adapter_protocol import (
     ConversationControlResult,
     ExtensionInitializeResult,
     JsonMap,
+)
+from agent_log_server_rs.codec import (
+    AdapterDecodeError,
+    decode_json_line,
+    encode_json_line,
 )
 from agent_log_server_rs.adapters.copilot_sdk_adapter import (
     INTERNAL_ERROR,
@@ -45,6 +49,7 @@ RpcId: TypeAlias = str | int | None
 
 SUPPORTED_RUNTIME_TYPES = {"copilot_sdk", "codex_ext"}
 SUPPORTED_MODEL_TYPES = SUPPORTED_RUNTIME_TYPES
+IMPORT_TRANSCRIPT_BATCH_SIZE = 1000
 
 
 async def _get_framework_shell_manager() -> object:
@@ -289,8 +294,8 @@ class ExtensionJsonRpcAdapter:
 
     async def _handle_line(self, line: str) -> None:
         try:
-            raw = cast(object, json.loads(line))
-        except json.JSONDecodeError as exc:
+            raw = decode_json_line(line)
+        except AdapterDecodeError as exc:
             await self._send_error(None, PARSE_ERROR, "Parse error", str(exc))
             return
 
@@ -750,6 +755,11 @@ class ExtensionJsonRpcAdapter:
         hydrated_count = 0
         hydrate_transcript = getattr(handler, "hydrate_transcript", None)
         if callable(hydrate_transcript):
+            await self._send_import_started(
+                conversation_id,
+                extension_id=extension_id,
+                provider_session_id=provider_session_id,
+            )
             try:
                 items = hydrate_transcript(
                     session_id=provider_session_id,
@@ -761,19 +771,71 @@ class ExtensionJsonRpcAdapter:
                 if hasattr(items, "__await__"):
                     items = await cast(Awaitable[object], items)
                 if isinstance(items, list):
+                    batch: list[JsonMap] = []
+                    total_count = len(items)
+                    await self._send_import_progress(
+                        conversation_id,
+                        extension_id=extension_id,
+                        provider_session_id=provider_session_id,
+                        phase="persisting",
+                        transcript_count=total_count,
+                        persisted_count=0,
+                    )
                     for item in items:
                         if isinstance(item, dict):
                             hydrated_entry = dict(cast(JsonMap, item))
                             hydrated_entry["_hydrated_history"] = True
-                            await self._transcript(conversation_id, hydrated_entry)
+                            batch.append(hydrated_entry)
                             hydrated_count += 1
+                            if len(batch) >= IMPORT_TRANSCRIPT_BATCH_SIZE:
+                                await self._send_import_transcript_batch(
+                                    conversation_id,
+                                    batch,
+                                    extension_id=extension_id,
+                                    provider_session_id=provider_session_id,
+                                    transcript_count=total_count,
+                                    persisted_count=hydrated_count,
+                                )
+                                batch = []
+                    if batch:
+                        await self._send_import_transcript_batch(
+                            conversation_id,
+                            batch,
+                            extension_id=extension_id,
+                            provider_session_id=provider_session_id,
+                            transcript_count=total_count,
+                            persisted_count=hydrated_count,
+                        )
+                    await self._send_import_completed(
+                        conversation_id,
+                        extension_id=extension_id,
+                        provider_session_id=provider_session_id,
+                        transcript_count=total_count,
+                        persisted_count=hydrated_count,
+                    )
+                else:
+                    await self._send_import_completed(
+                        conversation_id,
+                        extension_id=extension_id,
+                        provider_session_id=provider_session_id,
+                        transcript_count=0,
+                        persisted_count=0,
+                    )
             except Exception as exc:
                 print(
                     f"[ExtensionAdapter] {extension_id} hydrate_transcript failed for "
                     f"{conversation_id[:8]}: {exc}",
                     file=sys.stderr,
                 )
-                ack["hydration_error"] = f"{type(exc).__name__}: {exc}"
+                hydration_error = f"{type(exc).__name__}: {exc}"
+                ack["hydration_error"] = hydration_error
+                await self._send_import_failed(
+                    conversation_id,
+                    extension_id=extension_id,
+                    provider_session_id=provider_session_id,
+                    error=hydration_error,
+                    persisted_count=hydrated_count,
+                )
         ack["hydrated_count"] = hydrated_count
         return ack
 
@@ -958,6 +1020,116 @@ class ExtensionJsonRpcAdapter:
     async def _send_notification(self, method: str, params: object) -> None:
         await self._write_json({"jsonrpc": JSONRPC_VERSION, "method": method, "params": params})
 
+    async def _send_import_started(
+        self,
+        conversation_id: str,
+        *,
+        extension_id: str,
+        provider_session_id: str,
+    ) -> None:
+        await self._send_notification(
+            AdapterEventMethod.IMPORT_STARTED,
+            {
+                "conversation_id": conversation_id,
+                "extension_id": extension_id,
+                "provider_session_id": provider_session_id,
+                "phase": "hydrating",
+                "status": "starting",
+                "message": "Porting in transcript. This can take a while for large transcripts.",
+            },
+        )
+
+    async def _send_import_progress(
+        self,
+        conversation_id: str,
+        *,
+        extension_id: str,
+        provider_session_id: str,
+        phase: str,
+        transcript_count: int,
+        persisted_count: int,
+    ) -> None:
+        await self._send_notification(
+            AdapterEventMethod.IMPORT_PROGRESS,
+            {
+                "conversation_id": conversation_id,
+                "extension_id": extension_id,
+                "provider_session_id": provider_session_id,
+                "phase": phase,
+                "status": "in_progress",
+                "transcript_count": transcript_count,
+                "persisted_count": persisted_count,
+            },
+        )
+
+    async def _send_import_transcript_batch(
+        self,
+        conversation_id: str,
+        records: list[JsonMap],
+        *,
+        extension_id: str,
+        provider_session_id: str,
+        transcript_count: int,
+        persisted_count: int,
+    ) -> None:
+        await self._send_notification(
+            AdapterEventMethod.IMPORT_TRANSCRIPT_BATCH,
+            {
+                "conversation_id": conversation_id,
+                "extension_id": extension_id,
+                "provider_session_id": provider_session_id,
+                "records": records,
+                "batch_count": len(records),
+                "transcript_count": transcript_count,
+                "persisted_count": persisted_count,
+            },
+        )
+
+    async def _send_import_completed(
+        self,
+        conversation_id: str,
+        *,
+        extension_id: str,
+        provider_session_id: str,
+        transcript_count: int,
+        persisted_count: int,
+    ) -> None:
+        await self._send_notification(
+            AdapterEventMethod.IMPORT_COMPLETED,
+            {
+                "conversation_id": conversation_id,
+                "extension_id": extension_id,
+                "provider_session_id": provider_session_id,
+                "phase": "complete",
+                "status": "complete",
+                "transcript_count": transcript_count,
+                "persisted_count": persisted_count,
+                "select_conversation": True,
+            },
+        )
+
+    async def _send_import_failed(
+        self,
+        conversation_id: str,
+        *,
+        extension_id: str,
+        provider_session_id: str,
+        error: str,
+        persisted_count: int,
+    ) -> None:
+        await self._send_notification(
+            AdapterEventMethod.IMPORT_FAILED,
+            {
+                "conversation_id": conversation_id,
+                "extension_id": extension_id,
+                "provider_session_id": provider_session_id,
+                "phase": "failed",
+                "status": "failed",
+                "error": error,
+                "persisted_count": persisted_count,
+            },
+        )
+
     async def _send_success(self, request_id: RpcId, result: object) -> None:
         await self._write_json(
             {"jsonrpc": JSONRPC_VERSION, "id": request_id, "result": result}
@@ -978,9 +1150,9 @@ class ExtensionJsonRpcAdapter:
     async def _write_json(self, payload: JsonMap) -> None:
         if self._stdout is None:
             return
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        encoded = encode_json_line(payload)
         async with self._write_lock:
-            self._stdout.write(encoded + "\n")
+            self._stdout.write(encoded)
             self._stdout.flush()
 
 

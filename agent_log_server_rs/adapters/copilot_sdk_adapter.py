@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import json
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -17,6 +16,11 @@ from agent_log_server_rs.adapter_protocol import (
     ConversationAckResult,
     ExtensionInitializeResult,
     JsonMap,
+)
+from agent_log_server_rs.codec import (
+    AdapterDecodeError,
+    decode_json_line,
+    encode_json_line,
 )
 
 RpcId: TypeAlias = str | int | None
@@ -110,8 +114,8 @@ class CopilotSdkJsonRpcAdapter:
 
     async def _handle_line(self, line: str) -> None:
         try:
-            raw = cast(object, json.loads(line))
-        except json.JSONDecodeError as exc:
+            raw = decode_json_line(line)
+        except AdapterDecodeError as exc:
             await self._send_error(None, PARSE_ERROR, "Parse error", str(exc))
             return
 
@@ -283,9 +287,9 @@ class CopilotSdkJsonRpcAdapter:
     async def _write_json(self, payload: JsonMap) -> None:
         if self._stdout is None:
             return
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        encoded = encode_json_line(payload)
         async with self._write_lock:
-            self._stdout.write(encoded + "\n")
+            self._stdout.write(encoded)
             self._stdout.flush()
 
 

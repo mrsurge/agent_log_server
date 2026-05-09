@@ -38,6 +38,11 @@ class AdapterMethod(StrEnum):
 class AdapterEventMethod(StrEnum):
     LIVE_EVENT = "event.live"
     TRANSCRIPT_RECORD = "event.transcript_record"
+    IMPORT_STARTED = "event.import_started"
+    IMPORT_PROGRESS = "event.import_progress"
+    IMPORT_TRANSCRIPT_BATCH = "event.import_transcript_batch"
+    IMPORT_COMPLETED = "event.import_completed"
+    IMPORT_FAILED = "event.import_failed"
     STATUS = "event.status"
     USER_MESSAGE = "event.user_message"
     ASSISTANT_DELTA = "event.assistant_delta"

@@ -1893,6 +1893,85 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  let conversationImportOverlayEl: HTMLElement | null = null;
+
+  function ensureConversationImportOverlay(): HTMLElement {
+    if (conversationImportOverlayEl) {
+      return conversationImportOverlayEl;
+    }
+    const overlay = document.createElement('div');
+    overlay.id = 'conversation-import-overlay';
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.zIndex = '9999';
+    overlay.style.display = 'none';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.background = 'rgba(0, 0, 0, 0.45)';
+    overlay.style.backdropFilter = 'blur(2px)';
+    overlay.innerHTML = `
+      <div style="max-width: min(420px, calc(100vw - 32px)); padding: 22px 24px; border: 1px solid rgba(255,255,255,0.16); border-radius: 14px; background: rgba(18, 22, 30, 0.96); color: var(--text, #f4f6fb); box-shadow: 0 18px 60px rgba(0,0,0,0.45); text-align: center;">
+        <div style="width: 34px; height: 34px; margin: 0 auto 14px; border: 3px solid rgba(255,255,255,0.22); border-top-color: var(--accent, #6ea8fe); border-radius: 999px; animation: conversation-import-spin 900ms linear infinite;"></div>
+        <div data-import-title style="font-weight: 700; margin-bottom: 8px;">Porting in transcript</div>
+        <div data-import-message style="color: var(--muted, #aab2c0); font-size: 13px; line-height: 1.45;">This can take a while for large transcripts.</div>
+      </div>
+    `;
+    const style = document.createElement('style');
+    style.textContent = '@keyframes conversation-import-spin { to { transform: rotate(360deg); } }';
+    overlay.appendChild(style);
+    document.body.appendChild(overlay);
+    conversationImportOverlayEl = overlay;
+    return overlay;
+  }
+
+  function conversationIdFromImportEvent(event: Event): string {
+    const detail = event instanceof CustomEvent && event.detail && typeof event.detail === 'object'
+      ? event.detail as AnyRecord
+      : {};
+    const raw = detail.conversation_id ?? detail.conversationId;
+    return typeof raw === 'string' ? raw : '';
+  }
+
+  function shouldShowImportOverlay(event: Event): boolean {
+    const eventConversationId = conversationIdFromImportEvent(event);
+    const activeConversationId = clientConversationId || conversationMeta?.conversation_id || '';
+    return Boolean(eventConversationId && activeConversationId && eventConversationId === activeConversationId);
+  }
+
+  function showConversationImportOverlay(event: Event): void {
+    if (!shouldShowImportOverlay(event)) {
+      return;
+    }
+    const detail = event instanceof CustomEvent && event.detail && typeof event.detail === 'object'
+      ? event.detail as AnyRecord
+      : {};
+    const overlay = ensureConversationImportOverlay();
+    const messageEl = overlay.querySelector('[data-import-message]');
+    const persisted = typeof detail.persisted_count === 'number' ? detail.persisted_count : null;
+    const total = typeof detail.transcript_count === 'number' ? detail.transcript_count : null;
+    const message = persisted !== null && total !== null
+      ? `Porting transcript ${persisted}/${total}. This can take a while for large transcripts.`
+      : String(detail.message || 'This can take a while for large transcripts.');
+    if (messageEl) {
+      messageEl.textContent = message;
+    }
+    overlay.style.display = 'flex';
+  }
+
+  function hideConversationImportOverlay(event: Event): void {
+    if (!shouldShowImportOverlay(event)) {
+      return;
+    }
+    if (conversationImportOverlayEl) {
+      conversationImportOverlayEl.style.display = 'none';
+    }
+  }
+
+  window.addEventListener('codexagent:conversation-import-started', showConversationImportOverlay);
+  window.addEventListener('codexagent:conversation-import-progress', showConversationImportOverlay);
+  window.addEventListener('codexagent:conversation-import-completed', hideConversationImportOverlay);
+  window.addEventListener('codexagent:conversation-import-failed', hideConversationImportOverlay);
+
   const {
     initializeBoot,
     setupSettingsBoot,

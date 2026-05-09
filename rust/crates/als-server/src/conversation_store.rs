@@ -381,6 +381,69 @@ impl ConversationStore {
         Ok(entry)
     }
 
+    pub fn append_transcript_batch(
+        &self,
+        conversation_id: &str,
+        entries: Vec<Value>,
+    ) -> Result<Vec<Value>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let mut meta = self.load_or_default_meta_unlocked(conversation_id)?;
+        let mut line_count = meta.transcript_line_count.unwrap_or_else(|| {
+            count_transcript_lines(
+                &self
+                    .conversation_dir_unlocked(&meta.conversation_id)
+                    .join("transcript.jsonl"),
+            )
+            .unwrap_or_default()
+        });
+        let mut rows = Vec::with_capacity(entries.len());
+
+        for mut entry in entries {
+            let order_id = meta.next_transcript_order_id;
+            meta.next_transcript_order_id += 1;
+            line_count += 1;
+
+            let object = entry
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("transcript entry must be a JSON object"))?;
+            object
+                .entry("conversation_id")
+                .or_insert_with(|| Value::String(meta.conversation_id.clone()));
+            object
+                .entry("order_id")
+                .or_insert_with(|| Value::Number(order_id.into()));
+            object
+                .entry("ts")
+                .or_insert_with(|| Value::String(utc_ts()));
+            update_meta_from_transcript_entry(&mut meta, &entry);
+            rows.push(entry);
+        }
+
+        meta.transcript_line_count = Some(line_count);
+        meta.updated_at = utc_ts();
+        let dir = self.conversation_dir_unlocked(&meta.conversation_id);
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create conversation dir {}", dir.display()))?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("transcript.jsonl"))
+            .context("failed to open transcript for append")?;
+        for row in &rows {
+            writeln!(file, "{}", serde_json::to_string(row)?)
+                .context("failed to append transcript row")?;
+        }
+        self.write_meta_unlocked(&meta)?;
+        Ok(rows)
+    }
+
     pub fn read_transcript(&self, conversation_id: &str) -> Result<Vec<Value>> {
         let _guard = self
             .lock

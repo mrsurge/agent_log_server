@@ -1343,13 +1343,20 @@ Acceptance:
      ALS-RS now rejects any adapter/provider binding id that equals the harness
      `conversation_id`, so cold-resume/send retries cannot poison
      `provider_session_id` with a `conv_*` value.
-   - schema-modal port-in history import now preserves hydrated `role: "user"`
-     transcript rows while still suppressing normal live adapter user echoes.
-     Rust keeps ownership of user rows for live `conversation.send`, but
-     adapter-driven `conversation.resume` / `resume_session_with_history()`
-     imports mark hydrated history rows so they persist into transcript replay.
-   - generic MCP contract: implemented first ALS-RS-to-extension DTO slice.
-     `als-adapter-protocol` now carries a generic `mcp_context` on
+    - schema-modal port-in history import now preserves hydrated `role: "user"`
+      transcript rows while still suppressing normal live adapter user echoes.
+      Rust keeps ownership of user rows for live `conversation.send`, but
+      adapter-driven `conversation.resume` / `resume_session_with_history()`
+      imports mark hydrated history rows so they persist into transcript replay.
+    - large provider transcript import now has a source-level transaction path:
+      the Python adapter emits `event.import_*` notifications and transcript
+      batches around `hydrate_transcript()`, Rust persists those batches through
+      bulk transcript append without per-row live fanout, and the frontend source
+      reacts to `conversation.import.*` notifications with a conversation-scoped
+      busy overlay plus coarse activity/status updates. The current slice was
+      intentionally not rebuilt/transpiled before user smoke testing.
+    - generic MCP contract: implemented first ALS-RS-to-extension DTO slice.
+      `als-adapter-protocol` now carries a generic `mcp_context` on
      conversation start/resume/send, Rust builds a provider-neutral default
      context (`conversation_id`, `cwd`, requested `mcp_servers`, always-on
      stdio `agent-pty-blocks` with eager tool exposure intent, and optional

@@ -13,6 +13,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const DEFAULT_TE2_BASE_URL: &str = "http://127.0.0.1:8089";
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/adapter/copilot/initialize", post(initialize_copilot))
@@ -177,14 +179,10 @@ fn adapter_mcp_context(
         let mut te2_defaults = JsonMap::new();
         te2_defaults.insert("enabled_by_default".to_owned(), Value::Bool(true));
         te2_defaults.insert("transport".to_owned(), Value::String("http".to_owned()));
-        if let Some(base_url) = settings
-            .and_then(|value| value.get("te2_base_url"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            te2_defaults.insert("base_url".to_owned(), Value::String(base_url.to_owned()));
-        }
+        te2_defaults.insert(
+            "base_url".to_owned(),
+            Value::String(te2_base_url_from_settings(settings)),
+        );
         defaults.insert("te2-mcp".to_owned(), Value::Object(te2_defaults));
     }
 
@@ -207,6 +205,16 @@ fn appserver_origin(config: &crate::config::ServerConfig) -> String {
         value => value,
     };
     format!("http://{}:{}", host, config.port)
+}
+
+fn te2_base_url_from_settings(settings: Option<&JsonMap>) -> String {
+    settings
+        .and_then(|value| value.get("te2_base_url"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| DEFAULT_TE2_BASE_URL.to_owned())
 }
 
 struct AdapterRouteError(anyhow::Error);

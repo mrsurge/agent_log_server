@@ -29,6 +29,11 @@ pub mod methods {
 pub mod events {
     pub const LIVE_EVENT: &str = "event.live";
     pub const TRANSCRIPT_RECORD: &str = "event.transcript_record";
+    pub const IMPORT_STARTED: &str = "event.import_started";
+    pub const IMPORT_PROGRESS: &str = "event.import_progress";
+    pub const IMPORT_TRANSCRIPT_BATCH: &str = "event.import_transcript_batch";
+    pub const IMPORT_COMPLETED: &str = "event.import_completed";
+    pub const IMPORT_FAILED: &str = "event.import_failed";
     pub const STATUS: &str = "event.status";
     pub const USER_MESSAGE: &str = "event.user_message";
     pub const ASSISTANT_DELTA: &str = "event.assistant_delta";

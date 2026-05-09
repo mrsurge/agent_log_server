@@ -83,11 +83,14 @@ interface RouterEvent extends JsonObject {
   endCol?: number | string;
   content?: string;
   draft?: string;
-  status?: string;
-  label?: string;
-  active?: boolean | string | number;
-  message?: string;
-  action?: unknown;
+    status?: string;
+    label?: string;
+    active?: boolean | string | number;
+    message?: string;
+    error?: string;
+    persisted_count?: number;
+    transcript_count?: number;
+    action?: unknown;
   result?: unknown;
   output?: string;
   stdout?: string;
@@ -409,6 +412,36 @@ export function bindEventRouter(ctx: EventRouterContext) {
         setLastEventType('warning');
         renderWarningCard(event.message || '', event.action || null);
         setStatusDot('warning');
+        return;
+      case 'import_started':
+        setLastEventType('import');
+        setActivity(event.message || 'Porting in transcript. This can take a while for large transcripts.', true);
+        setStatusDot('working');
+        window.dispatchEvent(new CustomEvent('codexagent:conversation-import-started', { detail: event }));
+        return;
+      case 'import_progress': {
+        setLastEventType('import');
+        const done = typeof event.persisted_count === 'number' ? event.persisted_count : null;
+        const total = typeof event.transcript_count === 'number' ? event.transcript_count : null;
+        const label = done !== null && total !== null
+          ? `Porting transcript ${done}/${total}`
+          : 'Porting transcript';
+        setActivity(label, true);
+        window.dispatchEvent(new CustomEvent('codexagent:conversation-import-progress', { detail: event }));
+        return;
+      }
+      case 'import_completed':
+        setLastEventType('import');
+        setActivity('Transcript import complete', false);
+        setStatusDot('success');
+        window.dispatchEvent(new CustomEvent('codexagent:conversation-import-completed', { detail: event }));
+        return;
+      case 'import_failed':
+        setLastEventType('import');
+        setActivity('Transcript import failed', false);
+        renderErrorCard({ ...event, type: 'error', message: event.error || event.message || 'Transcript import failed' });
+        setStatusDot('error');
+        window.dispatchEvent(new CustomEvent('codexagent:conversation-import-failed', { detail: event }));
         return;
       case 'extensions_updated':
         window.dispatchEvent(new CustomEvent('codexagent:extensions-updated'));
