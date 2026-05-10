@@ -188,6 +188,9 @@ Bootstrap responsibilities:
    - otherwise `cargo run -p als-server`
    Packaged wheel launches set `CARGO_TARGET_DIR` under the ALS-RS cache root so
    cargo does not write build output into site-packages.
+   Bootstrap also exports `ALS_RS_EXTENSIONS_DIR` to the packaged/source
+   builtin `extensions/` root so Rust discovery does not rely on Cargo's
+   rust-workspace-relative default.
 5. Launch the Rust server as a subprocess.
 6. Launch extension adapter subprocesses only when requested by Rust or by
    startup configuration.

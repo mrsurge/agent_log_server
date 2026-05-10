@@ -126,6 +126,7 @@ def _build_env(args: BootstrapArgs) -> dict[str, str]:
     env["ALS_RS_CACHE_DIR"] = str(cache_dir)
     env["ALS_RS_CONFIG_DIR"] = str(config_dir)
     env["ALS_RS_STATIC_DIR"] = str(static_dir)
+    env.setdefault("ALS_RS_EXTENSIONS_DIR", str(_default_extensions_dir()))
     env["ALS_RS_PYTHON_BIN"] = sys.executable
     if _ferrous_framework_enabled(args):
         env.pop("PYO3_CONFIG_FILE", None)
@@ -255,6 +256,13 @@ def _default_data_dir() -> Path:
 
 def _default_cache_dir() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / APP_ID
+
+
+def _default_extensions_dir() -> Path:
+    extensions_dir = _source_root() / "extensions"
+    if (extensions_dir / "extensions.json").is_file():
+        return extensions_dir
+    return extensions_dir
 
 
 def _source_root() -> Path:
