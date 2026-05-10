@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -128,27 +131,10 @@ def _build_env(args: BootstrapArgs) -> dict[str, str]:
     env["ALS_RS_STATIC_DIR"] = str(static_dir)
     env.setdefault("ALS_RS_EXTENSIONS_DIR", str(_default_extensions_dir()))
     env["ALS_RS_PYTHON_BIN"] = sys.executable
+    _ensure_framework_shells_env(env, args, data_dir)
     if _ferrous_framework_enabled(args):
         env.pop("PYO3_CONFIG_FILE", None)
         env["PYO3_PYTHON"] = sys.executable
-    _set_if_present(env, "FRAMEWORK_SHELLS_BASE_DIR", args.framework_shells_base_dir)
-    _set_if_present(env, "FRAMEWORK_SHELLS_SECRET", args.framework_shells_secret)
-    _set_if_present(
-        env,
-        "FRAMEWORK_SHELLS_REPO_FINGERPRINT",
-        args.framework_shells_repo_fingerprint,
-    )
-    _set_if_present(
-        env,
-        "FRAMEWORK_SHELLS_SECRET_FINGERPRINT",
-        args.framework_shells_secret_fingerprint or args.framework_shells_repo_fingerprint,
-    )
-    _set_if_present(
-        env,
-        "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID",
-        args.framework_shells_fws_socketio_server_pid,
-    )
-    _set_if_present(env, "FRAMEWORK_SHELLS_RUN_ID", args.framework_shells_run_id)
     return env
 
 
@@ -229,6 +215,108 @@ def _ferrous_framework_enabled(args: BootstrapArgs) -> bool:
 def _set_if_present(env: dict[str, str], key: str, value: str | None) -> None:
     if value:
         env[key] = value
+
+
+def _ensure_framework_shells_env(
+    env: dict[str, str],
+    args: BootstrapArgs,
+    data_dir: Path,
+) -> None:
+    _set_if_present(env, "FRAMEWORK_SHELLS_BASE_DIR", args.framework_shells_base_dir)
+    _set_if_present(env, "FRAMEWORK_SHELLS_SECRET", args.framework_shells_secret)
+    _set_if_present(
+        env,
+        "FRAMEWORK_SHELLS_REPO_FINGERPRINT",
+        args.framework_shells_repo_fingerprint,
+    )
+    _set_if_present(
+        env,
+        "FRAMEWORK_SHELLS_SECRET_FINGERPRINT",
+        args.framework_shells_secret_fingerprint or args.framework_shells_repo_fingerprint,
+    )
+    _set_if_present(
+        env,
+        "FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID",
+        args.framework_shells_fws_socketio_server_pid,
+    )
+    _set_if_present(env, "FRAMEWORK_SHELLS_RUN_ID", args.framework_shells_run_id)
+    env.setdefault("FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE", "1")
+
+    if env.get("FRAMEWORK_SHELLS_SECRET"):
+        _prime_framework_shells_import(env)
+        return
+
+    fingerprint = env.get("FRAMEWORK_SHELLS_REPO_FINGERPRINT")
+    if not fingerprint:
+        fingerprint = _framework_shells_fingerprint(data_dir)
+        env["FRAMEWORK_SHELLS_REPO_FINGERPRINT"] = fingerprint
+    env.setdefault("FRAMEWORK_SHELLS_SECRET_FINGERPRINT", fingerprint)
+
+    base_dir = Path(
+        env.get("FRAMEWORK_SHELLS_BASE_DIR") or _default_framework_shells_base_dir()
+    )
+    secret_dir = base_dir / "runtimes" / fingerprint
+    secret_file = secret_dir / "secret"
+    if secret_file.is_file():
+        secret = secret_file.read_text(encoding="utf-8").strip()
+    else:
+        secret_dir.mkdir(parents=True, exist_ok=True)
+        secret = secrets.token_hex(32)
+        secret_file.write_text(secret, encoding="utf-8")
+        try:
+            os.chmod(secret_file, 0o600)
+        except OSError:
+            pass
+
+    env["FRAMEWORK_SHELLS_BASE_DIR"] = str(base_dir)
+    env["FRAMEWORK_SHELLS_SECRET"] = secret
+    env.setdefault("FRAMEWORK_SHELLS_RUN_ID", "app-server")
+    _prime_framework_shells_import(env)
+
+
+def _framework_shells_fingerprint(data_dir: Path) -> str:
+    root = _cwd_for_fingerprint() or data_dir
+    return hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+
+
+def _cwd_for_fingerprint() -> Path | None:
+    pwd = os.environ.get("PWD")
+    if pwd:
+        path = Path(pwd)
+        if path.is_dir():
+            return path
+    try:
+        return Path.cwd()
+    except OSError:
+        return None
+
+
+def _default_framework_shells_base_dir() -> Path:
+    return Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "framework_shells"
+
+
+def _prime_framework_shells_import(env: dict[str, str]) -> None:
+    try:
+        framework_shells = importlib.import_module("framework_shells")
+    except ImportError:
+        return
+    get_secret = getattr(framework_shells, "get_secret", None)
+    if not callable(get_secret):
+        return
+
+    framework_env = {
+        key: value for key, value in env.items() if key.startswith("FRAMEWORK_SHELLS_")
+    }
+    previous = {key: os.environ.get(key) for key in framework_env}
+    try:
+        os.environ.update(framework_env)
+        get_secret()
+    finally:
+        for key, old_value in previous.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
 
 
 def _run_child(command: Sequence[str], env: dict[str, str]) -> int:

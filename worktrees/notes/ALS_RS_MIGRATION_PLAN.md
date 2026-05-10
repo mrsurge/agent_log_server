@@ -1339,6 +1339,10 @@ Acceptance:
 3. Implement extension lifecycle mediation:
    - Completed first sub-slice: explicit framework-shell env preservation for
      adapter-spawned Python extension processes.
+   - Bootstrap now preserves inherited `FRAMEWORK_SHELLS_*` values from TE2/FWS
+     launches, and standalone launches seed a stable directory-fingerprinted
+     framework-shell secret before Rust/adapter startup so extension adapter
+     framework-shell imports do not require a manual dummy secret.
    - real `extensions.reload` disk rescan and running-adapter loader reload:
      completed
    - enable/disable state: completed with an ALS-RS config overlay
