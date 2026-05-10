@@ -3,6 +3,7 @@ import {
   findTranscriptCardRow,
 } from '../transcript_card_metadata.ts';
 import { buildShellCommandPreview } from '../shell_render.ts';
+import { ansiToHtml, hasAnsiSgr } from '../terminal_ansi.ts';
 import type { UnknownRecord } from '../shared_types.ts';
 
 interface AgentPtyReplayRecord {
@@ -480,7 +481,9 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         const stderr = asString(entry.stderr);
         const outLang = detectLangFromCommand(shellCmd);
         if (stdout) {
-          if (outLang) {
+          if (hasAnsiSgr(stdout)) {
+            pre.innerHTML = ansiToHtml(stdout);
+          } else if (outLang) {
             pre.innerHTML = highlightCodeAlways(stdout, outLang);
           } else {
             pre.appendChild(documentRef.createTextNode(stdout));
@@ -489,7 +492,11 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         if (stderr) {
           const stderrEl = documentRef.createElement('span');
           stderrEl.className = 'shell-stderr';
-          stderrEl.textContent = stderr;
+          if (hasAnsiSgr(stderr)) {
+            stderrEl.innerHTML = ansiToHtml(stderr);
+          } else {
+            stderrEl.textContent = stderr;
+          }
           pre.appendChild(stderrEl);
         }
         if (!stdout && !stderr) {

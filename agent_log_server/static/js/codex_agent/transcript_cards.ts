@@ -4,6 +4,7 @@ import {
   type TranscriptCardMetadata,
 } from './transcript_card_metadata.ts';
 import { buildShellCommandPreview } from './shell_render.ts';
+import { ansiToHtml, hasAnsiSgr } from './terminal_ansi.ts';
 
 type TranscriptRecord = Record<string, unknown>;
 
@@ -70,16 +71,6 @@ type NormalizedErrorPayload = {
   code: unknown;
 };
 
-type AnsiState = {
-  fg: number | null;
-  bg: number | null;
-  bold: boolean;
-  dim: boolean;
-  italic: boolean;
-  underline: boolean;
-  inverse: boolean;
-};
-
 type TranscriptCardsContext = {
   getConversationSettings?: () => { commandOutputLines?: number | string; [key: string]: unknown } | null | undefined;
   clearPlaceholder: () => void;
@@ -114,44 +105,6 @@ type TranscriptCardsContext = {
   openSplashSettingsModal?: () => unknown;
   addMessage?: (role: string, message: string) => unknown;
   escapeHtml: (text: string) => string;
-};
-
-const ANSI_FG_MAP: Record<number, string> = {
-  30: '#000000',
-  31: '#e06c75',
-  32: '#98c379',
-  33: '#e5c07b',
-  34: '#61afef',
-  35: '#c678dd',
-  36: '#56b6c2',
-  37: '#abb2bf',
-  90: '#5c6370',
-  91: '#ff7a85',
-  92: '#b7f39b',
-  93: '#ffd68a',
-  94: '#7ab7ff',
-  95: '#e79aff',
-  96: '#7ae8f5',
-  97: '#ffffff',
-};
-
-const ANSI_BG_MAP: Record<number, string> = {
-  40: '#000000',
-  41: '#e06c75',
-  42: '#98c379',
-  43: '#e5c07b',
-  44: '#61afef',
-  45: '#c678dd',
-  46: '#56b6c2',
-  47: '#abb2bf',
-  100: '#5c6370',
-  101: '#ff7a85',
-  102: '#b7f39b',
-  103: '#ffd68a',
-  104: '#7ab7ff',
-  105: '#e79aff',
-  106: '#7ae8f5',
-  107: '#ffffff',
 };
 
 function isRecord(value: unknown): value is TranscriptRecord {
@@ -226,82 +179,6 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     container.appendChild(note);
   }
 
-  function ansiToHtml(text: unknown): string {
-    const input = String(text || '');
-    const sgrRe = /\x1b\[([0-9;]*)m/g;
-    let lastIndex = 0;
-    let html = '';
-    let state: AnsiState = {
-      fg: null,
-      bg: null,
-      bold: false,
-      dim: false,
-      italic: false,
-      underline: false,
-      inverse: false,
-    };
-
-    function cssFor(st: AnsiState): string {
-      const styles: string[] = [];
-      if (st.bold) styles.push('font-weight:600');
-      if (st.dim) styles.push('opacity:0.8');
-      if (st.italic) styles.push('font-style:italic');
-      if (st.underline) styles.push('text-decoration:underline');
-      let fg = st.fg;
-      let bg = st.bg;
-      if (st.inverse) {
-        const tmp = fg;
-        fg = bg;
-        bg = tmp;
-      }
-      if (fg !== null && ANSI_FG_MAP[fg]) styles.push(`color:${ANSI_FG_MAP[fg]}`);
-      if (bg !== null && ANSI_BG_MAP[bg]) styles.push(`background-color:${ANSI_BG_MAP[bg]}`);
-      return styles.join(';');
-    }
-
-    function applyCodes(codes: string): void {
-      const parts = codes.length ? codes.split(';') : ['0'];
-      for (const part of parts) {
-        const n = Number(part || '0');
-        if (!Number.isFinite(n)) continue;
-        if (n === 0) {
-          state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
-        } else if (n === 1) state.bold = true;
-        else if (n === 2) state.dim = true;
-        else if (n === 3) state.italic = true;
-        else if (n === 4) state.underline = true;
-        else if (n === 7) state.inverse = true;
-        else if (n === 22) {
-          state.bold = false;
-          state.dim = false;
-        } else if (n === 23) state.italic = false;
-        else if (n === 24) state.underline = false;
-        else if (n === 27) state.inverse = false;
-        else if (n === 39) state.fg = null;
-        else if (n === 49) state.bg = null;
-        else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) state.fg = n;
-        else if ((n >= 40 && n <= 47) || (n >= 100 && n <= 107)) state.bg = n;
-      }
-    }
-
-    function emitChunk(chunk: string): void {
-      if (!chunk) return;
-      const css = cssFor(state);
-      const escaped = escapeHtml(chunk);
-      if (css) html += `<span style="${css}">${escaped}</span>`;
-      else html += escaped;
-    }
-
-    let match: RegExpExecArray | null;
-    while ((match = sgrRe.exec(input)) !== null) {
-      emitChunk(input.slice(lastIndex, match.index));
-      applyCodes(match[1] || '');
-      lastIndex = sgrRe.lastIndex;
-    }
-    emitChunk(input.slice(lastIndex));
-    return html;
-  }
-
   function renderCommandResult(evt: TranscriptEvent, parentEl: HTMLElement | null = null, options: RenderCommandOptions = {}): void {
     const {
       linkPathFromRibbon = false,
@@ -365,7 +242,7 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
 
     const cmdRibbon = document.createElement('div');
     cmdRibbon.className = 'command-ribbon shell-card-command';
-    if (isUserTerminal && ribbonText.includes('\x1b[')) {
+    if (isUserTerminal && hasAnsiSgr(ribbonText)) {
       cmdRibbon.innerHTML = ansiToHtml(ribbonText);
     } else if (!isUserTerminal) {
       renderShellCmdRibbon(cmdRibbon, command, { promptPrefix: '' });
@@ -389,8 +266,8 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     if (displayOutput) {
       const outputPre = document.createElement('pre');
       outputPre.className = 'command-output';
-      const hasAnsi = displayOutput.includes('\x1b[');
-      if (isUserTerminal && hasAnsi) {
+      const hasAnsi = hasAnsiSgr(displayOutput);
+      if (hasAnsi) {
         outputPre.innerHTML = ansiToHtml(displayOutput);
         if (truncated) {
           appendTruncationNote(outputPre, `\n... (truncated, showing ${truncateLines} of ${totalLines} lines)`, true);

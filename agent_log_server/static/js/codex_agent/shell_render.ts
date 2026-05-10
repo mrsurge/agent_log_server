@@ -4,6 +4,7 @@ import {
   applyTranscriptCardMetadata,
   type TranscriptCardMetadata,
 } from './transcript_card_metadata.ts';
+import { ansiToHtml, hasAnsiSgr } from './terminal_ansi.ts';
 
 export type ShellRowEntry = {
   row: HTMLDivElement;
@@ -87,6 +88,25 @@ export function bindShellRender(ctx: ShellRenderContext) {
     setLastEventType,
     _dbg,
   } = ctx;
+
+  function setTerminalText(el: HTMLElement, text: string): void {
+    if (hasAnsiSgr(text)) {
+      el.innerHTML = ansiToHtml(text);
+    } else {
+      el.textContent = text;
+    }
+  }
+
+  function appendTerminalSpan(parent: HTMLElement, text: string, className: string): void {
+    const span = document.createElement('span');
+    span.className = className;
+    if (hasAnsiSgr(text)) {
+      span.innerHTML = ansiToHtml(text);
+    } else {
+      span.textContent = text;
+    }
+    parent.appendChild(span);
+  }
 
   function createShellCardElements(metadata: TranscriptCardMetadata | null = null) {
     const row = document.createElement('div');
@@ -219,8 +239,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
     const delta = evt.delta || '';
     if (delta) {
       entry.text += delta;
-      // Plain text mode
-      entry.termEl.textContent = entry.text;
+      setTerminalText(entry.termEl, entry.text);
     }
     if (setLastEventType) setLastEventType('shell');
     maybeAutoScroll();
@@ -251,7 +270,9 @@ export function bindShellRender(ctx: ShellRenderContext) {
     const stderr = String(evt.stderr || '');
     const lang = detectLangFromCommand(cmd);
     if (stdout || stderr) {
-      if (lang) {
+      if (hasAnsiSgr(stdout)) {
+        entry.termEl.innerHTML = ansiToHtml(stdout);
+      } else if (lang) {
         try {
           entry.termEl.innerHTML = highlightCodeAlways(stdout, lang);
         } catch {
@@ -261,14 +282,10 @@ export function bindShellRender(ctx: ShellRenderContext) {
         entry.termEl.textContent = stdout;
       }
       if (stderr) {
-        const stderrEl = document.createElement('span');
-        stderrEl.className = 'shell-stderr';
-        stderrEl.textContent = stderr;
-        entry.termEl.appendChild(stderrEl);
+        appendTerminalSpan(entry.termEl, stderr, 'shell-stderr');
       }
     } else if (entry.text) {
-      // Streaming-only path (no stdout/stderr attached): keep plain text.
-      entry.termEl.textContent = entry.text;
+      setTerminalText(entry.termEl, entry.text);
     } else {
       entry.termEl.textContent = '(no output)';
     }
@@ -319,7 +336,9 @@ export function bindShellRender(ctx: ShellRenderContext) {
     const stderr = String(evt.stderr || '');
     const lang = detectLangFromCommand(cmd);
     if (stdout || stderr) {
-      if (lang) {
+      if (hasAnsiSgr(stdout)) {
+        termEl.innerHTML = ansiToHtml(stdout);
+      } else if (lang) {
         try {
           termEl.innerHTML = highlightCodeAlways(stdout, lang);
         } catch {
@@ -329,10 +348,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
         termEl.textContent = stdout;
       }
       if (stderr) {
-        const span = document.createElement('span');
-        span.className = 'shell-stderr';
-        span.textContent = stderr;
-        termEl.appendChild(span);
+        appendTerminalSpan(termEl, stderr, 'shell-stderr');
       }
     } else {
       termEl.textContent = '(no output)';
