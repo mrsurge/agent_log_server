@@ -33,6 +33,7 @@ interface RouterState {
   activeView?: string;
   splashTab?: string;
   conversationList: unknown[];
+  conversationListRevision?: number;
   conversationPreviewCache?: Record<string, ConversationPreview | null> | null;
   appConfig?: JsonObject;
   lastDraftHash?: string | null;
@@ -89,8 +90,13 @@ interface RouterEvent extends JsonObject {
     message?: string;
     error?: string;
     persisted_count?: number;
-    transcript_count?: number;
-    action?: unknown;
+  transcript_count?: number;
+  action?: unknown;
+  items?: unknown;
+  active_conversation_id?: string | null;
+  active_conversation?: string | null;
+  active_view?: string | null;
+  revision?: number;
   result?: unknown;
   output?: string;
   stdout?: string;
@@ -383,11 +389,44 @@ export function bindEventRouter(ctx: EventRouterContext) {
     }
   }
 
+  function updateConversationListFromEvent(evt: RouterEvent): boolean {
+    if (evt.type !== 'list_updated') {
+      return false;
+    }
+    const revision = typeof evt.revision === 'number' && Number.isFinite(evt.revision)
+      ? evt.revision
+      : 0;
+    const state = getState();
+    const currentRevision = typeof state.conversationListRevision === 'number'
+      && Number.isFinite(state.conversationListRevision)
+      ? state.conversationListRevision
+      : 0;
+    if (revision > 0 && currentRevision > 0 && revision <= currentRevision) {
+      return true;
+    }
+    const nextList = Array.isArray(evt.items)
+      ? evt.items.filter((item): item is JsonObject => (
+        Boolean(item) && typeof item === 'object' && !Array.isArray(item)
+      ))
+      : [];
+    const activeConversationId = typeof evt.active_conversation_id === 'string'
+      ? evt.active_conversation_id
+      : (typeof evt.active_conversation === 'string' ? evt.active_conversation : null);
+    setState({
+      conversationList: nextList,
+      conversationListRevision: Math.max(revision, currentRevision),
+    });
+    renderConversationList(nextList, activeConversationId);
+    renderMiniConversationList(nextList, activeConversationId);
+    return true;
+  }
+
   function handleEvent(evt: unknown): void {
     const event = asRouterEvent(evt);
     if (!event) return;
     if (isInternalEvent(event)) return;
     const state = getState();
+    if (updateConversationListFromEvent(event)) return;
     updateConversationPreview(event);
     updateConversationMetaFromEvent(event);
 

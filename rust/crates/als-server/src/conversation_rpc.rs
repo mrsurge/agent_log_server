@@ -42,6 +42,7 @@ const METHOD_COMPACT: &str = "conversation.compact";
 const METHOD_APPROVAL_RESPOND: &str = "conversation.approval.respond";
 const METHOD_SHELL_EXEC: &str = "conversation.shell.exec";
 const METHOD_PINS_SET: &str = "conversation.pins.set";
+const METHOD_LIST_UPDATED: &str = "conversation.list.updated";
 const AGENT_PTY_ASK_USER_REQUEST_METHOD: &str = "agent-pty/ask-user";
 const AGENT_PTY_BLOCKS_MCP_SERVER_NAME: &str = "agent-pty-blocks";
 const TE2_MCP_SERVER_NAME: &str = "te2-mcp";
@@ -103,14 +104,14 @@ async fn dispatch_rpc(
     match request.method.as_str() {
         METHOD_LIST => conversation_list(&state),
         METHOD_GET => conversation_get(&state, &request.params),
-        METHOD_CREATE => conversation_create(socket, state, request.params).await,
-        METHOD_SELECT => conversation_select(&state, &request.params),
-        METHOD_UPDATE => conversation_update(socket, state, request.params).await,
-        METHOD_DELETE => conversation_delete(&state, &request.params),
+        METHOD_CREATE => conversation_create(socket, io, state, request.params).await,
+        METHOD_SELECT => conversation_select(&io, &state, &request.params).await,
+        METHOD_UPDATE => conversation_update(socket, io, state, request.params).await,
+        METHOD_DELETE => conversation_delete(&io, &state, &request.params).await,
         METHOD_DRAFT_SET => conversation_draft_set(&io, &state, &request.params).await,
         METHOD_REPLAY_GET_CHUNK => conversation_replay_get_chunk(&state, &request.params),
-        METHOD_SEND => conversation_send(socket, state, request.params).await,
-        METHOD_PINS_SET => conversation_pins_set(&state, &request.params),
+        METHOD_SEND => conversation_send(socket, io, state, request.params).await,
+        METHOD_PINS_SET => conversation_pins_set(&io, &state, &request.params).await,
         METHOD_APPROVAL_RESPOND => {
             conversation_approval_respond(socket, io, state, request.params).await
         }
@@ -155,6 +156,7 @@ fn conversation_list(state: &AppState) -> Result<Value, RpcError> {
         "active_conversation_id": selection.active_conversation_id,
         "active_view": selection.active_view,
         "pinned_conversations": pinned_conversations,
+        "revision": state.current_list_revision(),
         "transport": "rpc"
     }))
 }
@@ -206,7 +208,8 @@ fn conversation_get(state: &AppState, params: &JsonMap) -> Result<Value, RpcErro
 }
 
 async fn conversation_create(
-    socket: SocketRef,
+    _socket: SocketRef,
+    io: SocketIo,
     state: AppState,
     params: JsonMap,
 ) -> Result<Value, RpcError> {
@@ -276,7 +279,7 @@ async fn conversation_create(
                             },
                         )
                         .map_err(internal_error)?;
-                    emit_meta_updated_to_socket(&socket, &state, &updated.conversation_id);
+                    emit_meta_updated_to_namespace(&io, &state, &updated.conversation_id).await;
                     value = meta_json(updated)?;
                 }
                 value["binding_result"] = bind_result;
@@ -289,10 +292,22 @@ async fn conversation_create(
         }
     }
     value["active_view"] = json!("conversation");
+    emit_conversation_list_updated(
+        &io,
+        &state,
+        "created",
+        Some(meta.conversation_id.as_str()),
+        None,
+    )
+    .await;
     Ok(value)
 }
 
-fn conversation_select(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+async fn conversation_select(
+    io: &SocketIo,
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
     let conversation_id = optional_str(&params, "conversation_id")
         .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
     let requested_view = optional_str(params, "view")
@@ -309,11 +324,13 @@ fn conversation_select(state: &AppState, params: &JsonMap) -> Result<Value, RpcE
             .map_err(internal_error)?,
     )?;
     value["active_view"] = Value::String(selection.active_view);
+    emit_conversation_list_updated(io, state, "selected", Some(conversation_id), None).await;
     Ok(value)
 }
 
 async fn conversation_update(
-    socket: SocketRef,
+    _socket: SocketRef,
+    io: SocketIo,
     state: AppState,
     params: JsonMap,
 ) -> Result<Value, RpcError> {
@@ -340,7 +357,7 @@ async fn conversation_update(
         .conversations
         .update_meta(conversation_id, update)
         .map_err(internal_error)?;
-    emit_meta_updated_to_socket(&socket, &state, conversation_id);
+    emit_meta_updated_to_namespace(&io, &state, conversation_id).await;
 
     let mut value = meta_json(meta.clone())?;
     if let Some(session_id) = picked_session {
@@ -362,7 +379,7 @@ async fn conversation_update(
                             },
                         )
                         .map_err(internal_error)?;
-                    emit_meta_updated_to_socket(&socket, &state, conversation_id);
+                    emit_meta_updated_to_namespace(&io, &state, conversation_id).await;
                     value = meta_json(updated)?;
                 }
                 value["binding_result"] = bind_result;
@@ -378,10 +395,15 @@ async fn conversation_update(
         }
     }
 
+    emit_conversation_list_updated(&io, &state, "updated", Some(conversation_id), None).await;
     Ok(value)
 }
 
-fn conversation_pins_set(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+async fn conversation_pins_set(
+    io: &SocketIo,
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
     let Some(requested) = params.get("pinned_conversations").and_then(Value::as_array) else {
         return Err(rpc_error(-32602, "pinned_conversations must be a list"));
     };
@@ -395,6 +417,7 @@ fn conversation_pins_set(state: &AppState, params: &JsonMap) -> Result<Value, Rp
         .conversations
         .set_pinned_conversations(pinned)
         .map_err(internal_error)?;
+    emit_conversation_list_updated(io, state, "pins_reordered", None, None).await;
     Ok(json!({
         "ok": true,
         "pinned_conversations": pinned,
@@ -402,7 +425,11 @@ fn conversation_pins_set(state: &AppState, params: &JsonMap) -> Result<Value, Rp
     }))
 }
 
-fn conversation_delete(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+async fn conversation_delete(
+    io: &SocketIo,
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
     let conversation_id = optional_str(params, "conversation_id")
         .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
     let deleted = state
@@ -417,6 +444,7 @@ fn conversation_delete(state: &AppState, params: &JsonMap) -> Result<Value, RpcE
                 .select(None, Some("splash".to_owned()))
                 .map_err(internal_error)?;
         }
+        emit_conversation_list_updated(io, state, "deleted", None, Some(conversation_id)).await;
     }
     Ok(
         json!({"ok": true, "deleted": deleted, "conversation_id": conversation_id, "transport": "rpc"}),
@@ -481,6 +509,7 @@ fn conversation_replay_get_chunk(state: &AppState, params: &JsonMap) -> Result<V
 
 async fn conversation_send(
     socket: SocketRef,
+    io: SocketIo,
     state: AppState,
     params: JsonMap,
 ) -> Result<Value, RpcError> {
@@ -504,6 +533,13 @@ async fn conversation_send(
             meta.conversation_id
         }
     };
+    if params
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        emit_conversation_list_updated(&io, &state, "created", Some(&conversation_id), None).await;
+    }
     let meta = state
         .conversations
         .load_meta(&conversation_id)
@@ -523,7 +559,7 @@ async fn conversation_send(
         .append_transcript(&conversation_id, user_event.clone())
         .map_err(internal_error)?;
     emit_rpc_notification(&socket, "conversation.user.message", transcript.clone());
-    emit_meta_updated_to_socket(&socket, &state, &conversation_id);
+    emit_meta_and_list_updated_to_namespace(&io, &state, &conversation_id, "meta_changed").await;
 
     let thread_id = meta.thread_id.clone();
     let provider_session_id = meta
@@ -571,7 +607,8 @@ async fn conversation_send(
                 ..ConversationMetaUpdate::default()
             },
         );
-        emit_meta_updated_to_socket(&socket, &state, &conversation_id);
+        emit_meta_and_list_updated_to_namespace(&io, &state, &conversation_id, "session_bound")
+            .await;
     }
     let mut result = adapter_result.as_object().cloned().unwrap_or_default();
     result.insert("conversation_id".to_owned(), Value::String(conversation_id));
@@ -645,13 +682,25 @@ async fn handle_adapter_other_event(
         }
         events::IMPORT_COMPLETED => {
             if let Some(conversation_id) = conversation_id_from_value(&other.params) {
-                emit_meta_updated_to_namespace(io, state, &conversation_id).await;
+                emit_meta_and_list_updated_to_namespace(
+                    io,
+                    state,
+                    &conversation_id,
+                    "meta_changed",
+                )
+                .await;
             }
             forward_import_event(io, "conversation.import.completed", other.params).await
         }
         events::IMPORT_FAILED => {
             if let Some(conversation_id) = conversation_id_from_value(&other.params) {
-                emit_meta_updated_to_namespace(io, state, &conversation_id).await;
+                emit_meta_and_list_updated_to_namespace(
+                    io,
+                    state,
+                    &conversation_id,
+                    "meta_changed",
+                )
+                .await;
             }
             forward_import_event(io, "conversation.import.failed", other.params).await
         }
@@ -685,7 +734,7 @@ async fn forward_adapter_live_event(
     if event_type.trim().eq_ignore_ascii_case("approval") {
         persist_pending_approval_event(state, &conversation_id, &event)?;
         emit_rpc_notification_to_namespace(io, method, event).await;
-        emit_meta_updated_to_namespace(io, state, &conversation_id).await;
+        emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
         return Ok(());
     }
     emit_rpc_notification_to_namespace(io, method, event).await;
@@ -747,7 +796,8 @@ async fn conversation_approval_respond(
 
     if is_agent_pty_ask_user_descriptor(&descriptor) {
         submit_ask_user_response(&io, &state, &conversation_id, &request_id, &resolution).await?;
-        emit_meta_updated_to_socket(&socket, &state, &conversation_id);
+        emit_meta_and_list_updated_to_namespace(&io, &state, &conversation_id, "meta_changed")
+            .await;
         return Ok(json!({
             "ok": true,
             "conversation_id": conversation_id,
@@ -784,7 +834,8 @@ async fn conversation_approval_respond(
         let _ = state
             .conversations
             .remove_pending_approval(&conversation_id, &request_id);
-        emit_meta_updated_to_socket(&socket, &state, &conversation_id);
+        emit_meta_and_list_updated_to_namespace(&io, &state, &conversation_id, "meta_changed")
+            .await;
         return Err(rpc_error(
             -32009,
             "Approval is stale or no longer actionable",
@@ -799,7 +850,7 @@ async fn conversation_approval_respond(
     let _ = state
         .conversations
         .remove_pending_approval(&conversation_id, &request_id);
-    emit_meta_updated_to_socket(&socket, &state, &conversation_id);
+    emit_meta_and_list_updated_to_namespace(&io, &state, &conversation_id, "meta_changed").await;
     emit_rpc_notification(
         &socket,
         "conversation.approval.handoff",
@@ -843,7 +894,7 @@ pub async fn acknowledge_ask_user_interaction(
         return Ok(false);
     };
     merge_recorded_approval_fields(&mut handoff_event, &recorded_entry);
-    emit_meta_updated_to_namespace(io, state, &conversation_id).await;
+    emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
     emit_rpc_notification_to_namespace(
         io,
         "conversation.approval.handoff",
@@ -935,7 +986,7 @@ async fn persist_adapter_transcript(
     value: Value,
 ) -> Result<(), RpcError> {
     if let Some(conversation_id) = persist_adapter_transcript_entry(state, value)? {
-        emit_meta_updated_to_namespace(io, state, &conversation_id).await;
+        emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
     }
     Ok(())
 }
@@ -1078,6 +1129,36 @@ pub async fn emit_draft_updated(io: &SocketIo, conversation_id: &str, draft: &st
     .await;
 }
 
+async fn emit_conversation_list_updated(
+    io: &SocketIo,
+    state: &AppState,
+    reason: &str,
+    changed_conversation_id: Option<&str>,
+    deleted_conversation_id: Option<&str>,
+) {
+    state.bump_list_revision();
+    let mut value = match conversation_list(state) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(
+                error = %error.message,
+                reason,
+                "failed to build conversation list update"
+            );
+            return;
+        }
+    };
+    value["reason"] = Value::String(reason.to_owned());
+    if let Some(conversation_id) = changed_conversation_id.filter(|value| !value.is_empty()) {
+        value["conversation_id"] = Value::String(conversation_id.to_owned());
+        value["changed_conversation_id"] = Value::String(conversation_id.to_owned());
+    }
+    if let Some(conversation_id) = deleted_conversation_id.filter(|value| !value.is_empty()) {
+        value["deleted_conversation_id"] = Value::String(conversation_id.to_owned());
+    }
+    emit_rpc_notification_to_namespace(io, METHOD_LIST_UPDATED, value).await;
+}
+
 fn draft_updated_event(conversation_id: &str, draft: &str) -> Value {
     json!({
         "conversation_id": conversation_id,
@@ -1138,6 +1219,7 @@ fn notification_method_for_event_type(event_type: &str) -> Option<&'static str> 
         "diff_declined" => Some("conversation.diff.declined"),
         "draft_update" => Some("conversation.draft.updated"),
         "error" => Some("conversation.error"),
+        "list_updated" => Some(METHOD_LIST_UPDATED),
         "mention_insert" => Some("conversation.mention.inserted"),
         "message" => Some("conversation.user.message"),
         "meta_updated" => Some("conversation.meta.updated"),
@@ -1561,16 +1643,6 @@ fn emit_rpc_notification(socket: &SocketRef, method: &str, params: Value) {
     let _ = socket.emit(RPC_NOTIFY_EVENT, &notification);
 }
 
-fn emit_meta_updated_to_socket(socket: &SocketRef, state: &AppState, conversation_id: &str) {
-    let Ok(meta) = state.conversations.load_meta(conversation_id) else {
-        return;
-    };
-    let Ok(value) = serde_json::to_value(meta) else {
-        return;
-    };
-    emit_rpc_notification(socket, "conversation.meta.updated", value);
-}
-
 async fn emit_meta_updated_to_namespace(io: &SocketIo, state: &AppState, conversation_id: &str) {
     let Ok(meta) = state.conversations.load_meta(conversation_id) else {
         return;
@@ -1579,6 +1651,16 @@ async fn emit_meta_updated_to_namespace(io: &SocketIo, state: &AppState, convers
         return;
     };
     emit_rpc_notification_to_namespace(io, "conversation.meta.updated", value).await;
+}
+
+async fn emit_meta_and_list_updated_to_namespace(
+    io: &SocketIo,
+    state: &AppState,
+    conversation_id: &str,
+    reason: &str,
+) {
+    emit_meta_updated_to_namespace(io, state, conversation_id).await;
+    emit_conversation_list_updated(io, state, reason, Some(conversation_id), None).await;
 }
 
 fn optional_str<'a>(params: &'a JsonMap, key: &str) -> Option<&'a str> {
@@ -1825,6 +1907,10 @@ mod tests {
         assert_eq!(
             notification_method_for_event_type("token_count"),
             Some("conversation.token.updated")
+        );
+        assert_eq!(
+            notification_method_for_event_type("list_updated"),
+            Some("conversation.list.updated")
         );
         assert_eq!(notification_method_for_event_type("debug_trace"), None);
     }
@@ -2106,16 +2192,47 @@ mod tests {
         assert_eq!(listed["active_conversation_id"], "conv-select");
         assert_eq!(listed["active_view"], "conversation");
 
-        let mut params = JsonMap::new();
-        params.insert("conversation_id".to_owned(), json!("conv-select"));
-        assert_eq!(
-            conversation_delete(&state, &params).unwrap()["deleted"],
-            json!(true)
-        );
+        assert!(state.conversations.delete("conv-select").unwrap());
+        let selection = state.ui_selection.snapshot().unwrap();
+        if selection.active_conversation_id.as_deref() == Some("conv-select") {
+            state
+                .ui_selection
+                .select(None, Some("splash".to_owned()))
+                .unwrap();
+        }
 
         let after_delete = conversation_list(&state).unwrap();
         assert_eq!(after_delete["active_conversation_id"], Value::Null);
         assert_eq!(after_delete["active_view"], "splash");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn conversation_list_carries_monotonic_revision() {
+        let root =
+            std::env::temp_dir().join(format!("als-rs-rpc-list-revision-test-{}", unix_millis()));
+        let state = AppState::new(ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                copilot_python: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        });
+
+        assert_eq!(conversation_list(&state).unwrap()["revision"], json!(0));
+        assert_eq!(state.bump_list_revision(), 1);
+        assert_eq!(conversation_list(&state).unwrap()["revision"], json!(1));
+        assert_eq!(state.bump_list_revision(), 2);
+        assert_eq!(conversation_list(&state).unwrap()["revision"], json!(2));
 
         let _ = fs::remove_dir_all(root);
     }

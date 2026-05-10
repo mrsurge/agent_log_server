@@ -273,6 +273,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let conversationMeta: RootConversationMeta = {};
   let conversationSettings: RootConversationSettings = {};
   let conversationList: NonNullable<ConversationDrawerState['conversationList']> = [];
+  let conversationListRevision = 0;
   let conversationPreviewCache: ConversationPreviewCache = {};
   let appConfig: RootAppConfig = {};
   let activeView = 'splash';
@@ -794,6 +795,7 @@ document.addEventListener('DOMContentLoaded', () => {
     sioCall,
     getState: () => ({
       conversationList,
+      conversationListRevision,
       conversationPreviewCache,
       appConfig,
       clientConversationId,
@@ -816,7 +818,12 @@ document.addEventListener('DOMContentLoaded', () => {
       miniConversationDrawerOpen,
     }),
     setState: (patch: ConversationDrawerPatch) => {
-      if (patch.conversationList !== undefined) conversationList = patch.conversationList;
+      if (patch.conversationList !== undefined) {
+        conversationList = patch.conversationList as NonNullable<ConversationDrawerState['conversationList']>;
+      }
+      if (patch.conversationListRevision !== undefined) {
+        conversationListRevision = Number(patch.conversationListRevision || 0);
+      }
       if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
       if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta as RootConversationMeta;
       if (patch.clientActiveView !== undefined) clientActiveView = patch.clientActiveView;
@@ -1736,6 +1743,7 @@ document.addEventListener('DOMContentLoaded', () => {
       activeView,
       splashTab,
       conversationList,
+      conversationListRevision,
       conversationPreviewCache: conversationPreviewCache as EventRouterContext['getState'] extends () => infer S ? S extends { conversationPreviewCache?: infer T } ? T : never : never,
       appConfig: appConfig as EventRouterContext['getState'] extends () => infer S ? S extends { appConfig?: infer T } ? T : never : never,
       lastDraftHash,
@@ -1743,6 +1751,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }),
     setState: (patch: EventRouterPatch) => {
       if (patch.hostUi !== undefined) hostUi = patch.hostUi as RootHostUi;
+      if (patch.conversationList !== undefined) {
+        conversationList = patch.conversationList as NonNullable<ConversationDrawerState['conversationList']>;
+      }
+      if (patch.conversationListRevision !== undefined) {
+        conversationListRevision = Number(patch.conversationListRevision || 0);
+      }
       if (patch.conversationPreviewCache !== undefined) conversationPreviewCache = patch.conversationPreviewCache as ConversationPreviewCache;
       if (patch.appConfig !== undefined) appConfig = patch.appConfig as RootAppConfig;
       if (patch.contextWindow !== undefined) contextWindow = patch.contextWindow;

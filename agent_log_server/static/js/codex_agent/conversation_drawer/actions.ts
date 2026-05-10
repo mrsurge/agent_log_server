@@ -23,6 +23,7 @@ export interface DrawerState {
   lastDraftHash?: string | null;
   clientActiveView?: string | null;
   conversationList?: ConversationMeta[];
+  conversationListRevision?: number;
   extensionCatalog?: unknown[];
   pendingNewConversation?: boolean;
   conversationSettings?: ConversationSettings;
@@ -34,6 +35,7 @@ interface ConversationListResponse {
   items: ConversationMeta[];
   activeConversationId: string | null;
   activeView: string | null;
+  revision: number;
 }
 
 type ConversationCreateResponse = Omit<ConversationMeta, 'conversation_id' | 'settings'> & {
@@ -94,6 +96,9 @@ function normalizeConversationListResponse(data: unknown): ConversationListRespo
     items,
     activeConversationId: typeof payload?.active_conversation_id === 'string' ? payload.active_conversation_id : null,
     activeView: typeof payload?.active_view === 'string' ? payload.active_view : null,
+    revision: typeof payload?.revision === 'number' && Number.isFinite(payload.revision)
+      ? payload.revision
+      : 0,
   };
 }
 
@@ -196,7 +201,7 @@ export function createConversationDrawerActions(
       const conversationList = data.items;
       const ssotActiveId = data.activeConversationId;
       const highlightId = state.clientConversationId || state.conversationMeta?.conversation_id || ssotActiveId;
-      const patch: Partial<DrawerState> = { conversationList, extensionCatalog };
+      const patch: Partial<DrawerState> = { conversationList, conversationListRevision: data.revision, extensionCatalog };
       let appliedSsotActiveView: string | null = null;
       if (!state.clientActiveView && data.activeView) {
         patch.clientActiveView = data.activeView;

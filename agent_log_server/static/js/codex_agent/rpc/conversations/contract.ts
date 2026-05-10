@@ -44,6 +44,10 @@ export interface ConversationListResult extends JsonObject {
   active_conversation_id: string | null;
   active_view: string | null;
   pinned_conversations?: string[];
+  revision?: number;
+  reason?: string;
+  changed_conversation_id?: string;
+  deleted_conversation_id?: string;
   transport: ConversationsRpcTransport;
 }
 
@@ -129,6 +133,7 @@ export const CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE = {
   import_progress: 'conversation.import.progress',
   import_completed: 'conversation.import.completed',
   import_failed: 'conversation.import.failed',
+  list_updated: 'conversation.list.updated',
   mention_insert: 'conversation.mention.inserted',
   message: 'conversation.user.message',
   meta_updated: 'conversation.meta.updated',
@@ -181,6 +186,7 @@ export const CONVERSATIONS_RPC_CANONICAL_EVENT_TYPE_BY_METHOD = {
   'conversation.import.progress': 'import_progress',
   'conversation.import.completed': 'import_completed',
   'conversation.import.failed': 'import_failed',
+  'conversation.list.updated': 'list_updated',
   'conversation.mention.inserted': 'mention_insert',
   'conversation.message.delta': 'assistant_delta',
   'conversation.message.final': 'assistant_finalize',

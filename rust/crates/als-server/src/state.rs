@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tracing::warn;
 
@@ -25,6 +28,7 @@ pub struct AppState {
     pub extensions: ExtensionRegistry,
     pub host_ui: HostUiStore,
     pub ipc_clients: IpcClientStore,
+    pub list_revision: Arc<AtomicU64>,
     pub sidebar_ipc: SidebarIpcStore,
     pub ui_selection: UiSelectionStore,
 }
@@ -52,6 +56,7 @@ impl AppState {
         });
         let host_ui = HostUiStore::default();
         let ipc_clients = IpcClientStore::default();
+        let list_revision = Arc::new(AtomicU64::new(0));
         let sidebar_ipc = SidebarIpcStore::default();
         let ui_selection = UiSelectionStore::with_cache_dir(config.roots.cache_dir.clone());
         Self {
@@ -62,9 +67,18 @@ impl AppState {
             extensions,
             host_ui,
             ipc_clients,
+            list_revision,
             sidebar_ipc,
             ui_selection,
         }
+    }
+
+    pub fn current_list_revision(&self) -> u64 {
+        self.list_revision.load(Ordering::SeqCst)
+    }
+
+    pub fn bump_list_revision(&self) -> u64 {
+        self.list_revision.fetch_add(1, Ordering::SeqCst) + 1
     }
 }
 

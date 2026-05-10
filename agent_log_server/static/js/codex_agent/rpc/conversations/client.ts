@@ -140,6 +140,16 @@ function normalizeConversationListResult(
     active_conversation_id: typeof payload.active_conversation_id === 'string' ? payload.active_conversation_id : null,
     active_view: typeof payload.active_view === 'string' ? payload.active_view : null,
     pinned_conversations: pinned,
+    revision: typeof payload.revision === 'number' && Number.isFinite(payload.revision)
+      ? payload.revision
+      : undefined,
+    reason: typeof payload.reason === 'string' ? payload.reason : undefined,
+    changed_conversation_id: typeof payload.changed_conversation_id === 'string'
+      ? payload.changed_conversation_id
+      : undefined,
+    deleted_conversation_id: typeof payload.deleted_conversation_id === 'string'
+      ? payload.deleted_conversation_id
+      : undefined,
     transport,
   };
 }

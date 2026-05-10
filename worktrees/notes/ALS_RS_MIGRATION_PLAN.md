@@ -682,7 +682,7 @@ Implemented methods:
 | Method | Behavior |
 | --- | --- |
 | `conversation.create` | Creates Rust conversation metadata. |
-| `conversation.list` | Lists splash-card-ready Rust conversation metadata as `{ items, active_conversation, active_conversation_id, active_view, pinned_conversations, transport }`. Pinned conversations are ordered first from persisted metadata. |
+| `conversation.list` | Lists splash-card-ready Rust conversation metadata as `{ items, active_conversation, active_conversation_id, active_view, pinned_conversations, revision, transport }`. Pinned conversations are ordered first from persisted metadata. |
 | `conversation.get` | Loads or creates metadata for an explicit conversation ID; when called without an ID during boot, hydrates the persisted active conversation from app UI state and returns an explicit `ok: false` result instead of creating missing metadata when no active conversation exists. |
 | `conversation.select` | Loads metadata and returns `active_view`. |
 | `conversation.update` | Merges settings updates into `meta.json`, normalizes extension/cwd/label/alias card fields, and persists provider thread/session ids. |
@@ -691,6 +691,19 @@ Implemented methods:
 | `conversation.draft.set` | Stores draft text on conversation metadata. |
 | `conversation.replay.getChunk` | Reads transcript JSONL rows and returns the frontend replay chunk frame shape. |
 | `conversation.send` | Appends/broadcasts the user message, resolves the selected extension from persisted metadata/settings, initializes that extension through the generic adapter, and sends the turn through the adapter. Adapter provider session ids are persisted back to metadata. |
+
+Backend-driven list sync:
+
+- ALS-RS emits `conversation.list.updated` on `/rpc/conversations` after
+  accepted create/select/update/session-bind/delete/pin and provider metadata
+  mutations that affect splash/minibar state.
+- The payload is the full `conversation.list` snapshot plus `reason`,
+  `changed_conversation_id` or `deleted_conversation_id`, and a monotonic
+  `revision`; frontend clients replace their splash/minibar list from this
+  snapshot and drop stale revisions.
+- High-frequency draft typing remains on the narrower
+  `conversation.draft.updated` row-level channel instead of broadcasting a full
+  list snapshot on every keystroke.
 
 Known follow-up:
 
@@ -1395,6 +1408,11 @@ Acceptance:
       queued sidebar mentions update an inactive conversation draft, so other
       clients can hydrate live draft changes through the existing frontend
       `draft_update` path.
+    - conversation splash/minibar sync: ALS-RS now broadcasts backend-owned
+      `conversation.list.updated` snapshots with monotonic revisions after
+      create/select/update/session-bind/delete/pin and provider metadata
+      mutations, while keeping high-frequency composer draft edits on the
+      narrower `conversation.draft.updated` channel.
    - interrupt
    - compact
    - shell/tool card parity for the Copilot pilot
