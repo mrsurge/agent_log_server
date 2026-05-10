@@ -77,25 +77,16 @@ pub async fn emit_agent_open(io: &SocketIo, state: &AppState, payload: JsonMap) 
         return false;
     };
     match sidebar_rpc_call(&client, "sidebar.file.open", Value::Object(payload.clone())).await {
-        Ok(value) if !rpc_result_explicitly_not_ok(&value) => return true,
+        Ok(value) if !rpc_result_explicitly_not_ok(&value) => true,
         Ok(value) => {
             warn!(
                 ?value,
-                "sidebar.file.open RPC returned an unsuccessful result; falling back to legacy event"
+                "sidebar.file.open RPC returned an unsuccessful result; legacy sidebar transport is disabled"
             );
+            false
         }
         Err(error) => {
-            warn!(%error, "sidebar.file.open RPC failed; falling back to legacy event");
-        }
-    }
-    match client
-        .emit("sidebar:agent_open", Value::Object(payload))
-        .await
-    {
-        Ok(()) => true,
-        Err(error) => {
-            warn!(%error, "failed to emit sidebar:agent_open");
-            state.sidebar_ipc.clear().await;
+            warn!(%error, "sidebar.file.open RPC failed; legacy sidebar transport is disabled");
             false
         }
     }
@@ -107,11 +98,7 @@ async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>
     }
 
     let address = sidebar_address(state);
-    let cwd_io = io.clone();
-    let cwd_state = state.clone();
     let disconnect_state = state.clone();
-    let mention_io = io.clone();
-    let mention_state = state.clone();
     let notify_io = io.clone();
     let notify_state = state.clone();
 
@@ -120,34 +107,6 @@ async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>
         .transport_type(TransportType::Websocket)
         .reconnect(false)
         .reconnect_on_disconnect(false)
-        .on("sidebar:cwd_set", move |payload, _client| {
-            let io = cwd_io.clone();
-            let state = cwd_state.clone();
-            async move {
-                if let Some(cwd) =
-                    payload_to_object(payload).and_then(|payload| string_field(&payload, "cwd"))
-                {
-                    if let Err(error) = update_project_root(&io, &state, cwd).await {
-                        warn!(%error, "failed to apply sidebar cwd_set");
-                    }
-                }
-            }
-            .boxed()
-        })
-        .on("sidebar:mention", move |payload, _client| {
-            let io = mention_io.clone();
-            let state = mention_state.clone();
-            async move {
-                let Some(payload) = payload_to_object(payload) else {
-                    warn!("sidebar mention ignored: payload is not an object");
-                    return;
-                };
-                if let Err(error) = process_mention(&io, &state, payload).await {
-                    warn!(%error, "sidebar mention processing failed");
-                }
-            }
-            .boxed()
-        })
         .on(RPC_NOTIFY_EVENT, move |payload, _client| {
             let io = notify_io.clone();
             let state = notify_state.clone();
@@ -200,45 +159,7 @@ async fn query_initial_cwd(
     io: &SocketIo,
     state: &AppState,
 ) -> Result<Option<String>> {
-    match sidebar_rpc_call(client, "sidebar.cwd.get", json!({})).await {
-        Ok(value) => {
-            if let Some(cwd) = cwd_from_value(&value) {
-                update_project_root(io, state, cwd.clone()).await?;
-                return Ok(Some(cwd));
-            }
-            return Ok(None);
-        }
-        Err(error) => {
-            warn!(%error, "sidebar.cwd.get RPC failed; falling back to legacy event");
-        }
-    }
-
-    let (tx, rx) = oneshot::channel::<Option<Value>>();
-    let tx = Arc::new(Mutex::new(Some(tx)));
-    let tx_for_ack = tx.clone();
-    client
-        .emit_with_ack(
-            "sidebar:cwd_get",
-            json!({"source": "codex_agent"}),
-            Duration::from_secs(5),
-            move |payload, _client| {
-                let tx = tx_for_ack.clone();
-                async move {
-                    if let Ok(mut guard) = tx.lock() {
-                        if let Some(sender) = guard.take() {
-                            let _ = sender.send(payload_first_value(payload));
-                        }
-                    }
-                }
-                .boxed()
-            },
-        )
-        .await
-        .map_err(|error| anyhow!(error.to_string()))?;
-
-    let Some(value) = timeout(Duration::from_secs(5), rx).await?? else {
-        return Ok(None);
-    };
+    let value = sidebar_rpc_call(client, "sidebar.cwd.get", json!({})).await?;
     if let Some(cwd) = cwd_from_value(&value) {
         update_project_root(io, state, cwd.clone()).await?;
         return Ok(Some(cwd));
@@ -284,9 +205,8 @@ async fn sidebar_rpc_call(client: &Client, method: &str, params: Value) -> Resul
 }
 
 fn sidebar_rpc_result(method: &str, value: Value) -> Result<Value> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow!("sidebar RPC {method} ack is not an object"))?;
+    let object = sidebar_rpc_ack_envelope(&value)
+        .ok_or_else(|| anyhow!("sidebar RPC {method} ack is not a JSON-RPC envelope"))?;
     if let Some(error) = object.get("error") {
         let message = error
             .as_object()
@@ -295,6 +215,29 @@ fn sidebar_rpc_result(method: &str, value: Value) -> Result<Value> {
         bail!("{message}");
     }
     Ok(object.get("result").cloned().unwrap_or(Value::Null))
+}
+
+fn sidebar_rpc_ack_envelope(value: &Value) -> Option<&Map<String, Value>> {
+    fn find_envelope(value: &Value, depth: usize) -> Option<&Map<String, Value>> {
+        if depth > 4 {
+            return None;
+        }
+        match value {
+            Value::Object(object)
+                if object.contains_key("result")
+                    || object.contains_key("error")
+                    || object.get("jsonrpc").and_then(Value::as_str) == Some(JSONRPC_VERSION) =>
+            {
+                Some(object)
+            }
+            Value::Array(values) => values
+                .iter()
+                .find_map(|value| find_envelope(value, depth + 1)),
+            _ => None,
+        }
+    }
+
+    find_envelope(value, 0)
 }
 
 fn rpc_result_explicitly_not_ok(value: &Value) -> bool {
@@ -610,6 +553,22 @@ mod tests {
             )
             .expect("result should parse"),
             json!({"cwd": "/repo"})
+        );
+        assert_eq!(
+            sidebar_rpc_result(
+                "sidebar.cwd.get",
+                json!([{"jsonrpc": "2.0", "id": "1", "result": {"cwd": "/ack-array"}}])
+            )
+            .expect("ack array result should parse"),
+            json!({"cwd": "/ack-array"})
+        );
+        assert_eq!(
+            sidebar_rpc_result(
+                "sidebar.cwd.get",
+                json!([[{"jsonrpc": "2.0", "id": "1", "result": {"cwd": "/nested-ack-array"}}]])
+            )
+            .expect("nested ack array result should parse"),
+            json!({"cwd": "/nested-ack-array"})
         );
 
         let error = sidebar_rpc_result(
