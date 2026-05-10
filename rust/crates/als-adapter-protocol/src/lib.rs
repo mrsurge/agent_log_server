@@ -11,6 +11,10 @@ pub mod methods {
     pub const EXTENSION_SHUTDOWN: &str = "extension.shutdown";
     pub const EXTENSION_RELOAD: &str = "extension.reload";
     pub const EXTENSION_INSTALL_DEPENDENCIES: &str = "extension.install_dependencies";
+    pub const EXTENSION_PACKAGE_VALIDATE: &str = "extension.package.validate";
+    pub const EXTENSION_PACKAGE_INSTALL: &str = "extension.package.install";
+    pub const EXTENSION_PACKAGE_UPDATE: &str = "extension.package.update";
+    pub const EXTENSION_PACKAGE_REMOVE: &str = "extension.package.remove";
     pub const EXTENSION_DEBUG_PROBE: &str = "extension.debug_probe";
     pub const EXTENSION_WARM_UP: &str = "extension.warm_up";
     pub const EXTENSION_GET_SETTINGS_SCHEMA: &str = "extension.get_settings_schema";
@@ -57,6 +61,8 @@ pub struct ExtensionInitializeParams {
     pub extension_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions_dirs: Option<Vec<PathBuf>>,
     pub cwd: PathBuf,
     pub data_dir: PathBuf,
     pub cache_dir: PathBuf,

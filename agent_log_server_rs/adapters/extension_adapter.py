@@ -146,6 +146,53 @@ async def _framework_shell_manager_probe(ensure_manager: bool) -> JsonMap:
     return probe
 
 
+def _optional_path_list(value: object) -> list[Path]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    paths: list[Path] = []
+    for item in value:
+        path = _optional_path(item)
+        if path is not None:
+            paths.append(path)
+    return paths
+
+
+def _env_path(key: str) -> Path | None:
+    value = os.environ.get(key)
+    return Path(value) if value else None
+
+
+def _fallback_root() -> Path:
+    for key in ("ALS_RS_DATA_DIR", "ALS_RS_CACHE_DIR", "ALS_RS_CONFIG_DIR", "HOME"):
+        path = _env_path(key)
+        if path is not None:
+            return path
+    return Path(".")
+
+
+def _safe_cwd() -> Path:
+    try:
+        return Path.cwd()
+    except OSError:
+        return _fallback_root()
+
+
+def _default_data_dir() -> Path:
+    return _env_path("ALS_RS_DATA_DIR") or _safe_cwd()
+
+
+def _default_cache_dir() -> Path:
+    return _env_path("ALS_RS_CACHE_DIR") or _default_data_dir()
+
+
+def _default_config_dir() -> Path:
+    return _env_path("ALS_RS_CONFIG_DIR") or _default_data_dir()
+
+
+def _default_extensions_dir() -> Path:
+    return _env_path("ALS_RS_EXTENSIONS_DIR") or (_safe_cwd() / "extensions")
+
+
 def _put_store_probe(probe: JsonMap, manager: object) -> None:
     store: object | None = getattr(manager, "store", None)
     if store is None:
@@ -219,6 +266,39 @@ class ExtensionLoaderModule(Protocol):
 
     async def install_extension_dependencies(self, extension_id: str) -> JsonMap: ...
 
+    def validate_extension_source(
+        self,
+        *,
+        source_type: str,
+        source_path: str | None = None,
+        repo_url: str | None = None,
+        ref: str | None = None,
+        extension_id: str | None = None,
+    ) -> JsonMap: ...
+
+    def install_extension_source(
+        self,
+        *,
+        source_type: str,
+        source_path: str | None = None,
+        repo_url: str | None = None,
+        ref: str | None = None,
+        extension_id: str | None = None,
+        allow_override: bool = False,
+    ) -> JsonMap: ...
+
+    def update_extension_source(
+        self,
+        extension_id: str,
+        *,
+        source_type: str | None = None,
+        source_path: str | None = None,
+        repo_url: str | None = None,
+        ref: str | None = None,
+    ) -> JsonMap: ...
+
+    def remove_user_extension(self, extension_id: str) -> JsonMap: ...
+
     def set_extension_dependency_result(
         self,
         extension_id: str,
@@ -257,11 +337,12 @@ class ExtensionLoaderModule(Protocol):
 @dataclass
 class AdapterState:
     extension_id: str = "copilot-sdk"
-    cwd: Path = field(default_factory=Path.cwd)
-    data_dir: Path = field(default_factory=Path.cwd)
-    cache_dir: Path = field(default_factory=Path.cwd)
-    config_dir: Path = field(default_factory=Path.cwd)
-    extensions_dir: Path = field(default_factory=lambda: Path.cwd() / "extensions")
+    cwd: Path = field(default_factory=_safe_cwd)
+    data_dir: Path = field(default_factory=_default_data_dir)
+    cache_dir: Path = field(default_factory=_default_cache_dir)
+    config_dir: Path = field(default_factory=_default_config_dir)
+    extensions_dir: Path = field(default_factory=_default_extensions_dir)
+    extension_roots: list[Path] = field(default_factory=list)
     settings: JsonMap = field(default_factory=dict)
     meta: dict[str, JsonMap] = field(default_factory=dict)
 
@@ -334,6 +415,14 @@ class ExtensionJsonRpcAdapter:
             return await self._reload(params)
         if method == AdapterMethod.EXTENSION_INSTALL_DEPENDENCIES:
             return await self._install_dependencies(params)
+        if method == AdapterMethod.EXTENSION_PACKAGE_VALIDATE:
+            return await self._package_validate(params)
+        if method == AdapterMethod.EXTENSION_PACKAGE_INSTALL:
+            return await self._package_install(params)
+        if method == AdapterMethod.EXTENSION_PACKAGE_UPDATE:
+            return await self._package_update(params)
+        if method == AdapterMethod.EXTENSION_PACKAGE_REMOVE:
+            return await self._package_remove(params)
         if method == AdapterMethod.EXTENSION_DEBUG_PROBE:
             return await self._debug_probe(params)
         if method == AdapterMethod.EXTENSION_WARM_UP:
@@ -363,11 +452,17 @@ class ExtensionJsonRpcAdapter:
 
     async def _initialize(self, params: JsonMap) -> JsonMap:
         extension_id = _optional_string(params.get("extension_id")) or self._state.extension_id
-        cwd = _optional_path(params.get("cwd")) or Path.cwd()
+        cwd = _optional_path(params.get("cwd")) or _safe_cwd()
         data_dir = _optional_path(params.get("data_dir")) or cwd
         cache_dir = _optional_path(params.get("cache_dir")) or data_dir
         config_dir = _optional_path(params.get("config_dir")) or data_dir
-        extensions_dir = _optional_path(params.get("extensions_dir")) or self._state.extensions_dir
+        extension_roots = _optional_path_list(params.get("extensions_dirs"))
+        legacy_extensions_dir = _optional_path(params.get("extensions_dir"))
+        if not extension_roots and legacy_extensions_dir is not None:
+            extension_roots = [legacy_extensions_dir]
+        if not extension_roots:
+            extension_roots = list(self._state.extension_roots) or [self._state.extensions_dir]
+        extensions_dir = extension_roots[0]
         settings = _optional_map(params.get("settings")) or {}
 
         self._state = AdapterState(
@@ -377,6 +472,7 @@ class ExtensionJsonRpcAdapter:
             cache_dir=cache_dir,
             config_dir=config_dir,
             extensions_dir=extensions_dir,
+            extension_roots=extension_roots,
             settings=settings,
             meta=self._state.meta,
         )
@@ -461,6 +557,73 @@ class ExtensionJsonRpcAdapter:
             "extensions": list(self._loader.list_extensions()),
         }
 
+    async def _package_validate(self, params: JsonMap) -> JsonMap:
+        self._ensure_loader_initialized()
+        source_type = _required_string(params, "source_type")
+        result = self._loader.validate_extension_source(
+            source_type=source_type,
+            source_path=_optional_string(params.get("source_path")),
+            repo_url=_optional_string(params.get("repo_url")),
+            ref=_optional_string(params.get("ref")),
+            extension_id=_optional_string(params.get("extension_id")),
+        )
+        return dict(result)
+
+    async def _package_install(self, params: JsonMap) -> JsonMap:
+        self._ensure_loader_initialized()
+        source_type = _required_string(params, "source_type")
+        result = self._loader.install_extension_source(
+            source_type=source_type,
+            source_path=_optional_string(params.get("source_path")),
+            repo_url=_optional_string(params.get("repo_url")),
+            ref=_optional_string(params.get("ref")),
+            extension_id=_optional_string(params.get("extension_id")),
+            allow_override=params.get("allow_override") is True,
+        )
+        return {
+            "ok": bool(result.get("ok")),
+            "result": dict(result),
+            "extension_id": _optional_string(result.get("extension_id")),
+            "extensions": list(self._loader.list_extensions()),
+        }
+
+    async def _package_update(self, params: JsonMap) -> JsonMap:
+        self._ensure_loader_initialized()
+        extension_id = _required_string(params, "extension_id")
+        result = self._loader.update_extension_source(
+            extension_id,
+            source_type=_optional_string(params.get("source_type")),
+            source_path=_optional_string(params.get("source_path")),
+            repo_url=_optional_string(params.get("repo_url")),
+            ref=_optional_string(params.get("ref")),
+        )
+        return {
+            "ok": bool(result.get("ok")),
+            "result": dict(result),
+            "extension_id": extension_id,
+            "extensions": list(self._loader.list_extensions()),
+        }
+
+    async def _package_remove(self, params: JsonMap) -> JsonMap:
+        self._ensure_loader_initialized()
+        extension_id = _required_string(params, "extension_id")
+        info = self._loader.get_extension_info(extension_id) or {}
+        if info.get("source_kind") == "builtin":
+            return {
+                "ok": False,
+                "status": "conflict",
+                "message": f"Refusing to remove builtin extension: {extension_id}",
+                "extension_id": extension_id,
+                "extensions": list(self._loader.list_extensions()),
+            }
+        result = self._loader.remove_user_extension(extension_id)
+        return {
+            "ok": bool(result.get("ok")),
+            "result": dict(result),
+            "extension_id": extension_id,
+            "extensions": list(self._loader.list_extensions()),
+        }
+
     async def _debug_probe(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
         ensure_manager = params.get("ensure_manager") is True
@@ -479,9 +642,10 @@ class ExtensionJsonRpcAdapter:
             "ok": True,
             "adapter": {
                 "pid": os.getpid(),
-                "cwd": str(Path.cwd()),
+                "cwd": str(_safe_cwd()),
                 "state_cwd": str(self._state.cwd),
                 "extensions_dir": str(self._state.extensions_dir),
+                "extension_roots": [str(root) for root in self._state.extension_roots],
                 "loader_initialized": self._loader_initialized,
                 "selected_extension_id": self._state.extension_id,
             },
@@ -918,9 +1082,10 @@ class ExtensionJsonRpcAdapter:
     def _ensure_loader_initialized(self) -> None:
         if self._loader_initialized:
             return
+        extension_roots = list(self._state.extension_roots) or [self._state.extensions_dir]
         self._loader.load_extensions(
-            self._state.extensions_dir,
-            self._state.extensions_dir.parent,
+            extension_roots,
+            self._state.cwd,
             _get_framework_shell_manager,
             self._broadcast,
             self._transcript,

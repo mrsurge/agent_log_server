@@ -16,27 +16,33 @@ pub struct ExtensionRegistry {
 
 #[derive(Debug)]
 struct ExtensionRegistryInner {
-    extensions_dir: PathBuf,
+    extension_roots: Vec<PathBuf>,
     config_dir: Option<PathBuf>,
     entries: Vec<ExtensionRegistryEntry>,
 }
 
 impl ExtensionRegistry {
-    pub fn load_with_config(extensions_dir: PathBuf, config_dir: Option<PathBuf>) -> Result<Self> {
-        let entries = discover_extensions(&extensions_dir)?;
+    pub fn load_with_config(
+        extension_roots: Vec<PathBuf>,
+        config_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        let entries = discover_extensions(&extension_roots)?;
         let mut entries = entries;
         apply_enabled_overrides(&mut entries, config_dir.as_ref())?;
-        Ok(Self::from_parts(extensions_dir, config_dir, entries))
+        Ok(Self::from_parts(extension_roots, config_dir, entries))
     }
 
-    pub fn load_empty_with_config(extensions_dir: PathBuf, config_dir: Option<PathBuf>) -> Self {
-        Self::from_parts(extensions_dir, config_dir, Vec::new())
+    pub fn load_empty_with_config(
+        extension_roots: Vec<PathBuf>,
+        config_dir: Option<PathBuf>,
+    ) -> Self {
+        Self::from_parts(extension_roots, config_dir, Vec::new())
     }
 
     pub fn reload(&self) -> Result<Vec<ExtensionRegistryEntry>> {
-        let extensions_dir = self.extensions_dir();
+        let extension_roots = self.extension_roots();
         let config_dir = self.config_dir();
-        let mut entries = discover_extensions(&extensions_dir)?;
+        let mut entries = discover_extensions(&extension_roots)?;
         apply_enabled_overrides(&mut entries, config_dir.as_ref())?;
         let mut guard = self
             .inner
@@ -134,24 +140,24 @@ impl ExtensionRegistry {
     }
 
     fn from_parts(
-        extensions_dir: PathBuf,
+        extension_roots: Vec<PathBuf>,
         config_dir: Option<PathBuf>,
         entries: Vec<ExtensionRegistryEntry>,
     ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(ExtensionRegistryInner {
-                extensions_dir,
+                extension_roots,
                 config_dir,
                 entries,
             })),
         }
     }
 
-    fn extensions_dir(&self) -> PathBuf {
+    fn extension_roots(&self) -> Vec<PathBuf> {
         self.inner
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extensions_dir
+            .extension_roots
             .clone()
     }
 
@@ -171,6 +177,8 @@ pub struct ExtensionRegistryEntry {
     #[serde(rename = "type")]
     pub extension_type: String,
     pub path: String,
+    pub source_root: PathBuf,
+    pub source_kind: String,
     pub enabled: bool,
     pub active: bool,
     pub version: String,
@@ -180,19 +188,38 @@ pub struct ExtensionRegistryEntry {
     pub dependency_details: Map<String, Value>,
     pub has_dependency_check: bool,
     pub has_dependency_install: bool,
+    pub install_source: Map<String, Value>,
+    pub installer_meta: Map<String, Value>,
     pub manifest: Map<String, Value>,
     pub capabilities: Map<String, Value>,
     pub ui: Map<String, Value>,
 }
 
-fn discover_extensions(extensions_dir: &PathBuf) -> Result<Vec<ExtensionRegistryEntry>> {
+fn discover_extensions(extension_roots: &[PathBuf]) -> Result<Vec<ExtensionRegistryEntry>> {
+    let mut merged: Vec<ExtensionRegistryEntry> = Vec::new();
+    for (index, root) in extension_roots.iter().enumerate() {
+        let source_kind = if index == 0 { "builtin" } else { "user" };
+        for entry in discover_extensions_in_root(root, source_kind)? {
+            if let Some(position) = merged.iter().position(|existing| existing.id == entry.id) {
+                merged.remove(position);
+            }
+            merged.push(entry);
+        }
+    }
+    Ok(merged)
+}
+
+fn discover_extensions_in_root(
+    extensions_dir: &PathBuf,
+    source_kind: &str,
+) -> Result<Vec<ExtensionRegistryEntry>> {
     if !extensions_dir.is_dir() {
         return Ok(Vec::new());
     }
 
     let explicit = extensions_dir.join("extensions.json");
     if explicit.is_file() {
-        return discover_from_registry_file(extensions_dir, explicit);
+        return discover_from_registry_file(extensions_dir, explicit, source_kind);
     }
 
     let mut entries = Vec::new();
@@ -213,6 +240,7 @@ fn discover_extensions(extensions_dir: &PathBuf) -> Result<Vec<ExtensionRegistry
         }
         entries.push(entry_from_parts(
             extensions_dir,
+            source_kind,
             &folder,
             Map::new(),
             manifest,
@@ -225,6 +253,7 @@ fn discover_extensions(extensions_dir: &PathBuf) -> Result<Vec<ExtensionRegistry
 fn discover_from_registry_file(
     extensions_dir: &PathBuf,
     registry_path: PathBuf,
+    source_kind: &str,
 ) -> Result<Vec<ExtensionRegistryEntry>> {
     let data = read_json_object(&registry_path)?;
     let mut entries = Vec::new();
@@ -243,6 +272,7 @@ fn discover_from_registry_file(
         let manifest = read_manifest(extensions_dir, &folder)?;
         entries.push(entry_from_parts(
             extensions_dir,
+            source_kind,
             &folder,
             registry_entry,
             manifest,
@@ -252,7 +282,8 @@ fn discover_from_registry_file(
 }
 
 fn entry_from_parts(
-    _extensions_dir: &PathBuf,
+    extensions_dir: &PathBuf,
+    source_kind: &str,
     folder: &str,
     registry_entry: Map<String, Value>,
     manifest: Map<String, Value>,
@@ -283,6 +314,10 @@ fn entry_from_parts(
     let capabilities = object_or_empty(manifest.get("capabilities").unwrap_or(&Value::Null));
     let ui = object_or_empty(manifest.get("ui").unwrap_or(&Value::Null));
     let dependencies = object_or_empty(manifest.get("dependencies").unwrap_or(&Value::Null));
+    let install_source =
+        object_or_empty(registry_entry.get("install_source").unwrap_or(&Value::Null));
+    let installer_meta =
+        object_or_empty(registry_entry.get("installer_meta").unwrap_or(&Value::Null));
     let has_dependency_check = dependencies
         .get("has_check")
         .and_then(Value::as_bool)
@@ -297,6 +332,8 @@ fn entry_from_parts(
         name,
         extension_type,
         path: folder.to_owned(),
+        source_root: extensions_dir.clone(),
+        source_kind: source_kind.to_owned(),
         enabled,
         active: enabled && dependency_ok,
         version,
@@ -306,6 +343,8 @@ fn entry_from_parts(
         dependency_details: Map::new(),
         has_dependency_check,
         has_dependency_install,
+        install_source,
+        installer_meta,
         manifest,
         capabilities,
         ui,
@@ -454,7 +493,7 @@ mod tests {
         )
         .unwrap();
 
-        let registry = ExtensionRegistry::load_with_config(ext_dir, None).unwrap();
+        let registry = ExtensionRegistry::load_with_config(vec![ext_dir], None).unwrap();
         let entries = registry.list();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "copilot-sdk");
@@ -493,7 +532,7 @@ mod tests {
         )
         .unwrap();
 
-        let registry = ExtensionRegistry::load_with_config(ext_dir.clone(), None).unwrap();
+        let registry = ExtensionRegistry::load_with_config(vec![ext_dir.clone()], None).unwrap();
         assert_eq!(registry.list().len(), 1);
         fs::write(
             ext_dir.join("extensions.json"),
@@ -504,6 +543,45 @@ mod tests {
         let entries = registry.reload().unwrap();
         assert_eq!(entries.len(), 2);
         assert!(registry.get("codex-ext").is_some());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn user_root_overrides_builtin_root_and_reload_sees_new_user_entries() {
+        let root = std::env::temp_dir().join(format!("als-rs-ext-reg-roots-{}", unix_millis()));
+        let builtin_dir = root.join("builtin");
+        let user_dir = root.join("user");
+        fs::create_dir_all(builtin_dir.join("shared_ext")).unwrap();
+        fs::create_dir_all(user_dir.join("shared_ext")).unwrap();
+        fs::write(
+            builtin_dir.join("shared_ext").join("manifest.json"),
+            r#"{"id":"shared","name":"Builtin Shared","version":"1.0.0","type":"builtin_type"}"#,
+        )
+        .unwrap();
+        fs::write(
+            user_dir.join("shared_ext").join("manifest.json"),
+            r#"{"id":"shared","name":"User Shared","version":"2.0.0","type":"user_type"}"#,
+        )
+        .unwrap();
+
+        let registry =
+            ExtensionRegistry::load_with_config(vec![builtin_dir.clone(), user_dir.clone()], None)
+                .unwrap();
+        let shared = registry.get("shared").unwrap();
+        assert_eq!(shared.name, "User Shared");
+        assert_eq!(shared.extension_type, "user_type");
+        assert_eq!(shared.source_kind, "user");
+        assert_eq!(shared.source_root, user_dir);
+
+        fs::create_dir_all(builtin_dir.join("builtin_only")).unwrap();
+        fs::write(
+            builtin_dir.join("builtin_only").join("manifest.json"),
+            r#"{"id":"builtin-only","name":"Builtin Only","version":"1.0.0","type":"builtin_type"}"#,
+        )
+        .unwrap();
+        let entries = registry.reload().unwrap();
+        assert!(entries.iter().any(|entry| entry.id == "builtin-only"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -526,13 +604,15 @@ mod tests {
         .unwrap();
 
         let registry =
-            ExtensionRegistry::load_with_config(ext_dir.clone(), Some(config_dir.clone())).unwrap();
+            ExtensionRegistry::load_with_config(vec![ext_dir.clone()], Some(config_dir.clone()))
+                .unwrap();
         let updated = registry.set_enabled("copilot-sdk", false).unwrap().unwrap();
         assert!(!updated.enabled);
         assert!(!updated.active);
         assert!(!registry.get("copilot-sdk").unwrap().active);
 
-        let reloaded = ExtensionRegistry::load_with_config(ext_dir, Some(config_dir)).unwrap();
+        let reloaded =
+            ExtensionRegistry::load_with_config(vec![ext_dir], Some(config_dir)).unwrap();
         let entry = reloaded.get("copilot-sdk").unwrap();
         assert!(!entry.enabled);
         assert!(!entry.active);
@@ -556,7 +636,7 @@ mod tests {
         )
         .unwrap();
 
-        let registry = ExtensionRegistry::load_with_config(ext_dir, None).unwrap();
+        let registry = ExtensionRegistry::load_with_config(vec![ext_dir], None).unwrap();
         assert!(registry.get("copilot-sdk").unwrap().active);
         registry.apply_runtime_extensions(&serde_json::json!({
             "extensions": [{

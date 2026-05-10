@@ -122,7 +122,7 @@ Recommended runtime environment variables:
 | `ALS_RS_HOST` | Bind host. Default: `127.0.0.1`. |
 | `ALS_RS_PORT` | Standalone HTTP port. Recommended default: `12459`. |
 | `ALS_RS_STATIC_DIR` | Static/frontend asset root, normally package-managed. |
-| `ALS_RS_EXTENSIONS_DIR` | Extension registry root. Default: repo-local `extensions/` in development. |
+| `ALS_RS_EXTENSIONS_DIR` | Builtin extension registry root. Default: repo-local `extensions/` in development. |
 | `ALS_RS_PYTHON_BIN` | Python executable used by Rust to launch adapter subprocesses. |
 | `ALS_RS_EXTENSION_ADAPTER` | Reserved adapter executable/module override; current Rust path launches the generic adapter module directly. |
 | `ALS_RS_LOG_LEVEL` | Rust/Python adapter log verbosity. |
@@ -489,6 +489,10 @@ Supported Copilot scope:
 | --- | --- |
 | `extension.initialize` | Initializes the loader, returns capabilities for the selected extension, and reports unsupported runtime capabilities for non-Copilot types. |
 | `extension.list_models` | For `copilot-sdk`, calls the existing Copilot SDK extension `list_models()` and normalizes each model into `AdapterModelInfo`. |
+| `extension.package.validate` | Validates a path/zip/git extension source through the existing Python installer helpers. |
+| `extension.package.install` | Installs a third-party extension into `${ALS_RS_DATA_DIR}/extensions`, updates that root's `extensions.json`, then reloads Rust and adapter registry state. |
+| `extension.package.update` | Updates a user-installed extension from an explicit or recorded source, then reloads Rust and adapter registry state. |
+| `extension.package.remove` | Removes only user-installed extensions; builtin extensions are refused. |
 | `conversation.start` | For `copilot-sdk`, calls the existing Copilot SDK extension `init_session()` and returns `ConversationAckResult`. |
 | `conversation.send` | For `copilot-sdk`, calls the existing Copilot SDK extension `handle_message()` and returns `ConversationAckResult`. |
 | `extension.shutdown` | Stops supported extension handlers. |
@@ -539,8 +543,10 @@ Runtime behavior:
   - `FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID`
   - `FRAMEWORK_SHELLS_SECRET_FINGERPRINT`, derived from
     `FRAMEWORK_SHELLS_REPO_FINGERPRINT` when present
-- `extension.initialize` passes `extensions_dir` so the Python loader and Rust
-  registry use the same extension registry root.
+- `extension.initialize` passes ordered `extensions_dirs` so the Python loader
+  and Rust registry use the same multi-root extension view. Root 0 is builtin;
+  root 1 is the ALS-RS user-installed extension root at
+  `${ALS_RS_DATA_DIR}/extensions`.
 - Adapter transport is newline-delimited JSON-RPC 2.0 on stdin/stdout.
 - If `ferrous-framework-pyo3` is enabled and framework-shell config is present,
   `als-server` prefers the `ferrous_framework` transport: a PyO3-backed

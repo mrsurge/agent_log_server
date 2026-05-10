@@ -73,6 +73,7 @@ impl AdapterSupervisor {
         let params = ExtensionInitializeParams {
             extension_id: extension_id.to_owned(),
             extensions_dir: Some(self.config.extensions_dir.clone()),
+            extensions_dirs: Some(self.config.extension_roots()),
             cwd: self
                 .config
                 .extensions_dir
@@ -204,7 +205,7 @@ impl AdapterClient {
         framework_shells: &FrameworkShellConfig,
         events: AdapterEventSink,
     ) -> Result<Self> {
-        let cwd = python_path_root.clone();
+        let cwd = Some(adapter_working_dir(python_path_root.as_deref(), roots));
         let shellspec_path = python_path_root
             .as_ref()
             .map(|root| root.join("agent_log_server_rs/shellspec/extension_adapter.yaml"));
@@ -275,6 +276,7 @@ impl AdapterClient {
         {
             command.env(key, value);
         }
+        command.current_dir(adapter_working_dir(python_path_root.as_deref(), roots));
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn extension adapter via {python}"))?;
@@ -402,6 +404,22 @@ fn adapter_env_overrides(
         roots.static_dir.to_string_lossy().into_owned(),
     );
     env
+}
+
+fn adapter_working_dir(python_path_root: Option<&Path>, roots: &RuntimeRoots) -> PathBuf {
+    for candidate in [
+        python_path_root,
+        Some(roots.data_dir.as_path()),
+        Some(roots.cache_dir.as_path()),
+        Some(roots.config_dir.as_path()),
+    ] {
+        if let Some(path) = candidate {
+            if path.is_dir() {
+                return path.to_path_buf();
+            }
+        }
+    }
+    roots.data_dir.clone()
 }
 
 async fn read_ferrous_adapter_stdout(

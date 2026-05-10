@@ -1,8 +1,8 @@
 use axum::{
-    extract::{Path as AxumPath, State},
     Json, Router,
-    http::header::CONTENT_TYPE,
+    extract::{Path as AxumPath, State},
     http::StatusCode,
+    http::header::CONTENT_TYPE,
     response::{Html, IntoResponse, Response},
     routing::get,
 };
@@ -77,7 +77,7 @@ fn extension_asset_path(state: &AppState, extension_id: &str, asset_path: &str) 
     if first != "ui" && first != "static" {
         return None;
     }
-    let mut path = state.config.extensions_dir.join(entry.path);
+    let mut path = entry.source_root.join(entry.path);
     for part in parts {
         path.push(part);
         if std::fs::symlink_metadata(&path)
@@ -114,7 +114,11 @@ fn safe_asset_components(asset_path: &str) -> Option<Vec<String>> {
 }
 
 fn content_type_for_path(path: &Path) -> &'static str {
-    match path.extension().and_then(|value| value.to_str()).unwrap_or("") {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+    {
         "css" => "text/css; charset=utf-8",
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",

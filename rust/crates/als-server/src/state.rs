@@ -40,7 +40,7 @@ impl AppState {
         let agent_log = AgentLogStore::with_cache_dir(config.roots.cache_dir.clone());
         let conversations = ConversationStore::new(config.roots.data_dir.clone());
         let extensions = ExtensionRegistry::load_with_config(
-            config.extensions_dir.clone(),
+            config.extension_roots(),
             Some(config.roots.config_dir.clone()),
         )
         .unwrap_or_else(|error| {
@@ -50,7 +50,7 @@ impl AppState {
                 "failed to load ALS-RS extension registry"
             );
             ExtensionRegistry::load_empty_with_config(
-                config.extensions_dir.clone(),
+                config.extension_roots(),
                 Some(config.roots.config_dir.clone()),
             )
         });

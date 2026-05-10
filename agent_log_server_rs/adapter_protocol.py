@@ -20,6 +20,10 @@ class AdapterMethod(StrEnum):
     EXTENSION_SHUTDOWN = "extension.shutdown"
     EXTENSION_RELOAD = "extension.reload"
     EXTENSION_INSTALL_DEPENDENCIES = "extension.install_dependencies"
+    EXTENSION_PACKAGE_VALIDATE = "extension.package.validate"
+    EXTENSION_PACKAGE_INSTALL = "extension.package.install"
+    EXTENSION_PACKAGE_UPDATE = "extension.package.update"
+    EXTENSION_PACKAGE_REMOVE = "extension.package.remove"
     EXTENSION_DEBUG_PROBE = "extension.debug_probe"
     EXTENSION_WARM_UP = "extension.warm_up"
     EXTENSION_GET_SETTINGS_SCHEMA = "extension.get_settings_schema"
@@ -147,6 +151,7 @@ class ExtensionInitializeParams:
     cache_dir: Path
     config_dir: Path
     extensions_dir: Path | None = None
+    extensions_dirs: list[Path] = field(default_factory=list)
     settings: JsonMap = field(default_factory=dict)
 
     def to_json(self) -> JsonMap:
@@ -159,6 +164,8 @@ class ExtensionInitializeParams:
         }
         if self.extensions_dir:
             payload["extensions_dir"] = str(self.extensions_dir)
+        if self.extensions_dirs:
+            payload["extensions_dirs"] = [str(path) for path in self.extensions_dirs]
         if self.settings:
             payload["settings"] = dict(self.settings)
         return payload

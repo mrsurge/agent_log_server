@@ -65,6 +65,10 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
         }
         "extension.enabled.set" => extension_enabled_set(state, &request.params).await,
         "extension.install" => extension_install(state, &request.params).await,
+        "extension.package.validate" => extension_package_validate(state, &request.params).await,
+        "extension.package.install" => extension_package_install(state, &request.params).await,
+        "extension.package.update" => extension_package_update(state, &request.params).await,
+        "extension.package.remove" => extension_package_remove(state, &request.params).await,
         "extension.debug.probe" => extension_debug_probe(state, &request.params).await,
         "extension.session.bind" => Ok(
             json!({"ok": false, "error": format!("{} is not implemented in ALS-RS yet", request.method), "transport": "rpc"}),
@@ -227,9 +231,16 @@ async fn extension_enabled_set(state: &AppState, params: &JsonMap) -> Result<Val
 async fn extension_install(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
     let extension_id = require_extension_id(params)?;
     ensure_registered_extension(state, &extension_id)?;
+    install_extension_dependencies(state, &extension_id).await
+}
+
+async fn install_extension_dependencies(
+    state: &AppState,
+    extension_id: &str,
+) -> Result<Value, RpcError> {
     state
         .adapter
-        .initialize_extension(&extension_id)
+        .initialize_extension(extension_id)
         .await
         .map_err(internal_rpc_error)?;
     let mut result = state
@@ -248,6 +259,30 @@ async fn extension_install(state: &AppState, params: &JsonMap) -> Result<Value, 
         object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
     }
     Ok(result)
+}
+
+async fn extension_package_validate(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let mut result =
+        adapter_package_request(state, methods::EXTENSION_PACKAGE_VALIDATE, params).await?;
+    if let Value::Object(ref mut object) = result {
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+    }
+    Ok(result)
+}
+
+async fn extension_package_install(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let result = adapter_package_request(state, methods::EXTENSION_PACKAGE_INSTALL, params).await?;
+    finalize_package_mutation(state, result, params).await
+}
+
+async fn extension_package_update(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let result = adapter_package_request(state, methods::EXTENSION_PACKAGE_UPDATE, params).await?;
+    finalize_package_mutation(state, result, params).await
+}
+
+async fn extension_package_remove(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let result = adapter_package_request(state, methods::EXTENSION_PACKAGE_REMOVE, params).await?;
+    finalize_package_mutation(state, result, params).await
 }
 
 async fn extension_debug_probe(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
@@ -504,6 +539,98 @@ async fn adapter_extension_request_with_params(
         .request_value(method, params)
         .await
         .map_err(internal_rpc_error)
+}
+
+async fn adapter_package_request(
+    state: &AppState,
+    method: &str,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
+    let init_extension_id = state
+        .extensions
+        .list()
+        .into_iter()
+        .find(|entry| entry.active)
+        .or_else(|| state.extensions.list().into_iter().next())
+        .map(|entry| entry.id)
+        .ok_or_else(|| rpc_error(-32602, "at least one extension root entry is required"))?;
+    state
+        .adapter
+        .initialize_extension(&init_extension_id)
+        .await
+        .map_err(internal_rpc_error)?;
+    state
+        .adapter
+        .client()
+        .await
+        .map_err(internal_rpc_error)?
+        .request_value(method, params)
+        .await
+        .map_err(internal_rpc_error)
+}
+
+async fn finalize_package_mutation(
+    state: &AppState,
+    mut result: Value,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
+    let ok = result
+        .as_object()
+        .and_then(|object| object.get("ok"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut dependency_install: Option<Value> = None;
+    if ok {
+        state.extensions.reload().map_err(internal_rpc_error)?;
+        let adapter = state
+            .adapter
+            .reload_extensions_if_running(state.extensions.enabled_overrides(), None)
+            .await
+            .map_err(internal_rpc_error)?;
+        if let Some(adapter) = adapter.as_ref() {
+            state.extensions.apply_runtime_extensions(adapter);
+        }
+        if params
+            .get("install_dependencies")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            if let Some(extension_id) = package_result_extension_id(&result, params) {
+                dependency_install =
+                    Some(install_extension_dependencies(state, &extension_id).await?);
+            }
+        }
+    }
+    if let Value::Object(ref mut object) = result {
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        object.insert(
+            "extensions".to_owned(),
+            serde_json::to_value(state.extensions.list()).map_err(internal_rpc_error)?,
+        );
+        if let Some(value) = dependency_install {
+            object.insert("dependency_install".to_owned(), value);
+        }
+    }
+    Ok(result)
+}
+
+fn package_result_extension_id(result: &Value, params: &JsonMap) -> Option<String> {
+    result
+        .as_object()
+        .and_then(|object| object.get("extension_id"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            result
+                .as_object()
+                .and_then(|object| object.get("result"))
+                .and_then(Value::as_object)
+                .and_then(|object| object.get("extension_id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| params.get("extension_id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn require_extension_id(params: &JsonMap) -> Result<String, RpcError> {

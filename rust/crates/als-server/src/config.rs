@@ -76,15 +76,30 @@ impl ServerConfig {
     }
 
     fn ensure_roots(&self) -> Result<()> {
+        let user_extensions_dir = self.user_extensions_dir();
         for root in [
             &self.roots.data_dir,
             &self.roots.cache_dir,
             &self.roots.config_dir,
+            &user_extensions_dir,
         ] {
             fs::create_dir_all(root)
                 .with_context(|| format!("failed to create ALS-RS root {}", root.display()))?;
         }
         Ok(())
+    }
+
+    pub fn user_extensions_dir(&self) -> PathBuf {
+        self.roots.data_dir.join("extensions")
+    }
+
+    pub fn extension_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.extensions_dir.clone()];
+        let user_root = self.user_extensions_dir();
+        if user_root != self.extensions_dir {
+            roots.push(user_root);
+        }
+        roots
     }
 }
 
