@@ -1510,6 +1510,9 @@ class CodexEventRouter:
             "tool_delta",
             "tool_end",
             "tool_interaction",
+            "shell_begin",
+            "shell_delta",
+            "shell_end",
             "command_result",
             "reasoning_delta",
             "reasoning_finalize",
@@ -2368,10 +2371,11 @@ class CodexEventRouter:
                     "handled": True,
                     "events": [
                         {
-                            "type": "tool_begin",
+                            "type": "shell_begin",
                             "id": item_id or _assistant_id(item, thread_id, turn_id),
-                            "tool": "command",
-                            "arguments": {"command": command, "cwd": cwd} if command or cwd else {},
+                            "command": _command_text(command),
+                            "cwd": cwd,
+                            "activity": "running command",
                         },
                         {"type": "activity", "label": "running command", "active": True},
                     ],
@@ -2579,12 +2583,22 @@ class CodexEventRouter:
                 state["output_buffer"] = f"{state.get('output_buffer', '')}{delta}"
                 if state.get("view_spec") or state.get("view_sequence") or state.get("search_spec"):
                     return {"handled": True, "events": [], "transcript_entries": []}
+                if not state.get("new_file_spec"):
+                    return self._decorate_routed_result({
+                        "handled": True,
+                        "events": [{
+                            "type": "shell_delta",
+                            "id": item_id or _assistant_id(payload, thread_id, turn_id),
+                            "delta": delta,
+                        }],
+                        "transcript_entries": [],
+                    }, thread_id=thread_id, item_state=state)
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": [{
                         "type": "tool_delta",
                         "id": item_id or _assistant_id(payload, thread_id, turn_id),
-                        "tool": "apply_patch" if state.get("new_file_spec") else "command",
+                        "tool": "apply_patch",
                         "delta": delta,
                     }],
                     "transcript_entries": [],
@@ -2884,26 +2898,16 @@ class CodexEventRouter:
                     "handled": True,
                     "events": [
                         {
-                            "type": "tool_end",
-                            "id": item_id or _assistant_id(item, thread_id, turn_id),
-                            "tool": "command",
-                            "arguments": {"command": command, "cwd": cwd} if command or cwd else {},
-                            "result": {
-                                "status": status or "completed",
-                                "exit_code": exit_code,
-                                "output_lines": len(output.splitlines()) if output else 0,
-                            },
-                            "duration_ms": duration_ms,
-                            "is_error": is_error,
-                        },
-                        {
-                            "type": "command_result",
+                            "type": "shell_end",
                             "id": item_id or _assistant_id(item, thread_id, turn_id),
                             "command": display_command,
                             "cwd": cwd,
-                            "output": output,
-                            "exit_code": exit_code,
+                            "stdout": output,
+                            "stderr": "",
+                            "exitCode": exit_code if exit_code is not None else (1 if is_error else 0),
                             "duration_ms": duration_ms,
+                            "status": status or ("error" if is_error else "completed"),
+                            "is_error": is_error,
                         },
                         {"type": "activity", "label": "processing", "active": True},
                     ],

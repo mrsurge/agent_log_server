@@ -1,4 +1,5 @@
 use crate::{
+    conversation_rpc,
     conversation_store::ConversationMetaUpdate,
     state::{AppState, HostUiSnapshot},
 };
@@ -13,7 +14,7 @@ use serde_json::{Map, Value, json};
 use socketioxide::SocketIo;
 use std::{
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::Mutex as AsyncMutex, sync::oneshot, time::timeout};
 use tracing::warn;
@@ -22,7 +23,9 @@ const SIDEBAR_NAMESPACE: &str = "/sidebar_ipc";
 const SIDEBAR_SOCKET_PATH: &str = "/ui_ipc_ws/socket.io/";
 const UI_RPC_NAMESPACE: &str = "/rpc/ui";
 const CONVERSATIONS_RPC_NAMESPACE: &str = "/rpc/conversations";
+const RPC_EVENT: &str = "rpc";
 const RPC_NOTIFY_EVENT: &str = "rpc.notify";
+const JSONRPC_VERSION: &str = "2.0";
 
 #[derive(Clone, Default)]
 pub struct SidebarIpcStore {
@@ -73,6 +76,18 @@ pub async fn emit_agent_open(io: &SocketIo, state: &AppState, payload: JsonMap) 
     let Ok(Some(client)) = ensure_client(io, state).await else {
         return false;
     };
+    match sidebar_rpc_call(&client, "sidebar.file.open", Value::Object(payload.clone())).await {
+        Ok(value) if !rpc_result_explicitly_not_ok(&value) => return true,
+        Ok(value) => {
+            warn!(
+                ?value,
+                "sidebar.file.open RPC returned an unsuccessful result; falling back to legacy event"
+            );
+        }
+        Err(error) => {
+            warn!(%error, "sidebar.file.open RPC failed; falling back to legacy event");
+        }
+    }
     match client
         .emit("sidebar:agent_open", Value::Object(payload))
         .await
@@ -97,6 +112,8 @@ async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>
     let disconnect_state = state.clone();
     let mention_io = io.clone();
     let mention_state = state.clone();
+    let notify_io = io.clone();
+    let notify_state = state.clone();
 
     let client = ClientBuilder::new(address)
         .namespace(SIDEBAR_NAMESPACE)
@@ -127,6 +144,16 @@ async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>
                 };
                 if let Err(error) = process_mention(&io, &state, payload).await {
                     warn!(%error, "sidebar mention processing failed");
+                }
+            }
+            .boxed()
+        })
+        .on(RPC_NOTIFY_EVENT, move |payload, _client| {
+            let io = notify_io.clone();
+            let state = notify_state.clone();
+            async move {
+                if let Err(error) = process_rpc_notification(&io, &state, payload).await {
+                    warn!(%error, "sidebar RPC notification processing failed");
                 }
             }
             .boxed()
@@ -173,6 +200,19 @@ async fn query_initial_cwd(
     io: &SocketIo,
     state: &AppState,
 ) -> Result<Option<String>> {
+    match sidebar_rpc_call(client, "sidebar.cwd.get", json!({})).await {
+        Ok(value) => {
+            if let Some(cwd) = cwd_from_value(&value) {
+                update_project_root(io, state, cwd.clone()).await?;
+                return Ok(Some(cwd));
+            }
+            return Ok(None);
+        }
+        Err(error) => {
+            warn!(%error, "sidebar.cwd.get RPC failed; falling back to legacy event");
+        }
+    }
+
     let (tx, rx) = oneshot::channel::<Option<Value>>();
     let tx = Arc::new(Mutex::new(Some(tx)));
     let tx_for_ack = tx.clone();
@@ -206,9 +246,94 @@ async fn query_initial_cwd(
     Ok(None)
 }
 
+async fn sidebar_rpc_call(client: &Client, method: &str, params: Value) -> Result<Value> {
+    let request_id = format!("als-rs-sidebar-{}", unix_millis());
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": request_id,
+        "method": method,
+        "params": params,
+    });
+    let (tx, rx) = oneshot::channel::<Option<Value>>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let tx_for_ack = tx.clone();
+    client
+        .emit_with_ack(
+            RPC_EVENT,
+            request,
+            Duration::from_secs(5),
+            move |payload, _client| {
+                let tx = tx_for_ack.clone();
+                async move {
+                    if let Ok(mut guard) = tx.lock() {
+                        if let Some(sender) = guard.take() {
+                            let _ = sender.send(payload_first_value(payload));
+                        }
+                    }
+                }
+                .boxed()
+            },
+        )
+        .await
+        .map_err(|error| anyhow!(error.to_string()))?;
+
+    let Some(value) = timeout(Duration::from_secs(5), rx).await?? else {
+        bail!("sidebar RPC {method} returned no ack payload");
+    };
+    sidebar_rpc_result(method, value)
+}
+
+fn sidebar_rpc_result(method: &str, value: Value) -> Result<Value> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("sidebar RPC {method} ack is not an object"))?;
+    if let Some(error) = object.get("error") {
+        let message = error
+            .as_object()
+            .and_then(|error| string_from_object(error, "message"))
+            .unwrap_or_else(|| format!("sidebar RPC {method} failed"));
+        bail!("{message}");
+    }
+    Ok(object.get("result").cloned().unwrap_or(Value::Null))
+}
+
+fn rpc_result_explicitly_not_ok(value: &Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("ok"))
+        .and_then(Value::as_bool)
+        == Some(false)
+}
+
 async fn update_project_root(io: &SocketIo, state: &AppState, cwd: String) -> Result<()> {
     state.host_ui.set_project_root(Some(cwd), true)?;
     emit_host_ui_updated(io, state).await;
+    Ok(())
+}
+
+async fn process_rpc_notification(io: &SocketIo, state: &AppState, payload: Payload) -> Result<()> {
+    let Some(envelope) = payload_to_object(payload) else {
+        bail!("sidebar RPC notification payload is not an object");
+    };
+    let method = string_field(&envelope, "method").ok_or_else(|| anyhow!("missing RPC method"))?;
+    let params = envelope
+        .get("params")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    match method.as_str() {
+        "sidebar.cwd.set" => {
+            if let Some(cwd) = string_field(&params, "cwd") {
+                update_project_root(io, state, cwd).await?;
+            }
+        }
+        "sidebar.mention" => {
+            process_mention(io, state, params).await?;
+        }
+        _ => {
+            warn!(method, "ignored sidebar RPC notification");
+        }
+    }
     Ok(())
 }
 
@@ -313,6 +438,12 @@ async fn process_mention(io: &SocketIo, state: &AppState, payload: JsonMap) -> R
             ..Default::default()
         },
     )?;
+    let updated_draft = state
+        .conversations
+        .load_meta(&conversation_id)?
+        .draft
+        .unwrap_or_default();
+    conversation_rpc::emit_draft_updated(io, &conversation_id, &updated_draft).await;
     Ok(json!({"ok": true, "queued": true, "conversation_id": conversation_id, "path": path}))
 }
 
@@ -337,6 +468,13 @@ fn payload_first_value(payload: Payload) -> Option<Value> {
         Payload::Binary(_) => None,
         _ => None,
     }
+}
+
+fn unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }
 
 fn cwd_from_value(value: &Value) -> Option<String> {
@@ -436,7 +574,10 @@ fn positive(value: Option<i64>) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cwd_from_value, encode_draft_mention_token, truncated_content};
+    use super::{
+        cwd_from_value, encode_draft_mention_token, rpc_result_explicitly_not_ok,
+        sidebar_rpc_result, truncated_content,
+    };
     use serde_json::json;
 
     #[test]
@@ -458,6 +599,37 @@ mod tests {
             Some("/nested-ack-array".to_owned())
         );
         assert_eq!(cwd_from_value(&json!({"data": {"cwd": ""}})), None);
+    }
+
+    #[test]
+    fn sidebar_rpc_result_extracts_result_or_error() {
+        assert_eq!(
+            sidebar_rpc_result(
+                "sidebar.cwd.get",
+                json!({"jsonrpc": "2.0", "id": "1", "result": {"cwd": "/repo"}})
+            )
+            .expect("result should parse"),
+            json!({"cwd": "/repo"})
+        );
+
+        let error = sidebar_rpc_result(
+            "sidebar.cwd.get",
+            json!({
+                "jsonrpc": "2.0",
+                "id": "1",
+                "error": {"code": -32601, "message": "unknown sidebar method"}
+            }),
+        )
+        .expect_err("error response should fail");
+        assert!(error.to_string().contains("unknown sidebar method"));
+    }
+
+    #[test]
+    fn rpc_result_ok_checker_only_rejects_explicit_false() {
+        assert!(rpc_result_explicitly_not_ok(&json!({"ok": false})));
+        assert!(!rpc_result_explicitly_not_ok(&json!({"ok": true})));
+        assert!(!rpc_result_explicitly_not_ok(&json!({"cwd": "/repo"})));
+        assert!(!rpc_result_explicitly_not_ok(&json!(null)));
     }
 
     #[test]

@@ -1383,11 +1383,18 @@ Acceptance:
      runtime signature/config during `handle_message()` and re-resumes when the
      effective prompt context changes. That gives next-turn/resume/compact
      freshness without a mid-turn push.
-   - TE2 sidebar IPC: Rust owns the legacy-lane sidebar client for now. UI RPC
-     `hostUi.recheck` best-effort connects to TE2 `/sidebar_ipc` and syncs CWD,
-     `file.open` emits `sidebar:agent_open`, and `sidebar:mention` inserts live
-     mentions or queues legacy draft mention tokens depending on the active
-     conversation/view state.
+    - TE2 sidebar IPC/RPC: Rust now speaks the typed JSON-RPC contract over the
+      existing `/sidebar_ipc` logical namespace and `/ui_ipc_ws/socket.io`
+      physical path. UI RPC `hostUi.recheck` best-effort calls
+      `sidebar.cwd.get` and syncs CWD, `file.open` calls `sidebar.file.open`,
+      and `rpc.notify` handles `sidebar.cwd.set` / `sidebar.mention`; narrow
+      legacy `sidebar:*` fallback remains only for older TE2 instances during
+      the cutover.
+    - synced composer drafts: ALS-RS now broadcasts
+      `conversation.draft.updated` after `conversation.draft.set` and after
+      queued sidebar mentions update an inactive conversation draft, so other
+      clients can hydrate live draft changes through the existing frontend
+      `draft_update` path.
    - interrupt
    - compact
    - shell/tool card parity for the Copilot pilot

@@ -605,11 +605,7 @@ fn ui_features_for_entry(entry: &ExtensionRegistryEntry) -> Value {
         .and_then(Value::as_object)
         .map(semantic_shell_quote_parsing)
         .unwrap_or(false);
-    let tool_render_policy = entry
-        .ui
-        .get("toolRenderPolicy")
-        .cloned()
-        .unwrap_or_else(default_tool_render_policy);
+    let tool_render_policy = normalize_tool_render_policy(entry.ui.get("toolRenderPolicy"));
     json!({
         "semanticShellRibbon": {
             "quoteParsing": quote_parsing
@@ -644,6 +640,184 @@ fn default_tool_render_policy() -> Value {
     })
 }
 
+fn normalize_tool_render_policy(policy_raw: Option<&Value>) -> Value {
+    let mut policy = default_tool_render_policy();
+    let Some(policy_map) = policy_raw.and_then(Value::as_object) else {
+        return policy;
+    };
+
+    if let Some(default_raw) = policy_map.get("default").and_then(Value::as_object) {
+        let mut normalized_default = Map::new();
+        if let Some(spec) = first_tool_render_spec(default_raw, &["request", "args", "arguments"]) {
+            normalized_default.insert("request".to_owned(), spec);
+        }
+        if let Some(spec) = first_tool_render_spec(default_raw, &["response", "result"]) {
+            normalized_default.insert("response".to_owned(), spec);
+        }
+        if let Some(fields) = first_tool_render_field_map(
+            default_raw,
+            &["requestFields", "argsFields", "argumentsFields"],
+        ) {
+            normalized_default.insert("requestFields".to_owned(), fields);
+        }
+        if let Some(fields) =
+            first_tool_render_field_map(default_raw, &["responseFields", "resultFields"])
+        {
+            normalized_default.insert("responseFields".to_owned(), fields);
+        }
+        if !normalized_default.is_empty() {
+            if let Some(existing_default) = policy.get_mut("default").and_then(Value::as_object_mut)
+            {
+                for (key, value) in normalized_default {
+                    existing_default.insert(key, value);
+                }
+            }
+        }
+    }
+
+    if let Some(rules_raw) = policy_map.get("rules").and_then(Value::as_array) {
+        let rules: Vec<Value> = rules_raw
+            .iter()
+            .filter_map(normalize_tool_render_rule)
+            .collect();
+        if let Some(policy_map) = policy.as_object_mut() {
+            policy_map.insert("rules".to_owned(), Value::Array(rules));
+        }
+    }
+
+    policy
+}
+
+fn normalize_tool_render_spec(spec_raw: &Value) -> Option<Value> {
+    if let Some(text) = spec_raw
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let lowered = text.to_ascii_lowercase();
+        if lowered == "plain" || lowered == "markdown" {
+            return Some(json!({"kind": lowered}));
+        }
+        if lowered == "hljs" {
+            return Some(json!({"kind": "hljs"}));
+        }
+        return Some(json!({"kind": "hljs", "language": text}));
+    }
+
+    let spec_map = spec_raw.as_object()?;
+    let kind = spec_map
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let language = spec_map
+        .get("language")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if kind != "plain" && kind != "markdown" && kind != "hljs" {
+        return language.map(|language| json!({"kind": "hljs", "language": language}));
+    }
+
+    let mut spec = Map::new();
+    let is_hljs = kind == "hljs";
+    spec.insert("kind".to_owned(), Value::String(kind));
+    if is_hljs {
+        if let Some(language) = language {
+            spec.insert("language".to_owned(), Value::String(language.to_owned()));
+        }
+    }
+    Some(Value::Object(spec))
+}
+
+fn normalize_tool_render_field_map(fields_raw: &Value) -> Option<Value> {
+    let fields_map = fields_raw.as_object()?;
+    let mut normalized = Map::new();
+    for (key, value) in fields_map {
+        let field_name = key.trim();
+        if field_name.is_empty() {
+            continue;
+        }
+        if let Some(spec) = normalize_tool_render_spec(value) {
+            normalized.insert(field_name.to_owned(), spec);
+        }
+    }
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(Value::Object(normalized))
+    }
+}
+
+fn first_tool_render_spec(map: &Map<String, Value>, keys: &[&str]) -> Option<Value> {
+    keys.iter()
+        .filter_map(|key| map.get(*key))
+        .find_map(normalize_tool_render_spec)
+}
+
+fn first_tool_render_field_map(map: &Map<String, Value>, keys: &[&str]) -> Option<Value> {
+    keys.iter()
+        .filter_map(|key| map.get(*key))
+        .find_map(normalize_tool_render_field_map)
+}
+
+fn normalize_tool_render_rule(rule_raw: &Value) -> Option<Value> {
+    let rule_map = rule_raw.as_object()?;
+    let mut rule = Map::new();
+
+    for field in ["server", "tool", "serverPrefix", "toolPrefix"] {
+        if let Some(value) = rule_map
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            rule.insert(field.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+
+    for field in ["servers", "tools"] {
+        if let Some(items_raw) = rule_map.get(field).and_then(Value::as_array) {
+            let items: Vec<Value> = items_raw
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| Value::String(value.to_owned()))
+                .collect();
+            if !items.is_empty() {
+                rule.insert(field.to_owned(), Value::Array(items));
+            }
+        }
+    }
+
+    if let Some(spec) = first_tool_render_spec(rule_map, &["request", "args", "arguments"]) {
+        rule.insert("request".to_owned(), spec);
+    }
+    if let Some(spec) = first_tool_render_spec(rule_map, &["response", "result"]) {
+        rule.insert("response".to_owned(), spec);
+    }
+    if let Some(fields) = first_tool_render_field_map(
+        rule_map,
+        &["requestFields", "argsFields", "argumentsFields"],
+    ) {
+        rule.insert("requestFields".to_owned(), fields);
+    }
+    if let Some(fields) = first_tool_render_field_map(rule_map, &["responseFields", "resultFields"])
+    {
+        rule.insert("responseFields".to_owned(), fields);
+    }
+
+    if rule.is_empty() {
+        None
+    } else {
+        Some(Value::Object(rule))
+    }
+}
+
 fn rpc_error(code: i64, message: impl Into<String>) -> RpcError {
     RpcError::new(code, message, None)
 }
@@ -662,4 +836,82 @@ struct JsonRpcRequest {
 enum RpcAck {
     Success(SuccessResponse),
     Error(ErrorResponse),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_tool_render_policy_aliases_and_specs() {
+        let policy = normalize_tool_render_policy(Some(&json!({
+            "default": {
+                "args": "markdown",
+                "result": {"kind": "hljs", "language": "json"},
+                "argsFields": {
+                    "content": "markdown",
+                    "code": {"kind": "hljs", "language": "javascript"},
+                    "ignored": {"kind": "unknown"}
+                },
+                "resultFields": {
+                    "value": "json"
+                }
+            },
+            "rules": [
+                {
+                    "server": "agent-pty-blocks",
+                    "toolPrefix": "kb_",
+                    "response": "markdown"
+                },
+                {
+                    "servers": ["te2-mcp", "", 42],
+                    "tools": ["te2_console_eval"],
+                    "argumentsFields": {
+                        "code": "javascript"
+                    },
+                    "responseFields": {
+                        "value": {"language": "json"}
+                    }
+                },
+                "bad-rule"
+            ]
+        })));
+
+        assert_eq!(policy["default"]["request"], json!({"kind": "markdown"}));
+        assert_eq!(
+            policy["default"]["response"],
+            json!({"kind": "hljs", "language": "json"})
+        );
+        assert_eq!(
+            policy["default"]["requestFields"]["code"],
+            json!({"kind": "hljs", "language": "javascript"})
+        );
+        assert!(policy["default"]["requestFields"].get("ignored").is_none());
+        assert_eq!(
+            policy["default"]["responseFields"]["value"],
+            json!({"kind": "hljs", "language": "json"})
+        );
+        assert_eq!(policy["rules"].as_array().map(Vec::len), Some(2));
+        assert_eq!(policy["rules"][0]["response"], json!({"kind": "markdown"}));
+        assert_eq!(
+            policy["rules"][1]["requestFields"]["code"],
+            json!({"kind": "hljs", "language": "javascript"})
+        );
+        assert_eq!(
+            policy["rules"][1]["responseFields"]["value"],
+            json!({"kind": "hljs", "language": "json"})
+        );
+    }
+
+    #[test]
+    fn falls_back_to_plain_policy_for_invalid_manifest_value() {
+        assert_eq!(
+            normalize_tool_render_policy(Some(&json!("markdown"))),
+            default_tool_render_policy()
+        );
+        assert_eq!(
+            normalize_tool_render_policy(Some(&json!({"rules": "bad"}))),
+            default_tool_render_policy()
+        );
+    }
 }

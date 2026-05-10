@@ -107,7 +107,7 @@ async fn dispatch_rpc(
         METHOD_SELECT => conversation_select(&state, &request.params),
         METHOD_UPDATE => conversation_update(socket, state, request.params).await,
         METHOD_DELETE => conversation_delete(&state, &request.params),
-        METHOD_DRAFT_SET => conversation_draft_set(&state, &request.params),
+        METHOD_DRAFT_SET => conversation_draft_set(&io, &state, &request.params).await,
         METHOD_REPLAY_GET_CHUNK => conversation_replay_get_chunk(&state, &request.params),
         METHOD_SEND => conversation_send(socket, state, request.params).await,
         METHOD_PINS_SET => conversation_pins_set(&state, &request.params),
@@ -423,7 +423,11 @@ fn conversation_delete(state: &AppState, params: &JsonMap) -> Result<Value, RpcE
     )
 }
 
-fn conversation_draft_set(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+async fn conversation_draft_set(
+    io: &SocketIo,
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
     let conversation_id = optional_str(params, "conversation_id")
         .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
     let draft = optional_str(params, "draft").unwrap_or("").to_owned();
@@ -432,11 +436,12 @@ fn conversation_draft_set(state: &AppState, params: &JsonMap) -> Result<Value, R
         .update_meta(
             conversation_id,
             ConversationMetaUpdate {
-                draft: Some(draft),
+                draft: Some(draft.clone()),
                 ..ConversationMetaUpdate::default()
             },
         )
         .map_err(internal_error)?;
+    emit_draft_updated(io, conversation_id, &draft).await;
     Ok(json!({"ok": true, "conversation_id": conversation_id, "transport": "rpc"}))
 }
 
@@ -1062,6 +1067,22 @@ async fn emit_rpc_notification_to_namespace(io: &SocketIo, method: &str, params:
     if let Err(error) = namespace.emit(RPC_NOTIFY_EVENT, &notification).await {
         warn!(error = %error, "failed to emit adapter event over conversations RPC");
     }
+}
+
+pub async fn emit_draft_updated(io: &SocketIo, conversation_id: &str, draft: &str) {
+    emit_rpc_notification_to_namespace(
+        io,
+        "conversation.draft.updated",
+        draft_updated_event(conversation_id, draft),
+    )
+    .await;
+}
+
+fn draft_updated_event(conversation_id: &str, draft: &str) -> Value {
+    json!({
+        "conversation_id": conversation_id,
+        "draft": draft,
+    })
 }
 
 fn adapter_conversation_object(value: Value) -> Option<(String, Value)> {
@@ -1806,6 +1827,17 @@ mod tests {
             Some("conversation.token.updated")
         );
         assert_eq!(notification_method_for_event_type("debug_trace"), None);
+    }
+
+    #[test]
+    fn draft_updated_event_matches_frontend_contract() {
+        assert_eq!(
+            draft_updated_event("conv-draft", "hello"),
+            json!({
+                "conversation_id": "conv-draft",
+                "draft": "hello",
+            })
+        );
     }
 
     #[test]
