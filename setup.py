@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+from setuptools import setup
+from setuptools.command.build_py import build_py as _build_py
+
+
+class build_py(_build_py):
+    def run(self) -> None:
+        super().run()
+        self._copy_rust_workspace()
+
+    def _copy_rust_workspace(self) -> None:
+        source_root = Path(__file__).parent
+        rust_source = source_root / "rust"
+        if not (rust_source / "Cargo.toml").is_file():
+            return
+
+        package_target = Path(self.build_lib) / "agent_log_server_rs" / "rust"
+        if package_target.exists():
+            shutil.rmtree(package_target)
+        shutil.copytree(
+            rust_source,
+            package_target,
+            ignore=shutil.ignore_patterns(
+                "target",
+                ".git",
+                "__pycache__",
+                "*.pyc",
+            ),
+        )
+
+
+setup(cmdclass={"build_py": build_py})

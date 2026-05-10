@@ -39,7 +39,7 @@ class BootstrapArgs:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     env = _build_env(args)
-    command = _server_command(args)
+    command = _server_command(args, env)
     return _run_child(command, env)
 
 
@@ -151,17 +151,24 @@ def _build_env(args: BootstrapArgs) -> dict[str, str]:
     return env
 
 
-def _server_command(args: BootstrapArgs) -> list[str]:
+def _server_command(args: BootstrapArgs, env: dict[str, str] | None = None) -> list[str]:
+    env = env if env is not None else os.environ
     framework_shell_args = _framework_shell_args(args)
     if args.server_bin:
         return [str(Path(args.server_bin)), *framework_shell_args]
 
-    manifest = (
-        Path(args.cargo_manifest)
-        if args.cargo_manifest
-        else _source_root() / "rust" / "Cargo.toml"
-    )
-    debug_binary = manifest.parent / "target" / "debug" / "als-server"
+    manifest = Path(args.cargo_manifest) if args.cargo_manifest else _default_rust_manifest()
+    packaged_manifest = _packaged_rust_manifest()
+    target_dir = None
+    if (
+        not args.cargo_manifest
+        and packaged_manifest is not None
+        and manifest == packaged_manifest
+    ):
+        cache_dir = Path(env["ALS_RS_CACHE_DIR"])
+        target_dir = Path(env.setdefault("CARGO_TARGET_DIR", str(cache_dir / "cargo-target")))
+
+    debug_binary = (target_dir or manifest.parent / "target") / "debug" / "als-server"
     use_ferrous_framework = _ferrous_framework_enabled(args)
     if debug_binary.exists() and not use_ferrous_framework:
         return [str(debug_binary), *framework_shell_args]
@@ -252,6 +259,25 @@ def _default_cache_dir() -> Path:
 
 def _source_root() -> Path:
     return Path(__file__).parent.parent
+
+
+def _package_root() -> Path:
+    return Path(__file__).parent
+
+
+def _packaged_rust_manifest() -> Path | None:
+    manifest = _package_root() / "rust" / "Cargo.toml"
+    return manifest if manifest.is_file() else None
+
+
+def _default_rust_manifest() -> Path:
+    source_manifest = _source_root() / "rust" / "Cargo.toml"
+    if source_manifest.is_file():
+        return source_manifest
+    packaged_manifest = _packaged_rust_manifest()
+    if packaged_manifest is not None:
+        return packaged_manifest
+    return source_manifest
 
 
 if __name__ == "__main__":

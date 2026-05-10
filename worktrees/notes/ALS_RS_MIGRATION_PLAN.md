@@ -180,9 +180,14 @@ Bootstrap responsibilities:
    adapter selection.
 2. Resolve isolated roots and export `ALS_RS_*`.
 3. Ensure required directories exist.
-4. Locate the Rust binary:
-   - installed binary from wheel/package data, or
-   - development binary under `target/debug/als-server`.
+4. Locate the Rust server source/binary:
+   - explicit `ALS_RS_SERVER_BIN` / `--server-bin` when provided
+   - source-checkout `rust/Cargo.toml` during development
+   - packaged `agent_log_server_rs/rust/Cargo.toml` inside pip wheels
+   - development binary under the active Cargo target dir when present
+   - otherwise `cargo run -p als-server`
+   Packaged wheel launches set `CARGO_TARGET_DIR` under the ALS-RS cache root so
+   cargo does not write build output into site-packages.
 5. Launch the Rust server as a subprocess.
 6. Launch extension adapter subprocesses only when requested by Rust or by
    startup configuration.

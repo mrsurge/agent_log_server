@@ -1,5 +1,7 @@
 include README.md
 include requirements.txt
+graft rust
+prune rust/target
 recursive-include agent_log_server/static *
 recursive-include agent_log_server/templates *
 recursive-include agent_log_server/shellspec *
