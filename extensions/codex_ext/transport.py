@@ -8,8 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Protocol, TypedDict, cast
 
-from als_deprecated import ask_user_interactions
-
 from .router import CodexEventRouter
 from .runtime_protocol import (
     build_initialize_params,
@@ -770,17 +768,6 @@ class CodexAppServerTransport:
                 await mgr.unsubscribe_output_bytes(shell_id, subscription)
             if self._stdout_subscription is subscription:
                 self._stdout_subscription = None
-            pending_ask_user_request_ids = [
-                request_id_text
-                for request_id_text, pending in list(self._pending_approval_requests.items())
-                if self._approval_request_method(pending) == ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD
-            ]
-            for request_id_text in pending_ask_user_request_ids:
-                with contextlib.suppress(Exception):
-                    await ask_user_interactions.finalize_interaction(
-                        request_id_text,
-                        {"status": "error", "error": "transport reader stopped"},
-                    )
             self._initialized = False
             self._resumed_threads.clear()
             self._thread_conversations.clear()
@@ -888,16 +875,6 @@ class CodexAppServerTransport:
                 request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
                 if request_id_text:
                     descriptors_by_request[request_id_text] = descriptor
-
-        ask_user_finalizations = routed_result.get("ask_user_finalizations")
-        if isinstance(ask_user_finalizations, list):
-            for finalization in ask_user_finalizations:
-                if not isinstance(finalization, dict):
-                    continue
-                await ask_user_interactions.finalize_interaction(
-                    finalization.get("request_id"),
-                    finalization.get("resolution"),
-                )
 
         transcript_entries = routed_result.get("transcript_entries")
         if resolved_conversation_id and isinstance(transcript_entries, list):

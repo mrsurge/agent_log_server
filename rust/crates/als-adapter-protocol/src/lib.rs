@@ -166,6 +166,28 @@ pub struct McpContext {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct DeveloperInstructionsContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub te2_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_memory_path: Option<PathBuf>,
+    #[serde(default)]
+    pub repo_memory_exists: bool,
+    #[serde(default)]
+    pub repo_memory_truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ConversationStartParams {
     pub extension_id: String,
     pub conversation_id: String,
@@ -175,6 +197,8 @@ pub struct ConversationStartParams {
     pub settings: JsonMap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_context: Option<McpContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devins_context: Option<DeveloperInstructionsContext>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -188,6 +212,8 @@ pub struct ConversationResumeParams {
     pub settings: JsonMap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_context: Option<McpContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devins_context: Option<DeveloperInstructionsContext>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -211,6 +237,8 @@ pub struct ConversationSendParams {
     pub settings: JsonMap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_context: Option<McpContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devins_context: Option<DeveloperInstructionsContext>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

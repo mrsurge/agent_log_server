@@ -29,25 +29,6 @@ from .runtime_protocol import (
     normalize_thread_list_timestamp,
 )
 from .transport import CodexAppServerTransport, _MetaFns
-from als_deprecated.te2_mcp_config import te2_mcp_integration_enabled
-
-
-class _ServerModule(Protocol):
-    def _te2_base_url(self) -> object: ...
-
-    async def _refresh_extension_runtime_state(self, extension_ids: List[str]) -> None: ...
-
-    def _conversation_transcript_path(self, conversation_id: str) -> object: ...
-
-    def _extension_unavailable_detail(self, extension_id: str) -> object: ...
-
-    async def _emit_extension_unavailable_warning(
-        self,
-        conversation_id: str,
-        extension_id: str,
-        *,
-        detail: str,
-    ) -> None: ...
 
 
 class _ExtensionsModule(Protocol):
@@ -85,10 +66,6 @@ def _add_to_raw_buffer(direction: str, conversation_id: str, data: object) -> No
 
 def get_raw_buffer(limit: int = 50) -> List[Dict[str, object]]:
     return _raw_buffer[-limit:]
-
-
-def _server_module() -> _ServerModule:
-    return cast(_ServerModule, importlib.import_module("als_deprecated.server"))
 
 
 def _extensions_module() -> _ExtensionsModule:
@@ -151,10 +128,6 @@ def _materialize_runtime_settings(settings: Optional[Dict[str, object]]) -> Dict
         model_name = model.get("name")
         if isinstance(model_name, str) and model_name.strip():
             merged["model"] = model_name.strip()
-    if te2_mcp_integration_enabled(merged):
-        te2_base_url = _server_module()._te2_base_url()
-        if isinstance(te2_base_url, str) and te2_base_url.strip():
-            merged["te2_base_url"] = te2_base_url
     return merged
 
 
@@ -214,10 +187,6 @@ def _auth_extension_ids(*extension_ids: str) -> List[str]:
     return registered or ["codex-ext"]
 
 
-async def _refresh_extension_auth_state(*extension_ids: str) -> None:
-    await _server_module()._refresh_extension_runtime_state(_auth_extension_ids(*extension_ids))
-
-
 async def _handle_auth_transport_event(
     *,
     label: str,
@@ -253,7 +222,6 @@ async def _handle_auth_transport_event(
                 continue
             if not success:
                 pending.clear()
-        await _refresh_extension_auth_state(*extension_ids)
         events.append({"type": "extensions_updated"})
         if not success and error_message:
             warning_event: Dict[str, object] = {
@@ -268,7 +236,6 @@ async def _handle_auth_transport_event(
     if label_lower == "account/updated" and isinstance(payload, dict):
         for extension_id in extension_ids:
             _clear_auth_state(extension_id)
-        await _refresh_extension_auth_state(*extension_ids)
         events.append({"type": "extensions_updated"})
     return events
 
@@ -677,22 +644,6 @@ def _build_send_failure_result(error_message: object) -> Dict[str, object]:
     }
 
 
-async def _handle_auth_failure(conversation_id: str, extension_id: str, error_message: str) -> None:
-    server = _server_module()
-    with contextlib.suppress(Exception):
-        await server._refresh_extension_runtime_state([extension_id])
-    detail = None
-    with contextlib.suppress(Exception):
-        detail = server._extension_unavailable_detail(extension_id)
-    with contextlib.suppress(Exception):
-        detail_text = detail if isinstance(detail, str) and detail else error_message
-        await server._emit_extension_unavailable_warning(
-            conversation_id,
-            extension_id,
-            detail=detail_text,
-        )
-
-
 # Thread resume can legitimately take longer than a normal RPC round-trip while the
 # app-server finishes startup work and emits the idle virtual ack.
 _THREAD_RESUME_TIMEOUT_SECONDS = 45.0
@@ -884,7 +835,6 @@ async def run_splash_action(
                 timeout=15.0,
             )
             auth_state.clear()
-            await _refresh_extension_auth_state(extension_id)
             cancel_status = result.get("status") if isinstance(result, dict) else None
             message = "Pending login canceled."
             if cancel_status == "notFound":
@@ -897,11 +847,9 @@ async def run_splash_action(
                 timeout=15.0,
             )
             auth_state.clear()
-            await _refresh_extension_auth_state(extension_id)
             return {"ok": True, "message": "Logged out of Codex OpenAI auth."}
         if action == "refresh_auth_status":
             status = await get_auth_status(extension_id, refresh=True)
-            await _refresh_extension_auth_state(extension_id)
             return {
                 "ok": bool(status.get("ok", True)),
                 "message": status.get("message") or "Auth status refreshed.",
@@ -979,24 +927,6 @@ def _build_plan_state(
         "plan_steps": normalized_steps,
         "plan_source": source,
     }
-
-
-def _latest_transcript_plan(conversation_id: str) -> Optional[Dict[str, object]]:
-    transcript_path = _server_module()._conversation_transcript_path(conversation_id)
-    if not isinstance(transcript_path, Path) or not transcript_path.is_file():
-        return None
-    try:
-        lines = transcript_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception:
-        return None
-    for line in reversed(lines):
-        try:
-            entry = cast(object, json.loads(line))
-        except Exception:
-            continue
-        if isinstance(entry, dict) and entry.get("role") == "plan":
-            return _object_dict(entry)
-    return None
 
 
 def init_codex_app_server_manager(
@@ -1373,17 +1303,6 @@ async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, object
                 source="active_meta",
             )
 
-    transcript_plan = _latest_transcript_plan(conversation_id)
-    if isinstance(transcript_plan, dict):
-        steps = normalize_plan_steps(transcript_plan.get("steps"))
-        if steps:
-            explanation = transcript_plan.get("explanation")
-            return _build_plan_state(
-                steps,
-                explanation=explanation if isinstance(explanation, str) else None,
-                source="transcript",
-            )
-
     return {
         "has_plan": False,
         "has_todo": True,
@@ -1429,11 +1348,6 @@ async def resume_session(
         _add_to_raw_buffer("out", conversation_id, f"thread_resumed {thread_id[:8]}")
         return {"ok": True, "provider_session_id": thread_id, "session_id": thread_id}
     except Exception as exc:
-        if _looks_like_auth_required_error(exc):
-            settings_dict = _object_dict(meta.get("settings"))
-            agent_value = settings_dict.get("agent")
-            agent_name = agent_value if isinstance(agent_value, str) and agent_value else "codex-ext"
-            await _handle_auth_failure(conversation_id, agent_name, str(exc))
         _add_to_raw_buffer("err", conversation_id, f"resume_failed {exc}")
         return {"ok": False, "error": f"Thread resume failed: {exc}"}
 
@@ -1565,8 +1479,6 @@ async def handle_message(
             "conversation_id": conversation_id,
         }
     except Exception as exc:
-        if _looks_like_auth_required_error(exc):
-            await _handle_auth_failure(conversation_id, agent_type or "codex-ext", str(exc))
         _add_to_raw_buffer("err", conversation_id, f"handle_message_failed {exc}")
         return _build_send_failure_result(exc)
 

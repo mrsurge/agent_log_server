@@ -11,7 +11,6 @@ and our internal format on the other (to _broadcast_appserver_ui).
 
 import json
 import re
-import importlib
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from collections.abc import Iterable
@@ -39,15 +38,6 @@ from ..tool_card_contracts import build_tool_card_request, build_tool_card_respo
 def utc_ts() -> str:
     """Return current UTC timestamp in ISO format."""
     return datetime.now(timezone.utc).isoformat()
-
-
-def _is_debug() -> bool:
-    """Check server DEBUG_MODE without circular import."""
-    try:
-        server_module = importlib.import_module("server")
-        return bool(getattr(server_module, "DEBUG_MODE", False))
-    except ImportError:
-        return False
 
 
 _COPILOT_VIEW_LINE_RE = re.compile(r"^\s*(\d+)\.(.*)$")
@@ -674,11 +664,6 @@ class CopilotEventRouter:
         data = CopilotEventView.from_event(event)
         etype = data.event_type
         self._remember_active_model(data)
-        if _is_debug():
-            print(
-                f"[ROUTER-EVENT] type={etype} id={data.event_id} "
-                f"parent_id={data.parent_id} data_type={type(data.payload).__name__}"
-            )
 
         if etype == SessionEventType.ASSISTANT_MESSAGE_DELTA:
             await self._handle_message_delta(data)
@@ -745,11 +730,6 @@ class CopilotEventRouter:
                 decision="subagent_started_registered",
                 resolved_subagent_id=sa_id,
             )
-            if _is_debug():
-                print(
-                    f"[SUBAGENT-DEBUG] SUBAGENT_STARTED: sa_id={sa_id} event.id={data.event_id} "
-                    f"data.tool_call_id={data.tool_call_id} event.parent_id={data.parent_id}"
-                )
             sa_evt: PayloadDict = {
                 "type": "subagent_start",
                 "conversation_id": self.conversation_id,
@@ -1243,10 +1223,6 @@ class CopilotEventRouter:
             resolved_subagent_id=subagent_id,
         )
         
-        if self._active_subagents and _is_debug():
-            print(f"[SUBAGENT-DEBUG] tool_start: tool_call_id={tool_call_id} parent_id={parent_id} "
-                  f"active_subagents={list(self._active_subagents.keys())} matched={subagent_id}")
-
         # Intercept UI-only tools — route to ribbon, suppress shell card
         if tool_name in self._UI_TOOLS:
             raw_args = data.arguments

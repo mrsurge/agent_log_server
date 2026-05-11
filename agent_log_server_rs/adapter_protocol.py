@@ -258,12 +258,42 @@ class McpContext:
 
 
 @dataclass(frozen=True)
+class DeveloperInstructionsContext:
+    effective: str | None = None
+    user: str | None = None
+    te2_enabled: bool = False
+    cwd: Path | None = None
+    template_path: Path | None = None
+    repo_root: Path | None = None
+    repo_memory_path: Path | None = None
+    repo_memory_exists: bool = False
+    repo_memory_truncated: bool = False
+
+    def to_json(self) -> JsonMap:
+        payload: JsonMap = {"te2_enabled": self.te2_enabled}
+        _put_optional(payload, "effective", self.effective)
+        _put_optional(payload, "user", self.user)
+        if self.cwd is not None:
+            payload["cwd"] = str(self.cwd)
+        if self.template_path is not None:
+            payload["template_path"] = str(self.template_path)
+        if self.repo_root is not None:
+            payload["repo_root"] = str(self.repo_root)
+        if self.repo_memory_path is not None:
+            payload["repo_memory_path"] = str(self.repo_memory_path)
+        payload["repo_memory_exists"] = self.repo_memory_exists
+        payload["repo_memory_truncated"] = self.repo_memory_truncated
+        return payload
+
+
+@dataclass(frozen=True)
 class ConversationStartParams:
     extension_id: str
     conversation_id: str
     cwd: Path | None = None
     settings: JsonMap = field(default_factory=dict)
     mcp_context: McpContext | None = None
+    devins_context: DeveloperInstructionsContext | None = None
 
     def to_json(self) -> JsonMap:
         payload: JsonMap = {
@@ -276,6 +306,8 @@ class ConversationStartParams:
             payload["settings"] = dict(self.settings)
         if self.mcp_context is not None:
             payload["mcp_context"] = self.mcp_context.to_json()
+        if self.devins_context is not None:
+            payload["devins_context"] = self.devins_context.to_json()
         return payload
 
 
@@ -287,6 +319,7 @@ class ConversationResumeParams:
     cwd: Path | None = None
     settings: JsonMap = field(default_factory=dict)
     mcp_context: McpContext | None = None
+    devins_context: DeveloperInstructionsContext | None = None
 
     def to_json(self) -> JsonMap:
         payload: JsonMap = {
@@ -300,6 +333,8 @@ class ConversationResumeParams:
             payload["settings"] = dict(self.settings)
         if self.mcp_context is not None:
             payload["mcp_context"] = self.mcp_context.to_json()
+        if self.devins_context is not None:
+            payload["devins_context"] = self.devins_context.to_json()
         return payload
 
 
@@ -316,6 +351,7 @@ class ConversationSendParams:
     toast_context: JsonMap | None = None
     settings: JsonMap = field(default_factory=dict)
     mcp_context: McpContext | None = None
+    devins_context: DeveloperInstructionsContext | None = None
 
     def to_json(self) -> JsonMap:
         payload: JsonMap = {
@@ -339,6 +375,8 @@ class ConversationSendParams:
             payload["settings"] = dict(self.settings)
         if self.mcp_context is not None:
             payload["mcp_context"] = self.mcp_context.to_json()
+        if self.devins_context is not None:
+            payload["devins_context"] = self.devins_context.to_json()
         return payload
 
 

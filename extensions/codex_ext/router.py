@@ -5,13 +5,7 @@ import os
 import re
 import shlex
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Tuple, cast
-
-from als_deprecated.ask_user_interactions import (
-    AGENT_PTY_ASK_USER_REQUEST_METHOD,
-    is_agent_pty_ask_user_request,
-    is_agent_pty_ask_user_tool,
-)
+from typing import Callable, Dict, List, Optional, Tuple, TypedDict, cast
 
 from ..message_card_contracts import (
     build_assistant_delta_event,
@@ -28,6 +22,67 @@ from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
 from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
 
 ObjectDict = Dict[str, object]
+
+AGENT_PTY_ASK_USER_REQUEST_METHOD = "agent-pty/ask-user"
+AGENT_PTY_ASK_USER_SERVER = "agent-pty-blocks"
+AGENT_PTY_ASK_USER_TOOL = "ask_user"
+
+
+class NormalizedAskUserRequest(TypedDict):
+    question: str
+    choices: List[str]
+    allow_freeform: bool
+
+
+def _ask_user_object_dict(value: object) -> ObjectDict:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def normalize_ask_user_choices(value: object) -> List[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        choice = item.strip()
+        if not choice or choice in seen:
+            continue
+        normalized.append(choice)
+        seen.add(choice)
+    return normalized
+
+
+def normalize_ask_user_request(question: object, choices: object, allow_freeform: object) -> NormalizedAskUserRequest:
+    return {
+        "question": str(question or "").strip(),
+        "choices": normalize_ask_user_choices(choices),
+        "allow_freeform": bool(allow_freeform),
+    }
+
+
+def is_agent_pty_ask_user_tool(server_name: object, tool_name: object) -> bool:
+    return (
+        str(server_name or "").strip() == AGENT_PTY_ASK_USER_SERVER
+        and str(tool_name or "").strip() == AGENT_PTY_ASK_USER_TOOL
+    )
+
+
+def is_agent_pty_ask_user_request(tool_name: object, arguments: object) -> bool:
+    if str(tool_name or "").strip() != AGENT_PTY_ASK_USER_TOOL:
+        return False
+    arguments_map = _ask_user_object_dict(arguments)
+    if not arguments_map:
+        return False
+    normalized = normalize_ask_user_request(
+        arguments_map.get("question"),
+        arguments_map.get("choices"),
+        arguments_map.get("allow_freeform", arguments_map.get("allowFreeform", True)),
+    )
+    return bool(normalized["question"] and (normalized["choices"] or normalized["allow_freeform"]))
 
 
 def utc_ts() -> str:
@@ -3031,10 +3086,6 @@ class CodexEventRouter:
                             "transcript_entries": [],
                         }
                         routed["clear_live_approval_ids"] = [approval_request_id]
-                        routed["ask_user_finalizations"] = [{
-                            "request_id": approval_request_id,
-                            "resolution": terminal_resolution or {"action": "cancel"},
-                        }]
                         self._approval_request_map.pop(str(item_id), None)
                         return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 request_payload = item_state.get("request")

@@ -53,6 +53,7 @@ CONVERSATION_METHODS = ("init_session", "handle_message", "resume_session_with_h
 SESSION_METHODS = ("list_sessions", "resume_session_with_history", "hydrate_transcript")
 LIVE_SESSION_STATE_METHOD = "get_live_session_state"
 LIVE_SESSION_UNLOAD_METHOD = "unload_live_session"
+DEVINS_CONTEXT_SETTINGS_KEY = "__als_devins_context__"
 
 
 async def _get_framework_shell_manager() -> object:
@@ -281,6 +282,12 @@ def _apply_mcp_context(settings: JsonMap, params: JsonMap) -> None:
     mcp_context = _optional_map(params.get("mcp_context"))
     if mcp_context:
         settings["mcp_context"] = mcp_context
+
+
+def _apply_devins_context(settings: JsonMap, params: JsonMap) -> None:
+    devins_context = _optional_map(params.get("devins_context"))
+    if devins_context:
+        settings[DEVINS_CONTEXT_SETTINGS_KEY] = devins_context
 
 
 class ExtensionLoaderModule(Protocol):
@@ -988,6 +995,7 @@ class ExtensionJsonRpcAdapter:
         cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
         settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
         _apply_mcp_context(settings, params)
+        _apply_devins_context(settings, params)
         settings["cwd"] = cwd
         settings.setdefault("agent", extension_id)
         result = init_session(conversation_id, extension_id, cwd, settings=settings)
@@ -1012,6 +1020,7 @@ class ExtensionJsonRpcAdapter:
         cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
         settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
         _apply_mcp_context(settings, params)
+        _apply_devins_context(settings, params)
         settings["cwd"] = cwd
         settings.setdefault("agent", extension_id)
         self._seed_conversation_meta(
@@ -1138,6 +1147,7 @@ class ExtensionJsonRpcAdapter:
         cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
         settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
         _apply_mcp_context(settings, params)
+        _apply_devins_context(settings, params)
         settings["cwd"] = cwd
         settings.setdefault("agent", extension_id)
         self._seed_conversation_meta(

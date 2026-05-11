@@ -66,6 +66,10 @@ async fn start_copilot_conversation(
             Some(&settings),
             body.cwd.as_deref(),
         )),
+        devins_context: Some(crate::devins_context::build_devins_context(
+            Some(&settings),
+            body.cwd.as_deref(),
+        )?),
         settings,
     };
     let result = state
@@ -100,6 +104,10 @@ async fn send_copilot_message(
             Some(&settings),
             body.cwd.as_deref(),
         )),
+        devins_context: Some(crate::devins_context::build_devins_context(
+            Some(&settings),
+            body.cwd.as_deref(),
+        )?),
         settings,
     };
     let result = state

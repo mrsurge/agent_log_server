@@ -62,6 +62,7 @@ from ._vendor.copilot.generated.session_events import SessionEventType
 
 from .file_change_preview import build_file_change_preview
 from .fws_pipe_process import FrameworkShellPipeProcess, PipeShellManager
+from .devins_contract import effective_developer_instructions
 from .mcp_contract import apply_mcp_context
 from .protocol_adapter import compact_sdk_session, resume_sdk_session
 from .router import CopilotEventRouter
@@ -93,24 +94,6 @@ class PlanDocState(TypedDict):
     plan_content: str
     plan_path: str | None
     plan_source: str
-
-
-class _BuildEffectivePromptContextFn(Protocol):
-    def __call__(
-        self,
-        user_instructions: object,
-        *,
-        te2_enabled: bool,
-        cwd: object = None,
-        template_path: str | None = None,
-    ) -> str | None: ...
-
-
-_prompt_context_module = importlib.import_module("als_deprecated.prompt_context")
-build_effective_prompt_context = cast(
-    _BuildEffectivePromptContextFn,
-    getattr(_prompt_context_module, "build_effective_prompt_context"),
-)
 
 
 # ── Global state ────────────────────────────────────────────────────
@@ -1732,11 +1715,7 @@ def _runtime_signature_payload(
 
     te2_enabled = _te2_mcp_integration_enabled(merged)
     payload["reasoning_effort"] = merged.get("reasoning_effort") or merged.get("effort")
-    payload["developer_instructions"] = build_effective_prompt_context(
-        merged.get("developer_instructions"),
-        te2_enabled=te2_enabled,
-        cwd=merged.get("cwd"),
-    )
+    payload["developer_instructions"] = effective_developer_instructions(merged)
     if isinstance(merged.get("mcp_context"), dict):
         payload["mcp_servers"] = merged.get("mcp_servers")
     else:
@@ -1790,11 +1769,7 @@ def _build_session_runtime_config(
     if isinstance(reasoning_effort, str) and reasoning_effort.strip():
         config["reasoning_effort"] = reasoning_effort.strip()
 
-    developer_instructions = build_effective_prompt_context(
-        merged.get("developer_instructions"),
-        te2_enabled=_te2_mcp_integration_enabled(merged),
-        cwd=merged.get("cwd"),
-    )
+    developer_instructions = effective_developer_instructions(merged)
     if developer_instructions:
         config["system_message"] = {
             "mode": "append",

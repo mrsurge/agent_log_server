@@ -582,6 +582,10 @@ async fn conversation_send(
             Some(&meta.settings),
             meta.cwd.as_deref(),
         ),
+        devins_context: Some(
+            crate::devins_context::build_devins_context(Some(&meta.settings), meta.cwd.as_deref())
+                .map_err(internal_error)?,
+        ),
         settings: meta.settings,
     };
     state
@@ -1082,6 +1086,13 @@ async fn bind_provider_session(
                         &conversation_id,
                         Some(&meta.settings),
                         meta.cwd.as_deref(),
+                    ),
+                    devins_context: Some(
+                        crate::devins_context::build_devins_context(
+                            Some(&meta.settings),
+                            meta.cwd.as_deref(),
+                        )
+                        .map_err(internal_error)?,
                     ),
                     settings: meta.settings.clone(),
                 },

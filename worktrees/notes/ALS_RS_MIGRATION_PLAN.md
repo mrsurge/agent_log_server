@@ -454,6 +454,12 @@ Important DTO choices:
   `supported_reasoning_efforts`, structured `capabilities`, and optional raw
   provider metadata so settings UIs do not lose provider capabilities during
   normalization.
+- Conversation start/resume/send params include a server-owned
+  `devins_context` DTO. Rust builds the effective developer-instructions string
+  from the request settings, TE2 developer template, and fresh `.repo_memory.md`
+  snapshot; the Python adapter injects that DTO into extension settings under
+  `__als_devins_context__`, and extensions use local `devins_contract.py`
+  modules to place the already-computed string into provider-native fields.
 - `ConversationSendParams` includes optional `toast_context`, matching the
   existing conversations RPC send contract for reply-capable toast flows.
 
@@ -1253,6 +1259,13 @@ Current session/rollout picker issues to investigate next:
   conversation create/update/resume paths.
 - `agent-pty-blocks` stdio injection and Codex eager tool exposure have passed
   user smoke; keep them in the live regression set when touching MCP contracts.
+- Codex prompt-context usage now flows through the server-owned `devins_context`
+  adapter DTO. Codex also localizes the TE2 MCP config helper logic and
+  `agent-pty-blocks.ask_user` constants/tool detection in extension-owned
+  contract modules, so `codex-ext` no longer imports deprecated prompt-context,
+  TE2 MCP config, typing-helper, or ask-user-interaction modules. The remaining
+  extension-side deprecated import is the dynamic server callback module used by
+  Codex client code; treat that as the next boundary-cleanup slice.
 
 ### Milestone 6: dependency minimization
 
@@ -1414,14 +1427,18 @@ Acceptance:
      `conversation.approval.respond` special-cases
      `request_method == "agent-pty/ask-user"` to emit the submitted response
      over IPC and only writes/removes the approval handoff after the MCP ack.
-   - repo-memory/dev-instruction refresh: ALS-RS does not implement the old
-     `pending_context` queue from the removed `codex-ext-exp` dynamic-devins
-     fork. `.repo_memory.md` is bundled through the TE2 integration prompt
-     context path at provider config boundaries instead: Codex rebuilds
-     `developerInstructions` on each `turn/start`, while Copilot recomputes its
-     runtime signature/config during `handle_message()` and re-resumes when the
-     effective prompt context changes. That gives next-turn/resume/compact
-     freshness without a mid-turn push.
+- repo-memory/dev-instruction refresh: ALS-RS does not implement the old
+  `pending_context` queue from the removed `codex-ext-exp` dynamic-devins
+  fork. Rust owns prompt-context construction at adapter request boundaries:
+  every conversation start/resume/send gets a fresh `devins_context` assembled
+  from the raw `developer_instructions` setting, TE2 developer template when
+  `te2_mcp_integration` is enabled, and the current `.repo_memory.md` snapshot
+  discovered from the effective cwd. The adapter passes that context through as
+  `settings.__als_devins_context__`; Copilot and Codex extension-local
+  `devins_contract.py` modules consume the already-computed `effective` string
+  and no longer import the deprecated Python prompt-context helper. This gives
+  next-turn/resume/compact freshness without a mid-turn push and keeps repo
+  memory concatenation server-owned.
     - TE2 sidebar IPC/RPC: Rust now speaks the typed JSON-RPC contract over the
       existing `/sidebar_ipc` logical namespace and `/ui_ipc_ws/socket.io`
       physical path. UI RPC `hostUi.recheck` best-effort calls

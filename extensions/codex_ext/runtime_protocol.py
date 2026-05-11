@@ -14,11 +14,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, cast
 
-from als_deprecated.prompt_context import build_effective_prompt_context
-from als_deprecated.te2_mcp_config import (
+from .mcp_contract import (
     build_codex_thread_config,
     te2_mcp_integration_enabled,
 )
+from .devins_contract import effective_developer_instructions
 from .mcp_contract import apply_mcp_context as apply_codex_mcp_context
 from .dependencies import is_android_termux as _is_android_termux
 from .dependencies import recommended_codex_install_command as _recommended_codex_install_command
@@ -1309,7 +1309,7 @@ def build_initialize_params(protocol: RuntimeProtocol) -> SchemaDict:
 
     client_info: SchemaDict = {}
     for key, value in (
-        ("name", "als_deprecated"),
+        ("name", "als-rs"),
         ("title", "Agent Log Server"),
         ("version", "0.1.0"),
     ):
@@ -1543,11 +1543,7 @@ def build_request_params(
             )
         if config:
             params["config"] = config
-    prompt_context = build_effective_prompt_context(
-        normalized_settings.get("developer_instructions"),
-        te2_enabled=te2_mcp_integration_enabled(normalized_settings),
-        cwd=config_cwd,
-    )
+    prompt_context = effective_developer_instructions(normalized_settings)
     if prompt_context:
         if "developerInstructions" in props or method == "turn/start":
             params["developerInstructions"] = prompt_context
