@@ -12,9 +12,10 @@ import importlib
 import json
 import os
 import shutil
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Protocol, cast
+from typing import Awaitable, Callable, Dict, List, Optional, Protocol, TypeGuard, cast
 
 from .plan_utils import normalize_plan_steps, render_plan_markdown
 from .rollout_import import find_rollout_path, preview_entries
@@ -28,16 +29,25 @@ from .runtime_protocol import (
     get_runtime_protocol,
     normalize_thread_list_timestamp,
 )
-from .transport import CodexAppServerTransport, _MetaFns
+from .transport import CodexAppServerTransport, MetaFns, ShellManager
 
 
 class _ExtensionsModule(Protocol):
     def get_extension_info(self, extension_id: str) -> object: ...
 
+
+def _is_object_dict(value: object) -> TypeGuard[Dict[str, object]]:
+    return isinstance(value, dict)
+
+
+def _is_object_list(value: object) -> TypeGuard[List[object]]:
+    return isinstance(value, list)
+
+
 # Stored references to server callbacks
-_broadcast_fn: Optional[Callable] = None
-_transcript_fn: Optional[Callable] = None
-_meta_fns: Optional[_MetaFns] = None
+_broadcast_fn: Optional[Callable[[Dict[str, object]], Awaitable[None]]] = None
+_transcript_fn: Optional[Callable[[str, Dict[str, object]], Awaitable[None]]] = None
+_meta_fns: Optional[MetaFns] = None
 _registered_extension_ids: set[str] = set()
 _ready_extensions: set[str] = set()
 _transport: Optional[CodexAppServerTransport] = None
@@ -73,7 +83,12 @@ def _extensions_module() -> _ExtensionsModule:
 
 
 def _object_dict(value: object) -> Dict[str, object]:
-    return dict(value) if isinstance(value, dict) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    result: Dict[str, object] = {}
+    for key, item_value in cast(Iterable[tuple[object, object]], value.items()):
+        result[str(key)] = item_value
+    return result
 
 
 def _save_meta(conversation_id: str, meta: Dict[str, object]) -> None:
@@ -91,9 +106,9 @@ def _merge_runtime_settings(
     if _meta_fns and "load" in _meta_fns:
         meta = _object_dict(_meta_fns["load"](conversation_id))
         settings_value = meta.get("settings")
-        if isinstance(settings_value, dict):
+        if _is_object_dict(settings_value):
             merged.update(_object_dict(settings_value))
-    if isinstance(settings, dict):
+    if _is_object_dict(settings):
         for key, value in settings.items():
             if value is None or value == "":
                 continue
@@ -112,7 +127,7 @@ def _thread_runtime_signature(protocol: RuntimeProtocol, settings: Dict[str, obj
 
 
 def _materialize_runtime_settings(settings: Optional[Dict[str, object]]) -> Dict[str, object]:
-    if not isinstance(settings, dict):
+    if not _is_object_dict(settings):
         return {}
     merged = dict(settings)
     model_value = merged.get("model")
@@ -123,7 +138,7 @@ def _materialize_runtime_settings(settings: Optional[Dict[str, object]]) -> Dict
             ext_info = _extensions_module().get_extension_info(extension_id)
         except Exception:
             ext_info = None
-        manifest = _object_dict(ext_info.get("manifest")) if isinstance(ext_info, dict) else {}
+        manifest = _object_dict(ext_info.get("manifest")) if _is_object_dict(ext_info) else {}
         model = _object_dict(manifest.get("model"))
         model_name = model.get("name")
         if isinstance(model_name, str) and model_name.strip():
@@ -132,9 +147,9 @@ def _materialize_runtime_settings(settings: Optional[Dict[str, object]]) -> Dict
 
 
 def _extract_thread_id_from_result(payload: object) -> Optional[str]:
-    if isinstance(payload, dict):
+    if _is_object_dict(payload):
         thread = payload.get("thread")
-        if isinstance(thread, dict) and thread.get("id"):
+        if _is_object_dict(thread) and thread.get("id"):
             return str(thread["id"])
     return None
 
@@ -160,7 +175,7 @@ async def _ensure_transport_ready() -> CodexAppServerTransport:
 def _auth_state_bucket(extension_id: str) -> Dict[str, object]:
     key = str(extension_id or "").strip() or "codex-ext"
     bucket = _auth_flow_state.get(key)
-    if not isinstance(bucket, dict):
+    if not _is_object_dict(bucket):
         bucket = {}
         _auth_flow_state[key] = bucket
     return bucket
@@ -175,14 +190,14 @@ def _auth_extension_ids(*extension_ids: str) -> List[str]:
     explicit = [
         ext_id.strip()
         for ext_id in extension_ids
-        if isinstance(ext_id, str) and ext_id.strip()
+        if ext_id.strip()
     ]
     if explicit:
         return explicit
     registered = sorted(
         ext_id
         for ext_id in _registered_extension_ids
-        if isinstance(ext_id, str) and ext_id.strip()
+        if ext_id.strip()
     )
     return registered or ["codex-ext"]
 
@@ -204,7 +219,7 @@ async def _handle_auth_transport_event(
     extension_ids = _auth_extension_ids()
     events: List[Dict[str, object]] = []
 
-    if label_lower == "account/login/completed" and isinstance(payload, dict):
+    if label_lower == "account/login/completed" and _is_object_dict(payload):
         login_id = payload.get("loginId")
         login_id = login_id.strip() if isinstance(login_id, str) and login_id.strip() else None
         success = payload.get("success") is True
@@ -233,7 +248,7 @@ async def _handle_auth_transport_event(
             events.append(warning_event)
         return events
 
-    if label_lower == "account/updated" and isinstance(payload, dict):
+    if label_lower == "account/updated" and _is_object_dict(payload):
         for extension_id in extension_ids:
             _clear_auth_state(extension_id)
         events.append({"type": "extensions_updated"})
@@ -263,7 +278,7 @@ async def _open_url_with_xdg_open(url: str) -> tuple[bool, str]:
         return True, ""
     if proc.returncode == 0:
         return True, ""
-    message = stderr.decode("utf-8", errors="replace").strip() if isinstance(stderr, (bytes, bytearray)) else ""
+    message = stderr.decode("utf-8", errors="replace").strip()
     return False, message or f"xdg-open exited with {proc.returncode}"
 
 
@@ -355,7 +370,7 @@ def _usage_info_unavailable(
 
 
 def _rate_limit_window_detail(label: str, raw_window: object) -> tuple[Optional[float], Optional[str]]:
-    if not isinstance(raw_window, dict):
+    if not _is_object_dict(raw_window):
         return None, None
     used_percent = raw_window.get("usedPercent")
     if isinstance(used_percent, bool) or not isinstance(used_percent, (int, float)):
@@ -396,7 +411,7 @@ def _build_rate_limit_lines(snapshot: Dict[str, object]) -> tuple[List[str], Lis
             remaining_values.append(remaining_percent)
 
     credits = snapshot.get("credits")
-    if isinstance(credits, dict):
+    if _is_object_dict(credits):
         if credits.get("unlimited") is True:
             lines.append("Credits: unlimited")
         elif credits.get("hasCredits") is True:
@@ -456,19 +471,19 @@ async def get_usage_info(
             tone="error",
         )
 
-    payload = raw if isinstance(raw, dict) else {}
+    payload = raw if _is_object_dict(raw) else {}
     snapshots: List[Dict[str, object]] = []
     rate_limits_by_id = payload.get("rateLimitsByLimitId")
-    if isinstance(rate_limits_by_id, dict):
+    if _is_object_dict(rate_limits_by_id):
         for limit_id, value in sorted(rate_limits_by_id.items()):
-            if not isinstance(value, dict):
+            if not _is_object_dict(value):
                 continue
-            snapshot = dict(value)
-            if not isinstance(snapshot.get("limitId"), str) and isinstance(limit_id, str):
+            snapshot = _object_dict(value)
+            if not isinstance(snapshot.get("limitId"), str):
                 snapshot["limitId"] = limit_id
             snapshots.append(snapshot)
     legacy_snapshot = payload.get("rateLimits")
-    if not snapshots and isinstance(legacy_snapshot, dict):
+    if not snapshots and _is_object_dict(legacy_snapshot):
         snapshots.append(dict(legacy_snapshot))
     if not snapshots:
         return _usage_info_unavailable(
@@ -539,14 +554,18 @@ def _normalize_auth_status(
     extension_id: str,
     pending: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
-    payload = raw if isinstance(raw, dict) else {}
-    account = payload.get("account") if isinstance(payload.get("account"), dict) else None
+    payload = raw if _is_object_dict(raw) else {}
+    account_value = payload.get("account")
+    account = account_value if _is_object_dict(account_value) else None
     requires_openai_auth = bool(payload.get("requiresOpenaiAuth"))
-    account_type = account.get("type") if isinstance(account, dict) and isinstance(account.get("type"), str) else None
-    account_email = account.get("email") if isinstance(account, dict) and isinstance(account.get("email"), str) else None
-    plan_type = account.get("planType") if isinstance(account, dict) and isinstance(account.get("planType"), str) else None
-    authenticated = isinstance(account, dict)
-    pending_state = pending if isinstance(pending, dict) else {}
+    account_type_value = account.get("type") if account is not None else None
+    account_email_value = account.get("email") if account is not None else None
+    plan_type_value = account.get("planType") if account is not None else None
+    account_type = account_type_value if isinstance(account_type_value, str) else None
+    account_email = account_email_value if isinstance(account_email_value, str) else None
+    plan_type = plan_type_value if isinstance(plan_type_value, str) else None
+    authenticated = account is not None
+    pending_state = pending if _is_object_dict(pending) else {}
     login_id = pending_state.get("login_id") if isinstance(pending_state.get("login_id"), str) else None
     auth_url = pending_state.get("auth_url") if isinstance(pending_state.get("auth_url"), str) else None
     login_pending = bool(login_id and requires_openai_auth and not authenticated)
@@ -794,7 +813,7 @@ async def run_splash_action(
     payload: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     action = str(action_id or "").strip().lower()
-    params = payload if isinstance(payload, dict) else {}
+    params = payload if _is_object_dict(payload) else {}
     auth_state = _auth_state_bucket(extension_id)
     try:
         transport = await _ensure_transport_ready()
@@ -804,7 +823,7 @@ async def run_splash_action(
                 params={"type": "chatgpt"},
                 timeout=15.0,
             )
-            if not isinstance(result, dict):
+            if not _is_object_dict(result):
                 return {"ok": False, "error": "Invalid login response"}
             auth_url = result.get("authUrl")
             login_id = result.get("loginId")
@@ -835,7 +854,7 @@ async def run_splash_action(
                 timeout=15.0,
             )
             auth_state.clear()
-            cancel_status = result.get("status") if isinstance(result, dict) else None
+            cancel_status = result.get("status") if _is_object_dict(result) else None
             message = "Pending login canceled."
             if cancel_status == "notFound":
                 message = "Pending login no longer exists."
@@ -932,10 +951,10 @@ def _build_plan_state(
 def init_codex_app_server_manager(
     extensions_dir: Path,
     server_root: Path,
-    fws_getter: Callable,
-    broadcast_fn: Callable,
-    transcript_fn: Callable,
-    meta_fns: Optional[_MetaFns] = None,
+    fws_getter: Callable[[], Awaitable[ShellManager]],
+    broadcast_fn: Callable[[Dict[str, object]], Awaitable[None]],
+    transcript_fn: Callable[[str, Dict[str, object]], Awaitable[None]],
+    meta_fns: Optional[MetaFns] = None,
     registered_extension_ids: Optional[List[str]] = None,
 ) -> None:
     global _broadcast_fn, _transcript_fn, _meta_fns
@@ -944,7 +963,7 @@ def init_codex_app_server_manager(
     _registered_extension_ids = {
         ext_id
         for ext_id in (registered_extension_ids or [])
-        if isinstance(ext_id, str) and ext_id
+        if ext_id
     }
     _ready_extensions.clear()
     _broadcast_fn = broadcast_fn
@@ -966,10 +985,10 @@ def init_codex_app_server_manager(
 def init_codex_ext_manager(
     extensions_dir: Path,
     server_root: Path,
-    fws_getter: Callable,
-    broadcast_fn: Callable,
-    transcript_fn: Callable,
-    meta_fns: Optional[_MetaFns] = None,
+    fws_getter: Callable[[], Awaitable[ShellManager]],
+    broadcast_fn: Callable[[Dict[str, object]], Awaitable[None]],
+    transcript_fn: Callable[[str, Dict[str, object]], Awaitable[None]],
+    meta_fns: Optional[MetaFns] = None,
     registered_extension_ids: Optional[List[str]] = None,
 ) -> None:
     init_codex_app_server_manager(
@@ -1019,7 +1038,7 @@ async def get_settings_schema(extension_id: str) -> Dict[str, object]:
     usage_info = await get_usage_info(extension_id, auth_status=auth_status)
     fields = schema.get("fields")
     schema["fields"] = _build_information_section_fields(auth_status, usage_info) + (
-        list(fields) if isinstance(fields, list) else []
+        list(fields) if _is_object_list(fields) else []
     )
     schema["cache"] = "none"
     return schema
@@ -1038,7 +1057,7 @@ async def get_request_card_schemas(extension_id: str) -> Dict[str, object]:
     for method in methods:
         request_schema = protocol.server_request_schema(method)
         response_schema = protocol.server_request_response_schema(method)
-        if isinstance(request_schema, dict) and isinstance(response_schema, dict):
+        if _is_object_dict(request_schema) and _is_object_dict(response_schema):
             schemas[method.lower()] = {
                 "request": request_schema,
                 "response": response_schema,
@@ -1049,12 +1068,12 @@ async def get_request_card_schemas(extension_id: str) -> Dict[str, object]:
 async def list_models() -> List[Dict[str, object]]:
     transport = await _ensure_transport_ready()
     result = await transport.rpc_request("model/list", params={}, timeout=15.0)
-    items = result.get("data", []) if isinstance(result, dict) else []
+    items: object = result.get("data")
     models: List[Dict[str, object]] = []
-    if not isinstance(items, list):
+    if not _is_object_list(items):
         return models
     for item in items:
-        if not isinstance(item, dict):
+        if not _is_object_dict(item):
             continue
         model = dict(item)
         if not model.get("id"):
@@ -1080,12 +1099,12 @@ async def list_sessions(cwd: Optional[str] = None, sort: Optional[str] = None) -
         params=build_thread_list_params(protocol, limit=200),
         timeout=15.0,
     )
-    items_raw = result.get("data", []) if isinstance(result, dict) else []
+    items_raw: object = result.get("data")
     sessions: List[Dict[str, object]] = []
-    if not isinstance(items_raw, list):
+    if not _is_object_list(items_raw):
         return sessions
     for item in items_raw:
-        if not isinstance(item, dict):
+        if not _is_object_dict(item):
             continue
         session_id = item.get("id")
         if not isinstance(session_id, str) or not session_id:
@@ -1154,14 +1173,14 @@ async def get_live_session_state(
 
     try:
         await get_runtime_protocol()
-        result = await transport._rpc_request_unchecked(
+        result = await transport.rpc_request_unchecked(
             "thread/loaded/list",
             params={},
             conversation_id=conversation_id,
             timeout=5.0,
         )
-        loaded_ids = result.get("data", []) if isinstance(result, dict) else []
-        loaded = thread_id in loaded_ids if isinstance(loaded_ids, list) else transport.is_thread_ready(thread_id)
+        loaded_ids: object = result.get("data")
+        loaded = thread_id in loaded_ids if _is_object_list(loaded_ids) else transport.is_thread_ready(thread_id)
         return {
             "ok": True,
             "supported": True,
@@ -1231,14 +1250,14 @@ async def unload_live_session(
     try:
         protocol = await get_runtime_protocol()
         params = build_request_params(protocol, "thread/unsubscribe", {}, thread_id=thread_id)
-        result = await transport._rpc_request_unchecked(
+        result = await transport.rpc_request_unchecked(
             "thread/unsubscribe",
             params=params,
             conversation_id=conversation_id,
             timeout=10.0,
         )
         transport.mark_thread_unready(thread_id)
-        status = result.get("status") if isinstance(result, dict) else None
+        status = result.get("status") if _is_object_dict(result) else None
         return {
             "ok": True,
             "supported": True,
@@ -1292,8 +1311,8 @@ async def read_plan(extension_id: str, conversation_id: str) -> Dict[str, object
         }
 
     meta = _meta_fns["load"](conversation_id)
-    active_plan = meta.get("active_plan") if isinstance(meta, dict) and isinstance(meta.get("active_plan"), dict) else None
-    if isinstance(active_plan, dict):
+    active_plan = meta.get("active_plan") if _is_object_dict(meta) and isinstance(meta.get("active_plan"), dict) else None
+    if _is_object_dict(active_plan):
         active_steps = normalize_plan_steps(active_plan.get("steps"))
         if active_steps:
             explanation = active_plan.get("explanation")
@@ -1469,7 +1488,7 @@ async def handle_message(
                 timeout=15.0,
             )
 
-        if not isinstance(thread_id, str) or not thread_id:
+        if not thread_id:
             return {"ok": False, "error": "Failed to resolve thread_id after message send"}
         _add_to_raw_buffer("out", conversation_id, f"turn_start thread={thread_id[:8]} text={text[:120]}")
         return {
@@ -1544,11 +1563,11 @@ async def hydrate_transcript(
         _add_to_raw_buffer("err", conversation_id, f"hydrate_transcript rollout_not_found session={session_id[:8]}")
         return []
     preview = await asyncio.to_thread(preview_entries, path, 200000)
-    items_value = preview.get("items") if isinstance(preview, dict) else None
+    items_value = preview.get("items") if _is_object_dict(preview) else None
     items: List[Dict[str, object]] = []
-    if isinstance(items_value, list):
+    if _is_object_list(items_value):
         for item in items_value:
-            if isinstance(item, dict):
+            if _is_object_dict(item):
                 items.append({str(key): value for key, value in item.items()})
     _add_to_raw_buffer("out", conversation_id, f"hydrate_transcript imported={len(items)} session={session_id[:8]}")
     return items
@@ -1562,22 +1581,20 @@ def resolve_approval(request_id: str, resolution: object) -> bool:
 
 
 def validate_pending_approval(conversation_id: str, request_id: str, descriptor: Dict[str, object]) -> bool:
-    if not isinstance(descriptor, dict):
-        return False
     transport = _transport
     if transport is None:
         return False
-    meta = _meta_fns["load"](conversation_id) if _meta_fns and "load" in _meta_fns else {}
+    meta: object = _meta_fns["load"](conversation_id) if _meta_fns and "load" in _meta_fns else {}
     if descriptor.get("conversation_id") and descriptor.get("conversation_id") != conversation_id:
         return False
     pending_thread_id = descriptor.get("thread_id")
-    current_thread_id = meta.get("thread_id") if isinstance(meta, dict) else None
+    current_thread_id = meta.get("thread_id") if _is_object_dict(meta) else None
     if pending_thread_id and current_thread_id and pending_thread_id != current_thread_id:
         return False
     if pending_thread_id and not current_thread_id:
         return False
     runtime_signature = descriptor.get("runtime_signature")
-    current_signature = meta.get("thread_runtime_signature") if isinstance(meta, dict) else None
+    current_signature = meta.get("thread_runtime_signature") if _is_object_dict(meta) else None
     if runtime_signature and not current_signature:
         return False
     if runtime_signature and current_signature and runtime_signature != current_signature:
@@ -1595,7 +1612,7 @@ async def abort_session(conversation_id: str) -> bool:
     if not _meta_fns or "load" not in _meta_fns:
         return False
     meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    if not _is_object_dict(meta):
         return False
     thread_id = meta.get("thread_id")
     turn_id = meta.get("turn_id")

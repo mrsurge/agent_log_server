@@ -4,9 +4,10 @@ import importlib
 import json
 import os
 import time
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Optional, Protocol, TypedDict, cast
+from typing import Awaitable, Callable, Dict, List, Optional, Protocol, TypeGuard, TypedDict, cast
 
 from .router import CodexEventRouter
 from .runtime_protocol import (
@@ -50,7 +51,7 @@ class _ShellRecord(Protocol):
     spec_id: str | None
 
 
-class _ShellManager(Protocol):
+class ShellManager(Protocol):
     async def get_shell(self, shell_id: str) -> _ShellRecord | None: ...
 
     async def list_shells(self) -> list[_ShellRecord]: ...
@@ -83,17 +84,34 @@ class _Orchestrator(Protocol):
 
 
 class _OrchestratorFactory(Protocol):
-    def __call__(self, mgr: _ShellManager) -> _Orchestrator: ...
+    def __call__(self, mgr: ShellManager) -> _Orchestrator: ...
 
 
-class _MetaFns(TypedDict, total=False):
+class MetaFns(TypedDict, total=False):
     load: Callable[[str], object]
     save: Callable[[str, Dict[str, object]], None]
     upsert_pending_approval: Callable[[str, Dict[str, object]], None]
 
 
+def _is_object_dict(value: object) -> TypeGuard[Dict[str, object]]:
+    return isinstance(value, dict)
+
+
+def _is_object_list(value: object) -> TypeGuard[List[object]]:
+    return isinstance(value, list)
+
+
+def _is_object_future(value: object) -> TypeGuard[asyncio.Future[object]]:
+    return isinstance(value, asyncio.Future)
+
+
 def _object_dict(value: object) -> Dict[str, object]:
-    return dict(value) if isinstance(value, dict) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    result: Dict[str, object] = {}
+    for key, item_value in cast(Iterable[tuple[object, object]], value.items()):
+        result[str(key)] = item_value
+    return result
 
 
 def _load_orchestrator_factory() -> _OrchestratorFactory:
@@ -118,7 +136,7 @@ def _shell_record_subgroups(record: object) -> set[str]:
         return set()
     return {
         subgroup.strip()
-        for subgroup in raw_subgroups
+        for subgroup in cast(Iterable[object], raw_subgroups)
         if isinstance(subgroup, str) and subgroup.strip()
     }
 
@@ -139,8 +157,8 @@ def _extract_item_text(item: Dict[str, object]) -> Optional[Dict[str, str]]:
     if item_type == "message":
         role = str(item.get("role") or "").lower()
         text_parts: List[str] = []
-        content = item.get("content") or []
-        if isinstance(content, list):
+        content = item.get("content")
+        if _is_object_list(content):
             for part in content:
                 part_dict = _object_dict(part)
                 if part_dict.get("type") == "text":
@@ -163,8 +181,8 @@ def _extract_item_text(item: Dict[str, object]) -> Optional[Dict[str, str]]:
 
     if item_type in {"usermessage", "user_message"}:
         user_text_parts: List[str] = []
-        content = item.get("content") or []
-        if isinstance(content, list):
+        content = item.get("content")
+        if _is_object_list(content):
             for part in content:
                 part_dict = _object_dict(part)
                 if part_dict.get("type") == "text":
@@ -194,10 +212,10 @@ class CodexAppServerTransport:
         self,
         *,
         server_root: Path,
-        fws_getter: Callable[[], Awaitable[_ShellManager]],
+        fws_getter: Callable[[], Awaitable[ShellManager]],
         broadcast_fn: Callable[[Dict[str, object]], Awaitable[None]],
         transcript_fn: Callable[[str, Dict[str, object]], Awaitable[None]],
-        meta_fns: Optional[_MetaFns],
+        meta_fns: Optional[MetaFns],
         raw_log_fn: Callable[[str, str, object], None],
         auth_event_handler: Optional[Callable[..., Awaitable[List[Dict[str, object]]]]] = None,
     ) -> None:
@@ -211,9 +229,9 @@ class CodexAppServerTransport:
 
         self._lock = asyncio.Lock()
         self._shell_id: Optional[str] = None
-        self._reader_task: Optional[asyncio.Task] = None
+        self._reader_task: Optional[asyncio.Task[None]] = None
         self._initialized = False
-        self._rpc_waiters: Dict[str, asyncio.Future] = {}
+        self._rpc_waiters: Dict[str, asyncio.Future[Dict[str, object]]] = {}
         self._request_conversations: Dict[str, Optional[str]] = {}
         self._resumed_threads: set[str] = set()
         self._thread_conversations: Dict[str, str] = {}
@@ -323,7 +341,7 @@ class CodexAppServerTransport:
             protocol = peek_runtime_protocol()
             if protocol is None:
                 raise RuntimeError("runtime protocol unavailable for approval resolution")
-            encoded_result = cast(object, encode_server_request_result(protocol, request_method, result_value))
+            encoded_result: object = encode_server_request_result(protocol, request_method, result_value)
         else:
             encoded_result = {
                 "decision": "accept" if str(result_value.get("decision")).strip().lower() == "accept" else "decline",
@@ -379,6 +397,21 @@ class CodexAppServerTransport:
             timeout=timeout,
         )
 
+    async def rpc_request_unchecked(
+        self,
+        method: str,
+        *,
+        params: Optional[Dict[str, object]] = None,
+        conversation_id: Optional[str] = None,
+        timeout: float = 6.0,
+    ) -> Dict[str, object]:
+        return await self._rpc_request_unchecked(
+            method,
+            params=params,
+            conversation_id=conversation_id,
+            timeout=timeout,
+        )
+
     async def _rpc_request_unchecked(
         self,
         method: str,
@@ -416,7 +449,7 @@ class CodexAppServerTransport:
         finally:
             self._rpc_waiters.pop(req_id, None)
             self._request_conversations.pop(req_id, None)
-        if not isinstance(response, dict):
+        if not _is_object_dict(response):
             if conversation_id and resume_thread_id:
                 self._discard_resume_startup_barrier(conversation_id, reason="invalid rpc response")
             raise RuntimeError("invalid rpc response")
@@ -424,8 +457,9 @@ class CodexAppServerTransport:
             if conversation_id and resume_thread_id:
                 self._discard_resume_startup_barrier(conversation_id, reason="rpc error")
             error = response.get("error")
-            if isinstance(error, dict):
-                message = error.get("message") or "rpc error"
+            if _is_object_dict(error):
+                message_value = error.get("message") or "rpc error"
+                message = message_value if isinstance(message_value, str) else str(message_value)
             else:
                 message = str(error)
             raise RuntimeError(message)
@@ -441,8 +475,8 @@ class CodexAppServerTransport:
                 "_virtual_ack_source": response.get("_virtual_ack_source"),
             }
         protocol = await get_runtime_protocol()
-        decoded_result = cast(object, decode_response_result(protocol, method, response.get("result", response)))
-        if not isinstance(decoded_result, dict):
+        decoded_result: object = decode_response_result(protocol, method, response.get("result", response))
+        if not _is_object_dict(decoded_result):
             raise RuntimeError("invalid rpc response result")
         decoded_result_dict = _object_dict(decoded_result)
         self._remember_response_bindings(conversation_id=conversation_id, result=decoded_result_dict)
@@ -493,7 +527,7 @@ class CodexAppServerTransport:
         self._set_shell(shell_id)
         return shell_id
 
-    async def _adopt_existing_shell(self, mgr: _ShellManager) -> Optional[str]:
+    async def _adopt_existing_shell(self, mgr: ShellManager) -> Optional[str]:
         try:
             records = await mgr.list_shells()
         except Exception:
@@ -510,7 +544,7 @@ class CodexAppServerTransport:
             return rec.id
         return None
 
-    async def _start_new_shell(self, mgr: _ShellManager) -> str:
+    async def _start_new_shell(self, mgr: ShellManager) -> str:
         spec_path = Path(__file__).parent / "shellspec" / "app_server.yaml"
         orch = _load_orchestrator_factory()(mgr)
         shell = await orch.start_from_ref(
@@ -792,8 +826,8 @@ class CodexAppServerTransport:
         request_id: Optional[str],
     ) -> Dict[str, object]:
         protocol = await get_runtime_protocol()
-        routed_payload: object = _object_dict(payload) if isinstance(payload, dict) else payload
-        if request_id is not None and isinstance(routed_payload, dict) and routed_payload.get("_request_id") is None:
+        routed_payload: object = _object_dict(payload) if _is_object_dict(payload) else payload
+        if request_id is not None and _is_object_dict(routed_payload) and routed_payload.get("_request_id") is None:
             routed_payload["_request_id"] = str(request_id)
         routed = self._router.route_event(
             protocol,
@@ -804,14 +838,14 @@ class CodexAppServerTransport:
             conversation_id=conversation_id,
             extract_item_text=_extract_item_text,
         )
-        if conversation_id and isinstance(routed, dict):
+        if conversation_id and _is_object_dict(routed):
             descriptors = routed.get("approval_descriptors")
-            if isinstance(descriptors, list):
+            if _is_object_list(descriptors):
                 for descriptor in descriptors:
-                    if isinstance(descriptor, dict):
+                    if _is_object_dict(descriptor):
                         self._persist_pending_approval(conversation_id, descriptor)
             bind_thread_ids = routed.get("bind_thread_ids")
-            if isinstance(bind_thread_ids, list):
+            if _is_object_list(bind_thread_ids):
                 for bound_thread_id in bind_thread_ids:
                     if isinstance(bound_thread_id, str) and bound_thread_id:
                         self._remember_bindings(
@@ -819,7 +853,7 @@ class CodexAppServerTransport:
                             thread_id=bound_thread_id,
                         )
             clear_ids = routed.get("clear_live_approval_ids")
-            if isinstance(clear_ids, list):
+            if _is_object_list(clear_ids):
                 for pending_id in clear_ids:
                     self._pending_approval_requests.pop(str(pending_id or "").strip(), None)
         return routed
@@ -853,13 +887,13 @@ class CodexAppServerTransport:
                 turn_id=turn_id,
                 request_id=request_id,
             )
-            if isinstance(handled_events, list):
-                extra_events = [event for event in handled_events if isinstance(event, dict)]
+            if _is_object_list(handled_events):
+                extra_events = [event for event in handled_events if _is_object_dict(event)]
 
-        if (not isinstance(routed, dict) or not routed.get("handled")) and not extra_events:
+        if (not _is_object_dict(routed) or not routed.get("handled")) and not extra_events:
             return
 
-        routed_result = routed if isinstance(routed, dict) else {}
+        routed_result = routed if _is_object_dict(routed) else {}
         routed_conversation_id = routed_result.get("conversation_id")
         resolved_conversation_id = (
             routed_conversation_id
@@ -868,18 +902,18 @@ class CodexAppServerTransport:
         )
         descriptors_by_request: Dict[str, Dict[str, object]] = {}
         routed_descriptors = routed_result.get("approval_descriptors")
-        if isinstance(routed_descriptors, list):
+        if _is_object_list(routed_descriptors):
             for descriptor in routed_descriptors:
-                if not isinstance(descriptor, dict):
+                if not _is_object_dict(descriptor):
                     continue
                 request_id_text = str(descriptor.get("request_id") or descriptor.get("id") or "").strip()
                 if request_id_text:
                     descriptors_by_request[request_id_text] = descriptor
 
         transcript_entries = routed_result.get("transcript_entries")
-        if resolved_conversation_id and isinstance(transcript_entries, list):
+        if resolved_conversation_id and _is_object_list(transcript_entries):
             for entry in transcript_entries:
-                if isinstance(entry, dict):
+                if _is_object_dict(entry):
                     await self._transcript_fn(resolved_conversation_id, entry)
 
         next_turn_id = routed_result.get("set_turn_id")
@@ -890,8 +924,8 @@ class CodexAppServerTransport:
 
         events: List[Dict[str, object]] = []
         routed_events = routed_result.get("events")
-        if isinstance(routed_events, list):
-            events.extend(event for event in routed_events if isinstance(event, dict))
+        if _is_object_list(routed_events):
+            events.extend(event for event in routed_events if _is_object_dict(event))
         events.extend(extra_events)
         for event in events:
             outbound = dict(event)
@@ -982,7 +1016,7 @@ class CodexAppServerTransport:
         return None
 
     def _extract_resume_thread_id(self, params: Optional[Dict[str, object]]) -> Optional[str]:
-        if not isinstance(params, dict):
+        if not _is_object_dict(params):
             return None
         for key in ("threadId", "thread_id"):
             value = params.get(key)
@@ -992,16 +1026,16 @@ class CodexAppServerTransport:
 
     def _begin_resume_startup_barrier(self, conversation_id: str, thread_id: str) -> Dict[str, object]:
         existing = self._resume_startup_barriers.get(conversation_id)
-        existing_future = existing.get("future") if isinstance(existing, dict) else None
+        existing_future = existing.get("future") if _is_object_dict(existing) else None
         if (
-            isinstance(existing, dict)
+            _is_object_dict(existing)
             and existing.get("thread_id") == thread_id
-            and isinstance(existing_future, asyncio.Future)
+            and _is_object_future(existing_future)
             and not existing_future.done()
         ):
             return existing
-        future = asyncio.get_running_loop().create_future()
-        barrier = {
+        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        barrier: Dict[str, object] = {
             "thread_id": thread_id,
             "saw_startup": False,
             "future": future,
@@ -1013,17 +1047,17 @@ class CodexAppServerTransport:
 
     def _clear_resume_startup_barriers(self, reason: str) -> None:
         for barrier in self._resume_startup_barriers.values():
-            future = barrier.get("future") if isinstance(barrier, dict) else None
-            if isinstance(future, asyncio.Future) and not future.done():
+            future = barrier.get("future") if _is_object_dict(barrier) else None
+            if _is_object_future(future) and not future.done():
                 future.cancel()
         self._resume_startup_barriers.clear()
 
     def _discard_resume_startup_barrier(self, conversation_id: str, *, reason: Optional[str] = None) -> None:
         barrier = self._resume_startup_barriers.pop(conversation_id, None)
-        if not isinstance(barrier, dict):
+        if not _is_object_dict(barrier):
             return
         future = barrier.get("future")
-        if not isinstance(future, asyncio.Future) or future.done():
+        if not _is_object_future(future) or future.done():
             return
         if reason:
             future.cancel()
@@ -1045,7 +1079,7 @@ class CodexAppServerTransport:
             msg_type = msg.get("type")
             if isinstance(msg_type, str) and msg_type:
                 candidates.append(msg_type)
-        if isinstance(label, str) and label:
+        if label:
             if label.startswith("codex/event/"):
                 candidates.append(label.split("/", 2)[-1])
             else:
@@ -1072,7 +1106,7 @@ class CodexAppServerTransport:
         if not conversation_id:
             return
         barrier = self._resume_startup_barriers.get(conversation_id)
-        if not isinstance(barrier, dict):
+        if not _is_object_dict(barrier):
             return
         barrier_dict = barrier
         barrier_thread_id = barrier_dict.get("thread_id")
@@ -1089,7 +1123,7 @@ class CodexAppServerTransport:
             state = str(status_dict.get("state") or "").strip().lower()
             if state == "failed":
                 future = barrier_dict.get("future")
-                if isinstance(future, asyncio.Future) and not future.done():
+                if _is_object_future(future) and not future.done():
                     server_name = str(msg_dict.get("server") or "").strip()
                     error_text = str(status_dict.get("error") or "").strip()
                     message = error_text or "MCP startup failed during thread resume"
@@ -1103,7 +1137,7 @@ class CodexAppServerTransport:
                     )
             return
         future = barrier_dict.get("future")
-        if not isinstance(future, asyncio.Future) or future.done():
+        if not _is_object_future(future) or future.done():
             return
         if event_type == "thread/status/changed":
             payload_dict = _object_dict(payload)
@@ -1144,7 +1178,7 @@ class CodexAppServerTransport:
         timeout: float,
     ) -> Dict[str, object]:
         barrier = self._resume_startup_barriers.get(conversation_id)
-        if not isinstance(barrier, dict):
+        if not _is_object_dict(barrier):
             try:
                 return await asyncio.wait_for(response_future, timeout=timeout)
             except asyncio.TimeoutError as exc:
@@ -1155,7 +1189,7 @@ class CodexAppServerTransport:
             except asyncio.TimeoutError as exc:
                 raise RuntimeError("thread/resume request timed out") from exc
         barrier_future = barrier.get("future")
-        if not isinstance(barrier_future, asyncio.Future):
+        if not _is_object_future(barrier_future):
             self._discard_resume_startup_barrier(conversation_id)
             try:
                 return await asyncio.wait_for(response_future, timeout=timeout)
@@ -1167,15 +1201,17 @@ class CodexAppServerTransport:
             f"resume_virtual_ack_wait thread={thread_id[:8]} timeout={timeout:.2f} req={req_id}",
         )
         try:
-            done, _ = await asyncio.wait(
-                {response_future, barrier_future},
+            response_future_obj = cast(asyncio.Future[object], response_future)
+            done, pending = await asyncio.wait(
+                {response_future_obj, barrier_future},
                 timeout=timeout,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            del pending
         except asyncio.CancelledError as exc:
             self._discard_resume_startup_barrier(conversation_id, reason="thread/resume virtual ack cancelled")
             raise RuntimeError("thread/resume virtual ack cancelled") from exc
-        if response_future in done:
+        if response_future_obj in done:
             self._discard_resume_startup_barrier(conversation_id)
             try:
                 response = response_future.result()
@@ -1203,7 +1239,8 @@ class CodexAppServerTransport:
                     f"resume_virtual_ack_fail thread={thread_id[:8]} req={req_id} error={exc}",
                 )
                 raise RuntimeError(str(exc) or "thread/resume virtual ack failed") from exc
-            source = ack_payload.get("source") if isinstance(ack_payload, dict) else "unknown"
+            source_value = ack_payload.get("source") if _is_object_dict(ack_payload) else "unknown"
+            source = source_value if isinstance(source_value, str) else str(source_value)
             if not response_future.done():
                 response_future.cancel()
             self._discard_resume_startup_barrier(conversation_id)
@@ -1242,7 +1279,7 @@ class CodexAppServerTransport:
                 data = cast(object, json.loads(meta_path.read_text(encoding="utf-8")))
             except Exception:
                 continue
-            if isinstance(data, dict) and data.get("thread_id") == thread_id:
+            if _is_object_dict(data) and data.get("thread_id") == thread_id:
                 return child.name
         return None
 
@@ -1259,7 +1296,7 @@ class CodexAppServerTransport:
                 data = cast(object, json.loads(meta_path.read_text(encoding="utf-8")))
             except Exception:
                 continue
-            if isinstance(data, dict) and data.get("turn_id") == turn_id:
+            if _is_object_dict(data) and data.get("turn_id") == turn_id:
                 return child.name
         return None
 
@@ -1279,7 +1316,7 @@ class CodexAppServerTransport:
         load = self._meta_fns.get("load")
         if callable(load):
             meta = load(conversation_id)
-            return _object_dict(meta) if isinstance(meta, dict) else None
+            return _object_dict(meta) if _is_object_dict(meta) else None
         path = self._conversation_meta_path(conversation_id)
         if not path.exists():
             return None
@@ -1287,7 +1324,7 @@ class CodexAppServerTransport:
             data = cast(object, json.loads(path.read_text(encoding="utf-8")))
         except Exception:
             return None
-        return _object_dict(data) if isinstance(data, dict) else None
+        return _object_dict(data) if _is_object_dict(data) else None
 
     def _save_meta(self, conversation_id: str, meta: Dict[str, object]) -> None:
         save = self._meta_fns.get("save")
@@ -1303,7 +1340,7 @@ class CodexAppServerTransport:
             return
         self._thread_conversations[thread_id] = conversation_id
         meta = self._load_meta(conversation_id)
-        if not isinstance(meta, dict):
+        if not _is_object_dict(meta):
             return
         existing = meta.get("thread_id")
         if existing and existing != thread_id:
@@ -1322,7 +1359,7 @@ class CodexAppServerTransport:
         if turn_id:
             self._turn_conversations[turn_id] = conversation_id
         meta = self._load_meta(conversation_id)
-        if not isinstance(meta, dict):
+        if not _is_object_dict(meta):
             return
         changed = False
         if turn_id:
@@ -1361,12 +1398,12 @@ class CodexAppServerTransport:
         thread_id: Optional[str] = None
         turn_id: Optional[str] = None
         thread = result_dict.get("thread")
-        if isinstance(thread, dict):
+        if _is_object_dict(thread):
             thread_value = thread.get("id")
             if isinstance(thread_value, str) and thread_value:
                 thread_id = thread_value
         turn = result_dict.get("turn")
-        if isinstance(turn, dict):
+        if _is_object_dict(turn):
             turn_value = turn.get("id")
             if isinstance(turn_value, str) and turn_value:
                 turn_id = turn_value
@@ -1381,8 +1418,10 @@ class CodexAppServerTransport:
         payload_dict = _object_dict(payload)
         if payload_dict:
             thread = payload_dict.get("thread")
-            if isinstance(thread, dict) and isinstance(thread.get("id"), str) and thread.get("id"):
-                return thread["id"]
+            if _is_object_dict(thread):
+                thread_id = thread.get("id")
+                if isinstance(thread_id, str) and thread_id:
+                    return thread_id
             for key in ("threadId", "thread_id", "conversationId", "conversation_id", "sender_thread_id"):
                 value = payload_dict.get(key)
                 if isinstance(value, str) and value:
@@ -1400,7 +1439,7 @@ class CodexAppServerTransport:
             if isinstance(value, str) and value:
                 return value
         turn = payload_dict.get("turn")
-        if isinstance(turn, dict):
+        if _is_object_dict(turn):
             turn_id = turn.get("id")
             if isinstance(turn_id, str) and turn_id:
                 return turn_id

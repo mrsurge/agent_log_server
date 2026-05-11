@@ -1,6 +1,10 @@
 import json
 import re
-from typing import Optional
+from typing import Optional, cast
+
+
+PlanStep = dict[str, str]
+ObjectMap = dict[str, object]
 
 
 def normalize_plan_status(status: object) -> str:
@@ -17,23 +21,24 @@ def normalize_plan_status(status: object) -> str:
 def normalize_plan_steps(plan: object) -> list[dict[str, str]]:
     if not isinstance(plan, list):
         return []
-    normalized: list[dict[str, str]] = []
-    for item in plan:
+    normalized: list[PlanStep] = []
+    for item in cast(list[object], plan):
         if not isinstance(item, dict):
             continue
-        step = item.get("step")
+        item_map = cast(ObjectMap, item)
+        step = item_map.get("step")
         if not isinstance(step, str) or not step.strip():
             continue
         normalized.append(
             {
                 "step": step.strip(),
-                "status": normalize_plan_status(item.get("status")),
+                "status": normalize_plan_status(item_map.get("status")),
             }
         )
     return normalized
 
 
-def plan_signature(steps: list[dict[str, str]], explanation: Optional[str]) -> str:
+def plan_signature(steps: list[PlanStep], explanation: Optional[str]) -> str:
     payload = {
         "steps": steps,
         "explanation": explanation or "",
@@ -41,7 +46,7 @@ def plan_signature(steps: list[dict[str, str]], explanation: Optional[str]) -> s
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def render_plan_markdown(steps: list[dict[str, str]], explanation: Optional[str] = None) -> str:
+def render_plan_markdown(steps: list[PlanStep], explanation: Optional[str] = None) -> str:
     if not steps and not explanation:
         return ""
 
@@ -51,8 +56,6 @@ def render_plan_markdown(steps: list[dict[str, str]], explanation: Optional[str]
         lines.append("")
 
     for item in steps:
-        if not isinstance(item, dict):
-            continue
         step = item.get("step")
         if not isinstance(step, str) or not step.strip():
             continue

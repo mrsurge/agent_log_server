@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, cast
 
 ObjectDict = Dict[str, object]
 
@@ -8,7 +8,7 @@ DEVINS_CONTEXT_SETTINGS_KEY = "__als_devins_context__"
 
 
 def _optional_map(value: object) -> ObjectDict:
-    return dict(value) if isinstance(value, dict) else {}
+    return cast(ObjectDict, value).copy() if isinstance(value, dict) else {}
 
 
 def _optional_string(value: object) -> str | None:

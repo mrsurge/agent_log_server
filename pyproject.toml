@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-log-server"
-version = "0.2.65"
+version = "0.2.66"
 description = "FastAPI server for Codex Agent UI, agent log, and TE2-hosted orchestration."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -55,17 +55,18 @@ dependencies = { file = ["requirements.txt"] }
 
 [tool.basedpyright]
 pythonVersion = "3.11"
-typeCheckingMode = "standard"
+typeCheckingMode = "strict"
 reportAny = "warning"
 reportExplicitAny = "warning"
 include = [
   "*.py",
   "agent_index",
-  "als_deprecated",
+  "agent_log_server_rs",
   "extensions",
 ]
 exclude = [
   "**/__pycache__",
+  "als_deprecated",
   "als_deprecated.egg-info",
   "build",
   "extensions/copilot_sdk/_vendor",

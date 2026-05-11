@@ -19,7 +19,7 @@ _META_ENVELOPE_END = "\x1f"
 def _coerce_payload_map(value: object) -> PayloadMap:
     if not isinstance(value, dict):
         return {}
-    return {str(key): item for key, item in value.items()}
+    return cast(PayloadMap, value).copy()
 
 
 def _sanitize_rollout_id(value: str) -> str:
@@ -58,7 +58,7 @@ def _rollout_content_text(payload: PayloadMap) -> str | None:
     content = payload.get("content")
     parts: list[str] = []
     if isinstance(content, list):
-        for item in content:
+        for item in cast(list[object], content):
             item_map = _coerce_payload_map(item)
             if not item_map:
                 continue
@@ -79,7 +79,7 @@ def _rollout_reasoning_text(payload: PayloadMap) -> str | None:
     summary = payload.get("summary")
     parts: list[str] = []
     if isinstance(summary, list):
-        for item in summary:
+        for item in cast(list[object], summary):
             item_map = _coerce_payload_map(item)
             if not item_map:
                 continue
@@ -108,7 +108,7 @@ def _rollout_extract_diff(payload: object) -> str | None:
             if diff:
                 return diff
     if isinstance(payload, list):
-        for value in payload:
+        for value in cast(list[object], payload):
             diff = _rollout_extract_diff(value)
             if diff:
                 return diff
@@ -189,7 +189,7 @@ def preview_entries(path: Path, limit: int = 400) -> PreviewResult:
                         usage_value = info.get("total_token_usage")
                         if not isinstance(usage_value, dict):
                             usage_value = info.get("last_token_usage")
-                        usage = _coerce_payload_map(usage_value)
+                        usage = cast(PayloadMap, usage_value).copy() if isinstance(usage_value, dict) else {}
                         total_tokens = usage.get("total_tokens")
                         if isinstance(total_tokens, (int, float)):
                             token_total = int(total_tokens)

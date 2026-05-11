@@ -402,6 +402,19 @@ def _rpc_id(value: object) -> RpcId:
     raise RpcAdapterError(INVALID_REQUEST, "Invalid request id")
 
 
+adapter_model = _adapter_model
+ack_from_result = _ack_from_result
+merged_settings = _merged_settings
+optional_map = _optional_map
+optional_path = _optional_path
+optional_string = _optional_string
+params_map = _params_map
+required_string = _required_string
+rpc_id = _rpc_id
+string_list = _string_list
+string = _string
+
+
 async def amain() -> int:
     adapter = CopilotSdkJsonRpcAdapter()
     protocol_stdout = sys.stdout

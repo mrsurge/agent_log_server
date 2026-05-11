@@ -32,17 +32,17 @@ from agent_log_server_rs.adapters.copilot_sdk_adapter import (
     METHOD_NOT_FOUND,
     PARSE_ERROR,
     RpcAdapterError,
-    _ack_from_result,
-    _adapter_model,
-    _merged_settings,
-    _optional_map,
-    _optional_path,
-    _optional_string,
-    _params_map,
-    _required_string,
-    _rpc_id,
-    _string_list,
-    _string,
+    ack_from_result,
+    adapter_model,
+    merged_settings,
+    optional_map,
+    optional_path,
+    optional_string,
+    params_map,
+    required_string,
+    rpc_id,
+    string_list,
+    string,
 )
 
 RpcId: TypeAlias = str | int | None
@@ -73,14 +73,13 @@ async def _close_framework_shell_peer() -> None:
         relay = cast(object | None, getattr(module, "_peer_relay", None))
         if relay is None:
             return
-        tasks = [
-            task
-            for task in (
-                getattr(relay, "_connect_task", None),
-                getattr(relay, "_relay_task", None),
-            )
-            if isinstance(task, asyncio.Task)
-        ]
+        tasks: list[asyncio.Task[object]] = []
+        for task_candidate in (
+            getattr(relay, "_connect_task", None),
+            getattr(relay, "_relay_task", None),
+        ):
+            if isinstance(task_candidate, asyncio.Task):
+                tasks.append(cast(asyncio.Task[object], task_candidate))
         for task in tasks:
             task.cancel()
         if tasks:
@@ -183,15 +182,22 @@ def _dict_result_with_defaults(
     return payload
 
 
-def _optional_path_list(value: object) -> list[Path]:
+def optional_path_list(value: object) -> list[Path]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
     paths: list[Path] = []
-    for item in value:
-        path = _optional_path(item)
+    for item in cast(Sequence[object], value):
+        path = optional_path(item)
         if path is not None:
             paths.append(path)
     return paths
+
+
+def _json_map_list(value: object) -> list[JsonMap]:
+    if not isinstance(value, list):
+        return []
+    items = cast(list[object], value)
+    return [cast(JsonMap, item) for item in items if isinstance(item, dict)]
 
 
 def _env_path(key: str) -> Path | None:
@@ -261,7 +267,7 @@ async def _put_shells_probe(probe: JsonMap, manager: object) -> None:
     result = list_shells()
     if hasattr(result, "__await__"):
         result = await cast(Awaitable[object], result)
-    shells = result if isinstance(result, list) else []
+    shells = cast(list[object], result) if isinstance(result, list) else []
     probe["shell_count"] = len(shells)
     probe["shells"] = [_shell_probe(shell) for shell in shells[-12:]]
 
@@ -279,13 +285,13 @@ def _shell_probe(shell: object) -> JsonMap:
 
 
 def _apply_mcp_context(settings: JsonMap, params: JsonMap) -> None:
-    mcp_context = _optional_map(params.get("mcp_context"))
+    mcp_context = optional_map(params.get("mcp_context"))
     if mcp_context:
         settings["mcp_context"] = mcp_context
 
 
 def _apply_devins_context(settings: JsonMap, params: JsonMap) -> None:
-    devins_context = _optional_map(params.get("devins_context"))
+    devins_context = optional_map(params.get("devins_context"))
     if devins_context:
         settings[DEVINS_CONTEXT_SETTINGS_KEY] = devins_context
 
@@ -439,7 +445,7 @@ class ExtensionJsonRpcAdapter:
             return
 
         message = cast(JsonMap, raw)
-        request_id = _rpc_id(message.get("id"))
+        request_id = rpc_id(message.get("id"))
         try:
             result = await self._dispatch(message)
         except RpcAdapterError as exc:
@@ -457,13 +463,13 @@ class ExtensionJsonRpcAdapter:
     async def _dispatch(self, message: JsonMap) -> object:
         if message.get("jsonrpc") != JSONRPC_VERSION:
             raise RpcAdapterError(INVALID_REQUEST, "Invalid JSON-RPC version")
-        method = _string(message.get("method"))
-        params = _params_map(message.get("params"))
+        method = string(message.get("method"))
+        params = params_map(message.get("params"))
 
         if method == AdapterMethod.EXTENSION_INITIALIZE:
             return await self._initialize(params)
         if method == AdapterMethod.EXTENSION_SHUTDOWN:
-            await self._stop_supported_handlers()
+            await self.stop_supported_handlers()
             self._shutdown_requested = True
             return {"ok": True}
         if method == AdapterMethod.EXTENSION_RELOAD:
@@ -510,19 +516,19 @@ class ExtensionJsonRpcAdapter:
         raise RpcAdapterError(METHOD_NOT_FOUND, f"Unsupported method: {method}")
 
     async def _initialize(self, params: JsonMap) -> JsonMap:
-        extension_id = _optional_string(params.get("extension_id")) or self._state.extension_id
-        cwd = _optional_path(params.get("cwd")) or _safe_cwd()
-        data_dir = _optional_path(params.get("data_dir")) or cwd
-        cache_dir = _optional_path(params.get("cache_dir")) or data_dir
-        config_dir = _optional_path(params.get("config_dir")) or data_dir
-        extension_roots = _optional_path_list(params.get("extensions_dirs"))
-        legacy_extensions_dir = _optional_path(params.get("extensions_dir"))
+        extension_id = optional_string(params.get("extension_id")) or self._state.extension_id
+        cwd = optional_path(params.get("cwd")) or _safe_cwd()
+        data_dir = optional_path(params.get("data_dir")) or cwd
+        cache_dir = optional_path(params.get("cache_dir")) or data_dir
+        config_dir = optional_path(params.get("config_dir")) or data_dir
+        extension_roots = optional_path_list(params.get("extensions_dirs"))
+        legacy_extensions_dir = optional_path(params.get("extensions_dir"))
         if not extension_roots and legacy_extensions_dir is not None:
             extension_roots = [legacy_extensions_dir]
         if not extension_roots:
             extension_roots = list(self._state.extension_roots) or [self._state.extensions_dir]
         extensions_dir = extension_roots[0]
-        settings = _optional_map(params.get("settings")) or {}
+        settings = optional_map(params.get("settings")) or {}
 
         self._state = AdapterState(
             extension_id=extension_id,
@@ -537,7 +543,7 @@ class ExtensionJsonRpcAdapter:
         )
         self._ensure_loader_initialized()
         info = self._extension_info(extension_id)
-        ext_type = _optional_string(info.get("type")) or ""
+        ext_type = optional_string(info.get("type")) or ""
         active = info.get("active") is True
         handler = self._loader.get_handler(extension_id) if active else None
         conversations_supported = _has_any_callable_attr(handler, CONVERSATION_METHODS)
@@ -565,11 +571,11 @@ class ExtensionJsonRpcAdapter:
     async def _reload(self, params: JsonMap) -> JsonMap:
         self._ensure_loader_initialized()
         force = params.get("force") is True
-        changed_extension_ids = _string_list(params.get("changed_extension_ids"))
+        changed_extension_ids = string_list(params.get("changed_extension_ids"))
         self._loader.reload_extensions(changed_extension_ids, force=force)
         self._apply_enabled_overrides(params.get("enabled_overrides"))
         extensions = await self._refresh_dependency_state()
-        wait_ready_extension_id = _optional_string(params.get("wait_ready_extension_id"))
+        wait_ready_extension_id = optional_string(params.get("wait_ready_extension_id"))
         wait_ready = False
         if wait_ready_extension_id:
             wait_ready = await self._wait_ready_if_active(wait_ready_extension_id)
@@ -579,11 +585,9 @@ class ExtensionJsonRpcAdapter:
     async def _warm_up(self, params: JsonMap) -> JsonMap:
         self._ensure_loader_initialized()
         self._apply_enabled_overrides(params.get("enabled_overrides"))
-        extensions = await self._refresh_dependency_state()
+        await self._refresh_dependency_state()
         timeout = _positive_float(params.get("timeout"), 60.0)
         results = await self._loader.warm_up_extensions(timeout=timeout)
-        if not isinstance(results, dict):
-            results = {}
         return {
             "ok": True,
             "supported": True,
@@ -601,7 +605,7 @@ class ExtensionJsonRpcAdapter:
             if self._loader.supports_dependency_check(extension_id):
                 dependency_result = await self._loader.check_extension_dependencies(extension_id)
             else:
-                dependency_result = {
+                dependency_result: JsonMap = {
                     "ok": True,
                     "status": "met",
                     "message": "No dependency check required",
@@ -623,43 +627,43 @@ class ExtensionJsonRpcAdapter:
 
     async def _package_validate(self, params: JsonMap) -> JsonMap:
         self._ensure_loader_initialized()
-        source_type = _required_string(params, "source_type")
+        source_type = required_string(params, "source_type")
         result = self._loader.validate_extension_source(
             source_type=source_type,
-            source_path=_optional_string(params.get("source_path")),
-            repo_url=_optional_string(params.get("repo_url")),
-            ref=_optional_string(params.get("ref")),
-            extension_id=_optional_string(params.get("extension_id")),
+            source_path=optional_string(params.get("source_path")),
+            repo_url=optional_string(params.get("repo_url")),
+            ref=optional_string(params.get("ref")),
+            extension_id=optional_string(params.get("extension_id")),
         )
         return dict(result)
 
     async def _package_install(self, params: JsonMap) -> JsonMap:
         self._ensure_loader_initialized()
-        source_type = _required_string(params, "source_type")
+        source_type = required_string(params, "source_type")
         result = self._loader.install_extension_source(
             source_type=source_type,
-            source_path=_optional_string(params.get("source_path")),
-            repo_url=_optional_string(params.get("repo_url")),
-            ref=_optional_string(params.get("ref")),
-            extension_id=_optional_string(params.get("extension_id")),
+            source_path=optional_string(params.get("source_path")),
+            repo_url=optional_string(params.get("repo_url")),
+            ref=optional_string(params.get("ref")),
+            extension_id=optional_string(params.get("extension_id")),
             allow_override=params.get("allow_override") is True,
         )
         return {
             "ok": bool(result.get("ok")),
             "result": dict(result),
-            "extension_id": _optional_string(result.get("extension_id")),
+            "extension_id": optional_string(result.get("extension_id")),
             "extensions": list(self._loader.list_extensions()),
         }
 
     async def _package_update(self, params: JsonMap) -> JsonMap:
         self._ensure_loader_initialized()
-        extension_id = _required_string(params, "extension_id")
+        extension_id = required_string(params, "extension_id")
         result = self._loader.update_extension_source(
             extension_id,
-            source_type=_optional_string(params.get("source_type")),
-            source_path=_optional_string(params.get("source_path")),
-            repo_url=_optional_string(params.get("repo_url")),
-            ref=_optional_string(params.get("ref")),
+            source_type=optional_string(params.get("source_type")),
+            source_path=optional_string(params.get("source_path")),
+            repo_url=optional_string(params.get("repo_url")),
+            ref=optional_string(params.get("ref")),
         )
         return {
             "ok": bool(result.get("ok")),
@@ -670,7 +674,7 @@ class ExtensionJsonRpcAdapter:
 
     async def _package_remove(self, params: JsonMap) -> JsonMap:
         self._ensure_loader_initialized()
-        extension_id = _required_string(params, "extension_id")
+        extension_id = required_string(params, "extension_id")
         info = self._loader.get_extension_info(extension_id) or {}
         if info.get("source_kind") == "builtin":
             return {
@@ -695,9 +699,7 @@ class ExtensionJsonRpcAdapter:
         handler: object | None = None
         handler_class: str | None = None
         if self._loader_initialized:
-            raw_info = self._loader.get_extension_info(extension_id)
-            if isinstance(raw_info, dict):
-                info = cast(JsonMap, raw_info)
+            info = self._loader.get_extension_info(extension_id)
             handler = self._loader.get_handler(extension_id)
             if handler is not None:
                 handler_class = type(handler).__name__
@@ -716,7 +718,7 @@ class ExtensionJsonRpcAdapter:
             "extension": {
                 "requested_id": extension_id,
                 "known": info is not None,
-                "type": _optional_string(info.get("type")) if info else None,
+                "type": optional_string(info.get("type")) if info else None,
                 "active": bool(info.get("active")) if info else False,
                 "enabled": bool(info.get("enabled")) if info else False,
                 "dependency_ok": bool(info.get("dependency_ok")) if info else False,
@@ -730,21 +732,19 @@ class ExtensionJsonRpcAdapter:
     def _apply_enabled_overrides(self, value: object) -> None:
         if not isinstance(value, dict):
             return
-        for extension_id, enabled in value.items():
-            if isinstance(extension_id, str) and isinstance(enabled, bool):
+        for extension_id, enabled in cast(JsonMap, value).items():
+            if isinstance(enabled, bool):
                 self._loader.set_extension_enabled(extension_id, enabled)
 
     async def _refresh_dependency_state(self) -> list[JsonMap]:
         for extension in list(self._loader.list_extensions()):
-            if not isinstance(extension, dict):
-                continue
-            extension_id = _optional_string(extension.get("id"))
+            extension_id = optional_string(extension.get("id"))
             if not extension_id:
                 continue
             if self._loader.supports_dependency_check(extension_id):
                 result = await self._loader.check_extension_dependencies(extension_id)
             else:
-                result = {
+                result: JsonMap = {
                     "ok": True,
                     "status": "met",
                     "message": "No dependency check required",
@@ -768,16 +768,16 @@ class ExtensionJsonRpcAdapter:
                 "reason": f"Extension is not active: {extension_id}",
             }
         result = await self._loader.list_models(extension_id)
-        if isinstance(result, dict):
-            raw_models = result.get("models")
-            models = raw_models if isinstance(raw_models, list) else []
+        result_map = optional_map(result)
+        if result_map is not None:
+            models = _json_map_list(result_map.get("models"))
         else:
-            models = result if isinstance(result, list) else []
+            models = _json_map_list(result)
         return {
             "models": [
-                _adapter_model(cast(JsonMap, model)).to_json()
+                adapter_model(model).to_json()
                 for model in models
-                if isinstance(model, dict) and isinstance(model.get("id"), str)
+                if isinstance(model.get("id"), str)
             ]
         }
 
@@ -787,7 +787,7 @@ class ExtensionJsonRpcAdapter:
         list_sessions = getattr(handler, "list_sessions", None)
         if not callable(list_sessions):
             raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support session listing")
-        cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
+        cwd = optional_string(params.get("cwd")) or str(self._state.cwd)
         limit_value = params.get("limit")
         limit = limit_value if isinstance(limit_value, int) and limit_value > 0 else None
         signature = inspect.signature(list_sessions)
@@ -804,50 +804,47 @@ class ExtensionJsonRpcAdapter:
         result = list_sessions(**call_kwargs)
         if hasattr(result, "__await__"):
             result = await cast(Awaitable[object], result)
-        if isinstance(result, dict):
-            raw_sessions = result.get("sessions")
-            sessions = raw_sessions if isinstance(raw_sessions, list) else []
+        result_map = optional_map(result)
+        if result_map is not None:
+            sessions = _json_map_list(result_map.get("sessions"))
         else:
-            sessions = result if isinstance(result, list) else []
+            sessions = _json_map_list(result)
         normalized: list[JsonMap] = []
         for session in sessions:
-            if not isinstance(session, dict):
-                continue
             session_id = (
-                _optional_string(session.get("id"))
-                or _optional_string(session.get("session_id"))
-                or _optional_string(session.get("thread_id"))
+                optional_string(session.get("id"))
+                or optional_string(session.get("session_id"))
+                or optional_string(session.get("thread_id"))
             )
             if not session_id:
                 continue
             label = (
-                _optional_string(session.get("label"))
-                or _optional_string(session.get("title"))
-                or _optional_string(session.get("name"))
+                optional_string(session.get("label"))
+                or optional_string(session.get("title"))
+                or optional_string(session.get("name"))
             )
-            session_cwd = _optional_path(session.get("cwd"))
+            session_cwd = optional_path(session.get("cwd"))
             if session_cwd is None:
-                raw_context = session.get("context")
-                if isinstance(raw_context, dict):
-                    session_cwd = _optional_path(raw_context.get("cwd"))
+                raw_context = optional_map(session.get("context"))
+                if raw_context is not None:
+                    session_cwd = optional_path(raw_context.get("cwd"))
             created_at = (
-                _optional_string(session.get("created_at"))
-                or _optional_string(session.get("createdAt"))
-                or _optional_string(session.get("start_time"))
-                or _optional_string(session.get("startTime"))
+                optional_string(session.get("created_at"))
+                or optional_string(session.get("createdAt"))
+                or optional_string(session.get("start_time"))
+                or optional_string(session.get("startTime"))
             )
             updated_at = (
-                _optional_string(session.get("updated_at"))
-                or _optional_string(session.get("updatedAt"))
-                or _optional_string(session.get("modified_time"))
-                or _optional_string(session.get("modifiedTime"))
+                optional_string(session.get("updated_at"))
+                or optional_string(session.get("updatedAt"))
+                or optional_string(session.get("modified_time"))
+                or optional_string(session.get("modifiedTime"))
             )
             metadata: JsonMap = {}
-            raw_metadata = session.get("metadata")
-            if isinstance(raw_metadata, dict):
+            raw_metadata = optional_map(session.get("metadata"))
+            if raw_metadata is not None:
                 for raw_key, raw_value in raw_metadata.items():
-                    if isinstance(raw_key, str):
-                        metadata[raw_key] = raw_value
+                    metadata[raw_key] = raw_value
             for key, value in session.items():
                 if key in {
                     "id",
@@ -895,15 +892,16 @@ class ExtensionJsonRpcAdapter:
                 "loaded": False,
                 "unload_supported": False,
             }
-        conversation_id = _required_string(params, "conversation_id")
+        conversation_id = required_string(params, "conversation_id")
         result = await _invoke_handler_with_supported_kwargs(
             state_fn,
             conversation_id=conversation_id,
             provider_session_id=_provider_session_id_param(params),
-            settings=_optional_map(params.get("settings")) or {},
+            settings=optional_map(params.get("settings")) or {},
         )
-        if isinstance(result, dict):
-            return _dict_result_with_defaults(result, extension_id, conversation_id, params)
+        result_map = optional_map(result)
+        if result_map is not None:
+            return _dict_result_with_defaults(result_map, extension_id, conversation_id, params)
         return {
             "ok": False,
             "supported": True,
@@ -929,15 +927,16 @@ class ExtensionJsonRpcAdapter:
                 "unload_supported": False,
                 "error": "Extension does not implement live session unload",
             }
-        conversation_id = _required_string(params, "conversation_id")
+        conversation_id = required_string(params, "conversation_id")
         result = await _invoke_handler_with_supported_kwargs(
             unload_fn,
             conversation_id=conversation_id,
             provider_session_id=_provider_session_id_param(params),
-            settings=_optional_map(params.get("settings")) or {},
+            settings=optional_map(params.get("settings")) or {},
         )
-        if isinstance(result, dict):
-            return _dict_result_with_defaults(result, extension_id, conversation_id, params)
+        result_map = optional_map(result)
+        if result_map is not None:
+            return _dict_result_with_defaults(result_map, extension_id, conversation_id, params)
         return {
             "ok": False,
             "supported": True,
@@ -973,16 +972,14 @@ class ExtensionJsonRpcAdapter:
     async def _runtime_options(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
         self._extension_info(extension_id)
-        conversation_id = _optional_string(params.get("conversation_id"))
-        settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
+        conversation_id = optional_string(params.get("conversation_id"))
+        settings = merged_settings(self._state.settings, optional_map(params.get("settings")))
         result = await self._loader.get_runtime_options(
             extension_id,
             conversation_id=conversation_id,
             settings=settings,
         )
-        if isinstance(result, dict):
-            return dict(result)
-        return {"agent": extension_id, "fields": {}, "quickControls": []}
+        return dict(result)
 
     async def _conversation_start(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
@@ -991,9 +988,9 @@ class ExtensionJsonRpcAdapter:
         if not callable(init_session):
             raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support session start")
 
-        conversation_id = _required_string(params, "conversation_id")
-        cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
-        settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
+        conversation_id = required_string(params, "conversation_id")
+        cwd = optional_string(params.get("cwd")) or str(self._state.cwd)
+        settings = merged_settings(self._state.settings, optional_map(params.get("settings")))
         _apply_mcp_context(settings, params)
         _apply_devins_context(settings, params)
         settings["cwd"] = cwd
@@ -1003,7 +1000,7 @@ class ExtensionJsonRpcAdapter:
             result = await cast(Awaitable[object], result)
         if not isinstance(result, dict):
             raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid session start result")
-        return _ack_from_result(conversation_id, cast(JsonMap, result)).to_json()
+        return ack_from_result(conversation_id, cast(JsonMap, result)).to_json()
 
     async def _conversation_resume(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
@@ -1012,13 +1009,13 @@ class ExtensionJsonRpcAdapter:
         if not callable(resume_session_with_history):
             raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support session resume")
 
-        conversation_id = _required_string(params, "conversation_id")
+        conversation_id = required_string(params, "conversation_id")
         provider_session_id = _provider_session_id_param(params)
         if not provider_session_id:
             raise RpcAdapterError(INVALID_PARAMS, "provider_session_id or thread_id is required")
 
-        cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
-        settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
+        cwd = optional_string(params.get("cwd")) or str(self._state.cwd)
+        settings = merged_settings(self._state.settings, optional_map(params.get("settings")))
         _apply_mcp_context(settings, params)
         _apply_devins_context(settings, params)
         settings["cwd"] = cwd
@@ -1036,7 +1033,7 @@ class ExtensionJsonRpcAdapter:
             session_id=provider_session_id,
             conversation_id=conversation_id,
             cwd=cwd,
-            model=_optional_string(settings.get("model")),
+            model=optional_string(settings.get("model")),
             settings=settings,
         )
         if hasattr(result, "__await__"):
@@ -1044,8 +1041,9 @@ class ExtensionJsonRpcAdapter:
         if not isinstance(result, dict):
             raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid session resume result")
 
-        ack = _ack_from_result(conversation_id, cast(JsonMap, result)).to_json()
-        if result.get("ok") is not True:
+        result_map = cast(JsonMap, result)
+        ack = ack_from_result(conversation_id, result_map).to_json()
+        if result_map.get("ok") is not True:
             return ack
 
         hydrated_count = 0
@@ -1061,14 +1059,15 @@ class ExtensionJsonRpcAdapter:
                     session_id=provider_session_id,
                     conversation_id=conversation_id,
                     cwd=cwd,
-                    model=_optional_string(settings.get("model")),
+                    model=optional_string(settings.get("model")),
                     settings=settings,
                 )
                 if hasattr(items, "__await__"):
                     items = await cast(Awaitable[object], items)
                 if isinstance(items, list):
+                    item_list = cast(list[object], items)
                     batch: list[JsonMap] = []
-                    total_count = len(items)
+                    total_count = len(item_list)
                     await self._send_import_progress(
                         conversation_id,
                         extension_id=extension_id,
@@ -1077,7 +1076,7 @@ class ExtensionJsonRpcAdapter:
                         transcript_count=total_count,
                         persisted_count=0,
                     )
-                    for item in items:
+                    for item in item_list:
                         if isinstance(item, dict):
                             hydrated_entry = dict(cast(JsonMap, item))
                             hydrated_entry["_hydrated_history"] = True
@@ -1142,10 +1141,10 @@ class ExtensionJsonRpcAdapter:
         if not callable(handle_message):
             raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support conversation send")
 
-        conversation_id = _required_string(params, "conversation_id")
-        text = _required_string(params, "text")
-        cwd = _optional_string(params.get("cwd")) or str(self._state.cwd)
-        settings = _merged_settings(self._state.settings, _optional_map(params.get("settings")))
+        conversation_id = required_string(params, "conversation_id")
+        text = required_string(params, "text")
+        cwd = optional_string(params.get("cwd")) or str(self._state.cwd)
+        settings = merged_settings(self._state.settings, optional_map(params.get("settings")))
         _apply_mcp_context(settings, params)
         _apply_devins_context(settings, params)
         settings["cwd"] = cwd
@@ -1162,18 +1161,19 @@ class ExtensionJsonRpcAdapter:
             result = await cast(Awaitable[object], result)
         if not isinstance(result, dict):
             raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid send result")
-        return _ack_from_result(conversation_id, cast(JsonMap, result)).to_json()
+        return ack_from_result(conversation_id, cast(JsonMap, result)).to_json()
 
     async def _conversation_interrupt(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
         self._supported_handler(extension_id)
-        conversation_id = _required_string(params, "conversation_id")
+        conversation_id = required_string(params, "conversation_id")
         result = await self._loader.interrupt_session(extension_id, conversation_id)
-        if not isinstance(result, dict):
+        result_map = optional_map(result)
+        if result_map is None:
             raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid interrupt result")
-        payload = dict(cast(JsonMap, result))
+        payload = dict(result_map)
         ok = bool(payload.get("ok"))
-        error = _optional_string(payload.get("error"))
+        error = optional_string(payload.get("error"))
         metadata = {
             key: value
             for key, value in payload.items()
@@ -1194,11 +1194,11 @@ class ExtensionJsonRpcAdapter:
         if not callable(resolver):
             raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support approvals")
 
-        conversation_id = _required_string(params, "conversation_id")
-        request_id = _required_string(params, "request_id")
+        conversation_id = required_string(params, "conversation_id")
+        request_id = required_string(params, "request_id")
         result_payload = params.get("result")
-        resolution: JsonMap = dict(result_payload) if isinstance(result_payload, dict) else {}
-        decision = _optional_string(params.get("decision"))
+        resolution: JsonMap = dict(optional_map(result_payload) or {})
+        decision = optional_string(params.get("decision"))
         if decision and "decision" not in resolution:
             resolution["decision"] = decision
         result = resolver(request_id, resolution)
@@ -1227,14 +1227,14 @@ class ExtensionJsonRpcAdapter:
         self._loader_initialized = True
 
     def _extension_id_param(self, params: JsonMap) -> str:
-        return _optional_string(params.get("extension_id")) or self._state.extension_id
+        return optional_string(params.get("extension_id")) or self._state.extension_id
 
     def _extension_info(self, extension_id: str) -> JsonMap:
         self._ensure_loader_initialized()
         info = self._loader.get_extension_info(extension_id)
         if not isinstance(info, dict):
             raise RpcAdapterError(INVALID_PARAMS, f"Unknown extension: {extension_id}")
-        return cast(JsonMap, info)
+        return info
 
     def _supported_handler(self, extension_id: str) -> object:
         info = self._extension_info(extension_id)
@@ -1245,11 +1245,9 @@ class ExtensionJsonRpcAdapter:
             raise RpcAdapterError(INTERNAL_ERROR, f"No handler loaded for extension: {extension_id}")
         return handler
 
-    async def _stop_supported_handlers(self) -> None:
+    async def stop_supported_handlers(self) -> None:
         for extension in self._loader.list_extensions():
-            if not isinstance(extension, dict):
-                continue
-            extension_id = _optional_string(extension.get("id"))
+            extension_id = optional_string(extension.get("id"))
             if not extension_id:
                 continue
             handler = self._loader.get_handler(extension_id)
@@ -1299,8 +1297,8 @@ class ExtensionJsonRpcAdapter:
         provider_session_id: str | None = None,
     ) -> None:
         meta = dict(self._load_meta(conversation_id))
-        existing_settings = meta.get("settings")
-        merged_settings = dict(existing_settings) if isinstance(existing_settings, dict) else {}
+        existing_settings = optional_map(meta.get("settings"))
+        merged_settings: JsonMap = dict(existing_settings or {})
         merged_settings.update(settings)
         if cwd:
             merged_settings["cwd"] = cwd
@@ -1467,7 +1465,7 @@ def _positive_float(value: object, default: float) -> float:
 
 def _provider_session_id_param(params: JsonMap) -> str | None:
     for key in ("provider_session_id", "thread_id", "session_id", "threadId", "sessionId"):
-        value = _optional_string(params.get(key))
+        value = optional_string(params.get(key))
         if value:
             return value
     return None
@@ -1480,7 +1478,7 @@ async def amain() -> int:
     try:
         return await adapter.run_stdio(sys.stdin, protocol_stdout)
     finally:
-        await adapter._stop_supported_handlers()
+        await adapter.stop_supported_handlers()
         await _close_framework_shell_peer()
 
 

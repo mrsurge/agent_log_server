@@ -8,11 +8,12 @@ import re
 import shutil
 import sys
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple, cast
+from typing import Dict, Iterable, List, Optional, Tuple, TypeGuard, cast
 
 from .mcp_contract import (
     build_codex_thread_config,
@@ -20,9 +21,7 @@ from .mcp_contract import (
 )
 from .devins_contract import effective_developer_instructions
 from .mcp_contract import apply_mcp_context as apply_codex_mcp_context
-from .dependencies import is_android_termux as _is_android_termux
 from .dependencies import recommended_codex_install_command as _recommended_codex_install_command
-from .dependencies import recommended_codex_package as _recommended_codex_package
 
 _server_root: Optional[Path] = None
 _extensions_dir: Optional[Path] = None
@@ -33,6 +32,14 @@ _AGENT_PTY_BLOCKS_TOOL_TIMEOUT_SEC = 3600
 
 SchemaDict = Dict[str, object]
 SchemaRegistry = Dict[str, SchemaDict]
+
+
+def _is_schema_dict(value: object) -> TypeGuard[SchemaDict]:
+    return isinstance(value, dict)
+
+
+def _is_object_list(value: object) -> TypeGuard[List[object]]:
+    return isinstance(value, list)
 
 
 _SEMANTIC_SUFFIXES = {
@@ -136,19 +143,19 @@ class RuntimeProtocol:
     def response_schema(self, method: str) -> Optional[Dict[str, object]]:
         normalized = method.lower()
         schema = self.responses.get(normalized)
-        if isinstance(schema, dict):
+        if _is_schema_dict(schema):
             return schema
         schema = _resolve_response_schema_from_definitions(method, self.definitions)
-        if isinstance(schema, dict):
+        if _is_schema_dict(schema):
             self.responses[normalized] = schema
             return schema
         with contextlib.suppress(Exception):
             _refresh_runtime_protocol_from_disk(self)
             schema = self.responses.get(normalized)
-            if isinstance(schema, dict):
+            if _is_schema_dict(schema):
                 return schema
             schema = _resolve_response_schema_from_definitions(method, self.definitions)
-            if isinstance(schema, dict):
+            if _is_schema_dict(schema):
                 self.responses[normalized] = schema
                 return schema
         return None
@@ -415,24 +422,25 @@ async def _ensure_schema_bundle() -> tuple[str, str, Path]:
 
 
 def _resolve_schema(spec: object, definitions: SchemaDict) -> SchemaDict:
-    if not isinstance(spec, dict):
+    if not _is_schema_dict(spec):
         return {}
     if "$ref" in spec:
         ref = spec["$ref"]
         if isinstance(ref, str) and ref.startswith("#/definitions/"):
             return _resolve_schema(definitions.get(ref.rsplit("/", 1)[-1], {}), definitions)
         return {}
-    if isinstance(spec.get("allOf"), list):
+    all_of = spec.get("allOf")
+    if _is_object_list(all_of):
         merged: SchemaDict = {k: v for k, v in spec.items() if k != "allOf"}
         merged_props: SchemaDict = {}
         merged_required: List[str] = []
-        for part in spec["allOf"]:
+        for part in all_of:
             resolved = _resolve_schema(part, definitions)
             resolved_properties = _dict_value(resolved.get("properties"))
             if resolved_properties:
                 merged_props.update(resolved_properties)
             resolved_required = resolved.get("required")
-            if isinstance(resolved_required, list):
+            if _is_object_list(resolved_required):
                 merged_required.extend(str(item) for item in resolved_required)
             for key, value in resolved.items():
                 if key in {"properties", "required"}:
@@ -444,7 +452,7 @@ def _resolve_schema(spec: object, definitions: SchemaDict) -> SchemaDict:
         if merged_props:
             merged["properties"] = merged_props
         merged_required_value = merged.get("required")
-        existing_required = [str(item) for item in merged_required_value] if isinstance(merged_required_value, list) else []
+        existing_required = [str(item) for item in merged_required_value] if _is_object_list(merged_required_value) else []
         if merged_required or existing_required:
             merged["required"] = list(dict.fromkeys(merged_required + existing_required))
         return merged
@@ -456,16 +464,16 @@ def _schema_string_enums(spec: object, definitions: SchemaDict) -> List[str]:
 
     def collect(node: object) -> None:
         resolved = _resolve_schema(node, definitions)
-        if not isinstance(resolved, dict):
+        if not _is_schema_dict(resolved):
             return
         enum_values = resolved.get("enum")
-        if isinstance(enum_values, list):
+        if _is_object_list(enum_values):
             for item in enum_values:
                 if isinstance(item, str) and item not in values:
                     values.append(item)
         for key in ("anyOf", "oneOf", "allOf"):
             variants = resolved.get(key)
-            if isinstance(variants, list):
+            if _is_object_list(variants):
                 for variant in variants:
                     collect(variant)
 
@@ -478,17 +486,17 @@ def _schema_tagged_union_variants(spec: object, definitions: SchemaDict) -> Dict
 
     def collect(node: object) -> None:
         resolved = _resolve_schema(node, definitions)
-        if not isinstance(resolved, dict):
+        if not _is_schema_dict(resolved):
             return
         props = resolved.get("properties")
-        if isinstance(props, dict):
+        if _is_schema_dict(props):
             type_prop = _resolve_schema(props.get("type"), definitions)
-            enum_values = type_prop.get("enum") if isinstance(type_prop, dict) else None
-            if isinstance(enum_values, list) and len(enum_values) == 1 and isinstance(enum_values[0], str):
+            enum_values = type_prop.get("enum") if _is_schema_dict(type_prop) else None
+            if _is_object_list(enum_values) and len(enum_values) == 1 and isinstance(enum_values[0], str):
                 variants[enum_values[0]] = resolved
         for key in ("anyOf", "oneOf", "allOf"):
             items = resolved.get(key)
-            if isinstance(items, list):
+            if _is_object_list(items):
                 for item in items:
                     collect(item)
 
@@ -565,22 +573,22 @@ def _build_request_registry(definitions: SchemaDict) -> SchemaRegistry:
     registry: SchemaRegistry = {}
     union = _dict_value(definitions.get("ClientRequest"))
     union_variants = union.get("oneOf")
-    if not isinstance(union_variants, list):
+    if not _is_object_list(union_variants):
         return registry
     for variant in union_variants:
-        if not isinstance(variant, dict):
+        if not _is_schema_dict(variant):
             continue
         props = variant.get("properties")
-        if not isinstance(props, dict):
+        if not _is_schema_dict(props):
             continue
         method_prop = props.get("method")
         params_prop = props.get("params")
-        method_values = method_prop.get("enum") if isinstance(method_prop, dict) else None
-        if not isinstance(method_values, list) or not method_values:
+        method_values = method_prop.get("enum") if _is_schema_dict(method_prop) else None
+        if not _is_object_list(method_values) or not method_values:
             continue
         method = method_values[0]
         if isinstance(method, str):
-            registry[method.lower()] = _resolve_schema(params_prop, definitions) if isinstance(params_prop, dict) else {}
+            registry[method.lower()] = _resolve_schema(params_prop, definitions) if _is_schema_dict(params_prop) else {}
     return registry
 
 
@@ -600,7 +608,7 @@ def _load_request_sidecar_definitions(cache_dir: Path) -> SchemaDict:
         except Exception:
             continue
         sidecar_definitions = schema.get("definitions")
-        if isinstance(sidecar_definitions, dict):
+        if _is_schema_dict(sidecar_definitions):
             definitions.update(sidecar_definitions)
     return definitions
 
@@ -612,8 +620,6 @@ def _load_request_sidecar_registry(
 ) -> SchemaRegistry:
     registry: SchemaRegistry = {}
     for method in methods:
-        if not isinstance(method, str):
-            continue
         path = _request_params_sidecar_path(cache_dir, method)
         if not path.exists():
             continue
@@ -664,7 +670,7 @@ def _infer_response_definition_name(
     if parts and parts[-1] == "read":
         read_candidate = f'Get{"".join(_pascalize_identifier(part) for part in parts[:-1])}Response'
         schema = definitions.get(read_candidate)
-        if isinstance(schema, dict):
+        if _is_schema_dict(schema):
             return read_candidate
 
     required_tokens = [token for token in _method_lookup_tokens(method) if token not in {"read"}]
@@ -673,9 +679,9 @@ def _infer_response_definition_name(
 
     matches: List[Tuple[Tuple[int, int, int, str], str]] = []
     for definition_name, schema in definitions.items():
-        if not isinstance(definition_name, str) or not definition_name.endswith("Response"):
+        if not definition_name.endswith("Response"):
             continue
-        if not isinstance(schema, dict):
+        if not _is_schema_dict(schema):
             continue
         definition_tokens = _method_lookup_tokens(definition_name[:-8])
         if not all(token in definition_tokens for token in required_tokens):
@@ -711,7 +717,7 @@ def _resolve_response_schema_from_definitions(
         candidates.append(inferred_name)
     for definition_name in candidates:
         schema = definitions.get(definition_name)
-        if isinstance(schema, dict):
+        if _is_schema_dict(schema):
             return _resolve_schema(schema, definitions)
     return None
 
@@ -722,18 +728,14 @@ def _build_response_registry(
 ) -> SchemaRegistry:
     registry: SchemaRegistry = {}
     missing: List[str] = []
-    normalized_methods = sorted({
-        method.lower()
-        for method in methods
-        if isinstance(method, str) and method.lower() in _CLIENT_RESPONSE_METHODS
-    })
+    normalized_methods = sorted({method.lower() for method in methods if method.lower() in _CLIENT_RESPONSE_METHODS})
     for method in normalized_methods:
         definition_name = _response_definition_name(method)
         if not definition_name:
             missing.append(f"{method} (unresolved)")
             continue
         schema = definitions.get(definition_name)
-        if not isinstance(schema, dict):
+        if not _is_schema_dict(schema):
             missing.append(f"{method} ({definition_name})")
             continue
         registry[method] = _resolve_schema(schema, definitions)
@@ -752,20 +754,20 @@ def _build_runtime_protocol_from_schema(
 ) -> RuntimeProtocol:
     schema = _load_json_object(schema_path)
     server_request_path = schema_path.parent / "ServerRequest.json"
-    server_request_schema = (
+    server_request_schema: SchemaDict = (
         _load_json_object(server_request_path)
         if server_request_path.exists()
-        else {"oneOf": [], "definitions": schema.get("definitions") if isinstance(schema.get("definitions"), dict) else {}}
+        else {"oneOf": [], "definitions": _dict_value(schema.get("definitions"))}
     )
     definitions = schema.get("definitions")
-    if not isinstance(definitions, dict):
+    if not _is_schema_dict(definitions):
         raise RuntimeError(f"runtime schema missing definitions: {schema_path}")
     merged_definitions: SchemaDict = {}
     legacy_schema_path = _legacy_schema_bundle_path(schema_path.parent)
     if legacy_schema_path.exists():
         legacy_schema = _load_json_object(legacy_schema_path)
         legacy_definitions = legacy_schema.get("definitions")
-        if isinstance(legacy_definitions, dict):
+        if _is_schema_dict(legacy_definitions):
             merged_definitions.update(legacy_definitions)
     merged_definitions.update(definitions)
     merged_definitions.update(_load_request_sidecar_definitions(schema_path.parent))
@@ -828,18 +830,14 @@ def _build_server_request_response_registry(
 ) -> SchemaRegistry:
     registry: SchemaRegistry = {}
     missing: List[str] = []
-    normalized_methods = sorted({
-        method.lower()
-        for method in methods
-        if isinstance(method, str) and method.lower() in _SERVER_REQUEST_RESPONSE_DEFINITIONS
-    })
+    normalized_methods = sorted({method.lower() for method in methods if method.lower() in _SERVER_REQUEST_RESPONSE_DEFINITIONS})
     for method in normalized_methods:
         definition_name = _SERVER_REQUEST_RESPONSE_DEFINITIONS.get(method)
         if not isinstance(definition_name, str) or not definition_name:
             missing.append(f"{method} (unresolved)")
             continue
         schema = definitions.get(definition_name)
-        if not isinstance(schema, dict):
+        if not _is_schema_dict(schema):
             missing.append(f"{method} ({definition_name})")
             continue
         registry[method] = _resolve_schema(schema, definitions)
@@ -855,22 +853,22 @@ def _build_server_request_registry(schema: SchemaDict) -> SchemaRegistry:
     registry: SchemaRegistry = {}
     definitions: SchemaDict = _dict_value(schema.get("definitions"))
     union_variants = schema.get("oneOf")
-    if not isinstance(union_variants, list):
+    if not _is_object_list(union_variants):
         return registry
     for variant in union_variants:
-        if not isinstance(variant, dict):
+        if not _is_schema_dict(variant):
             continue
         props = variant.get("properties")
-        if not isinstance(props, dict):
+        if not _is_schema_dict(props):
             continue
         method_prop = props.get("method")
         params_prop = props.get("params")
-        method_values = method_prop.get("enum") if isinstance(method_prop, dict) else None
-        if not isinstance(method_values, list) or not method_values:
+        method_values = method_prop.get("enum") if _is_schema_dict(method_prop) else None
+        if not _is_object_list(method_values) or not method_values:
             continue
         method = method_values[0]
         if isinstance(method, str):
-            registry[method.lower()] = _resolve_schema(params_prop, definitions) if isinstance(params_prop, dict) else {}
+            registry[method.lower()] = _resolve_schema(params_prop, definitions) if _is_schema_dict(params_prop) else {}
     return registry
 
 
@@ -878,22 +876,22 @@ def _build_notification_registry(definitions: SchemaDict) -> SchemaRegistry:
     registry: SchemaRegistry = {}
     union = _dict_value(definitions.get("ServerNotification"))
     union_variants = union.get("oneOf")
-    if not isinstance(union_variants, list):
+    if not _is_object_list(union_variants):
         return registry
     for variant in union_variants:
-        if not isinstance(variant, dict):
+        if not _is_schema_dict(variant):
             continue
         props = variant.get("properties")
-        if not isinstance(props, dict):
+        if not _is_schema_dict(props):
             continue
         method_prop = props.get("method")
         params_prop = props.get("params")
-        method_values = method_prop.get("enum") if isinstance(method_prop, dict) else None
-        if not isinstance(method_values, list) or not method_values:
+        method_values = method_prop.get("enum") if _is_schema_dict(method_prop) else None
+        if not _is_object_list(method_values) or not method_values:
             continue
         method = method_values[0]
         if isinstance(method, str):
-            registry[method.lower()] = _resolve_schema(params_prop, definitions) if isinstance(params_prop, dict) else {}
+            registry[method.lower()] = _resolve_schema(params_prop, definitions) if _is_schema_dict(params_prop) else {}
     return registry
 
 
@@ -901,17 +899,17 @@ def _build_event_registry(definitions: SchemaDict) -> SchemaRegistry:
     registry: SchemaRegistry = {}
     union = _dict_value(definitions.get("EventMsg"))
     union_variants = union.get("oneOf")
-    if not isinstance(union_variants, list):
+    if not _is_object_list(union_variants):
         return registry
     for variant in union_variants:
-        if not isinstance(variant, dict):
+        if not _is_schema_dict(variant):
             continue
         props = variant.get("properties")
-        if not isinstance(props, dict):
+        if not _is_schema_dict(props):
             continue
         type_prop = props.get("type")
-        type_values = type_prop.get("enum") if isinstance(type_prop, dict) else None
-        if not isinstance(type_values, list) or not type_values:
+        type_values = type_prop.get("enum") if _is_schema_dict(type_prop) else None
+        if not _is_object_list(type_values) or not type_values:
             continue
         event_type = type_values[0]
         if isinstance(event_type, str):
@@ -926,13 +924,15 @@ def _decode_schema_value(
     path: str,
 ) -> object:
     resolved = _resolve_schema(schema, definitions)
-    if not isinstance(resolved, dict):
+    if not _is_schema_dict(resolved):
         return value
 
     for key in ("anyOf", "oneOf"):
         variants = resolved.get(key)
-        if isinstance(variants, list) and variants:
+        if _is_object_list(variants) and variants:
             for variant in variants:
+                if not _is_schema_dict(variant):
+                    continue
                 try:
                     return _decode_schema_value(value, variant, definitions, path)
                 except _SchemaDecodeError:
@@ -940,13 +940,13 @@ def _decode_schema_value(
             raise _SchemaDecodeError(f"{path}: value did not match any allowed schema variant")
 
     enum_values = resolved.get("enum")
-    if isinstance(enum_values, list):
+    if _is_object_list(enum_values):
         if value in enum_values:
             return value
         raise _SchemaDecodeError(f"{path}: expected one of {enum_values!r}, got {value!r}")
 
     type_decl = resolved.get("type")
-    if isinstance(type_decl, list):
+    if _is_object_list(type_decl):
         if value is None and "null" in type_decl:
             return None
         for candidate_type in type_decl:
@@ -971,10 +971,10 @@ def _decode_schema_value(
     props = props_dict or None
     additional = resolved.get("additionalProperties", True)
     if type_decl == "object" or props is not None or additional is not True:
-        if not isinstance(value, dict):
+        if not _is_schema_dict(value):
             raise _SchemaDecodeError(f"{path}: expected object, got {type(value).__name__}")
         required_value = resolved.get("required")
-        required_fields = required_value if isinstance(required_value, list) else []
+        required_fields = required_value if _is_object_list(required_value) else []
         for key in required_fields:
             if key not in value:
                 raise _SchemaDecodeError(f"{path}.{key}: missing required property")
@@ -982,21 +982,21 @@ def _decode_schema_value(
         for key, item in value.items():
             next_path = f"{path}.{key}"
             prop_schema = props.get(key) if props is not None else None
-            if isinstance(prop_schema, dict):
+            if _is_schema_dict(prop_schema):
                 output[key] = _decode_schema_value(item, prop_schema, definitions, next_path)
             elif additional is False:
                 raise _SchemaDecodeError(f"{next_path}: unexpected property")
-            elif isinstance(additional, dict):
+            elif _is_schema_dict(additional):
                 output[key] = _decode_schema_value(item, additional, definitions, next_path)
             else:
                 output[key] = item
         return output
 
     items_schema = resolved.get("items")
-    if type_decl == "array" or isinstance(items_schema, dict):
-        if not isinstance(value, list):
+    if type_decl == "array" or _is_schema_dict(items_schema):
+        if not _is_object_list(value):
             raise _SchemaDecodeError(f"{path}: expected array, got {type(value).__name__}")
-        if isinstance(items_schema, dict):
+        if _is_schema_dict(items_schema):
             return [
                 _decode_schema_value(item, items_schema, definitions, f"{path}[{index}]")
                 for index, item in enumerate(value)
@@ -1031,7 +1031,7 @@ def decode_response_result(
     result: object,
 ) -> object:
     schema = protocol.response_schema(method)
-    if not isinstance(schema, dict):
+    if not _is_schema_dict(schema):
         raise RuntimeError(f"runtime protocol missing response schema for {method}")
     try:
         return _decode_schema_value(
@@ -1050,7 +1050,7 @@ def encode_server_request_result(
     result: object,
 ) -> object:
     schema = protocol.server_request_response_schema(method)
-    if not isinstance(schema, dict):
+    if not _is_schema_dict(schema):
         raise RuntimeError(f"runtime protocol missing server-request response schema for {method}")
     try:
         return _decode_schema_value(
@@ -1084,8 +1084,9 @@ def _coerce_schema_value(
 
     enum_values = _schema_string_enums(schema, definitions)
     if enum_values:
-        if isinstance(value, dict) and isinstance(value.get("type"), str):
-            matched = _match_allowed_string(value["type"], enum_values)
+        if _is_schema_dict(value) and isinstance(value.get("type"), str):
+            type_value = value.get("type")
+            matched = _match_allowed_string(type_value, enum_values) if isinstance(type_value, str) else None
             if matched is not None:
                 return matched
         if isinstance(value, str):
@@ -1095,20 +1096,22 @@ def _coerce_schema_value(
 
     tagged_variants = _schema_tagged_union_variants(schema, definitions)
     if tagged_variants:
-        if isinstance(value, dict) and isinstance(value.get("type"), str):
-            matched_tag = None
-            for tag in tagged_variants:
-                if _normalize_identifier(value["type"]) == _normalize_identifier(tag):
-                    matched_tag = tag
-                    break
-            if matched_tag:
-                out = dict(value)
-                out["type"] = matched_tag
-                if matched_tag == "workspaceWrite" and "writableRoots" not in out:
-                    cwd = _expand_path(settings.get("cwd"))
-                    if cwd:
-                        out["writableRoots"] = [cwd]
-                return out
+        if _is_schema_dict(value):
+            type_value = value.get("type")
+            if isinstance(type_value, str):
+                matched_tag = None
+                for tag in tagged_variants:
+                    if _normalize_identifier(type_value) == _normalize_identifier(tag):
+                        matched_tag = tag
+                        break
+                if matched_tag:
+                    out = _dict_value(value)
+                    out["type"] = matched_tag
+                    if matched_tag == "workspaceWrite" and "writableRoots" not in out:
+                        cwd = _expand_path(settings.get("cwd"))
+                        if cwd:
+                            out["writableRoots"] = [cwd]
+                    return out
         if isinstance(value, str):
             for tag, variant in tagged_variants.items():
                 if _normalize_identifier(value) != _normalize_identifier(tag):
@@ -1123,13 +1126,13 @@ def _coerce_schema_value(
 
     resolved = _resolve_schema(schema, definitions)
     type_decl = resolved.get("type")
-    if isinstance(type_decl, list) and "string" in type_decl and isinstance(value, str):
+    if _is_object_list(type_decl) and "string" in type_decl and isinstance(value, str):
         text = value.strip()
         return text or None
     if type_decl == "string" and isinstance(value, str):
         text = value.strip()
         return text or None
-    if isinstance(value, (dict, list, bool, int, float)):
+    if _is_schema_dict(value) or _is_object_list(value) or isinstance(value, (bool, int, float)):
         return value
     return None
 
@@ -1156,7 +1159,7 @@ def _apply_setting_binding(
         return
     for target in target_candidates:
         schema = props.get(target)
-        if not isinstance(schema, dict):
+        if not _is_schema_dict(schema):
             continue
         coerced = _coerce_schema_value(value, schema, definitions, settings)
         if coerced is not None:
@@ -1170,7 +1173,7 @@ def _resolve_object_schema(spec: object, definitions: SchemaDict) -> SchemaDict:
         return resolved
     for key in ("anyOf", "oneOf", "allOf"):
         variants = resolved.get(key)
-        if not isinstance(variants, list):
+        if not _is_object_list(variants):
             continue
         for variant in variants:
             candidate = _resolve_schema(variant, definitions)
@@ -1180,11 +1183,16 @@ def _resolve_object_schema(spec: object, definitions: SchemaDict) -> SchemaDict:
 
 
 def _dict_value(value: object) -> Dict[str, object]:
-    return dict(value) if isinstance(value, dict) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    result: Dict[str, object] = {}
+    for key, item_value in cast(Iterable[Tuple[object, object]], value.items()):
+        result[str(key)] = item_value
+    return result
 
 
 def _schema_properties(spec: object) -> Dict[str, object]:
-    if isinstance(spec, dict):
+    if _is_schema_dict(spec):
         return _dict_value(spec.get("properties"))
     return {}
 
@@ -1193,19 +1201,19 @@ def _schema_path(spec: object, definitions: SchemaDict, path: Iterable[str]) -> 
     current: object = spec
     for segment in path:
         resolved = _resolve_schema(current, definitions)
-        if not isinstance(resolved, dict):
+        if not _is_schema_dict(resolved):
             return {}
         if segment == "items":
             current = resolved.get("items")
             continue
         current = _schema_properties(resolved).get(segment)
     resolved = _resolve_schema(current, definitions)
-    return resolved if isinstance(resolved, dict) else {}
+    return resolved if _is_schema_dict(resolved) else {}
 
 
 def build_thread_list_params(protocol: RuntimeProtocol, limit: int = 200) -> SchemaDict:
     schema = protocol.request_schema("thread/list")
-    if not isinstance(schema, dict):
+    if not _is_schema_dict(schema):
         raise RuntimeError("runtime protocol missing request schema for thread/list")
     props = _schema_properties(schema)
     params: SchemaDict = {}
@@ -1218,7 +1226,7 @@ def normalize_thread_list_timestamp(protocol: RuntimeProtocol, field_name: str, 
     schema = protocol.response_schema("thread/list")
     field_schema = _schema_path(schema or {}, protocol.definitions, ("data", "items", field_name))
     field_type = field_schema.get("type")
-    field_types = field_type if isinstance(field_type, list) else [field_type]
+    field_types = field_type if _is_object_list(field_type) else [field_type]
     description = field_schema.get("description")
     is_unix_timestamp = (
         "integer" in field_types
@@ -1239,9 +1247,9 @@ def _build_collaboration_mode_setting(
     settings: SchemaDict,
 ) -> Optional[SchemaDict]:
     schema = props.get("collaborationMode")
-    if not isinstance(schema, dict) and isinstance(definitions.get("CollaborationMode"), dict):
+    if not _is_schema_dict(schema) and isinstance(definitions.get("CollaborationMode"), dict):
         schema = {"$ref": "#/definitions/CollaborationMode"}
-    if not isinstance(schema, dict):
+    if not _is_schema_dict(schema):
         return None
 
     mode_value = _first_setting(settings, ["mode"])
@@ -1252,7 +1260,7 @@ def _build_collaboration_mode_setting(
     collab_props = _schema_properties(resolved)
     mode_schema = collab_props.get("mode")
     settings_schema = collab_props.get("settings")
-    if not isinstance(mode_schema, dict) or not isinstance(settings_schema, dict):
+    if not _is_schema_dict(mode_schema) or not _is_schema_dict(settings_schema):
         return None
 
     coerced_mode = _coerce_schema_value(mode_value, mode_schema, definitions, settings)
@@ -1268,7 +1276,7 @@ def _build_collaboration_mode_setting(
 
     nested_settings: SchemaDict = {}
     model_schema = nested_props.get("model")
-    if isinstance(model_schema, dict):
+    if _is_schema_dict(model_schema):
         coerced_model = _coerce_schema_value(model_value, model_schema, definitions, settings)
         if not isinstance(coerced_model, str) or not coerced_model:
             return None
@@ -1278,14 +1286,14 @@ def _build_collaboration_mode_setting(
 
     reasoning_value = _first_setting(settings, ["reasoning_effort", "effort"])
     reasoning_schema = nested_props.get("reasoning_effort")
-    if reasoning_schema is not None and reasoning_value not in (None, "") and isinstance(reasoning_schema, dict):
+    if reasoning_schema is not None and reasoning_value not in (None, "") and _is_schema_dict(reasoning_schema):
         coerced_reasoning = _coerce_schema_value(reasoning_value, reasoning_schema, definitions, settings)
         if coerced_reasoning is not None:
             nested_settings["reasoning_effort"] = coerced_reasoning
 
     developer_instructions = _first_setting(settings, ["developer_instructions"])
     developer_schema = nested_props.get("developer_instructions")
-    if developer_schema is not None and developer_instructions not in (None, "") and isinstance(developer_schema, dict):
+    if developer_schema is not None and developer_instructions not in (None, "") and _is_schema_dict(developer_schema):
         coerced_developer = _coerce_schema_value(developer_instructions, developer_schema, definitions, settings)
         if coerced_developer is not None:
             nested_settings["developer_instructions"] = coerced_developer
@@ -1298,7 +1306,7 @@ def _build_collaboration_mode_setting(
 
 def build_initialize_params(protocol: RuntimeProtocol) -> SchemaDict:
     schema = protocol.request_schema("initialize")
-    if not isinstance(schema, dict):
+    if not _is_schema_dict(schema):
         raise RuntimeError("runtime protocol missing request schema for initialize")
     props = _schema_properties(schema)
 
@@ -1314,7 +1322,7 @@ def build_initialize_params(protocol: RuntimeProtocol) -> SchemaDict:
         ("version", "0.1.0"),
     ):
         field_schema = client_info_props.get(key)
-        if not isinstance(field_schema, dict):
+        if not _is_schema_dict(field_schema):
             continue
         coerced = _coerce_schema_value(value, field_schema, protocol.definitions, {})
         if coerced is not None:
@@ -1327,7 +1335,7 @@ def build_initialize_params(protocol: RuntimeProtocol) -> SchemaDict:
     capabilities_schema = _resolve_object_schema(props.get("capabilities"), protocol.definitions)
     capability_props = _schema_properties(capabilities_schema)
     experimental_schema = capability_props.get("experimentalApi")
-    if isinstance(experimental_schema, dict):
+    if _is_schema_dict(experimental_schema):
         experimental_api = _coerce_schema_value(True, experimental_schema, protocol.definitions, {})
         if isinstance(experimental_api, bool):
             params["capabilities"] = {"experimentalApi": experimental_api}
@@ -1396,8 +1404,8 @@ def _build_agent_pty_blocks_mcp_server(
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         return None
 
-    command = sys.executable.strip() if isinstance(sys.executable, str) and sys.executable.strip() else "python3"
-    merged: SchemaDict = dict(existing_server) if isinstance(existing_server, dict) else {}
+    command = sys.executable.strip() or "python3"
+    merged: SchemaDict = _dict_value(existing_server)
     env = _dict_value(merged.get("env"))
     existing_timeout = merged.get("tool_timeout_sec")
     tool_timeout_sec = (
@@ -1429,6 +1437,9 @@ def _build_agent_pty_blocks_mcp_server(
     return server
 
 
+build_agent_pty_blocks_mcp_server = _build_agent_pty_blocks_mcp_server
+
+
 def _build_codex_ext_thread_config(
     existing_config: object,
     *,
@@ -1446,12 +1457,12 @@ def _build_codex_ext_thread_config(
         force_te2_mcp_entry=force_te2_mcp_entry,
         enable_high_context_400k=enable_high_context_400k,
     )
-    config: SchemaDict = dict(merged) if isinstance(merged, dict) else {}
+    config: SchemaDict = dict(merged) if _is_schema_dict(merged) else {}
 
     existing_mcp = config.get("mcp_servers")
     if existing_mcp in (None, ""):
         mcp_servers: SchemaDict = {}
-    elif isinstance(existing_mcp, dict):
+    elif _is_schema_dict(existing_mcp):
         mcp_servers = dict(existing_mcp)
     else:
         raise ValueError("Codex config.mcp_servers must be a JSON object")
@@ -1483,7 +1494,7 @@ def build_request_params(
     force_te2_config: bool = False,
 ) -> SchemaDict:
     schema = protocol.request_schema(method)
-    if not isinstance(schema, dict):
+    if not _is_schema_dict(schema):
         raise RuntimeError(f"runtime protocol missing request schema for {method}")
     props = _schema_properties(schema)
     params: SchemaDict = {}
@@ -1577,17 +1588,16 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Schem
 
     approval_values = _schema_string_enums(thread_props.get("approvalPolicy", {}), protocol.definitions)
     sandbox_values = _schema_string_enums(thread_props.get("sandbox", {}), protocol.definitions)
-    effort_values = _schema_string_enums(turn_props.get("effort", {}), protocol.definitions)
     summary_values = _schema_string_enums(turn_props.get("summary", {}), protocol.definitions)
     collaboration_ref = turn_props.get("collaborationMode")
-    if not isinstance(collaboration_ref, dict) and isinstance(protocol.definitions.get("CollaborationMode"), dict):
+    if not _is_schema_dict(collaboration_ref) and _is_schema_dict(protocol.definitions.get("CollaborationMode")):
         collaboration_ref = {"$ref": "#/definitions/CollaborationMode"}
     collaboration_schema = _resolve_schema(collaboration_ref or {}, protocol.definitions)
     collaboration_props = _schema_properties(collaboration_schema)
     mode_values = _schema_string_enums(collaboration_props.get("mode", {}), protocol.definitions)
     mode_options = _schema_options(mode_values)
 
-    schema = {
+    schema: SchemaDict = {
         "version": "1",
         "description": "Runtime-generated settings schema for the Codex app-server extension",
         "generated_from": str(protocol.schema_path),

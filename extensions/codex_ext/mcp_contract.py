@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, cast
 
 ObjectMap = Dict[str, object]
 
@@ -18,7 +18,7 @@ _CODEX_EAGER_MCP_FEATURES: ObjectMap = {
 
 
 def _optional_map(value: object) -> ObjectMap:
-    return {str(key): item for key, item in value.items()} if isinstance(value, dict) else {}
+    return cast(ObjectMap, value).copy() if isinstance(value, dict) else {}
 
 
 def _optional_string(value: object) -> str | None:
@@ -30,11 +30,12 @@ def _optional_string(value: object) -> str | None:
 
 
 def te2_mcp_integration_enabled(settings: object) -> bool:
-    return isinstance(settings, dict) and settings.get("te2_mcp_integration") is True
+    settings_map = _optional_map(settings)
+    return settings_map.get("te2_mcp_integration") is True
 
 
 def build_te2_mcp_streamable_http_url(base_url: str) -> str:
-    if not isinstance(base_url, str) or not base_url.strip():
+    if not base_url.strip():
         raise ValueError("TE2 base URL is required")
     return f"{base_url.rstrip('/')}{TE2_MCP_STREAMABLE_HTTP_ROUTE}"
 
@@ -50,7 +51,7 @@ def build_codex_thread_config(
     if existing_config in (None, ""):
         merged: ObjectMap = {}
     elif isinstance(existing_config, dict):
-        merged = _optional_map(existing_config)
+        merged = cast(ObjectMap, existing_config).copy()
     else:
         raise ValueError("Codex config must be a JSON object")
 
@@ -58,7 +59,7 @@ def build_codex_thread_config(
     if existing_mcp in (None, ""):
         mcp_servers: ObjectMap = {}
     elif isinstance(existing_mcp, dict):
-        mcp_servers = _optional_map(existing_mcp)
+        mcp_servers = cast(ObjectMap, existing_mcp).copy()
     else:
         raise ValueError("Codex config.mcp_servers must be a JSON object")
 
@@ -144,7 +145,7 @@ def apply_mcp_context(
     if agent_defaults.get("enabled_by_default") is not False:
         from . import runtime_protocol as runtime
 
-        agent_server = runtime._build_agent_pty_blocks_mcp_server(
+        agent_server = runtime.build_agent_pty_blocks_mcp_server(
             cwd=_optional_string(agent_defaults.get("cwd"))
             or _optional_string(context.get("cwd"))
             or _optional_map(settings).get("cwd"),
