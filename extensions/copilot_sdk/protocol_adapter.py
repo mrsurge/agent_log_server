@@ -200,7 +200,7 @@ class CopilotEventView:
 
     @property
     def reasoning_text(self) -> Optional[str]:
-        return _payload_string(self.payload, "reasoning_text")
+        return _payload_string(self.payload, "reasoning_text") or _payload_string(self.payload, "content")
 
     @property
     def delta_content(self) -> Optional[str]:

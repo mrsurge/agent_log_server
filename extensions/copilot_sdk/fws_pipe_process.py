@@ -1,8 +1,10 @@
 import asyncio
 import contextlib
 import queue
+import sys
 import threading
 import time
+import traceback
 from collections.abc import Awaitable
 from typing import Optional, Protocol, TypeAlias, cast
 
@@ -216,7 +218,7 @@ class FrameworkShellPipeProcess:
     def raise_if_write_failed(self) -> None:
         exc = self._write_error
         if exc is not None:
-            raise RuntimeError("copilot sdk pipe write failed") from exc
+            raise RuntimeError(f"copilot sdk pipe write failed: {_format_exception_chain(exc)}") from exc
 
     def _enqueue_write(self, payload: _QueuedWrite) -> None:
         self._write_queue.put_nowait(payload)
@@ -238,19 +240,41 @@ class FrameworkShellPipeProcess:
                 await self.write_bytes(payload)
         except Exception as exc:
             self._write_error = exc
+            print(
+                "[CopilotSDK] pipe writer task failed: "
+                f"{_format_exception_chain(exc)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
             self.stdout.close()
 
     async def write_bytes(self, data: bytes) -> None:
-        text = data.decode("utf-8")
+        try:
+            text = data.decode("utf-8")
+        except Exception as exc:
+            raise RuntimeError(f"failed to decode Copilot pipe write payload bytes={len(data)}") from exc
+        detail = self._pipe_state_error_detail(self._mgr.get_pipe_state(self._shell_id))
         writer = cast(_SupportsWriteToShell | None, self._mgr if hasattr(self._mgr, "write_to_shell") else None)
         if writer is not None:
             try:
                 await writer.write_to_shell(self._shell_id, text, append_newline=False)
                 return
-            except TypeError:
-                await writer.write_to_shell(self._shell_id, text)
-                return
-        await self._mgr.write_to_pipe(self._shell_id, text)
+            except TypeError as first_error:
+                try:
+                    await writer.write_to_shell(self._shell_id, text)
+                    return
+                except Exception as exc:
+                    raise RuntimeError(
+                        "write_to_shell failed after signature fallback "
+                        f"({detail}, bytes={len(data)}, first_error={first_error!r})"
+                    ) from exc
+            except Exception as exc:
+                raise RuntimeError(f"write_to_shell failed ({detail}, bytes={len(data)})") from exc
+        try:
+            await self._mgr.write_to_pipe(self._shell_id, text)
+        except Exception as exc:
+            raise RuntimeError(f"write_to_pipe failed ({detail}, bytes={len(data)})") from exc
 
     async def _pump_output(self) -> None:
         try:
@@ -343,3 +367,14 @@ class FrameworkShellPipeProcess:
 
     async def aclose(self) -> None:
         await self.close_streams()
+
+
+def _format_exception_chain(exc: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " <- ".join(parts)

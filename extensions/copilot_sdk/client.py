@@ -2698,7 +2698,7 @@ def _mcp_ask_user_completion_resolution(event: SessionEvent) -> PayloadDict:
         return cast(PayloadDict, normalized_result)
 
     error_reason = str(getattr(data, "error_reason", "") or "").strip()
-    error_value = getattr(data, "error", None)
+    error_value = cast(object, getattr(data, "error", None))
     if error_reason or error_value not in (None, "", {}):
         resolution: PayloadDict = {"status": "error"}
         if error_reason:
@@ -3753,7 +3753,8 @@ async def hydrate_transcript(
 def _copilot_session_matches_provider(session: CopilotSession, provider_session_id: Optional[str]) -> bool:
     if not isinstance(provider_session_id, str) or not provider_session_id.strip():
         return True
-    return getattr(session, "session_id", None) == provider_session_id.strip()
+    session_id = cast(object, getattr(session, "session_id", None))
+    return isinstance(session_id, str) and session_id == provider_session_id.strip()
 
 
 def _conversation_busy(conversation_id: str) -> bool:
