@@ -14,8 +14,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, cast
 
-from agent_log_server.prompt_context import build_effective_prompt_context
-from agent_log_server.te2_mcp_config import (
+from als_deprecated.prompt_context import build_effective_prompt_context
+from als_deprecated.te2_mcp_config import (
     build_codex_thread_config,
     te2_mcp_integration_enabled,
 )
@@ -66,9 +66,11 @@ _CLIENT_RESPONSE_METHODS = frozenset({
     "command/exec",
     "model/list",
     "thread/compact/start",
+    "thread/loaded/list",
     "thread/list",
     "thread/resume",
     "thread/start",
+    "thread/unsubscribe",
     "turn/interrupt",
     "turn/start",
 })
@@ -1307,7 +1309,7 @@ def build_initialize_params(protocol: RuntimeProtocol) -> SchemaDict:
 
     client_info: SchemaDict = {}
     for key, value in (
-        ("name", "agent_log_server"),
+        ("name", "als_deprecated"),
         ("title", "Agent Log Server"),
         ("version", "0.1.0"),
     ):

@@ -221,6 +221,7 @@ class CopilotEventRouter:
 
         # State tracking
         self.current_turn_id: Optional[str] = None
+        self.turn_active = False
         self.current_message_id: Optional[str] = None
         self.current_reasoning_id: Optional[str] = None
         self.current_message_text: str = ""
@@ -907,6 +908,7 @@ class CopilotEventRouter:
     async def _handle_turn_start(self, data: CopilotEventView) -> None:
         """SDK-initiated turn start (assistant begins processing)."""
         # Reset block tracking so new turn's messages get fresh IDs
+        self.turn_active = True
         self._last_block_type = None
         self.current_message_text = ""
         self.current_message_subagent_id = None
@@ -960,6 +962,7 @@ class CopilotEventRouter:
             "timestamp": utc_ts(),
             "turn_id": self.current_turn_id,
         })
+        self.turn_active = False
 
     # ── Tool execution ──────────────────────────────────────────────
 
@@ -1731,6 +1734,7 @@ class CopilotEventRouter:
         """Called when a new turn starts (user sends message)."""
         local_turn_token = self._normalize_id(turn_token) or uuid4().hex
         self.current_turn_id = self._build_local_id("turn", local_turn_token)
+        self.turn_active = True
         self.current_message_id = None
         self.current_reasoning_id = None
         self.current_message_text = ""

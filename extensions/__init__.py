@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional, cast
 
-from agent_log_server.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
+from als_deprecated.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
 
 HandlerModule = types.ModuleType
 ObjectCallable = Callable[..., object]
@@ -2612,6 +2612,101 @@ async def list_sessions(extension_id: str, cwd: Optional[str] = None) -> object:
     if list_sessions_fn is not None:
         return await _invoke_maybe_async(list_sessions_fn, cwd=cwd)
     return []
+
+
+def live_session_request_enabled(extension_id: str) -> bool:
+    """Return whether an extension manifest opted into live session requests."""
+    info = get_extension_info(extension_id)
+    if not isinstance(info, dict):
+        return False
+    capabilities = _dict_or_empty(info.get("capabilities"))
+    return capabilities.get("live_session_request") is True or capabilities.get("liveSessionRequest") is True
+
+
+async def get_live_session_state(
+    extension_id: str,
+    conversation_id: str,
+    provider_session_id: Optional[str] = None,
+    settings: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
+    """Query cold-safe provider in-memory session state when manifest-enabled."""
+    if not live_session_request_enabled(extension_id):
+        return {
+            "ok": True,
+            "supported": False,
+            "state": "unsupported",
+            "loaded": False,
+            "unload_supported": False,
+        }
+    state_fn = _callable_attr(get_handler(extension_id), "get_live_session_state")
+    if state_fn is None:
+        return {
+            "ok": True,
+            "supported": False,
+            "state": "unsupported",
+            "loaded": False,
+            "unload_supported": False,
+        }
+    result = await _invoke_maybe_async(
+        state_fn,
+        conversation_id=conversation_id,
+        provider_session_id=provider_session_id,
+        settings=settings or {},
+    )
+    if isinstance(result, dict):
+        return _dict_or_empty(result)
+    return {
+        "ok": False,
+        "supported": True,
+        "state": "unknown",
+        "loaded": False,
+        "unload_supported": False,
+        "error": "Invalid live session state response",
+    }
+
+
+async def unload_live_session(
+    extension_id: str,
+    conversation_id: str,
+    provider_session_id: Optional[str] = None,
+    settings: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
+    """Release provider in-memory session state when manifest-enabled."""
+    if not live_session_request_enabled(extension_id):
+        return {
+            "ok": False,
+            "supported": False,
+            "state": "unsupported",
+            "loaded": False,
+            "unload_supported": False,
+            "error": "Extension does not support live session requests",
+        }
+    unload_fn = _callable_attr(get_handler(extension_id), "unload_live_session")
+    if unload_fn is None:
+        return {
+            "ok": False,
+            "supported": False,
+            "state": "unsupported",
+            "loaded": False,
+            "unload_supported": False,
+            "error": "Extension does not implement live session unload",
+        }
+    result = await _invoke_maybe_async(
+        unload_fn,
+        conversation_id=conversation_id,
+        provider_session_id=provider_session_id,
+        settings=settings or {},
+    )
+    if isinstance(result, dict):
+        return _dict_or_empty(result)
+    return {
+        "ok": False,
+        "supported": True,
+        "state": "unknown",
+        "loaded": False,
+        "unload_supported": True,
+        "error": "Invalid live session unload response",
+    }
 
 
 async def resume_session_with_history(

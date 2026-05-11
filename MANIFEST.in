@@ -2,10 +2,10 @@ include README.md
 include requirements.txt
 graft rust
 prune rust/target
-recursive-include agent_log_server/static *
-recursive-include agent_log_server/templates *
-recursive-include agent_log_server/shellspec *
-recursive-include agent_log_server/te2_assets *
+recursive-include rust/crates/als-server/src/static *
+recursive-include als_deprecated/templates *
+recursive-include als_deprecated/shellspec *
+recursive-include als_deprecated/te2_assets *
 recursive-include extensions *
 global-exclude __pycache__/*
 global-exclude *.py[cod]

@@ -22,6 +22,8 @@ pub mod methods {
     pub const EXTENSION_GET_RUNTIME_OPTIONS: &str = "extension.get_runtime_options";
     pub const EXTENSION_LIST_MODELS: &str = "extension.list_models";
     pub const EXTENSION_LIST_SESSIONS: &str = "extension.list_sessions";
+    pub const EXTENSION_SESSION_STATE_GET: &str = "extension.session.state.get";
+    pub const EXTENSION_SESSION_UNLOAD: &str = "extension.session.unload";
     pub const CONVERSATION_START: &str = "conversation.start";
     pub const CONVERSATION_RESUME: &str = "conversation.resume";
     pub const CONVERSATION_SEND: &str = "conversation.send";

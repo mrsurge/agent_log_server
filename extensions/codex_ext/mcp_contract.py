@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from agent_log_server.te2_mcp_config import (
+from als_deprecated.te2_mcp_config import (
     TE2_MCP_SERVER_NAME,
     build_codex_thread_config,
     build_te2_mcp_streamable_http_url,
 )
-from agent_log_server.typing_helpers import ObjectMap, coerce_object_map
+from als_deprecated.typing_helpers import ObjectMap, coerce_object_map
 
 AGENT_PTY_BLOCKS_MCP_SERVER_NAME = "agent-pty-blocks"
 _EAGER_LOAD_TOOLS_KEY = "eager_load_tools"

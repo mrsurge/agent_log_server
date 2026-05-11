@@ -68,9 +68,9 @@ from .mcp_contract import apply_mcp_context
 from .protocol_adapter import compact_sdk_session, resume_sdk_session
 from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
 from .te2_runtime import build_copilot_mcp_servers
-import agent_log_server.ask_user_interactions as ask_user_interactions
-from agent_log_server.prompt_context import build_effective_prompt_context
-from agent_log_server.te2_mcp_config import (
+import als_deprecated.ask_user_interactions as ask_user_interactions
+from als_deprecated.prompt_context import build_effective_prompt_context
+from als_deprecated.te2_mcp_config import (
     te2_mcp_integration_enabled,
 )
 from watchfiles import awatch
@@ -3750,6 +3750,82 @@ async def hydrate_transcript(
 
 # ── Cleanup ─────────────────────────────────────────────────────────
 
+def _copilot_session_matches_provider(session: CopilotSession, provider_session_id: Optional[str]) -> bool:
+    if not isinstance(provider_session_id, str) or not provider_session_id.strip():
+        return True
+    return getattr(session, "session_id", None) == provider_session_id.strip()
+
+
+def _conversation_busy(conversation_id: str) -> bool:
+    deferred = _deferred_send_tasks.get(conversation_id)
+    if deferred is not None and not deferred.done():
+        return True
+    queue = _event_queues.get(conversation_id)
+    if queue is not None and queue.qsize() > 0:
+        return True
+    router = _routers.get(conversation_id)
+    return bool(router is not None and getattr(router, "turn_active", False))
+
+
+async def get_live_session_state(
+    conversation_id: str,
+    provider_session_id: Optional[str] = None,
+    settings: Optional[SettingsDict] = None,
+) -> PayloadDict:
+    async with _get_session_lock(conversation_id):
+        session = _sessions.get(conversation_id)
+        loaded = bool(session and _copilot_session_matches_provider(session, provider_session_id))
+        session_id = getattr(session, "session_id", None) if session else None
+        return {
+            "ok": True,
+            "supported": True,
+            "state": "loaded" if loaded else "cold",
+            "loaded": loaded,
+            "busy": _conversation_busy(conversation_id),
+            "unload_supported": True,
+            "provider_session_id": session_id or provider_session_id,
+        }
+
+
+async def unload_live_session(
+    conversation_id: str,
+    provider_session_id: Optional[str] = None,
+    settings: Optional[SettingsDict] = None,
+) -> PayloadDict:
+    async with _get_session_lock(conversation_id):
+        session = _sessions.get(conversation_id)
+        if not session or not _copilot_session_matches_provider(session, provider_session_id):
+            return {
+                "ok": True,
+                "supported": True,
+                "state": "cold",
+                "loaded": False,
+                "unload_supported": True,
+                "provider_session_id": provider_session_id,
+            }
+        if _conversation_busy(conversation_id):
+            return {
+                "ok": False,
+                "supported": True,
+                "state": "busy",
+                "loaded": True,
+                "busy": True,
+                "unload_supported": True,
+                "provider_session_id": getattr(session, "session_id", None) or provider_session_id,
+                "error": "Cannot unload while a turn is active",
+            }
+        unloaded = await _destroy_session_unlocked(conversation_id)
+        return {
+            "ok": unloaded,
+            "supported": True,
+            "state": "cold" if unloaded else "unknown",
+            "loaded": False if unloaded else True,
+            "unload_supported": True,
+            "provider_session_id": getattr(session, "session_id", None) or provider_session_id,
+            "error": None if unloaded else "Session unload failed",
+        }
+
+
 async def destroy_session(conversation_id: str) -> bool:
     async with _get_session_lock(conversation_id):
         return await _destroy_session_unlocked(conversation_id)
@@ -3778,7 +3854,7 @@ async def _destroy_session_unlocked(conversation_id: str) -> bool:
 
     if session:
         try:
-            await session.destroy()
+            await session.disconnect()
             print(f"[CopilotSDK] Session destroyed: {conversation_id[:8]}")
             return True
         except Exception as e:

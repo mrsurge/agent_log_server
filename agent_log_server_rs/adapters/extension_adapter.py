@@ -51,6 +51,8 @@ IMPORT_TRANSCRIPT_BATCH_SIZE = 1000
 
 CONVERSATION_METHODS = ("init_session", "handle_message", "resume_session_with_history")
 SESSION_METHODS = ("list_sessions", "resume_session_with_history", "hydrate_transcript")
+LIVE_SESSION_STATE_METHOD = "get_live_session_state"
+LIVE_SESSION_UNLOAD_METHOD = "unload_live_session"
 
 
 async def _get_framework_shell_manager() -> object:
@@ -145,6 +147,39 @@ async def _framework_shell_manager_probe(ensure_manager: bool) -> JsonMap:
     except Exception as exc:
         probe["error"] = f"{type(exc).__name__}: {exc}"
     return probe
+
+
+async def _invoke_handler_with_supported_kwargs(handler_fn: Callable[..., object], **kwargs: object) -> object:
+    signature = inspect.signature(handler_fn)
+    allows_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    call_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if allows_kwargs or key in signature.parameters
+    }
+    result = handler_fn(**call_kwargs)
+    if hasattr(result, "__await__"):
+        return await cast(Awaitable[object], result)
+    return result
+
+
+def _dict_result_with_defaults(
+    result: JsonMap,
+    extension_id: str,
+    conversation_id: str,
+    params: JsonMap,
+) -> JsonMap:
+    payload = dict(result)
+    payload.setdefault("extension_id", extension_id)
+    payload.setdefault("conversation_id", conversation_id)
+    provider_session_id = _provider_session_id_param(params)
+    if provider_session_id:
+        payload.setdefault("provider_session_id", provider_session_id)
+    payload.setdefault("supported", True)
+    return payload
 
 
 def _optional_path_list(value: object) -> list[Path]:
@@ -450,6 +485,10 @@ class ExtensionJsonRpcAdapter:
             return await self._list_models(params)
         if method == AdapterMethod.EXTENSION_LIST_SESSIONS:
             return await self._list_sessions(params)
+        if method == AdapterMethod.EXTENSION_SESSION_STATE_GET:
+            return await self._live_session_state(params)
+        if method == AdapterMethod.EXTENSION_SESSION_UNLOAD:
+            return await self._live_session_unload(params)
         if method == AdapterMethod.CONVERSATION_START:
             return await self._conversation_start(params)
         if method == AdapterMethod.CONVERSATION_RESUME:
@@ -836,6 +875,73 @@ class ExtensionJsonRpcAdapter:
             if limit is not None and len(normalized) >= limit:
                 break
         return {"sessions": normalized}
+
+    async def _live_session_state(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        handler = self._supported_handler(extension_id)
+        state_fn = getattr(handler, LIVE_SESSION_STATE_METHOD, None)
+        if not callable(state_fn):
+            return {
+                "ok": True,
+                "supported": False,
+                "state": "unsupported",
+                "loaded": False,
+                "unload_supported": False,
+            }
+        conversation_id = _required_string(params, "conversation_id")
+        result = await _invoke_handler_with_supported_kwargs(
+            state_fn,
+            conversation_id=conversation_id,
+            provider_session_id=_provider_session_id_param(params),
+            settings=_optional_map(params.get("settings")) or {},
+        )
+        if isinstance(result, dict):
+            return _dict_result_with_defaults(result, extension_id, conversation_id, params)
+        return {
+            "ok": False,
+            "supported": True,
+            "state": "unknown",
+            "loaded": False,
+            "unload_supported": False,
+            "extension_id": extension_id,
+            "conversation_id": conversation_id,
+            "provider_session_id": _provider_session_id_param(params),
+            "error": "Invalid live session state response",
+        }
+
+    async def _live_session_unload(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        handler = self._supported_handler(extension_id)
+        unload_fn = getattr(handler, LIVE_SESSION_UNLOAD_METHOD, None)
+        if not callable(unload_fn):
+            return {
+                "ok": False,
+                "supported": False,
+                "state": "unsupported",
+                "loaded": False,
+                "unload_supported": False,
+                "error": "Extension does not implement live session unload",
+            }
+        conversation_id = _required_string(params, "conversation_id")
+        result = await _invoke_handler_with_supported_kwargs(
+            unload_fn,
+            conversation_id=conversation_id,
+            provider_session_id=_provider_session_id_param(params),
+            settings=_optional_map(params.get("settings")) or {},
+        )
+        if isinstance(result, dict):
+            return _dict_result_with_defaults(result, extension_id, conversation_id, params)
+        return {
+            "ok": False,
+            "supported": True,
+            "state": "unknown",
+            "loaded": False,
+            "unload_supported": True,
+            "extension_id": extension_id,
+            "conversation_id": conversation_id,
+            "provider_session_id": _provider_session_id_param(params),
+            "error": "Invalid live session unload response",
+        }
 
     async def _settings_schema(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)

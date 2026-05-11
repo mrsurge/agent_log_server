@@ -123,7 +123,7 @@ def _build_env(args: BootstrapArgs) -> dict[str, str]:
     data_dir = Path(args.data_dir) if args.data_dir else _default_data_dir()
     cache_dir = Path(args.cache_dir) if args.cache_dir else _default_cache_dir()
     config_dir = Path(args.config_dir) if args.config_dir else data_dir
-    static_dir = Path(args.static_dir) if args.static_dir else _source_root() / "agent_log_server" / "static"
+    static_dir = Path(args.static_dir) if args.static_dir else _default_static_dir()
 
     for root in (data_dir, cache_dir, config_dir):
         root.mkdir(parents=True, exist_ok=True)
@@ -356,6 +356,14 @@ def _default_extensions_dir() -> Path:
     if (extensions_dir / "extensions.json").is_file():
         return extensions_dir
     return extensions_dir
+
+
+def _default_static_dir() -> Path:
+    source_static = _source_root() / "rust" / "crates" / "als-server" / "src" / "static"
+    if source_static.is_dir():
+        return source_static
+    packaged_static = _package_root() / "rust" / "crates" / "als-server" / "src" / "static"
+    return packaged_static
 
 
 def _source_root() -> Path:

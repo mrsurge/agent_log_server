@@ -29,7 +29,7 @@ from .runtime_protocol import (
     normalize_thread_list_timestamp,
 )
 from .transport import CodexAppServerTransport, _MetaFns
-from agent_log_server.te2_mcp_config import te2_mcp_integration_enabled
+from als_deprecated.te2_mcp_config import te2_mcp_integration_enabled
 
 
 class _ServerModule(Protocol):
@@ -88,7 +88,7 @@ def get_raw_buffer(limit: int = 50) -> List[Dict[str, object]]:
 
 
 def _server_module() -> _ServerModule:
-    return cast(_ServerModule, importlib.import_module("agent_log_server.server"))
+    return cast(_ServerModule, importlib.import_module("als_deprecated.server"))
 
 
 def _extensions_module() -> _ExtensionsModule:
@@ -1178,6 +1178,156 @@ async def list_sessions(cwd: Optional[str] = None, sort: Optional[str] = None) -
             entry["context"] = {"cwd": session_cwd}
         sessions.append(entry)
     return _sort_session_entries(sessions, cwd, sort_key)
+
+
+def _bound_thread_id(conversation_id: str, provider_session_id: Optional[str]) -> Optional[str]:
+    if isinstance(provider_session_id, str) and provider_session_id.strip():
+        return provider_session_id.strip()
+    if _meta_fns and "load" in _meta_fns:
+        meta = _object_dict(_meta_fns["load"](conversation_id))
+        thread_id = meta.get("thread_id") or meta.get("provider_session_id")
+        if isinstance(thread_id, str) and thread_id.strip():
+            return thread_id.strip()
+    return None
+
+
+async def get_live_session_state(
+    conversation_id: str,
+    provider_session_id: Optional[str] = None,
+    settings: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    thread_id = _bound_thread_id(conversation_id, provider_session_id)
+    if not thread_id:
+        return {
+            "ok": True,
+            "supported": True,
+            "state": "unbound",
+            "loaded": False,
+            "unload_supported": False,
+        }
+
+    transport = _transport
+    if transport is None or not transport.is_ready():
+        return {
+            "ok": True,
+            "supported": True,
+            "state": "cold",
+            "loaded": False,
+            "unload_supported": True,
+            "provider_session_id": thread_id,
+        }
+
+    busy = False
+    if _meta_fns and "load" in _meta_fns:
+        meta = _object_dict(_meta_fns["load"](conversation_id))
+        busy = isinstance(meta.get("turn_id"), str) and bool(str(meta.get("turn_id")).strip())
+
+    try:
+        await get_runtime_protocol()
+        result = await transport._rpc_request_unchecked(
+            "thread/loaded/list",
+            params={},
+            conversation_id=conversation_id,
+            timeout=5.0,
+        )
+        loaded_ids = result.get("data", []) if isinstance(result, dict) else []
+        loaded = thread_id in loaded_ids if isinstance(loaded_ids, list) else transport.is_thread_ready(thread_id)
+        return {
+            "ok": True,
+            "supported": True,
+            "state": "loaded" if loaded else "cold",
+            "loaded": bool(loaded),
+            "busy": busy,
+            "unload_supported": True,
+            "provider_session_id": thread_id,
+        }
+    except Exception as exc:
+        loaded = transport.is_thread_ready(thread_id)
+        return {
+            "ok": False,
+            "supported": True,
+            "state": "loaded" if loaded else "unknown",
+            "loaded": loaded,
+            "busy": busy,
+            "unload_supported": True,
+            "provider_session_id": thread_id,
+            "error": str(exc),
+        }
+
+
+async def unload_live_session(
+    conversation_id: str,
+    provider_session_id: Optional[str] = None,
+    settings: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    thread_id = _bound_thread_id(conversation_id, provider_session_id)
+    if not thread_id:
+        return {
+            "ok": False,
+            "supported": True,
+            "state": "unbound",
+            "loaded": False,
+            "unload_supported": False,
+            "error": "No provider session is bound",
+        }
+    if _meta_fns and "load" in _meta_fns:
+        meta = _object_dict(_meta_fns["load"](conversation_id))
+        turn_id = meta.get("turn_id")
+        if isinstance(turn_id, str) and turn_id.strip():
+            return {
+                "ok": False,
+                "supported": True,
+                "state": "busy",
+                "loaded": True,
+                "busy": True,
+                "unload_supported": True,
+                "provider_session_id": thread_id,
+                "error": "Cannot unload while a turn is active",
+            }
+
+    transport = _transport
+    if transport is None or not transport.is_ready():
+        if transport is not None:
+            transport.mark_thread_unready(thread_id)
+        return {
+            "ok": True,
+            "supported": True,
+            "state": "cold",
+            "loaded": False,
+            "unload_supported": True,
+            "provider_session_id": thread_id,
+        }
+
+    try:
+        protocol = await get_runtime_protocol()
+        params = build_request_params(protocol, "thread/unsubscribe", {}, thread_id=thread_id)
+        result = await transport._rpc_request_unchecked(
+            "thread/unsubscribe",
+            params=params,
+            conversation_id=conversation_id,
+            timeout=10.0,
+        )
+        transport.mark_thread_unready(thread_id)
+        status = result.get("status") if isinstance(result, dict) else None
+        return {
+            "ok": True,
+            "supported": True,
+            "state": "cold",
+            "loaded": False,
+            "unload_supported": True,
+            "provider_session_id": thread_id,
+            "provider_status": status or "unloaded",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "supported": True,
+            "state": "unknown",
+            "loaded": transport.is_thread_ready(thread_id),
+            "unload_supported": True,
+            "provider_session_id": thread_id,
+            "error": str(exc),
+        }
 
 
 async def route_event(

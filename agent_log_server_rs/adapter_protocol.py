@@ -31,6 +31,8 @@ class AdapterMethod(StrEnum):
     EXTENSION_GET_RUNTIME_OPTIONS = "extension.get_runtime_options"
     EXTENSION_LIST_MODELS = "extension.list_models"
     EXTENSION_LIST_SESSIONS = "extension.list_sessions"
+    EXTENSION_SESSION_STATE_GET = "extension.session.state.get"
+    EXTENSION_SESSION_UNLOAD = "extension.session.unload"
     CONVERSATION_START = "conversation.start"
     CONVERSATION_RESUME = "conversation.resume"
     CONVERSATION_SEND = "conversation.send"

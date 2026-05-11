@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import esbuild from 'esbuild';
 
 const isWatch = process.argv.includes('--watch');
-const staticDir = 'agent_log_server/static';
+const staticDir = 'rust/crates/als-server/src/static';
 const distDir = join(staticDir, 'dist');
 const vendorDir = join(staticDir, 'vendor');
 
@@ -121,8 +121,8 @@ async function prepareVendorAssets() {
 
 const codexAgent = {
   ...common,
-  entryPoints: ['agent_log_server/static/codex_agent.ts'],
-  outfile: 'agent_log_server/static/dist/codex_agent.js',
+  entryPoints: ['rust/crates/als-server/src/static/codex_agent.ts'],
+  outfile: 'rust/crates/als-server/src/static/dist/codex_agent.js',
   format: 'esm',
 };
 

@@ -17,6 +17,7 @@
     "streaming": true,
     "modelListing": true,
     "permissionHandling": true,
+    "live_session_request": true,
     "hooks": true,
     "hasPlan": true,
     "hasTodo": true,

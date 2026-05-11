@@ -214,7 +214,12 @@ fn default_cache_dir() -> PathBuf {
 }
 
 fn default_static_dir() -> PathBuf {
-    default_repo_root().join("agent_log_server").join("static")
+    default_repo_root()
+        .join("rust")
+        .join("crates")
+        .join("als-server")
+        .join("src")
+        .join("static")
 }
 
 fn default_extensions_dir() -> PathBuf {

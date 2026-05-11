@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import extensions as ext_loader
 
-from agent_log_server.typing_helpers import ObjectMap, coerce_object_map
+from als_deprecated.typing_helpers import ObjectMap, coerce_object_map
 from agent_log_server_rs import bootstrap
 
 SETTINGS_RPC_NAMESPACE = "/rpc/settings"

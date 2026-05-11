@@ -20,13 +20,13 @@ from typing import Optional, Protocol, cast, runtime_checkable
 
 import socketio
 
-from agent_log_server.markdown_sections import SectionNode, normalize_heading as _normalize_heading, parse_markdown
-from agent_log_server.ipc_auth import load_or_create_ipc_secret
-from agent_log_server.prompt_context import REPO_MEMORY_FILENAME
-from agent_log_server.repo_memory_delta import build_repo_memory_delta
-from agent_log_server.socketio_config import socketio_client_kwargs
-from agent_log_server import conversation_todos as _conv_todos
-from agent_log_server.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
+from als_deprecated.markdown_sections import SectionNode, normalize_heading as _normalize_heading, parse_markdown
+from als_deprecated.ipc_auth import load_or_create_ipc_secret
+from als_deprecated.prompt_context import REPO_MEMORY_FILENAME
+from als_deprecated.repo_memory_delta import build_repo_memory_delta
+from als_deprecated.socketio_config import socketio_client_kwargs
+from als_deprecated import conversation_todos as _conv_todos
+from als_deprecated.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
 
 
 def _ensure_framework_shells_secret() -> None:

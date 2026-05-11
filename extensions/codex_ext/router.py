@@ -7,7 +7,7 @@ import shlex
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple, cast
 
-from agent_log_server.ask_user_interactions import (
+from als_deprecated.ask_user_interactions import (
     AGENT_PTY_ASK_USER_REQUEST_METHOD,
     is_agent_pty_ask_user_request,
     is_agent_pty_ask_user_tool,

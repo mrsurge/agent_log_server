@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from agent_log_server.server import main
+from als_deprecated.server import main
 
 
 if __name__ == "__main__":

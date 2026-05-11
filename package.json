@@ -1,5 +1,5 @@
 {
-  "name": "agent_log_server-frontend",
+  "name": "als-rs-frontend",
   "private": true,
   "type": "module",
   "devDependencies": {
@@ -13,7 +13,7 @@
   "scripts": {
     "build": "node build.mjs",
     "build:watch": "node build.mjs --watch",
-    "lint:types": "eslint --max-warnings=0 \"agent_log_server/static/**/*.ts\"",
+    "lint:types": "eslint --max-warnings=0 \"rust/crates/als-server/src/static/**/*.ts\"",
     "typecheck": "tsc --noEmit && npm run lint:types --silent"
   },
   "dependencies": {

@@ -128,6 +128,8 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
         })),
         "extension.models.list" => extension_models(state, &request.params).await,
         "extension.sessions.list" => extension_sessions(state, &request.params).await,
+        "extension.session.state.get" => extension_session_state(state, &request.params).await,
+        "extension.session.unload" => extension_session_unload(state, &request.params).await,
         _ => Err(rpc_error(
             -32601,
             format!("Unsupported method: {}", request.method),
@@ -395,6 +397,96 @@ async fn extension_sessions(state: &AppState, params: &JsonMap) -> Result<Value,
     Ok(json!({"sessions": [], "transport": "rpc"}))
 }
 
+async fn extension_session_state(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let request = live_session_request(state, params)?;
+    if !live_session_request_enabled(&request.entry) {
+        return Ok(unsupported_live_session_response(&request));
+    }
+    let mut result = match adapter_extension_request_with_params(
+        state,
+        methods::EXTENSION_SESSION_STATE_GET,
+        request.to_adapter_params(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "supported": true,
+                "state": "unknown",
+                "loaded": false,
+                "unload_supported": false,
+                "error": error.message,
+                "extension_id": request.extension_id,
+                "conversation_id": request.conversation_id,
+                "provider_session_id": request.provider_session_id,
+                "transport": "rpc"
+            }));
+        }
+    };
+    if let Value::Object(ref mut object) = result {
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        return Ok(result);
+    }
+    Ok(json!({
+        "ok": false,
+        "supported": true,
+        "state": "unknown",
+        "loaded": false,
+        "unload_supported": false,
+        "extension_id": request.extension_id,
+        "conversation_id": request.conversation_id,
+        "provider_session_id": request.provider_session_id,
+        "transport": "rpc"
+    }))
+}
+
+async fn extension_session_unload(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let request = live_session_request(state, params)?;
+    if !live_session_request_enabled(&request.entry) {
+        return Ok(unsupported_live_session_response(&request));
+    }
+    let mut result = match adapter_extension_request_with_params(
+        state,
+        methods::EXTENSION_SESSION_UNLOAD,
+        request.to_adapter_params(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "supported": true,
+                "state": "unknown",
+                "loaded": false,
+                "unload_supported": true,
+                "error": error.message,
+                "extension_id": request.extension_id,
+                "conversation_id": request.conversation_id,
+                "provider_session_id": request.provider_session_id,
+                "transport": "rpc"
+            }));
+        }
+    };
+    if let Value::Object(ref mut object) = result {
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        return Ok(result);
+    }
+    Ok(json!({
+        "ok": false,
+        "supported": true,
+        "state": "unknown",
+        "loaded": false,
+        "unload_supported": true,
+        "extension_id": request.extension_id,
+        "conversation_id": request.conversation_id,
+        "provider_session_id": request.provider_session_id,
+        "transport": "rpc"
+    }))
+}
+
 async fn extension_runtime_options(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
     let request = runtime_options_request(state, params)?;
     ensure_registered_extension(state, &request.extension_id)?;
@@ -417,6 +509,119 @@ async fn extension_runtime_options(state: &AppState, params: &JsonMap) -> Result
         "quickControls": [],
         "transport": "rpc"
     }))
+}
+
+struct LiveSessionRequest {
+    extension_id: String,
+    conversation_id: String,
+    provider_session_id: Option<String>,
+    settings: JsonMap,
+    entry: ExtensionRegistryEntry,
+}
+
+impl LiveSessionRequest {
+    fn to_adapter_params(&self) -> JsonMap {
+        let mut params = JsonMap::new();
+        params.insert(
+            "extension_id".to_owned(),
+            Value::String(self.extension_id.clone()),
+        );
+        params.insert(
+            "conversation_id".to_owned(),
+            Value::String(self.conversation_id.clone()),
+        );
+        if let Some(provider_session_id) = self.provider_session_id.as_ref() {
+            params.insert(
+                "provider_session_id".to_owned(),
+                Value::String(provider_session_id.clone()),
+            );
+            params.insert(
+                "thread_id".to_owned(),
+                Value::String(provider_session_id.clone()),
+            );
+        }
+        params.insert("settings".to_owned(), Value::Object(self.settings.clone()));
+        params
+    }
+}
+
+fn live_session_request(
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<LiveSessionRequest, RpcError> {
+    let conversation_id = params
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
+    let meta = state
+        .conversations
+        .load_meta_if_exists(&conversation_id)
+        .map_err(internal_rpc_error)?
+        .ok_or_else(|| rpc_error(-32602, format!("Conversation not found: {conversation_id}")))?;
+    let extension_id = extension_id_param(params)
+        .or_else(|| {
+            meta.extension_id
+                .as_deref()
+                .or(meta.agent_type.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            meta.settings
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .ok_or_else(|| rpc_error(-32602, "extension_id or conversation extension is required"))?;
+    let entry = state
+        .extensions
+        .get(&extension_id)
+        .ok_or_else(|| rpc_error(-32602, format!("Extension not found: {extension_id}")))?;
+    let provider_session_id = params
+        .get("provider_session_id")
+        .or_else(|| params.get("thread_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or(meta.thread_id.clone())
+        .or(meta.provider_session_id.clone());
+    Ok(LiveSessionRequest {
+        extension_id,
+        conversation_id,
+        provider_session_id,
+        settings: meta.settings,
+        entry,
+    })
+}
+
+fn live_session_request_enabled(entry: &ExtensionRegistryEntry) -> bool {
+    entry
+        .capabilities
+        .get("live_session_request")
+        .or_else(|| entry.capabilities.get("liveSessionRequest"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn unsupported_live_session_response(request: &LiveSessionRequest) -> Value {
+    json!({
+        "ok": true,
+        "supported": false,
+        "state": "unsupported",
+        "loaded": false,
+        "unload_supported": false,
+        "extension_id": request.extension_id,
+        "conversation_id": request.conversation_id,
+        "provider_session_id": request.provider_session_id,
+        "transport": "rpc"
+    })
 }
 
 struct RuntimeOptionsRequest {

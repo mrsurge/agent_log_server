@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from agent_log_server.te2_runtime import TE2_MCP_SERVER_NAME, build_te2_mcp_streamable_http_url
-from agent_log_server.typing_helpers import ObjectMap, coerce_object_map
+from als_deprecated.te2_runtime import TE2_MCP_SERVER_NAME, build_te2_mcp_streamable_http_url
+from als_deprecated.typing_helpers import ObjectMap, coerce_object_map
 
 from .te2_runtime import (
     AGENT_PTY_BLOCKS_MCP_SERVER_NAME,

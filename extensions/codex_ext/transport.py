@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Protocol, TypedDict, cast
 
-from agent_log_server import ask_user_interactions
+from als_deprecated import ask_user_interactions
 
 from .router import CodexEventRouter
 from .runtime_protocol import (
@@ -270,9 +270,16 @@ class CodexAppServerTransport:
     def needs_thread_resume(self, thread_id: str) -> bool:
         return thread_id not in self._resumed_threads
 
+    def is_thread_ready(self, thread_id: Optional[str]) -> bool:
+        return isinstance(thread_id, str) and thread_id in self._resumed_threads
+
     def mark_thread_ready(self, thread_id: Optional[str]) -> None:
         if isinstance(thread_id, str) and thread_id:
             self._resumed_threads.add(thread_id)
+
+    def mark_thread_unready(self, thread_id: Optional[str]) -> None:
+        if isinstance(thread_id, str) and thread_id:
+            self._resumed_threads.discard(thread_id)
 
     def runtime_instance_id(self) -> Optional[str]:
         return self._shell_id

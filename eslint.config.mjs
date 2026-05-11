@@ -4,12 +4,12 @@ import tsPlugin from '@typescript-eslint/eslint-plugin';
 export default [
   {
     ignores: [
-      'agent_log_server/static/dist/**',
-      'agent_log_server/static/vendor/**',
+      'rust/crates/als-server/src/static/dist/**',
+      'rust/crates/als-server/src/static/vendor/**',
     ],
   },
   {
-    files: ['agent_log_server/static/**/*.ts'],
+    files: ['rust/crates/als-server/src/static/**/*.ts'],
     languageOptions: {
       parser: tsParser,
       ecmaVersion: 'latest',
