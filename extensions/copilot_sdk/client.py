@@ -12,6 +12,7 @@ Key advantages:
 
 import asyncio
 import contextlib
+import importlib
 import inspect
 import json
 import os
@@ -21,12 +22,10 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Callable, Awaitable, Deque, Tuple, Protocol, TypeAlias, TypedDict, cast, get_args, runtime_checkable
+from collections.abc import AsyncIterator, Iterable
+from typing import Dict, List, Optional, Callable, Awaitable, Deque, Tuple, Protocol, TypeAlias, TypedDict, cast, get_args, runtime_checkable
 from collections import deque
 from uuid import uuid4
-
-from framework_shells.orchestrator import Orchestrator
-from framework_shells.manager import FrameworkShellManager
 
 from ._vendor.copilot import (
     CopilotClient,
@@ -48,7 +47,6 @@ from ._vendor.copilot.session import (
     PreToolUseHandler,
     PreToolUseHookInput,
     PreToolUseHookOutput,
-    _PermissionHandlerFn,
     ReasoningEffort,
     SessionHooks,
     SessionEndHandler,
@@ -63,22 +61,24 @@ from ._vendor.copilot.session import (
 from ._vendor.copilot.generated.session_events import SessionEventType
 
 from .file_change_preview import build_file_change_preview
-from .fws_pipe_process import FrameworkShellPipeProcess
+from .fws_pipe_process import FrameworkShellPipeProcess, PipeShellManager
 from .mcp_contract import apply_mcp_context
 from .protocol_adapter import compact_sdk_session, resume_sdk_session
-from .router import CopilotEventRouter, _looks_like_diff, _FILE_CHANGE_TOOLS
+from .router import CopilotEventRouter
 from .te2_runtime import build_copilot_mcp_servers
-import als_deprecated.ask_user_interactions as ask_user_interactions
-from als_deprecated.prompt_context import build_effective_prompt_context
-from als_deprecated.te2_mcp_config import (
-    te2_mcp_integration_enabled,
-)
-from watchfiles import awatch
+
+_FILE_CHANGE_TOOLS = {
+    "edit", "create", "write", "write_file", "apply_patch", "delete",
+    "move", "rename", "insert", "replace", "patch",
+}
 
 
 PayloadDict: TypeAlias = dict[str, object]
 SettingsDict: TypeAlias = dict[str, object]
 RequestContext: TypeAlias = dict[str, str]
+_WatchChanges: TypeAlias = set[tuple[object, str]]
+_AwatchFn: TypeAlias = Callable[..., AsyncIterator[_WatchChanges]]
+awatch = cast(_AwatchFn, getattr(importlib.import_module("watchfiles"), "awatch"))
 
 
 class RawBufferEntry(TypedDict):
@@ -95,15 +95,35 @@ class PlanDocState(TypedDict):
     plan_source: str
 
 
+class _BuildEffectivePromptContextFn(Protocol):
+    def __call__(
+        self,
+        user_instructions: object,
+        *,
+        te2_enabled: bool,
+        cwd: object = None,
+        template_path: str | None = None,
+    ) -> str | None: ...
+
+
+_prompt_context_module = importlib.import_module("als_deprecated.prompt_context")
+build_effective_prompt_context = cast(
+    _BuildEffectivePromptContextFn,
+    getattr(_prompt_context_module, "build_effective_prompt_context"),
+)
+
+
 # ── Global state ────────────────────────────────────────────────────
 
 _client: Optional[CopilotClient] = None
 _client_lock: Optional[asyncio.Lock] = None
-_fws_getter: Optional[Callable] = None
+_fws_getter: Optional[Callable[[], Awaitable["_FrameworkShellManager"]]] = None
 _copilot_shell_id: Optional[str] = None
 _copilot_fws_process: Optional[FrameworkShellPipeProcess] = None
 _BroadcastFn = Callable[[PayloadDict], Awaitable[None]]
 _TranscriptFn = Callable[[str, PayloadDict], Awaitable[None]]
+_MetaFns: TypeAlias = dict[str, Callable[..., object]]
+_PermissionHandler: TypeAlias = Callable[[PermissionRequest, RequestContext], Awaitable[PermissionRequestResult]]
 
 
 def _get_client_lock() -> asyncio.Lock:
@@ -137,14 +157,14 @@ async def _append_debug_transcript(conversation_id: str, transcript_entry: Paylo
 # Server callbacks (injected by init_copilot_manager)
 _broadcast_fn: Optional[_BroadcastFn] = None
 _transcript_fn: Optional[_TranscriptFn] = None
-_meta_fns: Optional[Dict[str, Callable]] = None
+_meta_fns: Optional[_MetaFns] = None
 
 # Session tracking: conversation_id -> CopilotSession
 _sessions: Dict[str, CopilotSession] = {}
 # Router tracking: conversation_id -> CopilotEventRouter
 _routers: Dict[str, CopilotEventRouter] = {}
 # Event unsubscribe fns: conversation_id -> unsubscribe callable
-_unsubs: Dict[str, Callable] = {}
+_unsubs: Dict[str, Callable[[], object]] = {}
 # Per-conversation event queue / worker to preserve SDK arrival order.
 _event_queues: Dict[str, asyncio.Queue[Optional[SessionEvent]]] = {}
 _event_tasks: Dict[str, asyncio.Task[None]] = {}
@@ -220,12 +240,29 @@ class _FrameworkShellRecord(Protocol):
     spec_id: str | None
 
 
-class _FrameworkShellManager(Protocol):
+class _FrameworkShellManager(PipeShellManager, Protocol):
     async def list_shells(self) -> list[_FrameworkShellRecord]: ...
 
     async def get_shell(self, shell_id: str) -> _FrameworkShellRecord | None: ...
 
     async def terminate_shell(self, shell_id: str, force: bool) -> None: ...
+
+
+
+class _FrameworkShellOrchestrator(Protocol):
+    async def start_from_ref(
+        self,
+        ref: str,
+        *,
+        base_dir: Path,
+        ctx: PayloadDict,
+        label: str,
+        wait_ready: bool,
+    ) -> _FrameworkShellRecord: ...
+
+
+class _FrameworkShellOrchestratorFactory(Protocol):
+    def __call__(self, manager: _FrameworkShellManager) -> _FrameworkShellOrchestrator: ...
 
 class TodoStep(TypedDict):
     step: str
@@ -284,12 +321,19 @@ class ApprovalDescriptor(TypedDict, total=False):
 
 def _object_mapping(value: object) -> PayloadDict | None:
     if isinstance(value, dict):
-        return cast(PayloadDict, value)
+        value_map = cast(dict[object, object], value)
+        return {str(key): item for key, item in value_map.items()}
     with contextlib.suppress(TypeError):
-        raw = vars(value)
+        raw = cast(object, vars(value))
         if isinstance(raw, dict):
-            return cast(PayloadDict, raw)
+            raw_map = cast(dict[object, object], raw)
+            return {str(key): item for key, item in raw_map.items()}
     return None
+
+
+def _te2_mcp_integration_enabled(settings: object) -> bool:
+    settings_map = _object_mapping(settings)
+    return settings_map is not None and settings_map.get("te2_mcp_integration") is True
 
 
 def _extract_model_context_window(model: object) -> Optional[int]:
@@ -321,8 +365,6 @@ async def _refresh_model_context_window_cache() -> None:
             return
         next_cache: Dict[str, Optional[int]] = {}
         for item in models:
-            if not isinstance(item, dict):
-                continue
             model_id = item.get("id")
             if not isinstance(model_id, str) or not model_id.strip():
                 continue
@@ -348,6 +390,9 @@ _DEFAULT_WEB_POLICY = "deny"
 _DEFAULT_MODE = "interactive"
 _COPILOT_PERMISSION_REQUEST_METHOD = "copilot/permission/request"
 _COPILOT_USER_INPUT_REQUEST_METHOD = "copilot/user_input/request"
+_AGENT_PTY_ASK_USER_REQUEST_METHOD = "agent-pty/ask-user"
+_AGENT_PTY_ASK_USER_SERVER = "agent-pty-blocks"
+_AGENT_PTY_ASK_USER_TOOL = "ask_user"
 _COPILOT_SESSION_STATE_ROOT = Path.home() / ".copilot" / "session-state"
 _COPILOT_TODO_FILENAMES = frozenset({"session.db", "session.db-wal", "session.db-shm"})
 _COPILOT_PLAN_FILENAME = "plan.md"
@@ -365,9 +410,10 @@ def _shell_record_subgroups(record: object) -> set[str]:
     raw_subgroups = getattr(record, "subgroups", None)
     if not isinstance(raw_subgroups, (list, tuple, set)):
         return set()
+    subgroup_values = cast(Iterable[object], raw_subgroups)
     return {
         subgroup.strip()
-        for subgroup in raw_subgroups
+        for subgroup in subgroup_values
         if isinstance(subgroup, str) and subgroup.strip()
     }
 
@@ -456,7 +502,7 @@ async def _drain_event_queue(conversation_id: str) -> None:
 def _ensure_event_worker(conversation_id: str) -> asyncio.Queue[Optional[SessionEvent]]:
     queue = _event_queues.get(conversation_id)
     if queue is None:
-        queue = asyncio.Queue()
+        queue = asyncio.Queue[Optional[SessionEvent]]()
         _event_queues[conversation_id] = queue
     task = _event_tasks.get(conversation_id)
     if task is None or task.done():
@@ -534,7 +580,7 @@ def _add_to_raw_buffer(
     if payload is not None:
         transcript_entry["payload"] = _json_safe_sdk_value(payload)
     elif isinstance(data, (dict, list, tuple, set)):
-        transcript_entry["payload"] = _json_safe_sdk_value(data)
+        transcript_entry["payload"] = _json_safe_sdk_value(cast(object, data))
     else:
         transcript_entry["payload"] = summary
 
@@ -559,9 +605,12 @@ def _get_session_lock(conversation_id: str) -> asyncio.Lock:
 
 def _summarize_runtime_config(config: SettingsDict) -> PayloadDict:
     mcp_servers = config.get("mcp_servers")
-    te2_cfg = mcp_servers.get("te2-mcp") if isinstance(mcp_servers, dict) else None
+    mcp_server_map = _object_mapping(mcp_servers)
+    te2_cfg = mcp_server_map.get("te2-mcp") if mcp_server_map is not None else None
+    te2_cfg_map = _object_mapping(te2_cfg)
     system_message = config.get("system_message")
-    system_content = system_message.get("content") if isinstance(system_message, dict) else ""
+    system_message_map = _object_mapping(system_message)
+    system_content = system_message_map.get("content") if system_message_map is not None else ""
     return {
         "model": config.get("model"),
         "working_directory": config.get("working_directory"),
@@ -570,12 +619,12 @@ def _summarize_runtime_config(config: SettingsDict) -> PayloadDict:
         "streaming": config.get("streaming") is True,
         "include_sub_agent_streaming_events": config.get("include_sub_agent_streaming_events") is True,
         "has_system_message": bool(system_message),
-        "system_message_mode": system_message.get("mode") if isinstance(system_message, dict) else None,
+        "system_message_mode": system_message_map.get("mode") if system_message_map is not None else None,
         "system_message_chars": len(system_content) if isinstance(system_content, str) else 0,
-        "mcp_server_names": sorted(mcp_servers.keys()) if isinstance(mcp_servers, dict) else [],
-        "te2_mcp_present": isinstance(te2_cfg, dict),
-        "te2_mcp_type": te2_cfg.get("type") if isinstance(te2_cfg, dict) else None,
-        "te2_mcp_url": te2_cfg.get("url") if isinstance(te2_cfg, dict) else None,
+        "mcp_server_names": sorted(mcp_server_map.keys()) if mcp_server_map is not None else [],
+        "te2_mcp_present": te2_cfg_map is not None,
+        "te2_mcp_type": te2_cfg_map.get("type") if te2_cfg_map is not None else None,
+        "te2_mcp_url": te2_cfg_map.get("url") if te2_cfg_map is not None else None,
     }
 
 
@@ -624,17 +673,17 @@ def _copilot_mcp_tool_identity(data: object) -> Tuple[str, str]:
     server_name = _optional_string(getattr(data, "mcp_server_name", None)) or ""
     tool_name = _optional_string(getattr(data, "mcp_tool_name", None)) or ""
     if not server_name and not tool_name:
-        prefix = f"{ask_user_interactions.AGENT_PTY_ASK_USER_SERVER}-"
+        prefix = f"{_AGENT_PTY_ASK_USER_SERVER}-"
         if raw_tool_name.startswith(prefix):
-            return ask_user_interactions.AGENT_PTY_ASK_USER_SERVER, raw_tool_name[len(prefix):]
+            return _AGENT_PTY_ASK_USER_SERVER, raw_tool_name[len(prefix):]
     return server_name, tool_name or raw_tool_name
 
 
 def _is_copilot_mcp_ask_user_event(data: object) -> bool:
     server_name, tool_name = _copilot_mcp_tool_identity(data)
     return (
-        server_name == ask_user_interactions.AGENT_PTY_ASK_USER_SERVER
-        and tool_name == ask_user_interactions.AGENT_PTY_ASK_USER_TOOL
+        server_name == _AGENT_PTY_ASK_USER_SERVER
+        and tool_name == _AGENT_PTY_ASK_USER_TOOL
     )
 
 
@@ -654,16 +703,38 @@ def _normalize_reasoning_effort(value: object) -> Optional[ReasoningEffort]:
 
 
 def _normalize_string_list(value: object, *, field_name: str) -> List[str]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+    if not isinstance(value, list):
         raise ValueError(f"{field_name} must be a list of strings")
-    return list(value)
+    values = cast(list[object], value)
+    if not all(isinstance(item, str) for item in values):
+        raise ValueError(f"{field_name} must be a list of strings")
+    return [item for item in values if isinstance(item, str)]
+
+
+def _normalize_choice_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in cast(list[object], value):
+        if not isinstance(item, str):
+            continue
+        choice = item.strip()
+        if not choice or choice in seen:
+            continue
+        normalized.append(choice)
+        seen.add(choice)
+    return normalized
 
 
 def _normalize_string_dict(value: object, *, field_name: str) -> Dict[str, str]:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a JSON object")
     normalized: Dict[str, str] = {}
-    for key, item in value.items():
+    value_map = cast(dict[object, object], value)
+    for key, item in value_map.items():
         if not isinstance(key, str) or not isinstance(item, str):
             raise ValueError(f"{field_name} must contain only string keys and values")
         normalized[key] = item
@@ -671,12 +742,13 @@ def _normalize_string_dict(value: object, *, field_name: str) -> Dict[str, str]:
 
 
 def _normalize_system_message_config(value: object) -> Optional[SystemMessageConfig]:
-    if not isinstance(value, dict):
+    value_map = _object_mapping(value)
+    if value_map is None:
         return None
-    content = value.get("content")
+    content = value_map.get("content")
     if not isinstance(content, str):
         return None
-    mode = value.get("mode")
+    mode = value_map.get("mode")
     if mode == "replace":
         return {"mode": "replace", "content": content}
     if mode in (None, "", "append"):
@@ -685,30 +757,31 @@ def _normalize_system_message_config(value: object) -> Optional[SystemMessageCon
 
 
 def _normalize_session_hooks(value: object) -> Optional[SessionHooks]:
-    if not isinstance(value, dict):
+    value_map = _object_mapping(value)
+    if value_map is None:
         return None
     hooks: SessionHooks = {}
-    on_pre_tool_use = value.get("on_pre_tool_use")
+    on_pre_tool_use = value_map.get("on_pre_tool_use")
     if callable(on_pre_tool_use):
         pre_tool_use = cast(PreToolUseHandler, on_pre_tool_use)
         hooks["on_pre_tool_use"] = pre_tool_use
-    on_post_tool_use = value.get("on_post_tool_use")
+    on_post_tool_use = value_map.get("on_post_tool_use")
     if callable(on_post_tool_use):
         post_tool_use = cast(PostToolUseHandler, on_post_tool_use)
         hooks["on_post_tool_use"] = post_tool_use
-    on_user_prompt_submitted = value.get("on_user_prompt_submitted")
+    on_user_prompt_submitted = value_map.get("on_user_prompt_submitted")
     if callable(on_user_prompt_submitted):
         user_prompt_submitted = cast(UserPromptSubmittedHandler, on_user_prompt_submitted)
         hooks["on_user_prompt_submitted"] = user_prompt_submitted
-    on_session_start = value.get("on_session_start")
+    on_session_start = value_map.get("on_session_start")
     if callable(on_session_start):
         session_start = cast(SessionStartHandler, on_session_start)
         hooks["on_session_start"] = session_start
-    on_session_end = value.get("on_session_end")
+    on_session_end = value_map.get("on_session_end")
     if callable(on_session_end):
         session_end = cast(SessionEndHandler, on_session_end)
         hooks["on_session_end"] = session_end
-    on_error_occurred = value.get("on_error_occurred")
+    on_error_occurred = value_map.get("on_error_occurred")
     if callable(on_error_occurred):
         error_occurred = cast(ErrorOccurredHandler, on_error_occurred)
         hooks["on_error_occurred"] = error_occurred
@@ -716,27 +789,28 @@ def _normalize_session_hooks(value: object) -> Optional[SessionHooks]:
 
 
 def _normalize_mcp_server_config(name: str, value: object) -> MCPServerConfig:
-    if not isinstance(value, dict):
+    value_map = _object_mapping(value)
+    if value_map is None:
         raise ValueError(f"MCP server '{name}' must be a JSON object")
-    tools = _normalize_string_list(value.get("tools"), field_name=f"MCP server '{name}'.tools")
-    server_type = value.get("type")
-    timeout = value.get("timeout")
+    tools = _normalize_string_list(value_map.get("tools"), field_name=f"MCP server '{name}'.tools")
+    server_type = value_map.get("type")
+    timeout = value_map.get("timeout")
     if timeout is not None and not isinstance(timeout, int):
         raise ValueError(f"MCP server '{name}'.timeout must be an integer")
 
-    command = value.get("command")
+    command = value_map.get("command")
     if isinstance(command, str) and command.strip():
         local: MCPLocalServerConfig = {
             "command": command,
             "tools": tools,
         }
-        args = value.get("args")
+        args = value_map.get("args")
         if args is not None:
             local["args"] = _normalize_string_list(args, field_name=f"MCP server '{name}'.args")
-        env = value.get("env")
+        env = value_map.get("env")
         if env is not None:
             local["env"] = _normalize_string_dict(env, field_name=f"MCP server '{name}'.env")
-        cwd = value.get("cwd")
+        cwd = value_map.get("cwd")
         if cwd is not None:
             if not isinstance(cwd, str):
                 raise ValueError(f"MCP server '{name}'.cwd must be a string")
@@ -746,17 +820,17 @@ def _normalize_mcp_server_config(name: str, value: object) -> MCPServerConfig:
         if server_type is not None:
             if server_type not in {"local", "stdio"}:
                 raise ValueError(f"MCP server '{name}'.type must be 'local' or 'stdio'")
-            local["type"] = server_type
+            local["type"] = "stdio" if server_type == "stdio" else "local"
         return local
 
-    url = value.get("url")
+    url = value_map.get("url")
     if server_type == "http" and isinstance(url, str) and url.strip():
         remote: MCPRemoteServerConfig = {
             "type": "http",
             "url": url,
             "tools": tools,
         }
-        headers = value.get("headers")
+        headers = value_map.get("headers")
         if headers is not None:
             remote["headers"] = _normalize_string_dict(headers, field_name=f"MCP server '{name}'.headers")
         if timeout is not None:
@@ -769,7 +843,7 @@ def _normalize_mcp_server_config(name: str, value: object) -> MCPServerConfig:
             "url": url,
             "tools": tools,
         }
-        headers = value.get("headers")
+        headers = value_map.get("headers")
         if headers is not None:
             remote_sse["headers"] = _normalize_string_dict(headers, field_name=f"MCP server '{name}'.headers")
         if timeout is not None:
@@ -782,11 +856,12 @@ def _normalize_mcp_server_config(name: str, value: object) -> MCPServerConfig:
 def _normalize_mcp_servers(value: object) -> Optional[Dict[str, MCPServerConfig]]:
     if value in (None, ""):
         return None
-    if not isinstance(value, dict):
+    value_map = _object_mapping(value)
+    if value_map is None:
         raise ValueError("MCP servers must be a JSON object")
     normalized: Dict[str, MCPServerConfig] = {}
-    for name, server in value.items():
-        if not isinstance(name, str) or not name:
+    for name, server in value_map.items():
+        if not name:
             raise ValueError("MCP server names must be non-empty strings")
         normalized[name] = _normalize_mcp_server_config(name, server)
     return normalized or None
@@ -810,8 +885,8 @@ def _populate_common_session_config(
 
     on_permission_request = config.get("on_permission_request")
     if callable(on_permission_request):
-        permission_handler = cast(_PermissionHandlerFn, on_permission_request)
-        target["on_permission_request"] = permission_handler
+        target_map = cast(dict[str, object], target)
+        target_map["on_permission_request"] = on_permission_request
 
     on_user_input_request = config.get("on_user_input_request")
     if callable(on_user_input_request):
@@ -876,26 +951,42 @@ def _coerce_permission_result_kind(
     return "approve-once" if decision_text == "accept" else "reject"
 
 
+def _meta_call(name: str, *args: object) -> object:
+    if _meta_fns is None:
+        return None
+    fn = _meta_fns.get(name)
+    if fn is None:
+        return None
+    return fn(*args)
+
+
+def _load_conversation_meta(conversation_id: str) -> PayloadDict | None:
+    return _object_mapping(_meta_call("load", conversation_id))
+
+
+def _save_conversation_meta(conversation_id: str, meta: PayloadDict) -> None:
+    _meta_call("save", conversation_id, meta)
+
+
 def _get_conversation_settings(conversation_id: str) -> SettingsDict:
     """Read settings from conversation meta.json."""
-    if _meta_fns and "load" in _meta_fns:
-        meta = _meta_fns["load"](conversation_id)
-        settings = meta.get("settings") if isinstance(meta, dict) else None
-        if isinstance(settings, dict):
-            return cast(SettingsDict, settings)
+    meta = _load_conversation_meta(conversation_id)
+    if meta is not None:
+        settings = _object_mapping(meta.get("settings"))
+        if settings is not None:
+            return settings
     return {}
 
 
 def _resolve_sdk_session_id(conversation_id: str) -> Optional[str]:
     session = _sessions.get(conversation_id)
-    if session is not None and isinstance(session.session_id, str) and session.session_id:
+    if session is not None and session.session_id:
         return session.session_id
-    if _meta_fns and "load" in _meta_fns:
-        meta = _meta_fns["load"](conversation_id)
-        if isinstance(meta, dict):
-            thread_id = meta.get("thread_id")
-            if isinstance(thread_id, str) and thread_id:
-                return thread_id
+    meta = _load_conversation_meta(conversation_id)
+    if meta is not None:
+        thread_id = meta.get("thread_id")
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
     return None
 
 
@@ -912,21 +1003,19 @@ def _copilot_plan_doc_path(session_id: str) -> Path:
 
 
 def _persist_meta_plan_exists(conversation_id: str, plan_exists: bool) -> None:
-    if not _meta_fns or "load" not in _meta_fns or "save" not in _meta_fns:
-        return
-    meta = _meta_fns["load"](conversation_id)
-    if not isinstance(meta, dict):
+    meta = _load_conversation_meta(conversation_id)
+    if meta is None:
         return
     normalized = bool(plan_exists)
     if meta.get("plan_exists") is normalized:
         return
     meta["plan_exists"] = normalized
-    _meta_fns["save"](conversation_id, meta)
+    _save_conversation_meta(conversation_id, meta)
 
 
 def _plan_doc_signature(plan_exists: bool, plan_content: str) -> str:
     return json.dumps(
-        [bool(plan_exists), plan_content if isinstance(plan_content, str) else ""],
+        [bool(plan_exists), plan_content],
         separators=(",", ":"),
         ensure_ascii=False,
     )
@@ -963,9 +1052,9 @@ def _set_plan_doc_state(
  ) -> PlanDocState:
     state: PlanDocState = {
         "plan_exists": bool(plan_exists),
-        "plan_content": plan_content if isinstance(plan_content, str) else "",
-        "plan_path": plan_path if isinstance(plan_path, str) and plan_path else None,
-        "plan_source": plan_source if isinstance(plan_source, str) and plan_source else "unknown",
+        "plan_content": plan_content,
+        "plan_path": plan_path if plan_path else None,
+        "plan_source": plan_source if plan_source else "unknown",
     }
     _plan_doc_state[conversation_id] = state
     _persist_meta_plan_exists(conversation_id, state["plan_exists"])
@@ -1149,7 +1238,7 @@ def _select_plan_doc_state_for_read(
     disk_snapshot: PlanDocSnapshot,
 ) -> PlanDocState:
     cached_state = _get_plan_doc_state(conversation_id)
-    disk_content = disk_snapshot.get("plan_content") if isinstance(disk_snapshot.get("plan_content"), str) else ""
+    disk_content = disk_snapshot.get("plan_content", "")
     disk_exists = bool(disk_snapshot.get("plan_exists"))
     cached_exists = bool(cached_state.get("plan_exists"))
 
@@ -1157,7 +1246,6 @@ def _select_plan_doc_state_for_read(
         if (
             cached_exists
             and cached_state.get("plan_source") == "sdk"
-            and isinstance(cached_state.get("plan_content"), str)
             and cached_state["plan_content"] != disk_content
         ):
             return cached_state
@@ -1337,24 +1425,24 @@ def _upsert_pending_approval(conversation_id: str, descriptor: ApprovalDescripto
     if _meta_fns and "upsert_pending_approval" in _meta_fns:
         _meta_fns["upsert_pending_approval"](conversation_id, descriptor)
         return
-    if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
-        meta = _meta_fns["load"](conversation_id)
-        pending = meta.get("pending_approvals") if isinstance(meta.get("pending_approvals"), dict) else {}
+    meta = _load_conversation_meta(conversation_id)
+    if meta is not None:
+        pending = _object_mapping(meta.get("pending_approvals")) or {}
         pending[str(descriptor.get("request_id") or "")] = descriptor
         meta["pending_approvals"] = pending
-        _meta_fns["save"](conversation_id, meta)
+        _save_conversation_meta(conversation_id, meta)
 
 
 def _remove_pending_approval(conversation_id: str, request_id: str) -> None:
     if _meta_fns and "remove_pending_approval" in _meta_fns:
         _meta_fns["remove_pending_approval"](conversation_id, request_id)
         return
-    if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
-        meta = _meta_fns["load"](conversation_id)
-        pending = meta.get("pending_approvals") if isinstance(meta.get("pending_approvals"), dict) else {}
+    meta = _load_conversation_meta(conversation_id)
+    if meta is not None:
+        pending = _object_mapping(meta.get("pending_approvals")) or {}
         pending.pop(str(request_id or ""), None)
         meta["pending_approvals"] = pending
-        _meta_fns["save"](conversation_id, meta)
+        _save_conversation_meta(conversation_id, meta)
 
 
 def _json_safe_sdk_value(value: object) -> object:
@@ -1366,9 +1454,11 @@ def _json_safe_sdk_value(value: object) -> object:
         data = cast(dict[str, object], asdict(value))
         return {key: _json_safe_sdk_value(val) for key, val in data.items() if val is not None}
     if isinstance(value, dict):
-        return {str(key): _json_safe_sdk_value(val) for key, val in value.items() if val is not None}
+        value_map = cast(dict[object, object], value)
+        return {str(key): _json_safe_sdk_value(val) for key, val in value_map.items() if val is not None}
     if isinstance(value, (list, tuple, set)):
-        return [_json_safe_sdk_value(item) for item in value]
+        value_items = cast(Iterable[object], value)
+        return [_json_safe_sdk_value(item) for item in value_items]
     return value
 
 
@@ -1400,19 +1490,21 @@ def _normalize_permission_resolution(resolution: object) -> PermissionRequestRes
         return resolution
 
     result_payload = resolution
-    if isinstance(resolution, dict) and isinstance(resolution.get("result"), dict):
-        result_payload = resolution.get("result")
+    resolution_map = _object_mapping(resolution)
+    if resolution_map is not None and _object_mapping(resolution_map.get("result")) is not None:
+        result_payload = resolution_map.get("result")
 
-    if not isinstance(result_payload, dict):
+    result_payload_map = _object_mapping(result_payload)
+    if result_payload_map is None:
         return _decision_to_permission_result(result_payload)
 
     decision_text = str(
-        result_payload.get("decision")
-        or (resolution.get("decision") if isinstance(resolution, dict) else "")
+        result_payload_map.get("decision")
+        or (resolution_map.get("decision") if resolution_map is not None else "")
         or ""
     ).strip().lower()
     kind_value = _coerce_permission_result_kind(
-        result_payload.get("kind"),
+        result_payload_map.get("kind"),
         decision_text=decision_text,
     )
 
@@ -1472,8 +1564,9 @@ def _normalize_user_input_resolution(
     request_spec: Optional[PendingRequestSpec] = None,
 ) -> UserInputResponse:
     payload = resolution
-    if isinstance(resolution, dict) and isinstance(resolution.get("result"), dict):
-        payload = resolution.get("result")
+    resolution_map = _object_mapping(resolution)
+    if resolution_map is not None and _object_mapping(resolution_map.get("result")) is not None:
+        payload = resolution_map.get("result")
 
     if isinstance(payload, str):
         answer = payload.strip()
@@ -1482,20 +1575,21 @@ def _normalize_user_input_resolution(
             "wasFreeform": True,
         }
 
-    if not isinstance(payload, dict):
+    payload_map = _object_mapping(payload)
+    if payload_map is None:
         return {
             "answer": str(payload or ""),
             "wasFreeform": True,
         }
 
-    answer = str(payload.get("answer") or payload.get("choice") or "").strip()
+    answer = str(payload_map.get("answer") or payload_map.get("choice") or "").strip()
     if not answer:
-        answers = payload.get("answers")
+        answers = payload_map.get("answers")
         if isinstance(answers, list) and answers:
-            answer = str(answers[0] or "").strip()
-    choices = request_spec.get("choices") if isinstance(request_spec, dict) else []
+            answer = str(cast(list[object], answers)[0] or "").strip()
+    choices = request_spec.get("choices") if request_spec is not None else []
     normalized_choices = [str(item) for item in choices] if isinstance(choices, list) else []
-    was_freeform = payload.get("wasFreeform")
+    was_freeform = payload_map.get("wasFreeform")
     if not isinstance(was_freeform, bool):
         was_freeform = not bool(answer and answer in normalized_choices)
     return {
@@ -1571,7 +1665,12 @@ async def _adopt_existing_copilot_shell(mgr: _FrameworkShellManager) -> Optional
 
 async def _start_new_copilot_shell(mgr: _FrameworkShellManager) -> str:
     spec_path = Path(__file__).parent / "shellspec" / "copilot_cli.yaml"
-    orch = Orchestrator(cast(FrameworkShellManager, mgr))
+    orchestrator_module = importlib.import_module("framework_shells.orchestrator")
+    orchestrator_factory = cast(
+        _FrameworkShellOrchestratorFactory,
+        getattr(orchestrator_module, "Orchestrator"),
+    )
+    orch = orchestrator_factory(mgr)
     cli_path = _resolve_external_copilot_cli_path() or "copilot"
     shell = await orch.start_from_ref(
         f"{spec_path}#{_COPILOT_SHELL_SPEC_ID}",
@@ -1631,7 +1730,7 @@ def _runtime_signature_payload(
         "config_dir": _copilot_config_dir(),
     }
 
-    te2_enabled = te2_mcp_integration_enabled(merged)
+    te2_enabled = _te2_mcp_integration_enabled(merged)
     payload["reasoning_effort"] = merged.get("reasoning_effort") or merged.get("effort")
     payload["developer_instructions"] = build_effective_prompt_context(
         merged.get("developer_instructions"),
@@ -1693,7 +1792,7 @@ def _build_session_runtime_config(
 
     developer_instructions = build_effective_prompt_context(
         merged.get("developer_instructions"),
-        te2_enabled=te2_mcp_integration_enabled(merged),
+        te2_enabled=_te2_mcp_integration_enabled(merged),
         cwd=merged.get("cwd"),
     )
     if developer_instructions:
@@ -1707,7 +1806,7 @@ def _build_session_runtime_config(
     else:
         mcp_servers = build_copilot_mcp_servers(
             merged.get("mcp_servers"),
-            te2_enabled=te2_mcp_integration_enabled(merged),
+            te2_enabled=_te2_mcp_integration_enabled(merged),
             base_url=_optional_string(merged.get("te2_base_url")),
             cwd=_optional_string(merged.get("cwd")),
             conversation_id=conversation_id,
@@ -1811,37 +1910,7 @@ async def _emit_deferred_send_error(
     if active_router is None:
         return
     msg = str(message or "Message send failed").strip() or "Message send failed"
-    active_turn_id = turn_id or getattr(active_router, "current_turn_id", None)
-    event: PayloadDict = {
-        "type": "error",
-        "conversation_id": conversation_id,
-        "message": msg,
-        "source": "copilot-sdk",
-    }
-    entry: PayloadDict = {
-        "role": "error",
-        "message": msg,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "source": "copilot-sdk",
-        "event": "copilot-sdk",
-    }
-    if active_turn_id:
-        event["turn_id"] = active_turn_id
-        entry["turn_id"] = active_turn_id
-    if error_type:
-        event["error_type"] = error_type
-        entry["error_type"] = error_type
-    await active_router._emit(event)
-    await active_router._record(entry)
-    await active_router._emit(
-        {
-            "type": "activity",
-            "conversation_id": conversation_id,
-            "label": "error",
-            "active": False,
-            "turn_id": active_turn_id,
-        }
-    )
+    await active_router.emit_client_error(msg, error_type=error_type, turn_id=turn_id)
 
 
 async def _complete_deferred_cold_send(
@@ -1973,11 +2042,13 @@ def _sanitize_session_attachments(session_id: str) -> PayloadDict:
                 if not isinstance(record, dict):
                     dst.write(line)
                     continue
-                data = record.get("data")
-                if isinstance(data, dict) and "attachments" in data and data.get("attachments") is None:
-                    data["attachments"] = []
+                record_map = _object_mapping(cast(object, record)) or {}
+                data_map = _object_mapping(record_map.get("data"))
+                if data_map is not None and "attachments" in data_map and data_map.get("attachments") is None:
+                    data_map["attachments"] = []
+                    record_map["data"] = data_map
                     rewritten += 1
-                    dst.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n")
+                    dst.write(json.dumps(record_map, separators=(",", ":"), ensure_ascii=False) + "\n")
                 else:
                     dst.write(line)
         if rewritten:
@@ -2018,9 +2089,11 @@ def _json_safe(value: object) -> object:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
+        value_map = cast(dict[object, object], value)
+        return {str(k): _json_safe(v) for k, v in value_map.items()}
     if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
+        value_items = cast(Iterable[object], value)
+        return [_json_safe(v) for v in value_items]
     if isinstance(value, _SupportsToDict):
         return _json_safe(value.to_dict())
     value_dict = _object_mapping(value)
@@ -2037,10 +2110,10 @@ def _load_settings_schema_template() -> PayloadDict:
     schema_path = Path(__file__).with_name("settings_schema.json")
     with schema_path.open("r", encoding="utf-8") as handle:
         loaded = cast(object, json.load(handle))
-    return loaded if isinstance(loaded, dict) else {}
+    return _object_mapping(loaded) or {}
 
 
-def _format_settings_datetime(value: Optional[str]) -> str:
+def _format_settings_datetime(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         return ""
     text = value.strip()
@@ -2077,11 +2150,13 @@ def _quota_tone_from_remaining(remaining_percentage: Optional[float]) -> str:
 
 
 def _format_quota_info(raw: object) -> QuotaInfo:
-    payload = raw if isinstance(raw, dict) else {}
+    payload = _object_mapping(raw) or {}
     snapshots_raw = payload.get("quota_snapshots")
-    if not isinstance(snapshots_raw, dict):
+    snapshots_map = _object_mapping(snapshots_raw)
+    if snapshots_map is None:
         snapshots_raw = payload.get("quotaSnapshots")
-    if not isinstance(snapshots_raw, dict) or not snapshots_raw:
+        snapshots_map = _object_mapping(snapshots_raw)
+    if not snapshots_map:
         return _quota_info_unavailable(
             "Usage info unavailable.",
             tone="warning",
@@ -2090,9 +2165,9 @@ def _format_quota_info(raw: object) -> QuotaInfo:
 
     lines: List[str] = []
     remaining_values: List[float] = []
-    for quota_name, raw_snapshot in sorted(snapshots_raw.items()):
-        snapshot = _json_safe(raw_snapshot)
-        if not isinstance(snapshot, dict):
+    for quota_name, raw_snapshot in sorted(snapshots_map.items()):
+        snapshot = _object_mapping(_json_safe(raw_snapshot))
+        if snapshot is None:
             continue
         remaining_percentage = snapshot.get("remaining_percentage")
         if remaining_percentage is None:
@@ -2231,7 +2306,7 @@ async def get_settings_schema(extension_id: str) -> PayloadDict:
             "detail": usage_info.get("detail") or "",
             "tone": usage_info.get("tone") or "warning",
         },
-        *(list(fields) if isinstance(fields, list) else []),
+        *cast(list[object], fields if isinstance(fields, list) else []),
     ]
     schema["cache"] = "none"
     return schema
@@ -2277,7 +2352,7 @@ async def read_plan(extension_id: str, conversation_id: str) -> PayloadDict:
 
 async def get_request_card_schemas(extension_id: str) -> PayloadDict:
     return {
-        ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD: {
+        _AGENT_PTY_ASK_USER_REQUEST_METHOD: {
             "request": {
                 "type": "object",
                 "properties": {
@@ -2367,7 +2442,7 @@ def resolve_approval(request_id: str, resolution: object) -> bool:
     fut = _pending_approvals.pop(request_id, None)
     request_spec = _pending_request_specs.pop(request_id, None)
     if fut and not fut.done():
-        request_type = request_spec.get("type") if isinstance(request_spec, dict) else "permission"
+        request_type = request_spec.get("type") if request_spec is not None else "permission"
         if request_type == "user_input":
             fut.set_result(_normalize_user_input_resolution(resolution, request_spec=request_spec))
         else:
@@ -2377,8 +2452,6 @@ def resolve_approval(request_id: str, resolution: object) -> bool:
 
 
 def validate_pending_approval(conversation_id: str, request_id: str, descriptor: ApprovalDescriptor) -> bool:
-    if not isinstance(descriptor, dict):
-        return False
     runtime_signature = descriptor.get("runtime_signature")
     current_signature = _runtime_signatures.get(conversation_id)
     if runtime_signature and not current_signature:
@@ -2395,7 +2468,7 @@ def validate_pending_approval(conversation_id: str, request_id: str, descriptor:
     return request_id in _pending_approvals
 
 
-def _make_permission_handler(conversation_id: str) -> _PermissionHandlerFn:
+def _make_permission_handler(conversation_id: str) -> _PermissionHandler:
     """
     Create a permission handler for a session.
 
@@ -2460,8 +2533,7 @@ def _make_permission_handler(conversation_id: str) -> _PermissionHandlerFn:
             payload["changes"] = request_fields.get("new_file_contents")
 
         # Compute a preview diff from tool arguments if possible
-        if isinstance(normalized_args, dict):
-            payload.update(build_file_change_preview(normalized_args))
+        payload.update(build_file_change_preview(normalized_args))
 
         # Create a Future that the WS handler will resolve
         loop = asyncio.get_running_loop()
@@ -2544,7 +2616,7 @@ def _make_user_input_handler(conversation_id: str) -> UserInputHandler:
     ) -> UserInputResponse:
         request_params = _build_user_input_request_params(request)
         request_choices = request_params.get("choices")
-        normalized_choices = [str(item) for item in request_choices] if isinstance(request_choices, list) else []
+        normalized_choices = [str(item) for item in cast(list[object], request_choices)] if isinstance(request_choices, list) else []
         response_request_spec: PendingRequestSpec = {"choices": normalized_choices}
         request_id = f"user_input_{conversation_id[:8]}_{id(request)}"
         router = _routers.get(conversation_id)
@@ -2614,7 +2686,7 @@ async def _start_mcp_ask_user_request(conversation_id: str, event: SessionEvent)
     tool_call_id = _optional_string(getattr(data, "tool_call_id", None)) or _optional_string(event.id) or request_id
     arguments = _coerce_copilot_tool_arguments(cast(object, getattr(data, "arguments", None)))
     question = str(arguments.get("question") or "").strip()
-    choices = ask_user_interactions.normalize_choices(arguments.get("choices"))
+    choices = _normalize_choice_list(arguments.get("choices"))
     allow_freeform = bool(arguments.get("allow_freeform", arguments.get("allowFreeform", True)))
     if not question:
         return
@@ -2635,7 +2707,7 @@ async def _start_mcp_ask_user_request(conversation_id: str, event: SessionEvent)
     }
     _pending_request_specs[request_id] = {
         "type": "user_input",
-        "request_method": ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD,
+        "request_method": _AGENT_PTY_ASK_USER_REQUEST_METHOD,
         "request_params": request_params,
         "choices": list(choices),
     }
@@ -2662,7 +2734,7 @@ async def _start_mcp_ask_user_request(conversation_id: str, event: SessionEvent)
         "kind": "user_input",
         "tool_call_id": tool_call_id,
         "turn_id": turn_id,
-        "request_method": ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD,
+        "request_method": _AGENT_PTY_ASK_USER_REQUEST_METHOD,
         "request_params": request_params,
         "payload": payload,
         "created_at": created_at,
@@ -2674,7 +2746,7 @@ async def _start_mcp_ask_user_request(conversation_id: str, event: SessionEvent)
     descriptor["agent"] = "copilot-sdk"
     descriptor["kind"] = "user_input"
     descriptor["payload"] = payload
-    descriptor["request_method"] = ask_user_interactions.AGENT_PTY_ASK_USER_REQUEST_METHOD
+    descriptor["request_method"] = _AGENT_PTY_ASK_USER_REQUEST_METHOD
     descriptor["request_params"] = request_params
     descriptor["thread_id"] = session_thread_id
     descriptor["turn_id"] = turn_id
@@ -2688,37 +2760,6 @@ async def _start_mcp_ask_user_request(conversation_id: str, event: SessionEvent)
 
     if _broadcast_fn:
         await _broadcast_fn(approval_event)
-
-
-def _mcp_ask_user_completion_resolution(event: SessionEvent) -> PayloadDict:
-    data = event.data
-    result_obj = getattr(data, "result", None)
-    normalized_result = _json_safe_sdk_value(cast(object, result_obj))
-    if isinstance(normalized_result, dict):
-        return cast(PayloadDict, normalized_result)
-
-    error_reason = str(getattr(data, "error_reason", "") or "").strip()
-    error_value = cast(object, getattr(data, "error", None))
-    if error_reason or error_value not in (None, "", {}):
-        resolution: PayloadDict = {"status": "error"}
-        if error_reason:
-            resolution["error"] = error_reason
-        elif isinstance(error_value, str):
-            resolution["error"] = error_value
-        elif error_value not in (None, "", {}):
-            resolution["error"] = str(error_value)
-        return resolution
-
-    content = ""
-    if isinstance(result_obj, str):
-        content = result_obj
-    elif isinstance(getattr(data, "content", None), str):
-        content = cast(str, getattr(data, "content"))
-    elif isinstance(getattr(data, "output", None), str):
-        content = cast(str, getattr(data, "output"))
-    if content.strip():
-        return {"answer": content.strip()}
-    return {"action": "cancel"}
 
 
 async def _complete_mcp_ask_user_request(conversation_id: str, event: SessionEvent) -> None:
@@ -2740,11 +2781,6 @@ async def _complete_mcp_ask_user_request(conversation_id: str, event: SessionEve
     if isinstance(pending_future, asyncio.Future) and not pending_future.done():
         pending_future.cancel()
     _pending_request_specs.pop(resolved_request_id, None)
-
-    await ask_user_interactions.finalize_interaction(
-        resolved_request_id,
-        _mcp_ask_user_completion_resolution(event),
-    )
 
 
 async def _handle_mcp_ask_user_event(conversation_id: str, event: SessionEvent) -> bool:
@@ -2805,7 +2841,7 @@ def _make_pre_tool_use_hook(conversation_id: str) -> PreToolUseHandler:
         context: RequestContext,
     ) -> PreToolUseHookOutput | None:
         tool_name = input.get("toolName")
-        tool_args = input.get("toolArgs") or {}
+        tool_args: object = input.get("toolArgs") or {}
         settings = _get_conversation_settings(conversation_id)
         normalized_tool_name = str(tool_name or "")
 
@@ -2828,8 +2864,14 @@ def _make_pre_tool_use_hook(conversation_id: str) -> PreToolUseHandler:
             cwd = os.path.realpath(os.path.expanduser(cwd))
             # Check path arguments
             target_path = None
-            if isinstance(tool_args, dict):
-                target_path = tool_args.get("path") or tool_args.get("file_path") or tool_args.get("file") or tool_args.get("command")
+            tool_args_map = _object_mapping(tool_args)
+            if tool_args_map is not None:
+                target_path = (
+                    tool_args_map.get("path")
+                    or tool_args_map.get("file_path")
+                    or tool_args_map.get("file")
+                    or tool_args_map.get("command")
+                )
             if target_path and isinstance(target_path, str) and os.path.sep in target_path:
                 real_target = os.path.realpath(os.path.expanduser(target_path))
                 if not real_target.startswith(cwd + os.path.sep) and real_target != cwd:
@@ -2877,10 +2919,10 @@ def _make_event_handler(conversation_id: str) -> Callable[[SessionEvent], None]:
 def init_copilot_manager(
     extensions_dir: Path,
     server_root: Path,
-    fws_getter: Callable,
-    broadcast_fn: Callable,
-    transcript_fn: Callable,
-    meta_fns: Optional[Dict[str, Callable]] = None,
+    fws_getter: Callable[[], Awaitable[_FrameworkShellManager]],
+    broadcast_fn: _BroadcastFn,
+    transcript_fn: _TranscriptFn,
+    meta_fns: Optional[_MetaFns] = None,
 ) -> None:
     """
     Initialize the Copilot SDK manager with server callbacks.
@@ -3064,17 +3106,16 @@ async def _init_session_unlocked(
 
         # Store SDK session_id as thread_id in conversation meta (like codex)
         # INVARIANT: thread_id is immutable once set — never overwrite
-        if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
-            meta = _meta_fns["load"](conversation_id)
-            if meta:
-                existing = meta.get("thread_id")
-                if existing and existing != sdk_session_id:
-                    print(f"[CopilotSDK] WARNING: init_session refusing to overwrite thread_id "
-                          f"{existing[:8]} with {sdk_session_id[:8]} for convo {conversation_id[:8]}")
-                else:
-                    meta["thread_id"] = sdk_session_id
-                    meta["status"] = "active"
-                    _meta_fns["save"](conversation_id, meta)
+        meta = _load_conversation_meta(conversation_id)
+        if meta is not None:
+            existing = meta.get("thread_id")
+            if isinstance(existing, str) and existing and existing != sdk_session_id:
+                print(f"[CopilotSDK] WARNING: init_session refusing to overwrite thread_id "
+                      f"{existing[:8]} with {sdk_session_id[:8]} for convo {conversation_id[:8]}")
+            else:
+                meta["thread_id"] = sdk_session_id
+                meta["status"] = "active"
+                _save_conversation_meta(conversation_id, meta)
 
         await _ensure_todo_watch(conversation_id, sdk_session_id)
 
@@ -3132,10 +3173,9 @@ async def _resume_session_unlocked(
 
     # Look up SDK session ID from conversation meta
     sdk_session_id = None
-    if _meta_fns and "load" in _meta_fns:
-        meta = _meta_fns["load"](conversation_id)
-        if meta:
-            sdk_session_id = meta.get("thread_id")
+    meta = _load_conversation_meta(conversation_id)
+    if meta is not None:
+        sdk_session_id = meta.get("thread_id")
 
     if not sdk_session_id:
         return {"ok": False, "error": f"No thread_id (SDK session) for conversation {conversation_id[:8]}"}
@@ -3179,7 +3219,8 @@ async def _resume_session_unlocked(
         _log_runtime_config("resume_session", conversation_id, config)
 
         # Resume using the real SDK session ID
-        session = await resume_sdk_session(client, sdk_session_id, resume_config)
+        sdk_session_id_text = str(sdk_session_id)
+        session = await resume_sdk_session(client, sdk_session_id_text, resume_config)
         # Key in-memory by our conversation_id
         _sessions[conversation_id] = session
         _runtime_signatures[conversation_id] = runtime_signature
@@ -3187,11 +3228,11 @@ async def _resume_session_unlocked(
 
         _replace_session_subscription(conversation_id, session)
 
-        await _ensure_todo_watch(conversation_id, str(sdk_session_id))
+        await _ensure_todo_watch(conversation_id, sdk_session_id_text)
 
-        print(f"[CopilotSDK] Session resumed: convo={conversation_id[:8]} sdk_session={sdk_session_id[:8]}")
-        _add_to_raw_buffer("out", conversation_id, f"session_resumed sdk={sdk_session_id[:8]}")
-        return {"ok": True, "provider_session_id": sdk_session_id, "session_id": sdk_session_id}
+        print(f"[CopilotSDK] Session resumed: convo={conversation_id[:8]} sdk_session={sdk_session_id_text[:8]}")
+        _add_to_raw_buffer("out", conversation_id, f"session_resumed sdk={sdk_session_id_text[:8]}")
+        return {"ok": True, "provider_session_id": sdk_session_id_text, "session_id": sdk_session_id_text}
 
     except Exception as e:
         print(f"[CopilotSDK] resume_session failed: {e}")
@@ -3233,13 +3274,22 @@ def _register_attached_session(
             session = CopilotSession(sdk_session_id, client._client)  # type: ignore[attr-defined]
             client._sessions[sdk_session_id] = session  # type: ignore[attr-defined]
             cold_bound_session = True
-    session._register_permission_handler(config.get("on_permission_request"))
+    register_permission = cast(
+        Callable[[object], object],
+        getattr(session, "_register_permission_handler"),
+    )
+    register_permission(config.get("on_permission_request"))
     hooks = config.get("hooks")
     if hooks:
-        session._register_hooks(hooks)
+        register_hooks = cast(Callable[[object], object], getattr(session, "_register_hooks"))
+        register_hooks(hooks)
     on_user_input_request = config.get("on_user_input_request")
     if on_user_input_request:
-        session._register_user_input_handler(on_user_input_request)
+        register_user_input = cast(
+            Callable[[object], object],
+            getattr(session, "_register_user_input_handler"),
+        )
+        register_user_input(on_user_input_request)
 
     _sessions[conversation_id] = session
     _runtime_signatures[conversation_id] = runtime_signature
@@ -3292,10 +3342,9 @@ async def handle_message(
             # Check if this conversation already has a thread_id.
             thread_id = None
             result: PayloadDict = {"ok": True}
-            if _meta_fns and "load" in _meta_fns:
-                meta = _meta_fns["load"](conversation_id)
-                if meta:
-                    thread_id = meta.get("thread_id")
+            meta = _load_conversation_meta(conversation_id)
+            if meta is not None:
+                thread_id = meta.get("thread_id")
 
             if thread_id:
                 client = await _ensure_client()
@@ -3447,7 +3496,7 @@ async def list_models() -> list[PayloadDict]:
             for raw in (explicit, raw_supported):
                 if not isinstance(raw, list):
                     continue
-                for item in raw:
+                for item in cast(list[object], raw):
                     if not isinstance(item, str):
                         continue
                     value = item.strip().lower()
@@ -3545,14 +3594,14 @@ async def list_sessions(cwd: Optional[str] = None, sort: Optional[str] = None) -
             if not resolved_cwd:
                 return 9
             ctx = entry.get("context")
-            session_ctx = ctx if isinstance(ctx, dict) else {}
+            session_ctx = _object_mapping(ctx) or {}
             session_cwd = session_ctx.get("cwd") or ""
             session_git = session_ctx.get("git_root") or ""
-            if session_cwd and os.path.realpath(session_cwd) == resolved_cwd:
+            if isinstance(session_cwd, str) and session_cwd and os.path.realpath(session_cwd) == resolved_cwd:
                 return 0
-            if git_root and session_git and os.path.realpath(session_git) == os.path.realpath(git_root):
+            if isinstance(session_git, str) and git_root and session_git and os.path.realpath(session_git) == os.path.realpath(git_root):
                 return 1
-            if session_cwd:
+            if isinstance(session_cwd, str) and session_cwd:
                 session_root = os.path.realpath(session_cwd)
                 if session_root.startswith(resolved_cwd) or resolved_cwd.startswith(session_root):
                     return 2
@@ -3597,34 +3646,28 @@ async def resume_session_with_history(
 
     # 1. Bind thread_id into meta
     # INVARIANT: thread_id is immutable once set — never overwrite
-    if _meta_fns and "load" in _meta_fns and "save" in _meta_fns:
-        meta = _meta_fns["load"](conversation_id)
-        if meta:
-            existing = meta.get("thread_id")
-            if existing and existing != session_id:
-                print(f"[CopilotSDK] WARNING: resume_session_with_history refusing to overwrite "
-                      f"thread_id {existing[:8]} with {session_id[:8]} for convo {conversation_id[:8]}")
-                return {"ok": False, "error": f"Conversation already bound to thread {existing[:8]}"}
-            meta["thread_id"] = session_id
-            meta["status"] = "active"
-            merged_settings = meta.get("settings") if isinstance(meta.get("settings"), dict) else {}
-            if isinstance(merged_settings, dict):
-                merged_settings = dict(merged_settings)
+    meta = _load_conversation_meta(conversation_id)
+    if meta is not None:
+        existing = meta.get("thread_id")
+        if isinstance(existing, str) and existing and existing != session_id:
+            print(f"[CopilotSDK] WARNING: resume_session_with_history refusing to overwrite "
+                  f"thread_id {existing[:8]} with {session_id[:8]} for convo {conversation_id[:8]}")
+            return {"ok": False, "error": f"Conversation already bound to thread {existing[:8]}"}
+        meta["thread_id"] = session_id
+        meta["status"] = "active"
+        merged_settings = dict(_object_mapping(meta.get("settings")) or {})
+        merged_settings["agent"] = "copilot-sdk"
+        if cwd:
+            merged_settings["cwd"] = cwd
+        if model:
+            merged_settings["model"] = model
+        for key, value in (settings or {}).items():
+            if value is None or value == "":
+                merged_settings.pop(key, None)
             else:
-                merged_settings = {}
-            merged_settings["agent"] = "copilot-sdk"
-            if cwd:
-                merged_settings["cwd"] = cwd
-            if model:
-                merged_settings["model"] = model
-            if isinstance(settings, dict):
-                for key, value in settings.items():
-                    if value is None or value == "":
-                        merged_settings.pop(key, None)
-                    else:
-                        merged_settings[key] = value
-            meta["settings"] = merged_settings
-            _meta_fns["save"](conversation_id, meta)
+                merged_settings[key] = value
+        meta["settings"] = merged_settings
+        _save_conversation_meta(conversation_id, meta)
 
     # 2. Resume the SDK session (creates in-memory session + router)
     result = await resume_session(conversation_id, cwd=cwd, model=model, settings=settings)
@@ -3734,7 +3777,6 @@ async def hydrate_transcript(
                     })
 
             elif etype == SessionEventType.ASSISTANT_USAGE:
-                total = getattr(data, "output_tokens", None)
                 # Record usage if available, but not critical for hydration
                 pass
 

@@ -19,7 +19,7 @@ def _status_from_checkbox(mark: str, text: str) -> str:
 
 
 def parse_plan_steps(plan_content: str) -> List[Dict[str, str]]:
-    if not isinstance(plan_content, str) or not plan_content.strip():
+    if not plan_content.strip():
         return []
 
     steps: List[Dict[str, str]] = []

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import difflib
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 PreviewMap: TypeAlias = dict[str, object]
 
@@ -11,7 +11,8 @@ PreviewMap: TypeAlias = dict[str, object]
 def _coerce_preview_map(value: object) -> PreviewMap:
     if not isinstance(value, dict):
         return {}
-    return {str(key): item for key, item in value.items()}
+    value_map = cast(dict[object, object], value)
+    return {str(key): item for key, item in value_map.items()}
 
 
 def _normalized_text(value: object) -> str:

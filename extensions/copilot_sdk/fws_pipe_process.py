@@ -5,7 +5,6 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Awaitable
 from typing import Optional, Protocol, TypeAlias, cast
 
 
@@ -37,6 +36,9 @@ class _PipeShellManager(Protocol):
     async def write_to_pipe(self, shell_id: str, text: str) -> None: ...
 
     async def terminate_shell(self, shell_id: str, force: bool) -> None: ...
+
+
+PipeShellManager: TypeAlias = _PipeShellManager
 
 
 class _SupportsWriteToShell(Protocol):
@@ -76,7 +78,7 @@ class _BlockingBytesReader:
         return True
 
     def read(self, size: int = -1) -> bytes:
-        if size is None or size < 0:
+        if size < 0:
             while self._fill():
                 pass
             data = bytes(self._buffer)
@@ -95,12 +97,12 @@ class _BlockingBytesReader:
             newline = self._buffer.find(b"\n")
             if newline != -1:
                 end = newline + 1
-                if size is not None and size >= 0:
+                if size >= 0:
                     end = min(end, size)
                 data = bytes(self._buffer[:end])
                 del self._buffer[:end]
                 return data
-            if size is not None and size >= 0 and len(self._buffer) >= size:
+            if size >= 0 and len(self._buffer) >= size:
                 data = bytes(self._buffer[:size])
                 del self._buffer[:size]
                 return data

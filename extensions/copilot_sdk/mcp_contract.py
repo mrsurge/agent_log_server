@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from als_deprecated.te2_runtime import TE2_MCP_SERVER_NAME, build_te2_mcp_streamable_http_url
-from als_deprecated.typing_helpers import ObjectMap, coerce_object_map
+from typing import cast
 
 from .te2_runtime import (
     AGENT_PTY_BLOCKS_MCP_SERVER_NAME,
+    ObjectMap,
+    TE2_MCP_SERVER_NAME,
     build_agent_pty_blocks_local_mcp_server,
+    build_te2_mcp_streamable_http_url,
+    coerce_object_map,
 )
 
 
 def _optional_map(value: object) -> ObjectMap:
-    return coerce_object_map(value) if isinstance(value, dict) else {}
+    return coerce_object_map(cast(dict[object, object], value)) if isinstance(value, dict) else {}
 
 
 def _optional_string(value: object) -> str | None:

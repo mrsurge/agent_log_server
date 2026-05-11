@@ -11,8 +11,10 @@ and our internal format on the other (to _broadcast_appserver_ui).
 
 import json
 import re
+import importlib
 from dataclasses import asdict, is_dataclass
 from enum import Enum
+from collections.abc import Iterable
 from typing import Optional, Callable, Awaitable, Protocol, TypeAlias, TypedDict, cast, runtime_checkable
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -42,19 +44,10 @@ def utc_ts() -> str:
 def _is_debug() -> bool:
     """Check server DEBUG_MODE without circular import."""
     try:
-        import server
-        return getattr(server, 'DEBUG_MODE', False)
+        server_module = importlib.import_module("server")
+        return bool(getattr(server_module, "DEBUG_MODE", False))
     except ImportError:
         return False
-
-
-def _looks_like_diff(text: str) -> bool:
-    """Check if text looks like a unified diff (not just any tool output)."""
-    for line in text.splitlines()[:5]:
-        stripped = line.lstrip()
-        if stripped.startswith("---") or stripped.startswith("+++") or stripped.startswith("@@"):
-            return True
-    return False
 
 
 _COPILOT_VIEW_LINE_RE = re.compile(r"^\s*(\d+)\.(.*)$")
@@ -126,16 +119,14 @@ def _mapping_str(mapping: PayloadDict, *keys: str) -> str:
 
 
 def _tool_card_request_payload(server_name: str, tool_name: str, arguments: object) -> object:
-    return cast(object, build_tool_card_request(server_name, tool_name, arguments))
+    return build_tool_card_request(server_name, tool_name, arguments)
 
 
 def _tool_card_response_payload(server_name: str, tool_name: str, response: object) -> object:
-    return cast(object, build_tool_card_response(server_name, tool_name, response))
+    return build_tool_card_response(server_name, tool_name, response)
 
 
 def _parse_copilot_view_lines(content: str) -> Optional[list[ViewLine]]:
-    if not isinstance(content, str):
-        return None
     if not content:
         return []
 
@@ -158,9 +149,11 @@ def _json_safe_value(value: object) -> object:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {str(key): _json_safe_value(inner) for key, inner in value.items()}
+        value_map = cast(dict[object, object], value)
+        return {str(key): _json_safe_value(inner) for key, inner in value_map.items()}
     if isinstance(value, (list, tuple)):
-        return [_json_safe_value(item) for item in value]
+        value_items = cast(Iterable[object], value)
+        return [_json_safe_value(item) for item in value_items]
     if is_dataclass(value) and not isinstance(value, type):
         return _json_safe_value(asdict(value))
     if isinstance(value, _SupportsToDict):
@@ -232,11 +225,11 @@ class CopilotEventRouter:
 
         # Block tracking for interleaved reasoning/message
         self._last_block_type: Optional[str] = None
-        self._suppressed_tools: set = set()  # tool_call_ids for UI-only tools (e.g. report_intent)
+        self._suppressed_tools: set[str] = set()  # tool_call_ids for UI-only tools (e.g. report_intent)
         self._active_subagents: dict[str, SubagentState] = {}  # tool_call_id -> subagent info
-        self._known_subagent_ids: set = set()  # all seen subagent ids for validation
-        self._subagent_tool_ids: set = set()  # tool_call_ids that belong to a subagent
-        self._recorded_reasoning_ids: set = set()  # reasoning ids already persisted this turn
+        self._known_subagent_ids: set[str] = set()  # all seen subagent ids for validation
+        self._subagent_tool_ids: set[str] = set()  # tool_call_ids that belong to a subagent
+        self._recorded_reasoning_ids: set[str] = set()  # reasoning ids already persisted this turn
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -429,13 +422,13 @@ class CopilotEventRouter:
         if not kind:
             return
         previous_kind = self._normalize_mode_kind(previous_raw)
-        event = {
+        event: PayloadDict = {
             "type": "mode",
             "conversation_id": self.conversation_id,
             "kind": kind,
             "turn_id": self.current_turn_id,
         }
-        entry = {
+        entry: PayloadDict = {
             "role": "mode",
             "kind": kind,
             "turn_id": self.current_turn_id,
@@ -459,6 +452,43 @@ class CopilotEventRouter:
         # REPLAY MUST BE AN EXACT MIRROR OF THE LIVE FEED. NO EXCEPTIONS.
         entry["seq"] = self._seq
         await self.append_transcript(self.conversation_id, entry)
+
+    async def emit_client_error(
+        self,
+        message: str,
+        *,
+        error_type: str,
+        turn_id: str | None = None,
+    ) -> None:
+        active_turn_id = turn_id or self.current_turn_id
+        event: PayloadDict = {
+            "type": "error",
+            "conversation_id": self.conversation_id,
+            "message": message,
+            "source": "copilot-sdk",
+        }
+        entry: PayloadDict = {
+            "role": "error",
+            "message": message,
+            "timestamp": utc_ts(),
+            "source": "copilot-sdk",
+            "event": "copilot-sdk",
+        }
+        if active_turn_id:
+            event["turn_id"] = active_turn_id
+            entry["turn_id"] = active_turn_id
+        if error_type:
+            event["error_type"] = error_type
+            entry["error_type"] = error_type
+        await self._emit(event)
+        await self._record(entry)
+        await self._emit({
+            "type": "activity",
+            "conversation_id": self.conversation_id,
+            "label": "error",
+            "active": False,
+            "turn_id": active_turn_id,
+        })
 
     @staticmethod
     def _normalize_id(value: object) -> Optional[str]:
@@ -601,7 +631,7 @@ class CopilotEventRouter:
         if not self.debug_trace:
             return
         data = event
-        payload = {
+        payload: PayloadDict = {
             "type": "debug_trace",
             "role": "debug_trace",
             "internal": True,
@@ -621,7 +651,7 @@ class CopilotEventRouter:
         await self._record(dict(payload))
 
     async def _emit_subagent_end(self, subagent_id: str, *, summary: str, success: bool) -> None:
-        subagent_event = {
+        subagent_event: PayloadDict = {
             "type": "subagent_end",
             "conversation_id": self.conversation_id,
             "id": subagent_id,
@@ -720,7 +750,7 @@ class CopilotEventRouter:
                     f"[SUBAGENT-DEBUG] SUBAGENT_STARTED: sa_id={sa_id} event.id={data.event_id} "
                     f"data.tool_call_id={data.tool_call_id} event.parent_id={data.parent_id}"
                 )
-            sa_evt = {
+            sa_evt: PayloadDict = {
                 "type": "subagent_start",
                 "conversation_id": self.conversation_id,
                 "id": sa_id,
@@ -1010,7 +1040,7 @@ class CopilotEventRouter:
         if mcp_server_name or mcp_tool_name:
             display_tool = mcp_tool_name or tool_name or "tool"
             display_server = mcp_server_name or ""
-            display_args = dict(args) if isinstance(args, dict) else {}
+            display_args = dict(args)
 
             if display_server == "agent-pty-blocks" and display_tool in {"agent_log_post", "agent_log_post_await"}:
                 message_value = display_args.get("message")
@@ -1142,10 +1172,16 @@ class CopilotEventRouter:
             vrange = args.get("view_range")
             # Build human-readable label
             short_path = path.rsplit("/", 1)[-1] if path else ""
-            if vrange and isinstance(vrange, (list, tuple)) and len(vrange) >= 2:
-                label = f"{short_path}  Lines {vrange[0]}–{vrange[1]}"
-            elif vrange and isinstance(vrange, (list, tuple)) and len(vrange) == 1:
-                label = f"{short_path}  Line {vrange[0]}+"
+            if vrange and isinstance(vrange, (list, tuple)):
+                vrange_items = [str(item) for item in cast(Iterable[object], vrange)]
+                if len(vrange_items) >= 2:
+                    label = f"{short_path}  Lines {vrange_items[0]}–{vrange_items[1]}"
+                elif len(vrange_items) == 1:
+                    label = f"{short_path}  Line {vrange_items[0]}+"
+                elif short_path:
+                    label = short_path
+                else:
+                    label = "Exploring"
             elif short_path:
                 label = short_path
             else:
@@ -1213,7 +1249,7 @@ class CopilotEventRouter:
 
         # Intercept UI-only tools — route to ribbon, suppress shell card
         if tool_name in self._UI_TOOLS:
-            raw_args = cast(object, data.arguments)
+            raw_args = data.arguments
             intent = ""
             arg_map = _object_mapping(raw_args)
             if arg_map is not None:
@@ -1232,7 +1268,7 @@ class CopilotEventRouter:
             self._suppressed_tools.add(tool_call_id)
             return
 
-        raw_args = cast(object, data.arguments)
+        raw_args = data.arguments
         render_state = self._build_tool_render_state(data, tool_name, raw_args)
         render_title = render_state.get("title", tool_name)
         render_tool_name = render_state.get("tool_name", tool_name)
@@ -1276,7 +1312,7 @@ class CopilotEventRouter:
             return
 
         if render_kind == "shell":
-            shell_begin_evt = {
+            shell_begin_evt: PayloadDict = {
                 "type": "shell_begin",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
@@ -1292,7 +1328,7 @@ class CopilotEventRouter:
             await self._emit(shell_begin_evt)
             return
 
-        tool_begin_evt = {
+        tool_begin_evt: PayloadDict = {
             "type": "tool_begin",
             "conversation_id": self.conversation_id,
             "id": tool_call_id,
@@ -1324,7 +1360,7 @@ class CopilotEventRouter:
             content = data.result_content
             detailed = data.result_detailed_content
         else:
-            output = cast(object, data.output)
+            output = data.output
             content = data.content or (output if isinstance(output, str) else "") or ""
         tool_call = self.tool_calls.get(tool_call_id)
         tool_name = ((tool_call.get("tool_name") if tool_call else "") or "").lower()
@@ -1357,7 +1393,7 @@ class CopilotEventRouter:
             view_lines = _parse_copilot_view_lines(view_content)
             view_title = (tool_call.get("title") if tool_call else "") or "view"
             view_range = tool_call.get("view_range") if tool_call else None
-            view_evt = {
+            view_evt: PayloadDict = {
                 "type": "view",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
@@ -1374,7 +1410,7 @@ class CopilotEventRouter:
                 view_evt["subagent_id"] = subagent_id
             await self._emit(view_evt)
 
-            record_entry = {
+            view_record_entry: PayloadDict = {
                 "role": "view",
                 "id": tool_call_id,
                 "turn_id": self.current_turn_id,
@@ -1385,14 +1421,14 @@ class CopilotEventRouter:
                 "subagent_id": subagent_id,
             }
             if view_lines is not None:
-                record_entry["lines"] = view_lines
+                view_record_entry["lines"] = view_lines
             if view_range is not None:
-                record_entry["view_range"] = view_range
-            await self._record(record_entry)
+                view_record_entry["view_range"] = view_range
+            await self._record(view_record_entry)
         elif render_kind == "search":
             search_content = content or ((tool_call.get("output") if tool_call else "") or "")
             search_title = (tool_call.get("title") if tool_call else "") or render_tool or "search"
-            search_evt = {
+            search_evt: PayloadDict = {
                 "type": "search",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
@@ -1408,7 +1444,7 @@ class CopilotEventRouter:
                 search_evt["subagent_id"] = subagent_id
             await self._emit(search_evt)
 
-            record_entry = {
+            search_record_entry: PayloadDict = {
                 "role": "search",
                 "id": tool_call_id,
                 "turn_id": self.current_turn_id,
@@ -1421,7 +1457,7 @@ class CopilotEventRouter:
                 "timestamp": utc_ts(),
                 "subagent_id": subagent_id,
             }
-            await self._record(record_entry)
+            await self._record(search_record_entry)
         elif render_kind == "shell":
             # For edit/create/apply_patch tools: suppress verbose output, add status emoji
             cmd_label = (tool_call.get("title") if tool_call else "") or ""
@@ -1439,7 +1475,7 @@ class CopilotEventRouter:
                 # Only show error output, not the verbose echo
                 stdout = content if has_error else ""
 
-            shell_end_evt = {
+            shell_end_evt: PayloadDict = {
                 "type": "shell_end",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
@@ -1455,7 +1491,7 @@ class CopilotEventRouter:
                 shell_end_evt["subagent_id"] = subagent_id
             await self._emit(shell_end_evt)
 
-            record_entry = {
+            shell_record_entry: PayloadDict = {
                 "role": "command",
                 "id": tool_call_id,
                 "turn_id": self.current_turn_id,
@@ -1466,8 +1502,8 @@ class CopilotEventRouter:
                 "subagent_id": subagent_id,
             }
             if file_path:
-                record_entry["path"] = file_path
-            await self._record(record_entry)
+                shell_record_entry["path"] = file_path
+            await self._record(shell_record_entry)
         else:
             result_payload: object | None = None
             if content:
@@ -1482,7 +1518,7 @@ class CopilotEventRouter:
                 _tool_card_response_payload(render_server, render_tool, result_payload)
             )
 
-            tool_end_evt = {
+            tool_end_evt: PayloadDict = {
                 "type": "tool_end",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
@@ -1503,7 +1539,7 @@ class CopilotEventRouter:
             await self._emit(tool_end_evt)
 
             transcript_role = "mcp_tool" if render_kind == "mcp" else "tool"
-            record_entry = {
+            tool_record_entry: PayloadDict = {
                 "role": transcript_role,
                 "id": tool_call_id,
                 "turn_id": self.current_turn_id,
@@ -1517,10 +1553,10 @@ class CopilotEventRouter:
                 "subagent_id": subagent_id,
             }
             if render_server:
-                record_entry["server"] = render_server
+                tool_record_entry["server"] = render_server
             if file_path:
-                record_entry["path"] = file_path
-            await self._record(record_entry)
+                tool_record_entry["path"] = file_path
+            await self._record(tool_record_entry)
 
         # Emit diff for file-mutating tools only (not view/grep/read)
         diff_text = detailed
@@ -1529,7 +1565,7 @@ class CopilotEventRouter:
             if content and (content.lstrip().startswith(("---", "@@", "diff ", "+++"))):
                 diff_text = content
             if not diff_text:
-                raw_args = tool_call.get("arguments") if tool_call else {}
+                raw_args: object = tool_call.get("arguments") if tool_call else {}
                 if isinstance(raw_args, str):
                     # Arguments may arrive as a JSON string
                     try:
@@ -1545,7 +1581,7 @@ class CopilotEventRouter:
                         or _mapping_str(raw_args_map, "content")
                     )
         if diff_text and tool_name in _FILE_CHANGE_TOOLS:
-            diff_evt = {
+            diff_evt: PayloadDict = {
                 "type": "diff",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
@@ -1588,7 +1624,7 @@ class CopilotEventRouter:
             if render_kind in {"view", "search"}:
                 return
 
-            delta_evt = {
+            delta_evt: PayloadDict = {
                 "type": "shell_delta" if render_kind == "shell" else "tool_delta",
                 "conversation_id": self.conversation_id,
                 "id": tool_call_id,
@@ -1694,21 +1730,21 @@ class CopilotEventRouter:
     async def _handle_plan_changed(self, data: CopilotEventView) -> None:
         plan_content = data.plan_content
         content = plan_content if isinstance(plan_content, str) else ""
-        plan_doc_update = {
+        plan_doc_update: PayloadDict = {
             "plan_exists": bool(content.strip()),
             "plan_content": content,
             "plan_path": data.path if isinstance(data.path, str) else None,
             "plan_source": "sdk",
         }
         if self.plan_state_provider is not None:
-            state = await self.plan_state_provider(self.conversation_id, plan_doc_update)
+            state: PayloadDict = await self.plan_state_provider(self.conversation_id, plan_doc_update)
         else:
             state = {
                 "has_plan": True,
                 "has_todo": True,
                 "plan_exists": bool(content.strip()),
                 "plan_content": content,
-                "plan_steps": [],
+                "plan_steps": cast(object, []),
                 "plan_path": plan_doc_update["plan_path"],
                 "plan_source": "sdk",
             }
