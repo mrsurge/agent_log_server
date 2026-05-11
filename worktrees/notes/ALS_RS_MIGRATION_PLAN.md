@@ -1343,6 +1343,14 @@ Acceptance:
      launches, and standalone launches seed a stable directory-fingerprinted
      framework-shell secret before Rust/adapter startup so extension adapter
      framework-shell imports do not require a manual dummy secret.
+   - `als-rs extension ...` now provides an offline-first package operator CLI
+     that installs/updates/removes/validates/list/reloads against the ALS-RS
+     second root (`${ALS_RS_DATA_DIR}/extensions`) without requiring a running
+     server, supports path/zip/git sources, and best-effort notifies a running
+     ALS-RS server to reload after successful mutations.
+   - SIGINT/SIGTERM now runs bounded graceful shutdown: stop extension handlers
+     through adapter `extension.shutdown`, close/terminate direct or
+     ferrous-framework adapter transport, then notify Axum graceful shutdown.
    - real `extensions.reload` disk rescan and running-adapter loader reload:
      completed
    - enable/disable state: completed with an ALS-RS config overlay

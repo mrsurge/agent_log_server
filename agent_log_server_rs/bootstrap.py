@@ -40,6 +40,11 @@ class BootstrapArgs:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(argv if argv is not None else sys.argv[1:])
+    if argv and argv[0] == "extension":
+        from agent_log_server_rs.extension_cli import run_extension_cli
+
+        return run_extension_cli(argv[1:])
     args = _parse_args(argv)
     env = _build_env(args)
     command = _server_command(args, env)
@@ -240,6 +245,7 @@ def _ensure_framework_shells_env(
         args.framework_shells_fws_socketio_server_pid,
     )
     _set_if_present(env, "FRAMEWORK_SHELLS_RUN_ID", args.framework_shells_run_id)
+    env.setdefault("FRAMEWORK_SHELLS_RUN_ID", "app-server")
     env.setdefault("FRAMEWORK_SHELLS_SIGWINCH_ON_RESIZE", "1")
 
     if env.get("FRAMEWORK_SHELLS_SECRET"):
@@ -270,7 +276,6 @@ def _ensure_framework_shells_env(
 
     env["FRAMEWORK_SHELLS_BASE_DIR"] = str(base_dir)
     env["FRAMEWORK_SHELLS_SECRET"] = secret
-    env.setdefault("FRAMEWORK_SHELLS_RUN_ID", "app-server")
     _prime_framework_shells_import(env)
 
 

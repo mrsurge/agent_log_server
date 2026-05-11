@@ -90,6 +90,14 @@ mod pyo3_pipe {
             })
             .context("failed to read ferrous_framework shell id")
         }
+
+        pub fn close_blocking(&self) -> Result<()> {
+            Python::attach(|py| -> PyResult<()> {
+                self.inner.call_method0(py, "close")?;
+                Ok(())
+            })
+            .map_err(|err| anyhow!("ferrous_framework pipe close failed: {err}"))
+        }
     }
 }
 
@@ -126,6 +134,10 @@ mod pyo3_pipe {
         }
 
         pub fn shell_id(&self) -> Result<String> {
+            bail!("ferrous_framework was built without the pyo3-embed feature")
+        }
+
+        pub fn close_blocking(&self) -> Result<()> {
             bail!("ferrous_framework was built without the pyo3-embed feature")
         }
     }

@@ -99,7 +99,9 @@ class FerrousFrameworkPipe:
                 if key.startswith("FRAMEWORK_SHELLS_")
             }
         )
-        self._mgr = await framework_shells.get_manager()
+        self._mgr = await framework_shells.get_manager(
+            run_id=os.environ.get("FRAMEWORK_SHELLS_RUN_ID", "app-server")
+        )
         command, cwd, env, spec_id, subgroups, pipe_config = self._render_shellspec()
         record = await self._mgr.spawn_shell_pipe(
             command,

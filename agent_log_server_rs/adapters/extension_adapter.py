@@ -47,9 +47,10 @@ from agent_log_server_rs.adapters.copilot_sdk_adapter import (
 
 RpcId: TypeAlias = str | int | None
 
-SUPPORTED_RUNTIME_TYPES = {"copilot_sdk", "codex_ext"}
-SUPPORTED_MODEL_TYPES = SUPPORTED_RUNTIME_TYPES
 IMPORT_TRANSCRIPT_BATCH_SIZE = 1000
+
+CONVERSATION_METHODS = ("init_session", "handle_message", "resume_session_with_history")
+SESSION_METHODS = ("list_sessions", "resume_session_with_history", "hydrate_transcript")
 
 
 async def _get_framework_shell_manager() -> object:
@@ -175,6 +176,14 @@ def _safe_cwd() -> Path:
         return Path.cwd()
     except OSError:
         return _fallback_root()
+
+
+def _has_callable_attr(obj: object | None, name: str) -> bool:
+    return callable(getattr(obj, name, None)) if obj is not None else False
+
+
+def _has_any_callable_attr(obj: object | None, names: Sequence[str]) -> bool:
+    return any(_has_callable_attr(obj, name) for name in names)
 
 
 def _default_data_dir() -> Path:
@@ -357,6 +366,7 @@ class ExtensionJsonRpcAdapter:
         self._loader_initialized = False
         self._stdout: TextIO | None = None
         self._write_lock = asyncio.Lock()
+        self._shutdown_requested = False
 
     async def run_stdio(
         self,
@@ -372,6 +382,8 @@ class ExtensionJsonRpcAdapter:
             if not line:
                 continue
             await self._handle_line(line)
+            if self._shutdown_requested:
+                return 0
 
     async def _handle_line(self, line: str) -> None:
         try:
@@ -410,6 +422,7 @@ class ExtensionJsonRpcAdapter:
             return await self._initialize(params)
         if method == AdapterMethod.EXTENSION_SHUTDOWN:
             await self._stop_supported_handlers()
+            self._shutdown_requested = True
             return {"ok": True}
         if method == AdapterMethod.EXTENSION_RELOAD:
             return await self._reload(params)
@@ -479,19 +492,24 @@ class ExtensionJsonRpcAdapter:
         self._ensure_loader_initialized()
         info = self._extension_info(extension_id)
         ext_type = _optional_string(info.get("type")) or ""
-        supported = ext_type in SUPPORTED_RUNTIME_TYPES
+        active = info.get("active") is True
+        handler = self._loader.get_handler(extension_id) if active else None
+        conversations_supported = _has_any_callable_attr(handler, CONVERSATION_METHODS)
+        models_supported = _has_callable_attr(handler, "list_models")
+        sessions_supported = _has_any_callable_attr(handler, SESSION_METHODS)
+        interruption_supported = _has_callable_attr(handler, "abort_session")
         return ExtensionInitializeResult(
             extension_id=extension_id,
             provider=ext_type or extension_id,
             capabilities=AdapterCapabilities(
-                conversations=supported,
-                models=supported,
-                sessions=supported,
-                interruption=supported,
-                live_events=supported,
-                transcript_records=supported,
+                conversations=conversations_supported,
+                models=models_supported,
+                sessions=sessions_supported,
+                interruption=interruption_supported,
+                live_events=conversations_supported,
+                transcript_records=conversations_supported,
                 extra={
-                    "supported": supported,
+                    "supported": active and handler is not None,
                     "type": ext_type,
                     "manifest": info.get("manifest", {}),
                 },
@@ -697,12 +715,11 @@ class ExtensionJsonRpcAdapter:
     async def _list_models(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
         info = self._extension_info(extension_id)
-        ext_type = _optional_string(info.get("type")) or ""
-        if ext_type not in SUPPORTED_MODEL_TYPES:
+        if info.get("active") is not True:
             return {
                 "models": [],
                 "supported": False,
-                "reason": f"Extension {extension_id} has type {ext_type or '<unknown>'}; ALS-RS model listing is not wired yet",
+                "reason": f"Extension is not active: {extension_id}",
             }
         result = await self._loader.list_models(extension_id)
         if isinstance(result, dict):
@@ -1105,12 +1122,6 @@ class ExtensionJsonRpcAdapter:
 
     def _supported_handler(self, extension_id: str) -> object:
         info = self._extension_info(extension_id)
-        ext_type = _optional_string(info.get("type")) or ""
-        if ext_type not in SUPPORTED_RUNTIME_TYPES:
-            raise RpcAdapterError(
-                METHOD_NOT_FOUND,
-                f"Extension {extension_id} has type {ext_type or '<unknown>'}; ALS-RS adapter support is not wired yet",
-            )
         if info.get("active") is not True:
             raise RpcAdapterError(INVALID_PARAMS, f"Extension is not active: {extension_id}")
         handler = self._loader.get_handler(extension_id)
@@ -1123,11 +1134,16 @@ class ExtensionJsonRpcAdapter:
             if not isinstance(extension, dict):
                 continue
             extension_id = _optional_string(extension.get("id"))
-            ext_type = _optional_string(extension.get("type"))
-            if not extension_id or ext_type not in SUPPORTED_RUNTIME_TYPES:
+            if not extension_id:
                 continue
             handler = self._loader.get_handler(extension_id)
-            stop_client = getattr(handler, "stop_client", None) if handler is not None else None
+            stop_client = None
+            if handler is not None:
+                stop_client = getattr(handler, "stop_client", None) or getattr(
+                    handler,
+                    "shutdown_client",
+                    None,
+                )
             if callable(stop_client):
                 result = stop_client()
                 if hasattr(result, "__await__"):

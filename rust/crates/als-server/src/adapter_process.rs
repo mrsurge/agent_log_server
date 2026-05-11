@@ -23,6 +23,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::{Mutex, broadcast, oneshot},
+    time::{Duration, timeout},
 };
 use tracing::{debug, error, warn};
 
@@ -142,13 +143,21 @@ impl AdapterSupervisor {
             .await?;
         Ok(result)
     }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        let client = self.client.lock().await.take();
+        if let Some(client) = client {
+            client.shutdown().await?;
+        }
+        Ok(())
+    }
 }
 
 pub struct AdapterClient {
     writer: AdapterWriter,
     pending: PendingMap,
     next_id: AtomicI64,
-    _child: Option<Child>,
+    child: Mutex<Option<Child>>,
 }
 
 #[derive(Clone)]
@@ -252,7 +261,7 @@ impl AdapterClient {
             writer: AdapterWriter::Ferrous(pipe),
             pending,
             next_id: AtomicI64::new(1),
-            _child: None,
+            child: Mutex::new(None),
         })
     }
 
@@ -298,7 +307,7 @@ impl AdapterClient {
             writer: AdapterWriter::Direct(Arc::new(Mutex::new(stdin))),
             pending,
             next_id: AtomicI64::new(1),
-            _child: Some(child),
+            child: Mutex::new(Some(child)),
         })
     }
 
@@ -358,6 +367,59 @@ impl AdapterClient {
                 tokio::task::spawn_blocking(move || pipe.write_line_blocking(&line))
                     .await
                     .context("ferrous_framework write task failed")?
+            }
+        }
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        match timeout(
+            Duration::from_secs(5),
+            self.request_value(methods::EXTENSION_SHUTDOWN, json!({})),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => warn!(error = %err, "extension adapter shutdown RPC failed"),
+            Err(_) => warn!("extension adapter shutdown RPC timed out"),
+        }
+
+        match &self.writer {
+            AdapterWriter::Direct(_) => self.shutdown_direct_child().await,
+            AdapterWriter::Ferrous(pipe) => {
+                let pipe = pipe.clone();
+                match tokio::task::spawn_blocking(move || pipe.close_blocking()).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(err)) => {
+                        warn!(error = %err, "ferrous_framework adapter close failed");
+                        Ok(())
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "ferrous_framework adapter close task failed");
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    async fn shutdown_direct_child(&self) -> Result<()> {
+        let child = self.child.lock().await.take();
+        let Some(mut child) = child else {
+            return Ok(());
+        };
+        match timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(Ok(_status)) => Ok(()),
+            Ok(Err(err)) => {
+                warn!(error = %err, "extension adapter child wait failed");
+                Ok(())
+            }
+            Err(_) => {
+                warn!("extension adapter child did not exit after shutdown; killing");
+                if let Err(err) = child.kill().await {
+                    warn!(error = %err, "failed to kill extension adapter child");
+                }
+                let _ = child.wait().await;
+                Ok(())
             }
         }
     }
