@@ -1217,6 +1217,41 @@ Current status:
     option merger.
   - Footer controls remain a settings/runtime-options surface; saving quick
     footer selections still persists through the conversation update path.
+- Restored ALS-RS extension plan reads:
+  - `/rpc/settings` `extension.plan.get` no longer returns the old hardcoded
+    false/empty stub; Rust now resolves the target conversation/extension and
+    forwards the request through the Python extension adapter.
+  - The adapter protocol includes `extension.get_plan`, implemented by
+    delegating to the existing extension loader `read_plan(...)` hook so the
+    authoritative provider plan/todo state stays extension-owned.
+  - The frontend plan overlay/modal contract stays unchanged: manifest/runtime
+    options still provide `has_plan` / `has_todo` capability flags, while
+    `extension.plan.get` supplies the actual `plan_exists`, `plan_content`, and
+    `plan_steps` state for the selected conversation.
+- Hardened ALS-RS extension hot reload after package mutation:
+  - Rust package install/update/remove finalization now passes the mutated
+    extension id through the adapter reload call and waits for ready when the
+    extension still exists after reload.
+  - The Python extension adapter now stops the affected handler/runtime before
+    `extension.reload` clears module cache and re-imports modules. This uses the
+    existing extension-owned `stop_client` / `shutdown_client` hooks instead of
+    `importlib.reload()`.
+  - Targeted reload now also terminates matching framework-shell transport shells
+    by the changed extension manifest's `agent.shellspec` spec id plus current
+    app scope before re-import, so observed app-server shells like
+    `gemini-app-server` do not survive reload just because the old transport no
+    longer has a live `_shell_id` cached.
+  - Reload targeting is by handler type, not raw extension id, because handler
+    modules are shared per extension type in the current loader.
+- Added an ALS-RS HTTP entrypoint for targeted extension reload:
+  - `POST /api/extensions/{extension_id}/reload` now reloads a single extension
+    id through the same safe adapter flow used by package mutation.
+  - The route reloads the Rust registry, verifies the extension exists, then
+    calls the adapter reload with `changed_extension_ids = [extension_id]` and
+    `wait_ready_extension_id = extension_id`.
+  - The response includes the targeted extension entry, the full extension list,
+    and the adapter reload payload so HTTP callers can inspect ready/runtime
+    state without going through the Socket.IO settings RPC lane.
 - Restored ALS-RS footer interrupt routing:
   - `/rpc/conversations` `conversation.interrupt` now resolves the selected
     extension from Rust-owned conversation metadata and calls the generic

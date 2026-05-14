@@ -7,6 +7,7 @@ mod conversation_rpc;
 mod conversation_store;
 mod devins_context;
 mod extension_registry;
+mod extension_routes;
 mod http;
 mod ipc;
 mod settings_rpc;

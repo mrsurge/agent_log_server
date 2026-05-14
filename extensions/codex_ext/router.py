@@ -140,7 +140,7 @@ def _ensure_dict_list(container: ObjectDict, key: str) -> List[ObjectDict]:
     value = container.get(key)
     if _is_object_list(value):
         if all(_is_object_dict(item) for item in value):
-            return [_dict_payload(item) for item in value]
+            return cast(List[ObjectDict], value)
     items: List[ObjectDict] = []
     container[key] = items
     return items
@@ -148,13 +148,14 @@ def _ensure_dict_list(container: ObjectDict, key: str) -> List[ObjectDict]:
 
 def _ensure_string_set(container: ObjectDict, key: str) -> set[str]:
     value = container.get(key)
-    normalized: set[str] = (
-        {item for item in cast(set[object], value) if isinstance(item, str)}
-        if isinstance(value, set)
-        else set[str]()
-    )
-    if value != normalized:
-        container[key] = normalized
+    if isinstance(value, set):
+        raw_items = cast(set[object], value)
+        if all(isinstance(item, str) for item in raw_items):
+            return cast(set[str], value)
+        normalized = {item for item in raw_items if isinstance(item, str)}
+    else:
+        normalized = set[str]()
+    container[key] = normalized
     return normalized
 
 
@@ -1178,6 +1179,74 @@ def _extract_diff_with_path(payload: object) -> Tuple[Optional[str], Optional[st
     return None, None
 
 
+def _diff_sections_from_changes(changes: object) -> List[Tuple[Optional[str], str]]:
+    sections: List[Tuple[Optional[str], str]] = []
+    if _is_object_list(changes):
+        for change in changes:
+            if not _is_object_dict(change):
+                continue
+            text = change.get("diff") or change.get("patch") or change.get("unified_diff")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            path = change.get("path") or change.get("file_path") or _extract_path_from_diff(text)
+            sections.append((path if isinstance(path, str) else None, text))
+    elif _is_object_dict(changes):
+        for change_path, change in changes.items():
+            if not _is_object_dict(change):
+                continue
+            text = change.get("diff") or change.get("patch") or change.get("unified_diff")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            path = change.get("path") or change.get("file_path") or change_path or _extract_path_from_diff(text)
+            sections.append((path if isinstance(path, str) else None, text))
+    return sections
+
+
+def _diff_header_path(path: Optional[str]) -> str:
+    if not isinstance(path, str) or not path.strip():
+        return "unknown"
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized or "unknown"
+
+
+def _prefix_diff_path(prefix: str, path: str) -> str:
+    if path == "/dev/null" or path.startswith(f"{prefix}/"):
+        return path
+    return f"{prefix}/{path}"
+
+
+def _diff_with_file_header(path: Optional[str], diff_text: str) -> str:
+    text = diff_text.strip()
+    if not text:
+        return ""
+    if any(line.startswith("diff --git ") for line in text.splitlines()):
+        return text
+    header_path = _diff_header_path(path or _extract_path_from_diff(text))
+    old_path = _prefix_diff_path("a", header_path)
+    new_path = _prefix_diff_path("b", header_path)
+    if any(line.startswith("--- ") or line.startswith("+++ ") for line in text.splitlines()):
+        return f"diff --git {old_path} {new_path}\n{text}"
+    return f"diff --git {old_path} {new_path}\n--- {old_path}\n+++ {new_path}\n{text}"
+
+
+def _diff_sections_from_changes_with_headers(changes: object) -> List[Tuple[Optional[str], str]]:
+    sections: List[Tuple[Optional[str], str]] = []
+    for path, diff_text in _diff_sections_from_changes(changes):
+        headered = _diff_with_file_header(path, diff_text)
+        if headered:
+            sections.append((path or _extract_path_from_diff(headered), headered))
+    return sections
+
+
+def _diff_text_from_changes_with_headers(changes: object) -> Optional[str]:
+    chunks = [text for _path, text in _diff_sections_from_changes_with_headers(changes)]
+    if not chunks:
+        return None
+    return "\n".join(chunks)
+
+
 def _diff_is_new_file(diff_text: Optional[str]) -> bool:
     if not isinstance(diff_text, str) or not diff_text.strip():
         return False
@@ -2047,6 +2116,51 @@ class CodexEventRouter:
                 "event": event_name,
             }, subagent_id))
 
+    def _emit_filechange_diff_entries(
+        self,
+        result: ObjectDict,
+        *,
+        changes: object,
+        diff_text: Optional[str],
+        path: Optional[str],
+        thread_id: Optional[str],
+        turn_id: Optional[str],
+        item_id: Optional[str],
+        event_name: str,
+    ) -> None:
+        turn_state = self._get_turn_state(thread_id, turn_id)
+        emitted_from_changes = False
+        emitted_any = False
+        for change_path, change_diff in _diff_sections_from_changes_with_headers(changes):
+            before_count = len(_ensure_dict_list(result, "transcript_entries"))
+            self._emit_diff_entries(
+                result,
+                diff_text=change_diff,
+                path=change_path or path,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=item_id,
+                event_name=event_name,
+            )
+            emitted_from_changes = True
+            if len(_ensure_dict_list(result, "transcript_entries")) > before_count:
+                emitted_any = True
+        if not emitted_from_changes and diff_text:
+            before_count = len(_ensure_dict_list(result, "transcript_entries"))
+            self._emit_diff_entries(
+                result,
+                diff_text=diff_text,
+                path=path,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=item_id,
+                event_name=event_name,
+            )
+            if len(_ensure_dict_list(result, "transcript_entries")) > before_count:
+                emitted_any = True
+        if emitted_any:
+            turn_state["filechange_diff_emitted"] = True
+
     def _tool_request_result(
         self,
         *,
@@ -2305,6 +2419,9 @@ class CodexEventRouter:
         ) and _is_object_dict(payload):
             diff_text, path = _extract_diff_with_path(payload)
             if diff_text:
+                turn_state = self._get_turn_state(thread_id, turn_id)
+                if turn_state.get("filechange_diff_emitted"):
+                    return {"handled": True, "events": [], "transcript_entries": []}
                 result["handled"] = True
                 self._emit_diff_entries(
                     result,
@@ -2461,15 +2578,17 @@ class CodexEventRouter:
             if item_type == "filechange":
                 changes = item.get("changes")
                 diff_text, path = _extract_diff_with_path(item)
+                display_diff_text = _diff_text_from_changes_with_headers(changes) or diff_text
                 paths = _paths_from_changes(changes)
-                new_file = _diff_is_new_file(diff_text)
+                new_file = _diff_is_new_file(display_diff_text)
                 item_state.update({
                     "item_type": item_type,
                     "changes": changes,
-                    "diff": diff_text,
+                    "diff": display_diff_text,
                     "path": path,
                     "paths": paths,
                     "new_file": new_file,
+                    "patch_updated_seen": False,
                     "output_buffer": "",
                 })
                 arguments: ObjectDict = {}
@@ -2485,7 +2604,7 @@ class CodexEventRouter:
                             "tool": "apply_patch",
                             "arguments": arguments,
                             "path": path,
-                            "diff": diff_text,
+                            "diff": display_diff_text,
                             "new_file": new_file,
                         },
                         {"type": "activity", "label": "preparing diff", "active": True},
@@ -2699,6 +2818,38 @@ class CodexEventRouter:
                 }, thread_id=thread_id, item_state=state)
             return {"handled": True, "events": [], "transcript_entries": []}
 
+        if (
+            (
+                notification_spec
+                and notification_spec.category == "item"
+                and notification_spec.subject == "filechange_patchupdated"
+            )
+            or label_lower == "item/filechange/patchupdated"
+        ) and _is_object_dict(payload):
+            item_id = _payload_string(payload, "itemId", "item_id")
+            state = self._get_item_state(item_id, thread_id, turn_id)
+            changes = payload.get("changes")
+            diff_text, path = _extract_diff_with_path({
+                "changes": changes,
+                "path": payload.get("path") or state.get("path"),
+            })
+            display_diff_text = _diff_text_from_changes_with_headers(changes) or diff_text
+            paths = _paths_from_changes(changes)
+            state["changes"] = changes
+            state["patch_updated_seen"] = True
+            if display_diff_text:
+                state["diff"] = display_diff_text
+                state["new_file"] = bool(state.get("new_file")) or _diff_is_new_file(display_diff_text)
+            if path:
+                state["path"] = path
+            if paths:
+                state["paths"] = paths
+            return self._decorate_routed_result({
+                "handled": True,
+                "events": [{"type": "activity", "label": "preparing diff", "active": True}],
+                "transcript_entries": [],
+            }, thread_id=thread_id, item_state=state)
+
         if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "terminalinteraction" and _is_object_dict(payload):
             item_id = _payload_string(payload, "itemId", "item_id")
             state = self._get_item_state(item_id, thread_id, turn_id)
@@ -2886,7 +3037,7 @@ class CodexEventRouter:
                     if approval_request_id:
                         routed["clear_live_approval_ids"] = [approval_request_id]
                         self._approval_request_map.pop(str(item_id), None)
-                    return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
+                    return self._decorate_routed_result(routed, thread_id=effective_thread_id, item_state=item_state)
                 if search_spec and not is_error:
                     normalized_search_output = _normalize_search_output(output, search_spec)
                     routed = {
@@ -2923,8 +3074,10 @@ class CodexEventRouter:
                         self._approval_request_map.pop(str(item_id), None)
                     return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 if new_file_spec:
-                    path = new_file_spec.get("path") if isinstance(new_file_spec.get("path"), str) else ""
-                    diff_text = new_file_spec.get("diff") if isinstance(new_file_spec.get("diff"), str) else ""
+                    path_value = new_file_spec.get("path")
+                    path = path_value if isinstance(path_value, str) else ""
+                    diff_value = new_file_spec.get("diff")
+                    diff_text = diff_value if isinstance(diff_value, str) else ""
                     arguments = _new_file_arguments(new_file_spec)
                     result_payload = {
                         "status": status or "completed",
@@ -2967,6 +3120,16 @@ class CodexEventRouter:
                             "event": label_lower,
                         }],
                     }
+                    self._emit_filechange_diff_entries(
+                        routed,
+                        changes=None,
+                        diff_text=diff_text,
+                        path=path,
+                        thread_id=effective_thread_id,
+                        turn_id=effective_turn_id,
+                        item_id=item_id,
+                        event_name=label_lower,
+                    )
                     approval_request_id = item_state.get("approval_request_id")
                     if approval_request_id:
                         routed["clear_live_approval_ids"] = [approval_request_id]
@@ -3017,6 +3180,13 @@ class CodexEventRouter:
                 primary_path = paths[0] if paths else item_state.get("path")
                 diff_value = item_state.get("diff")
                 diff_text = diff_value if isinstance(diff_value, str) else None
+                if not diff_text:
+                    diff_text = _diff_text_from_changes_with_headers(changes)
+                    extracted_path = None
+                    if not diff_text:
+                        diff_text, extracted_path = _extract_diff_with_path({"changes": changes, "path": primary_path})
+                    if extracted_path and not primary_path:
+                        primary_path = extracted_path
                 new_file = bool(item_state.get("new_file")) or _diff_is_new_file(diff_text)
                 is_error = status in {"failed", "declined", "error"}
                 arguments = {
@@ -3064,11 +3234,22 @@ class CodexEventRouter:
                         "event": label_lower,
                     }],
                 }
+                if item_state.get("patch_updated_seen"):
+                    self._emit_filechange_diff_entries(
+                        routed,
+                        changes=changes,
+                        diff_text=diff_text,
+                        path=primary_path if isinstance(primary_path, str) else None,
+                        thread_id=effective_thread_id,
+                        turn_id=effective_turn_id,
+                        item_id=item_id,
+                        event_name=label_lower,
+                    )
                 approval_request_id = item_state.get("approval_request_id")
                 if approval_request_id:
                     routed["clear_live_approval_ids"] = [approval_request_id]
                     self._approval_request_map.pop(str(item_id), None)
-                return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
+                return self._decorate_routed_result(routed, thread_id=effective_thread_id, item_state=item_state)
 
             if item_type in {"mcptoolcall", "websearch", "imageview"}:
                 tool_name = _string_value(item.get("tool"), _string_value(item_state.get("tool"), item_type))
@@ -3346,11 +3527,17 @@ class CodexEventRouter:
                 "changes": payload.get("changes") or item_state.get("changes"),
                 "path": payload.get("path") or item_state.get("path"),
             })
+            changes = payload.get("changes") or item_state.get("changes")
+            headered_diff = _diff_text_from_changes_with_headers(changes)
+            paths = _paths_from_changes(changes)
+            if headered_diff:
+                diff_text = headered_diff
             payload_data = {
                 "diff": diff_text,
-                "changes": payload.get("changes") or item_state.get("changes"),
+                "changes": changes,
+                "paths": paths,
                 "reason": payload.get("reason"),
-                "path": path or item_state.get("path"),
+                "path": (path or item_state.get("path")) if len(paths) <= 1 else None,
                 "grant_root": payload.get("grantRoot"),
             }
             return self._decorate_routed_result(self._tool_request_result(

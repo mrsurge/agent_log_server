@@ -56,6 +56,20 @@ LIVE_SESSION_UNLOAD_METHOD = "unload_live_session"
 DEVINS_CONTEXT_SETTINGS_KEY = "__als_devins_context__"
 
 
+class _FrameworkShellRecord(Protocol):
+    id: str
+    status: str
+    spec_id: str | None
+    app_id: str | None
+    subgroups: Sequence[str] | None
+
+
+class _FrameworkShellManager(Protocol):
+    async def list_shells(self) -> list[_FrameworkShellRecord]: ...
+
+    async def terminate_shell(self, shell_id: str, force: bool = False) -> object: ...
+
+
 async def _get_framework_shell_manager() -> object:
     module = importlib.import_module("framework_shells")
     get_manager = getattr(module, "get_manager", None)
@@ -111,6 +125,38 @@ def _framework_shell_env_probe() -> JsonMap:
         else:
             snapshot[key] = {"present": bool(value), "value": value or None}
     return snapshot
+
+
+def _shellspec_id_from_extension_info(info: JsonMap) -> str | None:
+    manifest = optional_map(info.get("manifest")) or {}
+    agent = optional_map(manifest.get("agent")) or {}
+    shellspec = optional_string(agent.get("shellspec"))
+    if not shellspec:
+        return None
+    _, marker, spec_id = shellspec.rpartition("#")
+    if marker != "#":
+        return None
+    normalized = spec_id.strip()
+    return normalized or None
+
+
+def _shell_record_subgroups(record: _FrameworkShellRecord) -> set[str]:
+    raw_subgroups = getattr(record, "subgroups", None)
+    if not isinstance(raw_subgroups, (list, tuple, set)):
+        return set()
+    return {
+        value.strip()
+        for value in cast(Sequence[object], raw_subgroups)
+        if isinstance(value, str) and value.strip()
+    }
+
+
+def _shell_record_matches_current_app(record: _FrameworkShellRecord) -> bool:
+    expected_app_id = optional_string(os.environ.get("TE_APP_ID"))
+    if not expected_app_id:
+        return True
+    record_app_id = optional_string(getattr(record, "app_id", None))
+    return record_app_id == expected_app_id or expected_app_id in _shell_record_subgroups(record)
 
 
 async def _framework_shell_manager_probe(ensure_manager: bool) -> JsonMap:
@@ -388,6 +434,8 @@ class ExtensionLoaderModule(Protocol):
         settings: JsonMap | None = None,
     ) -> JsonMap: ...
 
+    async def read_plan(self, extension_id: str, conversation_id: str) -> JsonMap: ...
+
     async def interrupt_session(self, extension_id: str, conversation_id: str) -> JsonMap: ...
 
 
@@ -494,6 +542,8 @@ class ExtensionJsonRpcAdapter:
             return await self._splash_schema(params)
         if method == AdapterMethod.EXTENSION_GET_RUNTIME_OPTIONS:
             return await self._runtime_options(params)
+        if method == AdapterMethod.EXTENSION_GET_PLAN:
+            return await self._read_plan(params)
         if method == AdapterMethod.EXTENSION_LIST_MODELS:
             return await self._list_models(params)
         if method == AdapterMethod.EXTENSION_LIST_SESSIONS:
@@ -572,6 +622,8 @@ class ExtensionJsonRpcAdapter:
         self._ensure_loader_initialized()
         force = params.get("force") is True
         changed_extension_ids = string_list(params.get("changed_extension_ids"))
+        await self._stop_reload_targets(changed_extension_ids, force=force)
+        await self._stop_reload_target_shells(changed_extension_ids)
         self._loader.reload_extensions(changed_extension_ids, force=force)
         self._apply_enabled_overrides(params.get("enabled_overrides"))
         extensions = await self._refresh_dependency_state()
@@ -981,6 +1033,25 @@ class ExtensionJsonRpcAdapter:
         )
         return dict(result)
 
+    async def _read_plan(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        info = self._extension_info(extension_id)
+        conversation_id = required_string(params, "conversation_id")
+        result = await self._loader.read_plan(extension_id, conversation_id)
+        result_map = optional_map(result)
+        if result_map is not None:
+            return _dict_result_with_defaults(result_map, extension_id, conversation_id, params)
+        return {
+            "extension_id": extension_id,
+            "conversation_id": conversation_id,
+            "has_plan": bool(info.get("has_plan")),
+            "has_todo": bool(info.get("has_todo")),
+            "plan_exists": False,
+            "plan_content": "",
+            "plan_steps": [],
+            "supported": True,
+        }
+
     async def _conversation_start(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
         handler = self._supported_handler(extension_id)
@@ -1262,6 +1333,75 @@ class ExtensionJsonRpcAdapter:
                 result = stop_client()
                 if hasattr(result, "__await__"):
                     await cast(Awaitable[object], result)
+
+    async def _stop_reload_targets(self, changed_extension_ids: list[str], *, force: bool) -> None:
+        if force and not changed_extension_ids:
+            await self.stop_supported_handlers()
+            return
+        if not changed_extension_ids:
+            return
+
+        affected_types: set[str] = set()
+        for extension_id in changed_extension_ids:
+            info = optional_map(self._loader.get_extension_info(extension_id))
+            extension_type = optional_string(info.get("type")) if info is not None else None
+            if extension_type:
+                affected_types.add(extension_type)
+        if not affected_types:
+            return
+
+        stopped_types: set[str] = set()
+        for extension in self._loader.list_extensions():
+            extension_id = optional_string(extension.get("id"))
+            if not extension_id:
+                continue
+            extension_type = optional_string(extension.get("type"))
+            if not extension_type or extension_type not in affected_types or extension_type in stopped_types:
+                continue
+            handler = self._loader.get_handler(extension_id)
+            stop_client = None
+            if handler is not None:
+                stop_client = getattr(handler, "stop_client", None) or getattr(
+                    handler,
+                    "shutdown_client",
+                    None,
+                )
+            if callable(stop_client):
+                result = stop_client()
+                if hasattr(result, "__await__"):
+                    await cast(Awaitable[object], result)
+            stopped_types.add(extension_type)
+
+    async def _stop_reload_target_shells(self, changed_extension_ids: list[str]) -> None:
+        if not changed_extension_ids:
+            return
+
+        target_spec_ids: set[str] = set()
+        for extension_id in changed_extension_ids:
+            info = optional_map(self._loader.get_extension_info(extension_id))
+            if info is None:
+                continue
+            spec_id = _shellspec_id_from_extension_info(info)
+            if spec_id:
+                target_spec_ids.add(spec_id)
+        if not target_spec_ids:
+            return
+
+        mgr = cast(_FrameworkShellManager, await _get_framework_shell_manager())
+        records = await mgr.list_shells()
+        terminated_shell_ids: set[str] = set()
+        for record in records:
+            shell_id = optional_string(getattr(record, "id", None))
+            if not shell_id or shell_id in terminated_shell_ids:
+                continue
+            if optional_string(getattr(record, "status", None)) != "running":
+                continue
+            if optional_string(getattr(record, "spec_id", None)) not in target_spec_ids:
+                continue
+            if not _shell_record_matches_current_app(record):
+                continue
+            await mgr.terminate_shell(shell_id, force=True)
+            terminated_shell_ids.add(shell_id)
 
     async def _broadcast(self, payload: JsonMap) -> None:
         await self._send_notification(AdapterEventMethod.LIVE_EVENT, payload)

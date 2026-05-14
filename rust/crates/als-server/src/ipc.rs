@@ -56,7 +56,9 @@ pub fn register_ipc_namespace(io: &SocketIo) {
             state.ipc_clients.insert(sid.clone());
             socket.on("ask_user_ack", handle_ask_user_ack);
             socket.on_disconnect(
-                async |socket: SocketRef, State(state): State<AppState>, _reason: DisconnectReason| {
+                async |socket: SocketRef,
+                       State(state): State<AppState>,
+                       _reason: DisconnectReason| {
                     state.ipc_clients.remove(&socket.id.to_string());
                 },
             );
@@ -64,7 +66,11 @@ pub fn register_ipc_namespace(io: &SocketIo) {
     );
 }
 
-pub async fn emit_ask_user_response(io: &SocketIo, request_id: &str, response: &Map<String, Value>) {
+pub async fn emit_ask_user_response(
+    io: &SocketIo,
+    request_id: &str,
+    response: &Map<String, Value>,
+) {
     emit_ipc_event(
         io,
         "ask_user_response",
@@ -172,7 +178,8 @@ fn load_or_create_ipc_secret() -> Result<String> {
 }
 
 fn ipc_secret_path() -> Result<PathBuf> {
-    let home = env::var_os("HOME").ok_or_else(|| anyhow!("HOME is required for IPC secret path"))?;
+    let home =
+        env::var_os("HOME").ok_or_else(|| anyhow!("HOME is required for IPC secret path"))?;
     Ok(PathBuf::from(home)
         .join(".cache")
         .join("app_server")

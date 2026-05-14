@@ -366,13 +366,8 @@ export function bindToolRender(ctx: ToolRenderContext) {
 
   function resolveToolCardDiff(toolName: string, payload: ToolPayload = {}): string {
     if (toolName !== 'apply_patch' || !payload || typeof payload !== 'object') return '';
-    if (typeof payload.diff === 'string' && payload.diff.trim()) {
-      return payload.diff;
-    }
-    const output = typeof payload.output === 'string' ? payload.output : '';
-    if (/^(?:diff --git |@@ |\+\+\+ |--- )/m.test(output)) {
-      return output;
-    }
+    // apply_patch diffs render as standalone diff cards; the embedded payload is
+    // provider-oriented and can collapse multi-file patches under one path.
     return '';
   }
 

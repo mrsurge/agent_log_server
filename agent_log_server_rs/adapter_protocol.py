@@ -29,6 +29,7 @@ class AdapterMethod(StrEnum):
     EXTENSION_GET_SETTINGS_SCHEMA = "extension.get_settings_schema"
     EXTENSION_GET_SPLASH_SCHEMA = "extension.get_splash_schema"
     EXTENSION_GET_RUNTIME_OPTIONS = "extension.get_runtime_options"
+    EXTENSION_GET_PLAN = "extension.get_plan"
     EXTENSION_LIST_MODELS = "extension.list_models"
     EXTENSION_LIST_SESSIONS = "extension.list_sessions"
     EXTENSION_SESSION_STATE_GET = "extension.session.state.get"

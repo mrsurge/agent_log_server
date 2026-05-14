@@ -49,7 +49,7 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
             let extensions = state.extensions.reload().map_err(internal_rpc_error)?;
             let adapter = state
                 .adapter
-                .reload_extensions_if_running(state.extensions.enabled_overrides(), None)
+                .reload_extensions_if_running(state.extensions.enabled_overrides(), None, None)
                 .await
                 .map_err(internal_rpc_error)?;
             let extensions = adapter
@@ -116,16 +116,7 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
                 .unwrap_or_else(default_ui_features);
             Ok(json!({"ui_features": ui_features, "transport": "rpc"}))
         }
-        "extension.plan.get" => Ok(json!({
-            "has_plan": false,
-            "plan_exists": false,
-            "plan_content": "",
-            "plan_path": Value::Null,
-            "plan_source": Value::Null,
-            "has_todo": false,
-            "plan_steps": [],
-            "transport": "rpc"
-        })),
+        "extension.plan.get" => extension_plan(state, &request.params).await,
         "extension.models.list" => extension_models(state, &request.params).await,
         "extension.sessions.list" => extension_sessions(state, &request.params).await,
         "extension.session.state.get" => extension_session_state(state, &request.params).await,
@@ -213,6 +204,7 @@ async fn extension_enabled_set(state: &AppState, params: &JsonMap) -> Result<Val
         .adapter
         .reload_extensions_if_running(
             state.extensions.enabled_overrides(),
+            Some(vec![extension_id.clone()]),
             enabled.then(|| extension_id.clone()),
         )
         .await
@@ -511,6 +503,56 @@ async fn extension_runtime_options(state: &AppState, params: &JsonMap) -> Result
     }))
 }
 
+async fn extension_plan(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let request = plan_request(state, params)?;
+    ensure_registered_extension(state, &request.extension_id)?;
+    let mut result = adapter_extension_request_with_params(
+        state,
+        methods::EXTENSION_GET_PLAN,
+        request.to_adapter_params(),
+    )
+    .await?;
+    if let Value::Object(ref mut object) = result {
+        object
+            .entry("extension_id")
+            .or_insert_with(|| Value::String(request.extension_id.clone()));
+        object
+            .entry("conversation_id")
+            .or_insert_with(|| Value::String(request.conversation_id.clone()));
+        object
+            .entry("has_plan")
+            .or_insert_with(|| Value::Bool(false));
+        object
+            .entry("plan_exists")
+            .or_insert_with(|| Value::Bool(false));
+        object
+            .entry("plan_content")
+            .or_insert_with(|| Value::String(String::new()));
+        object.entry("plan_path").or_insert(Value::Null);
+        object.entry("plan_source").or_insert(Value::Null);
+        object
+            .entry("has_todo")
+            .or_insert_with(|| Value::Bool(false));
+        object
+            .entry("plan_steps")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        return Ok(result);
+    }
+    Ok(json!({
+        "extension_id": request.extension_id,
+        "conversation_id": request.conversation_id,
+        "has_plan": false,
+        "plan_exists": false,
+        "plan_content": "",
+        "plan_path": Value::Null,
+        "plan_source": Value::Null,
+        "has_todo": false,
+        "plan_steps": [],
+        "transport": "rpc"
+    }))
+}
+
 struct LiveSessionRequest {
     extension_id: String,
     conversation_id: String,
@@ -709,6 +751,65 @@ fn runtime_options_request(
     })
 }
 
+struct PlanRequest {
+    extension_id: String,
+    conversation_id: String,
+}
+
+impl PlanRequest {
+    fn to_adapter_params(&self) -> JsonMap {
+        let mut params = JsonMap::new();
+        params.insert(
+            "extension_id".to_owned(),
+            Value::String(self.extension_id.clone()),
+        );
+        params.insert(
+            "conversation_id".to_owned(),
+            Value::String(self.conversation_id.clone()),
+        );
+        params
+    }
+}
+
+fn plan_request(state: &AppState, params: &JsonMap) -> Result<PlanRequest, RpcError> {
+    let selection = state.ui_selection.snapshot().map_err(internal_rpc_error)?;
+    let conversation_id = params
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or(selection.active_conversation_id)
+        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
+    let meta = state
+        .conversations
+        .load_meta_if_exists(&conversation_id)
+        .map_err(internal_rpc_error)?
+        .ok_or_else(|| rpc_error(-32602, format!("Conversation not found: {conversation_id}")))?;
+    let extension_id = extension_id_param(params)
+        .or_else(|| {
+            meta.extension_id
+                .as_deref()
+                .or(meta.agent_type.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            meta.settings
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .ok_or_else(|| rpc_error(-32602, "extension_id or conversation extension is required"))?;
+    Ok(PlanRequest {
+        extension_id,
+        conversation_id,
+    })
+}
+
 async fn adapter_extension_request(
     state: &AppState,
     extension_id: &str,
@@ -786,10 +887,21 @@ async fn finalize_package_mutation(
         .unwrap_or(false);
     let mut dependency_install: Option<Value> = None;
     if ok {
+        let changed_extension_id = package_result_extension_id(&result, params);
         state.extensions.reload().map_err(internal_rpc_error)?;
+        let wait_ready_extension_id = changed_extension_id
+            .as_ref()
+            .filter(|extension_id| state.extensions.get(extension_id).is_some())
+            .cloned();
         let adapter = state
             .adapter
-            .reload_extensions_if_running(state.extensions.enabled_overrides(), None)
+            .reload_extensions_if_running(
+                state.extensions.enabled_overrides(),
+                changed_extension_id
+                    .clone()
+                    .map(|extension_id| vec![extension_id]),
+                wait_ready_extension_id,
+            )
             .await
             .map_err(internal_rpc_error)?;
         if let Some(adapter) = adapter.as_ref() {

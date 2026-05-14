@@ -101,6 +101,7 @@ impl AdapterSupervisor {
     pub async fn reload_extensions_if_running(
         &self,
         enabled_overrides: JsonMap,
+        changed_extension_ids: Option<Vec<String>>,
         wait_ready_extension_id: Option<String>,
     ) -> Result<Option<Value>> {
         let client = self.client.lock().await.clone();
@@ -111,6 +112,21 @@ impl AdapterSupervisor {
             "force": true,
             "enabled_overrides": enabled_overrides,
         });
+        if let (Some(changed_extension_ids), Value::Object(object)) =
+            (changed_extension_ids, &mut params)
+        {
+            let changed_extension_ids = changed_extension_ids
+                .into_iter()
+                .filter(|value| !value.trim().is_empty())
+                .map(Value::String)
+                .collect::<Vec<_>>();
+            if !changed_extension_ids.is_empty() {
+                object.insert(
+                    "changed_extension_ids".to_owned(),
+                    Value::Array(changed_extension_ids),
+                );
+            }
+        }
         if let (Some(extension_id), Value::Object(object)) = (wait_ready_extension_id, &mut params)
         {
             object.insert(

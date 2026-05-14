@@ -20,6 +20,7 @@ pub mod methods {
     pub const EXTENSION_GET_SETTINGS_SCHEMA: &str = "extension.get_settings_schema";
     pub const EXTENSION_GET_SPLASH_SCHEMA: &str = "extension.get_splash_schema";
     pub const EXTENSION_GET_RUNTIME_OPTIONS: &str = "extension.get_runtime_options";
+    pub const EXTENSION_GET_PLAN: &str = "extension.get_plan";
     pub const EXTENSION_LIST_MODELS: &str = "extension.list_models";
     pub const EXTENSION_LIST_SESSIONS: &str = "extension.list_sessions";
     pub const EXTENSION_SESSION_STATE_GET: &str = "extension.session.state.get";
