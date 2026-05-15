@@ -6,7 +6,6 @@ from the installed binary plus the generic extension hook surface.
 """
 
 import asyncio
-import copy
 import contextlib
 import importlib
 import json
@@ -21,9 +20,9 @@ from .plan_utils import normalize_plan_steps, render_plan_markdown
 from .rollout_import import find_rollout_path, preview_entries
 from .runtime_protocol import (
     RuntimeProtocol,
+    build_runtime_option_descriptors,
     build_thread_list_params,
     build_request_params,
-    build_settings_schema,
     build_thread_runtime_signature_payload,
     configure_runtime_protocol,
     get_runtime_protocol,
@@ -329,15 +328,6 @@ def _build_auth_status_message(
     return "OpenAI auth required. Sign in with ChatGPT from splash settings."
 
 
-def _settings_info_tone_from_auth(auth_status: Dict[str, object]) -> str:
-    status = str(auth_status.get("status") or "").strip().lower()
-    if auth_status.get("ok") is False or status == "error":
-        return "error"
-    if status in {"auth_required", "login_pending"}:
-        return "warning"
-    return "success"
-
-
 def _settings_info_tone_from_remaining(remaining_percent: Optional[float]) -> str:
     if remaining_percent is None:
         return "success"
@@ -518,36 +508,6 @@ async def get_usage_info(
     }
 
 
-def _build_information_section_fields(
-    auth_status: Dict[str, object],
-    usage_info: Dict[str, object],
-) -> List[Dict[str, object]]:
-    return [
-        {
-            "id": "information_section",
-            "type": "section",
-            "label": "Information",
-            "description": "Live provider account and usage data.",
-        },
-        {
-            "id": "auth_information",
-            "type": "info",
-            "label": "Account",
-            "text": auth_status.get("message") or "Account status unavailable.",
-            "detail": auth_status.get("detail") or "",
-            "tone": _settings_info_tone_from_auth(auth_status),
-        },
-        {
-            "id": "usage_information",
-            "type": "info",
-            "label": "Usage",
-            "text": usage_info.get("text") or "Usage info unavailable.",
-            "detail": usage_info.get("detail") or "",
-            "tone": usage_info.get("tone") or "warning",
-        },
-    ]
-
-
 def _normalize_auth_status(
     raw: object,
     *,
@@ -676,8 +636,15 @@ async def _resume_thread_for_rpc_server(
     protocol: RuntimeProtocol,
     merged_settings: Dict[str, object],
     meta: Dict[str, object],
+    exclude_turns: bool = False,
 ) -> None:
-    resume_params = build_request_params(protocol, "thread/resume", merged_settings, thread_id=thread_id)
+    resume_params = build_request_params(
+        protocol,
+        "thread/resume",
+        merged_settings,
+        thread_id=thread_id,
+        exclude_turns=exclude_turns,
+    )
     await transport.rpc_request(
         "thread/resume",
         params=resume_params,
@@ -1032,16 +999,34 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
 
 
 async def get_settings_schema(extension_id: str) -> Dict[str, object]:
-    protocol = await get_runtime_protocol()
-    schema = copy.deepcopy(build_settings_schema(protocol, extension_id))
-    auth_status = await get_auth_status(extension_id, refresh=False)
-    usage_info = await get_usage_info(extension_id, auth_status=auth_status)
-    fields = schema.get("fields")
-    schema["fields"] = _build_information_section_fields(auth_status, usage_info) + (
-        list(fields) if _is_object_list(fields) else []
-    )
+    del extension_id
+    schema_path = Path(__file__).with_name("settings_schema.json")
+    with schema_path.open("r", encoding="utf-8") as handle:
+        loaded = cast(object, json.load(handle))
+    if isinstance(loaded, dict):
+        schema: Dict[str, object] = {
+            str(key): value
+            for key, value in cast(Mapping[object, object], loaded).items()
+        }
+    else:
+        schema = {"version": "1", "fields": []}
     schema["cache"] = "none"
     return schema
+
+
+async def get_runtime_options(
+    extension_id: str,
+    conversation_id: Optional[str] = None,
+    settings: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    protocol = await get_runtime_protocol()
+    merged = _merge_runtime_settings(
+        conversation_id or "",
+        settings=settings,
+    ) if conversation_id else _materialize_runtime_settings(settings or {})
+    result = build_runtime_option_descriptors(protocol, merged)
+    result["agent"] = extension_id
+    return result
 
 
 async def get_request_card_schemas(extension_id: str) -> Dict[str, object]:
@@ -1435,6 +1420,7 @@ async def handle_message(
                     protocol=protocol,
                     merged_settings=merged_settings,
                     meta=meta,
+                    exclude_turns=True,
                 )
                 retry_turn_params = build_request_params(
                     protocol,
@@ -1687,6 +1673,7 @@ async def compact_session(conversation_id: str) -> Dict[str, object]:
                 protocol=protocol,
                 merged_settings=merged_settings,
                 meta=meta,
+                exclude_turns=True,
             )
             _add_to_raw_buffer("out", conversation_id, f"compact_resume thread={thread_id[:8]}")
             params = build_request_params(protocol, "thread/compact/start", {}, thread_id=thread_id)

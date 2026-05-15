@@ -13,7 +13,6 @@ Key advantages:
 import asyncio
 import contextlib
 import importlib
-import inspect
 import json
 import os
 import shutil
@@ -270,12 +269,6 @@ class RuntimeOptionDescriptor(TypedDict):
     options: list[dict[str, str]]
     current: str
     default: str
-
-
-class QuotaInfo(TypedDict):
-    text: str
-    detail: str
-    tone: str
 
 
 class PendingRequestSpec(TypedDict, total=False):
@@ -2088,135 +2081,6 @@ def _load_settings_schema_template() -> PayloadDict:
     return _object_mapping(loaded) or {}
 
 
-def _format_settings_datetime(value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
-        return ""
-    text = value.strip()
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return text
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
-
-
-def _quota_info_unavailable(
-    message: str,
-    *,
-    tone: str = "warning",
-    detail: str = "",
-) -> QuotaInfo:
-    return {
-        "text": message,
-        "detail": detail,
-        "tone": tone,
-    }
-
-
-def _quota_tone_from_remaining(remaining_percentage: Optional[float]) -> str:
-    if remaining_percentage is None:
-        return "success"
-    if remaining_percentage <= 10.0:
-        return "error"
-    if remaining_percentage <= 25.0:
-        return "warning"
-    return "success"
-
-
-def _format_quota_info(raw: object) -> QuotaInfo:
-    payload = _object_mapping(raw) or {}
-    snapshots_raw = payload.get("quota_snapshots")
-    snapshots_map = _object_mapping(snapshots_raw)
-    if snapshots_map is None:
-        snapshots_raw = payload.get("quotaSnapshots")
-        snapshots_map = _object_mapping(snapshots_raw)
-    if not snapshots_map:
-        return _quota_info_unavailable(
-            "Usage info unavailable.",
-            tone="warning",
-            detail="No quota snapshots were returned.",
-        )
-
-    lines: List[str] = []
-    remaining_values: List[float] = []
-    for quota_name, raw_snapshot in sorted(snapshots_map.items()):
-        snapshot = _object_mapping(_json_safe(raw_snapshot))
-        if snapshot is None:
-            continue
-        remaining_percentage = snapshot.get("remaining_percentage")
-        if remaining_percentage is None:
-            remaining_percentage = snapshot.get("remainingPercentage")
-        if isinstance(remaining_percentage, bool) or not isinstance(remaining_percentage, (int, float)):
-            continue
-        remaining = max(0.0, min(100.0, float(remaining_percentage)))
-        remaining_values.append(remaining)
-        label = str(quota_name or "quota").replace("_", " ").title()
-        parts = [f"{label}: {remaining:.0f}% remaining"]
-
-        used_requests = snapshot.get("used_requests")
-        if used_requests is None:
-            used_requests = snapshot.get("usedRequests")
-        entitlement_requests = snapshot.get("entitlement_requests")
-        if entitlement_requests is None:
-            entitlement_requests = snapshot.get("entitlementRequests")
-        if isinstance(used_requests, (int, float)) and not isinstance(used_requests, bool):
-            if isinstance(entitlement_requests, (int, float)) and not isinstance(entitlement_requests, bool) and entitlement_requests > 0:
-                parts.append(f"{float(used_requests):g}/{float(entitlement_requests):g} used")
-            else:
-                parts.append(f"{float(used_requests):g} used")
-
-        overage = snapshot.get("overage")
-        if isinstance(overage, (int, float)) and not isinstance(overage, bool) and float(overage) > 0:
-            parts.append(f"{float(overage):g} overage")
-        if snapshot.get("overage_allowed_with_exhausted_quota") is True or snapshot.get("overageAllowedWithExhaustedQuota") is True:
-            parts.append("overage allowed")
-
-        reset_text = _format_settings_datetime(snapshot.get("reset_date") or snapshot.get("resetDate"))
-        if reset_text:
-            parts.append(f"resets {reset_text}")
-        lines.append("  •  ".join(parts))
-
-    if not lines:
-        return _quota_info_unavailable(
-            "Usage info unavailable.",
-            tone="warning",
-            detail="No usable quota snapshots were returned.",
-        )
-
-    minimum_remaining = min(remaining_values) if remaining_values else None
-    return {
-        "text": (
-            f"Usage remaining: {minimum_remaining:.0f}%"
-            if minimum_remaining is not None
-            else "Usage details available."
-        ),
-        "detail": "\n".join(lines),
-        "tone": _quota_tone_from_remaining(minimum_remaining),
-    }
-
-
-async def _get_quota_info() -> QuotaInfo:
-    try:
-        client = await _ensure_client()
-        rpc = getattr(client, "_rpc", None)
-        account_api = getattr(rpc, "account", None)
-        get_quota = getattr(account_api, "get_quota", None)
-        if not callable(get_quota):
-            return _quota_info_unavailable(
-                "Usage info unavailable in this Copilot SDK build.",
-                tone="warning",
-            )
-        quota_call = get_quota(timeout=15.0)
-        quota_result = await quota_call if inspect.isawaitable(quota_call) else quota_call
-    except Exception as exc:
-        return _quota_info_unavailable(
-            f"Failed to read Copilot usage info: {exc}",
-            tone="error",
-        )
-    return _format_quota_info(_json_safe(quota_result))
-
-
 async def get_runtime_options(
     extension_id: str,
     conversation_id: Optional[str] = None,
@@ -2263,28 +2127,8 @@ async def get_runtime_options(
 
 
 async def get_settings_schema(extension_id: str) -> PayloadDict:
-    schema = _load_settings_schema_template()
-    fields = schema.get("fields")
-    usage_info = await _get_quota_info()
-    schema["fields"] = [
-        {
-            "id": "information_section",
-            "type": "section",
-            "label": "Information",
-            "description": "Live provider usage data from the active Copilot runtime.",
-        },
-        {
-            "id": "usage_information",
-            "type": "info",
-            "label": "Usage",
-            "text": usage_info.get("text") or "Usage info unavailable.",
-            "detail": usage_info.get("detail") or "",
-            "tone": usage_info.get("tone") or "warning",
-        },
-        *cast(list[object], fields if isinstance(fields, list) else []),
-    ]
-    schema["cache"] = "none"
-    return schema
+    del extension_id
+    return _load_settings_schema_template()
 
 
 async def read_plan(extension_id: str, conversation_id: str) -> PayloadDict:
@@ -3610,10 +3454,10 @@ async def resume_session_with_history(
     """
     Bind a Copilot SDK session to a conversation.
 
-    Session picker flow: user picks an existing SDK session for a new internal
-    conversation.  We:
+    Session picker/import flow: user picks an existing SDK session for a new
+    internal conversation with history. We:
       1. Write thread_id into meta (binding).
-      2. Resume the SDK session (so it's live for future messages).
+      2. Resume the SDK session so get_messages() can hydrate history.
     Transcript hydration is handled separately by hydrate_transcript().
     """
     if not _broadcast_fn or not _transcript_fn:
@@ -3678,7 +3522,8 @@ async def hydrate_transcript(
     """
     from ._vendor.copilot.generated.session_events import SessionEventType
 
-    # Ensure session is resumed so we can call get_messages()
+    # History import is explicit: lazy resume never calls get_messages(), but
+    # this new-conversation-with-history flow needs a live session for it.
     session = _sessions.get(conversation_id)
     if not session:
         # Try resuming first

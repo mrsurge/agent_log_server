@@ -294,26 +294,51 @@ def _normalize_runtime_options_list(options_raw: object) -> ObjectList:
 
 def _schema_runtime_option_meta(field: ObjectMap) -> ObjectMap:
     meta: ObjectMap = {}
+    semantic = coerce_object_map(field.get("semantic"))
+    if semantic:
+        role = semantic.get("role")
+        if isinstance(role, str) and role.strip():
+            meta["role"] = role.strip()
+            if role.strip() == "approval_policy":
+                meta.setdefault("kind", "approval")
+                meta.setdefault("footer", True)
+            elif role.strip() == "mode":
+                meta.setdefault("kind", "mode")
+                meta.setdefault("footer", True)
+        runtime_key = semantic.get("runtime_key") or semantic.get("runtimeKey")
+        if isinstance(runtime_key, str) and runtime_key.strip():
+            meta["kind"] = runtime_key.strip()
+        footer_label = semantic.get("label") or semantic.get("footer_label") or semantic.get("footerLabel")
+        if isinstance(footer_label, str) and footer_label.strip():
+            meta["footerLabel"] = footer_label.strip()
+        accents_raw = coerce_object_map(semantic.get("accents"))
+        if accents_raw:
+            semantic_accents: dict[str, str] = {}
+            for key, value in accents_raw.items():
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                semantic_accents[key.strip()] = value.strip()
+            if semantic_accents:
+                meta["accents"] = semantic_accents
     runtime_option = field.get("runtime_option")
     if isinstance(runtime_option, str):
         text = runtime_option.strip()
         if text:
             meta["kind"] = text
-    elif isinstance(runtime_option, dict):
-        kind = runtime_option.get("kind")
+    else:
+        runtime_option_map = coerce_object_map(runtime_option)
+        kind = runtime_option_map.get("kind")
         if isinstance(kind, str) and kind.strip():
             meta["kind"] = kind.strip()
-        if runtime_option.get("footer") is True:
+        if runtime_option_map.get("footer") is True:
             meta["footer"] = True
-        footer_label = runtime_option.get("footer_label")
+        footer_label = runtime_option_map.get("footer_label")
         if isinstance(footer_label, str) and footer_label.strip():
             meta["footerLabel"] = footer_label.strip()
-        accents_raw = runtime_option.get("accents")
-        if isinstance(accents_raw, dict):
+        accents_raw = coerce_object_map(runtime_option_map.get("accents"))
+        if accents_raw:
             accents: dict[str, str] = {}
             for key, value in accents_raw.items():
-                if not isinstance(key, str) or not key.strip():
-                    continue
                 if not isinstance(value, str) or not value.strip():
                     continue
                 accents[key.strip()] = value.strip()
@@ -2273,7 +2298,10 @@ async def list_models(extension_id: str) -> object:
 
 
 async def get_settings_schema(extension_id: str) -> Optional[dict[str, object]]:
-    """Get a dynamic settings schema for an extension when supported."""
+    """Get the file-owned settings schema for an extension, with legacy hook fallback."""
+    static_schema = get_static_settings_schema(extension_id)
+    if isinstance(static_schema, dict) and static_schema:
+        return dict(static_schema)
     get_schema_fn = _callable_attr(get_handler(extension_id), "get_settings_schema")
     if get_schema_fn is not None:
         result = await _invoke_maybe_async(get_schema_fn, extension_id=extension_id)

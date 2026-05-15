@@ -24,6 +24,8 @@ type RuntimeOptionsState = {
   sandbox?: RuntimeSettingDescriptor | null;
 };
 
+const DEFAULT_COMMAND_OUTPUT_LINES = 500;
+
 type ConversationSettingsState = Record<string, unknown> & {
   cwd?: string | null;
 };
@@ -148,7 +150,9 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
       return value == null ? null : value;
     };
 
-    const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || '20', 10);
+    let nextState = getState();
+    const isNewConversation = nextState.pendingNewConversation || !nextState.conversationMeta?.conversation_id;
+    const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || String(DEFAULT_COMMAND_OUTPUT_LINES), 10);
     const viewWrapEnabled = settingsViewWrapEl?.checked === true;
     const mdEnabled = settingsMarkdownEl?.checked !== false;
     const diffSyntaxEnabled = settingsDiffSyntaxEl?.checked === true;
@@ -167,8 +171,22 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
       setActivity(err instanceof Error ? err.message : String(err), true);
       return;
     }
-    const approvalKey = state.runtimeOptions?.approval?.settingKey || 'approvalPolicy';
-    const sandboxKey = state.runtimeOptions?.sandbox?.settingKey || 'sandboxPolicy';
+    const approvalDescriptor = state.runtimeOptions?.approval && typeof state.runtimeOptions.approval === 'object'
+      ? state.runtimeOptions.approval
+      : null;
+    const sandboxDescriptor = state.runtimeOptions?.sandbox && typeof state.runtimeOptions.sandbox === 'object'
+      ? state.runtimeOptions.sandbox
+      : null;
+    const approvalKey = approvalDescriptor
+      ? (typeof approvalDescriptor.settingKey === 'string' && approvalDescriptor.settingKey.trim()
+        ? approvalDescriptor.settingKey.trim()
+        : 'approvalPolicy')
+      : '';
+    const sandboxKey = sandboxDescriptor
+      ? (typeof sandboxDescriptor.settingKey === 'string' && sandboxDescriptor.settingKey.trim()
+        ? sandboxDescriptor.settingKey.trim()
+        : 'sandboxPolicy')
+      : '';
     const schemaManagedKeys = new Set(Object.keys(schemaValues));
     const normalizedSchemaSettings: Record<string, unknown> = Object.fromEntries(
       Object.entries(schemaValues).map(([key, value]) => {
@@ -192,14 +210,18 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
       return;
     }
 
-    const preservedSettings: Record<string, unknown> = { ...(state.conversationSettings || {}) };
+    const preservedSettings: Record<string, unknown> = isNewConversation ? {} : { ...(state.conversationSettings || {}) };
     [
       'cwd',
       'approvalPolicy',
+      'approval_policy',
       'sandboxPolicy',
+      'sandbox_policy',
       'sandbox',
+      'web_policy',
       'model',
       'effort',
+      'reasoning_effort',
       'summary',
       'developer_instructions',
       'label',
@@ -226,7 +248,7 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
       cwd,
       label: normalizeStringSetting(settingsLabelEl?.value),
       alias: normalizeStringSetting(settingsAliasEl?.value),
-      commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : 20,
+      commandOutputLines: Number.isFinite(commandLinesVal) && commandLinesVal > 0 ? commandLinesVal : DEFAULT_COMMAND_OUTPUT_LINES,
       viewWrap: viewWrapEnabled,
       markdown: mdEnabled,
       diffSyntax: diffSyntaxEnabled,
@@ -236,10 +258,10 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
       lineNumbers: state.lineNumbersEnabled === true,
       agent: agentType,
     };
-    if (!schemaManages(approvalKey)) {
+    if (approvalKey && !schemaManages(approvalKey)) {
       settings[approvalKey] = normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null;
     }
-    if (!schemaManages(sandboxKey)) {
+    if (sandboxKey && !schemaManages(sandboxKey)) {
       settings[sandboxKey] = normalizeStringSetting(settingsSandboxEl?.value);
     }
     if (!schemaManages('model')) {
@@ -263,8 +285,6 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
       await ensureTreeSitterRibbonReady();
     }
 
-    let nextState = getState();
-    const isNewConversation = nextState.pendingNewConversation || !nextState.conversationMeta?.conversation_id;
     if (isNewConversation) {
       const meta = await conversationsRpcClient.createConversation();
       if (meta?.conversation_id) {

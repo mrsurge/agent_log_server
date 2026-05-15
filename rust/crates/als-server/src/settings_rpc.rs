@@ -9,6 +9,10 @@ use socketioxide::{
     SocketIo,
     extract::{AckSender, Data, SocketRef, State},
 };
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 const RPC_EVENT: &str = "rpc";
 const JSONRPC_VERSION: &str = "2.0";
@@ -325,7 +329,16 @@ async fn extension_schema(
     kind: SchemaKind,
 ) -> Result<Value, RpcError> {
     let extension_id = require_extension_id(params)?;
-    ensure_registered_extension(state, &extension_id)?;
+    let entry = ensure_registered_extension(state, &extension_id)?;
+    if matches!(kind, SchemaKind::Settings) {
+        if let Some(mut schema) = read_extension_schema_file(&entry, "settings_schema.json")? {
+            if let Value::Object(ref mut object) = schema {
+                object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+                object.insert("schema_source".to_owned(), Value::String("file".to_owned()));
+                return Ok(schema);
+            }
+        }
+    }
     let mut schema = adapter_extension_request(state, &extension_id, adapter_method).await?;
     if let Value::Object(ref mut object) = schema {
         if matches!(kind, SchemaKind::Splash) {
@@ -334,6 +347,9 @@ async fn extension_schema(
                 .or_insert_with(|| Value::String(extension_id.clone()));
         }
         object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        object
+            .entry("schema_source")
+            .or_insert_with(|| Value::String("adapter".to_owned()));
         return Ok(schema);
     }
     match kind {
@@ -342,6 +358,61 @@ async fn extension_schema(
             json!({"version": "1", "extension_id": extension_id, "fields": [], "transport": "rpc"}),
         ),
     }
+}
+
+fn read_extension_schema_file(
+    entry: &ExtensionRegistryEntry,
+    file_name: &str,
+) -> Result<Option<Value>, RpcError> {
+    let Some(path) = extension_root_file_path(entry, file_name) else {
+        return Ok(None);
+    };
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| internal_rpc_error(format!("failed to read {}: {error}", path.display())))?;
+    let parsed: Value = serde_json::from_str(&raw)
+        .map_err(|error| internal_rpc_error(format!("failed to parse {}: {error}", path.display())))?;
+    if parsed.is_object() {
+        Ok(Some(parsed))
+    } else {
+        Err(internal_rpc_error(format!(
+            "{} must contain a JSON object",
+            path.display()
+        )))
+    }
+}
+
+fn extension_root_file_path(entry: &ExtensionRegistryEntry, file_name: &str) -> Option<PathBuf> {
+    let mut path = entry.source_root.clone();
+    for component in Path::new(&entry.path).components() {
+        match component {
+            Component::Normal(part) => {
+                let text = part.to_str()?.trim();
+                if text.is_empty() {
+                    return None;
+                }
+                path.push(text);
+                if fs::symlink_metadata(&path)
+                    .ok()
+                    .is_some_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    return None;
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    path.push(file_name);
+    if fs::symlink_metadata(&path)
+        .ok()
+        .is_some_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return None;
+    }
+    Some(path)
 }
 
 async fn extension_models(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
@@ -954,15 +1025,16 @@ fn require_extension_id(params: &JsonMap) -> Result<String, RpcError> {
     extension_id_param(params).ok_or_else(|| rpc_error(-32602, "extension_id is required"))
 }
 
-fn ensure_registered_extension(state: &AppState, extension_id: &str) -> Result<(), RpcError> {
-    if state.extensions.get(extension_id).is_some() {
-        Ok(())
-    } else {
-        Err(rpc_error(
+fn ensure_registered_extension(
+    state: &AppState,
+    extension_id: &str,
+) -> Result<ExtensionRegistryEntry, RpcError> {
+    state.extensions.get(extension_id).ok_or_else(|| {
+        rpc_error(
             -32602,
             format!("Extension not found: {extension_id}"),
-        ))
-    }
+        )
+    })
 }
 
 fn internal_rpc_error(error: impl std::fmt::Display) -> RpcError {

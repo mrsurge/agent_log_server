@@ -1000,6 +1000,8 @@ Current status:
 
 ### Schema-declared picker/source contract
 
+Canonical contract doc: `worktrees/notes/SCHEMA_SETTINGS_CONTRACT.md`.
+
 The settings schema is the authority for dynamic settings UI behavior. Each
 dynamic field must answer three questions without requiring ALS-RS or the shared
 frontend to know provider-specific payload shapes:
@@ -1017,6 +1019,12 @@ frontend to know provider-specific payload shapes:
      defaults, and any item identity fields. The renderer follows those paths
      instead of hardcoding provider metadata normalization.
 
+Schema ownership is file-first. ALS-RS should read
+`settings_schema.json` from the registered extension source root/path before
+consulting any compatibility Python hook. Extension Python remains responsible
+for provider-native request translation and dynamic data sources, but the schema
+file is the contract that translates user intent into extension settings.
+
 This is the same rule used by the dynamic reasoning-effort fix:
 `dynamic_options_from` tells the shared renderer which model/source field to
 watch, which extension-facing method output to inspect, and where options and
@@ -1024,6 +1032,13 @@ defaults live in that response. The session/rollout picker should follow the
 same pattern. Codex should expose its normalized extension-facing registry
 methods/schema declarations; Copilot can use official SDK-backed methods, but
 still describes them through the same schema/source/path contract.
+
+Shared conversation controls are also schema/extension-declared semantics, not
+hardcoded field names. In particular, the footer corresponds to an extension's
+approval policy and mode for the active conversation. The schema or runtime
+descriptor should declare "this field is the approval policy" or "this field is
+the mode"; ALS-RS and the shared UI can then render those semantic controls in
+the footer without requiring a separate "footer" placement flag.
 
 Provider session/rollout selection is a local conversation creation mode, not a
 fresh provider-start mode:

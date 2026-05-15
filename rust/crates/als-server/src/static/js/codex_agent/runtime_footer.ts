@@ -127,17 +127,18 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
           .filter(Boolean)
       : [];
     if (configured.length) return configured;
-    return normalizeRuntimeOptionDescriptor('approval') ? ['approval'] : [];
+    return ['approval', 'mode'].filter((kind) => Boolean(normalizeRuntimeOptionDescriptor(kind)));
   }
 
   function getFooterSlotKinds(): string[] {
     const configured = new Set(getQuickControlKinds());
     const kinds: string[] = [];
-    const approvalDescriptor = normalizeRuntimeOptionDescriptor('approval');
-    if (configured.has('approval') || approvalDescriptor?.options?.length) {
-      kinds.push('approval');
+    for (const kind of ['approval', 'mode']) {
+      const descriptor = normalizeRuntimeOptionDescriptor(kind);
+      if (configured.has(kind) || descriptor?.options?.length) {
+        kinds.push(kind);
+      }
     }
-    kinds.push('mode');
     return kinds;
   }
 
@@ -197,13 +198,6 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
     kinds.forEach((kind: string) => {
       const descriptor = normalizeRuntimeOptionDescriptor(kind);
       if (!descriptor || !descriptor.options.length) {
-        if (kind === 'mode') {
-          const placeholder = document.createElement('div');
-          placeholder.className = 'status-pill footer-cell footer-runtime-cell footer-runtime-empty';
-          placeholder.dataset.runtimeKind = kind;
-          placeholder.setAttribute('aria-hidden', 'true');
-          footerRuntimeControlsEl.appendChild(placeholder);
-        }
         return;
       }
       const fallbackKey = descriptor.settingKey || kind;

@@ -29,6 +29,7 @@ interface HostUiState {
 interface RouterState {
   clientConversationId?: string | null;
   conversationMeta?: ConversationMetaState | null;
+  conversationSettings?: JsonObject | null;
   hostUi?: HostUiState | null;
   activeView?: string;
   splashTab?: string;
@@ -370,7 +371,11 @@ export function bindEventRouter(ctx: EventRouterContext) {
     const activeConversationId = state.clientConversationId || currentMeta?.conversation_id || null;
     const nextState: Partial<RouterState> = { conversationList: nextList };
     if (currentMeta?.conversation_id === conversationId) {
-      nextState.conversationMeta = { ...currentMeta, ...patch };
+      const nextMeta = { ...currentMeta, ...patch };
+      nextState.conversationMeta = nextMeta;
+      if (nextMeta.settings && typeof nextMeta.settings === 'object' && !Array.isArray(nextMeta.settings)) {
+        nextState.conversationSettings = { ...(nextMeta.settings as JsonObject) };
+      }
     }
     setState(nextState);
     renderConversationList(nextList, activeConversationId);

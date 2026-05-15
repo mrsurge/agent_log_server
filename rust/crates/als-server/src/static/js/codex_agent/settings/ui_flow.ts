@@ -39,6 +39,8 @@ type RuntimeOptionsState = {
   [key: string]: unknown;
 };
 
+const DEFAULT_COMMAND_OUTPUT_LINES = '500';
+
 type ConversationSettings = {
   cwd?: string;
   agent?: string;
@@ -433,6 +435,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       }
     } else {
       updateDropdownOptions(settingsApprovalOptions, [], settingsApprovalEl);
+      if (settingsApprovalEl) settingsApprovalEl.value = '';
     }
     if (sandbox) {
       updateDropdownOptions(settingsSandboxOptions, sandbox.options, settingsSandboxEl);
@@ -445,6 +448,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       }
     } else {
       updateDropdownOptions(settingsSandboxOptions, [], settingsSandboxEl);
+      if (settingsSandboxEl) settingsSandboxEl.value = '';
     }
   }
 
@@ -486,7 +490,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       if (settingsDeveloperInstructionsEl) settingsDeveloperInstructionsEl.value = '';
       if (settingsLabelEl) settingsLabelEl.value = '';
       if (settingsAliasEl) settingsAliasEl.value = '';
-      if (settingsCommandLinesEl) settingsCommandLinesEl.value = '20';
+      if (settingsCommandLinesEl) settingsCommandLinesEl.value = DEFAULT_COMMAND_OUTPUT_LINES;
       if (settingsViewWrapEl) settingsViewWrapEl.checked = false;
       if (settingsMarkdownEl) settingsMarkdownEl.checked = true;
       if (settingsRolloutEl) settingsRolloutEl.value = state.pendingRollout?.id || '';
@@ -504,7 +508,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       if (settingsDeveloperInstructionsEl) settingsDeveloperInstructionsEl.value = state.conversationSettings?.developer_instructions || '';
       if (settingsLabelEl) settingsLabelEl.value = state.conversationSettings?.label || '';
       if (settingsAliasEl) settingsAliasEl.value = state.conversationSettings?.alias || '';
-      if (settingsCommandLinesEl) settingsCommandLinesEl.value = state.conversationSettings?.commandOutputLines || '20';
+      if (settingsCommandLinesEl) settingsCommandLinesEl.value = String(state.conversationSettings?.commandOutputLines || DEFAULT_COMMAND_OUTPUT_LINES);
       if (settingsViewWrapEl) settingsViewWrapEl.checked = state.conversationSettings?.viewWrap === true;
       if (settingsMarkdownEl) settingsMarkdownEl.checked = state.conversationSettings?.markdown !== false;
       if (settingsDiffSyntaxEl) settingsDiffSyntaxEl.checked = state.conversationSettings?.diffSyntax === true;

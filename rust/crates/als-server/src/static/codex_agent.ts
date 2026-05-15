@@ -1758,6 +1758,8 @@ document.addEventListener('DOMContentLoaded', () => {
         conversationListRevision = Number(patch.conversationListRevision || 0);
       }
       if (patch.conversationPreviewCache !== undefined) conversationPreviewCache = patch.conversationPreviewCache as ConversationPreviewCache;
+      if (patch.conversationMeta !== undefined) conversationMeta = patch.conversationMeta as RootConversationMeta;
+      if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings as RootConversationSettings;
       if (patch.appConfig !== undefined) appConfig = patch.appConfig as RootAppConfig;
       if (patch.contextWindow !== undefined) contextWindow = patch.contextWindow;
       if (patch.lastDraftHash !== undefined) lastDraftHash = patch.lastDraftHash;

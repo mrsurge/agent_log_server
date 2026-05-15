@@ -150,7 +150,7 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     const settings = typeof getConversationSettings === 'function' ? getConversationSettings() : null;
     const raw = settings?.commandOutputLines;
     const parsed = Number(raw);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 500;
   }
 
   function mountRow(row: HTMLElement, parentEl: HTMLElement | null = null, evt: TranscriptEvent | null = null): void {

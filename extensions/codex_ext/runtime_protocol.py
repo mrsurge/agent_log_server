@@ -1492,6 +1492,7 @@ def build_request_params(
     turn_id: Optional[str] = None,
     text: Optional[str] = None,
     force_te2_config: bool = False,
+    exclude_turns: bool = False,
 ) -> SchemaDict:
     schema = protocol.request_schema(method)
     if not _is_schema_dict(schema):
@@ -1511,6 +1512,8 @@ def build_request_params(
         if text is None:
             raise RuntimeError(f"{method} requires text input")
         params["input"] = [{"type": "text", "text": text}]
+    if exclude_turns and "excludeTurns" in props:
+        params["excludeTurns"] = True
 
     normalized_settings = dict(settings)
     high_context_400k = normalized_settings.get("high_context_400k") in (True, "true")
@@ -1740,6 +1743,55 @@ def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> Schem
     }
     protocol.settings_cache[extension_id] = schema
     return schema
+
+
+def build_runtime_option_descriptors(
+    protocol: RuntimeProtocol,
+    settings: SchemaDict,
+) -> SchemaDict:
+    thread_start = protocol.request_schema("thread/start") or {}
+    turn_start = protocol.request_schema("turn/start") or {}
+    thread_props = _schema_properties(thread_start)
+    turn_props = _schema_properties(turn_start)
+    approval_options = _schema_options(_schema_string_enums(thread_props.get("approvalPolicy", {}), protocol.definitions))
+    sandbox_options = _schema_options(_schema_string_enums(thread_props.get("sandbox", {}), protocol.definitions))
+    collaboration_ref = turn_props.get("collaborationMode")
+    if not _is_schema_dict(collaboration_ref) and _is_schema_dict(protocol.definitions.get("CollaborationMode")):
+        collaboration_ref = {"$ref": "#/definitions/CollaborationMode"}
+    collaboration_schema = _resolve_schema(collaboration_ref or {}, protocol.definitions)
+    collaboration_props = _schema_properties(collaboration_schema)
+    mode_options = _schema_options(_schema_string_enums(collaboration_props.get("mode", {}), protocol.definitions))
+
+    approval_value = settings.get("approvalPolicy")
+    sandbox_value = settings.get("sandboxPolicy") or settings.get("sandbox")
+    mode_value = settings.get("mode")
+    return {
+        "approval": {
+            "settingKey": "approvalPolicy",
+            "label": "Approval Policy",
+            "options": approval_options,
+            "current": approval_value if isinstance(approval_value, str) else "",
+            "default": "",
+        },
+        "sandbox": {
+            "settingKey": "sandboxPolicy",
+            "label": "Sandbox Policy",
+            "options": sandbox_options,
+            "current": sandbox_value if isinstance(sandbox_value, str) else "",
+            "default": "",
+        },
+        "mode": {
+            "settingKey": "mode",
+            "label": "Mode",
+            "options": mode_options,
+            "current": mode_value if isinstance(mode_value, str) else "",
+            "default": "",
+            "accents": {
+                "plan": "ok",
+                "default": "warn",
+            },
+        },
+    }
 
 
 async def get_runtime_protocol() -> RuntimeProtocol:
