@@ -22,8 +22,6 @@ import socketio
 
 from als_deprecated.markdown_sections import SectionNode, normalize_heading as _normalize_heading, parse_markdown
 from als_deprecated.ipc_auth import load_or_create_ipc_secret
-from als_deprecated.prompt_context import REPO_MEMORY_FILENAME
-from als_deprecated.repo_memory_delta import build_repo_memory_delta
 from als_deprecated.socketio_config import socketio_client_kwargs
 from als_deprecated import conversation_todos as _conv_todos
 from als_deprecated.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
@@ -285,42 +283,6 @@ async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
         return client
 
 
-async def _notify_repo_memory_ipc(path: Path, old_text: str, new_text: str) -> Optional[str]:
-    if path.name != REPO_MEMORY_FILENAME:
-        return None
-
-    previous_content = old_text.strip()
-    current_content = new_text.strip()
-    update_ts = time.time()
-    delta_content = build_repo_memory_delta(
-        previous_content,
-        current_content,
-        source_path=str(path),
-        ts=update_ts,
-    )
-    payload = {
-        "source_path": str(path),
-        "previous_content": previous_content,
-        "current_content": current_content,
-        "delta_content": delta_content or "",
-        "ts": update_ts,
-    }
-    client = await _get_appserver_ipc_sio()
-    ack = await client.call(
-        "repo_memory_delta",
-        payload,
-        namespace=_APPSERVER_IPC_NAMESPACE,
-        timeout=10,
-    )
-    if not isinstance(ack, dict) or not ack.get("ok"):
-        detail = ack.get("error") if isinstance(ack, dict) else ack
-        raise RuntimeError(f"repo_memory_delta IPC failed: {detail}")
-    return (
-        f"[kb_ipc: OK  queued: {int(ack.get('queued') or 0)}"
-        f"  mode: {ack.get('mode') or '-'}  hash: {ack.get('content_hash') or '-'}]"
-    )
-
-
 async def _notify_conversation_todo_ipc(conversation_id: str) -> None:
     cid = str(conversation_id or "").strip()
     if not cid:
@@ -337,12 +299,8 @@ async def _notify_conversation_todo_ipc(conversation_id: str) -> None:
         raise RuntimeError(f"conversation_todo_changed IPC failed: {detail}")
 
 
-def _render_kb_result(header: str, diff: str, ipc_note: Optional[str] = None) -> str:
-    parts = [header]
-    if isinstance(ipc_note, str) and ipc_note.strip():
-        parts.append(ipc_note.strip())
-    parts.append(diff)
-    return "\n".join(parts)
+def _render_kb_result(header: str, diff: str) -> str:
+    return "\n".join([header, diff])
 
 
 _DEFAULT_CONVERSATION_DIR = Path(os.path.expanduser("~/.cache/app_server/conversations"))
@@ -1403,6 +1361,16 @@ def _resolve_section_or_error(
     if len(by_suffix) > 1:
         return _kb_ambiguous_section_error(raw_id, by_suffix)
 
+    # Line aliases make schema output such as "L42 # Heading" directly usable.
+    line_match = re.fullmatch(r"[Ll]?(\d+)", raw_id)
+    if line_match:
+        line_no = int(line_match.group(1))
+        by_line = [n for n in nodes if n.line_start == line_no]
+        if len(by_line) == 1:
+            return by_line[0]
+        if len(by_line) > 1:
+            return _kb_ambiguous_section_error(raw_id, by_line)
+
     return _kb_error("SectionNotFound", f"Section '{raw_id}' not found", id=raw_id)
 
 
@@ -1599,13 +1567,10 @@ async def kb_schema(
 
     lines = text.splitlines()
 
-    def _fmt_node(node, indent: int = 0) -> str:
+    def _fmt_node(node: SectionNode, indent: int = 0) -> str:
         prefix = "  " * indent
         dis = f"  (use: {node.id_disambiguated})" if node.id_disambiguated != node.id else ""
-        # Always show full id when it differs from the displayed title
-        if node.id != node.title:
-            return f"{prefix}L{node.line_start} {'#' * node.depth} {node.title}  id: {node.id}{dis}"
-        return f"{prefix}L{node.line_start} {'#' * node.depth} {node.title}{dis}"
+        return f"{prefix}L{node.line_start} {'#' * node.depth} {node.title}  id: {node.id}{dis}"
 
     # Root listing mode
     if not id:
@@ -1613,10 +1578,22 @@ async def kb_schema(
             top_depth = min(node.depth for node in nodes)
         else:
             top_depth = int(root_depth)
+        rel_depth = 1 if max_depth is None else int(max_depth)
+        if rel_depth < 0:
+            rel_depth = 0
         top_nodes = [node for node in nodes if node.depth == top_depth]
-        out = [f"[schema: {path.name}  sections: {len(top_nodes)}]"]
+        out = [f"[schema: {path.name}  sections: {len(top_nodes)}  max_depth: {rel_depth}]"]
         for node in top_nodes:
             out.append(_fmt_node(node))
+            if rel_depth <= 0:
+                continue
+            upper_depth = node.depth + rel_depth
+            for child in nodes:
+                if child.line_start <= node.line_start or child.line_start > node.subtree_end:
+                    continue
+                if child.depth <= node.depth or child.depth > upper_depth:
+                    continue
+                out.append(_fmt_node(child, child.depth - node.depth))
         return "\n".join(out)
 
     target = _resolve_section_or_error(nodes, id)
@@ -1756,6 +1733,48 @@ async def kb_search_content(
     return "\n".join(out)
 
 
+@mcp.tool(name="kb_help", description="List KB tool modes, section-id forms, and common examples.")
+async def kb_help() -> str:
+    return """[kb_help]
+Section ids:
+  - use the path-style id shown by kb_schema/kb_search_headers, for example: Parent > Child
+  - shorthand is accepted when unique: visible heading title, trailing path suffix, L<line>, or the bare heading line number
+  - id="" targets the file root
+
+kb_write modes:
+  - append: append content to the target section body
+  - heading: create a child heading after the target section subtree
+  - child/create_child: aliases for heading
+  - heading_title creates a child heading automatically when mode="append"
+  example: kb_write(id="Architecture", mode="create_child", heading_title="Auth", content="Notes")
+
+kb_update modes:
+  - body: replace only the section body
+  - replace: alias for body
+  - subtree: replace the heading and all descendants
+
+kb_remove modes:
+  - subtree: remove the heading and descendants
+  - body: remove only the section body
+
+Discovery:
+  - kb_list shows configured files
+  - kb_schema(max_depth=2) shows heading ids and nested headings
+  - kb_search_headers(query="...") is the fastest way to find a section id
+  - kb_search_content(query="...") finds body text, then kb_read can open the section"""
+
+
+@mcp.resource(
+    "kb://knowledge",
+    name="knowledge",
+    title="Knowledge base",
+    description="Configured KB files plus KB tool usage help.",
+    mime_type="text/plain",
+)
+async def kb_resource_knowledge() -> str:
+    return f"{await kb_list()}\n\n{await kb_help()}"
+
+
 @mcp.tool(name="kb_write", description="Append content to a section body, or create a child heading under a markdown section.")
 async def kb_write(
     file: Optional[str] = None,
@@ -1782,25 +1801,39 @@ async def kb_write(
         return _kb_dict_to_error_text(target)
     _ = confirm_hash  # Legacy no-op; KB mutations are patch-style edits.
 
+    normalized_mode = str(mode or "append").strip().lower().replace("-", "_")
     insert_at = max(0, target.body_end)
-    if heading_title and mode == "append":
-        mode = "heading"
-    if mode == "append":
+    if heading_title and normalized_mode == "append":
+        normalized_mode = "heading"
+    if normalized_mode == "append":
         insert_lines = (content or "").splitlines()
-    elif mode == "heading":
+    elif normalized_mode in {"heading", "child", "create_child"}:
         # Insert after the entire subtree, not just the body
         insert_at = max(0, target.subtree_end)
         if not heading_title:
-            return _kb_error_text("SectionNotFound", "heading_title is required for mode='heading'", id=id)
-        depth = heading_depth if heading_depth is not None else (target.depth + 1)
+            return _kb_error_text(
+                "InvalidParameter",
+                "heading_title is required for child-heading writes",
+                id=id,
+                mode=mode,
+                allowed_modes="append, heading, child, create_child",
+                example='kb_write(id="...", mode="create_child", heading_title="New Section", content="...")',
+            )
+        depth = _coerce_optional_int(heading_depth) if heading_depth is not None else (target.depth + 1)
         if not isinstance(depth, int) or depth < 1 or depth > 6:
-            return _kb_error_text("SectionNotFound", "heading_depth must be between 1 and 6", id=id)
+            return _kb_error_text("InvalidParameter", "heading_depth must be between 1 and 6", id=id, mode=mode)
         heading_line = f"{'#' * depth} {heading_title}"
         insert_lines = [heading_line]
         if content:
             insert_lines.extend(content.splitlines())
     else:
-        return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
+        return _kb_error_text(
+            "InvalidParameter",
+            f"Unsupported mode '{mode}'",
+            id=id,
+            allowed_modes="append, heading, child, create_child",
+            example='Use mode="create_child" with heading_title for a new child heading, or mode="append" to append body text.',
+        )
 
     new_lines = lines[:insert_at] + insert_lines + lines[insert_at:]
     new_text = "\n".join(new_lines)
@@ -1809,14 +1842,9 @@ async def kb_write(
 
     diff = _unified_diff(old_text, new_text, str(path))
     action = "DRY RUN" if dry_run else "WRITTEN"
-    ipc_note = None
     if not dry_run:
         _atomic_write(path, new_text)
-        try:
-            ipc_note = await _notify_repo_memory_ipc(path, old_text, new_text)
-        except Exception as exc:
-            ipc_note = f"[kb_ipc: ERROR  {exc}]"
-    return _render_kb_result(f"[kb_write: {action}  hash: {_content_hash(new_text)}]", diff, ipc_note)
+    return _render_kb_result(f"[kb_write: {action}  hash: {_content_hash(new_text)}]", diff)
 
 
 @mcp.tool(name="kb_update", description="Replace the body of a markdown section, or replace its full subtree.")
@@ -1866,14 +1894,9 @@ async def kb_update(
     diff = _unified_diff(old_text, new_text, str(path))
 
     action = "DRY RUN" if dry_run else "WRITTEN"
-    ipc_note = None
     if not dry_run:
         _atomic_write(path, new_text)
-        try:
-            ipc_note = await _notify_repo_memory_ipc(path, old_text, new_text)
-        except Exception as exc:
-            ipc_note = f"[kb_ipc: ERROR  {exc}]"
-    return _render_kb_result(f"[kb_update: {action}  hash: {_content_hash(content)}]", diff, ipc_note)
+    return _render_kb_result(f"[kb_update: {action}  hash: {_content_hash(content)}]", diff)
 
 
 @mcp.tool(name="kb_remove", description="Remove the body of a markdown section, or remove its full subtree.")
@@ -1899,12 +1922,18 @@ async def kb_remove(
         return _kb_dict_to_error_text(target)
     _ = confirm_hash  # Legacy no-op; KB mutations are patch-style edits.
 
-    if mode == "subtree":
+    normalized_mode = str(mode or "subtree").strip().lower().replace("-", "_")
+    if normalized_mode == "subtree":
         start, end = target.line_start, target.subtree_end
-    elif mode == "body":
+    elif normalized_mode == "body":
         start, end = target.body_start, target.body_end
     else:
-        return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
+        return _kb_error_text(
+            "InvalidParameter",
+            f"Unsupported mode '{mode}'",
+            id=id,
+            allowed_modes="body, subtree",
+        )
 
     new_lines = _replace_line_range(lines, start, end, "")
     new_text = "\n".join(new_lines)
@@ -1913,14 +1942,9 @@ async def kb_remove(
     diff = _unified_diff(old_text, new_text, str(path))
 
     action = "DRY RUN" if dry_run else "REMOVED"
-    ipc_note = None
     if not dry_run:
         _atomic_write(path, new_text)
-        try:
-            ipc_note = await _notify_repo_memory_ipc(path, old_text, new_text)
-        except Exception as exc:
-            ipc_note = f"[kb_ipc: ERROR  {exc}]"
-    return _render_kb_result(f"[kb_remove: {action}]", diff, ipc_note)
+    return _render_kb_result(f"[kb_remove: {action}]", diff)
 
 
 # =============================================================================

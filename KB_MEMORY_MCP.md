@@ -39,10 +39,10 @@ List all configured knowledge files and the current project root.
 
 **`kb_schema(file?, id?, max_depth?, root_depth?)`**
 Browse the heading tree. Output is a plain text listing.
-- No `id`: returns top-level headings (table of contents).
+- No `id`: returns top-level headings and nested headings through `max_depth`.
 - With `id`: returns the **body text** of that section + its **child heading titles**.
 - `root_depth`: treat a specific heading depth as top-level (useful for single-H1 docs — set `root_depth=2` to skip the wrapper).
-- `max_depth`: how many levels of children to show (default 1). **Note:** `max_depth` only applies when drilling into a section with `id`. Without `id`, only headings at the `root_depth` level are listed — use `kb_schema(id="...")` to see children.
+- `max_depth`: how many levels of children to show (default 1). Use `max_depth=0` for only top-level headings, or raise it to expose deeper ids.
 - When a heading's ID differs from its display title (due to unicode normalization or parent prefixing), the output shows `id: <full_id>` so you can copy it directly into `kb_read`.
 
 **Typical navigation flow:**
@@ -82,10 +82,12 @@ Returns the section content as plain text with a metadata header line.
 Returns a status line + unified diff.
 - `mode="append"` (default): appends content at the end of the section body.
 - `mode="heading"`: creates a new child heading with content. **Auto-inferred** when `heading_title` is provided.
+- `mode="child"` and `mode="create_child"` are aliases for `mode="heading"`.
 - `heading_depth`: defaults to parent depth + 1 if omitted.
 - `id=""` targets the file root, so appends happen at end-of-file.
 - `confirm_hash`: legacy no-op accepted for backward compatibility; it is ignored.
 - `dry_run=true`: returns the diff without writing.
+- KB writes do not send repo-memory IPC notifications; they report only the durable file mutation result.
 
 ### Updating
 
@@ -108,6 +110,14 @@ Returns a status line + unified diff.
 
 ### Management
 
+**`kb_help()`**
+List valid KB modes, section-id shorthands, and examples.
+
+**Resource `kb://knowledge`**
+Generic MCP resource discovery exposes a static `kb://knowledge` resource with
+the configured KB file list and `kb_help()` output. KB file content is still read
+through the section-aware KB tools.
+
 **`kb_reload_config()`**
 Reload `.agent-pty.toml` for the current project root and return the effective file list.
 
@@ -129,6 +139,7 @@ Top Level Heading > Sub Heading > Sub-Sub Heading
 - The resolver accepts **both** raw unicode titles and normalized IDs — so you can paste either.
 - The full path ID is authoritative, but a unique visible heading title is accepted as shorthand.
 - A unique trailing path suffix is also accepted as shorthand, for example `Child` or `Parent > Child` without the top-level wrapper.
+- `L<line>` or the bare heading line number shown by `kb_schema` is accepted as a shorthand when it uniquely identifies a heading.
 - If two sibling headings have the same title, they get disambiguated IDs: `Section Title@L42` (with the line number).
 - `id=""` means the file root.
 - Fenced code blocks (``` ``` ``` and `~~~`) are respected — headings inside code are not parsed.
@@ -146,6 +157,7 @@ Errors are returned as plain text in the format:
 |-------|---------|
 | `NotConfigured` | No `[knowledge] files` in `.agent-pty.toml` |
 | `FileNotAllowed` | File not in the configured allowlist |
+| `InvalidParameter` | Tool parameter is invalid, such as an unsupported mode |
 | `SectionNotFound` | Section ID doesn't match any heading |
 | `AmbiguousSection` | ID matches multiple headings (use disambiguated ID) |
 

@@ -3,6 +3,21 @@
 Observed during Gemini app-server work from the `gemini-cli-rpc-v0412-port`
 checkout on 2026-05-14.
 
+## Fix Status
+
+- `kb_schema` now shows copyable `id:` values for every displayed heading and
+  applies `max_depth` in root-listing mode.
+- `kb_read` / section resolution now accept `L<line>` and bare heading line
+  numbers when they uniquely identify a heading.
+- `kb_write` now accepts `mode="child"` and `mode="create_child"` as aliases for
+  child-heading creation.
+- Unsupported KB modes now return `InvalidParameter` with allowed modes instead
+  of `SectionNotFound`.
+- KB write/update/remove no longer call the obsolete repo-memory IPC
+  notification route.
+- `kb_help` and the static `kb://knowledge` MCP resource now expose KB
+  availability and mode examples.
+
 ## Issues Encountered
 
 ### `kb_read` ID Discovery Is Not Obvious
