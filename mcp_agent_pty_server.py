@@ -1551,7 +1551,7 @@ async def kb_remove_file(abs_path: str) -> str:
 async def kb_schema(
     file: Optional[str] = None,
     id: Optional[str] = None,
-    max_depth: Optional[int] = 1,
+    max_depth: Optional[int] = None,
     root_depth: Optional[int] = None,
 ) -> str:
     resolved = _kb_resolve_file(file)
@@ -1567,10 +1567,55 @@ async def kb_schema(
 
     lines = text.splitlines()
 
-    def _fmt_node(node: SectionNode, indent: int = 0) -> str:
-        prefix = "  " * indent
-        dis = f"  (use: {node.id_disambiguated})" if node.id_disambiguated != node.id else ""
-        return f"{prefix}L{node.line_start} {'#' * node.depth} {node.title}  id: {node.id}{dis}"
+    def _outline_entry(node: SectionNode) -> dict[str, object]:
+        entry: dict[str, object] = {
+            "line": node.line_start,
+            "line_ref": f"L{node.line_start}",
+            "depth": node.depth,
+            "atx": "#" * node.depth,
+            "title": node.title,
+            "id": node.id,
+            "use_id": node.id_disambiguated,
+            "body_lines": [node.body_start, node.body_end],
+            "subtree_lines": [node.line_start, node.subtree_end],
+            "children": [],
+        }
+        return entry
+
+    def _build_outline(
+        source_nodes: list[SectionNode],
+        *,
+        top_depth: int,
+        rel_depth: Optional[int],
+    ) -> list[dict[str, object]]:
+        roots: list[dict[str, object]] = []
+        stack: list[tuple[int, dict[str, object]]] = []
+        upper_depth = None if rel_depth is None else top_depth + rel_depth
+        for node in source_nodes:
+            if node.depth < top_depth:
+                continue
+            if upper_depth is not None and node.depth > upper_depth:
+                continue
+            entry = _outline_entry(node)
+            while stack and stack[-1][0] >= node.depth:
+                stack.pop()
+            if stack:
+                children = stack[-1][1].setdefault("children", [])
+                if isinstance(children, list):
+                    children.append(entry)
+            else:
+                roots.append(entry)
+            stack.append((node.depth, entry))
+        return roots
+
+    def _depth_value(value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        parsed = int(value)
+        return max(0, parsed)
+
+    def _depth_label(value: Optional[int]) -> str:
+        return "all" if value is None else str(value)
 
     # Root listing mode
     if not id:
@@ -1578,53 +1623,56 @@ async def kb_schema(
             top_depth = min(node.depth for node in nodes)
         else:
             top_depth = int(root_depth)
-        rel_depth = 1 if max_depth is None else int(max_depth)
-        if rel_depth < 0:
-            rel_depth = 0
-        top_nodes = [node for node in nodes if node.depth == top_depth]
-        out = [f"[schema: {path.name}  sections: {len(top_nodes)}  max_depth: {rel_depth}]"]
-        for node in top_nodes:
-            out.append(_fmt_node(node))
-            if rel_depth <= 0:
-                continue
-            upper_depth = node.depth + rel_depth
-            for child in nodes:
-                if child.line_start <= node.line_start or child.line_start > node.subtree_end:
-                    continue
-                if child.depth <= node.depth or child.depth > upper_depth:
-                    continue
-                out.append(_fmt_node(child, child.depth - node.depth))
-        return "\n".join(out)
+        rel_depth = _depth_value(max_depth)
+        outline = _build_outline(nodes, top_depth=top_depth, rel_depth=rel_depth)
+        payload: dict[str, object] = {
+            "file": path.name,
+            "root": str(_current_project_root()),
+            "section_count": len(nodes),
+            "root_depth": top_depth,
+            "max_depth": _depth_label(rel_depth),
+            "outline": outline,
+        }
+        header = (
+            f"[schema: {path.name}  sections: {len(nodes)}  root_depth: {top_depth}  "
+            f"max_depth: {_depth_label(rel_depth)}  format: json]"
+        )
+        return f"{header}\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
 
     target = _resolve_section_or_error(nodes, id)
     if isinstance(target, dict):
         return _kb_dict_to_error_text(target)
 
-    rel_depth = 1 if max_depth is None else int(max_depth)
-    if rel_depth < 0:
-        rel_depth = 0
-
-    body_text = _extract_line_range(lines, target.body_start, target.body_end)
-    upper_depth = target.depth + rel_depth
-    children = []
-    if rel_depth > 0:
-        for node in nodes:
-            if node.line_start <= target.line_start or node.line_start > target.subtree_end:
-                continue
-            if node.depth <= target.depth or node.depth > upper_depth:
-                continue
-            children.append(node)
-
-    h = _content_hash(body_text)
-    out = [f"[section: {_kb_section_label(target)}  depth: {target.depth}  lines: {target.line_start}-{target.subtree_end}  hash: {h}]"]
-    if body_text.strip():
-        out.append(body_text.rstrip())
-    if children:
-        out.append(f"\nChild headings ({len(children)}):")
-        for child in children:
-            indent = child.depth - target.depth - 1
-            out.append(_fmt_node(child, indent))
-    return "\n".join(out)
+    rel_depth = _depth_value(max_depth)
+    subtree_nodes = [
+        node
+        for node in nodes
+        if node.line_start == target.line_start
+        or (node.line_start > target.line_start and node.line_start <= target.subtree_end)
+    ]
+    outline = _build_outline(subtree_nodes, top_depth=target.depth, rel_depth=rel_depth)
+    payload = {
+        "file": path.name,
+        "root": str(_current_project_root()),
+        "target": {
+            "id": target.id,
+            "use_id": target.id_disambiguated,
+            "line": target.line_start,
+            "line_ref": f"L{target.line_start}",
+            "depth": target.depth,
+            "title": target.title,
+            "body_lines": [target.body_start, target.body_end],
+            "subtree_lines": [target.line_start, target.subtree_end],
+        },
+        "section_count": len(subtree_nodes),
+        "max_depth": _depth_label(rel_depth),
+        "outline": outline,
+    }
+    header = (
+        f"[schema: {path.name}  target: {_kb_section_label(target)}  sections: {len(subtree_nodes)}  "
+        f"max_depth: {_depth_label(rel_depth)}  format: json]"
+    )
+    return f"{header}\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
 
 
 @mcp.tool(name="kb_read", description="Read a section body or subtree from a markdown knowledge file.")
@@ -1759,7 +1807,7 @@ kb_remove modes:
 
 Discovery:
   - kb_list shows configured files
-  - kb_schema(max_depth=2) shows heading ids and nested headings
+  - kb_schema() returns a structured JSON outline of all ATX headings in the target file
   - kb_search_headers(query="...") is the fastest way to find a section id
   - kb_search_content(query="...") finds body text, then kb_read can open the section"""
 

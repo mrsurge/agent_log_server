@@ -38,18 +38,19 @@ All tools return plain text. Errors are formatted as `[ERROR: Type] Detail`.
 List all configured knowledge files and the current project root.
 
 **`kb_schema(file?, id?, max_depth?, root_depth?)`**
-Browse the heading tree. Output is a plain text listing.
-- No `id`: returns top-level headings and nested headings through `max_depth`.
-- With `id`: returns the **body text** of that section + its **child heading titles**.
+Browse the heading tree. Output is a structured JSON outline of ATX headings.
+- No `id`: returns the full heading outline for the target file.
+- With `id`: returns the heading outline for that section subtree.
 - `root_depth`: treat a specific heading depth as top-level (useful for single-H1 docs — set `root_depth=2` to skip the wrapper).
-- `max_depth`: how many levels of children to show (default 1). Use `max_depth=0` for only top-level headings, or raise it to expose deeper ids.
-- When a heading's ID differs from its display title (due to unicode normalization or parent prefixing), the output shows `id: <full_id>` so you can copy it directly into `kb_read`.
+- `max_depth`: optional narrowing only. Omit it for the full outline, or set `max_depth=0` for only the selected root headings.
+- Each heading entry includes `line`, `line_ref`, `depth`, `atx`, `title`, `id`, `use_id`, `body_lines`, `subtree_lines`, and `children`.
 
 **Typical navigation flow:**
 ```
 kb_list()                          → see configured files
-kb_schema(root_depth=2)            → see top-level sections
-kb_schema(id="Architecture")       → read body + see children
+kb_schema()                        → see the full structured heading outline
+kb_schema(root_depth=2)            → see the full outline starting at H2 headings
+kb_schema(id="Architecture")       → see that section's structured subtree
 kb_schema(id="Architecture > Auth")→ drill deeper
 kb_read(id="Architecture > Auth > JWT Flow") → get full content
 ```
@@ -172,11 +173,11 @@ KB mutations are patch-style text edits:
 
 ## Tips
 
-- **Section IDs are full paths.** `kb_schema` always shows the copyable `id:` when it differs from the title. Use that value when you want the most explicit, unambiguous target.
+- **Section IDs are full paths.** `kb_schema` returns copyable `id` and `use_id` fields for every heading. Use `use_id` when you want the most explicit, unambiguous target.
 - Unique visible section titles work as shorthand. If the shorthand is ambiguous, KB returns `AmbiguousSection` with candidates.
 - Use `id=""` when you want to patch the file root directly.
-- Use `kb_schema(root_depth=2)` for docs with a single H1 wrapper — jumps straight to the real sections.
-- Use `kb_search_headers` before browsing — often faster than walking the tree.
+- Use `kb_schema()` for a full document outline. Use `root_depth=2` only when you intentionally want the outline roots to start at H2.
+- Use `kb_search_headers` when you already know a heading fragment and want a targeted lookup.
 - Use `kb_search_content` like grep — find the snippet, then `kb_read` the full section.
 - The `file` parameter is optional when only one knowledge file is configured.
 - Headings inside fenced code blocks are ignored — safe for docs with code examples.

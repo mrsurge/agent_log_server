@@ -116,7 +116,7 @@ If KB MCP tools are available (`kb_list`, `kb_help`, `kb_schema`, `kb_read`, `kb
 ### On Session Start
 1. Call `kb_list` to discover configured knowledge files
 2. Call `kb_help` to see current KB modes, section-id forms, and examples
-3. Call `kb_schema(max_depth=2)` or `kb_search_headers` on relevant files to discover nested headings and copyable section ids
+3. Call `kb_schema()` on relevant files to get the full structured ATX heading outline with copyable section ids, or `kb_search_headers` when you already know a heading fragment
 4. If `AGENTS.md` is listed, read its top-level sections — it contains repo-specific workflow rules, architectural invariants, and coordination protocols
 
 ### During Work

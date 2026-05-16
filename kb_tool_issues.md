@@ -5,8 +5,8 @@ checkout on 2026-05-14.
 
 ## Fix Status
 
-- `kb_schema` now shows copyable `id:` values for every displayed heading and
-  applies `max_depth` in root-listing mode.
+- `kb_schema` now returns a structured outline with copyable IDs for every
+  parsed ATX heading; `max_depth` is an explicit narrowing option.
 - `kb_read` / section resolution now accept `L<line>` and bare heading line
   numbers when they uniquely identify a heading.
 - `kb_write` now accepts `mode="child"` and `mode="create_child"` as aliases for
@@ -17,6 +17,24 @@ checkout on 2026-05-14.
   notification route.
 - `kb_help` and the static `kb://knowledge` MCP resource now expose KB
   availability and mode examples.
+
+## Follow-up Observations
+
+During the later Gemini app-server approval work, the KB tool was noticeably
+more usable than during the first pass.
+
+What worked well:
+
+- `kb://knowledge` discovery correctly reported the configured KB files and repo
+  root.
+- `kb_schema` returned useful heading trees for all configured files, including
+  `.repo_memory.md` and the planning docs.
+- The displayed `id:` values were directly usable and removed most of the old
+  section-id guessing.
+- Parallel `kb_schema` calls were practical for a repo-memory/bootstrap pass.
+- The old "where is the configured KB?" friction did not show up in this pass.
+
+Remaining issues are mostly ergonomics rather than blockers.
 
 ## Issues Encountered
 
@@ -134,26 +152,16 @@ were available and functional.
 Impact: a generic MCP discovery pass can falsely suggest that no knowledge
 resources exist. Agents need to know to call `kb_list` directly.
 
-## Usability Quirks
+## Current Issue: `kb_schema` Should Be The Structured Outline
 
-- Section ids appear to be path-like heading labels, not numeric ids.
-- `kb_search_headers` is currently more useful than `kb_schema` for finding
-  nested section ids in large markdown files.
-- When KB writes fail, the safest fallback is still a direct file patch, but
-  that bypasses the nicer section-aware write surface.
-- The tools are useful once the exact id and mode are known, but discovery of
-  those inputs is currently brittle.
+Agents were still encouraged to call `kb_schema(max_depth=2)` repeatedly, which
+creates artificial shallow slices and unnecessary follow-up calls.
 
-## Obviously Missing Features
+Desired behavior:
 
-- A `kb_modes` or `kb_help` call that lists valid write/update modes with short
-  examples.
-- `kb_schema` output that includes every discovered heading id, at least behind
-  a depth option that works consistently for nested headings.
-- Better error classification for unsupported modes versus missing section ids.
-- A direct `create_child` operation, or an explicit documented `mode` for child
-  heading creation.
-- A dry-run example in errors when the requested write shape is close but
-  invalid.
-- Optional numeric aliases for schema-discovered headings, so callers can use
-  either stable heading paths or short ids.
+- `kb_schema()` should return a structured, LLM-readable outline for the entire
+  targeted markdown document.
+- The outline should include every parsed ATX heading, not a shallow default.
+- Each heading should expose the actionable section id directly.
+- `max_depth` should be an explicit narrowing option, not the normal discovery
+  path.
