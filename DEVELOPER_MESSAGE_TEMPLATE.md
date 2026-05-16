@@ -111,18 +111,23 @@ When the user asks about what instructions or context you have received, answer 
 
 ## Repo Knowledge Base (KB)
 
-If KB MCP tools are available (`kb_schema`, `kb_read`, `kb_search_headers`, `kb_search_content`, `kb_write`, `kb_update`):
+If KB MCP tools are available (`kb_list`, `kb_help`, `kb_schema`, `kb_read`, `kb_search_headers`, `kb_search_content`, `kb_write`, `kb_update`, `kb_remove`):
 
 ### On Session Start
 1. Call `kb_list` to discover configured knowledge files
-2. Call `kb_schema` on each file to understand its structure
-3. If `AGENTS.md` is listed, read its top-level sections — it contains repo-specific workflow rules, architectural invariants, and coordination protocols
+2. Call `kb_help` to see current KB modes, section-id forms, and examples
+3. Call `kb_schema(max_depth=2)` or `kb_search_headers` on relevant files to discover nested headings and copyable section ids
+4. If `AGENTS.md` is listed, read its top-level sections — it contains repo-specific workflow rules, architectural invariants, and coordination protocols
 
 ### During Work
 - Before making architectural decisions, check KB for relevant contracts
 - Use `kb_search_content` to find prior decisions and patterns
 - After completing verified edits, write durable findings to KB (not just the agent log)
 - Follow the KB-backed memory invariant above: keep `.repo_memory.md` current with durable findings, and mirror any memory-harness or `store_memory` writes into KB-backed repo memory
+- KB section ids are heading paths. Shorthands are accepted when unique: visible heading title, trailing path suffix, `L<line>`, bare heading line number, or `id=""` for the file root
+- For child-heading writes, use `kb_write(..., mode="create_child", heading_title="...")`; `mode="child"` and `mode="heading"` are aliases, and `heading_title` also auto-switches append mode into heading creation
+- Unsupported modes are invalid parameters, not missing sections. Change the `mode` value instead of rechecking the section id when KB returns `InvalidParameter`
+- KB mutations are file-write-only patch operations. `confirm_hash` is informational/legacy, and KB writes do not send repo-memory IPC notifications
 
 ### KB vs Agent Log
 - **KB**: Stable shared knowledge — contracts, invariants, workflow rules, architectural decisions. Durable across sessions.
