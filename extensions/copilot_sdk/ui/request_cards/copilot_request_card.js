@@ -100,6 +100,18 @@ function addJsonDetails(body, label, value) {
   body.append(details);
 }
 
+function renderDiffPreview(body, diffText, filePath, helpers) {
+  if (!diffText) return;
+  const diffBlock = document.createElement('div');
+  diffBlock.className = 'diff-block';
+  if (typeof helpers.renderDiffBlock === 'function') {
+    helpers.renderDiffBlock(diffBlock, diffText, filePath || '');
+  } else {
+    diffBlock.innerHTML = helpers.formatDiff(diffText, filePath || null);
+  }
+  body.append(diffBlock);
+}
+
 function createSubmittedAnswerNode(answer) {
   const wrapper = document.createElement('div');
   wrapper.className = 'approval-summary';
@@ -179,10 +191,7 @@ function renderPermissionCard(body, event, schema, helpers) {
   const diffText = payload.diff || requestParams.diff || '';
   const filePath = payload.path || requestParams.path || '';
   if (diffText) {
-    const diffBlock = document.createElement('pre');
-    diffBlock.className = 'diff-block';
-    diffBlock.innerHTML = helpers.formatDiff(diffText, filePath || null);
-    body.append(diffBlock);
+    renderDiffPreview(body, diffText, filePath, helpers);
   }
 
   appendStringList(body, 'Possible Paths', requestParams.possible_paths || payload.possible_paths, helpers);

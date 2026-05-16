@@ -143,6 +143,48 @@ Handler family / shared implementation type.
 
 Multiple extension IDs may still share one handler type.
 
+### `ui.requestCards`
+
+Manifest-owned custom approval/request-card rendering declarations.
+
+Canonical shape:
+
+```json
+{
+  "ui": {
+    "requestCards": [
+      {
+        "id": "provider-request-card",
+        "module": "ui/request_cards/provider_request_card.js",
+        "export": "renderRequestCard",
+        "matches": [
+          {"requestMethod": "provider/request/method"}
+        ]
+      }
+    ]
+  }
+}
+```
+
+Semantics:
+
+- `module` must resolve inside the extension package and must be under `ui/...`
+  or `static/...` to be served by ALS-RS.
+- `export` defaults to `renderRequestCard`; `"default"` uses the module default
+  export.
+- `matches` entries select cards by `requestMethod` / `request_method` and
+  optional `kind`; request-method matching is normalized to lowercase.
+- the server owns descriptor discovery and asset URLs through
+  `extension.requestCards.get` and
+  `/api/extensions/{extension_id}/assets/{asset_path}`.
+- the module renderer receives the approval event, descriptor, extension id,
+  optional schema, target body, and helpers. It should return `true` only after
+  fully rendering the card; otherwise the generic approval fallback remains the
+  supported renderer.
+- approval diff previews should use the supplied shared diff helper when
+  available. Visible transcript patch bodies still belong in standalone `diff`
+  rows, not in request-card declarations.
+
 ## Compatibility block
 
 Canonical shape:

@@ -676,6 +676,13 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     const helpers = {
       escapeHtml,
       formatDiff,
+      renderDiffBlock: (container: HTMLElement, diff: string, path = '') => {
+        if (typeof renderDiffBlock === 'function') {
+          renderDiffBlock(container, diff, path || '');
+        } else {
+          container.innerHTML = formatDiff(diff, path || '');
+        }
+      },
       toRelativePath,
       normalizeDecisionLabel,
       renderMarkdown: (container: HTMLElement, text: unknown, extraClass = '') => renderApprovalMarkdown(container, text, extraClass),

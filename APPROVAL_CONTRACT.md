@@ -27,7 +27,12 @@ Required fields:
 ```
 
 Optional fields such as `card_id`, `tool_call_id`, `subagent_id`, `path`, and
-`diff` may be included by an extension when they are part of the rendered card.
+`diff` may be included by an extension when they are part of the rendered
+approval card. Approval diffs are request-card previews: custom and fallback
+approval renderers should use the shared `renderDiffBlock` helper when it is
+available. They are not a substitute for standalone transcript `diff` rows when
+the patch body should remain visible as transcript output after the approval
+flow.
 
 Provider-native user-input prompts use the same approval event lane. Examples:
 
@@ -51,6 +56,38 @@ Extension manifests may declare custom approval renderers under
 Only extension-local `ui/...` and `static/...` assets are served. Request-card
 modules such as `ui/request_cards/copilot_request_card.js` and
 `ui/request_cards/codex_ext_request_card.js` are loaded through this route.
+
+Each `ui.requestCards[]` descriptor is a manifest-owned rendering declaration:
+
+```json
+{
+  "id": "provider-request-card",
+  "module": "ui/request_cards/provider_request_card.js",
+  "export": "renderRequestCard",
+  "matches": [
+    {"requestMethod": "provider/request/method", "kind": "optional-kind"}
+  ]
+}
+```
+
+Descriptor semantics:
+
+- `module` is resolved inside the extension package and is exposed to the
+  frontend as a server-owned `module_url`; request-card modules should be ES
+  modules loaded through that URL, not hardcoded frontend bundle imports.
+- `export` defaults to `renderRequestCard`; `default` may also be used by
+  setting `"export": "default"`.
+- `matches` entries may use `requestMethod` or `request_method`; matching is
+  case-insensitive for the request method and exact for `kind` when supplied.
+- a matching module receives `{ extensionId, event, card, config, schema,
+  body, helpers }` and returns `true` only when it fully rendered the card;
+  returning anything else lets the generic fallback renderer handle it.
+- modules may optionally export `initializeRequestCardModule(config)` (or the
+  legacy `initializeExtensionCardModule`) to receive `{ extensionId, cards,
+  schemas }` after load.
+- `helpers.renderDiffBlock(container, diff, path)` is the preferred approval
+  diff renderer. `helpers.formatDiff(diff, path)` remains a fallback for older
+  modules.
 
 ## Pending descriptor
 

@@ -149,6 +149,18 @@ function addJsonDetails(body, label, value) {
   body.append(details);
 }
 
+function renderDiffPreview(body, diffText, filePath, helpers) {
+  if (!diffText) return;
+  const diffBlock = document.createElement('div');
+  diffBlock.className = 'diff-block';
+  if (typeof helpers.renderDiffBlock === 'function') {
+    helpers.renderDiffBlock(diffBlock, diffText, filePath || '');
+  } else {
+    diffBlock.innerHTML = helpers.formatDiff(diffText, filePath || null);
+  }
+  body.append(diffBlock);
+}
+
 function createOptionDescription(text, helpers) {
   const description = document.createElement('div');
   renderMarkdownNode(description, String(text || ''), helpers, 'approval-option-description');
@@ -329,10 +341,7 @@ function renderFileChangeCard(body, event, schema, helpers) {
   const diffText = payload.diff || '';
   const filePath = payload.path || null;
   if (diffText) {
-    const diffBlock = document.createElement('pre');
-    diffBlock.className = 'diff-block';
-    diffBlock.innerHTML = helpers.formatDiff(diffText, filePath);
-    body.append(diffBlock);
+    renderDiffPreview(body, diffText, filePath, helpers);
   } else if (payload.changes) {
     addJsonDetails(body, 'File change details', payload.changes);
   }
