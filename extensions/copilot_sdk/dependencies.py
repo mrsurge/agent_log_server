@@ -1,7 +1,7 @@
 import asyncio
 import shutil
 import sys
-from typing import Optional, TypeAlias
+from typing import Optional, TypeAlias, cast
 
 PayloadMap: TypeAlias = dict[str, object]
 
@@ -92,7 +92,7 @@ async def install_dependencies(*, extension_id: str, extension_info: Optional[Pa
 
     checked = await check_dependencies(extension_id=extension_id, extension_info=extension_info)
     details = checked.get("details")
-    detail_map = details if isinstance(details, dict) else {}
+    detail_map = cast(PayloadMap, details) if isinstance(details, dict) else {}
     if checked.get("ok"):
         return {
             "ok": True,

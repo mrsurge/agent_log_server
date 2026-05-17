@@ -4,14 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-log-server"
-version = "0.2.24"
+version = "0.2.73"
 description = "FastAPI server for Codex Agent UI, agent log, and TE2-hosted orchestration."
 readme = "README.md"
 requires-python = ">=3.11"
 dynamic = ["dependencies"]
 
 [project.scripts]
-codex-agent = "agent_log_server.server:main"
+als-rs = "agent_log_server_rs.bootstrap:main"
+als-rs-copilot-adapter = "agent_log_server_rs.adapters.copilot_sdk_adapter:main"
+als-rs-extension-adapter = "agent_log_server_rs.adapters.extension_adapter:main"
+codex-agent = "als_deprecated.server:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -19,13 +22,11 @@ py-modules = ["agent_index", "mcp_agent_pty_server", "mcp_agent_pty_http_shim", 
 zip-safe = false
 
 [tool.setuptools.packages.find]
-include = ["agent_log_server*", "extensions*", "te2_services*"]
+include = ["als_deprecated*", "agent_log_server_rs*", "extensions*"]
 
 [tool.setuptools.package-data]
-agent_log_server = [
+als_deprecated = [
   "DEVELOPER_MESSAGE_TEMPLATE.md",
-  "static/*",
-  "static/**/*",
   "templates/*",
   "templates/**/*",
   "shellspec/*",
@@ -33,11 +34,16 @@ agent_log_server = [
   "te2_assets/*",
   "te2_assets/**/*",
 ]
+agent_log_server_rs = [
+  "shellspec/*",
+  "shellspec/**/*",
+  "rust/*",
+  "rust/**/*",
+]
 extensions = [
   "**/*",
 ]
 "extensions.codex_ext" = ["**/*"]
-"extensions.codex_ext_exp" = ["**/*"]
 "extensions.copilot_sdk" = ["**/*"]
 "extensions.copilot_sdk._vendor.copilot" = ["py.typed"]
 
@@ -49,19 +55,19 @@ dependencies = { file = ["requirements.txt"] }
 
 [tool.basedpyright]
 pythonVersion = "3.11"
-typeCheckingMode = "standard"
+typeCheckingMode = "strict"
 reportAny = "warning"
 reportExplicitAny = "warning"
 include = [
   "*.py",
   "agent_index",
-  "agent_log_server",
+  "agent_log_server_rs",
   "extensions",
-  "te2_services",
 ]
 exclude = [
   "**/__pycache__",
-  "agent_log_server.egg-info",
+  "als_deprecated",
+  "als_deprecated.egg-info",
   "build",
   "extensions/copilot_sdk/_vendor",
   "node_modules",

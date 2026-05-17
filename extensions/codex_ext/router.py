@@ -4,14 +4,9 @@ import json
 import os
 import re
 import shlex
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Tuple, cast
-
-from agent_log_server.ask_user_interactions import (
-    AGENT_PTY_ASK_USER_REQUEST_METHOD,
-    is_agent_pty_ask_user_request,
-    is_agent_pty_ask_user_tool,
-)
+from typing import Callable, Dict, List, Optional, Tuple, TypeGuard, TypedDict, cast
 
 from ..message_card_contracts import (
     build_assistant_delta_event,
@@ -28,6 +23,75 @@ from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
 from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
 
 ObjectDict = Dict[str, object]
+
+AGENT_PTY_ASK_USER_REQUEST_METHOD = "agent-pty/ask-user"
+AGENT_PTY_ASK_USER_SERVER = "agent-pty-blocks"
+AGENT_PTY_ASK_USER_TOOL = "ask_user"
+
+
+class NormalizedAskUserRequest(TypedDict):
+    question: str
+    choices: List[str]
+    allow_freeform: bool
+
+
+def _is_object_dict(value: object) -> TypeGuard[ObjectDict]:
+    return isinstance(value, dict)
+
+
+def _is_object_list(value: object) -> TypeGuard[List[object]]:
+    return isinstance(value, list)
+
+
+def _ask_user_object_dict(value: object) -> ObjectDict:
+    return _dict_payload(value)
+
+
+def normalize_ask_user_choices(value: object) -> List[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not _is_object_list(value):
+        return []
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        choice = item.strip()
+        if not choice or choice in seen:
+            continue
+        normalized.append(choice)
+        seen.add(choice)
+    return normalized
+
+
+def normalize_ask_user_request(question: object, choices: object, allow_freeform: object) -> NormalizedAskUserRequest:
+    return {
+        "question": str(question or "").strip(),
+        "choices": normalize_ask_user_choices(choices),
+        "allow_freeform": bool(allow_freeform),
+    }
+
+
+def is_agent_pty_ask_user_tool(server_name: object, tool_name: object) -> bool:
+    return (
+        str(server_name or "").strip() == AGENT_PTY_ASK_USER_SERVER
+        and str(tool_name or "").strip() == AGENT_PTY_ASK_USER_TOOL
+    )
+
+
+def is_agent_pty_ask_user_request(tool_name: object, arguments: object) -> bool:
+    if str(tool_name or "").strip() != AGENT_PTY_ASK_USER_TOOL:
+        return False
+    arguments_map = _ask_user_object_dict(arguments)
+    if not arguments_map:
+        return False
+    normalized = normalize_ask_user_request(
+        arguments_map.get("question"),
+        arguments_map.get("choices"),
+        arguments_map.get("allow_freeform", arguments_map.get("allowFreeform", True)),
+    )
+    return bool(normalized["question"] and (normalized["choices"] or normalized["allow_freeform"]))
 
 
 def utc_ts() -> str:
@@ -52,21 +116,31 @@ def _extract_known_fields(spec: Optional[ProtocolSemanticSpec], payload: ObjectD
 
 
 def _dict_payload(value: object) -> ObjectDict:
-    return dict(value) if isinstance(value, dict) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    result: ObjectDict = {}
+    for key, item_value in cast(Iterable[tuple[object, object]], value.items()):
+        result[str(key)] = item_value
+    return result
 
 
 def _dict_list(value: object) -> List[ObjectDict]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    if not _is_object_list(value):
+        return []
+    return [_dict_payload(item) for item in value if _is_object_dict(item)]
 
 
 def _string_list(value: object) -> List[str]:
-    return [item for item in value if isinstance(item, str) and item] if isinstance(value, list) else []
+    if not _is_object_list(value):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
 
 
 def _ensure_dict_list(container: ObjectDict, key: str) -> List[ObjectDict]:
     value = container.get(key)
-    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
-        return cast(List[ObjectDict], value)
+    if _is_object_list(value):
+        if all(_is_object_dict(item) for item in value):
+            return cast(List[ObjectDict], value)
     items: List[ObjectDict] = []
     container[key] = items
     return items
@@ -74,9 +148,14 @@ def _ensure_dict_list(container: ObjectDict, key: str) -> List[ObjectDict]:
 
 def _ensure_string_set(container: ObjectDict, key: str) -> set[str]:
     value = container.get(key)
-    normalized = {item for item in value if isinstance(item, str)} if isinstance(value, set) else set()
-    if value != normalized:
-        container[key] = normalized
+    if isinstance(value, set):
+        raw_items = cast(set[object], value)
+        if all(isinstance(item, str) for item in raw_items):
+            return cast(set[str], value)
+        normalized = {item for item in raw_items if isinstance(item, str)}
+    else:
+        normalized = set[str]()
+    container[key] = normalized
     return normalized
 
 
@@ -111,10 +190,10 @@ def _collab_agent_records(fields: ObjectDict) -> List[ObjectDict]:
     records: List[ObjectDict] = []
     for key in ("receiver_agents", "agent_statuses"):
         value = fields.get(key)
-        if not isinstance(value, list):
+        if not _is_object_list(value):
             continue
         for item in value:
-            if isinstance(item, dict):
+            if _is_object_dict(item):
                 records.append(item)
     return records
 
@@ -130,7 +209,7 @@ def _collab_thread_ids(fields: ObjectDict) -> List[str]:
     add(fields.get("receiver_thread_id"))
 
     receiver_thread_ids = fields.get("receiver_thread_ids")
-    if isinstance(receiver_thread_ids, list):
+    if _is_object_list(receiver_thread_ids):
         for item in receiver_thread_ids:
             add(item)
 
@@ -138,7 +217,7 @@ def _collab_thread_ids(fields: ObjectDict) -> List[str]:
         add(record.get("thread_id"))
 
     statuses = fields.get("statuses")
-    if isinstance(statuses, dict):
+    if _is_object_dict(statuses):
         for candidate in statuses.keys():
             add(candidate)
 
@@ -151,7 +230,7 @@ def _collab_status_for_thread(fields: ObjectDict, thread_id: str) -> object:
             return record.get("status")
 
     statuses = fields.get("statuses")
-    if isinstance(statuses, dict):
+    if _is_object_dict(statuses):
         status = statuses.get(thread_id)
         if status is not None:
             return status
@@ -160,8 +239,9 @@ def _collab_status_for_thread(fields: ObjectDict, thread_id: str) -> object:
 
 
 def _subagent_terminal_summary(name: str, status: object, *, success_text: str, failure_text: str) -> str:
-    if isinstance(status, dict):
-        errored = status.get("errored")
+    if _is_object_dict(status):
+        status_map = status
+        errored = status_map.get("errored")
         if isinstance(errored, str) and errored.strip():
             return f"Failed: {errored.strip()}"
     if status == "shutdown":
@@ -172,30 +252,16 @@ def _subagent_terminal_summary(name: str, status: object, *, success_text: str, 
 
 
 def _agent_status_is_terminal(status: object) -> bool:
-    if isinstance(status, dict):
-        return "completed" in status or "errored" in status
+    if _is_object_dict(status):
+        status_map = status
+        return "completed" in status_map or "errored" in status_map
     return status in {"shutdown", "not_found"}
 
 
 def _agent_status_success(status: object) -> bool:
-    if isinstance(status, dict):
+    if _is_object_dict(status):
         return "completed" in status
     return False
-
-
-def _agent_status_summary(status: object, default: str) -> str:
-    if isinstance(status, dict):
-        completed = status.get("completed")
-        if isinstance(completed, str) and completed.strip():
-            return completed.strip()
-        errored = status.get("errored")
-        if isinstance(errored, str) and errored.strip():
-            return f"Failed: {errored.strip()}"
-    if status == "shutdown":
-        return "subagent shutdown"
-    if status == "not_found":
-        return "subagent not found"
-    return default
 
 
 def _direct_event_text(payload: ObjectDict) -> Optional[str]:
@@ -205,7 +271,7 @@ def _direct_event_text(payload: ObjectDict) -> Optional[str]:
     if isinstance(text, str) and text.strip():
         return text.strip()
     text_elements = payload.get("text_elements") or payload.get("textElements")
-    if isinstance(text_elements, list):
+    if _is_object_list(text_elements):
         parts = [part for part in text_elements if isinstance(part, str) and part.strip()]
         if parts:
             return "\n".join(parts).strip()
@@ -216,7 +282,7 @@ def _notification_text(payload: ObjectDict) -> Optional[str]:
     error_value = payload.get("error")
     if isinstance(error_value, str) and error_value.strip():
         return error_value.strip()
-    if isinstance(error_value, dict):
+    if _is_object_dict(error_value):
         for key in ("message", "details", "summary", "error"):
             candidate = error_value.get(key)
             if isinstance(candidate, str) and candidate.strip():
@@ -258,9 +324,9 @@ def _notification_severity(
             tokens.append(value.strip().lower())
 
     error_value = payload.get("error")
-    if isinstance(error_value, (str, dict)):
+    if isinstance(error_value, str) or _is_object_dict(error_value):
         tokens.append("error")
-    if isinstance(error_value, dict):
+    if _is_object_dict(error_value):
         for key in ("type", "kind", "level", "severity", "status", "error_type", "errorType"):
             value = error_value.get(key)
             if isinstance(value, str) and value.strip():
@@ -285,11 +351,11 @@ def _append_text_parts(parts: List[str], value: object) -> None:
         if text:
             parts.append(text)
         return
-    if isinstance(value, list):
+    if _is_object_list(value):
         for item in value:
             _append_text_parts(parts, item)
         return
-    if isinstance(value, dict):
+    if _is_object_dict(value):
         for key in ("text", "summary", "content", "message"):
             candidate = value.get(key)
             if candidate is None:
@@ -306,9 +372,9 @@ def _extract_reasoning_text(item: ObjectDict, fallback: Optional[str] = None) ->
         _append_text_parts(parts, item.get(key))
         if parts:
             break
-    if not parts and isinstance(fallback, str):
+    if not parts and fallback:
         _append_text_parts(parts, fallback)
-    text = "\n".join(part for part in parts if isinstance(part, str) and part).strip()
+    text = "\n".join(part for part in parts if part).strip()
     return text or None
 
 
@@ -325,8 +391,9 @@ def _reasoning_event_id(payload: ObjectDict, turn_state: ObjectDict) -> str:
 
 def _assistant_id(payload: ObjectDict, thread_id: Optional[str], turn_id: Optional[str]) -> str:
     item = _dict_payload(payload.get("item"))
-    if isinstance(item.get("id"), str):
-        return cast(str, item["id"])
+    item_id = item.get("id")
+    if isinstance(item_id, str):
+        return item_id
     for key in ("item_id", "itemId", "id", "callId", "call_id"):
         value = payload.get(key)
         if isinstance(value, str) and value:
@@ -341,7 +408,7 @@ def _assistant_id(payload: ObjectDict, thread_id: Optional[str], turn_id: Option
 def _payload_string(payload: ObjectDict, *keys: str) -> Optional[str]:
     sources: List[ObjectDict] = [payload]
     item = payload.get("item")
-    if isinstance(item, dict):
+    if _is_object_dict(item):
         sources.append(item)
     for source in sources:
         for key in keys:
@@ -360,15 +427,16 @@ def _payload_turn_id(payload: ObjectDict, fallback: Optional[str]) -> Optional[s
 
 
 def _normalize_turn_status(payload: ObjectDict) -> tuple[str, Optional[str]]:
-    turn_obj = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
-    status = turn_obj.get("status") if isinstance(turn_obj, dict) else None
-    if isinstance(status, dict):
+    turn_value = payload.get("turn")
+    turn_obj = turn_value if _is_object_dict(turn_value) else {}
+    status = turn_obj.get("status")
+    if _is_object_dict(status):
         turn_status = str(status.get("type") or status.get("status") or "completed")
     elif isinstance(status, str):
         turn_status = status
     else:
         turn_status = str(payload.get("status") or "completed")
-    turn_error = turn_obj.get("error") if isinstance(turn_obj, dict) else payload.get("error")
+    turn_error = turn_obj.get("error") if turn_obj else payload.get("error")
     if not isinstance(turn_error, str):
         turn_error = None
     return turn_status, turn_error
@@ -396,11 +464,13 @@ def _stringify_value(value: object) -> str:
 
 
 def _duration_ms(value: object) -> Optional[int]:
-    if isinstance(value, dict):
+    if _is_object_dict(value):
         secs = value.get("secs")
         nanos = value.get("nanos")
         if isinstance(secs, (int, float)) or isinstance(nanos, (int, float)):
-            return int(secs or 0) * 1000 + int(nanos or 0) // 1_000_000
+            secs_value = secs if isinstance(secs, (int, float)) else 0
+            nanos_value = nanos if isinstance(nanos, (int, float)) else 0
+            return int(secs_value) * 1000 + int(nanos_value) // 1_000_000
         return None
     if isinstance(value, (int, float)):
         return int(value)
@@ -411,22 +481,24 @@ def _extract_tool_result(value: object, *, status: str, error: object = None) ->
     is_error = bool(error) or status in {"failed", "error"}
     if error is not None:
         return {"error": error}, True
-    if isinstance(value, dict):
-        if isinstance(value.get("isError"), bool):
-            is_error = value["isError"] or is_error
+    if _is_object_dict(value):
+        is_error_value = value.get("isError")
+        if isinstance(is_error_value, bool):
+            is_error = is_error_value or is_error
         structured = value.get("structuredContent")
-        if isinstance(structured, dict) and structured.get("result") is not None:
+        if _is_object_dict(structured) and structured.get("result") is not None:
             return structured.get("result"), is_error
         content = value.get("content")
-        if isinstance(content, list):
+        if _is_object_list(content):
             for item in content:
-                if not isinstance(item, dict):
+                if not _is_object_dict(item):
                     continue
                 text = item.get("text")
                 if not isinstance(text, str) or not text.strip():
                     continue
                 try:
-                    return json.loads(text), is_error
+                    parsed = cast(object, json.loads(text))
+                    return parsed, is_error
                 except (json.JSONDecodeError, TypeError, ValueError):
                     return _normalize_output(text), is_error
     return value, is_error
@@ -435,7 +507,7 @@ def _extract_tool_result(value: object, *, status: str, error: object = None) ->
 def _command_text(value: object) -> str:
     if isinstance(value, str):
         return value
-    if isinstance(value, list):
+    if _is_object_list(value):
         return " ".join(str(part) for part in value)
     if value is None:
         return ""
@@ -452,9 +524,9 @@ def _resolve_view_path(path: str, cwd: str) -> str:
 
 def _build_view_title(path: str, view_range: Optional[List[int]]) -> str:
     short_path = os.path.basename(path) if path else "view"
-    if isinstance(view_range, list) and len(view_range) >= 2:
+    if _is_object_list(view_range) and len(view_range) >= 2:
         return f"{short_path}  Lines {view_range[0]}–{view_range[1]}"
-    if isinstance(view_range, list) and len(view_range) == 1:
+    if _is_object_list(view_range) and len(view_range) == 1:
         return f"{short_path}  Line {view_range[0]}+"
     return short_path
 
@@ -466,7 +538,7 @@ def _view_spec_path(spec: ObjectDict) -> str:
 
 def _view_spec_range(spec: ObjectDict) -> Optional[List[int]]:
     value = spec.get("view_range")
-    if not isinstance(value, list):
+    if not _is_object_list(value):
         return None
     result: List[int] = []
     for item in value:
@@ -488,8 +560,6 @@ _CODEX_NL_VIEW_LINE_RE = re.compile(r"^\s*(\d+)\t(.*)$")
 
 
 def _parse_codex_view_lines(content: str) -> Optional[List[ObjectDict]]:
-    if not isinstance(content, str):
-        return None
     if not content:
         return []
 
@@ -520,18 +590,19 @@ def _build_codex_view_lines(content: str, view_spec: Optional[ObjectDict] = None
     parsed = _parse_codex_view_lines(content)
     if parsed is not None:
         return parsed
-    if not isinstance(content, str):
-        return None
     if not content:
         return []
-    if not isinstance(view_spec, dict):
+    if not _is_object_dict(view_spec):
         return None
 
     start_line = 1
     raw_view_range = view_spec.get("view_range")
-    if isinstance(raw_view_range, list) and raw_view_range:
+    if _is_object_list(raw_view_range) and raw_view_range:
+        start_value = raw_view_range[0]
+        if not isinstance(start_value, (int, float, str)):
+            return None
         try:
-            start_line = int(raw_view_range[0])
+            start_line = int(start_value)
         except (TypeError, ValueError):
             return None
 
@@ -739,7 +810,7 @@ def _shell_command_to_view_sequence(command: object, cwd: str = "") -> Optional[
 
 
 def _split_view_output_by_divider(output: str, divider: str, expected_parts: int) -> Optional[List[str]]:
-    if not isinstance(output, str) or not divider or expected_parts <= 0:
+    if not divider or expected_parts <= 0:
         return None
     parts: List[str] = []
     current: List[str] = []
@@ -850,7 +921,7 @@ def _new_file_arguments(spec: ObjectDict) -> ObjectDict:
         arguments["directory"] = directory
         return arguments
     directories = spec.get("directories")
-    if isinstance(directories, list):
+    if _is_object_list(directories):
         normalized = [value for value in directories if isinstance(value, str) and value]
         if len(normalized) == 1:
             arguments["directory"] = normalized[0]
@@ -882,7 +953,7 @@ def _shell_command_to_new_file_spec(command: object, cwd: str = "") -> Optional[
         return None
     resolved_path = _resolve_view_path(path_token, cwd)
     content = "\n".join(lines[cat_line_idx + 1 : end_idx])
-    spec = {
+    spec: ObjectDict = {
         "path": resolved_path,
         "content": content,
         "diff": _build_new_file_diff(resolved_path, content),
@@ -1011,7 +1082,7 @@ def _shell_command_to_search_spec(command: object, cwd: str = "") -> Optional[Ob
 
 def _normalize_search_output(output: str, search_spec: Optional[ObjectDict]) -> str:
     text = _normalize_output(output)
-    if not text or not isinstance(search_spec, dict):
+    if not text or not _is_object_dict(search_spec):
         return text
     target_path = str(search_spec.get("path") or "")
     if not target_path:
@@ -1064,32 +1135,35 @@ def _extract_path_from_diff(diff_text: str) -> Optional[str]:
 
 
 def _extract_diff_with_path(payload: object) -> Tuple[Optional[str], Optional[str]]:
-    if not isinstance(payload, dict):
+    if not _is_object_dict(payload):
         return None, None
-    path = payload.get("path") if isinstance(payload.get("path"), str) else None
+    path_value = payload.get("path")
+    path = path_value if isinstance(path_value, str) else None
     diff = payload.get("diff") or payload.get("patch") or payload.get("unified_diff")
     if isinstance(diff, str) and diff.strip():
         return diff, path or _extract_path_from_diff(diff)
 
     changes = payload.get("changes")
-    if isinstance(changes, list):
+    if _is_object_list(changes):
         chunks: List[str] = []
         for change in changes:
-            if not isinstance(change, dict):
+            if not _is_object_dict(change):
                 continue
             text = change.get("diff") or change.get("patch") or change.get("unified_diff")
             if isinstance(text, str) and text.strip():
                 chunks.append(text)
-                if not path and isinstance(change.get("path"), str):
-                    path = change["path"]
+                if not path:
+                    change_path_value = change.get("path")
+                    if isinstance(change_path_value, str):
+                        path = change_path_value
         if chunks:
             combined = "\n".join(chunks)
             return combined, path or _extract_path_from_diff(combined)
 
-    if isinstance(changes, dict):
+    if _is_object_dict(changes):
         chunks = []
         for change_path, change in changes.items():
-            if not isinstance(change, dict):
+            if not _is_object_dict(change):
                 continue
             text = change.get("diff") or change.get("patch") or change.get("unified_diff")
             if isinstance(text, str) and text.strip():
@@ -1103,6 +1177,74 @@ def _extract_diff_with_path(payload: object) -> Tuple[Optional[str], Optional[st
             return combined, path or _extract_path_from_diff(combined)
 
     return None, None
+
+
+def _diff_sections_from_changes(changes: object) -> List[Tuple[Optional[str], str]]:
+    sections: List[Tuple[Optional[str], str]] = []
+    if _is_object_list(changes):
+        for change in changes:
+            if not _is_object_dict(change):
+                continue
+            text = change.get("diff") or change.get("patch") or change.get("unified_diff")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            path = change.get("path") or change.get("file_path") or _extract_path_from_diff(text)
+            sections.append((path if isinstance(path, str) else None, text))
+    elif _is_object_dict(changes):
+        for change_path, change in changes.items():
+            if not _is_object_dict(change):
+                continue
+            text = change.get("diff") or change.get("patch") or change.get("unified_diff")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            path = change.get("path") or change.get("file_path") or change_path or _extract_path_from_diff(text)
+            sections.append((path if isinstance(path, str) else None, text))
+    return sections
+
+
+def _diff_header_path(path: Optional[str]) -> str:
+    if not isinstance(path, str) or not path.strip():
+        return "unknown"
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized or "unknown"
+
+
+def _prefix_diff_path(prefix: str, path: str) -> str:
+    if path == "/dev/null" or path.startswith(f"{prefix}/"):
+        return path
+    return f"{prefix}/{path}"
+
+
+def _diff_with_file_header(path: Optional[str], diff_text: str) -> str:
+    text = diff_text.strip()
+    if not text:
+        return ""
+    if any(line.startswith("diff --git ") for line in text.splitlines()):
+        return text
+    header_path = _diff_header_path(path or _extract_path_from_diff(text))
+    old_path = _prefix_diff_path("a", header_path)
+    new_path = _prefix_diff_path("b", header_path)
+    if any(line.startswith("--- ") or line.startswith("+++ ") for line in text.splitlines()):
+        return f"diff --git {old_path} {new_path}\n{text}"
+    return f"diff --git {old_path} {new_path}\n--- {old_path}\n+++ {new_path}\n{text}"
+
+
+def _diff_sections_from_changes_with_headers(changes: object) -> List[Tuple[Optional[str], str]]:
+    sections: List[Tuple[Optional[str], str]] = []
+    for path, diff_text in _diff_sections_from_changes(changes):
+        headered = _diff_with_file_header(path, diff_text)
+        if headered:
+            sections.append((path or _extract_path_from_diff(headered), headered))
+    return sections
+
+
+def _diff_text_from_changes_with_headers(changes: object) -> Optional[str]:
+    chunks = [text for _path, text in _diff_sections_from_changes_with_headers(changes)]
+    if not chunks:
+        return None
+    return "\n".join(chunks)
 
 
 def _diff_is_new_file(diff_text: Optional[str]) -> bool:
@@ -1137,7 +1279,7 @@ def _diff_signature(diff_text: str) -> str:
 
 
 def _split_unified_diff_by_file(diff_text: str) -> List[Tuple[Optional[str], str]]:
-    if not isinstance(diff_text, str) or not diff_text.strip():
+    if not diff_text.strip():
         return []
     lines = diff_text.splitlines(keepends=True)
     start_idxs: List[int] = []
@@ -1159,31 +1301,23 @@ def _split_unified_diff_by_file(diff_text: str) -> List[Tuple[Optional[str], str
 
 def _paths_from_changes(changes: object) -> List[str]:
     paths: List[str] = []
-    if isinstance(changes, list):
+    if _is_object_list(changes):
         for change in changes:
-            if not isinstance(change, dict):
+            if not _is_object_dict(change):
                 continue
             path = change.get("path") or _extract_path_from_diff(str(change.get("diff") or ""))
             if isinstance(path, str) and path and path not in paths:
                 paths.append(path)
-    elif isinstance(changes, dict):
+    elif _is_object_dict(changes):
         for change_path, change in changes.items():
             candidate = None
-            if isinstance(change, dict):
+            if _is_object_dict(change):
                 candidate = change.get("path") or change.get("file_path") or change_path
-            elif isinstance(change_path, str):
+            else:
                 candidate = change_path
             if isinstance(candidate, str) and candidate and candidate not in paths:
                 paths.append(candidate)
     return paths
-
-
-def _summarize_paths(paths: List[str]) -> Optional[str]:
-    if not paths:
-        return None
-    if len(paths) == 1:
-        return paths[0]
-    return f"{paths[0]} (+{len(paths) - 1} more)"
 
 
 def _result_error_status(status: str, exit_code: Optional[int], error: object = None) -> bool:
@@ -1194,11 +1328,11 @@ _THOUGHT_PATTERN = re.compile(r"\*\*([^*]+)\*\*")
 
 
 def _has_visible_reasoning_text(text: str) -> bool:
-    return isinstance(text, str) and bool(text.strip())
+    return bool(text.strip())
 
 
 def _extract_and_scrub_thoughts_stream(delta: str, state: ObjectDict) -> Tuple[str, List[str]]:
-    if not isinstance(delta, str) or not delta:
+    if not delta:
         return delta, []
     buffer_value = state.get("thought_buffer")
     buffer = buffer_value if isinstance(buffer_value, str) else ""
@@ -1238,7 +1372,7 @@ def _extract_and_scrub_thoughts(text: str) -> Tuple[str, List[str]]:
 
 
 def _consume_live_reasoning_delta(delta: str, state: ObjectDict) -> Optional[str]:
-    if not isinstance(delta, str) or not delta:
+    if not delta:
         return None
     if state.get("reasoning_live_visible"):
         return delta
@@ -1273,17 +1407,18 @@ class CodexEventRouter:
     def _get_turn_state(self, thread_id: Optional[str], turn_id: Optional[str]) -> ObjectDict:
         key = self._turn_key(thread_id, turn_id)
         state = self._turn_states.get(key)
-        if state is None:
-            state = {
-                "thread_id": thread_id,
-                "turn_id": turn_id,
-                "diff_hashes": set(),
-                "plan_steps": [],
-                "plan_signature": None,
-                "plan_explanation": None,
-            }
-            self._turn_states[key] = state
-        return state
+        if state is not None:
+            return state
+        new_state: ObjectDict = {
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "diff_hashes": set[str](),
+            "plan_steps": list[object](),
+            "plan_signature": None,
+            "plan_explanation": None,
+        }
+        self._turn_states[key] = new_state
+        return new_state
 
     def _get_item_state(self, item_id: Optional[str], thread_id: Optional[str], turn_id: Optional[str]) -> ObjectDict:
         turn_state = self._get_turn_state(thread_id, turn_id)
@@ -1291,14 +1426,15 @@ class CodexEventRouter:
             return turn_state
         state = self._item_states.get(item_id)
         if state is None:
-            state = {
+            new_state: ObjectDict = {
                 "item_id": item_id,
                 "thread_id": thread_id,
                 "turn_id": turn_id,
                 "turn_key": self._turn_key(thread_id, turn_id),
                 "output_buffer": "",
             }
-            self._item_states[item_id] = state
+            self._item_states[item_id] = new_state
+            state = new_state
         else:
             state["thread_id"] = thread_id or state.get("thread_id")
             state["turn_id"] = turn_id or state.get("turn_id")
@@ -1327,17 +1463,18 @@ class CodexEventRouter:
     ) -> ObjectDict:
         state = self._subagent_states.get(subagent_id)
         if state is None:
-            state = {
+            new_state: ObjectDict = {
                 "id": subagent_id,
                 "name": name or "subagent",
                 "intent": intent or "",
                 "parent_thread_id": parent_thread_id,
-                "thread_ids": set(),
+                "thread_ids": set[str](),
                 "started": False,
                 "ended": False,
                 "active": False,
             }
-            self._subagent_states[subagent_id] = state
+            self._subagent_states[subagent_id] = new_state
+            state = new_state
         if isinstance(name, str) and name.strip():
             state["name"] = name.strip()
         if isinstance(intent, str) and intent.strip():
@@ -1350,9 +1487,9 @@ class CodexEventRouter:
         if not isinstance(thread_id, str) or not thread_id:
             return
         state = self._ensure_subagent_state(subagent_id)
-        thread_ids = state.setdefault("thread_ids", set())
+        thread_ids = state.setdefault("thread_ids", set[str]())
         if isinstance(thread_ids, set):
-            thread_ids.add(thread_id)
+            cast(set[object], thread_ids).add(thread_id)
         self._thread_subagent_ids[thread_id] = subagent_id
 
     def _subagent_id_for_context(self, thread_id: Optional[str]) -> Optional[str]:
@@ -1387,16 +1524,16 @@ class CodexEventRouter:
         return turn_state, item_state, item_id
 
     def _should_record_reasoning(self, turn_state: ObjectDict, item_id: str) -> bool:
-        recorded = turn_state.setdefault("reasoning_transcript_ids", set())
+        recorded = turn_state.setdefault("reasoning_transcript_ids", set[object]())
         if not isinstance(recorded, set):
             if isinstance(recorded, (list, tuple)):
-                recorded = set(recorded)
+                recorded = set(cast(list[object] | tuple[object, ...], recorded))
             else:
-                recorded = set()
+                recorded = set[object]()
             turn_state["reasoning_transcript_ids"] = recorded
         if item_id in recorded:
             return False
-        recorded.add(item_id)
+        cast(set[object], recorded).add(item_id)
         return True
 
     def _reset_reasoning_stream(self, turn_state: ObjectDict) -> None:
@@ -1493,7 +1630,7 @@ class CodexEventRouter:
         item_state: Optional[ObjectDict] = None,
     ) -> ObjectDict:
         subagent_id = None
-        if isinstance(item_state, dict):
+        if _is_object_dict(item_state):
             candidate = item_state.get("subagent_id")
             if isinstance(candidate, str) and candidate:
                 subagent_id = candidate
@@ -1510,6 +1647,9 @@ class CodexEventRouter:
             "tool_delta",
             "tool_end",
             "tool_interaction",
+            "shell_begin",
+            "shell_delta",
+            "shell_end",
             "command_result",
             "reasoning_delta",
             "reasoning_finalize",
@@ -1521,24 +1661,24 @@ class CodexEventRouter:
         transcript_roles = {"assistant", "user", "command", "diff", "reasoning", "mcp_tool", "tool", "view", "search", "web_search"}
 
         for event in _dict_list(routed.get("events")):
-            if not isinstance(event, dict) or event.get("subagent_id"):
+            if not _is_object_dict(event) or event.get("subagent_id"):
                 continue
             if event.get("type") in event_types:
                 event["subagent_id"] = subagent_id
 
         for entry in _dict_list(routed.get("transcript_entries")):
-            if not isinstance(entry, dict) or entry.get("subagent_id"):
+            if not _is_object_dict(entry) or entry.get("subagent_id"):
                 continue
             if entry.get("role") in transcript_roles:
                 entry["subagent_id"] = subagent_id
 
         descriptors = routed.get("approval_descriptors")
-        if isinstance(descriptors, list):
+        if _is_object_list(descriptors):
             for descriptor in descriptors:
-                if not isinstance(descriptor, dict):
+                if not _is_object_dict(descriptor):
                     continue
                 render_event = descriptor.get("render_event")
-                if isinstance(render_event, dict) and not render_event.get("subagent_id"):
+                if _is_object_dict(render_event) and not render_event.get("subagent_id"):
                     render_event["subagent_id"] = subagent_id
         return routed
 
@@ -1721,7 +1861,7 @@ class CodexEventRouter:
         turn_id: Optional[str],
     ) -> ObjectDict:
         error_value = payload.get("error")
-        if isinstance(error_value, dict):
+        if _is_object_dict(error_value):
             error_obj = error_value
         elif isinstance(error_value, str) and error_value.strip():
             error_obj = {"message": error_value.strip()}
@@ -1729,7 +1869,7 @@ class CodexEventRouter:
             error_obj = payload
 
         message = ""
-        if isinstance(error_obj, dict):
+        if _is_object_dict(error_obj):
             raw_message = error_obj.get("message") or payload.get("message")
             if isinstance(raw_message, str):
                 message = raw_message.strip()
@@ -1844,19 +1984,21 @@ class CodexEventRouter:
         cached_input_tokens = None
         context_window = None
 
-        if isinstance(payload.get("info"), dict):
-            info = _dict_payload(payload.get("info"))
-            usage = info.get("last_token_usage") or {}
-            if isinstance(usage, dict):
+        info_value = payload.get("info")
+        if _is_object_dict(info_value):
+            info = _dict_payload(info_value)
+            usage: object = info.get("last_token_usage")
+            if _is_object_dict(usage):
                 total = usage.get("input_tokens")
                 input_tokens = usage.get("input_tokens")
                 cached_input_tokens = usage.get("cached_input_tokens")
             context_window = info.get("model_context_window")
 
-        if total is None and isinstance(payload.get("tokenUsage"), dict):
-            token_usage = _dict_payload(payload.get("tokenUsage"))
-            last_breakdown = token_usage.get("last") or {}
-            if isinstance(last_breakdown, dict):
+        token_usage_value = payload.get("tokenUsage")
+        if total is None and _is_object_dict(token_usage_value):
+            token_usage = _dict_payload(token_usage_value)
+            last_breakdown: object = token_usage.get("last")
+            if _is_object_dict(last_breakdown):
                 total = last_breakdown.get("inputTokens") or last_breakdown.get("input_tokens")
                 input_tokens = last_breakdown.get("inputTokens") or last_breakdown.get("input_tokens")
                 cached_input_tokens = last_breakdown.get("cachedInputTokens") or last_breakdown.get("cached_input_tokens")
@@ -1974,6 +2116,51 @@ class CodexEventRouter:
                 "event": event_name,
             }, subagent_id))
 
+    def _emit_filechange_diff_entries(
+        self,
+        result: ObjectDict,
+        *,
+        changes: object,
+        diff_text: Optional[str],
+        path: Optional[str],
+        thread_id: Optional[str],
+        turn_id: Optional[str],
+        item_id: Optional[str],
+        event_name: str,
+    ) -> None:
+        turn_state = self._get_turn_state(thread_id, turn_id)
+        emitted_from_changes = False
+        emitted_any = False
+        for change_path, change_diff in _diff_sections_from_changes_with_headers(changes):
+            before_count = len(_ensure_dict_list(result, "transcript_entries"))
+            self._emit_diff_entries(
+                result,
+                diff_text=change_diff,
+                path=change_path or path,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=item_id,
+                event_name=event_name,
+            )
+            emitted_from_changes = True
+            if len(_ensure_dict_list(result, "transcript_entries")) > before_count:
+                emitted_any = True
+        if not emitted_from_changes and diff_text:
+            before_count = len(_ensure_dict_list(result, "transcript_entries"))
+            self._emit_diff_entries(
+                result,
+                diff_text=diff_text,
+                path=path,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_id=item_id,
+                event_name=event_name,
+            )
+            if len(_ensure_dict_list(result, "transcript_entries")) > before_count:
+                emitted_any = True
+        if emitted_any:
+            turn_state["filechange_diff_emitted"] = True
+
     def _tool_request_result(
         self,
         *,
@@ -2032,15 +2219,15 @@ class CodexEventRouter:
         thread_id: Optional[str],
         turn_id: Optional[str],
     ) -> ObjectDict:
-        normalized_arguments = arguments if isinstance(arguments, dict) else {}
+        normalized_arguments = arguments if _is_object_dict(arguments) else {}
         question = str(normalized_arguments.get("question") or "").strip()
         raw_choices = normalized_arguments.get("choices")
-        if isinstance(raw_choices, list):
+        if _is_object_list(raw_choices):
             choices = raw_choices
         elif isinstance(raw_choices, str):
             try:
                 parsed = cast(object, json.loads(raw_choices))
-                choices = parsed if isinstance(parsed, list) else []
+                choices = parsed if _is_object_list(parsed) else []
             except Exception:
                 choices = []
         else:
@@ -2053,13 +2240,13 @@ class CodexEventRouter:
         item_state["approval_request_id"] = request_id
         item_state["ask_user_descriptor_emitted"] = True
         self._approval_request_map[str(tool_id)] = request_id
-        request_params = {
+        request_params: ObjectDict = {
             "requestId": request_id,
             "question": question,
             "choices": list(choices),
             "allowFreeform": bool(allow_freeform),
         }
-        payload_data = {
+        payload_data: ObjectDict = {
             "requestId": request_id,
             "question": question,
             "choices": list(choices),
@@ -2078,18 +2265,19 @@ class CodexEventRouter:
             activity_label="request",
         )
         events = routed.get("events")
-        if isinstance(events, list):
+        if _is_object_list(events):
             for event in events:
-                if isinstance(event, dict) and event.get("type") == "approval":
+                if _is_object_dict(event) and event.get("type") == "approval":
                     event["card_id"] = card_id
         descriptors = routed.get("approval_descriptors")
-        if isinstance(descriptors, list):
+        if _is_object_list(descriptors):
             for descriptor in descriptors:
-                if not isinstance(descriptor, dict):
+                if not _is_object_dict(descriptor):
                     continue
                 descriptor["card_id"] = card_id
-                render_event = descriptor.get("render_event") if isinstance(descriptor.get("render_event"), dict) else None
-                if isinstance(render_event, dict):
+                render_event_value = descriptor.get("render_event")
+                render_event = render_event_value if _is_object_dict(render_event_value) else None
+                if _is_object_dict(render_event):
                     render_event["card_id"] = card_id
         return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
 
@@ -2118,13 +2306,13 @@ class CodexEventRouter:
         notification_spec = protocol.notification_spec(label_lower)
         request_spec = protocol.server_request_spec(label_lower)
 
-        if event_spec is not None and event_type is not None and isinstance(payload, dict):
+        if event_spec is not None and event_type is not None and _is_object_dict(payload):
             collab = self._route_collab_event(protocol, event_type, payload, thread_id, turn_id)
             if collab is not None:
                 return collab
 
         if notification_spec and notification_spec.category == "thread" and notification_spec.subject == "thread" and notification_spec.phase == "started":
-            thread_obj = _dict_payload(payload.get("thread")) if isinstance(payload, dict) else {}
+            thread_obj = _dict_payload(payload.get("thread")) if _is_object_dict(payload) else {}
             next_thread_id = thread_obj.get("id") if isinstance(thread_obj.get("id"), str) else None
             return {
                 "handled": True,
@@ -2133,11 +2321,13 @@ class CodexEventRouter:
                 "bind_thread_ids": [next_thread_id] if next_thread_id else [],
             }
 
-        if notification_spec and notification_spec.category == "turn" and notification_spec.subject == "turn" and notification_spec.phase == "started" and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "turn" and notification_spec.subject == "turn" and notification_spec.phase == "started" and _is_object_dict(payload):
             next_turn_id = turn_id
-            turn_obj = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
-            if isinstance(turn_obj, dict):
-                next_turn_id = turn_obj.get("id") or next_turn_id
+            turn_value = payload.get("turn")
+            turn_obj = turn_value if _is_object_dict(turn_value) else {}
+            turn_id_value = turn_obj.get("id")
+            if isinstance(turn_id_value, str) and turn_id_value:
+                next_turn_id = turn_id_value
             self._get_turn_state(thread_id, next_turn_id)
             return {
                 "handled": True,
@@ -2150,7 +2340,7 @@ class CodexEventRouter:
         if (
             (notification_spec and notification_spec.category == "turn" and notification_spec.subject == "plan" and notification_spec.phase == "updated")
             or (event_spec and event_spec.category == "plan" and event_spec.subject == "update")
-        ) and isinstance(payload, dict):
+        ) and _is_object_dict(payload):
             return self._plan_update_result(
                 label_lower=label_lower,
                 payload=payload,
@@ -2158,9 +2348,9 @@ class CodexEventRouter:
                 turn_id=turn_id,
             )
 
-        if notification_spec and notification_spec.category == "turn" and notification_spec.subject == "turn" and notification_spec.phase == "completed" and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "turn" and notification_spec.subject == "turn" and notification_spec.phase == "completed" and _is_object_dict(payload):
             turn_state = self._get_turn_state(thread_id, turn_id)
-            plan_steps = turn_state.get("plan_steps")
+            plan_steps = normalize_plan_steps(turn_state.get("plan_steps"))
             plan_explanation = turn_state.get("plan_explanation")
             turn_status, turn_error = _normalize_turn_status(payload)
             if turn_status == "failed":
@@ -2190,7 +2380,7 @@ class CodexEventRouter:
                 "error": turn_error,
                 "event": label_lower,
             }]
-            if isinstance(plan_steps, list) and plan_steps:
+            if plan_steps:
                 plan_content = render_plan_markdown(plan_steps, plan_explanation if isinstance(plan_explanation, str) else None)
                 events.append({
                     "type": "plan_state",
@@ -2226,9 +2416,12 @@ class CodexEventRouter:
         if (
             (notification_spec and notification_spec.category == "turn" and notification_spec.subject == "diff" and notification_spec.phase == "updated")
             or label_lower == "codex/event/turn_diff"
-        ) and isinstance(payload, dict):
+        ) and _is_object_dict(payload):
             diff_text, path = _extract_diff_with_path(payload)
             if diff_text:
+                turn_state = self._get_turn_state(thread_id, turn_id)
+                if turn_state.get("filechange_diff_emitted"):
+                    return {"handled": True, "events": [], "transcript_entries": []}
                 result["handled"] = True
                 self._emit_diff_entries(
                     result,
@@ -2244,26 +2437,28 @@ class CodexEventRouter:
         if (
             (notification_spec and notification_spec.category == "thread" and notification_spec.subject == "tokenusage" and notification_spec.phase == "updated")
             or label_lower == "codex/event/token_count"
-        ) and isinstance(payload, dict):
+        ) and _is_object_dict(payload):
             return self._token_usage_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
 
         if (
             (notification_spec and notification_spec.category == "thread" and notification_spec.subject == "realtime" and notification_spec.phase == "error")
             or label_lower in {"thread/realtime/error", "codex/event/error", "codex/event/stream_error"}
-        ) and isinstance(payload, dict):
+        ) and _is_object_dict(payload):
             return self._error_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
 
-        if label_lower == "codex/event/task_started" and isinstance(payload, dict):
+        if label_lower == "codex/event/task_started" and _is_object_dict(payload):
             return self._collaboration_mode_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
 
-        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "item" and notification_spec.phase == "started" and isinstance(payload, dict):
-            item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
-            if not isinstance(item, dict):
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "item" and notification_spec.phase == "started" and _is_object_dict(payload):
+            item_value = payload.get("item")
+            item = item_value if _is_object_dict(item_value) else payload
+            if not _is_object_dict(item):
                 return result
             item_type = _item_type(item)
             effective_thread_id = _payload_thread_id(payload, thread_id)
             effective_turn_id = _payload_turn_id(payload, turn_id)
-            item_id = item.get("id") if isinstance(item.get("id"), str) else None
+            item_id_value = item.get("id")
+            item_id = item_id_value if isinstance(item_id_value, str) else None
             item_state = self._get_item_state(item_id, effective_thread_id, effective_turn_id)
 
             if extract_item_text:
@@ -2306,7 +2501,8 @@ class CodexEventRouter:
 
             if item_type == "commandexecution":
                 command = item.get("command") or item.get("parsedCmd") or item.get("cmd") or item.get("argv") or ""
-                cwd = item.get("cwd") or ""
+                cwd_value = item.get("cwd")
+                cwd = cwd_value if isinstance(cwd_value, str) else ""
                 new_file_spec = _shell_command_to_new_file_spec(command, cwd)
                 view_sequence = None if new_file_spec else _shell_command_to_view_sequence(command, cwd)
                 view_spec = None if (new_file_spec or view_sequence) else _shell_command_to_view_spec(command, cwd)
@@ -2368,10 +2564,11 @@ class CodexEventRouter:
                     "handled": True,
                     "events": [
                         {
-                            "type": "tool_begin",
+                            "type": "shell_begin",
                             "id": item_id or _assistant_id(item, thread_id, turn_id),
-                            "tool": "command",
-                            "arguments": {"command": command, "cwd": cwd} if command or cwd else {},
+                            "command": _command_text(command),
+                            "cwd": cwd,
+                            "activity": "running command",
                         },
                         {"type": "activity", "label": "running command", "active": True},
                     ],
@@ -2381,15 +2578,17 @@ class CodexEventRouter:
             if item_type == "filechange":
                 changes = item.get("changes")
                 diff_text, path = _extract_diff_with_path(item)
+                display_diff_text = _diff_text_from_changes_with_headers(changes) or diff_text
                 paths = _paths_from_changes(changes)
-                new_file = _diff_is_new_file(diff_text)
+                new_file = _diff_is_new_file(display_diff_text)
                 item_state.update({
                     "item_type": item_type,
                     "changes": changes,
-                    "diff": diff_text,
+                    "diff": display_diff_text,
                     "path": path,
                     "paths": paths,
                     "new_file": new_file,
+                    "patch_updated_seen": False,
                     "output_buffer": "",
                 })
                 arguments: ObjectDict = {}
@@ -2405,7 +2604,7 @@ class CodexEventRouter:
                             "tool": "apply_patch",
                             "arguments": arguments,
                             "path": path,
-                            "diff": diff_text,
+                            "diff": display_diff_text,
                             "new_file": new_file,
                         },
                         {"type": "activity", "label": "preparing diff", "active": True},
@@ -2423,7 +2622,7 @@ class CodexEventRouter:
                 elif item_type == "imageview":
                     tool_name = "view_image"
                     arguments = {"path": item.get("path")}
-                request_payload = cast(ObjectDict, build_tool_card_request(server_name or "", tool_name or item_type, arguments))
+                request_payload = build_tool_card_request(server_name or "", tool_name or item_type, arguments)
                 item_state.update({
                     "item_type": item_type,
                     "tool": tool_name or item_type,
@@ -2433,7 +2632,7 @@ class CodexEventRouter:
                 })
                 if is_agent_pty_ask_user_tool(server_name, tool_name):
                     request_id = str(conversation_id or "").strip()
-                    if request_id and isinstance(arguments, dict):
+                    if request_id and _is_object_dict(arguments):
                         arguments = dict(arguments)
                         arguments["requestId"] = request_id
                         item_state["arguments"] = arguments
@@ -2466,7 +2665,7 @@ class CodexEventRouter:
                         ],
                         "transcript_entries": [],
                     }, thread_id=thread_id, item_state=item_state)
-                activity_label = f"calling {tool_name}" if isinstance(tool_name, str) and tool_name else "calling tool"
+                activity_label = f"calling {tool_name}" if tool_name else "calling tool"
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": [
@@ -2483,7 +2682,7 @@ class CodexEventRouter:
                     "transcript_entries": [],
                 }, thread_id=thread_id, item_state=item_state)
 
-        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "agentmessage" and notification_spec.phase == "delta" and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "agentmessage" and notification_spec.phase == "delta" and _is_object_dict(payload):
             delta = payload.get("delta")
             if isinstance(delta, str):
                 effective_thread_id = _payload_thread_id(payload, thread_id)
@@ -2507,7 +2706,7 @@ class CodexEventRouter:
         if notification_spec and notification_spec.category == "item" and notification_spec.subject == "plan" and notification_spec.phase == "delta":
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        if notification_spec and notification_spec.category == "item" and isinstance(payload, dict):
+        if notification_spec and notification_spec.category == "item" and _is_object_dict(payload):
             spec_name = notification_spec.name
             if spec_name in {"item/reasoning/summarytextdelta", "item/reasoning/textdelta"}:
                 effective_thread_id = _payload_thread_id(payload, thread_id)
@@ -2571,28 +2770,38 @@ class CodexEventRouter:
                     "transcript_entries": [],
                 }, thread_id=effective_thread_id, item_state=item_state)
 
-        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "outputdelta" and isinstance(payload, dict):
-            item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "outputdelta" and _is_object_dict(payload):
+            item_id = _payload_string(payload, "itemId", "item_id")
             state = self._get_item_state(item_id, thread_id, turn_id)
             delta = _normalize_output(payload.get("delta"))
             if delta:
                 state["output_buffer"] = f"{state.get('output_buffer', '')}{delta}"
                 if state.get("view_spec") or state.get("view_sequence") or state.get("search_spec"):
                     return {"handled": True, "events": [], "transcript_entries": []}
+                if not state.get("new_file_spec"):
+                    return self._decorate_routed_result({
+                        "handled": True,
+                        "events": [{
+                            "type": "shell_delta",
+                            "id": item_id or _assistant_id(payload, thread_id, turn_id),
+                            "delta": delta,
+                        }],
+                        "transcript_entries": [],
+                    }, thread_id=thread_id, item_state=state)
                 return self._decorate_routed_result({
                     "handled": True,
                     "events": [{
                         "type": "tool_delta",
                         "id": item_id or _assistant_id(payload, thread_id, turn_id),
-                        "tool": "apply_patch" if state.get("new_file_spec") else "command",
+                        "tool": "apply_patch",
                         "delta": delta,
                     }],
                     "transcript_entries": [],
                 }, thread_id=thread_id, item_state=state)
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "filechange" and notification_spec.phase == "outputdelta" and isinstance(payload, dict):
-            item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "filechange" and notification_spec.phase == "outputdelta" and _is_object_dict(payload):
+            item_id = _payload_string(payload, "itemId", "item_id")
             state = self._get_item_state(item_id, thread_id, turn_id)
             delta = _normalize_output(payload.get("delta"))
             if delta:
@@ -2609,8 +2818,40 @@ class CodexEventRouter:
                 }, thread_id=thread_id, item_state=state)
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "terminalinteraction" and isinstance(payload, dict):
-            item_id = payload.get("itemId") if isinstance(payload.get("itemId"), str) else payload.get("item_id")
+        if (
+            (
+                notification_spec
+                and notification_spec.category == "item"
+                and notification_spec.subject == "filechange_patchupdated"
+            )
+            or label_lower == "item/filechange/patchupdated"
+        ) and _is_object_dict(payload):
+            item_id = _payload_string(payload, "itemId", "item_id")
+            state = self._get_item_state(item_id, thread_id, turn_id)
+            changes = payload.get("changes")
+            diff_text, path = _extract_diff_with_path({
+                "changes": changes,
+                "path": payload.get("path") or state.get("path"),
+            })
+            display_diff_text = _diff_text_from_changes_with_headers(changes) or diff_text
+            paths = _paths_from_changes(changes)
+            state["changes"] = changes
+            state["patch_updated_seen"] = True
+            if display_diff_text:
+                state["diff"] = display_diff_text
+                state["new_file"] = bool(state.get("new_file")) or _diff_is_new_file(display_diff_text)
+            if path:
+                state["path"] = path
+            if paths:
+                state["paths"] = paths
+            return self._decorate_routed_result({
+                "handled": True,
+                "events": [{"type": "activity", "label": "preparing diff", "active": True}],
+                "transcript_entries": [],
+            }, thread_id=thread_id, item_state=state)
+
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "commandexecution" and notification_spec.phase == "terminalinteraction" and _is_object_dict(payload):
+            item_id = _payload_string(payload, "itemId", "item_id")
             state = self._get_item_state(item_id, thread_id, turn_id)
             if state.get("view_spec") or state.get("view_sequence") or state.get("search_spec"):
                 return {"handled": True, "events": [], "transcript_entries": []}
@@ -2629,14 +2870,16 @@ class CodexEventRouter:
                 "transcript_entries": [],
             }, thread_id=thread_id)
 
-        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "item" and notification_spec.phase == "completed" and isinstance(payload, dict):
-            item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
-            if not isinstance(item, dict):
+        if notification_spec and notification_spec.category == "item" and notification_spec.subject == "item" and notification_spec.phase == "completed" and _is_object_dict(payload):
+            item_value = payload.get("item")
+            item = item_value if _is_object_dict(item_value) else payload
+            if not _is_object_dict(item):
                 return result
             item_type = _item_type(item)
             effective_thread_id = _payload_thread_id(payload, thread_id)
             effective_turn_id = _payload_turn_id(payload, turn_id)
-            item_id = item.get("id") if isinstance(item.get("id"), str) else None
+            item_id_value = item.get("id")
+            item_id = item_id_value if isinstance(item_id_value, str) else None
             item_state = self._clear_item_state(item_id)
 
             if extract_item_text:
@@ -2672,21 +2915,21 @@ class CodexEventRouter:
                 scrubbed_text, thoughts = _extract_and_scrub_thoughts(text) if text else ("", [])
                 has_visible_reasoning = _has_visible_reasoning_text(scrubbed_text)
                 should_finalize_live = turn_state.get("reason_source") in {None, "item"} and has_visible_reasoning
-                events = []
+                reasoning_events: List[ObjectDict] = []
                 if thoughts:
-                    events.extend(
+                    reasoning_events.extend(
                         build_thought_event(text=thought, turn_id=effective_turn_id)
                         for thought in thoughts
                     )
                 if should_finalize_live:
-                    events.append(build_reasoning_finalize_event(
+                    reasoning_events.append(build_reasoning_finalize_event(
                         entry_id=effective_id,
                         text=scrubbed_text,
                         turn_id=effective_turn_id,
                     ))
-                transcript_entries = []
+                reasoning_transcript_entries: List[ObjectDict] = []
                 if has_visible_reasoning and self._should_record_reasoning(turn_state, effective_id):
-                    transcript_entries.append(build_reasoning_transcript_entry(
+                    reasoning_transcript_entries.append(build_reasoning_transcript_entry(
                         entry_id=effective_id,
                         item_id=effective_id,
                         text=scrubbed_text,
@@ -2698,8 +2941,8 @@ class CodexEventRouter:
                     self._reset_reasoning_stream(turn_state)
                 return self._decorate_routed_result({
                     "handled": True,
-                    "events": events,
-                    "transcript_entries": transcript_entries,
+                    "events": reasoning_events,
+                    "transcript_entries": reasoning_transcript_entries,
                 }, thread_id=effective_thread_id, item_state=item_state)
 
             if item_type == "commandexecution":
@@ -2709,7 +2952,8 @@ class CodexEventRouter:
                 output = _normalize_output(
                     item.get("aggregatedOutput") or item.get("output") or item.get("stdout") or item_state.get("output_buffer")
                 )
-                exit_code = item.get("exitCode") if item.get("exitCode") is not None else item.get("exit_code")
+                exit_code_value = item.get("exitCode") if item.get("exitCode") is not None else item.get("exit_code")
+                exit_code = exit_code_value if isinstance(exit_code_value, int) else None
                 duration_ms = item.get("durationMs") if item.get("durationMs") is not None else item.get("duration_ms")
                 status = str(item.get("status") or "").strip().lower()
                 is_error = _result_error_status(status, exit_code, item.get("error"))
@@ -2750,18 +2994,17 @@ class CodexEventRouter:
                                     "turn_id": turn_id,
                                     "event": label_lower,
                                 })
-                            if split_output is not None:
-                                routed_events.append({"type": "activity", "label": "processing", "active": True})
-                                routed = {
-                                    "handled": True,
-                                    "events": routed_events,
-                                    "transcript_entries": view_entries,
-                                }
-                                approval_request_id = item_state.get("approval_request_id")
-                                if approval_request_id:
-                                    routed["clear_live_approval_ids"] = [approval_request_id]
-                                    self._approval_request_map.pop(str(item_id), None)
-                                return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
+                            routed_events.append({"type": "activity", "label": "processing", "active": True})
+                            view_routed: ObjectDict = {
+                                "handled": True,
+                                "events": routed_events,
+                                "transcript_entries": view_entries,
+                            }
+                            approval_request_id = item_state.get("approval_request_id")
+                            if approval_request_id:
+                                view_routed["clear_live_approval_ids"] = [approval_request_id]
+                                self._approval_request_map.pop(str(item_id), None)
+                            return self._decorate_routed_result(view_routed, thread_id=thread_id, item_state=item_state)
                 if view_spec and not is_error:
                     view_lines = _build_codex_view_lines(output, view_spec)
                     routed = {
@@ -2794,7 +3037,7 @@ class CodexEventRouter:
                     if approval_request_id:
                         routed["clear_live_approval_ids"] = [approval_request_id]
                         self._approval_request_map.pop(str(item_id), None)
-                    return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
+                    return self._decorate_routed_result(routed, thread_id=effective_thread_id, item_state=item_state)
                 if search_spec and not is_error:
                     normalized_search_output = _normalize_search_output(output, search_spec)
                     routed = {
@@ -2831,8 +3074,10 @@ class CodexEventRouter:
                         self._approval_request_map.pop(str(item_id), None)
                     return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 if new_file_spec:
-                    path = new_file_spec.get("path") if isinstance(new_file_spec.get("path"), str) else ""
-                    diff_text = new_file_spec.get("diff") if isinstance(new_file_spec.get("diff"), str) else ""
+                    path_value = new_file_spec.get("path")
+                    path = path_value if isinstance(path_value, str) else ""
+                    diff_value = new_file_spec.get("diff")
+                    diff_text = diff_value if isinstance(diff_value, str) else ""
                     arguments = _new_file_arguments(new_file_spec)
                     result_payload = {
                         "status": status or "completed",
@@ -2875,6 +3120,16 @@ class CodexEventRouter:
                             "event": label_lower,
                         }],
                     }
+                    self._emit_filechange_diff_entries(
+                        routed,
+                        changes=None,
+                        diff_text=diff_text,
+                        path=path,
+                        thread_id=effective_thread_id,
+                        turn_id=effective_turn_id,
+                        item_id=item_id,
+                        event_name=label_lower,
+                    )
                     approval_request_id = item_state.get("approval_request_id")
                     if approval_request_id:
                         routed["clear_live_approval_ids"] = [approval_request_id]
@@ -2884,26 +3139,16 @@ class CodexEventRouter:
                     "handled": True,
                     "events": [
                         {
-                            "type": "tool_end",
-                            "id": item_id or _assistant_id(item, thread_id, turn_id),
-                            "tool": "command",
-                            "arguments": {"command": command, "cwd": cwd} if command or cwd else {},
-                            "result": {
-                                "status": status or "completed",
-                                "exit_code": exit_code,
-                                "output_lines": len(output.splitlines()) if output else 0,
-                            },
-                            "duration_ms": duration_ms,
-                            "is_error": is_error,
-                        },
-                        {
-                            "type": "command_result",
+                            "type": "shell_end",
                             "id": item_id or _assistant_id(item, thread_id, turn_id),
                             "command": display_command,
                             "cwd": cwd,
-                            "output": output,
-                            "exit_code": exit_code,
+                            "stdout": output,
+                            "stderr": "",
+                            "exitCode": exit_code if exit_code is not None else (1 if is_error else 0),
                             "duration_ms": duration_ms,
+                            "status": status or ("error" if is_error else "completed"),
+                            "is_error": is_error,
                         },
                         {"type": "activity", "label": "processing", "active": True},
                     ],
@@ -2935,6 +3180,13 @@ class CodexEventRouter:
                 primary_path = paths[0] if paths else item_state.get("path")
                 diff_value = item_state.get("diff")
                 diff_text = diff_value if isinstance(diff_value, str) else None
+                if not diff_text:
+                    diff_text = _diff_text_from_changes_with_headers(changes)
+                    extracted_path = None
+                    if not diff_text:
+                        diff_text, extracted_path = _extract_diff_with_path({"changes": changes, "path": primary_path})
+                    if extracted_path and not primary_path:
+                        primary_path = extracted_path
                 new_file = bool(item_state.get("new_file")) or _diff_is_new_file(diff_text)
                 is_error = status in {"failed", "declined", "error"}
                 arguments = {
@@ -2982,11 +3234,22 @@ class CodexEventRouter:
                         "event": label_lower,
                     }],
                 }
+                if item_state.get("patch_updated_seen"):
+                    self._emit_filechange_diff_entries(
+                        routed,
+                        changes=changes,
+                        diff_text=diff_text,
+                        path=primary_path if isinstance(primary_path, str) else None,
+                        thread_id=effective_thread_id,
+                        turn_id=effective_turn_id,
+                        item_id=item_id,
+                        event_name=label_lower,
+                    )
                 approval_request_id = item_state.get("approval_request_id")
                 if approval_request_id:
                     routed["clear_live_approval_ids"] = [approval_request_id]
                     self._approval_request_map.pop(str(item_id), None)
-                return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
+                return self._decorate_routed_result(routed, thread_id=effective_thread_id, item_state=item_state)
 
             if item_type in {"mcptoolcall", "websearch", "imageview"}:
                 tool_name = _string_value(item.get("tool"), _string_value(item_state.get("tool"), item_type))
@@ -3014,7 +3277,7 @@ class CodexEventRouter:
                         or ""
                     ).strip()
                     if approval_request_id:
-                        terminal_resolution = dict(live_result) if isinstance(live_result, dict) else {}
+                        terminal_resolution = dict(live_result) if _is_object_dict(live_result) else {}
                         if is_error:
                             if not terminal_resolution:
                                 terminal_resolution = {"status": "error"}
@@ -3027,22 +3290,18 @@ class CodexEventRouter:
                             "transcript_entries": [],
                         }
                         routed["clear_live_approval_ids"] = [approval_request_id]
-                        routed["ask_user_finalizations"] = [{
-                            "request_id": approval_request_id,
-                            "resolution": terminal_resolution or {"action": "cancel"},
-                        }]
                         self._approval_request_map.pop(str(item_id), None)
                         return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
                 request_payload = item_state.get("request")
                 if request_payload is None:
-                    request_payload = cast(ObjectDict, build_tool_card_request(server_name, tool_name, arguments))
-                response_payload = cast(ObjectDict, build_tool_card_response(server_name, tool_name, live_result))
+                    request_payload = build_tool_card_request(server_name, tool_name, arguments)
+                response_payload = build_tool_card_response(server_name, tool_name, live_result)
                 if item_type == "websearch":
                     query = item.get("query")
                     if not isinstance(query, str):
                         query = item_state.get("query") if isinstance(item_state.get("query"), str) else ""
                     results_payload: object = result_value
-                    if isinstance(result_value, dict) and "results" in result_value:
+                    if _is_object_dict(result_value) and "results" in result_value:
                         results_payload = result_value.get("results")
                     search_content = ""
                     if results_payload is not None:
@@ -3128,7 +3387,7 @@ class CodexEventRouter:
 
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        if request_spec and request_spec.category == "item" and request_spec.subject == "tool" and request_spec.phase == "call" and isinstance(payload, dict):
+        if request_spec and request_spec.category == "item" and request_spec.subject == "tool" and request_spec.phase == "call" and _is_object_dict(payload):
             request_id = payload.get("_request_id")
             if request_id is None:
                 request_id = payload.get("id")
@@ -3155,7 +3414,7 @@ class CodexEventRouter:
             if is_agent_pty_ask_user_request(tool_name, arguments):
                 request_id = str(conversation_id or "").strip()
                 if request_id:
-                    if isinstance(arguments, dict):
+                    if _is_object_dict(arguments):
                         arguments = dict(arguments)
                         arguments["requestId"] = request_id
                         item_state["arguments"] = arguments
@@ -3196,7 +3455,7 @@ class CodexEventRouter:
                 activity_label="request",
             ), thread_id=thread_id, item_state=item_state)
 
-        if request_spec and request_spec.category == "item" and request_spec.subject == "tool" and request_spec.phase == "requestuserinput" and isinstance(payload, dict):
+        if request_spec and request_spec.category == "item" and request_spec.subject == "tool" and request_spec.phase == "requestuserinput" and _is_object_dict(payload):
             request_id = payload.get("_request_id")
             if request_id is None:
                 request_id = payload.get("id")
@@ -3218,7 +3477,7 @@ class CodexEventRouter:
                 activity_label="request",
             ), thread_id=thread_id, item_state=item_state)
 
-        if request_spec and request_spec.category == "item" and request_spec.subject == "commandexecution" and request_spec.phase == "requestapproval" and isinstance(payload, dict):
+        if request_spec and request_spec.category == "item" and request_spec.subject == "commandexecution" and request_spec.phase == "requestapproval" and _is_object_dict(payload):
             request_id = payload.get("_request_id")
             if request_id is None:
                 request_id = payload.get("id")
@@ -3251,7 +3510,7 @@ class CodexEventRouter:
                 request_params=dict(payload),
             ), thread_id=thread_id, item_state=item_state)
 
-        if request_spec and request_spec.category == "item" and request_spec.subject == "filechange" and request_spec.phase == "requestapproval" and isinstance(payload, dict):
+        if request_spec and request_spec.category == "item" and request_spec.subject == "filechange" and request_spec.phase == "requestapproval" and _is_object_dict(payload):
             request_id = payload.get("_request_id")
             if request_id is None:
                 request_id = payload.get("id")
@@ -3268,11 +3527,17 @@ class CodexEventRouter:
                 "changes": payload.get("changes") or item_state.get("changes"),
                 "path": payload.get("path") or item_state.get("path"),
             })
+            changes = payload.get("changes") or item_state.get("changes")
+            headered_diff = _diff_text_from_changes_with_headers(changes)
+            paths = _paths_from_changes(changes)
+            if headered_diff:
+                diff_text = headered_diff
             payload_data = {
                 "diff": diff_text,
-                "changes": payload.get("changes") or item_state.get("changes"),
+                "changes": changes,
+                "paths": paths,
                 "reason": payload.get("reason"),
-                "path": path or item_state.get("path"),
+                "path": (path or item_state.get("path")) if len(paths) <= 1 else None,
                 "grant_root": payload.get("grantRoot"),
             }
             return self._decorate_routed_result(self._tool_request_result(
@@ -3285,7 +3550,7 @@ class CodexEventRouter:
                 request_params=dict(payload),
             ), thread_id=thread_id, item_state=item_state)
 
-        if request_spec and request_spec.name.lower() == "mcpserver/elicitation/request" and isinstance(payload, dict):
+        if request_spec and request_spec.name.lower() == "mcpserver/elicitation/request" and _is_object_dict(payload):
             request_id = payload.get("_request_id")
             if request_id is None:
                 request_id = payload.get("id") or payload.get("elicitationId")
@@ -3309,7 +3574,7 @@ class CodexEventRouter:
                 activity_label="request",
             ), thread_id=thread_id)
 
-        if event_spec and event_spec.category == "user" and event_spec.subject == "message" and isinstance(payload, dict):
+        if event_spec and event_spec.category == "user" and event_spec.subject == "message" and _is_object_dict(payload):
             text = _direct_event_text(payload)
             if text:
                 effective_thread_id = _payload_thread_id(payload, thread_id)
@@ -3327,7 +3592,7 @@ class CodexEventRouter:
                     "transcript_entries": [build_message_transcript_entry(
                         role="user",
                         entry_id=item_id,
-                        item_id=payload.get("item_id") or payload.get("itemId"),
+                        item_id=_payload_string(payload, "item_id", "itemId"),
                         text=text,
                         timestamp=utc_ts(),
                         turn_id=effective_turn_id,
@@ -3335,7 +3600,7 @@ class CodexEventRouter:
                     )],
                 }, thread_id=effective_thread_id, item_state=item_state)
 
-        if event_spec and isinstance(payload, dict):
+        if event_spec and _is_object_dict(payload):
             if (
                 (
                     event_spec.category == "agent"
@@ -3460,7 +3725,7 @@ class CodexEventRouter:
                     "transcript_entries": transcript_entries,
                 }, thread_id=effective_thread_id, item_state=item_state)
 
-        if event_spec and event_spec.category == "agent" and event_spec.subject in {"message", "message_content"} and event_spec.phase == "delta" and isinstance(payload, dict):
+        if event_spec and event_spec.category == "agent" and event_spec.subject in {"message", "message_content"} and event_spec.phase == "delta" and _is_object_dict(payload):
             delta = payload.get("delta")
             if isinstance(delta, str):
                 effective_thread_id = _payload_thread_id(payload, thread_id)
@@ -3481,7 +3746,7 @@ class CodexEventRouter:
                     "transcript_entries": [],
                 }, thread_id=effective_thread_id, item_state=item_state)
 
-        if event_spec and event_spec.category == "agent" and event_spec.subject == "message" and event_spec.phase is None and isinstance(payload, dict):
+        if event_spec and event_spec.category == "agent" and event_spec.subject == "message" and event_spec.phase is None and _is_object_dict(payload):
             text = _direct_event_text(payload)
             if text:
                 effective_thread_id = _payload_thread_id(payload, thread_id)
@@ -3499,7 +3764,7 @@ class CodexEventRouter:
                     "transcript_entries": [build_message_transcript_entry(
                         role="assistant",
                         entry_id=item_id,
-                        item_id=payload.get("item_id") or payload.get("itemId"),
+                        item_id=_payload_string(payload, "item_id", "itemId"),
                         text=text,
                         timestamp=utc_ts(),
                         turn_id=effective_turn_id,
@@ -3507,7 +3772,7 @@ class CodexEventRouter:
                     )],
                 }, thread_id=effective_thread_id, item_state=item_state)
 
-        if event_spec and event_spec.phase == "request" and isinstance(payload, dict) and (
+        if event_spec and event_spec.phase == "request" and _is_object_dict(payload) and (
             (event_spec.category == "exec" and event_spec.subject == "approval")
             or (event_spec.category == "apply" and event_spec.subject == "patch_approval")
         ):
@@ -3515,7 +3780,7 @@ class CodexEventRouter:
             # JSON-RPC request id; only item/*/requestApproval should create live approval cards.
             return {"handled": True, "events": [], "transcript_entries": []}
 
-        if isinstance(payload, dict):
+        if _is_object_dict(payload):
             generic_notification = self._generic_notification_result(
                 label_lower=label_lower,
                 payload=payload,

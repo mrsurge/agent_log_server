@@ -357,15 +357,27 @@ Use for file patch/diff output.
 
 Expected fields:
 
+- live `type: "diff"`
 - `role: "diff"`
 - `text`
 - `path` optional
+- `id` / `item_id` optional but recommended for replay-safe identity
+- `turn_id`, `event`, and `subagent_id` when available
 
 Render expectations:
 
 - preserve existing diff card behavior
 - clickable path when available
+- if `path` is absent, the frontend may derive it from a `diff --git a/... b/...` header
+- standalone diff cards own user-visible patch rendering for file-change output
 - this standalone diff card may exist alongside a related tool card that also carries embedded diff metadata
+
+Router expectations:
+
+- normalize structured upstream file-change payloads into unified diff text before emitting `diff`
+- when upstream per-file changes provide hunks without file headers, add `diff --git`, `---`, and `+++` headers so path extraction and highlighting work during live render and replay
+- split multi-file unified diffs into per-file diff cards when the upstream shape provides independent file changes or when doing so preserves path-specific rendering
+- avoid duplicate standalone diff cards when a provider emits the same patch through both file-change items and later aggregate turn-diff notifications
 
 ### `error`
 
@@ -631,9 +643,10 @@ Render expectations:
   - when `new_file: true`, keep the same patch-style card but label it as a new-file operation instead of a generic patch
   - path-aware header behavior when path is available
   - success/failure outcome treatment from generic tool fields such as `status`, `is_error`, and `response`
-  - embedded diff preview only when a real `diff` payload is present
+  - summary/outcome/path rendering only; standalone `diff` cards own patch body rendering for apply-patch/file-change output
 - routers may normalize semantically equivalent upstream edit tools onto this shared contract; for example an old-string/new-string replacement may be emitted as `tool: "apply_patch"` for success/failure/path semantics even when its actual diff arrives separately as a standalone `diff` card
-- emitting a tool card with embedded `diff` does not forbid also emitting a standalone `diff` card when preserving existing diff-row behavior matters
+- routers may still include `diff` metadata on the tool event/transcript entry for semantic parity, but they should not rely on the apply-patch tool card to render that patch body
+- emit a standalone `diff` card whenever the patch body should be visible in the transcript
 
 ### `mcp_tool`
 
@@ -659,7 +672,7 @@ Render expectations:
 - this uses the same shared generic tool-card renderer as `tool`
 - frontend prefers canonical `request` / `response` and falls back to legacy fields
 - this is a fallback, not the preferred target when a more specific generic card exists
-- if an `mcp_tool` payload is normalized onto `tool: "apply_patch"`, it should still render with the shared patch-style tool-card behavior; embedded diff preview remains conditional on an actual `diff` payload
+- if an `mcp_tool` payload is normalized onto `tool: "apply_patch"`, it should still render with the shared patch-style summary/outcome/path behavior; emit a standalone `diff` card for visible patch bodies
 
 ## Router responsibilities
 

@@ -1,9 +1,10 @@
 import asyncio
 import contextlib
 import queue
+import sys
 import threading
 import time
-from collections.abc import Awaitable
+import traceback
 from typing import Optional, Protocol, TypeAlias, cast
 
 
@@ -35,6 +36,9 @@ class _PipeShellManager(Protocol):
     async def write_to_pipe(self, shell_id: str, text: str) -> None: ...
 
     async def terminate_shell(self, shell_id: str, force: bool) -> None: ...
+
+
+PipeShellManager: TypeAlias = _PipeShellManager
 
 
 class _SupportsWriteToShell(Protocol):
@@ -74,7 +78,7 @@ class _BlockingBytesReader:
         return True
 
     def read(self, size: int = -1) -> bytes:
-        if size is None or size < 0:
+        if size < 0:
             while self._fill():
                 pass
             data = bytes(self._buffer)
@@ -93,12 +97,12 @@ class _BlockingBytesReader:
             newline = self._buffer.find(b"\n")
             if newline != -1:
                 end = newline + 1
-                if size is not None and size >= 0:
+                if size >= 0:
                     end = min(end, size)
                 data = bytes(self._buffer[:end])
                 del self._buffer[:end]
                 return data
-            if size is not None and size >= 0 and len(self._buffer) >= size:
+            if size >= 0 and len(self._buffer) >= size:
                 data = bytes(self._buffer[:size])
                 del self._buffer[:size]
                 return data
@@ -171,9 +175,7 @@ class FrameworkShellPipeProcess:
         return process
 
     async def _start(self) -> None:
-        state = self._mgr.get_pipe_state(self._shell_id)
-        if not state or not state.process.stdin:
-            raise RuntimeError("copilot sdk pipe not available")
+        await self._wait_for_pipe_state()
         self._subscription = await self._mgr.subscribe_output_bytes(self._shell_id)
         self._writer_task = asyncio.create_task(
             self._drain_writes(),
@@ -184,10 +186,41 @@ class FrameworkShellPipeProcess:
             name=f"copilot-sdk-pipe:{self._shell_id}",
         )
 
+    async def _wait_for_pipe_state(self) -> _PipeState:
+        deadline = time.monotonic() + 5.0
+        state: _PipeState | None = None
+        while True:
+            state = self._mgr.get_pipe_state(self._shell_id)
+            if state and state.process.stdin:
+                return state
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "copilot sdk pipe not available "
+                    f"({self._pipe_state_error_detail(state)})"
+                )
+            await asyncio.sleep(0.05)
+
+    def _pipe_state_error_detail(self, state: object | None) -> str:
+        if state is None:
+            return f"shell_id={self._shell_id} state=missing"
+        process = cast(object | None, getattr(state, "process", None))
+        stdin = cast(object | None, getattr(process, "stdin", None)) if process is not None else None
+        returncode = (
+            cast(object | None, getattr(process, "returncode", None))
+            if process is not None
+            else None
+        )
+        process_status = "present" if process is not None else "missing"
+        stdin_status = "present" if stdin is not None else "missing"
+        return (
+            f"shell_id={self._shell_id} state=present "
+            f"process={process_status} stdin={stdin_status} returncode={returncode!r}"
+        )
+
     def raise_if_write_failed(self) -> None:
         exc = self._write_error
         if exc is not None:
-            raise RuntimeError("copilot sdk pipe write failed") from exc
+            raise RuntimeError(f"copilot sdk pipe write failed: {_format_exception_chain(exc)}") from exc
 
     def _enqueue_write(self, payload: _QueuedWrite) -> None:
         self._write_queue.put_nowait(payload)
@@ -209,19 +242,41 @@ class FrameworkShellPipeProcess:
                 await self.write_bytes(payload)
         except Exception as exc:
             self._write_error = exc
+            print(
+                "[CopilotSDK] pipe writer task failed: "
+                f"{_format_exception_chain(exc)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
             self.stdout.close()
 
     async def write_bytes(self, data: bytes) -> None:
-        text = data.decode("utf-8")
+        try:
+            text = data.decode("utf-8")
+        except Exception as exc:
+            raise RuntimeError(f"failed to decode Copilot pipe write payload bytes={len(data)}") from exc
+        detail = self._pipe_state_error_detail(self._mgr.get_pipe_state(self._shell_id))
         writer = cast(_SupportsWriteToShell | None, self._mgr if hasattr(self._mgr, "write_to_shell") else None)
         if writer is not None:
             try:
                 await writer.write_to_shell(self._shell_id, text, append_newline=False)
                 return
-            except TypeError:
-                await writer.write_to_shell(self._shell_id, text)
-                return
-        await self._mgr.write_to_pipe(self._shell_id, text)
+            except TypeError as first_error:
+                try:
+                    await writer.write_to_shell(self._shell_id, text)
+                    return
+                except Exception as exc:
+                    raise RuntimeError(
+                        "write_to_shell failed after signature fallback "
+                        f"({detail}, bytes={len(data)}, first_error={first_error!r})"
+                    ) from exc
+            except Exception as exc:
+                raise RuntimeError(f"write_to_shell failed ({detail}, bytes={len(data)})") from exc
+        try:
+            await self._mgr.write_to_pipe(self._shell_id, text)
+        except Exception as exc:
+            raise RuntimeError(f"write_to_pipe failed ({detail}, bytes={len(data)})") from exc
 
     async def _pump_output(self) -> None:
         try:
@@ -314,3 +369,14 @@ class FrameworkShellPipeProcess:
 
     async def aclose(self) -> None:
         await self.close_streams()
+
+
+def _format_exception_chain(exc: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " <- ".join(parts)

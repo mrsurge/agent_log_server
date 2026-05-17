@@ -12,11 +12,11 @@
     "skipLibCheck": true
   },
   "include": [
-    "agent_log_server/static/**/*.js",
-    "agent_log_server/static/**/*.ts"
+    "rust/crates/als-server/src/static/**/*.js",
+    "rust/crates/als-server/src/static/**/*.ts"
   ],
   "exclude": [
-    "agent_log_server/static/dist/**",
-    "agent_log_server/static/vendor/**"
+    "rust/crates/als-server/src/static/dist/**",
+    "rust/crates/als-server/src/static/vendor/**"
   ]
 }

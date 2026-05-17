@@ -7,6 +7,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final, cast
 
+JsonObject = dict[str, object]
+
 
 _SCHEMA_DIR: Final[Path] = Path(__file__).with_name("schemas")
 _API_SCHEMA_PATH: Final[Path] = _SCHEMA_DIR / "api.schema.json"
@@ -29,65 +31,77 @@ def _snake_case(name: str) -> str:
     return "".join(result)
 
 
-def _load_json(path: Path) -> dict[str, object]:
+def _coerce_json_object(value: object) -> JsonObject | None:
+    if not isinstance(value, dict):
+        return None
+    value_map = cast(dict[object, object], value)
+    return {str(key): item for key, item in value_map.items()}
+
+
+def _load_json(path: Path) -> JsonObject:
     with path.open("r", encoding="utf-8") as handle:
         data = cast(object, json.load(handle))
-    return data if isinstance(data, dict) else {}
+    return _coerce_json_object(data) or {}
 
 
 def _collect_session_methods(node: object, methods: set[str]) -> None:
-    if isinstance(node, dict):
-        rpc_method = node.get("rpcMethod")
+    node_map = _coerce_json_object(node)
+    if node_map is not None:
+        rpc_method = node_map.get("rpcMethod")
         if isinstance(rpc_method, str) and rpc_method.startswith("session."):
             methods.add(rpc_method)
-        for child in node.values():
+        for child in node_map.values():
             _collect_session_methods(child, methods)
     elif isinstance(node, list):
-        for child in node:
+        node_list = cast(list[object], node)
+        for child in node_list:
             _collect_session_methods(child, methods)
 
 
 def _resolve_schema_node(
     node: object,
-    definitions: dict[str, object],
-) -> dict[str, object]:
-    if not isinstance(node, dict):
+    definitions: JsonObject,
+) -> JsonObject:
+    node_map = _coerce_json_object(node)
+    if node_map is None:
         return {}
-    ref = node.get("$ref")
+    ref = node_map.get("$ref")
     if isinstance(ref, str) and ref.startswith("#/definitions/"):
         target = definitions.get(ref.rsplit("/", 1)[-1])
-        return target if isinstance(target, dict) else {}
-    return node
+        return _coerce_json_object(target) or {}
+    return node_map
 
 
-def _collect_event_fields(schema: dict[str, object]) -> dict[str, frozenset[str]]:
-    definitions = schema.get("definitions")
-    definition_map = definitions if isinstance(definitions, dict) else {}
+def _collect_event_fields(schema: JsonObject) -> dict[str, frozenset[str]]:
+    definition_map = _coerce_json_object(schema.get("definitions")) or {}
     root = _resolve_schema_node(schema, definition_map)
     variants = root.get("anyOf")
     if not isinstance(variants, list):
         variants = root.get("oneOf")
     if not isinstance(variants, list):
         return {}
+    variant_list = cast(list[object], variants)
     fields: dict[str, frozenset[str]] = {}
-    for variant in variants:
+    for variant in variant_list:
         resolved_variant = _resolve_schema_node(variant, definition_map)
         if not resolved_variant:
             continue
         properties = resolved_variant.get("properties")
-        if not isinstance(properties, dict):
+        properties_map = _coerce_json_object(properties)
+        if properties_map is None:
             continue
-        type_prop = properties.get("type")
-        data_prop = properties.get("data")
+        type_prop = properties_map.get("type")
+        data_prop = properties_map.get("data")
         resolved_type = _resolve_schema_node(type_prop, definition_map)
         resolved_data = _resolve_schema_node(data_prop, definition_map)
         if not resolved_type or not resolved_data:
             continue
         event_type = resolved_type.get("const")
         data_properties = resolved_data.get("properties")
-        if not isinstance(event_type, str) or not isinstance(data_properties, dict):
+        data_properties_map = _coerce_json_object(data_properties)
+        if not isinstance(event_type, str) or data_properties_map is None:
             continue
-        fields[event_type] = frozenset(_snake_case(str(name)) for name in data_properties.keys())
+        fields[event_type] = frozenset(_snake_case(name) for name in data_properties_map.keys())
     return fields
 
 

@@ -1,0 +1,232 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>ALS-RS</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#0d0f13">
+    <link rel="icon" type="image/svg+xml" href="/static/codexas-icon.svg">
+    <link rel="stylesheet" href="/static/vendor/fonts/jetbrains-mono.css">
+    <link rel="stylesheet" href="/static/codex_agent.css">
+    <style id="als-rs-session-picker-style">
+      #session-picker-sort.picker-sort-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding-bottom: 8px;
+      }
+      #session-picker-sort .picker-sort-group,
+      #session-picker-sort .picker-filter-group {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+      #session-picker-sort .picker-filter-group {
+        margin-left: auto;
+      }
+      #session-picker-sort .picker-sort-btn[data-selected="true"] {
+        border-color: var(--accent);
+        background: rgba(80, 120, 255, 0.16);
+        color: var(--text);
+      }
+      #session-picker-sort .picker-filter-btn {
+        max-width: min(320px, 46vw);
+      }
+      #session-picker-list .session-item {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+      }
+      #session-picker-list .session-header {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        width: 100%;
+      }
+      #session-picker-list .session-footer {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        width: 100%;
+      }
+      #session-picker-list .session-cell {
+        font-size: 12px;
+        color: var(--muted);
+        letter-spacing: 0.4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #session-picker-list .session-summary {
+        font-size: 13px;
+        font-weight: 500;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-width: 100%;
+      }
+    </style>
+    <script>window.AGENT_LOG_SOCKETIO_SERIALIZER = "json";</script>
+    <script src="/static/dist/codex_agent.js" type="module"></script>
+    <script type="module">
+      import { initConsoleBridge } from '/static/js/console_bridge.js';
+      const startAlsRsConsoleBridge = (attempt = 0) => {
+        try {
+          const isProxied = window.location.pathname.startsWith('/api/app/') || window.location.pathname.startsWith('/app/');
+          const directTe2Origin = `${window.location.protocol}//${window.location.hostname || '127.0.0.1'}:8089`;
+          const bridge = initConsoleBridge({
+            workerLabel: 'als_rs',
+            uniquePerWindow: true,
+            ...(isProxied ? {} : { socketOrigin: directTe2Origin }),
+          });
+          if (!bridge && attempt < 40) {
+            window.setTimeout(() => startAlsRsConsoleBridge(attempt + 1), 250);
+          }
+        } catch (e) {
+          console.warn('[console_bridge] init failed', e);
+        }
+      };
+      startAlsRsConsoleBridge();
+    </script>
+  </head>
+  <body>
+    <div class="appshell">
+      <main class="grid">
+        <section class="splash-view" id="splash-view">
+          <div class="splash-header">
+            <div class="splash-header-main">
+              <div class="brand">
+                <h1>ALS-RS</h1>
+                <small>Unified Timeline</small>
+              </div>
+              <div class="splash-tabs" id="splash-tabs">
+                <button id="splash-tab-project" class="btn tiny toggle">Project</button>
+                <button id="splash-tab-all" class="btn tiny toggle active">All</button>
+                <button id="splash-go-conversation" class="btn ghost splash-go-conversation-btn" title="Go to active conversation" aria-label="Go to active conversation" disabled>
+                  <img src="/static/images/green-right-arrow.png" alt="" class="splash-go-conversation-icon">
+                </button>
+              </div>
+            </div>
+            <div class="splash-header-actions">
+              <span id="splash-console-worker-id" class="pill console-worker-pill" title="TE2 console worker ID" hidden></span>
+              <button id="splash-settings" class="btn ghost" title="Splash settings">⚙</button>
+              <button id="host-close-top" class="btn ghost host-close-btn">×</button>
+            </div>
+          </div>
+          <div class="conversation-list-panel">
+            <div class="conversation-list-panel-header">
+              <p class="muted">Pick or create a conversation</p>
+            </div>
+            <div class="conversation-list-scroller">
+              <div id="conversation-list" class="conversation-list"></div>
+            </div>
+          </div>
+          <footer class="splash-footer">
+            <button id="conversation-create" class="btn primary">New Conversation</button>
+          </footer>
+        </section>
+        <div id="widescreen-resizer" class="widescreen-resizer" role="separator" aria-orientation="vertical" aria-label="Resize splash and conversation panels" tabindex="0"></div>
+        <section class="conversation-drawer" id="conversation-drawer">
+          <div class="drawer-header">
+            <div class="brand">
+              <h2 id="conversation-title" class="conversation-title-trigger" role="button" tabindex="0" aria-controls="conversation-mini-drawer" aria-expanded="false">Conversation</h2>
+              <div id="conversation-label" class="conversation-label">—</div>
+            </div>
+            <div class="drawer-actions">
+              <label class="toggle-label"><input type="checkbox" id="markdown-toggle" checked><span>MD</span></label>
+              <label class="toggle-label"><input type="checkbox" id="track-edits-toggle"><span>📝</span></label>
+              <label class="toggle-label"><input type="checkbox" id="line-numbers-toggle"><span>#</span></label>
+              <span id="agent-ws" class="pill warn">👎</span>
+              <button id="conversation-settings" class="btn">Settings</button>
+              <button id="conversation-back" class="btn ghost">Back</button>
+              <button id="host-close-drawer" class="btn ghost host-close-btn">×</button>
+            </div>
+          </div>
+          <div id="conversation-body" class="conversation-body">
+            <div class="conversation-mini-drawer" id="conversation-mini-drawer" aria-hidden="true">
+              <div class="conversation-mini-header">
+                <span class="conversation-mini-title">Switch conversation</span>
+                <button id="conversation-mini-close" class="btn ghost tiny">×</button>
+              </div>
+              <div id="conversation-mini-list" class="conversation-mini-list"></div>
+            </div>
+            <div class="conversation-main">
+              <div class="timeline-wrap">
+                <div id="agent-timeline" class="timeline"></div>
+              </div>
+              <div class="status-ribbon" id="status-ribbon">
+                <span class="status-spinner"></span>
+                <span id="status-label" class="status-text">idle</span>
+                <span id="status-reasoning" class="status-reasoning"></span>
+                <span id="status-dot" class="status-dot"></span>
+              </div>
+              <div class="composer">
+                <div id="agent-prompt" contenteditable="true" class="prompt-input" data-placeholder="@ to mention files"></div>
+              </div>
+              <footer class="footer">
+                <div id="footer-runtime-controls" class="footer-runtime-controls"></div>
+                <div class="status-pill footer-cell"><span>context:</span><span id="context-remaining" class="pill">—</span></div>
+                <div class="status-pill footer-cell footer-send"><button id="agent-send" class="btn primary">Send</button></div>
+                <div class="status-pill footer-cell"><span>Scroll</span><button id="scroll-pin" class="btn tiny toggle active">Pinned</button></div>
+                <div class="status-pill footer-cell"><span id="mention-pill" class="pill">mention</span></div>
+                <div class="status-pill footer-cell"><span>Tokens</span><span id="counter-tokens" class="pill">0</span></div>
+                <div class="status-pill footer-cell footer-end"><button id="turn-interrupt" class="btn danger">Interrupt</button></div>
+              </footer>
+            </div>
+          </div>
+        </section>
+      </main>
+      <div class="settings-overlay hidden" id="settings-modal">
+        <div class="settings-dialog">
+          <div class="settings-header"><h3>Conversation Settings</h3><button id="settings-close" class="btn ghost">×</button></div>
+          <div class="settings-body">
+            <label id="settings-agent-row"><span>Agent</span><div class="dropdown-field"><input type="text" id="settings-agent" placeholder="(select agent)" readonly><button id="settings-agent-toggle" class="btn ghost dropdown-toggle">▾</button><div id="settings-agent-options" class="dropdown-list"></div></div></label>
+            <label><span>Conversation Label</span><input type="text" id="settings-label" placeholder="label"></label>
+            <label><span>Assistant Alias</span><input type="text" id="settings-alias" placeholder="assistant"></label>
+            <div id="settings-codex-fields">
+              <label><span>CWD</span><div class="settings-row"><input type="text" id="settings-cwd" placeholder="~/project"><button id="settings-cwd-browse" class="btn ghost">Browse</button></div></label>
+              <label><span>Approval Policy</span><div class="dropdown-field"><input type="text" id="settings-approval" placeholder="Use runtime default"><button id="settings-approval-toggle" class="btn ghost dropdown-toggle">▾</button><div id="settings-approval-options" class="dropdown-list"></div></div></label>
+              <label><span>Sandbox Policy</span><div class="dropdown-field"><input type="text" id="settings-sandbox" placeholder="Use runtime default"><button id="settings-sandbox-toggle" class="btn ghost dropdown-toggle">▾</button><div id="settings-sandbox-options" class="dropdown-list"></div></div></label>
+              <label><span>Model</span><div class="dropdown-field"><input type="text" id="settings-model" placeholder="model id"><button id="settings-model-toggle" class="btn ghost dropdown-toggle">▾</button><div id="settings-model-options" class="dropdown-list"></div></div></label>
+              <label><span>Effort</span><div class="dropdown-field"><input type="text" id="settings-effort" placeholder="medium"><button id="settings-effort-toggle" class="btn ghost dropdown-toggle">▾</button><div id="settings-effort-options" class="dropdown-list"></div></div></label>
+              <label><span>Summary</span><div class="dropdown-field"><input type="text" id="settings-summary" placeholder="concise"><button id="settings-summary-toggle" class="btn ghost dropdown-toggle">▾</button><div id="settings-summary-options" class="dropdown-list"></div></div></label>
+              <label><span>Developer Instructions</span><textarea id="settings-developer-instructions" class="settings-textarea" placeholder="Additional runtime instructions applied when the agent starts or resumes a thread"></textarea></label>
+            </div>
+            <div id="settings-extension-fields"></div>
+            <label><span>Command Output Lines</span><input type="number" id="settings-command-lines" placeholder="500" value="500" min="1" max="500"></label>
+            <label class="settings-checkbox-row"><span>Wrap view cards</span><input type="checkbox" id="settings-view-wrap"></label>
+            <label class="settings-checkbox-row"><span>Render Markdown</span><input type="checkbox" id="settings-markdown" checked></label>
+            <label class="settings-checkbox-row"><span>Syntax highlighting (diffs & terminal)</span><input type="checkbox" id="settings-diff-syntax" checked></label>
+            <label class="settings-checkbox-row"><span>Semantic shell ribbon (Tree-sitter)</span><input type="checkbox" id="settings-semantic-shell-ribbon" checked></label>
+            <label class="settings-checkbox-row"><span>TE2 MCP Integration</span><input type="checkbox" id="settings-te2-mcp-integration"></label>
+          </div>
+          <div class="settings-footer"><button id="settings-cancel" class="btn ghost">Cancel</button><button id="settings-save" class="btn primary">Save</button></div>
+        </div>
+      </div>
+      <div class="settings-overlay hidden" id="splash-settings-modal">
+        <div class="settings-dialog">
+          <div class="settings-header"><h3>Splash Settings</h3><button id="splash-settings-close" class="btn ghost">×</button></div>
+          <div class="settings-body">
+            <label><span>User Name</span><input type="text" id="splash-settings-user-name" placeholder="User"></label>
+            <label class="settings-checkbox-row"><span>Show TE2 console worker ID</span><input type="checkbox" id="splash-settings-show-console-worker-id"></label>
+            <div class="extension-settings-section"><h3 class="settings-subheading">Extensions</h3><small>Enable, disable, or install extension dependencies.</small><div id="splash-settings-extensions" class="extension-settings-list"></div></div>
+          </div>
+          <div class="settings-footer"><button id="splash-settings-cancel" class="btn ghost">Cancel</button><button id="splash-settings-save" class="btn primary">Save</button></div>
+        </div>
+      </div>
+      <div class="picker-overlay hidden" id="cwd-picker">
+        <div class="picker-dialog">
+          <div class="picker-header"><h3 id="picker-title">Pick CWD</h3><button id="picker-close" class="btn ghost">×</button></div>
+          <div class="picker-body"><div id="picker-path" class="picker-path"></div><div id="picker-list" class="picker-list"></div></div>
+          <div class="picker-footer"><div class="picker-footer-left"><input type="text" id="picker-filter" placeholder="filter (regex)..."></div><div class="picker-footer-right"><button id="picker-up" class="btn ghost">Up</button><button id="picker-select" class="btn primary">Select Current</button></div></div>
+        </div>
+      </div>
+      <div class="picker-overlay hidden" id="rollout-picker"><div class="picker-dialog"><div class="picker-header"><h3>Pick Rollout</h3><button id="rollout-close" class="btn ghost">×</button></div><div class="picker-body"><div id="rollout-list" class="picker-list"></div></div></div></div>
+      <div class="picker-overlay hidden" id="session-picker"><div class="picker-dialog"><div class="picker-header"><h3>Resume Session</h3><button id="session-picker-close" class="btn ghost">×</button></div><div class="picker-body"><div id="session-picker-sort" class="picker-sort-actions" hidden></div><div id="session-picker-list" class="picker-list"></div></div></div></div>
+      <div class="settings-overlay hidden" id="warning-modal"><div class="settings-dialog"><div class="settings-header"><h3>Confirm</h3><button id="warning-close" class="btn ghost">×</button></div><div class="settings-body"><p id="warning-body">Are you sure?</p></div><div class="settings-footer"><button id="warning-cancel" class="btn ghost">Cancel</button><button id="warning-confirm" class="btn danger">Continue</button></div></div></div>
+      <div class="settings-overlay hidden" id="plan-modal"><div class="settings-dialog"><div class="settings-header"><h3>Plan</h3><button id="plan-close" class="btn ghost">×</button></div><div class="settings-body"><div id="plan-body" class="markdown-body plan-modal-body"></div></div><div class="settings-footer"><button id="plan-dismiss" class="btn primary">Close</button></div></div></div>
+    </div>
+  </body>
+</html>

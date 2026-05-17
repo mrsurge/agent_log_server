@@ -19,7 +19,7 @@ from starlette.background import BackgroundTask
 
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8765
+DEFAULT_PORT = 8766
 DEFAULT_SHIM_PATH = "/mcp"
 DEFAULT_CHILD_PATH = "/mcp"
 DEFAULT_READY_TIMEOUT_SEC = 10.0

@@ -17,7 +17,15 @@
       "label": "Session",
       "placeholder": "(new session) or type/paste session ID",
       "source": "/api/extensions/copilot-sdk/sessions",
-      "resume_endpoint": "/api/extensions/copilot-sdk/sessions/resume"
+      "resume_endpoint": "/api/extensions/copilot-sdk/sessions/resume",
+      "picker_sort": {
+        "param": "sort",
+        "default": "updated_at",
+        "options": [
+          { "value": "updated_at", "label": "MRU" },
+          { "value": "created_at", "label": "Created" }
+        ]
+      }
     },
     {
       "id": "model",
@@ -31,12 +39,29 @@
       "id": "reasoning_effort",
       "type": "select",
       "label": "Reasoning Effort",
-      "options": [
-        {"value": "low", "label": "Low"},
-        {"value": "medium", "label": "Medium"},
-        {"value": "high", "label": "High"}
-      ],
-      "default": "medium"
+      "options": [],
+      "dynamic_source": "/api/extensions/copilot-sdk/models",
+      "dynamic_options_from": {
+        "source_field": "model",
+        "match_path": "id",
+        "options_path": [
+          "supported_reasoning_efforts",
+          "supportedReasoningEfforts",
+          "raw.supported_reasoning_efforts",
+          "raw.supportedReasoningEfforts"
+        ],
+        "option_value_path": "value",
+        "option_label_path": "label",
+        "default_path": [
+          "default_reasoning_effort",
+          "defaultReasoningEffort",
+          "raw.default_reasoning_effort",
+          "raw.defaultReasoningEffort"
+        ],
+        "missing_source_placeholder": "Select model first",
+        "empty_placeholder": "Not supported by selected model"
+      },
+      "default": ""
     },
     {
       "id": "developer_instructions",
@@ -69,10 +94,10 @@
       "dynamic_source": "/api/appserver/runtime_options",
       "dynamic_options_key": "approval",
       "default": "suggest",
-      "runtime_option": {
-        "kind": "approval",
-        "footer": true,
-        "footer_label": "Approval"
+      "semantic": {
+        "role": "approval_policy",
+        "runtime_key": "approval",
+        "label": "Approval"
       }
     },
     {
@@ -107,10 +132,10 @@
       "dynamic_source": "/api/appserver/runtime_options",
       "dynamic_options_key": "mode",
       "default": "interactive",
-      "runtime_option": {
-        "kind": "mode",
-        "footer": true,
-        "footer_label": "Mode",
+      "semantic": {
+        "role": "mode",
+        "runtime_key": "mode",
+        "label": "Mode",
         "accents": {
           "plan": "ok",
           "interactive": "warn",

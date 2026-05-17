@@ -75,6 +75,11 @@ If I use a choice-capable approval tool in Step 1 or Step 2, the prompt must inc
 - This repo is harness infrastructure used to work on many other repos.
 - I will not assume downstream target repos inherit this repo's workflow or approval rules unless those repos explicitly define them.
 
+# ALS-RS Migration Harness Note
+
+- Do not assume the current interactive session is already hosted by the Rust ALS-RS runtime just because the implementation target is `als-rs`.
+- This repo can still be running on the Python harness while ALS-RS parity work is in progress, so treat live shell ownership and restart decisions accordingly.
+
 # Invariant: Platform-Agnostic Core Files — Zero Extension-Specific Code
 
 **This is the single most important architectural rule in this repo. Violating it WILL break things and WILL get your work reverted.**
@@ -226,8 +231,10 @@ UNDER NO CIRCUMSTANCES WILL I EVER USE `resolve()` or ANY SYMLINK RESOLOVING MET
   - `~/.cache/framework_shells/runtimes/**/logs/`
 - For those roots:
   - file-name listing and path discovery are fine
-  - targeted content inspection must use a Python heredoc heuristic/parser tailored to the file format and the question being asked
-  - prefer JSON-aware or line-scoped Python extraction over raw text grep so you do not drown in minified/noisy output or miss the real structured event boundary
+  - for framework-shell logs, prefer the TE2 MCP framework-shell tools over ad hoc parsing when they are available
+  - use `te2_fws_log_inspect` first for structured triage of JSON/JSON-RPC or mixed logs, `te2_fws_log_search` for targeted follow-up, and `te2_fws_log_tail` for recent raw context
+  - targeted conversation-transcript inspection should still use a Python heredoc heuristic/parser tailored to the file format and the question being asked
+  - when Python extraction is needed, prefer JSON-aware or line-scoped extraction over raw text grep so you do not drown in minified/noisy output or miss the real structured event boundary
 
 ## Copilot harness heredoc quirk
 
@@ -302,8 +309,9 @@ After making a round of successful edits that have been verified by the user, I 
 - The KB tool guide for this repo is `KB_MEMORY_MCP.md`.
 - Important KB quirks:
   - all KB tool output is plain text
-  - `kb_schema` only shows child headings when drilling with an `id`
-  - KB writes are patch-style; header hashes are informational only and `confirm_hash` is ignored
+  - `kb_schema(target="...")` returns the complete numbered ATX heading index for the target file
+  - KB section selectors use schema numbers, `L<line>` / `line:<line>`, heading paths, unique visible titles, unique trailing path suffixes, or `section=""` for the file root
+  - KB mutations use `target` + `section` and are patch-style file writes; use `dry_run=true` when you want the diff before writing
   - `kb_reload_config()` only reloads the current repo; KB root follows the harness cwd/repo root
   - `kb_add_file(abs_path)` only works for files inside the current project root
 - For third-party extension install/update workflow, use `THIRD_PARTY_EXTENSION_WORKFLOW.md` as the contract doc and prefer KB reads/writes when it is loaded into KB.

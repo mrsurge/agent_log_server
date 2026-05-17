@@ -11,7 +11,6 @@ from ._vendor.copilot.client import CopilotClient
 from ._vendor.copilot.generated.session_events import SessionEvent, SessionEventType
 from ._vendor.copilot.session import (
     CopilotSession,
-    _PermissionHandlerFn,
 )
 from .protocol_registry import load_copilot_protocol_registry
 
@@ -35,9 +34,10 @@ def _payload_value(payload: object, key: str) -> object:
     if hasattr(payload, key):
         return _coerce_scalar(cast(object, getattr(payload, key)))
     if isinstance(payload, Mapping):
-        value = payload.get(key)
+        payload_map = cast(Mapping[object, object], payload)
+        value = payload_map.get(key)
         if value is None:
-            value = payload.get(_snake_to_camel(key))
+            value = payload_map.get(_snake_to_camel(key))
         return _coerce_scalar(cast(object, value))
     return None
 
@@ -101,9 +101,8 @@ async def resume_sdk_session(
 ) -> CopilotSession:
     kwargs = _resume_session_kwargs(client, config)
     permission_handler = kwargs.get("on_permission_request")
-    if permission_handler is None:
+    if not callable(permission_handler):
         raise ValueError("resume config missing on_permission_request")
-    kwargs["on_permission_request"] = cast(_PermissionHandlerFn, permission_handler)
     resume_call = cast(Callable[..., Awaitable[CopilotSession]], client.resume_session)
     return await resume_call(session_id, **kwargs)
 
@@ -200,7 +199,7 @@ class CopilotEventView:
 
     @property
     def reasoning_text(self) -> Optional[str]:
-        return _payload_string(self.payload, "reasoning_text")
+        return _payload_string(self.payload, "reasoning_text") or _payload_string(self.payload, "content")
 
     @property
     def delta_content(self) -> Optional[str]:

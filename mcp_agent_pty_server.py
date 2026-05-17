@@ -20,13 +20,11 @@ from typing import Optional, Protocol, cast, runtime_checkable
 
 import socketio
 
-from agent_log_server.markdown_sections import SectionNode, normalize_heading as _normalize_heading, parse_markdown
-from agent_log_server.ipc_auth import load_or_create_ipc_secret
-from agent_log_server.prompt_context import REPO_MEMORY_FILENAME
-from agent_log_server.repo_memory_delta import build_repo_memory_delta
-from agent_log_server.socketio_config import socketio_client_kwargs
-from agent_log_server import conversation_todos as _conv_todos
-from agent_log_server.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
+from als_deprecated.markdown_sections import SectionNode, normalize_heading as _normalize_heading, parse_markdown
+from als_deprecated.ipc_auth import load_or_create_ipc_secret
+from als_deprecated.socketio_config import socketio_client_kwargs
+from als_deprecated import conversation_todos as _conv_todos
+from als_deprecated.typing_helpers import ObjectList, ObjectMap, coerce_object_list, coerce_object_map
 
 
 def _ensure_framework_shells_secret() -> None:
@@ -285,42 +283,6 @@ async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
         return client
 
 
-async def _notify_repo_memory_ipc(path: Path, old_text: str, new_text: str) -> Optional[str]:
-    if path.name != REPO_MEMORY_FILENAME:
-        return None
-
-    previous_content = old_text.strip()
-    current_content = new_text.strip()
-    update_ts = time.time()
-    delta_content = build_repo_memory_delta(
-        previous_content,
-        current_content,
-        source_path=str(path),
-        ts=update_ts,
-    )
-    payload = {
-        "source_path": str(path),
-        "previous_content": previous_content,
-        "current_content": current_content,
-        "delta_content": delta_content or "",
-        "ts": update_ts,
-    }
-    client = await _get_appserver_ipc_sio()
-    ack = await client.call(
-        "repo_memory_delta",
-        payload,
-        namespace=_APPSERVER_IPC_NAMESPACE,
-        timeout=10,
-    )
-    if not isinstance(ack, dict) or not ack.get("ok"):
-        detail = ack.get("error") if isinstance(ack, dict) else ack
-        raise RuntimeError(f"repo_memory_delta IPC failed: {detail}")
-    return (
-        f"[kb_ipc: OK  queued: {int(ack.get('queued') or 0)}"
-        f"  mode: {ack.get('mode') or '-'}  hash: {ack.get('content_hash') or '-'}]"
-    )
-
-
 async def _notify_conversation_todo_ipc(conversation_id: str) -> None:
     cid = str(conversation_id or "").strip()
     if not cid:
@@ -337,12 +299,8 @@ async def _notify_conversation_todo_ipc(conversation_id: str) -> None:
         raise RuntimeError(f"conversation_todo_changed IPC failed: {detail}")
 
 
-def _render_kb_result(header: str, diff: str, ipc_note: Optional[str] = None) -> str:
-    parts = [header]
-    if isinstance(ipc_note, str) and ipc_note.strip():
-        parts.append(ipc_note.strip())
-    parts.append(diff)
-    return "\n".join(parts)
+def _render_kb_result(header: str, diff: str) -> str:
+    return "\n".join([header, diff])
 
 
 _DEFAULT_CONVERSATION_DIR = Path(os.path.expanduser("~/.cache/app_server/conversations"))
@@ -842,7 +800,7 @@ async def todo_ready() -> ObjectMap:
 # These tools provide a plain-text interface to the agent log server,
 # abstracting away JSON escaping and HTTP details.
 
-_AGENT_LOG_URL = "http://127.0.0.1:12359/api/messages"
+_AGENT_LOG_URL = _APPSERVER_ORIGIN.rstrip("/") + "/api/messages"
 
 
 async def _agent_log_fetch(limit: int = 10) -> ObjectList:
@@ -1268,6 +1226,57 @@ def _kb_resolve_file(file: Optional[str] = None) -> Path | ObjectMap:
     return _logical_abspath(root / selected)
 
 
+def _kb_resolve_target(target: Optional[str] = None) -> Path | ObjectMap:
+    """Resolve a target knowledge file path. Returns absolute Path or error dict."""
+    root = _current_project_root()
+    files = _kb_configured_files(root)
+    if not files:
+        return _kb_error("NotConfigured", "No knowledge files in .agent-pty.toml")
+
+    selected = target
+    if selected is None:
+        if len(files) == 1:
+            selected = files[0]
+        else:
+            return _kb_error(
+                "FileNotAllowed",
+                "Multiple knowledge files configured; specify 'target'",
+                configured=files,
+            )
+
+    if not isinstance(selected, str) or not selected:
+        return _kb_error("FileNotAllowed", "Invalid target value", configured=files)
+    if selected not in files:
+        return _kb_error(
+            "FileNotAllowed",
+            f"Target '{selected}' not in configured knowledge files",
+            configured=files,
+        )
+    return _logical_abspath(root / selected)
+
+
+def _kb_select_target_file(file: Optional[str], target: Optional[str]) -> Optional[str] | ObjectMap:
+    """Normalize the KB target/file aliases for read-only tools."""
+    if target is None:
+        return file
+    if not isinstance(target, str) or not target.strip():
+        return _kb_error("InvalidParameter", "target must be a non-empty string when supplied")
+    selected_target = target.strip()
+    if file is None:
+        return selected_target
+    if not isinstance(file, str) or not file.strip():
+        return _kb_error("InvalidParameter", "file must be a non-empty string when supplied")
+    selected_file = file.strip()
+    if selected_file != selected_target:
+        return _kb_error(
+            "InvalidParameter",
+            "file and target refer to different knowledge files",
+            file=selected_file,
+            target=selected_target,
+        )
+    return selected_file
+
+
 def _atomic_write(path: Path, content: str) -> None:
     """Write content atomically: temp file, fsync, rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1403,6 +1412,16 @@ def _resolve_section_or_error(
     if len(by_suffix) > 1:
         return _kb_ambiguous_section_error(raw_id, by_suffix)
 
+    # Line aliases make schema output such as "L42 # Heading" directly usable.
+    line_match = re.fullmatch(r"[Ll]?(\d+)", raw_id)
+    if line_match:
+        line_no = int(line_match.group(1))
+        by_line = [n for n in nodes if n.line_start == line_no]
+        if len(by_line) == 1:
+            return by_line[0]
+        if len(by_line) > 1:
+            return _kb_ambiguous_section_error(raw_id, by_line)
+
     return _kb_error("SectionNotFound", f"Section '{raw_id}' not found", id=raw_id)
 
 
@@ -1467,6 +1486,238 @@ def _snippet_with_offsets(line: str, match_start: int, match_end: int, context_c
     local_start = max(0, min(local_start, len(snippet)))
     local_end = max(local_start, min(local_end, len(snippet)))
     return snippet, local_start, local_end
+
+
+def _kb_depth_value(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    parsed = int(value)
+    return max(0, parsed)
+
+
+def _kb_depth_label(value: Optional[int]) -> str:
+    return "all" if value is None else str(value)
+
+
+def _kb_node_number_map(nodes: list[SectionNode]) -> dict[int, int]:
+    return {node.line_start: idx for idx, node in enumerate(nodes, start=1)}
+
+
+def _kb_line_count(start: int, end: int) -> int:
+    return max(0, end - start + 1)
+
+
+def _kb_body_range(node: SectionNode) -> tuple[int, int]:
+    return node.body_start, node.body_end
+
+
+def _kb_heading_body_range(node: SectionNode) -> tuple[int, int]:
+    return node.line_start, max(node.line_start, node.body_end)
+
+
+def _kb_node_ancestors(nodes: list[SectionNode], target: SectionNode) -> list[SectionNode]:
+    if target.depth <= 0:
+        return []
+    return [
+        node
+        for node in nodes
+        if node.depth < target.depth
+        and node.line_start < target.line_start
+        and target.line_start <= node.subtree_end
+    ]
+
+
+def _kb_node_children(nodes: list[SectionNode], target: SectionNode) -> list[SectionNode]:
+    if target.depth <= 0:
+        return [node for node in nodes if node.depth == min((n.depth for n in nodes), default=1)]
+    return [
+        node
+        for node in nodes
+        if node.depth == target.depth + 1
+        and node.line_start > target.line_start
+        and node.line_start <= target.subtree_end
+    ]
+
+
+def _kb_preview_text(text: str, max_chars: int) -> str:
+    cap = max(0, int(max_chars))
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if cap <= 0:
+        return ""
+    if len(cleaned) <= cap:
+        return cleaned
+    return cleaned[: max(0, cap - 3)].rstrip() + "..."
+
+
+def _kb_extract_node_body(lines: list[str], node: SectionNode) -> str:
+    start, end = _kb_body_range(node)
+    return _extract_line_range(lines, start, end)
+
+
+def _kb_extract_heading_body(lines: list[str], node: SectionNode) -> str:
+    start, end = _kb_heading_body_range(node)
+    return _extract_line_range(lines, start, end)
+
+
+def _kb_apply_max_chars(text: str, max_chars: Optional[int]) -> str:
+    if max_chars is None:
+        return text
+    cap = int(max_chars)
+    if cap <= 0 or len(text) <= cap:
+        return text
+    notice = f"\n[TRUNCATED: output exceeded max_chars={cap}]\n"
+    return text[: max(0, cap - len(notice))].rstrip() + notice
+
+
+def _kb_split_section_specs(sections: Optional[str], id_value: Optional[str] = None) -> list[str]:
+    specs: list[str] = []
+    raw_sections = (sections or "").strip()
+    if raw_sections:
+        parsed: object = None
+        with contextlib.suppress(Exception):
+            parsed = json.loads(raw_sections)
+        if isinstance(parsed, list):
+            specs.extend(str(item).strip() for item in parsed if str(item).strip())
+        elif isinstance(parsed, str) and parsed.strip():
+            specs.append(parsed.strip())
+        else:
+            specs.extend(part.strip() for part in re.split(r"[\n,;]+", raw_sections) if part.strip())
+    raw_id = (id_value or "").strip()
+    if raw_id:
+        specs.append(raw_id)
+    return specs
+
+
+def _resolve_section_selector_or_error(
+    nodes: list[SectionNode],
+    selector: str,
+    *,
+    total_lines: int,
+    allow_root: bool = False,
+) -> SectionNode | ObjectMap:
+    raw = (selector or "").strip()
+    if allow_root and raw in {"", "root", "<file-root>"}:
+        return _kb_root_section(total_lines)
+
+    ordinal_match = re.fullmatch(r"#?(\d+)", raw)
+    if ordinal_match:
+        ordinal = int(ordinal_match.group(1))
+        if 1 <= ordinal <= len(nodes):
+            return nodes[ordinal - 1]
+        return _kb_error(
+            "SectionNotFound",
+            f"Section number {ordinal} is outside the available range 1-{len(nodes)}",
+            section=raw,
+        )
+
+    line_match = re.fullmatch(r"(?:[Ll]|line:)(\d+)", raw)
+    if line_match:
+        line_no = int(line_match.group(1))
+        by_line = [node for node in nodes if node.line_start == line_no]
+        if len(by_line) == 1:
+            return by_line[0]
+        if len(by_line) > 1:
+            return _kb_ambiguous_section_error(raw, by_line)
+        return _kb_error("SectionNotFound", f"No heading starts at line {line_no}", section=raw)
+
+    return _resolve_section_or_error(nodes, raw, total_lines=total_lines, allow_root=allow_root)
+
+
+def _resolve_section_list_or_error(
+    nodes: list[SectionNode],
+    sections: Optional[str],
+    id_value: Optional[str],
+    *,
+    total_lines: int,
+    allow_root: bool = False,
+) -> list[SectionNode] | ObjectMap:
+    specs = _kb_split_section_specs(sections, id_value)
+    if not specs:
+        if allow_root:
+            return [_kb_root_section(total_lines)]
+        return _kb_error("InvalidParameter", "At least one section selector is required")
+
+    selected: list[SectionNode] = []
+    seen: set[tuple[int, int]] = set()
+    for spec in specs:
+        node = _resolve_section_selector_or_error(nodes, spec, total_lines=total_lines, allow_root=allow_root)
+        if isinstance(node, dict):
+            return node
+        key = (node.depth, node.line_start)
+        if key not in seen:
+            selected.append(node)
+            seen.add(key)
+    return selected
+
+
+def _resolve_single_section_or_error(
+    nodes: list[SectionNode],
+    section: Optional[str],
+    *,
+    total_lines: int,
+    allow_root: bool = False,
+) -> SectionNode | ObjectMap:
+    selected = _resolve_section_list_or_error(
+        nodes,
+        section,
+        None,
+        total_lines=total_lines,
+        allow_root=allow_root,
+    )
+    if isinstance(selected, dict):
+        return selected
+    if len(selected) != 1:
+        return _kb_error(
+            "InvalidParameter",
+            "Mutation tools accept exactly one section selector",
+            section=section,
+            selected=len(selected),
+        )
+    return selected[0]
+
+
+def _kb_schema_line(node: SectionNode, ordinal: int, *, include_id: bool = True) -> str:
+    indent = "  " * max(0, node.depth - 1)
+    base = f"{ordinal:03d} H{node.depth} L{node.line_start} {indent}{'#' * node.depth} {node.title}"
+    if include_id:
+        base += f" | id: {node.id_disambiguated}"
+    return base
+
+
+def _kb_node_info_block(
+    lines: list[str],
+    nodes: list[SectionNode],
+    node: SectionNode,
+    *,
+    number_by_line: dict[int, int],
+    max_chars: int,
+    label: str,
+) -> list[str]:
+    number = number_by_line.get(node.line_start)
+    prefix = f"{label}: "
+    if number is not None:
+        prefix += f"{number:03d} "
+    prefix += f"H{node.depth} L{node.line_start} {'#' * node.depth} {node.title}"
+    body_start, body_end = _kb_body_range(node)
+    body = _kb_extract_node_body(lines, node)
+    children = _kb_node_children(nodes, node)
+    out = [
+        prefix,
+        f"  id: {node.id_disambiguated}",
+        f"  body: L{body_start}-{body_end} ({_kb_line_count(body_start, body_end)} lines, {len(body)} chars)",
+        f"  subtree: L{node.line_start}-{node.subtree_end} ({_kb_line_count(node.line_start, node.subtree_end)} lines)",
+    ]
+    if children:
+        child_labels = [
+            f"{number_by_line.get(child.line_start, 0):03d} H{child.depth} L{child.line_start} {child.title}"
+            for child in children
+        ]
+        out.append("  children: " + "; ".join(child_labels))
+    else:
+        out.append("  children: (none)")
+    preview = _kb_preview_text(body, max_chars)
+    out.append("  body_preview: " + (preview if preview else "(empty)"))
+    return out
 
 
 @mcp.tool(name="kb_list", description="List configured markdown knowledge files.")
@@ -1579,14 +1830,18 @@ async def kb_remove_file(abs_path: str) -> str:
     return f"[kb_remove_file: OK  removed: {rel_str}]\n  config: {config_path}\n  files: {rendered_files}"
 
 
-@mcp.tool(name="kb_schema", description="Show heading schema for a markdown knowledge file with optional drill-down.")
+@mcp.tool(name="kb_schema", description="Show the complete numbered ATX heading index for one markdown knowledge file.")
 async def kb_schema(
     file: Optional[str] = None,
+    target: Optional[str] = None,
     id: Optional[str] = None,
-    max_depth: Optional[int] = 1,
+    max_depth: Optional[int] = None,
     root_depth: Optional[int] = None,
 ) -> str:
-    resolved = _kb_resolve_file(file)
+    selected_file = _kb_select_target_file(file, target)
+    if isinstance(selected_file, dict):
+        return _kb_dict_to_error_text(selected_file)
+    resolved = _kb_resolve_file(selected_file)
     if isinstance(resolved, dict):
         return _kb_dict_to_error_text(resolved)
     path = resolved
@@ -1597,62 +1852,64 @@ async def kb_schema(
     if not nodes:
         return f"[schema: {path}]\n(no sections found)"
 
-    lines = text.splitlines()
-
-    def _fmt_node(node, indent: int = 0) -> str:
-        prefix = "  " * indent
-        dis = f"  (use: {node.id_disambiguated})" if node.id_disambiguated != node.id else ""
-        # Always show full id when it differs from the displayed title
-        if node.id != node.title:
-            return f"{prefix}L{node.line_start} {'#' * node.depth} {node.title}  id: {node.id}{dis}"
-        return f"{prefix}L{node.line_start} {'#' * node.depth} {node.title}{dis}"
-
-    # Root listing mode
+    # Root listing mode: one compact line per ATX heading, not a nested JSON tree.
     if not id:
         if root_depth is None:
             top_depth = min(node.depth for node in nodes)
         else:
             top_depth = int(root_depth)
-        top_nodes = [node for node in nodes if node.depth == top_depth]
-        out = [f"[schema: {path.name}  sections: {len(top_nodes)}]"]
-        for node in top_nodes:
-            out.append(_fmt_node(node))
-        return "\n".join(out)
+        rel_depth = _kb_depth_value(max_depth)
+        upper_depth = None if rel_depth is None else top_depth + rel_depth
+        included = [
+            (idx, node)
+            for idx, node in enumerate(nodes, start=1)
+            if node.depth >= top_depth and (upper_depth is None or node.depth <= upper_depth)
+        ]
+        header = (
+            f"[schema: {path.name}  sections: {len(included)}/{len(nodes)}  root_depth: {top_depth}  "
+            f"max_depth: {_kb_depth_label(rel_depth)}]"
+        )
+        help_line = "Use section numbers, L<line>, heading paths, unique titles, or suffixes with kb_info/kb_read/kb_write."
+        outline = [_kb_schema_line(node, idx) for idx, node in included]
+        return "\n".join([header, help_line, *outline])
 
-    target = _resolve_section_or_error(nodes, id)
-    if isinstance(target, dict):
-        return _kb_dict_to_error_text(target)
+    lines = text.splitlines()
+    target_node = _resolve_section_selector_or_error(nodes, id, total_lines=len(lines))
+    if isinstance(target_node, dict):
+        return _kb_dict_to_error_text(target_node)
 
-    rel_depth = 1 if max_depth is None else int(max_depth)
-    if rel_depth < 0:
-        rel_depth = 0
-
-    body_text = _extract_line_range(lines, target.body_start, target.body_end)
-    upper_depth = target.depth + rel_depth
-    children = []
-    if rel_depth > 0:
-        for node in nodes:
-            if node.line_start <= target.line_start or node.line_start > target.subtree_end:
-                continue
-            if node.depth <= target.depth or node.depth > upper_depth:
-                continue
-            children.append(node)
-
-    h = _content_hash(body_text)
-    out = [f"[section: {_kb_section_label(target)}  depth: {target.depth}  lines: {target.line_start}-{target.subtree_end}  hash: {h}]"]
-    if body_text.strip():
-        out.append(body_text.rstrip())
-    if children:
-        out.append(f"\nChild headings ({len(children)}):")
-        for child in children:
-            indent = child.depth - target.depth - 1
-            out.append(_fmt_node(child, indent))
-    return "\n".join(out)
+    rel_depth = _kb_depth_value(max_depth)
+    upper_depth = None if rel_depth is None else target_node.depth + rel_depth
+    subtree_nodes = [
+        (idx, node)
+        for idx, node in enumerate(nodes, start=1)
+        if (
+            node.line_start == target_node.line_start
+            or (node.line_start > target_node.line_start and node.line_start <= target_node.subtree_end)
+        )
+        and (upper_depth is None or node.depth <= upper_depth)
+    ]
+    header = (
+        f"[schema: {path.name}  target: {_kb_section_label(target_node)}  "
+        f"sections: {len(subtree_nodes)}  max_depth: {_kb_depth_label(rel_depth)}]"
+    )
+    help_line = "Use section numbers, L<line>, heading paths, unique titles, or suffixes with kb_info/kb_read/kb_write."
+    outline = [_kb_schema_line(node, idx) for idx, node in subtree_nodes]
+    return "\n".join([header, help_line, *outline])
 
 
-@mcp.tool(name="kb_read", description="Read a section body or subtree from a markdown knowledge file.")
-async def kb_read(file: Optional[str] = None, id: str = "", include_children: bool = False) -> str:
-    resolved = _kb_resolve_file(file)
+@mcp.tool(name="kb_info", description="Show parent-chain context, ranges, children, and body previews for selected KB sections.")
+async def kb_info(
+    file: Optional[str] = None,
+    target: Optional[str] = None,
+    sections: Optional[str] = None,
+    id: str = "",
+    max_chars: int = 600,
+) -> str:
+    selected_file = _kb_select_target_file(file, target)
+    if isinstance(selected_file, dict):
+        return _kb_dict_to_error_text(selected_file)
+    resolved = _kb_resolve_file(selected_file)
     if isinstance(resolved, dict):
         return _kb_dict_to_error_text(resolved)
     path = resolved
@@ -1661,24 +1918,138 @@ async def kb_read(file: Optional[str] = None, id: str = "", include_children: bo
         return _kb_dict_to_error_text(text)
     lines = text.splitlines()
     nodes = parse_markdown(text)
-    target = _resolve_section_or_error(nodes, id, total_lines=len(lines), allow_root=True)
-    if isinstance(target, dict):
-        return _kb_dict_to_error_text(target)
-    if include_children or target.depth == 0:
-        start = target.line_start
-        end = target.subtree_end
-    else:
-        start = target.body_start
-        end = target.body_end
-    section_text = _extract_line_range(lines, start, end)
-    h = _content_hash(section_text)
-    header = f"[section: {_kb_section_label(target)}  lines: {start}-{end}  hash: {h}]\n"
-    return header + section_text
+    selected = _resolve_section_list_or_error(
+        nodes,
+        sections,
+        id,
+        total_lines=len(lines),
+        allow_root=False,
+    )
+    if isinstance(selected, dict):
+        return _kb_dict_to_error_text(selected)
+
+    number_by_line = _kb_node_number_map(nodes)
+    out = [
+        f"[info: {path.name}  selected: {len(selected)}  body_preview_chars: {max(0, int(max_chars))}]",
+        "Selectors accept schema numbers, L<line>, full ids, unique titles, or unique trailing id suffixes.",
+    ]
+    for selected_idx, node in enumerate(selected, start=1):
+        out.append("")
+        out.append(f"## Selection {selected_idx}")
+        ancestors = _kb_node_ancestors(nodes, node)
+        if ancestors:
+            out.append("parent_chain:")
+            for ancestor in ancestors:
+                out.extend(
+                    "  " + line
+                    for line in _kb_node_info_block(
+                        lines,
+                        nodes,
+                        ancestor,
+                        number_by_line=number_by_line,
+                        max_chars=max_chars,
+                        label="parent",
+                    )
+                )
+        else:
+            out.append("parent_chain: (none)")
+        out.append("target:")
+        out.extend(
+            "  " + line
+            for line in _kb_node_info_block(
+                lines,
+                nodes,
+                node,
+                number_by_line=number_by_line,
+                max_chars=max_chars,
+                label="target",
+            )
+        )
+    return "\n".join(out)
+
+
+@mcp.tool(name="kb_read", description="Read selected KB section bodies with parent heading/body context.")
+async def kb_read(
+    file: Optional[str] = None,
+    target: Optional[str] = None,
+    sections: Optional[str] = None,
+    id: str = "",
+    include_children: bool = False,
+    max_chars: int = 20000,
+) -> str:
+    selected_file = _kb_select_target_file(file, target)
+    if isinstance(selected_file, dict):
+        return _kb_dict_to_error_text(selected_file)
+    resolved = _kb_resolve_file(selected_file)
+    if isinstance(resolved, dict):
+        return _kb_dict_to_error_text(resolved)
+    path = resolved
+    text = _read_text_or_error(path)
+    if isinstance(text, dict):
+        return _kb_dict_to_error_text(text)
+    lines = text.splitlines()
+    nodes = parse_markdown(text)
+    selected = _resolve_section_list_or_error(
+        nodes,
+        sections,
+        id,
+        total_lines=len(lines),
+        allow_root=True,
+    )
+    if isinstance(selected, dict):
+        return _kb_dict_to_error_text(selected)
+
+    number_by_line = _kb_node_number_map(nodes)
+    out = [
+        f"[read: {path.name}  selected: {len(selected)}  include_children: {include_children}  max_chars: {max_chars}]",
+        "Returned blocks include parent heading/body context before each selected target.",
+    ]
+    for selected_idx, node in enumerate(selected, start=1):
+        out.append("")
+        out.append(f"## Selection {selected_idx}: {_kb_section_label(node)}")
+        if node.depth == 0:
+            section_text = _extract_line_range(lines, node.line_start, node.subtree_end)
+            out.append(f"[file-root L{node.line_start}-{node.subtree_end} hash: {_content_hash(section_text)}]")
+            out.append(section_text)
+            continue
+
+        for ancestor in _kb_node_ancestors(nodes, node):
+            number = number_by_line.get(ancestor.line_start, 0)
+            start, end = _kb_heading_body_range(ancestor)
+            block = _kb_extract_heading_body(lines, ancestor)
+            out.append("")
+            out.append(
+                f"[parent {number:03d} H{ancestor.depth} L{start}-{end} id: {ancestor.id_disambiguated}]"
+            )
+            out.append(block)
+
+        number = number_by_line.get(node.line_start, 0)
+        if include_children:
+            start, end = node.line_start, node.subtree_end
+            block = _extract_line_range(lines, start, end)
+            mode = "target_subtree"
+        else:
+            start, end = _kb_heading_body_range(node)
+            block = _kb_extract_heading_body(lines, node)
+            mode = "target_body"
+        out.append("")
+        out.append(f"[{mode} {number:03d} H{node.depth} L{start}-{end} id: {node.id_disambiguated}]")
+        out.append(block)
+
+    return _kb_apply_max_chars("\n".join(out), max_chars)
 
 
 @mcp.tool(name="kb_search_headers", description="Case-insensitive substring search across heading titles.")
-async def kb_search_headers(file: Optional[str] = None, query: str = "") -> str:
-    resolved = _kb_resolve_file(file)
+async def kb_search_headers(
+    file: Optional[str] = None,
+    target: Optional[str] = None,
+    query: str = "",
+    max_hits: int = 25,
+) -> str:
+    selected_file = _kb_select_target_file(file, target)
+    if isinstance(selected_file, dict):
+        return _kb_dict_to_error_text(selected_file)
+    resolved = _kb_resolve_file(selected_file)
     if isinstance(resolved, dict):
         return _kb_dict_to_error_text(resolved)
     path = resolved
@@ -1691,83 +2062,202 @@ async def kb_search_headers(file: Optional[str] = None, query: str = "") -> str:
     qf = q.casefold()
     nodes = parse_markdown(text)
     matches = [node for node in nodes if qf in node.title.casefold()]
-    out = [f"[search_headers: {path.name}  query: {q}  matches: {len(matches)}]"]
+    cap = max(1, int(max_hits))
+    number_by_line = _kb_node_number_map(nodes)
+    out = [f"[search_headers: {path.name}  query: {q}  matches: {min(len(matches), cap)}/{len(matches)}]"]
     for node in matches:
-        dis = f"  (disambiguated: {node.id_disambiguated})" if node.id_disambiguated != node.id else ""
-        out.append(f"  L{node.line_start} {'#' * node.depth} {node.title}  id: {node.id}{dis}")
+        if len(out) - 1 >= cap:
+            break
+        out.append(_kb_schema_line(node, number_by_line.get(node.line_start, 0)))
     if not matches:
         out.append("  (no matches)")
     return "\n".join(out)
 
 
-@mcp.tool(name="kb_search_content", description="Case-insensitive substring search across section bodies.")
-async def kb_search_content(
-    file: Optional[str] = None,
-    query: str = "",
-    max_results: int = 10,
-    context_chars: int = 80,
+def _kb_search_body_matches(
+    *,
+    path: Path,
+    text: str,
+    query: str,
+    regex: bool,
+    max_hits: int,
+    preview_chars: int,
+    from_match: bool,
 ) -> str:
-    resolved = _kb_resolve_file(file)
+    q = (query or "").strip()
+    if not q:
+        return f"[search: {path.name}  query: (empty)]\nNo query provided."
+
+    flags = re.IGNORECASE | re.MULTILINE
+    try:
+        pattern = re.compile(q if regex else re.escape(q), flags)
+    except re.error as exc:
+        return _kb_error_text("InvalidParameter", f"Invalid regex: {exc}", query=q)
+
+    lines = text.splitlines()
+    nodes = parse_markdown(text)
+    number_by_line = _kb_node_number_map(nodes)
+    cap = max(1, int(max_hits))
+    preview_cap = max(20, int(preview_chars))
+    results: list[str] = []
+
+    for node in nodes:
+        if len(results) >= cap:
+            break
+        body_start, body_end = _kb_body_range(node)
+        body_text = _extract_line_range(lines, body_start, body_end)
+        if not body_text:
+            continue
+        body_offsets: list[int] = []
+        offset = 0
+        for line_no in range(body_start, body_end + 1):
+            if line_no > len(lines):
+                break
+            body_offsets.append(offset)
+            offset += len(lines[line_no - 1]) + 1
+        for match in pattern.finditer(body_text):
+            if len(results) >= cap:
+                break
+            match_start = match.start()
+            line_index = 0
+            for idx, start_offset in enumerate(body_offsets):
+                if start_offset <= match_start:
+                    line_index = idx
+                else:
+                    break
+            line_no = body_start + line_index
+            if from_match:
+                preview_source = body_text[match.start() :]
+            else:
+                preview_source = body_text
+            preview = _kb_preview_text(preview_source, preview_cap)
+            number = number_by_line.get(node.line_start, 0)
+            results.append(
+                "\n".join(
+                    [
+                        f"[{len(results) + 1}] section {number:03d} H{node.depth} match_line L{line_no}",
+                        f"  id: {node.id_disambiguated}",
+                        f"  preview: {preview if preview else '(empty)'}",
+                    ]
+                )
+            )
+
+    out = [
+        f"[search: {path.name}  query: {q}  regex: {regex}  matches: {len(results)}  max_hits: {cap}]"
+    ]
+    if results:
+        out.extend(results)
+    else:
+        out.append("(no matches)")
+    return "\n".join(out)
+
+
+@mcp.tool(name="kb_search", description="Regex-capable section-aware KB body search with previews.")
+async def kb_search(
+    file: Optional[str] = None,
+    target: Optional[str] = None,
+    query: str = "",
+    regex: bool = False,
+    max_hits: int = 10,
+    preview_chars: int = 240,
+    from_match: bool = True,
+) -> str:
+    selected_file = _kb_select_target_file(file, target)
+    if isinstance(selected_file, dict):
+        return _kb_dict_to_error_text(selected_file)
+    resolved = _kb_resolve_file(selected_file)
     if isinstance(resolved, dict):
         return _kb_dict_to_error_text(resolved)
     path = resolved
     text = _read_text_or_error(path)
     if isinstance(text, dict):
         return _kb_dict_to_error_text(text)
-    q = (query or "").strip()
-    if not q:
-        return f"[search_content: {path.name}  query: (empty)]\nNo query provided."
-
-    lines = text.splitlines()
-    nodes = parse_markdown(text)
-    qf = q.casefold()
-    cap = max(1, int(max_results))
-    ctx = max(20, int(context_chars))
-
-    results: list[str] = []
-    for node in nodes:
-        if len(results) >= cap:
-            break
-        body_start = max(1, node.body_start)
-        body_end = max(body_start - 1, node.body_end)
-        for ln in range(body_start, min(body_end, len(lines)) + 1):
-            if len(results) >= cap:
-                break
-            line_text = lines[ln - 1]
-            lf = line_text.casefold()
-            start = 0
-            while len(results) < cap:
-                idx = lf.find(qf, start)
-                if idx == -1:
-                    break
-                end = idx + len(q)
-                snippet, ms, me = _snippet_with_offsets(line_text, idx, end, ctx)
-                dis = f"  (id: {node.id_disambiguated})" if node.id_disambiguated != node.id else f"  (id: {node.id})"
-                results.append(f"  L{ln} [{node.title}]{dis}  ...{snippet}...")
-                start = idx + max(1, len(qf))
-                if start >= len(lf):
-                    break
-
-    out = [f"[search_content: {path.name}  query: {q}  results: {len(results)}]"]
-    if results:
-        out.extend(results)
-    else:
-        out.append("  (no matches)")
-    return "\n".join(out)
+    return _kb_search_body_matches(
+        path=path,
+        text=text,
+        query=query,
+        regex=regex,
+        max_hits=max_hits,
+        preview_chars=preview_chars,
+        from_match=from_match,
+    )
 
 
-@mcp.tool(name="kb_write", description="Append content to a section body, or create a child heading under a markdown section.")
-async def kb_write(
+@mcp.tool(name="kb_search_content", description="Alias for kb_search.")
+async def kb_search_content(
     file: Optional[str] = None,
-    id: str = "",
+    target: Optional[str] = None,
+    query: str = "",
+    max_results: int = 10,
+    context_chars: int = 240,
+    regex: bool = False,
+    from_match: bool = True,
+) -> str:
+    return await kb_search(
+        file=file,
+        target=target,
+        query=query,
+        regex=regex,
+        max_hits=max_results,
+        preview_chars=context_chars,
+        from_match=from_match,
+    )
+
+
+@mcp.tool(name="kb_help", description="List KB tool modes, section-id forms, and common examples.")
+async def kb_help() -> str:
+    return """[kb_help]
+Section ids:
+  - kb_schema(target="...") returns every ATX heading as a numbered index
+  - selectors accept schema numbers, L<line>, heading paths, unique titles, or unique trailing path suffixes
+  - section="" targets the file root
+
+kb_write modes:
+  - append: append content to the target section body
+  - heading: create a child heading after the target section subtree
+  - child/create_child: aliases for heading
+  - heading_title creates a child heading automatically when mode="append"
+  example: kb_write(target="AGENTS.md", section="12", mode="create_child", heading_title="Auth", content="Notes")
+
+kb_update modes:
+  - body: replace only the section body
+  - replace: alias for body
+  - subtree: replace the heading and all descendants
+
+kb_remove modes:
+  - subtree: remove the heading and descendants
+  - body: remove only the section body
+
+Discovery:
+  - kb_list shows configured files
+  - kb_schema(target="...") returns a compact complete heading index for one target file
+  - kb_info(target="...", sections="1,L42") shows parent-chain context, ranges, child headings, and body previews
+  - kb_read(target="...", sections="1,L42") returns parent heading/body context plus selected target bodies
+  - kb_search(target="...", query="...", regex=true, max_hits=10, preview_chars=240) searches bodies with section-aware previews"""
+
+
+@mcp.resource(
+    "kb://knowledge",
+    name="knowledge",
+    title="Knowledge base",
+    description="Configured KB files plus KB tool usage help.",
+    mime_type="text/plain",
+)
+async def kb_resource_knowledge() -> str:
+    return f"{await kb_list()}\n\n{await kb_help()}"
+
+
+@mcp.tool(name="kb_write", description="Append content to one KB section, or create a child heading under it.")
+async def kb_write(
+    target: Optional[str] = None,
+    section: str = "",
     content: str = "",
     mode: str = "append",
     heading_title: Optional[str] = None,
     heading_depth: Optional[int] = None,
     dry_run: bool = False,
-    confirm_hash: Optional[str] = None,
 ) -> str:
-    resolved = _kb_resolve_file(file)
+    resolved = _kb_resolve_target(target)
     if isinstance(resolved, dict):
         return _kb_dict_to_error_text(resolved)
     path = resolved
@@ -1777,30 +2267,43 @@ async def kb_write(
     had_trailing_newline = old_text.endswith("\n")
     lines = old_text.splitlines()
     nodes = parse_markdown(old_text)
-    target = _resolve_section_or_error(nodes, id, total_lines=len(lines), allow_root=True)
-    if isinstance(target, dict):
-        return _kb_dict_to_error_text(target)
-    _ = confirm_hash  # Legacy no-op; KB mutations are patch-style edits.
+    selected = _resolve_single_section_or_error(nodes, section, total_lines=len(lines), allow_root=True)
+    if isinstance(selected, dict):
+        return _kb_dict_to_error_text(selected)
 
-    insert_at = max(0, target.body_end)
-    if heading_title and mode == "append":
-        mode = "heading"
-    if mode == "append":
+    normalized_mode = str(mode or "append").strip().lower().replace("-", "_")
+    insert_at = max(0, selected.body_end)
+    if heading_title and normalized_mode == "append":
+        normalized_mode = "heading"
+    if normalized_mode == "append":
         insert_lines = (content or "").splitlines()
-    elif mode == "heading":
+    elif normalized_mode in {"heading", "child", "create_child"}:
         # Insert after the entire subtree, not just the body
-        insert_at = max(0, target.subtree_end)
+        insert_at = max(0, selected.subtree_end)
         if not heading_title:
-            return _kb_error_text("SectionNotFound", "heading_title is required for mode='heading'", id=id)
-        depth = heading_depth if heading_depth is not None else (target.depth + 1)
+            return _kb_error_text(
+                "InvalidParameter",
+                "heading_title is required for child-heading writes",
+                section=section,
+                mode=mode,
+                allowed_modes="append, heading, child, create_child",
+                example='kb_write(target="...", section="12", mode="create_child", heading_title="New Section", content="...")',
+            )
+        depth = _coerce_optional_int(heading_depth) if heading_depth is not None else (selected.depth + 1)
         if not isinstance(depth, int) or depth < 1 or depth > 6:
-            return _kb_error_text("SectionNotFound", "heading_depth must be between 1 and 6", id=id)
+            return _kb_error_text("InvalidParameter", "heading_depth must be between 1 and 6", section=section, mode=mode)
         heading_line = f"{'#' * depth} {heading_title}"
         insert_lines = [heading_line]
         if content:
             insert_lines.extend(content.splitlines())
     else:
-        return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
+        return _kb_error_text(
+            "InvalidParameter",
+            f"Unsupported mode '{mode}'",
+            section=section,
+            allowed_modes="append, heading, child, create_child",
+            example='Use mode="create_child" with heading_title for a new child heading, or mode="append" to append body text.',
+        )
 
     new_lines = lines[:insert_at] + insert_lines + lines[insert_at:]
     new_text = "\n".join(new_lines)
@@ -1809,26 +2312,20 @@ async def kb_write(
 
     diff = _unified_diff(old_text, new_text, str(path))
     action = "DRY RUN" if dry_run else "WRITTEN"
-    ipc_note = None
     if not dry_run:
         _atomic_write(path, new_text)
-        try:
-            ipc_note = await _notify_repo_memory_ipc(path, old_text, new_text)
-        except Exception as exc:
-            ipc_note = f"[kb_ipc: ERROR  {exc}]"
-    return _render_kb_result(f"[kb_write: {action}  hash: {_content_hash(new_text)}]", diff, ipc_note)
+    return _render_kb_result(f"[kb_write: {action}  hash: {_content_hash(new_text)}]", diff)
 
 
-@mcp.tool(name="kb_update", description="Replace the body of a markdown section, or replace its full subtree.")
+@mcp.tool(name="kb_update", description="Replace the body of one KB section, or replace its full subtree.")
 async def kb_update(
-    file: Optional[str] = None,
-    id: str = "",
+    target: Optional[str] = None,
+    section: str = "",
     content: str = "",
     mode: str = "body",
     dry_run: bool = False,
-    confirm_hash: Optional[str] = None,
 ) -> str:
-    resolved = _kb_resolve_file(file)
+    resolved = _kb_resolve_target(target)
     if isinstance(resolved, dict):
         return _kb_dict_to_error_text(resolved)
     path = resolved
@@ -1838,24 +2335,23 @@ async def kb_update(
     had_trailing_newline = old_text.endswith("\n")
     lines = old_text.splitlines()
     nodes = parse_markdown(old_text)
-    target = _resolve_section_or_error(nodes, id, total_lines=len(lines), allow_root=True)
-    if isinstance(target, dict):
-        return _kb_dict_to_error_text(target)
-    _ = confirm_hash  # Legacy no-op; KB mutations are patch-style edits.
+    selected = _resolve_single_section_or_error(nodes, section, total_lines=len(lines), allow_root=True)
+    if isinstance(selected, dict):
+        return _kb_dict_to_error_text(selected)
 
     normalized_mode = str(mode or "body").strip().lower()
     if normalized_mode == "replace":
         normalized_mode = "body"
 
     if normalized_mode == "body":
-        start, end = target.body_start, target.body_end
+        start, end = selected.body_start, selected.body_end
     elif normalized_mode == "subtree":
-        start, end = target.line_start, target.subtree_end
+        start, end = selected.line_start, selected.subtree_end
     else:
         return _kb_error_text(
             "InvalidParameter",
             f"Unsupported mode '{mode}'",
-            id=id,
+            section=section,
             allowed_modes="body, replace, subtree",
         )
 
@@ -1866,25 +2362,19 @@ async def kb_update(
     diff = _unified_diff(old_text, new_text, str(path))
 
     action = "DRY RUN" if dry_run else "WRITTEN"
-    ipc_note = None
     if not dry_run:
         _atomic_write(path, new_text)
-        try:
-            ipc_note = await _notify_repo_memory_ipc(path, old_text, new_text)
-        except Exception as exc:
-            ipc_note = f"[kb_ipc: ERROR  {exc}]"
-    return _render_kb_result(f"[kb_update: {action}  hash: {_content_hash(content)}]", diff, ipc_note)
+    return _render_kb_result(f"[kb_update: {action}  hash: {_content_hash(content)}]", diff)
 
 
-@mcp.tool(name="kb_remove", description="Remove the body of a markdown section, or remove its full subtree.")
+@mcp.tool(name="kb_remove", description="Remove the body of one KB section, or remove its full subtree.")
 async def kb_remove(
-    file: Optional[str] = None,
-    id: str = "",
+    target: Optional[str] = None,
+    section: str = "",
     mode: str = "subtree",
     dry_run: bool = False,
-    confirm_hash: Optional[str] = None,
 ) -> str:
-    resolved = _kb_resolve_file(file)
+    resolved = _kb_resolve_target(target)
     if isinstance(resolved, dict):
         return _kb_dict_to_error_text(resolved)
     path = resolved
@@ -1894,17 +2384,22 @@ async def kb_remove(
     had_trailing_newline = old_text.endswith("\n")
     lines = old_text.splitlines()
     nodes = parse_markdown(old_text)
-    target = _resolve_section_or_error(nodes, id, total_lines=len(lines), allow_root=True)
-    if isinstance(target, dict):
-        return _kb_dict_to_error_text(target)
-    _ = confirm_hash  # Legacy no-op; KB mutations are patch-style edits.
+    selected = _resolve_single_section_or_error(nodes, section, total_lines=len(lines), allow_root=True)
+    if isinstance(selected, dict):
+        return _kb_dict_to_error_text(selected)
 
-    if mode == "subtree":
-        start, end = target.line_start, target.subtree_end
-    elif mode == "body":
-        start, end = target.body_start, target.body_end
+    normalized_mode = str(mode or "subtree").strip().lower().replace("-", "_")
+    if normalized_mode == "subtree":
+        start, end = selected.line_start, selected.subtree_end
+    elif normalized_mode == "body":
+        start, end = selected.body_start, selected.body_end
     else:
-        return _kb_error_text("SectionNotFound", f"Unsupported mode '{mode}'", id=id)
+        return _kb_error_text(
+            "InvalidParameter",
+            f"Unsupported mode '{mode}'",
+            section=section,
+            allowed_modes="body, subtree",
+        )
 
     new_lines = _replace_line_range(lines, start, end, "")
     new_text = "\n".join(new_lines)
@@ -1913,14 +2408,9 @@ async def kb_remove(
     diff = _unified_diff(old_text, new_text, str(path))
 
     action = "DRY RUN" if dry_run else "REMOVED"
-    ipc_note = None
     if not dry_run:
         _atomic_write(path, new_text)
-        try:
-            ipc_note = await _notify_repo_memory_ipc(path, old_text, new_text)
-        except Exception as exc:
-            ipc_note = f"[kb_ipc: ERROR  {exc}]"
-    return _render_kb_result(f"[kb_remove: {action}]", diff, ipc_note)
+    return _render_kb_result(f"[kb_remove: {action}]", diff)
 
 
 # =============================================================================

@@ -20,7 +20,7 @@ class _AuthStatusReader(Protocol):
 def _coerce_payload_map(value: object) -> PayloadMap:
     if not isinstance(value, dict):
         return {}
-    return {str(key): item for key, item in value.items()}
+    return cast(PayloadMap, value).copy()
 
 
 def _load_extensions() -> _ExtensionLoader:

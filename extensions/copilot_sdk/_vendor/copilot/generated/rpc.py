@@ -156,19 +156,27 @@ class AgentInfo:
     name: str
     """Unique identifier of the custom agent"""
 
+    path: str | None = None
+    """Absolute local file path of the agent definition. Only set for file-based agents loaded
+    from disk; remote agents do not have a path.
+    """
+
     @staticmethod
     def from_dict(obj: Any) -> 'AgentInfo':
         assert isinstance(obj, dict)
         description = from_str(obj.get("description"))
         display_name = from_str(obj.get("displayName"))
         name = from_str(obj.get("name"))
-        return AgentInfo(description, display_name, name)
+        path = from_union([from_str, from_none], obj.get("path"))
+        return AgentInfo(description, display_name, name, path)
 
     def to_dict(self) -> dict:
         result: dict = {}
         result["description"] = from_str(self.description)
         result["displayName"] = from_str(self.display_name)
         result["name"] = from_str(self.name)
+        if self.path is not None:
+            result["path"] = from_union([from_str, from_none], self.path)
         return result
 
 # Experimental: this type is part of an experimental API and may change or be removed.
@@ -237,6 +245,51 @@ class CommandsHandlePendingCommandResult:
         result["success"] = from_bool(self.success)
         return result
 
+# Internal: this type is an internal SDK API and is not part of the public surface.
+@dataclass
+class ConnectRequest:
+    token: str | None = None
+    """Connection token; required when the server was started with COPILOT_CONNECTION_TOKEN"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ConnectRequest':
+        assert isinstance(obj, dict)
+        token = from_union([from_str, from_none], obj.get("token"))
+        return ConnectRequest(token)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        if self.token is not None:
+            result["token"] = from_union([from_str, from_none], self.token)
+        return result
+
+# Internal: this type is an internal SDK API and is not part of the public surface.
+@dataclass
+class ConnectResult:
+    ok: bool
+    """Always true on success"""
+
+    protocol_version: int
+    """Server protocol version number"""
+
+    version: str
+    """Server package version"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ConnectResult':
+        assert isinstance(obj, dict)
+        ok = from_bool(obj.get("ok"))
+        protocol_version = from_int(obj.get("protocolVersion"))
+        version = from_str(obj.get("version"))
+        return ConnectResult(ok, protocol_version, version)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["ok"] = from_bool(self.ok)
+        result["protocolVersion"] = from_int(self.protocol_version)
+        result["version"] = from_str(self.version)
+        return result
+
 @dataclass
 class CurrentModel:
     model_id: str | None = None
@@ -271,6 +324,60 @@ class DiscoveredMCPServerType(Enum):
     MEMORY = "memory"
     SSE = "sse"
     STDIO = "stdio"
+
+@dataclass
+class EmbeddedBlobResourceContents:
+    blob: str
+    """Base64-encoded binary content of the resource"""
+
+    uri: str
+    """URI identifying the resource"""
+
+    mime_type: str | None = None
+    """MIME type of the blob content"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'EmbeddedBlobResourceContents':
+        assert isinstance(obj, dict)
+        blob = from_str(obj.get("blob"))
+        uri = from_str(obj.get("uri"))
+        mime_type = from_union([from_str, from_none], obj.get("mimeType"))
+        return EmbeddedBlobResourceContents(blob, uri, mime_type)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["blob"] = from_str(self.blob)
+        result["uri"] = from_str(self.uri)
+        if self.mime_type is not None:
+            result["mimeType"] = from_union([from_str, from_none], self.mime_type)
+        return result
+
+@dataclass
+class EmbeddedTextResourceContents:
+    text: str
+    """Text content of the resource"""
+
+    uri: str
+    """URI identifying the resource"""
+
+    mime_type: str | None = None
+    """MIME type of the text content"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'EmbeddedTextResourceContents':
+        assert isinstance(obj, dict)
+        text = from_str(obj.get("text"))
+        uri = from_str(obj.get("uri"))
+        mime_type = from_union([from_str, from_none], obj.get("mimeType"))
+        return EmbeddedTextResourceContents(text, uri, mime_type)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["text"] = from_str(self.text)
+        result["uri"] = from_str(self.uri)
+        if self.mime_type is not None:
+            result["mimeType"] = from_union([from_str, from_none], self.mime_type)
+        return result
 
 class ExtensionSource(Enum):
     """Discovery source: project (.github/extensions/) or user (~/.copilot/extensions/)"""
@@ -320,6 +427,76 @@ class ExtensionsEnableRequest:
         result["id"] = from_str(self.id)
         return result
 
+class ExternalToolTextResultForLlmContentResourceLinkIconTheme(Enum):
+    """Theme variant this icon is intended for"""
+
+    DARK = "dark"
+    LIGHT = "light"
+
+@dataclass
+class ExternalToolTextResultForLlmContentResourceDetails:
+    """The embedded resource contents, either text or base64-encoded binary"""
+
+    uri: str
+    """URI identifying the resource"""
+
+    mime_type: str | None = None
+    """MIME type of the text content
+
+    MIME type of the blob content
+    """
+    text: str | None = None
+    """Text content of the resource"""
+
+    blob: str | None = None
+    """Base64-encoded binary content of the resource"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlmContentResourceDetails':
+        assert isinstance(obj, dict)
+        uri = from_str(obj.get("uri"))
+        mime_type = from_union([from_str, from_none], obj.get("mimeType"))
+        text = from_union([from_str, from_none], obj.get("text"))
+        blob = from_union([from_str, from_none], obj.get("blob"))
+        return ExternalToolTextResultForLlmContentResourceDetails(uri, mime_type, text, blob)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["uri"] = from_str(self.uri)
+        if self.mime_type is not None:
+            result["mimeType"] = from_union([from_str, from_none], self.mime_type)
+        if self.text is not None:
+            result["text"] = from_union([from_str, from_none], self.text)
+        if self.blob is not None:
+            result["blob"] = from_union([from_str, from_none], self.blob)
+        return result
+
+class ExternalToolTextResultForLlmContentType(Enum):
+    AUDIO = "audio"
+    IMAGE = "image"
+    RESOURCE = "resource"
+    RESOURCE_LINK = "resource_link"
+    TERMINAL = "terminal"
+    TEXT = "text"
+
+class ExternalToolTextResultForLlmContentAudioType(Enum):
+    AUDIO = "audio"
+
+class ExternalToolTextResultForLlmContentImageType(Enum):
+    IMAGE = "image"
+
+class ExternalToolTextResultForLlmContentResourceType(Enum):
+    RESOURCE = "resource"
+
+class ExternalToolTextResultForLlmContentResourceLinkType(Enum):
+    RESOURCE_LINK = "resource_link"
+
+class ExternalToolTextResultForLlmContentTerminalType(Enum):
+    TERMINAL = "terminal"
+
+class ExternalToolTextResultForLlmContentTextType(Enum):
+    TEXT = "text"
+
 class FilterMappingString(Enum):
     HIDDEN_CHARACTERS = "hidden_characters"
     MARKDOWN = "markdown"
@@ -361,15 +538,15 @@ class FleetStartResult:
         return result
 
 @dataclass
-class HandleToolCallResult:
+class HandlePendingToolCallResult:
     success: bool
     """Whether the tool call result was handled successfully"""
 
     @staticmethod
-    def from_dict(obj: Any) -> 'HandleToolCallResult':
+    def from_dict(obj: Any) -> 'HandlePendingToolCallResult':
         assert isinstance(obj, dict)
         success = from_bool(obj.get("success"))
-        return HandleToolCallResult(success)
+        return HandlePendingToolCallResult(success)
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -496,6 +673,10 @@ class LogResult:
         result: dict = {}
         result["eventId"] = str(self.event_id)
         return result
+
+class MCPServerConfigHTTPOauthGrantType(Enum):
+    AUTHORIZATION_CODE = "authorization_code"
+    CLIENT_CREDENTIALS = "client_credentials"
 
 class MCPServerConfigType(Enum):
     """Remote transport type. Defaults to "http" when omitted."""
@@ -703,18 +884,19 @@ class SessionMode(Enum):
 class ModelBilling:
     """Billing information"""
 
-    multiplier: float
+    multiplier: float | None = None
     """Billing cost multiplier relative to the base rate"""
 
     @staticmethod
     def from_dict(obj: Any) -> 'ModelBilling':
         assert isinstance(obj, dict)
-        multiplier = from_float(obj.get("multiplier"))
+        multiplier = from_union([from_float, from_none], obj.get("multiplier"))
         return ModelBilling(multiplier)
 
     def to_dict(self) -> dict:
         result: dict = {}
-        result["multiplier"] = to_float(self.multiplier)
+        if self.multiplier is not None:
+            result["multiplier"] = from_union([to_float, from_none], self.multiplier)
         return result
 
 @dataclass
@@ -884,7 +1066,7 @@ class ModelsListRequest:
 @dataclass
 class NameGetResult:
     name: str | None = None
-    """The session name, falling back to the auto-generated summary, or null if neither exists"""
+    """The session name (user-set or auto-generated), or null if not yet set"""
 
     @staticmethod
     def from_dict(obj: Any) -> 'NameGetResult':
@@ -916,6 +1098,8 @@ class NameSetRequest:
 class ApprovalKind(Enum):
     COMMANDS = "commands"
     CUSTOM_TOOL = "custom-tool"
+    EXTENSION_MANAGEMENT = "extension-management"
+    EXTENSION_PERMISSION_ACCESS = "extension-permission-access"
     MCP = "mcp"
     MCP_SAMPLING = "mcp-sampling"
     MEMORY = "memory"
@@ -926,6 +1110,7 @@ class PermissionDecisionKind(Enum):
     APPROVE_FOR_LOCATION = "approve-for-location"
     APPROVE_FOR_SESSION = "approve-for-session"
     APPROVE_ONCE = "approve-once"
+    APPROVE_PERMANENTLY = "approve-permanently"
     REJECT = "reject"
     USER_NOT_AVAILABLE = "user-not-available"
 
@@ -937,6 +1122,12 @@ class PermissionDecisionApproveForLocationApprovalCommandsKind(Enum):
 
 class PermissionDecisionApproveForLocationApprovalCustomToolKind(Enum):
     CUSTOM_TOOL = "custom-tool"
+
+class PermissionDecisionApproveForLocationApprovalExtensionManagementKind(Enum):
+    EXTENSION_MANAGEMENT = "extension-management"
+
+class PermissionDecisionApproveForLocationApprovalExtensionPermissionAccessKind(Enum):
+    EXTENSION_PERMISSION_ACCESS = "extension-permission-access"
 
 class PermissionDecisionApproveForLocationApprovalMCPKind(Enum):
     MCP = "mcp"
@@ -958,6 +1149,9 @@ class PermissionDecisionApproveForSessionKind(Enum):
 
 class PermissionDecisionApproveOnceKind(Enum):
     APPROVE_ONCE = "approve-once"
+
+class PermissionDecisionApprovePermanentlyKind(Enum):
+    APPROVE_PERMANENTLY = "approve-permanently"
 
 class PermissionDecisionRejectKind(Enum):
     REJECT = "reject"
@@ -1155,6 +1349,29 @@ class Plugin:
         result["name"] = from_str(self.name)
         if self.version is not None:
             result["version"] = from_union([from_str, from_none], self.version)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class RemoteEnableResult:
+    remote_steerable: bool
+    """Whether remote steering is enabled"""
+
+    url: str | None = None
+    """Mission Control frontend URL for this session"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'RemoteEnableResult':
+        assert isinstance(obj, dict)
+        remote_steerable = from_bool(obj.get("remoteSteerable"))
+        url = from_union([from_str, from_none], obj.get("url"))
+        return RemoteEnableResult(remote_steerable, url)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["remoteSteerable"] = from_bool(self.remote_steerable)
+        if self.url is not None:
+            result["url"] = from_union([from_str, from_none], self.url)
         return result
 
 @dataclass
@@ -1740,6 +1957,251 @@ class SkillsEnableRequest:
         result["name"] = from_str(self.name)
         return result
 
+class TaskInfoExecutionMode(Enum):
+    """How the agent is currently being managed by the runtime
+
+    Whether the shell command is currently sync-waited or background-managed
+    """
+    BACKGROUND = "background"
+    SYNC = "sync"
+
+class TaskInfoStatus(Enum):
+    """Current lifecycle status of the task"""
+
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    IDLE = "idle"
+    RUNNING = "running"
+
+class TaskAgentInfoType(Enum):
+    AGENT = "agent"
+
+class TaskShellInfoAttachmentMode(Enum):
+    """Whether the shell runs inside a managed PTY session or as an independent background
+    process
+    """
+    ATTACHED = "attached"
+    DETACHED = "detached"
+
+class TaskInfoType(Enum):
+    AGENT = "agent"
+    SHELL = "shell"
+
+class TaskShellInfoType(Enum):
+    SHELL = "shell"
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksCancelRequest:
+    id: str
+    """Task identifier"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksCancelRequest':
+        assert isinstance(obj, dict)
+        id = from_str(obj.get("id"))
+        return TasksCancelRequest(id)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["id"] = from_str(self.id)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksCancelResult:
+    cancelled: bool
+    """Whether the task was successfully cancelled"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksCancelResult':
+        assert isinstance(obj, dict)
+        cancelled = from_bool(obj.get("cancelled"))
+        return TasksCancelResult(cancelled)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["cancelled"] = from_bool(self.cancelled)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksPromoteToBackgroundRequest:
+    id: str
+    """Task identifier"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksPromoteToBackgroundRequest':
+        assert isinstance(obj, dict)
+        id = from_str(obj.get("id"))
+        return TasksPromoteToBackgroundRequest(id)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["id"] = from_str(self.id)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksPromoteToBackgroundResult:
+    promoted: bool
+    """Whether the task was successfully promoted to background mode"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksPromoteToBackgroundResult':
+        assert isinstance(obj, dict)
+        promoted = from_bool(obj.get("promoted"))
+        return TasksPromoteToBackgroundResult(promoted)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["promoted"] = from_bool(self.promoted)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksRemoveRequest:
+    id: str
+    """Task identifier"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksRemoveRequest':
+        assert isinstance(obj, dict)
+        id = from_str(obj.get("id"))
+        return TasksRemoveRequest(id)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["id"] = from_str(self.id)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksRemoveResult:
+    removed: bool
+    """Whether the task was removed. Returns false if the task does not exist or is still
+    running/idle (cancel it first).
+    """
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksRemoveResult':
+        assert isinstance(obj, dict)
+        removed = from_bool(obj.get("removed"))
+        return TasksRemoveResult(removed)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["removed"] = from_bool(self.removed)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksSendMessageRequest:
+    id: str
+    """Agent task identifier"""
+
+    message: str
+    """Message content to send to the agent"""
+
+    from_agent_id: str | None = None
+    """Agent ID of the sender, if sent on behalf of another agent"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksSendMessageRequest':
+        assert isinstance(obj, dict)
+        id = from_str(obj.get("id"))
+        message = from_str(obj.get("message"))
+        from_agent_id = from_union([from_str, from_none], obj.get("fromAgentId"))
+        return TasksSendMessageRequest(id, message, from_agent_id)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["id"] = from_str(self.id)
+        result["message"] = from_str(self.message)
+        if self.from_agent_id is not None:
+            result["fromAgentId"] = from_union([from_str, from_none], self.from_agent_id)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksSendMessageResult:
+    sent: bool
+    """Whether the message was successfully delivered or steered"""
+
+    error: str | None = None
+    """Error message if delivery failed"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksSendMessageResult':
+        assert isinstance(obj, dict)
+        sent = from_bool(obj.get("sent"))
+        error = from_union([from_str, from_none], obj.get("error"))
+        return TasksSendMessageResult(sent, error)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["sent"] = from_bool(self.sent)
+        if self.error is not None:
+            result["error"] = from_union([from_str, from_none], self.error)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksStartAgentRequest:
+    agent_type: str
+    """Type of agent to start (e.g., 'explore', 'task', 'general-purpose')"""
+
+    name: str
+    """Short name for the agent, used to generate a human-readable ID"""
+
+    prompt: str
+    """Task prompt for the agent"""
+
+    description: str | None = None
+    """Short description of the task"""
+
+    model: str | None = None
+    """Optional model override"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksStartAgentRequest':
+        assert isinstance(obj, dict)
+        agent_type = from_str(obj.get("agentType"))
+        name = from_str(obj.get("name"))
+        prompt = from_str(obj.get("prompt"))
+        description = from_union([from_str, from_none], obj.get("description"))
+        model = from_union([from_str, from_none], obj.get("model"))
+        return TasksStartAgentRequest(agent_type, name, prompt, description, model)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["agentType"] = from_str(self.agent_type)
+        result["name"] = from_str(self.name)
+        result["prompt"] = from_str(self.prompt)
+        if self.description is not None:
+            result["description"] = from_union([from_str, from_none], self.description)
+        if self.model is not None:
+            result["model"] = from_union([from_str, from_none], self.model)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TasksStartAgentResult:
+    agent_id: str
+    """Generated agent ID for the background task"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TasksStartAgentResult':
+        assert isinstance(obj, dict)
+        agent_id = from_str(obj.get("agentId"))
+        return TasksStartAgentResult(agent_id)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["agentId"] = from_str(self.agent_id)
+        return result
+
 @dataclass
 class Tool:
     description: str
@@ -1778,40 +2240,6 @@ class Tool:
             result["namespacedName"] = from_union([from_str, from_none], self.namespaced_name)
         if self.parameters is not None:
             result["parameters"] = from_union([lambda x: from_dict(lambda x: x, x), from_none], self.parameters)
-        return result
-
-@dataclass
-class ToolCallResult:
-    text_result_for_llm: str
-    """Text result to send back to the LLM"""
-
-    error: str | None = None
-    """Error message if the tool call failed"""
-
-    result_type: str | None = None
-    """Type of the tool result"""
-
-    tool_telemetry: dict[str, Any] | None = None
-    """Telemetry data from tool execution"""
-
-    @staticmethod
-    def from_dict(obj: Any) -> 'ToolCallResult':
-        assert isinstance(obj, dict)
-        text_result_for_llm = from_str(obj.get("textResultForLlm"))
-        error = from_union([from_str, from_none], obj.get("error"))
-        result_type = from_union([from_str, from_none], obj.get("resultType"))
-        tool_telemetry = from_union([lambda x: from_dict(lambda x: x, x), from_none], obj.get("toolTelemetry"))
-        return ToolCallResult(text_result_for_llm, error, result_type, tool_telemetry)
-
-    def to_dict(self) -> dict:
-        result: dict = {}
-        result["textResultForLlm"] = from_str(self.text_result_for_llm)
-        if self.error is not None:
-            result["error"] = from_union([from_str, from_none], self.error)
-        if self.result_type is not None:
-            result["resultType"] = from_union([from_str, from_none], self.result_type)
-        if self.tool_telemetry is not None:
-            result["toolTelemetry"] = from_union([lambda x: from_dict(lambda x: x, x), from_none], self.tool_telemetry)
         return result
 
 @dataclass
@@ -1975,6 +2403,22 @@ class UsageMetricsModelMetricRequests:
         return result
 
 @dataclass
+class UsageMetricsModelMetricTokenDetail:
+    token_count: int
+    """Accumulated token count for this token type"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'UsageMetricsModelMetricTokenDetail':
+        assert isinstance(obj, dict)
+        token_count = from_int(obj.get("tokenCount"))
+        return UsageMetricsModelMetricTokenDetail(token_count)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["tokenCount"] = from_int(self.token_count)
+        return result
+
+@dataclass
 class UsageMetricsModelMetricUsage:
     """Token usage metrics for this model"""
 
@@ -2014,6 +2458,22 @@ class UsageMetricsModelMetricUsage:
         return result
 
 @dataclass
+class UsageMetricsTokenDetail:
+    token_count: int
+    """Accumulated token count for this token type"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'UsageMetricsTokenDetail':
+        assert isinstance(obj, dict)
+        token_count = from_int(obj.get("tokenCount"))
+        return UsageMetricsTokenDetail(token_count)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["tokenCount"] = from_int(self.token_count)
+        return result
+
+@dataclass
 class WorkspacesCreateFileRequest:
     content: str
     """File content to write as a UTF-8 string"""
@@ -2037,11 +2497,6 @@ class WorkspacesCreateFileRequest:
 class HostType(Enum):
     ADO = "ado"
     GITHUB = "github"
-
-class SessionSyncLevel(Enum):
-    LOCAL = "local"
-    REPO_AND_USER = "repo_and_user"
-    USER = "user"
 
 @dataclass
 class WorkspacesListFilesResult:
@@ -2291,6 +2746,179 @@ class Extension:
             result["pid"] = from_union([from_int, from_none], self.pid)
         return result
 
+@dataclass
+class ExternalToolTextResultForLlmContentResourceLinkIcon:
+    """Icon image for a resource"""
+
+    src: str
+    """URL or path to the icon image"""
+
+    mime_type: str | None = None
+    """MIME type of the icon image"""
+
+    sizes: list[str] | None = None
+    """Available icon sizes (e.g., ['16x16', '32x32'])"""
+
+    theme: ExternalToolTextResultForLlmContentResourceLinkIconTheme | None = None
+    """Theme variant this icon is intended for"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlmContentResourceLinkIcon':
+        assert isinstance(obj, dict)
+        src = from_str(obj.get("src"))
+        mime_type = from_union([from_str, from_none], obj.get("mimeType"))
+        sizes = from_union([lambda x: from_list(from_str, x), from_none], obj.get("sizes"))
+        theme = from_union([ExternalToolTextResultForLlmContentResourceLinkIconTheme, from_none], obj.get("theme"))
+        return ExternalToolTextResultForLlmContentResourceLinkIcon(src, mime_type, sizes, theme)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["src"] = from_str(self.src)
+        if self.mime_type is not None:
+            result["mimeType"] = from_union([from_str, from_none], self.mime_type)
+        if self.sizes is not None:
+            result["sizes"] = from_union([lambda x: from_list(from_str, x), from_none], self.sizes)
+        if self.theme is not None:
+            result["theme"] = from_union([lambda x: to_enum(ExternalToolTextResultForLlmContentResourceLinkIconTheme, x), from_none], self.theme)
+        return result
+
+@dataclass
+class ExternalToolTextResultForLlmContentAudio:
+    """Audio content block with base64-encoded data"""
+
+    data: str
+    """Base64-encoded audio data"""
+
+    mime_type: str
+    """MIME type of the audio (e.g., audio/wav, audio/mpeg)"""
+
+    type: ExternalToolTextResultForLlmContentAudioType
+    """Content block type discriminator"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlmContentAudio':
+        assert isinstance(obj, dict)
+        data = from_str(obj.get("data"))
+        mime_type = from_str(obj.get("mimeType"))
+        type = ExternalToolTextResultForLlmContentAudioType(obj.get("type"))
+        return ExternalToolTextResultForLlmContentAudio(data, mime_type, type)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["data"] = from_str(self.data)
+        result["mimeType"] = from_str(self.mime_type)
+        result["type"] = to_enum(ExternalToolTextResultForLlmContentAudioType, self.type)
+        return result
+
+@dataclass
+class ExternalToolTextResultForLlmContentImage:
+    """Image content block with base64-encoded data"""
+
+    data: str
+    """Base64-encoded image data"""
+
+    mime_type: str
+    """MIME type of the image (e.g., image/png, image/jpeg)"""
+
+    type: ExternalToolTextResultForLlmContentImageType
+    """Content block type discriminator"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlmContentImage':
+        assert isinstance(obj, dict)
+        data = from_str(obj.get("data"))
+        mime_type = from_str(obj.get("mimeType"))
+        type = ExternalToolTextResultForLlmContentImageType(obj.get("type"))
+        return ExternalToolTextResultForLlmContentImage(data, mime_type, type)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["data"] = from_str(self.data)
+        result["mimeType"] = from_str(self.mime_type)
+        result["type"] = to_enum(ExternalToolTextResultForLlmContentImageType, self.type)
+        return result
+
+@dataclass
+class ExternalToolTextResultForLlmContentResource:
+    """Embedded resource content block with inline text or binary data"""
+
+    resource: ExternalToolTextResultForLlmContentResourceDetails
+    """The embedded resource contents, either text or base64-encoded binary"""
+
+    type: ExternalToolTextResultForLlmContentResourceType
+    """Content block type discriminator"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlmContentResource':
+        assert isinstance(obj, dict)
+        resource = ExternalToolTextResultForLlmContentResourceDetails.from_dict(obj.get("resource"))
+        type = ExternalToolTextResultForLlmContentResourceType(obj.get("type"))
+        return ExternalToolTextResultForLlmContentResource(resource, type)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["resource"] = to_class(ExternalToolTextResultForLlmContentResourceDetails, self.resource)
+        result["type"] = to_enum(ExternalToolTextResultForLlmContentResourceType, self.type)
+        return result
+
+@dataclass
+class ExternalToolTextResultForLlmContentTerminal:
+    """Terminal/shell output content block with optional exit code and working directory"""
+
+    text: str
+    """Terminal/shell output text"""
+
+    type: ExternalToolTextResultForLlmContentTerminalType
+    """Content block type discriminator"""
+
+    cwd: str | None = None
+    """Working directory where the command was executed"""
+
+    exit_code: float | None = None
+    """Process exit code, if the command has completed"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlmContentTerminal':
+        assert isinstance(obj, dict)
+        text = from_str(obj.get("text"))
+        type = ExternalToolTextResultForLlmContentTerminalType(obj.get("type"))
+        cwd = from_union([from_str, from_none], obj.get("cwd"))
+        exit_code = from_union([from_float, from_none], obj.get("exitCode"))
+        return ExternalToolTextResultForLlmContentTerminal(text, type, cwd, exit_code)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["text"] = from_str(self.text)
+        result["type"] = to_enum(ExternalToolTextResultForLlmContentTerminalType, self.type)
+        if self.cwd is not None:
+            result["cwd"] = from_union([from_str, from_none], self.cwd)
+        if self.exit_code is not None:
+            result["exitCode"] = from_union([to_float, from_none], self.exit_code)
+        return result
+
+@dataclass
+class ExternalToolTextResultForLlmContentText:
+    """Plain text content block"""
+
+    text: str
+    """The text content"""
+
+    type: ExternalToolTextResultForLlmContentTextType
+    """Content block type discriminator"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlmContentText':
+        assert isinstance(obj, dict)
+        text = from_str(obj.get("text"))
+        type = ExternalToolTextResultForLlmContentTextType(obj.get("type"))
+        return ExternalToolTextResultForLlmContentText(text, type)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["text"] = from_str(self.text)
+        result["type"] = to_enum(ExternalToolTextResultForLlmContentTextType, self.type)
+        return result
+
 # Experimental: this type is part of an experimental API and may change or be removed.
 @dataclass
 class HistoryCompactResult:
@@ -2433,6 +3061,7 @@ class MCPServerConfig:
 
     headers: dict[str, str] | None = None
     oauth_client_id: str | None = None
+    oauth_grant_type: MCPServerConfigHTTPOauthGrantType | None = None
     oauth_public_client: bool | None = None
     url: str | None = None
 
@@ -2450,9 +3079,10 @@ class MCPServerConfig:
         type = from_union([MCPServerConfigType, from_none], obj.get("type"))
         headers = from_union([lambda x: from_dict(from_str, x), from_none], obj.get("headers"))
         oauth_client_id = from_union([from_str, from_none], obj.get("oauthClientId"))
+        oauth_grant_type = from_union([MCPServerConfigHTTPOauthGrantType, from_none], obj.get("oauthGrantType"))
         oauth_public_client = from_union([from_bool, from_none], obj.get("oauthPublicClient"))
         url = from_union([from_str, from_none], obj.get("url"))
-        return MCPServerConfig(args, command, cwd, env, filter_mapping, is_default_server, timeout, tools, type, headers, oauth_client_id, oauth_public_client, url)
+        return MCPServerConfig(args, command, cwd, env, filter_mapping, is_default_server, timeout, tools, type, headers, oauth_client_id, oauth_grant_type, oauth_public_client, url)
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -2478,6 +3108,8 @@ class MCPServerConfig:
             result["headers"] = from_union([lambda x: from_dict(from_str, x), from_none], self.headers)
         if self.oauth_client_id is not None:
             result["oauthClientId"] = from_union([from_str, from_none], self.oauth_client_id)
+        if self.oauth_grant_type is not None:
+            result["oauthGrantType"] = from_union([lambda x: to_enum(MCPServerConfigHTTPOauthGrantType, x), from_none], self.oauth_grant_type)
         if self.oauth_public_client is not None:
             result["oauthPublicClient"] = from_union([from_bool, from_none], self.oauth_public_client)
         if self.url is not None:
@@ -2524,6 +3156,7 @@ class MCPServerConfigHTTP:
     headers: dict[str, str] | None = None
     is_default_server: bool | None = None
     oauth_client_id: str | None = None
+    oauth_grant_type: MCPServerConfigHTTPOauthGrantType | None = None
     oauth_public_client: bool | None = None
     timeout: int | None = None
     """Timeout in milliseconds for tool calls to this server."""
@@ -2542,11 +3175,12 @@ class MCPServerConfigHTTP:
         headers = from_union([lambda x: from_dict(from_str, x), from_none], obj.get("headers"))
         is_default_server = from_union([from_bool, from_none], obj.get("isDefaultServer"))
         oauth_client_id = from_union([from_str, from_none], obj.get("oauthClientId"))
+        oauth_grant_type = from_union([MCPServerConfigHTTPOauthGrantType, from_none], obj.get("oauthGrantType"))
         oauth_public_client = from_union([from_bool, from_none], obj.get("oauthPublicClient"))
         timeout = from_union([from_int, from_none], obj.get("timeout"))
         tools = from_union([lambda x: from_list(from_str, x), from_none], obj.get("tools"))
         type = from_union([MCPServerConfigHTTPType, from_none], obj.get("type"))
-        return MCPServerConfigHTTP(url, filter_mapping, headers, is_default_server, oauth_client_id, oauth_public_client, timeout, tools, type)
+        return MCPServerConfigHTTP(url, filter_mapping, headers, is_default_server, oauth_client_id, oauth_grant_type, oauth_public_client, timeout, tools, type)
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -2559,6 +3193,8 @@ class MCPServerConfigHTTP:
             result["isDefaultServer"] = from_union([from_bool, from_none], self.is_default_server)
         if self.oauth_client_id is not None:
             result["oauthClientId"] = from_union([from_str, from_none], self.oauth_client_id)
+        if self.oauth_grant_type is not None:
+            result["oauthGrantType"] = from_union([lambda x: to_enum(MCPServerConfigHTTPOauthGrantType, x), from_none], self.oauth_grant_type)
         if self.oauth_public_client is not None:
             result["oauthPublicClient"] = from_union([from_bool, from_none], self.oauth_public_client)
         if self.timeout is not None:
@@ -2714,6 +3350,8 @@ class PermissionDecisionApproveForIonApproval:
     command_identifiers: list[str] | None = None
     server_name: str | None = None
     tool_name: str | None = None
+    operation: str | None = None
+    extension_name: str | None = None
 
     @staticmethod
     def from_dict(obj: Any) -> 'PermissionDecisionApproveForIonApproval':
@@ -2722,7 +3360,9 @@ class PermissionDecisionApproveForIonApproval:
         command_identifiers = from_union([lambda x: from_list(from_str, x), from_none], obj.get("commandIdentifiers"))
         server_name = from_union([from_str, from_none], obj.get("serverName"))
         tool_name = from_union([from_none, from_str], obj.get("toolName"))
-        return PermissionDecisionApproveForIonApproval(kind, command_identifiers, server_name, tool_name)
+        operation = from_union([from_str, from_none], obj.get("operation"))
+        extension_name = from_union([from_str, from_none], obj.get("extensionName"))
+        return PermissionDecisionApproveForIonApproval(kind, command_identifiers, server_name, tool_name, operation, extension_name)
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -2733,6 +3373,10 @@ class PermissionDecisionApproveForIonApproval:
             result["serverName"] = from_union([from_str, from_none], self.server_name)
         if self.tool_name is not None:
             result["toolName"] = from_union([from_none, from_str], self.tool_name)
+        if self.operation is not None:
+            result["operation"] = from_union([from_str, from_none], self.operation)
+        if self.extension_name is not None:
+            result["extensionName"] = from_union([from_str, from_none], self.extension_name)
         return result
 
 @dataclass
@@ -2743,6 +3387,8 @@ class PermissionDecisionApproveForLocationApproval:
     command_identifiers: list[str] | None = None
     server_name: str | None = None
     tool_name: str | None = None
+    operation: str | None = None
+    extension_name: str | None = None
 
     @staticmethod
     def from_dict(obj: Any) -> 'PermissionDecisionApproveForLocationApproval':
@@ -2751,7 +3397,9 @@ class PermissionDecisionApproveForLocationApproval:
         command_identifiers = from_union([lambda x: from_list(from_str, x), from_none], obj.get("commandIdentifiers"))
         server_name = from_union([from_str, from_none], obj.get("serverName"))
         tool_name = from_union([from_none, from_str], obj.get("toolName"))
-        return PermissionDecisionApproveForLocationApproval(kind, command_identifiers, server_name, tool_name)
+        operation = from_union([from_str, from_none], obj.get("operation"))
+        extension_name = from_union([from_str, from_none], obj.get("extensionName"))
+        return PermissionDecisionApproveForLocationApproval(kind, command_identifiers, server_name, tool_name, operation, extension_name)
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -2762,6 +3410,10 @@ class PermissionDecisionApproveForLocationApproval:
             result["serverName"] = from_union([from_str, from_none], self.server_name)
         if self.tool_name is not None:
             result["toolName"] = from_union([from_none, from_str], self.tool_name)
+        if self.operation is not None:
+            result["operation"] = from_union([from_str, from_none], self.operation)
+        if self.extension_name is not None:
+            result["extensionName"] = from_union([from_str, from_none], self.extension_name)
         return result
 
 @dataclass
@@ -2772,6 +3424,8 @@ class PermissionDecisionApproveForSessionApproval:
     command_identifiers: list[str] | None = None
     server_name: str | None = None
     tool_name: str | None = None
+    operation: str | None = None
+    extension_name: str | None = None
 
     @staticmethod
     def from_dict(obj: Any) -> 'PermissionDecisionApproveForSessionApproval':
@@ -2780,7 +3434,9 @@ class PermissionDecisionApproveForSessionApproval:
         command_identifiers = from_union([lambda x: from_list(from_str, x), from_none], obj.get("commandIdentifiers"))
         server_name = from_union([from_str, from_none], obj.get("serverName"))
         tool_name = from_union([from_none, from_str], obj.get("toolName"))
-        return PermissionDecisionApproveForSessionApproval(kind, command_identifiers, server_name, tool_name)
+        operation = from_union([from_str, from_none], obj.get("operation"))
+        extension_name = from_union([from_str, from_none], obj.get("extensionName"))
+        return PermissionDecisionApproveForSessionApproval(kind, command_identifiers, server_name, tool_name, operation, extension_name)
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -2791,6 +3447,10 @@ class PermissionDecisionApproveForSessionApproval:
             result["serverName"] = from_union([from_str, from_none], self.server_name)
         if self.tool_name is not None:
             result["toolName"] = from_union([from_none, from_str], self.tool_name)
+        if self.operation is not None:
+            result["operation"] = from_union([from_str, from_none], self.operation)
+        if self.extension_name is not None:
+            result["extensionName"] = from_union([from_str, from_none], self.extension_name)
         return result
 
 @dataclass
@@ -2863,6 +3523,80 @@ class PermissionDecisionApproveForSessionApprovalCustomTool:
         result: dict = {}
         result["kind"] = to_enum(PermissionDecisionApproveForLocationApprovalCustomToolKind, self.kind)
         result["toolName"] = from_str(self.tool_name)
+        return result
+
+@dataclass
+class PermissionDecisionApproveForLocationApprovalExtensionManagement:
+    kind: PermissionDecisionApproveForLocationApprovalExtensionManagementKind
+    operation: str | None = None
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'PermissionDecisionApproveForLocationApprovalExtensionManagement':
+        assert isinstance(obj, dict)
+        kind = PermissionDecisionApproveForLocationApprovalExtensionManagementKind(obj.get("kind"))
+        operation = from_union([from_str, from_none], obj.get("operation"))
+        return PermissionDecisionApproveForLocationApprovalExtensionManagement(kind, operation)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["kind"] = to_enum(PermissionDecisionApproveForLocationApprovalExtensionManagementKind, self.kind)
+        if self.operation is not None:
+            result["operation"] = from_union([from_str, from_none], self.operation)
+        return result
+
+@dataclass
+class PermissionDecisionApproveForSessionApprovalExtensionManagement:
+    kind: PermissionDecisionApproveForLocationApprovalExtensionManagementKind
+    operation: str | None = None
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'PermissionDecisionApproveForSessionApprovalExtensionManagement':
+        assert isinstance(obj, dict)
+        kind = PermissionDecisionApproveForLocationApprovalExtensionManagementKind(obj.get("kind"))
+        operation = from_union([from_str, from_none], obj.get("operation"))
+        return PermissionDecisionApproveForSessionApprovalExtensionManagement(kind, operation)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["kind"] = to_enum(PermissionDecisionApproveForLocationApprovalExtensionManagementKind, self.kind)
+        if self.operation is not None:
+            result["operation"] = from_union([from_str, from_none], self.operation)
+        return result
+
+@dataclass
+class PermissionDecisionApproveForLocationApprovalExtensionPermissionAccess:
+    extension_name: str
+    kind: PermissionDecisionApproveForLocationApprovalExtensionPermissionAccessKind
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'PermissionDecisionApproveForLocationApprovalExtensionPermissionAccess':
+        assert isinstance(obj, dict)
+        extension_name = from_str(obj.get("extensionName"))
+        kind = PermissionDecisionApproveForLocationApprovalExtensionPermissionAccessKind(obj.get("kind"))
+        return PermissionDecisionApproveForLocationApprovalExtensionPermissionAccess(extension_name, kind)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["extensionName"] = from_str(self.extension_name)
+        result["kind"] = to_enum(PermissionDecisionApproveForLocationApprovalExtensionPermissionAccessKind, self.kind)
+        return result
+
+@dataclass
+class PermissionDecisionApproveForSessionApprovalExtensionPermissionAccess:
+    extension_name: str
+    kind: PermissionDecisionApproveForLocationApprovalExtensionPermissionAccessKind
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'PermissionDecisionApproveForSessionApprovalExtensionPermissionAccess':
+        assert isinstance(obj, dict)
+        extension_name = from_str(obj.get("extensionName"))
+        kind = PermissionDecisionApproveForLocationApprovalExtensionPermissionAccessKind(obj.get("kind"))
+        return PermissionDecisionApproveForSessionApprovalExtensionPermissionAccess(extension_name, kind)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["extensionName"] = from_str(self.extension_name)
+        result["kind"] = to_enum(PermissionDecisionApproveForLocationApprovalExtensionPermissionAccessKind, self.kind)
         return result
 
 @dataclass
@@ -3050,6 +3784,27 @@ class PermissionDecisionApproveOnce:
         return result
 
 @dataclass
+class PermissionDecisionApprovePermanently:
+    domain: str
+    """The URL domain to approve permanently"""
+
+    kind: PermissionDecisionApprovePermanentlyKind
+    """Approved and persisted across sessions"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'PermissionDecisionApprovePermanently':
+        assert isinstance(obj, dict)
+        domain = from_str(obj.get("domain"))
+        kind = PermissionDecisionApprovePermanentlyKind(obj.get("kind"))
+        return PermissionDecisionApprovePermanently(domain, kind)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["domain"] = from_str(self.domain)
+        result["kind"] = to_enum(PermissionDecisionApprovePermanentlyKind, self.kind)
+        return result
+
+@dataclass
 class PermissionDecisionReject:
     kind: PermissionDecisionRejectKind
     """Denied by the user during an interactive prompt"""
@@ -3231,6 +3986,83 @@ class SkillList:
         return result
 
 @dataclass
+class TaskShellInfo:
+    attachment_mode: TaskShellInfoAttachmentMode
+    """Whether the shell runs inside a managed PTY session or as an independent background
+    process
+    """
+    command: str
+    """Command being executed"""
+
+    description: str
+    """Short description of the task"""
+
+    id: str
+    """Unique task identifier"""
+
+    started_at: datetime
+    """ISO 8601 timestamp when the task was started"""
+
+    status: TaskInfoStatus
+    """Current lifecycle status of the task"""
+
+    type: TaskShellInfoType
+    """Task kind"""
+
+    can_promote_to_background: bool | None = None
+    """Whether this shell task can be promoted to background mode"""
+
+    completed_at: datetime | None = None
+    """ISO 8601 timestamp when the task finished"""
+
+    execution_mode: TaskInfoExecutionMode | None = None
+    """Whether the shell command is currently sync-waited or background-managed"""
+
+    log_path: str | None = None
+    """Path to the detached shell log, when available"""
+
+    pid: int | None = None
+    """Process ID when available"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TaskShellInfo':
+        assert isinstance(obj, dict)
+        attachment_mode = TaskShellInfoAttachmentMode(obj.get("attachmentMode"))
+        command = from_str(obj.get("command"))
+        description = from_str(obj.get("description"))
+        id = from_str(obj.get("id"))
+        started_at = from_datetime(obj.get("startedAt"))
+        status = TaskInfoStatus(obj.get("status"))
+        type = TaskShellInfoType(obj.get("type"))
+        can_promote_to_background = from_union([from_bool, from_none], obj.get("canPromoteToBackground"))
+        completed_at = from_union([from_datetime, from_none], obj.get("completedAt"))
+        execution_mode = from_union([TaskInfoExecutionMode, from_none], obj.get("executionMode"))
+        log_path = from_union([from_str, from_none], obj.get("logPath"))
+        pid = from_union([from_int, from_none], obj.get("pid"))
+        return TaskShellInfo(attachment_mode, command, description, id, started_at, status, type, can_promote_to_background, completed_at, execution_mode, log_path, pid)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["attachmentMode"] = to_enum(TaskShellInfoAttachmentMode, self.attachment_mode)
+        result["command"] = from_str(self.command)
+        result["description"] = from_str(self.description)
+        result["id"] = from_str(self.id)
+        result["startedAt"] = self.started_at.isoformat()
+        result["status"] = to_enum(TaskInfoStatus, self.status)
+        result["type"] = to_enum(TaskShellInfoType, self.type)
+        if self.can_promote_to_background is not None:
+            result["canPromoteToBackground"] = from_union([from_bool, from_none], self.can_promote_to_background)
+        if self.completed_at is not None:
+            result["completedAt"] = from_union([lambda x: x.isoformat(), from_none], self.completed_at)
+        if self.execution_mode is not None:
+            result["executionMode"] = from_union([lambda x: to_enum(TaskInfoExecutionMode, x), from_none], self.execution_mode)
+        if self.log_path is not None:
+            result["logPath"] = from_union([from_str, from_none], self.log_path)
+        if self.pid is not None:
+            result["pid"] = from_union([from_int, from_none], self.pid)
+        return result
+
+@dataclass
 class ToolList:
     tools: list[Tool]
     """List of available built-in tools with metadata"""
@@ -3244,34 +4076,6 @@ class ToolList:
     def to_dict(self) -> dict:
         result: dict = {}
         result["tools"] = from_list(lambda x: to_class(Tool, x), self.tools)
-        return result
-
-@dataclass
-class ToolsHandlePendingToolCallRequest:
-    request_id: str
-    """Request ID of the pending tool call"""
-
-    error: str | None = None
-    """Error message if the tool call failed"""
-
-    result: ToolCallResult | str | None = None
-    """Tool call result (string or expanded result object)"""
-
-    @staticmethod
-    def from_dict(obj: Any) -> 'ToolsHandlePendingToolCallRequest':
-        assert isinstance(obj, dict)
-        request_id = from_str(obj.get("requestId"))
-        error = from_union([from_str, from_none], obj.get("error"))
-        result = from_union([ToolCallResult.from_dict, from_str, from_none], obj.get("result"))
-        return ToolsHandlePendingToolCallRequest(request_id, error, result)
-
-    def to_dict(self) -> dict:
-        result: dict = {}
-        result["requestId"] = from_str(self.request_id)
-        if self.error is not None:
-            result["error"] = from_union([from_str, from_none], self.error)
-        if self.result is not None:
-            result["result"] = from_union([lambda x: to_class(ToolCallResult, x), from_str, from_none], self.result)
         return result
 
 @dataclass
@@ -3528,17 +4332,29 @@ class UsageMetricsModelMetric:
     usage: UsageMetricsModelMetricUsage
     """Token usage metrics for this model"""
 
+    token_details: dict[str, UsageMetricsModelMetricTokenDetail] | None = None
+    """Token count details per type"""
+
+    total_nano_aiu: int | None = None
+    """Accumulated nano-AI units cost for this model"""
+
     @staticmethod
     def from_dict(obj: Any) -> 'UsageMetricsModelMetric':
         assert isinstance(obj, dict)
         requests = UsageMetricsModelMetricRequests.from_dict(obj.get("requests"))
         usage = UsageMetricsModelMetricUsage.from_dict(obj.get("usage"))
-        return UsageMetricsModelMetric(requests, usage)
+        token_details = from_union([lambda x: from_dict(UsageMetricsModelMetricTokenDetail.from_dict, x), from_none], obj.get("tokenDetails"))
+        total_nano_aiu = from_union([from_int, from_none], obj.get("totalNanoAiu"))
+        return UsageMetricsModelMetric(requests, usage, token_details, total_nano_aiu)
 
     def to_dict(self) -> dict:
         result: dict = {}
         result["requests"] = to_class(UsageMetricsModelMetricRequests, self.requests)
         result["usage"] = to_class(UsageMetricsModelMetricUsage, self.usage)
+        if self.token_details is not None:
+            result["tokenDetails"] = from_union([lambda x: from_dict(lambda x: to_class(UsageMetricsModelMetricTokenDetail, x), x), from_none], self.token_details)
+        if self.total_nano_aiu is not None:
+            result["totalNanoAiu"] = from_union([from_int, from_none], self.total_nano_aiu)
         return result
 
 @dataclass
@@ -3556,10 +4372,10 @@ class Workspace:
     name: str | None = None
     remote_steerable: bool | None = None
     repository: str | None = None
-    session_sync_level: SessionSyncLevel | None = None
     summary: str | None = None
     summary_count: int | None = None
     updated_at: datetime | None = None
+    user_named: bool | None = None
 
     @staticmethod
     def from_dict(obj: Any) -> 'Workspace':
@@ -3577,11 +4393,11 @@ class Workspace:
         name = from_union([from_str, from_none], obj.get("name"))
         remote_steerable = from_union([from_bool, from_none], obj.get("remote_steerable"))
         repository = from_union([from_str, from_none], obj.get("repository"))
-        session_sync_level = from_union([SessionSyncLevel, from_none], obj.get("session_sync_level"))
         summary = from_union([from_str, from_none], obj.get("summary"))
         summary_count = from_union([from_int, from_none], obj.get("summary_count"))
         updated_at = from_union([from_datetime, from_none], obj.get("updated_at"))
-        return Workspace(id, branch, chronicle_sync_dismissed, created_at, cwd, git_root, host_type, mc_last_event_id, mc_session_id, mc_task_id, name, remote_steerable, repository, session_sync_level, summary, summary_count, updated_at)
+        user_named = from_union([from_bool, from_none], obj.get("user_named"))
+        return Workspace(id, branch, chronicle_sync_dismissed, created_at, cwd, git_root, host_type, mc_last_event_id, mc_session_id, mc_task_id, name, remote_steerable, repository, summary, summary_count, updated_at, user_named)
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -3610,14 +4426,14 @@ class Workspace:
             result["remote_steerable"] = from_union([from_bool, from_none], self.remote_steerable)
         if self.repository is not None:
             result["repository"] = from_union([from_str, from_none], self.repository)
-        if self.session_sync_level is not None:
-            result["session_sync_level"] = from_union([lambda x: to_enum(SessionSyncLevel, x), from_none], self.session_sync_level)
         if self.summary is not None:
             result["summary"] = from_union([from_str, from_none], self.summary)
         if self.summary_count is not None:
             result["summary_count"] = from_union([from_int, from_none], self.summary_count)
         if self.updated_at is not None:
             result["updated_at"] = from_union([lambda x: x.isoformat(), from_none], self.updated_at)
+        if self.user_named is not None:
+            result["user_named"] = from_union([from_bool, from_none], self.user_named)
         return result
 
 @dataclass
@@ -3651,6 +4467,175 @@ class ExtensionList:
     def to_dict(self) -> dict:
         result: dict = {}
         result["extensions"] = from_list(lambda x: to_class(Extension, x), self.extensions)
+        return result
+
+@dataclass
+class ExternalToolTextResultForLlmContent:
+    """A content block within a tool result, which may be text, terminal output, image, audio,
+    or a resource
+
+    Plain text content block
+
+    Terminal/shell output content block with optional exit code and working directory
+
+    Image content block with base64-encoded data
+
+    Audio content block with base64-encoded data
+
+    Resource link content block referencing an external resource
+
+    Embedded resource content block with inline text or binary data
+    """
+    type: ExternalToolTextResultForLlmContentType
+    """Content block type discriminator"""
+
+    text: str | None = None
+    """The text content
+
+    Terminal/shell output text
+    """
+    cwd: str | None = None
+    """Working directory where the command was executed"""
+
+    exit_code: float | None = None
+    """Process exit code, if the command has completed"""
+
+    data: str | None = None
+    """Base64-encoded image data
+
+    Base64-encoded audio data
+    """
+    mime_type: str | None = None
+    """MIME type of the image (e.g., image/png, image/jpeg)
+
+    MIME type of the audio (e.g., audio/wav, audio/mpeg)
+
+    MIME type of the resource content
+    """
+    description: str | None = None
+    """Human-readable description of the resource"""
+
+    icons: list[ExternalToolTextResultForLlmContentResourceLinkIcon] | None = None
+    """Icons associated with this resource"""
+
+    name: str | None = None
+    """Resource name identifier"""
+
+    size: float | None = None
+    """Size of the resource in bytes"""
+
+    title: str | None = None
+    """Human-readable display title for the resource"""
+
+    uri: str | None = None
+    """URI identifying the resource"""
+
+    resource: ExternalToolTextResultForLlmContentResourceDetails | None = None
+    """The embedded resource contents, either text or base64-encoded binary"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlmContent':
+        assert isinstance(obj, dict)
+        type = ExternalToolTextResultForLlmContentType(obj.get("type"))
+        text = from_union([from_str, from_none], obj.get("text"))
+        cwd = from_union([from_str, from_none], obj.get("cwd"))
+        exit_code = from_union([from_float, from_none], obj.get("exitCode"))
+        data = from_union([from_str, from_none], obj.get("data"))
+        mime_type = from_union([from_str, from_none], obj.get("mimeType"))
+        description = from_union([from_str, from_none], obj.get("description"))
+        icons = from_union([lambda x: from_list(ExternalToolTextResultForLlmContentResourceLinkIcon.from_dict, x), from_none], obj.get("icons"))
+        name = from_union([from_str, from_none], obj.get("name"))
+        size = from_union([from_float, from_none], obj.get("size"))
+        title = from_union([from_str, from_none], obj.get("title"))
+        uri = from_union([from_str, from_none], obj.get("uri"))
+        resource = from_union([ExternalToolTextResultForLlmContentResourceDetails.from_dict, from_none], obj.get("resource"))
+        return ExternalToolTextResultForLlmContent(type, text, cwd, exit_code, data, mime_type, description, icons, name, size, title, uri, resource)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["type"] = to_enum(ExternalToolTextResultForLlmContentType, self.type)
+        if self.text is not None:
+            result["text"] = from_union([from_str, from_none], self.text)
+        if self.cwd is not None:
+            result["cwd"] = from_union([from_str, from_none], self.cwd)
+        if self.exit_code is not None:
+            result["exitCode"] = from_union([to_float, from_none], self.exit_code)
+        if self.data is not None:
+            result["data"] = from_union([from_str, from_none], self.data)
+        if self.mime_type is not None:
+            result["mimeType"] = from_union([from_str, from_none], self.mime_type)
+        if self.description is not None:
+            result["description"] = from_union([from_str, from_none], self.description)
+        if self.icons is not None:
+            result["icons"] = from_union([lambda x: from_list(lambda x: to_class(ExternalToolTextResultForLlmContentResourceLinkIcon, x), x), from_none], self.icons)
+        if self.name is not None:
+            result["name"] = from_union([from_str, from_none], self.name)
+        if self.size is not None:
+            result["size"] = from_union([to_float, from_none], self.size)
+        if self.title is not None:
+            result["title"] = from_union([from_str, from_none], self.title)
+        if self.uri is not None:
+            result["uri"] = from_union([from_str, from_none], self.uri)
+        if self.resource is not None:
+            result["resource"] = from_union([lambda x: to_class(ExternalToolTextResultForLlmContentResourceDetails, x), from_none], self.resource)
+        return result
+
+@dataclass
+class ExternalToolTextResultForLlmContentResourceLink:
+    """Resource link content block referencing an external resource"""
+
+    name: str
+    """Resource name identifier"""
+
+    type: ExternalToolTextResultForLlmContentResourceLinkType
+    """Content block type discriminator"""
+
+    uri: str
+    """URI identifying the resource"""
+
+    description: str | None = None
+    """Human-readable description of the resource"""
+
+    icons: list[ExternalToolTextResultForLlmContentResourceLinkIcon] | None = None
+    """Icons associated with this resource"""
+
+    mime_type: str | None = None
+    """MIME type of the resource content"""
+
+    size: float | None = None
+    """Size of the resource in bytes"""
+
+    title: str | None = None
+    """Human-readable display title for the resource"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlmContentResourceLink':
+        assert isinstance(obj, dict)
+        name = from_str(obj.get("name"))
+        type = ExternalToolTextResultForLlmContentResourceLinkType(obj.get("type"))
+        uri = from_str(obj.get("uri"))
+        description = from_union([from_str, from_none], obj.get("description"))
+        icons = from_union([lambda x: from_list(ExternalToolTextResultForLlmContentResourceLinkIcon.from_dict, x), from_none], obj.get("icons"))
+        mime_type = from_union([from_str, from_none], obj.get("mimeType"))
+        size = from_union([from_float, from_none], obj.get("size"))
+        title = from_union([from_str, from_none], obj.get("title"))
+        return ExternalToolTextResultForLlmContentResourceLink(name, type, uri, description, icons, mime_type, size, title)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["name"] = from_str(self.name)
+        result["type"] = to_enum(ExternalToolTextResultForLlmContentResourceLinkType, self.type)
+        result["uri"] = from_str(self.uri)
+        if self.description is not None:
+            result["description"] = from_union([from_str, from_none], self.description)
+        if self.icons is not None:
+            result["icons"] = from_union([lambda x: from_list(lambda x: to_class(ExternalToolTextResultForLlmContentResourceLinkIcon, x), x), from_none], self.icons)
+        if self.mime_type is not None:
+            result["mimeType"] = from_union([from_str, from_none], self.mime_type)
+        if self.size is not None:
+            result["size"] = from_union([to_float, from_none], self.size)
+        if self.title is not None:
+            result["title"] = from_union([from_str, from_none], self.title)
         return result
 
 @dataclass
@@ -3777,6 +4762,8 @@ class PermissionDecision:
 
     Approved and persisted for this project location
 
+    Approved and persisted across sessions
+
     Denied by the user during an interactive prompt
 
     Denied because user confirmation was unavailable
@@ -3785,6 +4772,11 @@ class PermissionDecision:
     """The approval to add as a session-scoped rule
 
     The approval to persist for this location
+    """
+    domain: str | None = None
+    """The URL domain to approve for this session
+
+    The URL domain to approve permanently
     """
     location_key: str | None = None
     """The location key (git root or cwd) to persist the approval to"""
@@ -3797,15 +4789,18 @@ class PermissionDecision:
         assert isinstance(obj, dict)
         kind = PermissionDecisionKind(obj.get("kind"))
         approval = from_union([PermissionDecisionApproveForIonApproval.from_dict, from_none], obj.get("approval"))
+        domain = from_union([from_str, from_none], obj.get("domain"))
         location_key = from_union([from_str, from_none], obj.get("locationKey"))
         feedback = from_union([from_str, from_none], obj.get("feedback"))
-        return PermissionDecision(kind, approval, location_key, feedback)
+        return PermissionDecision(kind, approval, domain, location_key, feedback)
 
     def to_dict(self) -> dict:
         result: dict = {}
         result["kind"] = to_enum(PermissionDecisionKind, self.kind)
         if self.approval is not None:
             result["approval"] = from_union([lambda x: to_class(PermissionDecisionApproveForIonApproval, x), from_none], self.approval)
+        if self.domain is not None:
+            result["domain"] = from_union([from_str, from_none], self.domain)
         if self.location_key is not None:
             result["locationKey"] = from_union([from_str, from_none], self.location_key)
         if self.feedback is not None:
@@ -3840,23 +4835,30 @@ class PermissionDecisionApproveForLocation:
 
 @dataclass
 class PermissionDecisionApproveForSession:
-    approval: PermissionDecisionApproveForSessionApproval
-    """The approval to add as a session-scoped rule"""
-
     kind: PermissionDecisionApproveForSessionKind
     """Approved and remembered for the rest of the session"""
+
+    approval: PermissionDecisionApproveForSessionApproval | None = None
+    """The approval to add as a session-scoped rule"""
+
+    domain: str | None = None
+    """The URL domain to approve for this session"""
 
     @staticmethod
     def from_dict(obj: Any) -> 'PermissionDecisionApproveForSession':
         assert isinstance(obj, dict)
-        approval = PermissionDecisionApproveForSessionApproval.from_dict(obj.get("approval"))
         kind = PermissionDecisionApproveForSessionKind(obj.get("kind"))
-        return PermissionDecisionApproveForSession(approval, kind)
+        approval = from_union([PermissionDecisionApproveForSessionApproval.from_dict, from_none], obj.get("approval"))
+        domain = from_union([from_str, from_none], obj.get("domain"))
+        return PermissionDecisionApproveForSession(kind, approval, domain)
 
     def to_dict(self) -> dict:
         result: dict = {}
-        result["approval"] = to_class(PermissionDecisionApproveForSessionApproval, self.approval)
         result["kind"] = to_enum(PermissionDecisionApproveForSessionKind, self.kind)
+        if self.approval is not None:
+            result["approval"] = from_union([lambda x: to_class(PermissionDecisionApproveForSessionApproval, x), from_none], self.approval)
+        if self.domain is not None:
+            result["domain"] = from_union([from_str, from_none], self.domain)
         return result
 
 @dataclass
@@ -4166,6 +5168,12 @@ class UsageGetMetricsResult:
     current_model: str | None = None
     """Currently active model identifier"""
 
+    token_details: dict[str, UsageMetricsTokenDetail] | None = None
+    """Session-wide per-token-type accumulated token counts"""
+
+    total_nano_aiu: int | None = None
+    """Session-wide accumulated nano-AI units cost"""
+
     @staticmethod
     def from_dict(obj: Any) -> 'UsageGetMetricsResult':
         assert isinstance(obj, dict)
@@ -4178,7 +5186,9 @@ class UsageGetMetricsResult:
         total_premium_request_cost = from_float(obj.get("totalPremiumRequestCost"))
         total_user_requests = from_int(obj.get("totalUserRequests"))
         current_model = from_union([from_str, from_none], obj.get("currentModel"))
-        return UsageGetMetricsResult(code_changes, last_call_input_tokens, last_call_output_tokens, model_metrics, session_start_time, total_api_duration_ms, total_premium_request_cost, total_user_requests, current_model)
+        token_details = from_union([lambda x: from_dict(UsageMetricsTokenDetail.from_dict, x), from_none], obj.get("tokenDetails"))
+        total_nano_aiu = from_union([from_int, from_none], obj.get("totalNanoAiu"))
+        return UsageGetMetricsResult(code_changes, last_call_input_tokens, last_call_output_tokens, model_metrics, session_start_time, total_api_duration_ms, total_premium_request_cost, total_user_requests, current_model, token_details, total_nano_aiu)
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -4192,6 +5202,10 @@ class UsageGetMetricsResult:
         result["totalUserRequests"] = from_int(self.total_user_requests)
         if self.current_model is not None:
             result["currentModel"] = from_union([from_str, from_none], self.current_model)
+        if self.token_details is not None:
+            result["tokenDetails"] = from_union([lambda x: from_dict(lambda x: to_class(UsageMetricsTokenDetail, x), x), from_none], self.token_details)
+        if self.total_nano_aiu is not None:
+            result["totalNanoAiu"] = from_union([from_int, from_none], self.total_nano_aiu)
         return result
 
 @dataclass
@@ -4208,6 +5222,55 @@ class WorkspacesGetWorkspaceResult:
     def to_dict(self) -> dict:
         result: dict = {}
         result["workspace"] = from_union([lambda x: to_class(Workspace, x), from_none], self.workspace)
+        return result
+
+@dataclass
+class ExternalToolTextResultForLlm:
+    """Expanded external tool result payload"""
+
+    text_result_for_llm: str
+    """Text result returned to the model"""
+
+    contents: list[ExternalToolTextResultForLlmContent] | None = None
+    """Structured content blocks from the tool"""
+
+    error: str | None = None
+    """Optional error message for failed executions"""
+
+    result_type: str | None = None
+    """Execution outcome classification. Optional for back-compat; normalized to 'success' (or
+    'failure' when error is present) when missing or unrecognized.
+    """
+    session_log: str | None = None
+    """Detailed log content for timeline display"""
+
+    tool_telemetry: dict[str, Any] | None = None
+    """Optional tool-specific telemetry"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'ExternalToolTextResultForLlm':
+        assert isinstance(obj, dict)
+        text_result_for_llm = from_str(obj.get("textResultForLlm"))
+        contents = from_union([lambda x: from_list(ExternalToolTextResultForLlmContent.from_dict, x), from_none], obj.get("contents"))
+        error = from_union([from_str, from_none], obj.get("error"))
+        result_type = from_union([from_str, from_none], obj.get("resultType"))
+        session_log = from_union([from_str, from_none], obj.get("sessionLog"))
+        tool_telemetry = from_union([lambda x: from_dict(lambda x: x, x), from_none], obj.get("toolTelemetry"))
+        return ExternalToolTextResultForLlm(text_result_for_llm, contents, error, result_type, session_log, tool_telemetry)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["textResultForLlm"] = from_str(self.text_result_for_llm)
+        if self.contents is not None:
+            result["contents"] = from_union([lambda x: from_list(lambda x: to_class(ExternalToolTextResultForLlmContent, x), x), from_none], self.contents)
+        if self.error is not None:
+            result["error"] = from_union([from_str, from_none], self.error)
+        if self.result_type is not None:
+            result["resultType"] = from_union([from_str, from_none], self.result_type)
+        if self.session_log is not None:
+            result["sessionLog"] = from_union([from_str, from_none], self.session_log)
+        if self.tool_telemetry is not None:
+            result["toolTelemetry"] = from_union([lambda x: from_dict(lambda x: x, x), from_none], self.tool_telemetry)
         return result
 
 @dataclass
@@ -4257,6 +5320,34 @@ class UIElicitationSchema:
         result["type"] = to_enum(UIElicitationSchemaType, self.type)
         if self.required is not None:
             result["required"] = from_union([lambda x: from_list(from_str, x), from_none], self.required)
+        return result
+
+@dataclass
+class HandlePendingToolCallRequest:
+    request_id: str
+    """Request ID of the pending tool call"""
+
+    error: str | None = None
+    """Error message if the tool call failed"""
+
+    result: ExternalToolTextResultForLlm | str | None = None
+    """Tool call result (string or expanded result object)"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'HandlePendingToolCallRequest':
+        assert isinstance(obj, dict)
+        request_id = from_str(obj.get("requestId"))
+        error = from_union([from_str, from_none], obj.get("error"))
+        result = from_union([ExternalToolTextResultForLlm.from_dict, from_str, from_none], obj.get("result"))
+        return HandlePendingToolCallRequest(request_id, error, result)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["requestId"] = from_str(self.request_id)
+        if self.error is not None:
+            result["error"] = from_union([from_str, from_none], self.error)
+        if self.result is not None:
+            result["result"] = from_union([lambda x: to_class(ExternalToolTextResultForLlm, x), from_str, from_none], self.result)
         return result
 
 @dataclass
@@ -4400,6 +5491,281 @@ class ModelSwitchToRequest:
         return result
 
 @dataclass
+class TaskAgentInfo:
+    agent_type: str
+    """Type of agent running this task"""
+
+    description: str
+    """Short description of the task"""
+
+    id: str
+    """Unique task identifier"""
+
+    prompt: str
+    """Prompt passed to the agent"""
+
+    started_at: datetime
+    """ISO 8601 timestamp when the task was started"""
+
+    status: TaskInfoStatus
+    """Current lifecycle status of the task"""
+
+    tool_call_id: str
+    """Tool call ID associated with this agent task"""
+
+    type: TaskAgentInfoType
+    """Task kind"""
+
+    active_started_at: datetime | None = None
+    """ISO 8601 timestamp when the current active period began"""
+
+    active_time_ms: int | None = None
+    """Accumulated active execution time in milliseconds"""
+
+    can_promote_to_background: bool | None = None
+    """Whether the task is currently in the original sync wait and can be moved to background
+    mode. False once it is already backgrounded, idle, finished, or no longer has a
+    promotable sync waiter.
+    """
+    completed_at: datetime | None = None
+    """ISO 8601 timestamp when the task finished"""
+
+    error: str | None = None
+    """Error message when the task failed"""
+
+    execution_mode: TaskInfoExecutionMode | None = None
+    """How the agent is currently being managed by the runtime"""
+
+    idle_since: datetime | None = None
+    """ISO 8601 timestamp when the agent entered idle state"""
+
+    latest_response: str | None = None
+    """Most recent response text from the agent"""
+
+    model: str | None = None
+    """Model used for the task when specified"""
+
+    result: str | None = None
+    """Result text from the task when available"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TaskAgentInfo':
+        assert isinstance(obj, dict)
+        agent_type = from_str(obj.get("agentType"))
+        description = from_str(obj.get("description"))
+        id = from_str(obj.get("id"))
+        prompt = from_str(obj.get("prompt"))
+        started_at = from_datetime(obj.get("startedAt"))
+        status = TaskInfoStatus(obj.get("status"))
+        tool_call_id = from_str(obj.get("toolCallId"))
+        type = TaskAgentInfoType(obj.get("type"))
+        active_started_at = from_union([from_datetime, from_none], obj.get("activeStartedAt"))
+        active_time_ms = from_union([from_int, from_none], obj.get("activeTimeMs"))
+        can_promote_to_background = from_union([from_bool, from_none], obj.get("canPromoteToBackground"))
+        completed_at = from_union([from_datetime, from_none], obj.get("completedAt"))
+        error = from_union([from_str, from_none], obj.get("error"))
+        execution_mode = from_union([TaskInfoExecutionMode, from_none], obj.get("executionMode"))
+        idle_since = from_union([from_datetime, from_none], obj.get("idleSince"))
+        latest_response = from_union([from_str, from_none], obj.get("latestResponse"))
+        model = from_union([from_str, from_none], obj.get("model"))
+        result = from_union([from_str, from_none], obj.get("result"))
+        return TaskAgentInfo(agent_type, description, id, prompt, started_at, status, tool_call_id, type, active_started_at, active_time_ms, can_promote_to_background, completed_at, error, execution_mode, idle_since, latest_response, model, result)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["agentType"] = from_str(self.agent_type)
+        result["description"] = from_str(self.description)
+        result["id"] = from_str(self.id)
+        result["prompt"] = from_str(self.prompt)
+        result["startedAt"] = self.started_at.isoformat()
+        result["status"] = to_enum(TaskInfoStatus, self.status)
+        result["toolCallId"] = from_str(self.tool_call_id)
+        result["type"] = to_enum(TaskAgentInfoType, self.type)
+        if self.active_started_at is not None:
+            result["activeStartedAt"] = from_union([lambda x: x.isoformat(), from_none], self.active_started_at)
+        if self.active_time_ms is not None:
+            result["activeTimeMs"] = from_union([from_int, from_none], self.active_time_ms)
+        if self.can_promote_to_background is not None:
+            result["canPromoteToBackground"] = from_union([from_bool, from_none], self.can_promote_to_background)
+        if self.completed_at is not None:
+            result["completedAt"] = from_union([lambda x: x.isoformat(), from_none], self.completed_at)
+        if self.error is not None:
+            result["error"] = from_union([from_str, from_none], self.error)
+        if self.execution_mode is not None:
+            result["executionMode"] = from_union([lambda x: to_enum(TaskInfoExecutionMode, x), from_none], self.execution_mode)
+        if self.idle_since is not None:
+            result["idleSince"] = from_union([lambda x: x.isoformat(), from_none], self.idle_since)
+        if self.latest_response is not None:
+            result["latestResponse"] = from_union([from_str, from_none], self.latest_response)
+        if self.model is not None:
+            result["model"] = from_union([from_str, from_none], self.model)
+        if self.result is not None:
+            result["result"] = from_union([from_str, from_none], self.result)
+        return result
+
+@dataclass
+class TaskInfo:
+    description: str
+    """Short description of the task"""
+
+    id: str
+    """Unique task identifier"""
+
+    started_at: datetime
+    """ISO 8601 timestamp when the task was started"""
+
+    status: TaskInfoStatus
+    """Current lifecycle status of the task"""
+
+    type: TaskInfoType
+    """Task kind"""
+
+    active_started_at: datetime | None = None
+    """ISO 8601 timestamp when the current active period began"""
+
+    active_time_ms: int | None = None
+    """Accumulated active execution time in milliseconds"""
+
+    agent_type: str | None = None
+    """Type of agent running this task"""
+
+    can_promote_to_background: bool | None = None
+    """Whether the task is currently in the original sync wait and can be moved to background
+    mode. False once it is already backgrounded, idle, finished, or no longer has a
+    promotable sync waiter.
+
+    Whether this shell task can be promoted to background mode
+    """
+    completed_at: datetime | None = None
+    """ISO 8601 timestamp when the task finished"""
+
+    error: str | None = None
+    """Error message when the task failed"""
+
+    execution_mode: TaskInfoExecutionMode | None = None
+    """How the agent is currently being managed by the runtime
+
+    Whether the shell command is currently sync-waited or background-managed
+    """
+    idle_since: datetime | None = None
+    """ISO 8601 timestamp when the agent entered idle state"""
+
+    latest_response: str | None = None
+    """Most recent response text from the agent"""
+
+    model: str | None = None
+    """Model used for the task when specified"""
+
+    prompt: str | None = None
+    """Prompt passed to the agent"""
+
+    result: str | None = None
+    """Result text from the task when available"""
+
+    tool_call_id: str | None = None
+    """Tool call ID associated with this agent task"""
+
+    attachment_mode: TaskShellInfoAttachmentMode | None = None
+    """Whether the shell runs inside a managed PTY session or as an independent background
+    process
+    """
+    command: str | None = None
+    """Command being executed"""
+
+    log_path: str | None = None
+    """Path to the detached shell log, when available"""
+
+    pid: int | None = None
+    """Process ID when available"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TaskInfo':
+        assert isinstance(obj, dict)
+        description = from_str(obj.get("description"))
+        id = from_str(obj.get("id"))
+        started_at = from_datetime(obj.get("startedAt"))
+        status = TaskInfoStatus(obj.get("status"))
+        type = TaskInfoType(obj.get("type"))
+        active_started_at = from_union([from_datetime, from_none], obj.get("activeStartedAt"))
+        active_time_ms = from_union([from_int, from_none], obj.get("activeTimeMs"))
+        agent_type = from_union([from_str, from_none], obj.get("agentType"))
+        can_promote_to_background = from_union([from_bool, from_none], obj.get("canPromoteToBackground"))
+        completed_at = from_union([from_datetime, from_none], obj.get("completedAt"))
+        error = from_union([from_str, from_none], obj.get("error"))
+        execution_mode = from_union([TaskInfoExecutionMode, from_none], obj.get("executionMode"))
+        idle_since = from_union([from_datetime, from_none], obj.get("idleSince"))
+        latest_response = from_union([from_str, from_none], obj.get("latestResponse"))
+        model = from_union([from_str, from_none], obj.get("model"))
+        prompt = from_union([from_str, from_none], obj.get("prompt"))
+        result = from_union([from_str, from_none], obj.get("result"))
+        tool_call_id = from_union([from_str, from_none], obj.get("toolCallId"))
+        attachment_mode = from_union([TaskShellInfoAttachmentMode, from_none], obj.get("attachmentMode"))
+        command = from_union([from_str, from_none], obj.get("command"))
+        log_path = from_union([from_str, from_none], obj.get("logPath"))
+        pid = from_union([from_int, from_none], obj.get("pid"))
+        return TaskInfo(description, id, started_at, status, type, active_started_at, active_time_ms, agent_type, can_promote_to_background, completed_at, error, execution_mode, idle_since, latest_response, model, prompt, result, tool_call_id, attachment_mode, command, log_path, pid)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["description"] = from_str(self.description)
+        result["id"] = from_str(self.id)
+        result["startedAt"] = self.started_at.isoformat()
+        result["status"] = to_enum(TaskInfoStatus, self.status)
+        result["type"] = to_enum(TaskInfoType, self.type)
+        if self.active_started_at is not None:
+            result["activeStartedAt"] = from_union([lambda x: x.isoformat(), from_none], self.active_started_at)
+        if self.active_time_ms is not None:
+            result["activeTimeMs"] = from_union([from_int, from_none], self.active_time_ms)
+        if self.agent_type is not None:
+            result["agentType"] = from_union([from_str, from_none], self.agent_type)
+        if self.can_promote_to_background is not None:
+            result["canPromoteToBackground"] = from_union([from_bool, from_none], self.can_promote_to_background)
+        if self.completed_at is not None:
+            result["completedAt"] = from_union([lambda x: x.isoformat(), from_none], self.completed_at)
+        if self.error is not None:
+            result["error"] = from_union([from_str, from_none], self.error)
+        if self.execution_mode is not None:
+            result["executionMode"] = from_union([lambda x: to_enum(TaskInfoExecutionMode, x), from_none], self.execution_mode)
+        if self.idle_since is not None:
+            result["idleSince"] = from_union([lambda x: x.isoformat(), from_none], self.idle_since)
+        if self.latest_response is not None:
+            result["latestResponse"] = from_union([from_str, from_none], self.latest_response)
+        if self.model is not None:
+            result["model"] = from_union([from_str, from_none], self.model)
+        if self.prompt is not None:
+            result["prompt"] = from_union([from_str, from_none], self.prompt)
+        if self.result is not None:
+            result["result"] = from_union([from_str, from_none], self.result)
+        if self.tool_call_id is not None:
+            result["toolCallId"] = from_union([from_str, from_none], self.tool_call_id)
+        if self.attachment_mode is not None:
+            result["attachmentMode"] = from_union([lambda x: to_enum(TaskShellInfoAttachmentMode, x), from_none], self.attachment_mode)
+        if self.command is not None:
+            result["command"] = from_union([from_str, from_none], self.command)
+        if self.log_path is not None:
+            result["logPath"] = from_union([from_str, from_none], self.log_path)
+        if self.pid is not None:
+            result["pid"] = from_union([from_int, from_none], self.pid)
+        return result
+
+# Experimental: this type is part of an experimental API and may change or be removed.
+@dataclass
+class TaskList:
+    tasks: list[TaskInfo]
+    """Currently tracked tasks"""
+
+    @staticmethod
+    def from_dict(obj: Any) -> 'TaskList':
+        assert isinstance(obj, dict)
+        tasks = from_list(TaskInfo.from_dict, obj.get("tasks"))
+        return TaskList(tasks)
+
+    def to_dict(self) -> dict:
+        result: dict = {}
+        result["tasks"] = from_list(lambda x: to_class(TaskInfo, x), self.tasks)
+        return result
+
+@dataclass
 class RPC:
     account_get_quota_request: AccountGetQuotaRequest
     account_get_quota_result: AccountGetQuotaResult
@@ -4413,22 +5779,39 @@ class RPC:
     auth_info_type: AuthInfoType
     commands_handle_pending_command_request: CommandsHandlePendingCommandRequest
     commands_handle_pending_command_result: CommandsHandlePendingCommandResult
+    connect_request: ConnectRequest
+    connect_result: ConnectResult
     current_model: CurrentModel
     discovered_mcp_server: DiscoveredMCPServer
     discovered_mcp_server_source: MCPServerSource
     discovered_mcp_server_type: DiscoveredMCPServerType
+    embedded_blob_resource_contents: EmbeddedBlobResourceContents
+    embedded_text_resource_contents: EmbeddedTextResourceContents
     extension: Extension
     extension_list: ExtensionList
     extensions_disable_request: ExtensionsDisableRequest
     extensions_enable_request: ExtensionsEnableRequest
     extension_source: ExtensionSource
     extension_status: ExtensionStatus
+    external_tool_result: ExternalToolTextResultForLlm | str
+    external_tool_text_result_for_llm: ExternalToolTextResultForLlm
+    external_tool_text_result_for_llm_content: ExternalToolTextResultForLlmContent
+    external_tool_text_result_for_llm_content_audio: ExternalToolTextResultForLlmContentAudio
+    external_tool_text_result_for_llm_content_image: ExternalToolTextResultForLlmContentImage
+    external_tool_text_result_for_llm_content_resource: ExternalToolTextResultForLlmContentResource
+    external_tool_text_result_for_llm_content_resource_details: ExternalToolTextResultForLlmContentResourceDetails
+    external_tool_text_result_for_llm_content_resource_link: ExternalToolTextResultForLlmContentResourceLink
+    external_tool_text_result_for_llm_content_resource_link_icon: ExternalToolTextResultForLlmContentResourceLinkIcon
+    external_tool_text_result_for_llm_content_resource_link_icon_theme: ExternalToolTextResultForLlmContentResourceLinkIconTheme
+    external_tool_text_result_for_llm_content_terminal: ExternalToolTextResultForLlmContentTerminal
+    external_tool_text_result_for_llm_content_text: ExternalToolTextResultForLlmContentText
     filter_mapping: dict[str, FilterMappingString] | FilterMappingString
     filter_mapping_string: FilterMappingString
     filter_mapping_value: FilterMappingString
     fleet_start_request: FleetStartRequest
     fleet_start_result: FleetStartResult
-    handle_tool_call_result: HandleToolCallResult
+    handle_pending_tool_call_request: HandlePendingToolCallRequest
+    handle_pending_tool_call_result: HandlePendingToolCallResult
     history_compact_context_window: HistoryCompactContextWindow
     history_compact_result: HistoryCompactResult
     history_truncate_request: HistoryTruncateRequest
@@ -4454,6 +5837,7 @@ class RPC:
     mcp_server: MCPServer
     mcp_server_config: MCPServerConfig
     mcp_server_config_http: MCPServerConfigHTTP
+    mcp_server_config_http_oauth_grant_type: MCPServerConfigHTTPOauthGrantType
     mcp_server_config_http_type: MCPServerConfigHTTPType
     mcp_server_config_local: MCPServerConfigLocal
     mcp_server_config_local_type: MCPServerConfigLocalType
@@ -4483,6 +5867,8 @@ class RPC:
     permission_decision_approve_for_location_approval: PermissionDecisionApproveForLocationApproval
     permission_decision_approve_for_location_approval_commands: PermissionDecisionApproveForLocationApprovalCommands
     permission_decision_approve_for_location_approval_custom_tool: PermissionDecisionApproveForLocationApprovalCustomTool
+    permission_decision_approve_for_location_approval_extension_management: PermissionDecisionApproveForLocationApprovalExtensionManagement
+    permission_decision_approve_for_location_approval_extension_permission_access: PermissionDecisionApproveForLocationApprovalExtensionPermissionAccess
     permission_decision_approve_for_location_approval_mcp: PermissionDecisionApproveForLocationApprovalMCP
     permission_decision_approve_for_location_approval_mcp_sampling: PermissionDecisionApproveForLocationApprovalMCPSampling
     permission_decision_approve_for_location_approval_memory: PermissionDecisionApproveForLocationApprovalMemory
@@ -4492,12 +5878,15 @@ class RPC:
     permission_decision_approve_for_session_approval: PermissionDecisionApproveForSessionApproval
     permission_decision_approve_for_session_approval_commands: PermissionDecisionApproveForSessionApprovalCommands
     permission_decision_approve_for_session_approval_custom_tool: PermissionDecisionApproveForSessionApprovalCustomTool
+    permission_decision_approve_for_session_approval_extension_management: PermissionDecisionApproveForSessionApprovalExtensionManagement
+    permission_decision_approve_for_session_approval_extension_permission_access: PermissionDecisionApproveForSessionApprovalExtensionPermissionAccess
     permission_decision_approve_for_session_approval_mcp: PermissionDecisionApproveForSessionApprovalMCP
     permission_decision_approve_for_session_approval_mcp_sampling: PermissionDecisionApproveForSessionApprovalMCPSampling
     permission_decision_approve_for_session_approval_memory: PermissionDecisionApproveForSessionApprovalMemory
     permission_decision_approve_for_session_approval_read: PermissionDecisionApproveForSessionApprovalRead
     permission_decision_approve_for_session_approval_write: PermissionDecisionApproveForSessionApprovalWrite
     permission_decision_approve_once: PermissionDecisionApproveOnce
+    permission_decision_approve_permanently: PermissionDecisionApprovePermanently
     permission_decision_reject: PermissionDecisionReject
     permission_decision_request: PermissionDecisionRequest
     permission_decision_user_not_available: PermissionDecisionUserNotAvailable
@@ -4512,6 +5901,7 @@ class RPC:
     plan_update_request: PlanUpdateRequest
     plugin: Plugin
     plugin_list: PluginList
+    remote_enable_result: RemoteEnableResult
     server_skill: ServerSkill
     server_skill_list: ServerSkillList
     session_auth_status: SessionAuthStatus
@@ -4552,11 +5942,27 @@ class RPC:
     skills_disable_request: SkillsDisableRequest
     skills_discover_request: SkillsDiscoverRequest
     skills_enable_request: SkillsEnableRequest
+    task_agent_info: TaskAgentInfo
+    task_agent_info_execution_mode: TaskInfoExecutionMode
+    task_agent_info_status: TaskInfoStatus
+    task_info: TaskInfo
+    task_list: TaskList
+    tasks_cancel_request: TasksCancelRequest
+    tasks_cancel_result: TasksCancelResult
+    task_shell_info: TaskShellInfo
+    task_shell_info_attachment_mode: TaskShellInfoAttachmentMode
+    task_shell_info_execution_mode: TaskInfoExecutionMode
+    task_shell_info_status: TaskInfoStatus
+    tasks_promote_to_background_request: TasksPromoteToBackgroundRequest
+    tasks_promote_to_background_result: TasksPromoteToBackgroundResult
+    tasks_remove_request: TasksRemoveRequest
+    tasks_remove_result: TasksRemoveResult
+    tasks_send_message_request: TasksSendMessageRequest
+    tasks_send_message_result: TasksSendMessageResult
+    tasks_start_agent_request: TasksStartAgentRequest
+    tasks_start_agent_result: TasksStartAgentResult
     tool: Tool
-    tool_call_result: ToolCallResult
     tool_list: ToolList
-    tools_handle_pending_tool_call: ToolCallResult | str
-    tools_handle_pending_tool_call_request: ToolsHandlePendingToolCallRequest
     tools_list_request: ToolsListRequest
     ui_elicitation_array_any_of_field: UIElicitationArrayAnyOfField
     ui_elicitation_array_any_of_field_items: UIElicitationArrayAnyOfFieldItems
@@ -4584,7 +5990,9 @@ class RPC:
     usage_metrics_code_changes: UsageMetricsCodeChanges
     usage_metrics_model_metric: UsageMetricsModelMetric
     usage_metrics_model_metric_requests: UsageMetricsModelMetricRequests
+    usage_metrics_model_metric_token_detail: UsageMetricsModelMetricTokenDetail
     usage_metrics_model_metric_usage: UsageMetricsModelMetricUsage
+    usage_metrics_token_detail: UsageMetricsTokenDetail
     workspaces_create_file_request: WorkspacesCreateFileRequest
     workspaces_get_workspace_result: WorkspacesGetWorkspaceResult
     workspaces_list_files_result: WorkspacesListFilesResult
@@ -4606,22 +6014,39 @@ class RPC:
         auth_info_type = AuthInfoType(obj.get("AuthInfoType"))
         commands_handle_pending_command_request = CommandsHandlePendingCommandRequest.from_dict(obj.get("CommandsHandlePendingCommandRequest"))
         commands_handle_pending_command_result = CommandsHandlePendingCommandResult.from_dict(obj.get("CommandsHandlePendingCommandResult"))
+        connect_request = ConnectRequest.from_dict(obj.get("ConnectRequest"))
+        connect_result = ConnectResult.from_dict(obj.get("ConnectResult"))
         current_model = CurrentModel.from_dict(obj.get("CurrentModel"))
         discovered_mcp_server = DiscoveredMCPServer.from_dict(obj.get("DiscoveredMcpServer"))
         discovered_mcp_server_source = MCPServerSource(obj.get("DiscoveredMcpServerSource"))
         discovered_mcp_server_type = DiscoveredMCPServerType(obj.get("DiscoveredMcpServerType"))
+        embedded_blob_resource_contents = EmbeddedBlobResourceContents.from_dict(obj.get("EmbeddedBlobResourceContents"))
+        embedded_text_resource_contents = EmbeddedTextResourceContents.from_dict(obj.get("EmbeddedTextResourceContents"))
         extension = Extension.from_dict(obj.get("Extension"))
         extension_list = ExtensionList.from_dict(obj.get("ExtensionList"))
         extensions_disable_request = ExtensionsDisableRequest.from_dict(obj.get("ExtensionsDisableRequest"))
         extensions_enable_request = ExtensionsEnableRequest.from_dict(obj.get("ExtensionsEnableRequest"))
         extension_source = ExtensionSource(obj.get("ExtensionSource"))
         extension_status = ExtensionStatus(obj.get("ExtensionStatus"))
+        external_tool_result = from_union([ExternalToolTextResultForLlm.from_dict, from_str], obj.get("ExternalToolResult"))
+        external_tool_text_result_for_llm = ExternalToolTextResultForLlm.from_dict(obj.get("ExternalToolTextResultForLlm"))
+        external_tool_text_result_for_llm_content = ExternalToolTextResultForLlmContent.from_dict(obj.get("ExternalToolTextResultForLlmContent"))
+        external_tool_text_result_for_llm_content_audio = ExternalToolTextResultForLlmContentAudio.from_dict(obj.get("ExternalToolTextResultForLlmContentAudio"))
+        external_tool_text_result_for_llm_content_image = ExternalToolTextResultForLlmContentImage.from_dict(obj.get("ExternalToolTextResultForLlmContentImage"))
+        external_tool_text_result_for_llm_content_resource = ExternalToolTextResultForLlmContentResource.from_dict(obj.get("ExternalToolTextResultForLlmContentResource"))
+        external_tool_text_result_for_llm_content_resource_details = ExternalToolTextResultForLlmContentResourceDetails.from_dict(obj.get("ExternalToolTextResultForLlmContentResourceDetails"))
+        external_tool_text_result_for_llm_content_resource_link = ExternalToolTextResultForLlmContentResourceLink.from_dict(obj.get("ExternalToolTextResultForLlmContentResourceLink"))
+        external_tool_text_result_for_llm_content_resource_link_icon = ExternalToolTextResultForLlmContentResourceLinkIcon.from_dict(obj.get("ExternalToolTextResultForLlmContentResourceLinkIcon"))
+        external_tool_text_result_for_llm_content_resource_link_icon_theme = ExternalToolTextResultForLlmContentResourceLinkIconTheme(obj.get("ExternalToolTextResultForLlmContentResourceLinkIconTheme"))
+        external_tool_text_result_for_llm_content_terminal = ExternalToolTextResultForLlmContentTerminal.from_dict(obj.get("ExternalToolTextResultForLlmContentTerminal"))
+        external_tool_text_result_for_llm_content_text = ExternalToolTextResultForLlmContentText.from_dict(obj.get("ExternalToolTextResultForLlmContentText"))
         filter_mapping = from_union([lambda x: from_dict(FilterMappingString, x), FilterMappingString], obj.get("FilterMapping"))
         filter_mapping_string = FilterMappingString(obj.get("FilterMappingString"))
         filter_mapping_value = FilterMappingString(obj.get("FilterMappingValue"))
         fleet_start_request = FleetStartRequest.from_dict(obj.get("FleetStartRequest"))
         fleet_start_result = FleetStartResult.from_dict(obj.get("FleetStartResult"))
-        handle_tool_call_result = HandleToolCallResult.from_dict(obj.get("HandleToolCallResult"))
+        handle_pending_tool_call_request = HandlePendingToolCallRequest.from_dict(obj.get("HandlePendingToolCallRequest"))
+        handle_pending_tool_call_result = HandlePendingToolCallResult.from_dict(obj.get("HandlePendingToolCallResult"))
         history_compact_context_window = HistoryCompactContextWindow.from_dict(obj.get("HistoryCompactContextWindow"))
         history_compact_result = HistoryCompactResult.from_dict(obj.get("HistoryCompactResult"))
         history_truncate_request = HistoryTruncateRequest.from_dict(obj.get("HistoryTruncateRequest"))
@@ -4647,6 +6072,7 @@ class RPC:
         mcp_server = MCPServer.from_dict(obj.get("McpServer"))
         mcp_server_config = MCPServerConfig.from_dict(obj.get("McpServerConfig"))
         mcp_server_config_http = MCPServerConfigHTTP.from_dict(obj.get("McpServerConfigHttp"))
+        mcp_server_config_http_oauth_grant_type = MCPServerConfigHTTPOauthGrantType(obj.get("McpServerConfigHttpOauthGrantType"))
         mcp_server_config_http_type = MCPServerConfigHTTPType(obj.get("McpServerConfigHttpType"))
         mcp_server_config_local = MCPServerConfigLocal.from_dict(obj.get("McpServerConfigLocal"))
         mcp_server_config_local_type = MCPServerConfigLocalType(obj.get("McpServerConfigLocalType"))
@@ -4676,6 +6102,8 @@ class RPC:
         permission_decision_approve_for_location_approval = PermissionDecisionApproveForLocationApproval.from_dict(obj.get("PermissionDecisionApproveForLocationApproval"))
         permission_decision_approve_for_location_approval_commands = PermissionDecisionApproveForLocationApprovalCommands.from_dict(obj.get("PermissionDecisionApproveForLocationApprovalCommands"))
         permission_decision_approve_for_location_approval_custom_tool = PermissionDecisionApproveForLocationApprovalCustomTool.from_dict(obj.get("PermissionDecisionApproveForLocationApprovalCustomTool"))
+        permission_decision_approve_for_location_approval_extension_management = PermissionDecisionApproveForLocationApprovalExtensionManagement.from_dict(obj.get("PermissionDecisionApproveForLocationApprovalExtensionManagement"))
+        permission_decision_approve_for_location_approval_extension_permission_access = PermissionDecisionApproveForLocationApprovalExtensionPermissionAccess.from_dict(obj.get("PermissionDecisionApproveForLocationApprovalExtensionPermissionAccess"))
         permission_decision_approve_for_location_approval_mcp = PermissionDecisionApproveForLocationApprovalMCP.from_dict(obj.get("PermissionDecisionApproveForLocationApprovalMcp"))
         permission_decision_approve_for_location_approval_mcp_sampling = PermissionDecisionApproveForLocationApprovalMCPSampling.from_dict(obj.get("PermissionDecisionApproveForLocationApprovalMcpSampling"))
         permission_decision_approve_for_location_approval_memory = PermissionDecisionApproveForLocationApprovalMemory.from_dict(obj.get("PermissionDecisionApproveForLocationApprovalMemory"))
@@ -4685,12 +6113,15 @@ class RPC:
         permission_decision_approve_for_session_approval = PermissionDecisionApproveForSessionApproval.from_dict(obj.get("PermissionDecisionApproveForSessionApproval"))
         permission_decision_approve_for_session_approval_commands = PermissionDecisionApproveForSessionApprovalCommands.from_dict(obj.get("PermissionDecisionApproveForSessionApprovalCommands"))
         permission_decision_approve_for_session_approval_custom_tool = PermissionDecisionApproveForSessionApprovalCustomTool.from_dict(obj.get("PermissionDecisionApproveForSessionApprovalCustomTool"))
+        permission_decision_approve_for_session_approval_extension_management = PermissionDecisionApproveForSessionApprovalExtensionManagement.from_dict(obj.get("PermissionDecisionApproveForSessionApprovalExtensionManagement"))
+        permission_decision_approve_for_session_approval_extension_permission_access = PermissionDecisionApproveForSessionApprovalExtensionPermissionAccess.from_dict(obj.get("PermissionDecisionApproveForSessionApprovalExtensionPermissionAccess"))
         permission_decision_approve_for_session_approval_mcp = PermissionDecisionApproveForSessionApprovalMCP.from_dict(obj.get("PermissionDecisionApproveForSessionApprovalMcp"))
         permission_decision_approve_for_session_approval_mcp_sampling = PermissionDecisionApproveForSessionApprovalMCPSampling.from_dict(obj.get("PermissionDecisionApproveForSessionApprovalMcpSampling"))
         permission_decision_approve_for_session_approval_memory = PermissionDecisionApproveForSessionApprovalMemory.from_dict(obj.get("PermissionDecisionApproveForSessionApprovalMemory"))
         permission_decision_approve_for_session_approval_read = PermissionDecisionApproveForSessionApprovalRead.from_dict(obj.get("PermissionDecisionApproveForSessionApprovalRead"))
         permission_decision_approve_for_session_approval_write = PermissionDecisionApproveForSessionApprovalWrite.from_dict(obj.get("PermissionDecisionApproveForSessionApprovalWrite"))
         permission_decision_approve_once = PermissionDecisionApproveOnce.from_dict(obj.get("PermissionDecisionApproveOnce"))
+        permission_decision_approve_permanently = PermissionDecisionApprovePermanently.from_dict(obj.get("PermissionDecisionApprovePermanently"))
         permission_decision_reject = PermissionDecisionReject.from_dict(obj.get("PermissionDecisionReject"))
         permission_decision_request = PermissionDecisionRequest.from_dict(obj.get("PermissionDecisionRequest"))
         permission_decision_user_not_available = PermissionDecisionUserNotAvailable.from_dict(obj.get("PermissionDecisionUserNotAvailable"))
@@ -4705,6 +6136,7 @@ class RPC:
         plan_update_request = PlanUpdateRequest.from_dict(obj.get("PlanUpdateRequest"))
         plugin = Plugin.from_dict(obj.get("Plugin"))
         plugin_list = PluginList.from_dict(obj.get("PluginList"))
+        remote_enable_result = RemoteEnableResult.from_dict(obj.get("RemoteEnableResult"))
         server_skill = ServerSkill.from_dict(obj.get("ServerSkill"))
         server_skill_list = ServerSkillList.from_dict(obj.get("ServerSkillList"))
         session_auth_status = SessionAuthStatus.from_dict(obj.get("SessionAuthStatus"))
@@ -4745,11 +6177,27 @@ class RPC:
         skills_disable_request = SkillsDisableRequest.from_dict(obj.get("SkillsDisableRequest"))
         skills_discover_request = SkillsDiscoverRequest.from_dict(obj.get("SkillsDiscoverRequest"))
         skills_enable_request = SkillsEnableRequest.from_dict(obj.get("SkillsEnableRequest"))
+        task_agent_info = TaskAgentInfo.from_dict(obj.get("TaskAgentInfo"))
+        task_agent_info_execution_mode = TaskInfoExecutionMode(obj.get("TaskAgentInfoExecutionMode"))
+        task_agent_info_status = TaskInfoStatus(obj.get("TaskAgentInfoStatus"))
+        task_info = TaskInfo.from_dict(obj.get("TaskInfo"))
+        task_list = TaskList.from_dict(obj.get("TaskList"))
+        tasks_cancel_request = TasksCancelRequest.from_dict(obj.get("TasksCancelRequest"))
+        tasks_cancel_result = TasksCancelResult.from_dict(obj.get("TasksCancelResult"))
+        task_shell_info = TaskShellInfo.from_dict(obj.get("TaskShellInfo"))
+        task_shell_info_attachment_mode = TaskShellInfoAttachmentMode(obj.get("TaskShellInfoAttachmentMode"))
+        task_shell_info_execution_mode = TaskInfoExecutionMode(obj.get("TaskShellInfoExecutionMode"))
+        task_shell_info_status = TaskInfoStatus(obj.get("TaskShellInfoStatus"))
+        tasks_promote_to_background_request = TasksPromoteToBackgroundRequest.from_dict(obj.get("TasksPromoteToBackgroundRequest"))
+        tasks_promote_to_background_result = TasksPromoteToBackgroundResult.from_dict(obj.get("TasksPromoteToBackgroundResult"))
+        tasks_remove_request = TasksRemoveRequest.from_dict(obj.get("TasksRemoveRequest"))
+        tasks_remove_result = TasksRemoveResult.from_dict(obj.get("TasksRemoveResult"))
+        tasks_send_message_request = TasksSendMessageRequest.from_dict(obj.get("TasksSendMessageRequest"))
+        tasks_send_message_result = TasksSendMessageResult.from_dict(obj.get("TasksSendMessageResult"))
+        tasks_start_agent_request = TasksStartAgentRequest.from_dict(obj.get("TasksStartAgentRequest"))
+        tasks_start_agent_result = TasksStartAgentResult.from_dict(obj.get("TasksStartAgentResult"))
         tool = Tool.from_dict(obj.get("Tool"))
-        tool_call_result = ToolCallResult.from_dict(obj.get("ToolCallResult"))
         tool_list = ToolList.from_dict(obj.get("ToolList"))
-        tools_handle_pending_tool_call = from_union([ToolCallResult.from_dict, from_str], obj.get("ToolsHandlePendingToolCall"))
-        tools_handle_pending_tool_call_request = ToolsHandlePendingToolCallRequest.from_dict(obj.get("ToolsHandlePendingToolCallRequest"))
         tools_list_request = ToolsListRequest.from_dict(obj.get("ToolsListRequest"))
         ui_elicitation_array_any_of_field = UIElicitationArrayAnyOfField.from_dict(obj.get("UIElicitationArrayAnyOfField"))
         ui_elicitation_array_any_of_field_items = UIElicitationArrayAnyOfFieldItems.from_dict(obj.get("UIElicitationArrayAnyOfFieldItems"))
@@ -4777,13 +6225,15 @@ class RPC:
         usage_metrics_code_changes = UsageMetricsCodeChanges.from_dict(obj.get("UsageMetricsCodeChanges"))
         usage_metrics_model_metric = UsageMetricsModelMetric.from_dict(obj.get("UsageMetricsModelMetric"))
         usage_metrics_model_metric_requests = UsageMetricsModelMetricRequests.from_dict(obj.get("UsageMetricsModelMetricRequests"))
+        usage_metrics_model_metric_token_detail = UsageMetricsModelMetricTokenDetail.from_dict(obj.get("UsageMetricsModelMetricTokenDetail"))
         usage_metrics_model_metric_usage = UsageMetricsModelMetricUsage.from_dict(obj.get("UsageMetricsModelMetricUsage"))
+        usage_metrics_token_detail = UsageMetricsTokenDetail.from_dict(obj.get("UsageMetricsTokenDetail"))
         workspaces_create_file_request = WorkspacesCreateFileRequest.from_dict(obj.get("WorkspacesCreateFileRequest"))
         workspaces_get_workspace_result = WorkspacesGetWorkspaceResult.from_dict(obj.get("WorkspacesGetWorkspaceResult"))
         workspaces_list_files_result = WorkspacesListFilesResult.from_dict(obj.get("WorkspacesListFilesResult"))
         workspaces_read_file_request = WorkspacesReadFileRequest.from_dict(obj.get("WorkspacesReadFileRequest"))
         workspaces_read_file_result = WorkspacesReadFileResult.from_dict(obj.get("WorkspacesReadFileResult"))
-        return RPC(account_get_quota_request, account_get_quota_result, account_quota_snapshot, agent_get_current_result, agent_info, agent_list, agent_reload_result, agent_select_request, agent_select_result, auth_info_type, commands_handle_pending_command_request, commands_handle_pending_command_result, current_model, discovered_mcp_server, discovered_mcp_server_source, discovered_mcp_server_type, extension, extension_list, extensions_disable_request, extensions_enable_request, extension_source, extension_status, filter_mapping, filter_mapping_string, filter_mapping_value, fleet_start_request, fleet_start_result, handle_tool_call_result, history_compact_context_window, history_compact_result, history_truncate_request, history_truncate_result, instructions_get_sources_result, instructions_sources, instructions_sources_location, instructions_sources_type, log_request, log_result, mcp_config_add_request, mcp_config_disable_request, mcp_config_enable_request, mcp_config_list, mcp_config_remove_request, mcp_config_update_request, mcp_disable_request, mcp_discover_request, mcp_discover_result, mcp_enable_request, mcp_oauth_login_request, mcp_oauth_login_result, mcp_server, mcp_server_config, mcp_server_config_http, mcp_server_config_http_type, mcp_server_config_local, mcp_server_config_local_type, mcp_server_list, mcp_server_source, mcp_server_status, model, model_billing, model_capabilities, model_capabilities_limits, model_capabilities_limits_vision, model_capabilities_override, model_capabilities_override_limits, model_capabilities_override_limits_vision, model_capabilities_override_supports, model_capabilities_supports, model_list, model_policy, models_list_request, model_switch_to_request, model_switch_to_result, mode_set_request, name_get_result, name_set_request, permission_decision, permission_decision_approve_for_location, permission_decision_approve_for_location_approval, permission_decision_approve_for_location_approval_commands, permission_decision_approve_for_location_approval_custom_tool, permission_decision_approve_for_location_approval_mcp, permission_decision_approve_for_location_approval_mcp_sampling, permission_decision_approve_for_location_approval_memory, permission_decision_approve_for_location_approval_read, permission_decision_approve_for_location_approval_write, permission_decision_approve_for_session, permission_decision_approve_for_session_approval, permission_decision_approve_for_session_approval_commands, permission_decision_approve_for_session_approval_custom_tool, permission_decision_approve_for_session_approval_mcp, permission_decision_approve_for_session_approval_mcp_sampling, permission_decision_approve_for_session_approval_memory, permission_decision_approve_for_session_approval_read, permission_decision_approve_for_session_approval_write, permission_decision_approve_once, permission_decision_reject, permission_decision_request, permission_decision_user_not_available, permission_request_result, permissions_reset_session_approvals_request, permissions_reset_session_approvals_result, permissions_set_approve_all_request, permissions_set_approve_all_result, ping_request, ping_result, plan_read_result, plan_update_request, plugin, plugin_list, server_skill, server_skill_list, session_auth_status, session_fs_append_file_request, session_fs_error, session_fs_error_code, session_fs_exists_request, session_fs_exists_result, session_fs_mkdir_request, session_fs_readdir_request, session_fs_readdir_result, session_fs_readdir_with_types_entry, session_fs_readdir_with_types_entry_type, session_fs_readdir_with_types_request, session_fs_readdir_with_types_result, session_fs_read_file_request, session_fs_read_file_result, session_fs_rename_request, session_fs_rm_request, session_fs_set_provider_conventions, session_fs_set_provider_request, session_fs_set_provider_result, session_fs_stat_request, session_fs_stat_result, session_fs_write_file_request, session_log_level, session_mode, sessions_fork_request, sessions_fork_result, shell_exec_request, shell_exec_result, shell_kill_request, shell_kill_result, shell_kill_signal, skill, skill_list, skills_config_set_disabled_skills_request, skills_disable_request, skills_discover_request, skills_enable_request, tool, tool_call_result, tool_list, tools_handle_pending_tool_call, tools_handle_pending_tool_call_request, tools_list_request, ui_elicitation_array_any_of_field, ui_elicitation_array_any_of_field_items, ui_elicitation_array_any_of_field_items_any_of, ui_elicitation_array_enum_field, ui_elicitation_array_enum_field_items, ui_elicitation_field_value, ui_elicitation_request, ui_elicitation_response, ui_elicitation_response_action, ui_elicitation_response_content, ui_elicitation_result, ui_elicitation_schema, ui_elicitation_schema_property, ui_elicitation_schema_property_boolean, ui_elicitation_schema_property_number, ui_elicitation_schema_property_number_type, ui_elicitation_schema_property_string, ui_elicitation_schema_property_string_format, ui_elicitation_string_enum_field, ui_elicitation_string_one_of_field, ui_elicitation_string_one_of_field_one_of, ui_handle_pending_elicitation_request, usage_get_metrics_result, usage_metrics_code_changes, usage_metrics_model_metric, usage_metrics_model_metric_requests, usage_metrics_model_metric_usage, workspaces_create_file_request, workspaces_get_workspace_result, workspaces_list_files_result, workspaces_read_file_request, workspaces_read_file_result)
+        return RPC(account_get_quota_request, account_get_quota_result, account_quota_snapshot, agent_get_current_result, agent_info, agent_list, agent_reload_result, agent_select_request, agent_select_result, auth_info_type, commands_handle_pending_command_request, commands_handle_pending_command_result, connect_request, connect_result, current_model, discovered_mcp_server, discovered_mcp_server_source, discovered_mcp_server_type, embedded_blob_resource_contents, embedded_text_resource_contents, extension, extension_list, extensions_disable_request, extensions_enable_request, extension_source, extension_status, external_tool_result, external_tool_text_result_for_llm, external_tool_text_result_for_llm_content, external_tool_text_result_for_llm_content_audio, external_tool_text_result_for_llm_content_image, external_tool_text_result_for_llm_content_resource, external_tool_text_result_for_llm_content_resource_details, external_tool_text_result_for_llm_content_resource_link, external_tool_text_result_for_llm_content_resource_link_icon, external_tool_text_result_for_llm_content_resource_link_icon_theme, external_tool_text_result_for_llm_content_terminal, external_tool_text_result_for_llm_content_text, filter_mapping, filter_mapping_string, filter_mapping_value, fleet_start_request, fleet_start_result, handle_pending_tool_call_request, handle_pending_tool_call_result, history_compact_context_window, history_compact_result, history_truncate_request, history_truncate_result, instructions_get_sources_result, instructions_sources, instructions_sources_location, instructions_sources_type, log_request, log_result, mcp_config_add_request, mcp_config_disable_request, mcp_config_enable_request, mcp_config_list, mcp_config_remove_request, mcp_config_update_request, mcp_disable_request, mcp_discover_request, mcp_discover_result, mcp_enable_request, mcp_oauth_login_request, mcp_oauth_login_result, mcp_server, mcp_server_config, mcp_server_config_http, mcp_server_config_http_oauth_grant_type, mcp_server_config_http_type, mcp_server_config_local, mcp_server_config_local_type, mcp_server_list, mcp_server_source, mcp_server_status, model, model_billing, model_capabilities, model_capabilities_limits, model_capabilities_limits_vision, model_capabilities_override, model_capabilities_override_limits, model_capabilities_override_limits_vision, model_capabilities_override_supports, model_capabilities_supports, model_list, model_policy, models_list_request, model_switch_to_request, model_switch_to_result, mode_set_request, name_get_result, name_set_request, permission_decision, permission_decision_approve_for_location, permission_decision_approve_for_location_approval, permission_decision_approve_for_location_approval_commands, permission_decision_approve_for_location_approval_custom_tool, permission_decision_approve_for_location_approval_extension_management, permission_decision_approve_for_location_approval_extension_permission_access, permission_decision_approve_for_location_approval_mcp, permission_decision_approve_for_location_approval_mcp_sampling, permission_decision_approve_for_location_approval_memory, permission_decision_approve_for_location_approval_read, permission_decision_approve_for_location_approval_write, permission_decision_approve_for_session, permission_decision_approve_for_session_approval, permission_decision_approve_for_session_approval_commands, permission_decision_approve_for_session_approval_custom_tool, permission_decision_approve_for_session_approval_extension_management, permission_decision_approve_for_session_approval_extension_permission_access, permission_decision_approve_for_session_approval_mcp, permission_decision_approve_for_session_approval_mcp_sampling, permission_decision_approve_for_session_approval_memory, permission_decision_approve_for_session_approval_read, permission_decision_approve_for_session_approval_write, permission_decision_approve_once, permission_decision_approve_permanently, permission_decision_reject, permission_decision_request, permission_decision_user_not_available, permission_request_result, permissions_reset_session_approvals_request, permissions_reset_session_approvals_result, permissions_set_approve_all_request, permissions_set_approve_all_result, ping_request, ping_result, plan_read_result, plan_update_request, plugin, plugin_list, remote_enable_result, server_skill, server_skill_list, session_auth_status, session_fs_append_file_request, session_fs_error, session_fs_error_code, session_fs_exists_request, session_fs_exists_result, session_fs_mkdir_request, session_fs_readdir_request, session_fs_readdir_result, session_fs_readdir_with_types_entry, session_fs_readdir_with_types_entry_type, session_fs_readdir_with_types_request, session_fs_readdir_with_types_result, session_fs_read_file_request, session_fs_read_file_result, session_fs_rename_request, session_fs_rm_request, session_fs_set_provider_conventions, session_fs_set_provider_request, session_fs_set_provider_result, session_fs_stat_request, session_fs_stat_result, session_fs_write_file_request, session_log_level, session_mode, sessions_fork_request, sessions_fork_result, shell_exec_request, shell_exec_result, shell_kill_request, shell_kill_result, shell_kill_signal, skill, skill_list, skills_config_set_disabled_skills_request, skills_disable_request, skills_discover_request, skills_enable_request, task_agent_info, task_agent_info_execution_mode, task_agent_info_status, task_info, task_list, tasks_cancel_request, tasks_cancel_result, task_shell_info, task_shell_info_attachment_mode, task_shell_info_execution_mode, task_shell_info_status, tasks_promote_to_background_request, tasks_promote_to_background_result, tasks_remove_request, tasks_remove_result, tasks_send_message_request, tasks_send_message_result, tasks_start_agent_request, tasks_start_agent_result, tool, tool_list, tools_list_request, ui_elicitation_array_any_of_field, ui_elicitation_array_any_of_field_items, ui_elicitation_array_any_of_field_items_any_of, ui_elicitation_array_enum_field, ui_elicitation_array_enum_field_items, ui_elicitation_field_value, ui_elicitation_request, ui_elicitation_response, ui_elicitation_response_action, ui_elicitation_response_content, ui_elicitation_result, ui_elicitation_schema, ui_elicitation_schema_property, ui_elicitation_schema_property_boolean, ui_elicitation_schema_property_number, ui_elicitation_schema_property_number_type, ui_elicitation_schema_property_string, ui_elicitation_schema_property_string_format, ui_elicitation_string_enum_field, ui_elicitation_string_one_of_field, ui_elicitation_string_one_of_field_one_of, ui_handle_pending_elicitation_request, usage_get_metrics_result, usage_metrics_code_changes, usage_metrics_model_metric, usage_metrics_model_metric_requests, usage_metrics_model_metric_token_detail, usage_metrics_model_metric_usage, usage_metrics_token_detail, workspaces_create_file_request, workspaces_get_workspace_result, workspaces_list_files_result, workspaces_read_file_request, workspaces_read_file_result)
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -4799,22 +6249,39 @@ class RPC:
         result["AuthInfoType"] = to_enum(AuthInfoType, self.auth_info_type)
         result["CommandsHandlePendingCommandRequest"] = to_class(CommandsHandlePendingCommandRequest, self.commands_handle_pending_command_request)
         result["CommandsHandlePendingCommandResult"] = to_class(CommandsHandlePendingCommandResult, self.commands_handle_pending_command_result)
+        result["ConnectRequest"] = to_class(ConnectRequest, self.connect_request)
+        result["ConnectResult"] = to_class(ConnectResult, self.connect_result)
         result["CurrentModel"] = to_class(CurrentModel, self.current_model)
         result["DiscoveredMcpServer"] = to_class(DiscoveredMCPServer, self.discovered_mcp_server)
         result["DiscoveredMcpServerSource"] = to_enum(MCPServerSource, self.discovered_mcp_server_source)
         result["DiscoveredMcpServerType"] = to_enum(DiscoveredMCPServerType, self.discovered_mcp_server_type)
+        result["EmbeddedBlobResourceContents"] = to_class(EmbeddedBlobResourceContents, self.embedded_blob_resource_contents)
+        result["EmbeddedTextResourceContents"] = to_class(EmbeddedTextResourceContents, self.embedded_text_resource_contents)
         result["Extension"] = to_class(Extension, self.extension)
         result["ExtensionList"] = to_class(ExtensionList, self.extension_list)
         result["ExtensionsDisableRequest"] = to_class(ExtensionsDisableRequest, self.extensions_disable_request)
         result["ExtensionsEnableRequest"] = to_class(ExtensionsEnableRequest, self.extensions_enable_request)
         result["ExtensionSource"] = to_enum(ExtensionSource, self.extension_source)
         result["ExtensionStatus"] = to_enum(ExtensionStatus, self.extension_status)
+        result["ExternalToolResult"] = from_union([lambda x: to_class(ExternalToolTextResultForLlm, x), from_str], self.external_tool_result)
+        result["ExternalToolTextResultForLlm"] = to_class(ExternalToolTextResultForLlm, self.external_tool_text_result_for_llm)
+        result["ExternalToolTextResultForLlmContent"] = to_class(ExternalToolTextResultForLlmContent, self.external_tool_text_result_for_llm_content)
+        result["ExternalToolTextResultForLlmContentAudio"] = to_class(ExternalToolTextResultForLlmContentAudio, self.external_tool_text_result_for_llm_content_audio)
+        result["ExternalToolTextResultForLlmContentImage"] = to_class(ExternalToolTextResultForLlmContentImage, self.external_tool_text_result_for_llm_content_image)
+        result["ExternalToolTextResultForLlmContentResource"] = to_class(ExternalToolTextResultForLlmContentResource, self.external_tool_text_result_for_llm_content_resource)
+        result["ExternalToolTextResultForLlmContentResourceDetails"] = to_class(ExternalToolTextResultForLlmContentResourceDetails, self.external_tool_text_result_for_llm_content_resource_details)
+        result["ExternalToolTextResultForLlmContentResourceLink"] = to_class(ExternalToolTextResultForLlmContentResourceLink, self.external_tool_text_result_for_llm_content_resource_link)
+        result["ExternalToolTextResultForLlmContentResourceLinkIcon"] = to_class(ExternalToolTextResultForLlmContentResourceLinkIcon, self.external_tool_text_result_for_llm_content_resource_link_icon)
+        result["ExternalToolTextResultForLlmContentResourceLinkIconTheme"] = to_enum(ExternalToolTextResultForLlmContentResourceLinkIconTheme, self.external_tool_text_result_for_llm_content_resource_link_icon_theme)
+        result["ExternalToolTextResultForLlmContentTerminal"] = to_class(ExternalToolTextResultForLlmContentTerminal, self.external_tool_text_result_for_llm_content_terminal)
+        result["ExternalToolTextResultForLlmContentText"] = to_class(ExternalToolTextResultForLlmContentText, self.external_tool_text_result_for_llm_content_text)
         result["FilterMapping"] = from_union([lambda x: from_dict(lambda x: to_enum(FilterMappingString, x), x), lambda x: to_enum(FilterMappingString, x)], self.filter_mapping)
         result["FilterMappingString"] = to_enum(FilterMappingString, self.filter_mapping_string)
         result["FilterMappingValue"] = to_enum(FilterMappingString, self.filter_mapping_value)
         result["FleetStartRequest"] = to_class(FleetStartRequest, self.fleet_start_request)
         result["FleetStartResult"] = to_class(FleetStartResult, self.fleet_start_result)
-        result["HandleToolCallResult"] = to_class(HandleToolCallResult, self.handle_tool_call_result)
+        result["HandlePendingToolCallRequest"] = to_class(HandlePendingToolCallRequest, self.handle_pending_tool_call_request)
+        result["HandlePendingToolCallResult"] = to_class(HandlePendingToolCallResult, self.handle_pending_tool_call_result)
         result["HistoryCompactContextWindow"] = to_class(HistoryCompactContextWindow, self.history_compact_context_window)
         result["HistoryCompactResult"] = to_class(HistoryCompactResult, self.history_compact_result)
         result["HistoryTruncateRequest"] = to_class(HistoryTruncateRequest, self.history_truncate_request)
@@ -4840,6 +6307,7 @@ class RPC:
         result["McpServer"] = to_class(MCPServer, self.mcp_server)
         result["McpServerConfig"] = to_class(MCPServerConfig, self.mcp_server_config)
         result["McpServerConfigHttp"] = to_class(MCPServerConfigHTTP, self.mcp_server_config_http)
+        result["McpServerConfigHttpOauthGrantType"] = to_enum(MCPServerConfigHTTPOauthGrantType, self.mcp_server_config_http_oauth_grant_type)
         result["McpServerConfigHttpType"] = to_enum(MCPServerConfigHTTPType, self.mcp_server_config_http_type)
         result["McpServerConfigLocal"] = to_class(MCPServerConfigLocal, self.mcp_server_config_local)
         result["McpServerConfigLocalType"] = to_enum(MCPServerConfigLocalType, self.mcp_server_config_local_type)
@@ -4869,6 +6337,8 @@ class RPC:
         result["PermissionDecisionApproveForLocationApproval"] = to_class(PermissionDecisionApproveForLocationApproval, self.permission_decision_approve_for_location_approval)
         result["PermissionDecisionApproveForLocationApprovalCommands"] = to_class(PermissionDecisionApproveForLocationApprovalCommands, self.permission_decision_approve_for_location_approval_commands)
         result["PermissionDecisionApproveForLocationApprovalCustomTool"] = to_class(PermissionDecisionApproveForLocationApprovalCustomTool, self.permission_decision_approve_for_location_approval_custom_tool)
+        result["PermissionDecisionApproveForLocationApprovalExtensionManagement"] = to_class(PermissionDecisionApproveForLocationApprovalExtensionManagement, self.permission_decision_approve_for_location_approval_extension_management)
+        result["PermissionDecisionApproveForLocationApprovalExtensionPermissionAccess"] = to_class(PermissionDecisionApproveForLocationApprovalExtensionPermissionAccess, self.permission_decision_approve_for_location_approval_extension_permission_access)
         result["PermissionDecisionApproveForLocationApprovalMcp"] = to_class(PermissionDecisionApproveForLocationApprovalMCP, self.permission_decision_approve_for_location_approval_mcp)
         result["PermissionDecisionApproveForLocationApprovalMcpSampling"] = to_class(PermissionDecisionApproveForLocationApprovalMCPSampling, self.permission_decision_approve_for_location_approval_mcp_sampling)
         result["PermissionDecisionApproveForLocationApprovalMemory"] = to_class(PermissionDecisionApproveForLocationApprovalMemory, self.permission_decision_approve_for_location_approval_memory)
@@ -4878,12 +6348,15 @@ class RPC:
         result["PermissionDecisionApproveForSessionApproval"] = to_class(PermissionDecisionApproveForSessionApproval, self.permission_decision_approve_for_session_approval)
         result["PermissionDecisionApproveForSessionApprovalCommands"] = to_class(PermissionDecisionApproveForSessionApprovalCommands, self.permission_decision_approve_for_session_approval_commands)
         result["PermissionDecisionApproveForSessionApprovalCustomTool"] = to_class(PermissionDecisionApproveForSessionApprovalCustomTool, self.permission_decision_approve_for_session_approval_custom_tool)
+        result["PermissionDecisionApproveForSessionApprovalExtensionManagement"] = to_class(PermissionDecisionApproveForSessionApprovalExtensionManagement, self.permission_decision_approve_for_session_approval_extension_management)
+        result["PermissionDecisionApproveForSessionApprovalExtensionPermissionAccess"] = to_class(PermissionDecisionApproveForSessionApprovalExtensionPermissionAccess, self.permission_decision_approve_for_session_approval_extension_permission_access)
         result["PermissionDecisionApproveForSessionApprovalMcp"] = to_class(PermissionDecisionApproveForSessionApprovalMCP, self.permission_decision_approve_for_session_approval_mcp)
         result["PermissionDecisionApproveForSessionApprovalMcpSampling"] = to_class(PermissionDecisionApproveForSessionApprovalMCPSampling, self.permission_decision_approve_for_session_approval_mcp_sampling)
         result["PermissionDecisionApproveForSessionApprovalMemory"] = to_class(PermissionDecisionApproveForSessionApprovalMemory, self.permission_decision_approve_for_session_approval_memory)
         result["PermissionDecisionApproveForSessionApprovalRead"] = to_class(PermissionDecisionApproveForSessionApprovalRead, self.permission_decision_approve_for_session_approval_read)
         result["PermissionDecisionApproveForSessionApprovalWrite"] = to_class(PermissionDecisionApproveForSessionApprovalWrite, self.permission_decision_approve_for_session_approval_write)
         result["PermissionDecisionApproveOnce"] = to_class(PermissionDecisionApproveOnce, self.permission_decision_approve_once)
+        result["PermissionDecisionApprovePermanently"] = to_class(PermissionDecisionApprovePermanently, self.permission_decision_approve_permanently)
         result["PermissionDecisionReject"] = to_class(PermissionDecisionReject, self.permission_decision_reject)
         result["PermissionDecisionRequest"] = to_class(PermissionDecisionRequest, self.permission_decision_request)
         result["PermissionDecisionUserNotAvailable"] = to_class(PermissionDecisionUserNotAvailable, self.permission_decision_user_not_available)
@@ -4898,6 +6371,7 @@ class RPC:
         result["PlanUpdateRequest"] = to_class(PlanUpdateRequest, self.plan_update_request)
         result["Plugin"] = to_class(Plugin, self.plugin)
         result["PluginList"] = to_class(PluginList, self.plugin_list)
+        result["RemoteEnableResult"] = to_class(RemoteEnableResult, self.remote_enable_result)
         result["ServerSkill"] = to_class(ServerSkill, self.server_skill)
         result["ServerSkillList"] = to_class(ServerSkillList, self.server_skill_list)
         result["SessionAuthStatus"] = to_class(SessionAuthStatus, self.session_auth_status)
@@ -4938,11 +6412,27 @@ class RPC:
         result["SkillsDisableRequest"] = to_class(SkillsDisableRequest, self.skills_disable_request)
         result["SkillsDiscoverRequest"] = to_class(SkillsDiscoverRequest, self.skills_discover_request)
         result["SkillsEnableRequest"] = to_class(SkillsEnableRequest, self.skills_enable_request)
+        result["TaskAgentInfo"] = to_class(TaskAgentInfo, self.task_agent_info)
+        result["TaskAgentInfoExecutionMode"] = to_enum(TaskInfoExecutionMode, self.task_agent_info_execution_mode)
+        result["TaskAgentInfoStatus"] = to_enum(TaskInfoStatus, self.task_agent_info_status)
+        result["TaskInfo"] = to_class(TaskInfo, self.task_info)
+        result["TaskList"] = to_class(TaskList, self.task_list)
+        result["TasksCancelRequest"] = to_class(TasksCancelRequest, self.tasks_cancel_request)
+        result["TasksCancelResult"] = to_class(TasksCancelResult, self.tasks_cancel_result)
+        result["TaskShellInfo"] = to_class(TaskShellInfo, self.task_shell_info)
+        result["TaskShellInfoAttachmentMode"] = to_enum(TaskShellInfoAttachmentMode, self.task_shell_info_attachment_mode)
+        result["TaskShellInfoExecutionMode"] = to_enum(TaskInfoExecutionMode, self.task_shell_info_execution_mode)
+        result["TaskShellInfoStatus"] = to_enum(TaskInfoStatus, self.task_shell_info_status)
+        result["TasksPromoteToBackgroundRequest"] = to_class(TasksPromoteToBackgroundRequest, self.tasks_promote_to_background_request)
+        result["TasksPromoteToBackgroundResult"] = to_class(TasksPromoteToBackgroundResult, self.tasks_promote_to_background_result)
+        result["TasksRemoveRequest"] = to_class(TasksRemoveRequest, self.tasks_remove_request)
+        result["TasksRemoveResult"] = to_class(TasksRemoveResult, self.tasks_remove_result)
+        result["TasksSendMessageRequest"] = to_class(TasksSendMessageRequest, self.tasks_send_message_request)
+        result["TasksSendMessageResult"] = to_class(TasksSendMessageResult, self.tasks_send_message_result)
+        result["TasksStartAgentRequest"] = to_class(TasksStartAgentRequest, self.tasks_start_agent_request)
+        result["TasksStartAgentResult"] = to_class(TasksStartAgentResult, self.tasks_start_agent_result)
         result["Tool"] = to_class(Tool, self.tool)
-        result["ToolCallResult"] = to_class(ToolCallResult, self.tool_call_result)
         result["ToolList"] = to_class(ToolList, self.tool_list)
-        result["ToolsHandlePendingToolCall"] = from_union([lambda x: to_class(ToolCallResult, x), from_str], self.tools_handle_pending_tool_call)
-        result["ToolsHandlePendingToolCallRequest"] = to_class(ToolsHandlePendingToolCallRequest, self.tools_handle_pending_tool_call_request)
         result["ToolsListRequest"] = to_class(ToolsListRequest, self.tools_list_request)
         result["UIElicitationArrayAnyOfField"] = to_class(UIElicitationArrayAnyOfField, self.ui_elicitation_array_any_of_field)
         result["UIElicitationArrayAnyOfFieldItems"] = to_class(UIElicitationArrayAnyOfFieldItems, self.ui_elicitation_array_any_of_field_items)
@@ -4970,7 +6460,9 @@ class RPC:
         result["UsageMetricsCodeChanges"] = to_class(UsageMetricsCodeChanges, self.usage_metrics_code_changes)
         result["UsageMetricsModelMetric"] = to_class(UsageMetricsModelMetric, self.usage_metrics_model_metric)
         result["UsageMetricsModelMetricRequests"] = to_class(UsageMetricsModelMetricRequests, self.usage_metrics_model_metric_requests)
+        result["UsageMetricsModelMetricTokenDetail"] = to_class(UsageMetricsModelMetricTokenDetail, self.usage_metrics_model_metric_token_detail)
         result["UsageMetricsModelMetricUsage"] = to_class(UsageMetricsModelMetricUsage, self.usage_metrics_model_metric_usage)
+        result["UsageMetricsTokenDetail"] = to_class(UsageMetricsTokenDetail, self.usage_metrics_token_detail)
         result["WorkspacesCreateFileRequest"] = to_class(WorkspacesCreateFileRequest, self.workspaces_create_file_request)
         result["WorkspacesGetWorkspaceResult"] = to_class(WorkspacesGetWorkspaceResult, self.workspaces_get_workspace_result)
         result["WorkspacesListFilesResult"] = to_class(WorkspacesListFilesResult, self.workspaces_list_files_result)
@@ -5133,6 +6625,17 @@ class ServerRpc:
         return PingResult.from_dict(await self._client.request("ping", params_dict, **_timeout_kwargs(timeout)))
 
 
+class _InternalServerRpc:
+    """Internal SDK server-scoped RPC methods (handshake helpers etc.). Not part of the public API."""
+    def __init__(self, client: "JsonRpcClient"):
+        self._client = client
+
+    async def connect(self, params: ConnectRequest, *, timeout: float | None = None) -> ConnectResult:
+        """:meta private: Internal SDK API; not part of the public surface."""
+        params_dict = {k: v for k, v in params.to_dict().items() if v is not None}
+        return ConnectResult.from_dict(await self._client.request("connect", params_dict, **_timeout_kwargs(timeout)))
+
+
 class AuthApi:
     def __init__(self, client: "JsonRpcClient", session_id: str):
         self._client = client
@@ -5269,6 +6772,41 @@ class AgentApi:
 
 
 # Experimental: this API group is experimental and may change or be removed.
+class TasksApi:
+    def __init__(self, client: "JsonRpcClient", session_id: str):
+        self._client = client
+        self._session_id = session_id
+
+    async def start_agent(self, params: TasksStartAgentRequest, *, timeout: float | None = None) -> TasksStartAgentResult:
+        params_dict: dict[str, Any] = {k: v for k, v in params.to_dict().items() if v is not None}
+        params_dict["sessionId"] = self._session_id
+        return TasksStartAgentResult.from_dict(await self._client.request("session.tasks.startAgent", params_dict, **_timeout_kwargs(timeout)))
+
+    async def list(self, *, timeout: float | None = None) -> TaskList:
+        return TaskList.from_dict(await self._client.request("session.tasks.list", {"sessionId": self._session_id}, **_timeout_kwargs(timeout)))
+
+    async def promote_to_background(self, params: TasksPromoteToBackgroundRequest, *, timeout: float | None = None) -> TasksPromoteToBackgroundResult:
+        params_dict: dict[str, Any] = {k: v for k, v in params.to_dict().items() if v is not None}
+        params_dict["sessionId"] = self._session_id
+        return TasksPromoteToBackgroundResult.from_dict(await self._client.request("session.tasks.promoteToBackground", params_dict, **_timeout_kwargs(timeout)))
+
+    async def cancel(self, params: TasksCancelRequest, *, timeout: float | None = None) -> TasksCancelResult:
+        params_dict: dict[str, Any] = {k: v for k, v in params.to_dict().items() if v is not None}
+        params_dict["sessionId"] = self._session_id
+        return TasksCancelResult.from_dict(await self._client.request("session.tasks.cancel", params_dict, **_timeout_kwargs(timeout)))
+
+    async def remove(self, params: TasksRemoveRequest, *, timeout: float | None = None) -> TasksRemoveResult:
+        params_dict: dict[str, Any] = {k: v for k, v in params.to_dict().items() if v is not None}
+        params_dict["sessionId"] = self._session_id
+        return TasksRemoveResult.from_dict(await self._client.request("session.tasks.remove", params_dict, **_timeout_kwargs(timeout)))
+
+    async def send_message(self, params: TasksSendMessageRequest, *, timeout: float | None = None) -> TasksSendMessageResult:
+        params_dict: dict[str, Any] = {k: v for k, v in params.to_dict().items() if v is not None}
+        params_dict["sessionId"] = self._session_id
+        return TasksSendMessageResult.from_dict(await self._client.request("session.tasks.sendMessage", params_dict, **_timeout_kwargs(timeout)))
+
+
+# Experimental: this API group is experimental and may change or be removed.
 class SkillsApi:
     def __init__(self, client: "JsonRpcClient", session_id: str):
         self._client = client
@@ -5365,10 +6903,10 @@ class ToolsApi:
         self._client = client
         self._session_id = session_id
 
-    async def handle_pending_tool_call(self, params: ToolsHandlePendingToolCallRequest, *, timeout: float | None = None) -> HandleToolCallResult:
+    async def handle_pending_tool_call(self, params: HandlePendingToolCallRequest, *, timeout: float | None = None) -> HandlePendingToolCallResult:
         params_dict: dict[str, Any] = {k: v for k, v in params.to_dict().items() if v is not None}
         params_dict["sessionId"] = self._session_id
-        return HandleToolCallResult.from_dict(await self._client.request("session.tools.handlePendingToolCall", params_dict, **_timeout_kwargs(timeout)))
+        return HandlePendingToolCallResult.from_dict(await self._client.request("session.tools.handlePendingToolCall", params_dict, **_timeout_kwargs(timeout)))
 
 
 class CommandsApi:
@@ -5458,6 +6996,19 @@ class UsageApi:
         return UsageGetMetricsResult.from_dict(await self._client.request("session.usage.getMetrics", {"sessionId": self._session_id}, **_timeout_kwargs(timeout)))
 
 
+# Experimental: this API group is experimental and may change or be removed.
+class RemoteApi:
+    def __init__(self, client: "JsonRpcClient", session_id: str):
+        self._client = client
+        self._session_id = session_id
+
+    async def enable(self, *, timeout: float | None = None) -> RemoteEnableResult:
+        return RemoteEnableResult.from_dict(await self._client.request("session.remote.enable", {"sessionId": self._session_id}, **_timeout_kwargs(timeout)))
+
+    async def disable(self, *, timeout: float | None = None) -> None:
+        await self._client.request("session.remote.disable", {"sessionId": self._session_id}, **_timeout_kwargs(timeout))
+
+
 class SessionRpc:
     """Typed session-scoped RPC methods."""
     def __init__(self, client: "JsonRpcClient", session_id: str):
@@ -5472,6 +7023,7 @@ class SessionRpc:
         self.instructions = InstructionsApi(client, session_id)
         self.fleet = FleetApi(client, session_id)
         self.agent = AgentApi(client, session_id)
+        self.tasks = TasksApi(client, session_id)
         self.skills = SkillsApi(client, session_id)
         self.mcp = McpApi(client, session_id)
         self.plugins = PluginsApi(client, session_id)
@@ -5483,6 +7035,10 @@ class SessionRpc:
         self.shell = ShellApi(client, session_id)
         self.history = HistoryApi(client, session_id)
         self.usage = UsageApi(client, session_id)
+        self.remote = RemoteApi(client, session_id)
+
+    async def suspend(self, *, timeout: float | None = None) -> None:
+        await self._client.request("session.suspend", {"sessionId": self._session_id}, **_timeout_kwargs(timeout))
 
     async def log(self, params: LogRequest, *, timeout: float | None = None) -> LogResult:
         params_dict: dict[str, Any] = {k: v for k, v in params.to_dict().items() if v is not None}
