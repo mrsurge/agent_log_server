@@ -37,77 +37,93 @@ All tools return plain text. Errors are formatted as `[ERROR: Type] Detail`.
 **`kb_list()`**
 List all configured knowledge files and the current project root.
 
-**`kb_schema(file?, id?, max_depth?, root_depth?)`**
-Browse the heading tree. Output is a structured JSON outline of ATX headings.
-- No `id`: returns the full heading outline for the target file.
-- With `id`: returns the heading outline for that section subtree.
+**`kb_schema(file?/target?, id?, max_depth?, root_depth?)`**
+Browse the heading index. Output is a compact complete list with one line per ATX heading.
+- No `id`: returns every ATX heading in the target file.
+- With `id`: returns every ATX heading in that section subtree.
+- `target` is an alias for `file`, useful when thinking in terms of a selected
+  KB target from `kb_list`. If both are supplied, they must name the same file.
 - `root_depth`: treat a specific heading depth as top-level (useful for single-H1 docs — set `root_depth=2` to skip the wrapper).
 - `max_depth`: optional narrowing only. Omit it for the full outline, or set `max_depth=0` for only the selected root headings.
-- Each heading entry includes `line`, `line_ref`, `depth`, `atx`, `title`, `id`, `use_id`, `body_lines`, `subtree_lines`, and `children`.
+- Each heading line includes a stable section number, header level, heading line,
+  visible heading text, and copyable `id`.
+
+**`kb_info(file?/target?, sections?, id?, max_chars?)`**
+Inspect selected section context before reading full bodies.
+- `sections` accepts schema numbers, `L<line>`, full ids, unique visible titles,
+  or unique trailing id suffixes. Separate multiple selectors with commas or
+  newlines, or pass a JSON array string.
+- Returns the selected section's parent chain, each parent/target body range,
+  subtree range, immediate child headings, and body previews.
+- `max_chars` caps each body preview.
+
+**`kb_read(file?/target?, sections?, id?, include_children?, max_chars?)`**
+Read selected section bodies with parent context.
+- For each selected target, returns parent headings plus parent body text from
+  the top level down to the target, then the target heading/body.
+- `include_children=true` returns the selected target subtree instead of only
+  the target's own body.
+- `max_chars` caps the aggregate returned text.
+- `section=""` is the mutation-tool file-root selector; read tools use no selector to read the file root.
 
 **Typical navigation flow:**
 ```
 kb_list()                          → see configured files
-kb_schema()                        → see the full structured heading outline
-kb_schema(root_depth=2)            → see the full outline starting at H2 headings
-kb_schema(id="Architecture")       → see that section's structured subtree
-kb_schema(id="Architecture > Auth")→ drill deeper
-kb_read(id="Architecture > Auth > JWT Flow") → get full content
+kb_schema(target="KNOWLEDGE.md")   → see every heading in that target file
+kb_info(target="KNOWLEDGE.md", sections="12,L80") → inspect context/ranges/previews
+kb_read(target="KNOWLEDGE.md", sections="12,L80") → read parent context + target bodies
+kb_schema(target="KNOWLEDGE.md", id="Architecture") → list headings in that subtree
 ```
 
 ### Search
 
-**`kb_search_headers(file?, query)`**
+**`kb_search_headers(file?/target?, query, max_hits?)`**
 Case-insensitive substring search across heading titles. Returns matching headings with their section IDs so you can navigate to them.
 
-**`kb_search_content(file?, query, max_results?, context_chars?)`**
-Grep-like search across section bodies. Returns one line per match:
-- Section title and ID
-- Line number of the match
-- Truncated snippet with the match centered
+**`kb_search(file?/target?, query, regex?, max_hits?, preview_chars?, from_match?)`**
+Section-aware body search.
+- `regex=false` does a literal case-insensitive search.
+- `regex=true` treats `query` as a Python regular expression.
+- `max_hits` caps results.
+- `preview_chars` caps each body preview.
+- `from_match=true` starts previews at the match; `false` starts previews at the
+  beginning of the section body.
 
-Use this to find content, then `kb_read` the section you want.
+**`kb_search_content(...)`**
+Alias for `kb_search`.
 
-### Reading
-
-**`kb_read(file?, id?, include_children?)`**
-Returns the section content as plain text with a metadata header line.
-- Default: returns body text only (content between this heading and the next).
-- `include_children=true`: returns the full subtree as raw markdown.
-- `id=""` targets the file root and returns the full file.
-- The header line includes a `hash` of the content. It is informational only; KB writes do not validate it.
+Use search to find candidate sections, then `kb_info` or `kb_read` the selected section numbers.
 
 ### Writing
 
-**`kb_write(file?, id?, content, mode?, heading_title?, heading_depth?, dry_run?, confirm_hash?)`**
+**`kb_write(target?, section?, content, mode?, heading_title?, heading_depth?, dry_run?)`**
 Returns a status line + unified diff.
 - `mode="append"` (default): appends content at the end of the section body.
 - `mode="heading"`: creates a new child heading with content. **Auto-inferred** when `heading_title` is provided.
 - `mode="child"` and `mode="create_child"` are aliases for `mode="heading"`.
 - `heading_depth`: defaults to parent depth + 1 if omitted.
-- `id=""` targets the file root, so appends happen at end-of-file.
-- `confirm_hash`: legacy no-op accepted for backward compatibility; it is ignored.
+- `section` accepts schema numbers, `L<line>` / `line:<line>`, heading paths, unique visible titles, unique trailing path suffixes, or `section=""` for the file root.
 - `dry_run=true`: returns the diff without writing.
 - KB writes do not send repo-memory IPC notifications; they report only the durable file mutation result.
 
 ### Updating
 
-**`kb_update(file?, id?, content, mode?, dry_run?, confirm_hash?)`**
+**`kb_update(target?, section?, content, mode?, dry_run?)`**
 Returns a status line + unified diff.
 - `mode="body"` (default): replaces only the section body. The heading and any child headings are preserved.
-- `mode="replace"`: compatibility alias for `mode="body"`; it is still body-only replacement.
+- `mode="replace"`: alias for `mode="body"`; it is still body-only replacement.
 - `mode="subtree"`: replaces the heading and all descendants.
-- `id=""` targets the full file.
-- Supports `dry_run`. `confirm_hash` is accepted but ignored.
+- `section=""` targets the full file.
+- Supports `dry_run`.
 
 ### Removing
 
-**`kb_remove(file?, id?, mode?, dry_run?, confirm_hash?)`**
+**`kb_remove(target?, section?, mode?, dry_run?)`**
 Returns a status line + unified diff.
 - `mode="subtree"` (default): removes the heading and all its children.
 - `mode="body"`: removes only the body content and keeps the heading and child headings.
-- `id=""` targets the full file.
-- Supports `dry_run`. `confirm_hash` is accepted but ignored.
+- `section=""` targets the full file.
+- Supports `dry_run`.
 
 ### Management
 
@@ -140,9 +156,10 @@ Top Level Heading > Sub Heading > Sub-Sub Heading
 - The resolver accepts **both** raw unicode titles and normalized IDs — so you can paste either.
 - The full path ID is authoritative, but a unique visible heading title is accepted as shorthand.
 - A unique trailing path suffix is also accepted as shorthand, for example `Child` or `Parent > Child` without the top-level wrapper.
-- `L<line>` or the bare heading line number shown by `kb_schema` is accepted as a shorthand when it uniquely identifies a heading.
+- `kb_schema` section numbers are accepted by `kb_info` / `kb_read` / search follow-ups.
+- `L<line>` or `line:<line>` targets a heading by source line.
 - If two sibling headings have the same title, they get disambiguated IDs: `Section Title@L42` (with the line number).
-- `id=""` means the file root.
+- `section=""` means the file root for mutation tools.
 - Fenced code blocks (``` ``` ``` and `~~~`) are respected — headings inside code are not parsed.
 
 ## Error Handling
@@ -168,17 +185,19 @@ KB mutations are patch-style text edits:
 
 - `kb_write`, `kb_update`, and `kb_remove` do not perform explicit hash/CAS conflict checks.
 - The `hash` shown in read headers is informational only.
-- `confirm_hash` is a legacy no-op and can be omitted.
+- Mutation tools return patch-style diffs and write directly unless `dry_run=true`.
 - Use `dry_run=true` to preview any mutation as a unified diff before committing.
 
 ## Tips
 
-- **Section IDs are full paths.** `kb_schema` returns copyable `id` and `use_id` fields for every heading. Use `use_id` when you want the most explicit, unambiguous target.
+- **Section IDs are full paths.** `kb_schema` returns copyable `id` values for every heading.
 - Unique visible section titles work as shorthand. If the shorthand is ambiguous, KB returns `AmbiguousSection` with candidates.
-- Use `id=""` when you want to patch the file root directly.
-- Use `kb_schema()` for a full document outline. Use `root_depth=2` only when you intentionally want the outline roots to start at H2.
+- Use `section=""` when you want to patch the file root directly.
+- Use `kb_schema(target="...")` for a full document outline after `kb_list`.
+  Use `root_depth=2` only when you intentionally want the outline roots to start at H2.
 - Use `kb_search_headers` when you already know a heading fragment and want a targeted lookup.
-- Use `kb_search_content` like grep — find the snippet, then `kb_read` the full section.
+- Use `kb_info` after schema/search when you need ranges, child headings, or previews before reading.
+- Use `kb_search` like grep — find the snippet, then `kb_info` or `kb_read` the selected section.
 - The `file` parameter is optional when only one knowledge file is configured.
 - Headings inside fenced code blocks are ignored — safe for docs with code examples.
 - To target a different repo, launch the MCP server from that repo's harness `cwd` instead of switching roots through KB tools.

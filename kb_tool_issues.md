@@ -5,10 +5,17 @@ checkout on 2026-05-14.
 
 ## Fix Status
 
-- `kb_schema` now returns a structured outline with copyable IDs for every
-  parsed ATX heading; `max_depth` is an explicit narrowing option.
-- `kb_read` / section resolution now accept `L<line>` and bare heading line
-  numbers when they uniquely identify a heading.
+- `kb_schema` now returns a compact complete numbered ATX heading index for the
+  targeted file; `target` is accepted as an alias for `file`, and `max_depth` is
+  an explicit narrowing option.
+- `kb_info` provides parent-chain context, line ranges, child headings, and body
+  previews for selected schema numbers / line refs / ids.
+- `kb_read` accepts multiple selected sections and returns parent heading/body
+  context from the top level down to each target before returning target bodies.
+- Section selectors now treat bare numbers as schema indexes and `L<line>` /
+  `line:<line>` as source-line refs.
+- `kb_search` is regex-capable and returns section-aware body previews with
+  `max_hits`, `preview_chars`, and `from_match` controls.
 - `kb_write` now accepts `mode="child"` and `mode="create_child"` as aliases for
   child-heading creation.
 - Unsupported KB modes now return `InvalidParameter` with allowed modes instead
@@ -77,7 +84,7 @@ large memory file.
 An attempt to create a child section failed:
 
 ```text
-kb_write(file=".repo_memory.md", id="Repo Memory > Fork Target", mode="child", ...)
+kb_write(target=".repo_memory.md", section="Repo Memory > Fork Target", mode="child", ...)
 [ERROR: SectionNotFound] Unsupported mode 'child'
 ```
 
@@ -90,7 +97,7 @@ creation without trial and error.
 A later attempt with the seemingly obvious `create_child` mode also failed:
 
 ```text
-kb_write(file=".repo_memory.md", id="", heading_title="ALS-RS settings schema ownership", heading_depth=3, mode="create_child", ...)
+kb_write(target=".repo_memory.md", section="", heading_title="ALS-RS settings schema ownership", heading_depth=3, mode="create_child", ...)
 [ERROR: SectionNotFound] Unsupported mode 'create_child'
 ```
 
@@ -110,7 +117,7 @@ unsupported mode.
 Impact: this makes troubleshooting ambiguous. The caller may waste time
 rechecking section ids when the actionable issue is the mode value.
 
-The same happened for `mode="create_child"` against `id=""`: the section target
+The same happened for `mode="create_child"` against `section=""`: the section target
 was valid for a file-root append, but the error still used `SectionNotFound`
 while saying the mode was unsupported.
 
@@ -152,16 +159,33 @@ were available and functional.
 Impact: a generic MCP discovery pass can falsely suggest that no knowledge
 resources exist. Agents need to know to call `kb_list` directly.
 
-## Current Issue: `kb_schema` Should Be The Structured Outline
+## Current Issue: KB Discovery / Info / Read Split
 
-Agents were still encouraged to call `kb_schema(max_depth=2)` repeatedly, which
-creates artificial shallow slices and unnecessary follow-up calls.
+Agents were still encouraged to call `kb_schema(max_depth=2)` repeatedly or
+drill schema calls instead of first getting the entire header index, then
+deciding what body context to read.
 
 Desired behavior:
 
-- `kb_schema()` should return a structured, LLM-readable outline for the entire
-  targeted markdown document.
+- `kb_list()` should enumerate the configured KB files.
+- `kb_schema(file="...")` or `kb_schema(target="...")` should return a
+  compact, LLM-readable numbered index for the entire targeted markdown document.
 - The outline should include every parsed ATX heading, not a shallow default.
-- Each heading should expose the actionable section id directly.
+- Each heading should expose the section number, header level, line ref, and
+  actionable section id directly.
+- `kb_info(...)` should be the range/preview layer for selected sections and
+  their parent chains.
+- `kb_read(...)` should be the full-body layer for selected sections and their
+  parent chains.
+- Search should return section identity and a preview of matching body text,
+  with regex support and caller-controlled hit/preview limits.
 - `max_depth` should be an explicit narrowing option, not the normal discovery
   path.
+
+Follow-up fix:
+
+- `.agent-pty.toml` had two stale KB paths:
+  `worktrees/notes/PATCHED_APP_SERVER.md` and
+  `acp/AGENT_EXTENSION_INTEGRATION.md`. They were corrected to the existing
+  target files `worktrees/notes/old-notes/PATCHED_APP_SERVER.md` and
+  `AGENT_EXTENSION_INTEGRATION.md`.

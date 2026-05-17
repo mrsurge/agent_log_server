@@ -309,8 +309,9 @@ After making a round of successful edits that have been verified by the user, I 
 - The KB tool guide for this repo is `KB_MEMORY_MCP.md`.
 - Important KB quirks:
   - all KB tool output is plain text
-  - `kb_schema` only shows child headings when drilling with an `id`
-  - KB writes are patch-style; header hashes are informational only and `confirm_hash` is ignored
+  - `kb_schema(target="...")` returns the complete numbered ATX heading index for the target file
+  - KB section selectors use schema numbers, `L<line>` / `line:<line>`, heading paths, unique visible titles, unique trailing path suffixes, or `section=""` for the file root
+  - KB mutations use `target` + `section` and are patch-style file writes; use `dry_run=true` when you want the diff before writing
   - `kb_reload_config()` only reloads the current repo; KB root follows the harness cwd/repo root
   - `kb_add_file(abs_path)` only works for files inside the current project root
 - For third-party extension install/update workflow, use `THIRD_PARTY_EXTENSION_WORKFLOW.md` as the contract doc and prefer KB reads/writes when it is loaded into KB.

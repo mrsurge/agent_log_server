@@ -111,23 +111,24 @@ When the user asks about what instructions or context you have received, answer 
 
 ## Repo Knowledge Base (KB)
 
-If KB MCP tools are available (`kb_list`, `kb_help`, `kb_schema`, `kb_read`, `kb_search_headers`, `kb_search_content`, `kb_write`, `kb_update`, `kb_remove`):
+If KB MCP tools are available (`kb_list`, `kb_help`, `kb_schema`, `kb_info`, `kb_read`, `kb_search_headers`, `kb_search`, `kb_search_content`, `kb_write`, `kb_update`, `kb_remove`):
 
 ### On Session Start
 1. Call `kb_list` to discover configured knowledge files
 2. Call `kb_help` to see current KB modes, section-id forms, and examples
-3. Call `kb_schema()` on relevant files to get the full structured ATX heading outline with copyable section ids, or `kb_search_headers` when you already know a heading fragment
-4. If `AGENTS.md` is listed, read its top-level sections — it contains repo-specific workflow rules, architectural invariants, and coordination protocols
+3. Call `kb_schema(file="...")` or `kb_schema(target="...")` on relevant files from `kb_list` to get the complete numbered ATX heading index
+4. Use `kb_info(target="...", sections="...")` for parent-chain context, ranges, child headings, and previews before selecting what to read
+5. If `AGENTS.md` is listed, read its top-level sections — it contains repo-specific workflow rules, architectural invariants, and coordination protocols
 
 ### During Work
 - Before making architectural decisions, check KB for relevant contracts
-- Use `kb_search_content` to find prior decisions and patterns
+- Use `kb_search` / `kb_search_content` to find prior decisions and patterns, then `kb_info` or `kb_read` the selected section numbers
 - After completing verified edits, write durable findings to KB (not just the agent log)
 - Follow the KB-backed memory invariant above: keep `.repo_memory.md` current with durable findings, and mirror any memory-harness or `store_memory` writes into KB-backed repo memory
-- KB section ids are heading paths. Shorthands are accepted when unique: visible heading title, trailing path suffix, `L<line>`, bare heading line number, or `id=""` for the file root
-- For child-heading writes, use `kb_write(..., mode="create_child", heading_title="...")`; `mode="child"` and `mode="heading"` are aliases, and `heading_title` also auto-switches append mode into heading creation
+- KB section selectors are schema numbers, heading paths, unique visible titles, unique trailing path suffixes, `L<line>` / `line:<line>`, or `section=""` for the file root
+- For child-heading writes, use `kb_write(target="...", section="...", mode="create_child", heading_title="...")`; `mode="child"` and `mode="heading"` are aliases, and `heading_title` also auto-switches append mode into heading creation
 - Unsupported modes are invalid parameters, not missing sections. Change the `mode` value instead of rechecking the section id when KB returns `InvalidParameter`
-- KB mutations are file-write-only patch operations. `confirm_hash` is informational/legacy, and KB writes do not send repo-memory IPC notifications
+- KB mutations are file-write-only patch operations. Use `dry_run=true` for a diff preview; KB writes do not send repo-memory IPC notifications
 
 ### KB vs Agent Log
 - **KB**: Stable shared knowledge — contracts, invariants, workflow rules, architectural decisions. Durable across sessions.
@@ -369,6 +370,23 @@ When investigating framework-shell logs, prefer this order:
 - use `te2_fws_log_inspect` first for structured first-pass triage, especially when logs contain JSON, JSON-RPC, mixed plain+structured output, or you need prefixes/signatures instead of raw substring matches
 - use `te2_fws_log_search` next for narrow substring/regex follow-up once you know the event family or error text you want
 - use `te2_fws_log_tail` for recent raw context after you already know which shell/stream matters
+
+For framework-shell stdio/STDIN observation:
+- raw stdout/stderr logs must stay raw; do not expect stdin writes to appear in those logs
+- stdin observation is opt-in per shell via `debug.io_metadata: true` in the shellspec, or the equivalent launch-time debug flag
+- captured stdin lives in the JSONL sidecar referenced by `io_metadata_log`, not in stdout/stderr
+- use `stdin_capture: preview` plus `stdin_preview_bytes` for bounded previews, or `stdin_capture: full` only for bounded protocol traffic such as known JSON-RPC debug shells
+- use `te2_fws_log_inspect(..., include_io_metadata=true, include_stdin=true, include_timestamps=true)` or `fws inspect <shell_id> --io-metadata --stdin --timestamps --json` when you need stdin visibility
+- the dashboard `IO overlay` is a convenience view only; treat MCP/CLI inspect output and the sidecar as the authoritative observation path
+- if a dashboard overlay appears stale, incomplete, or confusing, do not infer protocol behavior from it; inspect the shell through `te2_fws_log_inspect` with stdin metadata enabled
+
+Example shellspec debug block for a bounded JSON-RPC pipe shell:
+
+```yaml
+debug:
+  io_metadata: true
+  stdin_capture: full
+```
 
 For deeper framework-shells usage details, read the cached README at:
 - `~/.cache/app_server/framework_shells_README.md`
