@@ -536,7 +536,7 @@ mod tests {
                 static_dir: root.join("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         });

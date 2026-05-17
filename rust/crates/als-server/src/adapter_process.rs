@@ -6,7 +6,7 @@ use als_jsonrpc::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use ferrous_framework::{FerrousFrameworkPipe, FerrousPipeConfig, pyo3_embed_enabled};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -60,7 +60,7 @@ impl AdapterSupervisor {
         }
 
         let client = Arc::new(AdapterClient::spawn(
-            self.config.adapters.copilot_python.clone(),
+            self.config.adapters.python_bin.clone(),
             self.config.extensions_dir.parent().map(Path::to_path_buf),
             self.config.roots.clone(),
             self.config.framework_shells.clone(),
@@ -92,10 +92,6 @@ impl AdapterSupervisor {
             .await?
             .request_value(methods::EXTENSION_INITIALIZE, params)
             .await
-    }
-
-    pub async fn initialize_copilot(&self) -> Result<Value> {
-        self.initialize_extension("copilot-sdk").await
     }
 
     pub async fn reload_extensions_if_running(
@@ -335,15 +331,6 @@ impl AdapterClient {
             .request_raw(method, serde_json::to_value(params)?)
             .await?;
         Ok(result)
-    }
-
-    pub async fn request<T, P>(&self, method: &str, params: P) -> Result<T>
-    where
-        T: DeserializeOwned,
-        P: Serialize,
-    {
-        let value = self.request_value(method, params).await?;
-        Ok(serde_json::from_value(value)?)
     }
 
     async fn request_raw(&self, method: &str, params: Value) -> Result<Value> {

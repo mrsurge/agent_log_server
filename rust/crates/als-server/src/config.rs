@@ -18,7 +18,7 @@ pub struct ServerConfig {
 
 #[derive(Clone, Debug)]
 pub struct AdapterConfig {
-    pub copilot_python: String,
+    pub python_bin: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -60,8 +60,7 @@ impl ServerConfig {
                 static_dir: env_path_or_default("ALS_RS_STATIC_DIR", default_static_dir),
             },
             adapters: AdapterConfig {
-                copilot_python: env::var("ALS_RS_PYTHON_BIN")
-                    .unwrap_or_else(|_| "python".to_owned()),
+                python_bin: env::var("ALS_RS_PYTHON_BIN").unwrap_or_else(|_| "python".to_owned()),
             },
             framework_shells,
         };

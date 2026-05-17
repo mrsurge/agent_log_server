@@ -481,23 +481,23 @@ mod tests {
     fn discovers_extensions_from_registry_file() {
         let root = std::env::temp_dir().join(format!("als-rs-ext-reg-{}", unix_millis()));
         let ext_dir = root.join("extensions");
-        fs::create_dir_all(ext_dir.join("copilot_sdk")).unwrap();
+        fs::create_dir_all(ext_dir.join("sample_ext")).unwrap();
         fs::write(
             ext_dir.join("extensions.json"),
-            r#"{"version":"1.0","extensions":[{"id":"copilot-sdk","name":"GitHub Copilot","type":"copilot_sdk","path":"copilot_sdk","enabled":true}]}"#,
+            r#"{"version":"1.0","extensions":[{"id":"sample-ext","name":"Sample Extension","type":"sample_ext","path":"sample_ext","enabled":true}]}"#,
         )
         .unwrap();
         fs::write(
-            ext_dir.join("copilot_sdk").join("manifest.json"),
-            r#"{"id":"copilot-sdk","name":"GitHub Copilot","version":"1.0.0","type":"copilot_sdk","capabilities":{"modelListing":true}}"#,
+            ext_dir.join("sample_ext").join("manifest.json"),
+            r#"{"id":"sample-ext","name":"Sample Extension","version":"1.0.0","type":"sample_ext","capabilities":{"modelListing":true}}"#,
         )
         .unwrap();
 
         let registry = ExtensionRegistry::load_with_config(vec![ext_dir], None).unwrap();
         let entries = registry.list();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id, "copilot-sdk");
-        assert_eq!(entries[0].extension_type, "copilot_sdk");
+        assert_eq!(entries[0].id, "sample-ext");
+        assert_eq!(entries[0].extension_type, "sample_ext");
         assert!(entries[0].active);
         assert_eq!(
             entries[0]
@@ -514,21 +514,21 @@ mod tests {
     fn reload_refreshes_registry_entries_from_disk() {
         let root = std::env::temp_dir().join(format!("als-rs-ext-reg-reload-{}", unix_millis()));
         let ext_dir = root.join("extensions");
-        fs::create_dir_all(ext_dir.join("copilot_sdk")).unwrap();
-        fs::create_dir_all(ext_dir.join("codex_ext")).unwrap();
+        fs::create_dir_all(ext_dir.join("sample_ext")).unwrap();
+        fs::create_dir_all(ext_dir.join("other_ext")).unwrap();
         fs::write(
             ext_dir.join("extensions.json"),
-            r#"{"version":"1.0","extensions":[{"id":"copilot-sdk","name":"GitHub Copilot","type":"copilot_sdk","path":"copilot_sdk","enabled":true}]}"#,
+            r#"{"version":"1.0","extensions":[{"id":"sample-ext","name":"Sample Extension","type":"sample_ext","path":"sample_ext","enabled":true}]}"#,
         )
         .unwrap();
         fs::write(
-            ext_dir.join("copilot_sdk").join("manifest.json"),
-            r#"{"id":"copilot-sdk","name":"GitHub Copilot","version":"1.0.0","type":"copilot_sdk"}"#,
+            ext_dir.join("sample_ext").join("manifest.json"),
+            r#"{"id":"sample-ext","name":"Sample Extension","version":"1.0.0","type":"sample_ext"}"#,
         )
         .unwrap();
         fs::write(
-            ext_dir.join("codex_ext").join("manifest.json"),
-            r#"{"id":"codex-ext","name":"Codex","version":"1.0.0","type":"codex_ext"}"#,
+            ext_dir.join("other_ext").join("manifest.json"),
+            r#"{"id":"other-ext","name":"Other Extension","version":"1.0.0","type":"other_ext"}"#,
         )
         .unwrap();
 
@@ -536,13 +536,13 @@ mod tests {
         assert_eq!(registry.list().len(), 1);
         fs::write(
             ext_dir.join("extensions.json"),
-            r#"{"version":"1.0","extensions":[{"id":"copilot-sdk","name":"GitHub Copilot","type":"copilot_sdk","path":"copilot_sdk","enabled":true},{"id":"codex-ext","name":"Codex","type":"codex_ext","path":"codex_ext","enabled":true}]}"#,
+            r#"{"version":"1.0","extensions":[{"id":"sample-ext","name":"Sample Extension","type":"sample_ext","path":"sample_ext","enabled":true},{"id":"other-ext","name":"Other Extension","type":"other_ext","path":"other_ext","enabled":true}]}"#,
         )
         .unwrap();
 
         let entries = registry.reload().unwrap();
         assert_eq!(entries.len(), 2);
-        assert!(registry.get("codex-ext").is_some());
+        assert!(registry.get("other-ext").is_some());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -591,29 +591,29 @@ mod tests {
         let root = std::env::temp_dir().join(format!("als-rs-ext-reg-enabled-{}", unix_millis()));
         let ext_dir = root.join("extensions");
         let config_dir = root.join("config");
-        fs::create_dir_all(ext_dir.join("copilot_sdk")).unwrap();
+        fs::create_dir_all(ext_dir.join("sample_ext")).unwrap();
         fs::write(
             ext_dir.join("extensions.json"),
-            r#"{"version":"1.0","extensions":[{"id":"copilot-sdk","name":"GitHub Copilot","type":"copilot_sdk","path":"copilot_sdk","enabled":true}]}"#,
+            r#"{"version":"1.0","extensions":[{"id":"sample-ext","name":"Sample Extension","type":"sample_ext","path":"sample_ext","enabled":true}]}"#,
         )
         .unwrap();
         fs::write(
-            ext_dir.join("copilot_sdk").join("manifest.json"),
-            r#"{"id":"copilot-sdk","name":"GitHub Copilot","version":"1.0.0","type":"copilot_sdk"}"#,
+            ext_dir.join("sample_ext").join("manifest.json"),
+            r#"{"id":"sample-ext","name":"Sample Extension","version":"1.0.0","type":"sample_ext"}"#,
         )
         .unwrap();
 
         let registry =
             ExtensionRegistry::load_with_config(vec![ext_dir.clone()], Some(config_dir.clone()))
                 .unwrap();
-        let updated = registry.set_enabled("copilot-sdk", false).unwrap().unwrap();
+        let updated = registry.set_enabled("sample-ext", false).unwrap().unwrap();
         assert!(!updated.enabled);
         assert!(!updated.active);
-        assert!(!registry.get("copilot-sdk").unwrap().active);
+        assert!(!registry.get("sample-ext").unwrap().active);
 
         let reloaded =
             ExtensionRegistry::load_with_config(vec![ext_dir], Some(config_dir)).unwrap();
-        let entry = reloaded.get("copilot-sdk").unwrap();
+        let entry = reloaded.get("sample-ext").unwrap();
         assert!(!entry.enabled);
         assert!(!entry.active);
 
@@ -624,36 +624,36 @@ mod tests {
     fn runtime_dependency_fields_update_active_state() {
         let root = std::env::temp_dir().join(format!("als-rs-ext-reg-runtime-{}", unix_millis()));
         let ext_dir = root.join("extensions");
-        fs::create_dir_all(ext_dir.join("copilot_sdk")).unwrap();
+        fs::create_dir_all(ext_dir.join("sample_ext")).unwrap();
         fs::write(
             ext_dir.join("extensions.json"),
-            r#"{"version":"1.0","extensions":[{"id":"copilot-sdk","name":"GitHub Copilot","type":"copilot_sdk","path":"copilot_sdk","enabled":true}]}"#,
+            r#"{"version":"1.0","extensions":[{"id":"sample-ext","name":"Sample Extension","type":"sample_ext","path":"sample_ext","enabled":true}]}"#,
         )
         .unwrap();
         fs::write(
-            ext_dir.join("copilot_sdk").join("manifest.json"),
-            r#"{"id":"copilot-sdk","name":"GitHub Copilot","version":"1.0.0","type":"copilot_sdk","dependencies":{"has_check":true,"has_install":true}}"#,
+            ext_dir.join("sample_ext").join("manifest.json"),
+            r#"{"id":"sample-ext","name":"Sample Extension","version":"1.0.0","type":"sample_ext","dependencies":{"has_check":true,"has_install":true}}"#,
         )
         .unwrap();
 
         let registry = ExtensionRegistry::load_with_config(vec![ext_dir], None).unwrap();
-        assert!(registry.get("copilot-sdk").unwrap().active);
+        assert!(registry.get("sample-ext").unwrap().active);
         registry.apply_runtime_extensions(&serde_json::json!({
             "extensions": [{
-                "id": "copilot-sdk",
+                "id": "sample-ext",
                 "dependency_ok": false,
                 "dependency_status": "unmet",
-                "dependency_message": "copilot missing",
+                "dependency_message": "sample missing",
                 "dependency_details": {"binary": null},
                 "has_dependency_check": true,
                 "has_dependency_install": true
             }]
         }));
-        let entry = registry.get("copilot-sdk").unwrap();
+        let entry = registry.get("sample-ext").unwrap();
         assert!(!entry.dependency_ok);
         assert!(!entry.active);
         assert_eq!(entry.dependency_status, "unmet");
-        assert_eq!(entry.dependency_message, "copilot missing");
+        assert_eq!(entry.dependency_message, "sample missing");
         assert!(entry.has_dependency_check);
         assert!(entry.has_dependency_install);
 

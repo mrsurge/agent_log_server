@@ -24,7 +24,7 @@ from agent_log_server_rs.codec import (
     decode_json_line,
     encode_json_line,
 )
-from agent_log_server_rs.adapters.copilot_sdk_adapter import (
+from agent_log_server_rs.adapters.rpc_common import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
@@ -441,7 +441,7 @@ class ExtensionLoaderModule(Protocol):
 
 @dataclass
 class AdapterState:
-    extension_id: str = "copilot-sdk"
+    extension_id: str = ""
     cwd: Path = field(default_factory=_safe_cwd)
     data_dir: Path = field(default_factory=_default_data_dir)
     cache_dir: Path = field(default_factory=_default_cache_dir)
@@ -566,7 +566,9 @@ class ExtensionJsonRpcAdapter:
         raise RpcAdapterError(METHOD_NOT_FOUND, f"Unsupported method: {method}")
 
     async def _initialize(self, params: JsonMap) -> JsonMap:
-        extension_id = optional_string(params.get("extension_id")) or self._state.extension_id
+        extension_id = optional_string(params.get("extension_id"))
+        if extension_id is None:
+            raise RpcAdapterError(INVALID_PARAMS, "extension_id is required")
         cwd = optional_path(params.get("cwd")) or _safe_cwd()
         data_dir = optional_path(params.get("data_dir")) or cwd
         cache_dir = optional_path(params.get("cache_dir")) or data_dir
@@ -1298,7 +1300,10 @@ class ExtensionJsonRpcAdapter:
         self._loader_initialized = True
 
     def _extension_id_param(self, params: JsonMap) -> str:
-        return optional_string(params.get("extension_id")) or self._state.extension_id
+        extension_id = optional_string(params.get("extension_id")) or optional_string(self._state.extension_id)
+        if extension_id is None:
+            raise RpcAdapterError(INVALID_PARAMS, "extension_id is required")
+        return extension_id
 
     def _extension_info(self, extension_id: str) -> JsonMap:
         self._ensure_loader_initialized()

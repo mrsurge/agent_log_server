@@ -1302,7 +1302,15 @@ fn persist_pending_approval_event(
         .or_else(|| meta.extension_id.clone())
         .or_else(|| meta.agent_type.clone())
         .or_else(|| string_from_map(&meta.settings, "agent"))
-        .unwrap_or_else(|| "codex-ext".to_owned());
+        .or_else(|| {
+            state
+                .extensions
+                .list()
+                .into_iter()
+                .find(|entry| entry.active)
+                .map(|entry| entry.id)
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
     let thread_id = first_nonempty_event_string(
         event_object,
         &["thread_id", "provider_session_id", "session_id"],
@@ -1998,7 +2006,7 @@ mod tests {
                 static_dir: PathBuf::from("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         };
@@ -2075,7 +2083,7 @@ mod tests {
                 static_dir: root.join("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         });
@@ -2130,12 +2138,12 @@ mod tests {
                 static_dir: root.join("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         });
         let mut settings = JsonMap::new();
-        settings.insert("agent".to_owned(), json!("codex-ext"));
+        settings.insert("agent".to_owned(), json!("other-ext"));
         settings.insert("cwd".to_owned(), json!("/repo/project"));
         let meta = state
             .conversations
@@ -2148,7 +2156,7 @@ mod tests {
 
         assert_eq!(
             resolve_extension_id(&state, &JsonMap::new(), &meta),
-            Some("codex-ext".to_owned())
+            Some("other-ext".to_owned())
         );
         assert_eq!(
             resolve_cwd(&JsonMap::new(), &meta),
@@ -2156,10 +2164,10 @@ mod tests {
         );
 
         let mut params = JsonMap::new();
-        params.insert("extension_id".to_owned(), json!("copilot-sdk"));
+        params.insert("extension_id".to_owned(), json!("sample-ext"));
         assert_eq!(
             resolve_extension_id(&state, &params, &meta),
-            Some("copilot-sdk".to_owned())
+            Some("sample-ext".to_owned())
         );
 
         let _ = fs::remove_dir_all(root);
@@ -2180,7 +2188,7 @@ mod tests {
                 static_dir: root.join("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         });
@@ -2234,7 +2242,7 @@ mod tests {
                 static_dir: root.join("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         });
@@ -2263,7 +2271,7 @@ mod tests {
                 static_dir: root.join("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         };
@@ -2305,12 +2313,12 @@ mod tests {
                 static_dir: root.join("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         });
         let mut settings = JsonMap::new();
-        settings.insert("agent".to_owned(), json!("codex-ext"));
+        settings.insert("agent".to_owned(), json!("other-ext"));
         state
             .conversations
             .create(CreateConversationRequest {
@@ -2344,7 +2352,7 @@ mod tests {
             .as_object()
             .expect("pending descriptor should be persisted")
             .clone();
-        assert_eq!(descriptor["agent"], "codex-ext");
+        assert_eq!(descriptor["agent"], "other-ext");
         assert_eq!(descriptor["thread_id"], "thread-123");
         assert_eq!(descriptor["render_event"]["order_id"], -1);
 
@@ -2395,12 +2403,12 @@ mod tests {
                 static_dir: root.join("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         });
         let mut settings = JsonMap::new();
-        settings.insert("agent".to_owned(), json!("codex-ext"));
+        settings.insert("agent".to_owned(), json!("other-ext"));
         state
             .conversations
             .create(CreateConversationRequest {
@@ -2474,7 +2482,7 @@ mod tests {
                 static_dir: root.join("static"),
             },
             adapters: AdapterConfig {
-                copilot_python: "python".to_owned(),
+                python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
         };

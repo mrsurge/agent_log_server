@@ -1,4 +1,3 @@
-use crate::adapter_routes;
 use crate::agent_log;
 use crate::sidebar_ipc;
 use crate::socketio::register_socket_namespaces;
@@ -22,7 +21,6 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(static_assets::routes(&state.config.roots.static_dir))
         .merge(agent_log::routes())
-        .merge(adapter_routes::routes())
         .merge(conversation_routes::routes())
         .merge(extension_routes::routes())
         .route("/api/health", get(health))

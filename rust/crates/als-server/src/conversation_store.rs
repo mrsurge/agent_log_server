@@ -1039,7 +1039,7 @@ mod tests {
             .create(CreateConversationRequest {
                 conversation_id: Some("test/conversation".to_owned()),
                 title: Some("Test".to_owned()),
-                agent_type: Some("copilot-sdk".to_owned()),
+                agent_type: Some("sample-ext".to_owned()),
                 settings: JsonMap::new(),
                 ..CreateConversationRequest::default()
             })
@@ -1119,7 +1119,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("als-rs-store-meta-test-{}", unix_millis()));
         let store = ConversationStore::new(root.clone());
         let mut settings = JsonMap::new();
-        settings.insert("agent".to_owned(), json!("codex-ext"));
+        settings.insert("agent".to_owned(), json!("other-ext"));
         settings.insert("cwd".to_owned(), json!("/repo/project"));
         settings.insert("label".to_owned(), json!("Project chat"));
         settings.insert("alias".to_owned(), json!("agent one"));
@@ -1131,8 +1131,8 @@ mod tests {
                 ..CreateConversationRequest::default()
             })
             .unwrap();
-        assert_eq!(meta.extension_id.as_deref(), Some("codex-ext"));
-        assert_eq!(meta.agent_type.as_deref(), Some("codex-ext"));
+        assert_eq!(meta.extension_id.as_deref(), Some("other-ext"));
+        assert_eq!(meta.agent_type.as_deref(), Some("other-ext"));
         assert_eq!(meta.cwd.as_deref(), Some("/repo/project"));
         assert_eq!(meta.label.as_deref(), Some("Project chat"));
         assert_eq!(meta.alias.as_deref(), Some("agent one"));
@@ -1140,7 +1140,7 @@ mod tests {
         store
             .create(CreateConversationRequest {
                 conversation_id: Some("meta-b".to_owned()),
-                extension_id: Some("copilot-sdk".to_owned()),
+                extension_id: Some("sample-ext".to_owned()),
                 ..CreateConversationRequest::default()
             })
             .unwrap();
@@ -1159,7 +1159,7 @@ mod tests {
         assert_eq!(list[0].pinned_order, Some(0));
         assert_eq!(list[1].conversation_id, "meta-a");
         assert_eq!(list[1].pinned_order, Some(1));
-        assert_eq!(list[1].settings["agent"], "codex-ext");
+        assert_eq!(list[1].settings["agent"], "other-ext");
 
         let _ = fs::remove_dir_all(root);
     }

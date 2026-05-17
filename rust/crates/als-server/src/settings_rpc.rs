@@ -370,10 +370,12 @@ fn read_extension_schema_file(
     if !path.is_file() {
         return Ok(None);
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| internal_rpc_error(format!("failed to read {}: {error}", path.display())))?;
-    let parsed: Value = serde_json::from_str(&raw)
-        .map_err(|error| internal_rpc_error(format!("failed to parse {}: {error}", path.display())))?;
+    let raw = fs::read_to_string(&path).map_err(|error| {
+        internal_rpc_error(format!("failed to read {}: {error}", path.display()))
+    })?;
+    let parsed: Value = serde_json::from_str(&raw).map_err(|error| {
+        internal_rpc_error(format!("failed to parse {}: {error}", path.display()))
+    })?;
     if parsed.is_object() {
         Ok(Some(parsed))
     } else {
@@ -1029,12 +1031,10 @@ fn ensure_registered_extension(
     state: &AppState,
     extension_id: &str,
 ) -> Result<ExtensionRegistryEntry, RpcError> {
-    state.extensions.get(extension_id).ok_or_else(|| {
-        rpc_error(
-            -32602,
-            format!("Extension not found: {extension_id}"),
-        )
-    })
+    state
+        .extensions
+        .get(extension_id)
+        .ok_or_else(|| rpc_error(-32602, format!("Extension not found: {extension_id}")))
 }
 
 fn internal_rpc_error(error: impl std::fmt::Display) -> RpcError {
