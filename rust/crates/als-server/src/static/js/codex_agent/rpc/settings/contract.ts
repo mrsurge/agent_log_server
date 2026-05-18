@@ -16,6 +16,7 @@ export const SETTINGS_RPC_METHODS = {
   extensionSplashActionRun: 'extension.splashAction.run',
   extensionSettingsSchemaGet: 'extension.settingsSchema.get',
   extensionRuntimeOptionsGet: 'extension.runtimeOptions.get',
+  extensionProviderInfoGet: 'extension.providerInfo.get',
   extensionRequestCardsGet: 'extension.requestCards.get',
   extensionUiFeaturesGet: 'extension.uiFeatures.get',
   extensionPlanGet: 'extension.plan.get',

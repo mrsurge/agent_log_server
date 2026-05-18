@@ -1020,10 +1020,10 @@ frontend to know provider-specific payload shapes:
      instead of hardcoding provider metadata normalization.
 
 Schema ownership is file-first. ALS-RS should read
-`settings_schema.json` from the registered extension source root/path before
-consulting any compatibility Python hook. Extension Python remains responsible
-for provider-native request translation and dynamic data sources, but the schema
-file is the contract that translates user intent into extension settings.
+`settings_schema.json` from the registered extension source root/path.
+Extension Python remains responsible for provider-native request translation and
+dynamic data sources, but the schema file is the contract that translates user
+intent into extension settings.
 
 This is the same rule used by the dynamic reasoning-effort fix:
 `dynamic_options_from` tells the shared renderer which model/source field to
@@ -1039,6 +1039,15 @@ approval policy and mode for the active conversation. The schema or runtime
 descriptor should declare "this field is the approval policy" or "this field is
 the mode"; ALS-RS and the shared UI can then render those semantic controls in
 the footer without requiring a separate "footer" placement flag.
+
+Provider status and usage are the same kind of schema-declared semantic
+surface. A schema `info` field declares `semantic.role = provider_status` or
+`provider_usage` plus a `semantic.runtime_key` (`status` or `usage`). The shared
+settings modal then calls `/rpc/settings` method `extension.providerInfo.get`,
+Rust forwards through adapter method `extension.get_provider_info`, and the
+extension returns one DTO with `status` and `usage` members. Unsupported provider
+usage is represented inside that DTO with `usage.supported = false`; there is no
+separate provider-specific modal route.
 
 Provider session/rollout selection is a local conversation creation mode, not a
 fresh provider-start mode:

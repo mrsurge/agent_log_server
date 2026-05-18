@@ -2397,6 +2397,97 @@ async def get_request_cards(extension_id: str) -> dict[str, object]:
     }
 
 
+def _provider_info_unsupported(extension_id: str) -> dict[str, object]:
+    return {
+        "ok": True,
+        "supported": False,
+        "extension_id": extension_id,
+        "status": {
+            "supported": False,
+            "state": "unsupported",
+            "text": "Provider status is not implemented by this extension.",
+            "detail": "",
+            "tone": "neutral",
+        },
+        "usage": {
+            "supported": False,
+            "state": "unsupported",
+            "text": "Provider usage is not implemented by this extension.",
+            "detail": "",
+            "tone": "neutral",
+        },
+    }
+
+
+def _normalize_provider_info_result(
+    extension_id: str,
+    result: dict[str, object],
+) -> dict[str, object]:
+    normalized = dict(result)
+    normalized.setdefault("ok", True)
+    normalized.setdefault("supported", True)
+    normalized.setdefault("extension_id", extension_id)
+    status = normalized.get("status")
+    if not isinstance(status, dict):
+        normalized["status"] = {
+            "supported": False,
+            "state": "unavailable",
+            "text": "Provider status unavailable.",
+            "detail": "",
+            "tone": "neutral",
+        }
+    usage = normalized.get("usage")
+    if not isinstance(usage, dict):
+        normalized["usage"] = {
+            "supported": False,
+            "state": "unavailable",
+            "text": "Provider usage unavailable.",
+            "detail": "",
+            "tone": "neutral",
+        }
+    return normalized
+
+
+async def get_provider_info(
+    extension_id: str,
+    conversation_id: Optional[str] = None,
+    provider_session_id: Optional[str] = None,
+    settings: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
+    """Get provider status/usage DTO for schema-declared settings info fields."""
+    get_provider_info_fn = _callable_attr(get_handler(extension_id), "get_provider_info")
+    if get_provider_info_fn is None:
+        return _provider_info_unsupported(extension_id)
+    raw_result = await _invoke_maybe_async(
+        get_provider_info_fn,
+        extension_id=extension_id,
+        conversation_id=conversation_id,
+        provider_session_id=provider_session_id,
+        settings=settings,
+    )
+    if isinstance(raw_result, dict):
+        return _normalize_provider_info_result(extension_id, _dict_or_empty(raw_result))
+    return {
+        "ok": False,
+        "supported": True,
+        "extension_id": extension_id,
+        "status": {
+            "supported": False,
+            "state": "error",
+            "text": "Provider status unavailable.",
+            "detail": "Extension returned an invalid provider info DTO.",
+            "tone": "error",
+        },
+        "usage": {
+            "supported": False,
+            "state": "error",
+            "text": "Provider usage unavailable.",
+            "detail": "Extension returned an invalid provider info DTO.",
+            "tone": "error",
+        },
+    }
+
+
 def _runtime_option_from_schema_field(
     field: Optional[dict[str, object]],
     settings: Optional[dict[str, object]] = None,

@@ -2074,6 +2074,212 @@ def _json_safe(value: object) -> object:
     return str(value)
 
 
+def _number_value(value: object) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _provider_tone_from_remaining(remaining_percent: Optional[float]) -> str:
+    if remaining_percent is None:
+        return "success"
+    if remaining_percent <= 10.0:
+        return "error"
+    if remaining_percent <= 25.0:
+        return "warning"
+    return "success"
+
+
+def _copilot_status_payload(auth_status: object) -> PayloadDict:
+    raw = _object_mapping(_json_safe(auth_status)) or {}
+    authenticated = raw.get("isAuthenticated") is True
+    status_message = _string_or_empty(raw.get("statusMessage")).strip()
+    login = _string_or_empty(raw.get("login")).strip()
+    auth_type = _string_or_empty(raw.get("authType")).strip()
+    host = _string_or_empty(raw.get("host")).strip()
+    text = status_message
+    if not text:
+        text = f"Signed in as {login}." if authenticated and login else "Authenticated." if authenticated else "Not authenticated."
+    items: list[PayloadDict] = []
+    for label, value in (("Login", login), ("Auth", auth_type), ("Host", host)):
+        if value:
+            items.append({"label": label, "value": value})
+    return {
+        "supported": True,
+        "state": "ready" if authenticated else "auth_required",
+        "text": text,
+        "detail": "",
+        "tone": "success" if authenticated else "warning",
+        "items": items,
+    }
+
+
+def _copilot_usage_payload(quota_result: object) -> PayloadDict:
+    raw = _object_mapping(_json_safe(quota_result)) or {}
+    snapshots = raw.get("quota_snapshots")
+    if not isinstance(snapshots, dict):
+        snapshots = raw.get("quotaSnapshots")
+    snapshot_map: PayloadDict | None = None
+    if isinstance(snapshots, dict):
+        snapshot_map = {
+            str(key): item
+            for key, item in cast(dict[object, object], snapshots).items()
+        }
+    if not snapshot_map:
+        return {
+            "supported": False,
+            "state": "unavailable",
+            "text": "Provider usage unavailable.",
+            "detail": "Copilot returned no quota snapshots.",
+            "tone": "warning",
+        }
+
+    lines: list[str] = []
+    remaining_values: list[float] = []
+    limits: list[PayloadDict] = []
+    for raw_key, raw_snapshot in sorted(snapshot_map.items()):
+        snapshot = _object_mapping(raw_snapshot) or {}
+        remaining = _number_value(snapshot.get("remaining_percentage"))
+        if remaining is None:
+            remaining = _number_value(snapshot.get("remainingPercentage"))
+        used_requests = snapshot.get("used_requests")
+        if not isinstance(used_requests, int) or isinstance(used_requests, bool):
+            used_requests = snapshot.get("usedRequests")
+        entitlement = snapshot.get("entitlement_requests")
+        if not isinstance(entitlement, int) or isinstance(entitlement, bool):
+            entitlement = snapshot.get("entitlementRequests")
+        reset_date = _string_or_empty(snapshot.get("reset_date")).strip() or _string_or_empty(snapshot.get("resetDate")).strip()
+        label = str(raw_key).replace("_", " ").title()
+        parts: list[str] = []
+        if remaining is not None:
+            remaining = max(0.0, min(100.0, remaining))
+            remaining_values.append(remaining)
+            parts.append(f"{remaining:.0f}% remaining")
+        if isinstance(used_requests, int) and not isinstance(used_requests, bool):
+            parts.append(f"{used_requests} used")
+        if isinstance(entitlement, int) and not isinstance(entitlement, bool):
+            parts.append(f"{entitlement} included")
+        if reset_date:
+            parts.append(f"resets {reset_date}")
+        if parts:
+            lines.append(f"{label}: " + "  •  ".join(parts))
+        limits.append({
+            "id": str(raw_key),
+            "label": label,
+            "remaining_percent": remaining,
+            "used_requests": used_requests if isinstance(used_requests, int) and not isinstance(used_requests, bool) else None,
+            "entitlement_requests": entitlement if isinstance(entitlement, int) and not isinstance(entitlement, bool) else None,
+            "reset_date": reset_date or None,
+        })
+
+    minimum_remaining = min(remaining_values) if remaining_values else None
+    return {
+        "supported": True,
+        "state": "available",
+        "text": f"Usage remaining: {minimum_remaining:.0f}%" if minimum_remaining is not None else "Usage details available.",
+        "detail": "\n".join(lines),
+        "tone": _provider_tone_from_remaining(minimum_remaining),
+        "remaining_percent": minimum_remaining,
+        "limits": limits,
+    }
+
+
+async def get_provider_info(
+    extension_id: str,
+    conversation_id: Optional[str] = None,
+    provider_session_id: Optional[str] = None,
+    settings: Optional[SettingsDict] = None,
+) -> PayloadDict:
+    del conversation_id, provider_session_id, settings
+    try:
+        client = await _ensure_client()
+    except Exception as exc:
+        error_text = f"Failed to start Copilot provider: {exc}"
+        return {
+            "ok": False,
+            "supported": True,
+            "extension_id": extension_id,
+            "provider": "copilot",
+            "status": {
+                "supported": True,
+                "state": "error",
+                "text": "Provider status unavailable.",
+                "detail": error_text,
+                "tone": "error",
+            },
+            "usage": {
+                "supported": False,
+                "state": "error",
+                "text": "Provider usage unavailable.",
+                "detail": error_text,
+                "tone": "error",
+            },
+        }
+
+    try:
+        auth_status = await client.get_auth_status()
+        status_payload = _copilot_status_payload(auth_status)
+    except Exception as exc:
+        error_text = f"Failed to read Copilot auth status: {exc}"
+        return {
+            "ok": False,
+            "supported": True,
+            "extension_id": extension_id,
+            "provider": "copilot",
+            "status": {
+                "supported": True,
+                "state": "error",
+                "text": "Provider status unavailable.",
+                "detail": error_text,
+                "tone": "error",
+            },
+            "usage": {
+                "supported": False,
+                "state": "error",
+                "text": "Provider usage unavailable.",
+                "detail": error_text,
+                "tone": "error",
+            },
+        }
+
+    if status_payload.get("state") != "ready":
+        return {
+            "ok": True,
+            "supported": True,
+            "extension_id": extension_id,
+            "provider": "copilot",
+            "status": status_payload,
+            "usage": {
+                "supported": False,
+                "state": "auth_required",
+                "text": "Provider usage unavailable until sign-in is complete.",
+                "detail": "",
+                "tone": "warning",
+            },
+        }
+
+    try:
+        quota_result = await client.rpc.account.get_quota(timeout=15.0)
+        usage_payload = _copilot_usage_payload(quota_result)
+    except Exception as exc:
+        usage_payload = {
+            "supported": False,
+            "state": "error",
+            "text": "Provider usage unavailable.",
+            "detail": f"Failed to read Copilot quota: {exc}",
+            "tone": "error",
+        }
+
+    return {
+        "ok": True,
+        "supported": True,
+        "extension_id": extension_id,
+        "provider": "copilot",
+        "status": status_payload,
+        "usage": usage_payload,
+    }
+
+
 async def get_runtime_options(
     extension_id: str,
     conversation_id: Optional[str] = None,

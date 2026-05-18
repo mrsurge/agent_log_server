@@ -18,6 +18,11 @@ type SettingsRpcClient = {
   listExtensionSessions: (options: { extensionId: string; cwd: string | null; extraParams?: JsonRecord | null }) => Promise<unknown>;
   listExtensionModels: (options: { extensionId: string }) => Promise<unknown>;
   getRuntimeOptions: (options: { conversationId: string | null; agent: string | null }) => Promise<unknown>;
+  getExtensionProviderInfo: (options: {
+    extensionId: string;
+    conversationId?: string | null;
+    providerSessionId?: string | null;
+  }) => Promise<unknown>;
   getExtensionSessionState?: (options: {
     extensionId: string;
     conversationId: string;
@@ -46,6 +51,7 @@ type SchemaField = {
   dynamic_options_from?: JsonRecord;
   value_keys?: unknown[];
   model_gate?: JsonRecord;
+  semantic?: JsonRecord;
   source?: string;
   picker_sort?: JsonRecord;
   browse?: boolean;
@@ -195,6 +201,7 @@ function normalizeSchemaField(value: unknown): SchemaField | null {
     dynamic_source: typeof value.dynamic_source === 'string' ? value.dynamic_source : undefined,
     dynamic_options_key: typeof value.dynamic_options_key === 'string' ? value.dynamic_options_key : undefined,
     dynamic_options_from: isRecord(value.dynamic_options_from) ? value.dynamic_options_from : undefined,
+    semantic: isRecord(value.semantic) ? value.semantic : undefined,
     source: typeof value.source === 'string' ? value.source : undefined,
     picker_sort: isRecord(value.picker_sort) ? value.picker_sort : undefined,
     browse: value.browse === true,
@@ -746,6 +753,134 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     };
   }
 
+  function semanticRole(field: SchemaField): string {
+    return trimString(asRecord(field.semantic).role);
+  }
+
+  function semanticRuntimeKey(field: SchemaField): string {
+    return trimString(asRecord(field.semantic).runtime_key);
+  }
+
+  function isProviderInfoField(field: SchemaField): boolean {
+    const role = semanticRole(field);
+    return role === 'provider_status' || role === 'provider_usage';
+  }
+
+  function providerInfoTarget(schemaExtensionId = ''): {
+    extensionId: string;
+    conversationId?: string;
+    providerSessionId?: string;
+  } | null {
+    const state = getCodexAgentState();
+    const meta = state.conversationMeta;
+    const requestedExtensionId = schemaExtensionId.trim();
+    const selectedExtensionId = settingsAgentEl?.value?.trim() || '';
+    const boundExtensionId = meta && typeof meta === 'object'
+      ? trimString(meta.extension_id)
+        || trimString(meta.agent_type)
+        || trimString(state.conversationSettings?.agent)
+      : '';
+    const extensionId = requestedExtensionId || selectedExtensionId || boundExtensionId;
+    if (!extensionId) return null;
+
+    const target: {
+      extensionId: string;
+      conversationId?: string;
+      providerSessionId?: string;
+    } = { extensionId };
+    if (!state.pendingNewConversation && meta && typeof meta === 'object') {
+      const conversationId = trimString(meta.conversation_id);
+      const providerSessionId = trimString(meta.provider_session_id) || trimString(meta.thread_id);
+      if (conversationId && (!boundExtensionId || boundExtensionId === extensionId)) {
+        target.conversationId = conversationId;
+        if (providerSessionId) target.providerSessionId = providerSessionId;
+      }
+    }
+    return target;
+  }
+
+  function providerInfoUnavailable(message: string, detail = ''): JsonRecord {
+    return {
+      ok: false,
+      supported: true,
+      status: {
+        supported: false,
+        state: 'error',
+        text: message,
+        detail,
+        tone: 'error',
+      },
+      usage: {
+        supported: false,
+        state: 'error',
+        text: message,
+        detail,
+        tone: 'error',
+      },
+    };
+  }
+
+  function loadProviderInfo(schemaExtensionId = ''): Promise<JsonRecord> {
+    const target = providerInfoTarget(schemaExtensionId);
+    if (!target) {
+      return Promise.resolve(providerInfoUnavailable('Provider unavailable.', 'No extension is selected.'));
+    }
+    return requireSettingsRpc().getExtensionProviderInfo({
+      extensionId: target.extensionId,
+      conversationId: target.conversationId ?? null,
+      providerSessionId: target.providerSessionId ?? null,
+    }).then(asRecord).catch((error: unknown) => providerInfoUnavailable(
+      'Provider info unavailable.',
+      dynamicSourceErrorMessage(error),
+    ));
+  }
+
+  function renderProviderInfo(field: SchemaField, providerInfoPromise: Promise<JsonRecord> | null): HTMLDivElement {
+    const info = document.createElement('div');
+    info.className = 'settings-schema-info';
+    info.dataset.tone = 'neutral';
+
+    const infoLabel = document.createElement('div');
+    infoLabel.className = 'settings-schema-info-label';
+    infoLabel.textContent = field.label || field.id || 'Provider Info';
+    info.appendChild(infoLabel);
+
+    const infoText = document.createElement('div');
+    infoText.className = 'settings-schema-info-text';
+    infoText.textContent = providerInfoPromise ? 'Checking...' : 'Provider info unavailable.';
+    info.appendChild(infoText);
+
+    const infoDetail = document.createElement('div');
+    infoDetail.className = 'settings-schema-info-detail';
+    infoDetail.textContent = field.detail || '';
+    info.appendChild(infoDetail);
+
+    const runtimeKey = semanticRuntimeKey(field);
+    if (!runtimeKey) {
+      info.dataset.tone = 'error';
+      infoText.textContent = 'Provider info field is missing semantic.runtime_key.';
+      return info;
+    }
+    if (!providerInfoPromise) return info;
+
+    providerInfoPromise.then((payload) => {
+      const part = asRecord(payload[runtimeKey]);
+      const tone = trimString(part.tone) || 'neutral';
+      info.dataset.tone = tone;
+      infoText.textContent = trimString(part.text) || 'Provider info unavailable.';
+      infoDetail.textContent = trimString(part.detail);
+      if (!infoDetail.textContent) {
+        infoDetail.remove();
+      }
+    }).catch((error: unknown) => {
+      info.dataset.tone = 'error';
+      infoText.textContent = 'Provider info unavailable.';
+      infoDetail.textContent = dynamicSourceErrorMessage(error);
+    });
+
+    return info;
+  }
+
   function boolFromPayload(payload: JsonRecord, key: string): boolean {
     return payload[key] === true;
   }
@@ -981,6 +1116,9 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
 
     const renderFields = getRenderFields();
     if (!renderFields.length) return;
+    const providerInfoPromise = renderFields.some(isProviderInfoField)
+      ? loadProviderInfo(schemaExtensionId)
+      : null;
     const selectControls: Record<string, SelectControl> = {};
     let modelItems: JsonRecord[] = [];
 
@@ -1286,6 +1424,12 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       }
 
       if (field.type === 'info') {
+        if (isProviderInfoField(field)) {
+          const info = renderProviderInfo(field, providerInfoPromise);
+          settingsExtensionFields.appendChild(info);
+          return;
+        }
+
         const info = document.createElement('div');
         info.className = 'settings-schema-info';
         if (typeof field.tone === 'string' && field.tone.trim()) {

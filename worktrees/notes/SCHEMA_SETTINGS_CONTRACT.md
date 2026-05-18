@@ -230,6 +230,52 @@ ALS-RS behavior for this role:
   `approvalPolicy`, or another extension-owned name; the semantic role is what
   makes it the shared approval control.
 
+## Provider status and usage roles
+
+Provider status and usage are shared read-only schema concepts. The settings
+schema declares them as `info` fields with semantic roles, and ALS-RS reads one
+provider DTO from `/rpc/settings` method `extension.providerInfo.get`.
+
+Example concept:
+
+```json
+{
+  "id": "__provider_status",
+  "type": "info",
+  "label": "Provider Status",
+  "semantic": {
+    "role": "provider_status",
+    "runtime_key": "status"
+  }
+}
+```
+
+```json
+{
+  "id": "__provider_usage",
+  "type": "info",
+  "label": "Provider Usage",
+  "semantic": {
+    "role": "provider_usage",
+    "runtime_key": "usage"
+  }
+}
+```
+
+ALS-RS behavior for this role:
+
+- The modal calls `extension.providerInfo.get` once for the selected extension.
+- The Rust settings RPC forwards that request through adapter method
+  `extension.get_provider_info`.
+- Extension Python returns a provider-neutral DTO with `status` and `usage`
+  members; provider-native account, quota, and auth calls stay inside the
+  extension package.
+- Unsupported usage is represented as `usage.supported = false` in the same DTO,
+  not as a separate route or extension-specific UI branch.
+- The renderer reads the member named by `semantic.runtime_key` and displays its
+  `text`, `detail`, and `tone` fields without knowing Codex, Copilot, or Gemini
+  payload shapes.
+
 ## Persistence rules
 
 Conversation metadata is generic and stable:

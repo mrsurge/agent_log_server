@@ -28,6 +28,24 @@
       }
     },
     {
+      "id": "__provider_status",
+      "type": "info",
+      "label": "Provider Status",
+      "semantic": {
+        "role": "provider_status",
+        "runtime_key": "status"
+      }
+    },
+    {
+      "id": "__provider_usage",
+      "type": "info",
+      "label": "Provider Usage",
+      "semantic": {
+        "role": "provider_usage",
+        "runtime_key": "usage"
+      }
+    },
+    {
       "id": "model",
       "type": "select",
       "label": "Model",

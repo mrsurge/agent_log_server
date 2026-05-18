@@ -430,6 +430,14 @@ class ExtensionLoaderModule(Protocol):
         settings: JsonMap | None = None,
     ) -> JsonMap: ...
 
+    async def get_provider_info(
+        self,
+        extension_id: str,
+        conversation_id: str | None = None,
+        provider_session_id: str | None = None,
+        settings: JsonMap | None = None,
+    ) -> JsonMap: ...
+
     async def read_plan(self, extension_id: str, conversation_id: str) -> JsonMap: ...
 
     async def interrupt_session(self, extension_id: str, conversation_id: str) -> JsonMap: ...
@@ -536,6 +544,8 @@ class ExtensionJsonRpcAdapter:
             return await self._splash_schema(params)
         if method == AdapterMethod.EXTENSION_GET_RUNTIME_OPTIONS:
             return await self._runtime_options(params)
+        if method == AdapterMethod.EXTENSION_GET_PROVIDER_INFO:
+            return await self._provider_info(params)
         if method == AdapterMethod.EXTENSION_GET_PLAN:
             return await self._read_plan(params)
         if method == AdapterMethod.EXTENSION_LIST_MODELS:
@@ -1018,6 +1028,37 @@ class ExtensionJsonRpcAdapter:
             settings=settings,
         )
         return dict(result)
+
+    async def _provider_info(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        self._extension_info(extension_id)
+        conversation_id = optional_string(params.get("conversation_id"))
+        provider_session_id = _provider_session_id_param(params)
+        settings = merged_settings(self._state.settings, optional_map(params.get("settings")))
+        result = await self._loader.get_provider_info(
+            extension_id,
+            conversation_id=conversation_id,
+            provider_session_id=provider_session_id,
+            settings=settings,
+        )
+        result_map = optional_map(result)
+        if result_map is not None:
+            defaults: JsonMap = {"extension_id": extension_id}
+            if conversation_id is not None:
+                defaults["conversation_id"] = conversation_id
+            if provider_session_id is not None:
+                defaults["provider_session_id"] = provider_session_id
+            for key, value in defaults.items():
+                result_map.setdefault(key, value)
+            return result_map
+        return {
+            "ok": False,
+            "supported": True,
+            "extension_id": extension_id,
+            "conversation_id": conversation_id,
+            "provider_session_id": provider_session_id,
+            "error": "Invalid provider info response",
+        }
 
     async def _read_plan(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)

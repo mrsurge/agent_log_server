@@ -20,6 +20,7 @@ from .plan_utils import normalize_plan_steps, render_plan_markdown
 from .rollout_import import find_rollout_path, preview_entries
 from .runtime_protocol import (
     RuntimeProtocol,
+    SchemaDict,
     build_runtime_option_descriptors,
     build_thread_list_params,
     build_request_params,
@@ -351,8 +352,11 @@ def _usage_info_unavailable(
     *,
     tone: str = "warning",
     detail: str = "",
+    state: str = "unavailable",
 ) -> Dict[str, object]:
     return {
+        "supported": False,
+        "state": state,
         "text": message,
         "detail": detail,
         "tone": tone,
@@ -424,29 +428,34 @@ async def get_usage_info(
         return _usage_info_unavailable(
             message if isinstance(message, str) and message else "Failed to read Codex auth status.",
             tone="error",
+            state="error",
         )
     status = str(resolved_auth_status.get("status") or "").strip().lower()
     if status == "login_pending":
         return _usage_info_unavailable(
             "Usage unavailable while ChatGPT login is pending.",
             tone="warning",
+            state="login_pending",
             detail="Finish sign-in in the opened browser, then reopen settings.",
         )
     if status == "auth_required":
         return _usage_info_unavailable(
             "Usage unavailable until ChatGPT sign-in is complete.",
             tone="warning",
+            state="auth_required",
         )
     if not resolved_auth_status.get("requires_openai_auth"):
         return _usage_info_unavailable(
             "Usage info is not required for the current provider.",
             tone="success",
+            state="not_applicable",
         )
     if resolved_auth_status.get("account_type") == "apiKey":
         return _usage_info_unavailable(
             "Usage info is unavailable for API key authentication.",
             tone="success",
             detail="ChatGPT rate-limit snapshots are only available for ChatGPT-authenticated accounts.",
+            state="not_applicable",
         )
 
     try:
@@ -459,6 +468,7 @@ async def get_usage_info(
         return _usage_info_unavailable(
             f"Failed to read Codex usage info: {exc}",
             tone="error",
+            state="error",
         )
 
     payload = raw if _is_object_dict(raw) else {}
@@ -480,6 +490,7 @@ async def get_usage_info(
             "Usage info unavailable.",
             tone="warning",
             detail="No rate-limit snapshots were returned.",
+            state="unavailable",
         )
 
     lines: List[str] = []
@@ -493,6 +504,7 @@ async def get_usage_info(
             "Usage info unavailable.",
             tone="warning",
             detail="No rate-limit window details were returned.",
+            state="unavailable",
         )
 
     minimum_remaining = min(remaining_values) if remaining_values else None
@@ -502,9 +514,62 @@ async def get_usage_info(
         else "Usage details available."
     )
     return {
+        "supported": True,
+        "state": "available",
         "text": text,
         "detail": "\n".join(lines),
         "tone": _settings_info_tone_from_remaining(minimum_remaining),
+        "remaining_percent": minimum_remaining,
+    }
+
+
+def _provider_status_tone(auth_status: Dict[str, object]) -> str:
+    status = str(auth_status.get("status") or "").strip().lower()
+    if auth_status.get("ok") is False or status == "error":
+        return "error"
+    if status in {"auth_required", "login_pending"}:
+        return "warning"
+    return "success"
+
+
+def _provider_status_items(auth_status: Dict[str, object]) -> List[Dict[str, object]]:
+    items: List[Dict[str, object]] = []
+    for label, key in (
+        ("Account", "account_email"),
+        ("Plan", "plan_type"),
+        ("Auth", "account_type"),
+    ):
+        value = auth_status.get(key)
+        if isinstance(value, str) and value.strip():
+            items.append({"label": label, "value": value.strip()})
+    return items
+
+
+async def get_provider_info(
+    extension_id: str,
+    conversation_id: Optional[str] = None,
+    provider_session_id: Optional[str] = None,
+    settings: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    del conversation_id, provider_session_id, settings
+    auth_status = await get_auth_status(extension_id, refresh=False)
+    status_state = str(auth_status.get("status") or "unknown").strip() or "unknown"
+    status_payload: Dict[str, object] = {
+        "supported": True,
+        "state": status_state,
+        "text": auth_status.get("message") if isinstance(auth_status.get("message"), str) else "Provider status unavailable.",
+        "detail": auth_status.get("detail") if isinstance(auth_status.get("detail"), str) else "",
+        "tone": _provider_status_tone(auth_status),
+        "items": _provider_status_items(auth_status),
+    }
+    usage_payload = await get_usage_info(extension_id, auth_status=auth_status)
+    return {
+        "ok": auth_status.get("ok") is not False,
+        "supported": True,
+        "extension_id": extension_id,
+        "provider": "codex",
+        "status": status_payload,
+        "usage": usage_payload,
     }
 
 
@@ -1063,11 +1128,11 @@ async def list_models() -> List[Dict[str, object]]:
     return models
 
 
-async def _collaboration_mode_options() -> List[Dict[str, str]]:
+async def _collaboration_mode_options() -> List[SchemaDict]:
     transport = await _ensure_transport_ready()
     result = await transport.rpc_request("collaborationMode/list", params={}, timeout=15.0)
     items: object = result.get("data")
-    options: List[Dict[str, str]] = []
+    options: List[SchemaDict] = []
     seen: set[str] = set()
     if not _is_object_list(items):
         return options

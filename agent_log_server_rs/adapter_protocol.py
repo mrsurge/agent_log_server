@@ -28,6 +28,7 @@ class AdapterMethod(StrEnum):
     EXTENSION_WARM_UP = "extension.warm_up"
     EXTENSION_GET_SPLASH_SCHEMA = "extension.get_splash_schema"
     EXTENSION_GET_RUNTIME_OPTIONS = "extension.get_runtime_options"
+    EXTENSION_GET_PROVIDER_INFO = "extension.get_provider_info"
     EXTENSION_GET_PLAN = "extension.get_plan"
     EXTENSION_LIST_MODELS = "extension.list_models"
     EXTENSION_LIST_SESSIONS = "extension.list_sessions"

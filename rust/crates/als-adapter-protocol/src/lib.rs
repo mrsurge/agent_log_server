@@ -19,6 +19,7 @@ pub mod methods {
     pub const EXTENSION_WARM_UP: &str = "extension.warm_up";
     pub const EXTENSION_GET_SPLASH_SCHEMA: &str = "extension.get_splash_schema";
     pub const EXTENSION_GET_RUNTIME_OPTIONS: &str = "extension.get_runtime_options";
+    pub const EXTENSION_GET_PROVIDER_INFO: &str = "extension.get_provider_info";
     pub const EXTENSION_GET_PLAN: &str = "extension.get_plan";
     pub const EXTENSION_LIST_MODELS: &str = "extension.list_models";
     pub const EXTENSION_LIST_SESSIONS: &str = "extension.list_sessions";

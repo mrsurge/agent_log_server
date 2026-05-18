@@ -279,6 +279,30 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function getExtensionProviderInfo(options: {
+    extensionId: string;
+    conversationId?: string | null;
+    providerSessionId?: string | null;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const params: JsonObject = {
+      extension_id: options.extensionId,
+    };
+    if (typeof options.conversationId === 'string' && options.conversationId.trim()) {
+      params.conversation_id = options.conversationId.trim();
+    }
+    if (typeof options.providerSessionId === 'string' && options.providerSessionId.trim()) {
+      params.provider_session_id = options.providerSessionId.trim();
+      params.thread_id = options.providerSessionId.trim();
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionProviderInfoGet,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function getExtensionRequestCards(options: {
     extensionId: string;
   }): Promise<JsonObject & { transport: TransportTag }> {
@@ -553,6 +577,7 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     runExtensionSplashAction,
     getExtensionSettingsSchema,
     getRuntimeOptions,
+    getExtensionProviderInfo,
     getExtensionRequestCards,
     getExtensionUiFeatures,
     getExtensionPlan,

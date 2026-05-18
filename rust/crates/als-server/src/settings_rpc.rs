@@ -91,6 +91,7 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
         }
         "extension.splashAction.run" => Ok(json!({"ok": false, "transport": "rpc"})),
         "extension.runtimeOptions.get" => extension_runtime_options(state, &request.params).await,
+        "extension.providerInfo.get" => extension_provider_info(state, &request.params).await,
         "extension.requestCards.get" => {
             let extension_id = extension_id_param(&request.params);
             let cards = extension_id
@@ -573,6 +574,43 @@ async fn extension_runtime_options(state: &AppState, params: &JsonMap) -> Result
     }))
 }
 
+async fn extension_provider_info(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let request = provider_info_request(state, params)?;
+    ensure_registered_extension(state, &request.extension_id)?;
+    let mut result = adapter_extension_request_with_params(
+        state,
+        methods::EXTENSION_GET_PROVIDER_INFO,
+        request.to_adapter_params(),
+    )
+    .await?;
+    if let Value::Object(ref mut object) = result {
+        object
+            .entry("extension_id")
+            .or_insert_with(|| Value::String(request.extension_id.clone()));
+        if let Some(conversation_id) = request.conversation_id.as_ref() {
+            object
+                .entry("conversation_id")
+                .or_insert_with(|| Value::String(conversation_id.clone()));
+        }
+        if let Some(provider_session_id) = request.provider_session_id.as_ref() {
+            object
+                .entry("provider_session_id")
+                .or_insert_with(|| Value::String(provider_session_id.clone()));
+        }
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        return Ok(result);
+    }
+    Ok(json!({
+        "ok": false,
+        "supported": true,
+        "extension_id": request.extension_id,
+        "conversation_id": request.conversation_id,
+        "provider_session_id": request.provider_session_id,
+        "transport": "rpc",
+        "error": "Invalid provider info response"
+    }))
+}
+
 async fn extension_plan(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
     let request = plan_request(state, params)?;
     ensure_registered_extension(state, &request.extension_id)?;
@@ -758,6 +796,109 @@ impl RuntimeOptionsRequest {
         params.insert("settings".to_owned(), Value::Object(self.settings.clone()));
         params
     }
+}
+
+struct ProviderInfoRequest {
+    extension_id: String,
+    conversation_id: Option<String>,
+    provider_session_id: Option<String>,
+    settings: JsonMap,
+}
+
+impl ProviderInfoRequest {
+    fn to_adapter_params(&self) -> JsonMap {
+        let mut params = JsonMap::new();
+        params.insert(
+            "extension_id".to_owned(),
+            Value::String(self.extension_id.clone()),
+        );
+        if let Some(conversation_id) = self.conversation_id.as_ref() {
+            params.insert(
+                "conversation_id".to_owned(),
+                Value::String(conversation_id.clone()),
+            );
+        }
+        if let Some(provider_session_id) = self.provider_session_id.as_ref() {
+            params.insert(
+                "provider_session_id".to_owned(),
+                Value::String(provider_session_id.clone()),
+            );
+            params.insert(
+                "thread_id".to_owned(),
+                Value::String(provider_session_id.clone()),
+            );
+        }
+        params.insert("settings".to_owned(), Value::Object(self.settings.clone()));
+        params
+    }
+}
+
+fn provider_info_request(
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<ProviderInfoRequest, RpcError> {
+    let conversation_id = params
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let meta = conversation_id
+        .as_deref()
+        .map(|id| {
+            state
+                .conversations
+                .load_meta_if_exists(id)
+                .map_err(internal_rpc_error)
+        })
+        .transpose()?
+        .flatten();
+    let extension_id = extension_id_param(params)
+        .or_else(|| {
+            params
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            meta.as_ref()
+                .and_then(|meta| meta.extension_id.as_deref().or(meta.agent_type.as_deref()))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            meta.as_ref()
+                .and_then(|meta| meta.settings.get("agent"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .ok_or_else(|| rpc_error(-32602, "extension_id or conversation extension is required"))?;
+    let provider_session_id = params
+        .get("provider_session_id")
+        .or_else(|| params.get("thread_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            meta.as_ref()
+                .and_then(|meta| meta.provider_session_id.clone().or(meta.thread_id.clone()))
+        });
+    let settings = meta
+        .as_ref()
+        .map(|meta| meta.settings.clone())
+        .unwrap_or_default();
+    Ok(ProviderInfoRequest {
+        extension_id,
+        conversation_id,
+        provider_session_id,
+        settings,
+    })
 }
 
 fn runtime_options_request(
