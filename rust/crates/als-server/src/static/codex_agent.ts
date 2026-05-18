@@ -917,7 +917,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   const {
-    normalizeApprovalValue,
     renderFooterRuntimeControls,
     saveApprovalQuick,
     applyRuntimeMode,
@@ -1547,7 +1546,6 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsLabelEl,
       settingsAliasEl,
     },
-    normalizeApprovalValue,
     setActivity,
     setMarkdownEnabled,
     setViewWrapEnabled,

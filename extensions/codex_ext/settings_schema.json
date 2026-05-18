@@ -128,11 +128,7 @@
       "semantic": {
         "role": "mode",
         "runtime_key": "mode",
-        "label": "Mode",
-        "accents": {
-          "plan": "ok",
-          "default": "warn"
-        }
+        "label": "Mode"
       }
     },
     {

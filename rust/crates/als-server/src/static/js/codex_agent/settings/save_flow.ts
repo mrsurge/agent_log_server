@@ -69,7 +69,6 @@ interface SettingsSaveFlowContext {
   getState(): SettingsSaveState;
   setState(patch: Partial<SettingsSaveState>): void;
   elements: SettingsSaveElements;
-  normalizeApprovalValue(value: string | undefined): string | undefined;
   setActivity(message: string, isError: boolean): void;
   setMarkdownEnabled(enabled: boolean): void;
   setViewWrapEnabled(enabled: boolean): void;
@@ -93,7 +92,6 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
     getState,
     setState,
     elements,
-    normalizeApprovalValue,
     setActivity,
     setMarkdownEnabled,
     setViewWrapEnabled,
@@ -180,20 +178,16 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
     const approvalKey = approvalDescriptor
       ? (typeof approvalDescriptor.settingKey === 'string' && approvalDescriptor.settingKey.trim()
         ? approvalDescriptor.settingKey.trim()
-        : 'approvalPolicy')
+        : '')
       : '';
     const sandboxKey = sandboxDescriptor
       ? (typeof sandboxDescriptor.settingKey === 'string' && sandboxDescriptor.settingKey.trim()
         ? sandboxDescriptor.settingKey.trim()
-        : 'sandboxPolicy')
+        : '')
       : '';
     const schemaManagedKeys = new Set(Object.keys(schemaValues));
     const normalizedSchemaSettings: Record<string, unknown> = Object.fromEntries(
       Object.entries(schemaValues).map(([key, value]) => {
-        if (key === approvalKey) {
-          const approvalValue = typeof value === 'string' ? normalizeApprovalValue(value.trim()) : '';
-          return [key, approvalValue || null];
-        }
         return [key, normalizeStringSetting(value)];
       })
     );
@@ -259,7 +253,7 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
       agent: agentType,
     };
     if (approvalKey && !schemaManages(approvalKey)) {
-      settings[approvalKey] = normalizeApprovalValue(settingsApprovalEl?.value?.trim()) || null;
+      settings[approvalKey] = normalizeStringSetting(settingsApprovalEl?.value) || null;
     }
     if (sandboxKey && !schemaManages(sandboxKey)) {
       settings[sandboxKey] = normalizeStringSetting(settingsSandboxEl?.value);

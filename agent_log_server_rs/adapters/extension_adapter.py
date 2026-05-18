@@ -419,11 +419,7 @@ class ExtensionLoaderModule(Protocol):
         force: bool = False,
     ) -> list[JsonMap]: ...
 
-    def get_static_settings_schema(self, extension_id: str) -> JsonMap | None: ...
-
     async def list_models(self, extension_id: str) -> object: ...
-
-    async def get_settings_schema(self, extension_id: str) -> JsonMap | None: ...
 
     async def get_splash_schema(self, extension_id: str) -> JsonMap | None: ...
 
@@ -536,8 +532,6 @@ class ExtensionJsonRpcAdapter:
             return await self._debug_probe(params)
         if method == AdapterMethod.EXTENSION_WARM_UP:
             return await self._warm_up(params)
-        if method == AdapterMethod.EXTENSION_GET_SETTINGS_SCHEMA:
-            return await self._settings_schema(params)
         if method == AdapterMethod.EXTENSION_GET_SPLASH_SCHEMA:
             return await self._splash_schema(params)
         if method == AdapterMethod.EXTENSION_GET_RUNTIME_OPTIONS:
@@ -1002,16 +996,6 @@ class ExtensionJsonRpcAdapter:
             "provider_session_id": _provider_session_id_param(params),
             "error": "Invalid live session unload response",
         }
-
-    async def _settings_schema(self, params: JsonMap) -> JsonMap:
-        extension_id = self._extension_id_param(params)
-        self._extension_info(extension_id)
-        schema = await self._loader.get_settings_schema(extension_id)
-        if not isinstance(schema, dict) or not schema:
-            schema = self._loader.get_static_settings_schema(extension_id)
-        if isinstance(schema, dict) and schema:
-            return dict(schema)
-        return {"version": "1", "fields": []}
 
     async def _splash_schema(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)

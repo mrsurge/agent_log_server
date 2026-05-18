@@ -2298,15 +2298,10 @@ async def list_models(extension_id: str) -> object:
 
 
 async def get_settings_schema(extension_id: str) -> Optional[dict[str, object]]:
-    """Get the file-owned settings schema for an extension, with legacy hook fallback."""
+    """Get the file-owned settings schema for an extension."""
     static_schema = get_static_settings_schema(extension_id)
     if isinstance(static_schema, dict) and static_schema:
         return dict(static_schema)
-    get_schema_fn = _callable_attr(get_handler(extension_id), "get_settings_schema")
-    if get_schema_fn is not None:
-        result = await _invoke_maybe_async(get_schema_fn, extension_id=extension_id)
-        if isinstance(result, dict):
-            return _dict_or_empty(result)
     return None
 
 

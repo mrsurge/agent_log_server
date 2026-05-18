@@ -9,7 +9,7 @@ import shutil
 import sys
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -69,6 +69,7 @@ _CLIENT_RESPONSE_METHODS = frozenset({
     "account/logout",
     "account/ratelimits/read",
     "account/read",
+    "collaborationmode/list",
     "initialize",
     "command/exec",
     "model/list",
@@ -87,6 +88,18 @@ _RESPONSE_SCHEMA_OVERRIDES: Dict[str, str] = {
     "account/logout": "LogoutAccountResponse",
     "account/ratelimits/read": "GetAccountRateLimitsResponse",
     "account/read": "GetAccountResponse",
+}
+_INLINE_RESPONSE_SCHEMAS: Dict[str, SchemaDict] = {
+    "collaborationmode/list": {
+        "type": "object",
+        "required": ["data"],
+        "properties": {
+            "data": {
+                "type": "array",
+                "items": {"$ref": "#/definitions/CollaborationModeMask"},
+            },
+        },
+    },
 }
 _SERVER_REQUEST_RESPONSE_DEFINITIONS: Dict[str, str] = {
     "account/chatgptauthtokens/refresh": "ChatgptAuthTokensRefreshResponse",
@@ -135,8 +148,6 @@ class RuntimeProtocol:
     server_request_semantics: Dict[str, ProtocolSemanticSpec]
     notification_semantics: Dict[str, ProtocolSemanticSpec]
     event_semantics: Dict[str, ProtocolSemanticSpec]
-    settings_cache: Dict[str, Dict[str, object]] = field(default_factory=dict)
-
     def request_schema(self, method: str) -> Optional[Dict[str, object]]:
         return self.request_params.get(method.lower())
 
@@ -708,6 +719,9 @@ def _resolve_response_schema_from_definitions(
 ) -> Optional[SchemaDict]:
     raw_method = str(method or "").strip()
     normalized = raw_method.lower()
+    inline_schema = _INLINE_RESPONSE_SCHEMAS.get(normalized)
+    if _is_schema_dict(inline_schema):
+        return _resolve_schema(inline_schema, definitions)
     candidates: List[str] = []
     direct_name = _response_definition_name(normalized)
     if isinstance(direct_name, str) and direct_name:
@@ -730,6 +744,10 @@ def _build_response_registry(
     missing: List[str] = []
     normalized_methods = sorted({method.lower() for method in methods if method.lower() in _CLIENT_RESPONSE_METHODS})
     for method in normalized_methods:
+        inline_schema = _INLINE_RESPONSE_SCHEMAS.get(method)
+        if _is_schema_dict(inline_schema):
+            registry[method] = _resolve_schema(inline_schema, definitions)
+            continue
         definition_name = _response_definition_name(method)
         if not definition_name:
             missing.append(f"{method} (unresolved)")
@@ -821,7 +839,6 @@ def _refresh_runtime_protocol_from_disk(protocol: RuntimeProtocol) -> None:
     protocol.server_request_semantics = refreshed.server_request_semantics
     protocol.notification_semantics = refreshed.notification_semantics
     protocol.event_semantics = refreshed.event_semantics
-    protocol.settings_cache.clear()
 
 
 def _build_server_request_response_registry(
@@ -1579,188 +1596,15 @@ def build_thread_runtime_signature_payload(
     )
 
 
-def build_settings_schema(protocol: RuntimeProtocol, extension_id: str) -> SchemaDict:
-    cached = protocol.settings_cache.get(extension_id)
-    if cached is not None:
-        return cached
-
-    thread_start = protocol.request_schema("thread/start") or {}
-    turn_start = protocol.request_schema("turn/start") or {}
-    thread_props = _schema_properties(thread_start)
-    turn_props = _schema_properties(turn_start)
-
-    approval_values = _schema_string_enums(thread_props.get("approvalPolicy", {}), protocol.definitions)
-    sandbox_values = _schema_string_enums(thread_props.get("sandbox", {}), protocol.definitions)
-    summary_values = _schema_string_enums(turn_props.get("summary", {}), protocol.definitions)
-    collaboration_ref = turn_props.get("collaborationMode")
-    if not _is_schema_dict(collaboration_ref) and _is_schema_dict(protocol.definitions.get("CollaborationMode")):
-        collaboration_ref = {"$ref": "#/definitions/CollaborationMode"}
-    collaboration_schema = _resolve_schema(collaboration_ref or {}, protocol.definitions)
-    collaboration_props = _schema_properties(collaboration_schema)
-    mode_values = _schema_string_enums(collaboration_props.get("mode", {}), protocol.definitions)
-    mode_options = _schema_options(mode_values)
-
-    schema: SchemaDict = {
-        "version": "1",
-        "description": "Runtime-generated settings schema for the Codex app-server extension",
-        "generated_from": str(protocol.schema_path),
-        "codex_version": protocol.version,
-        "fields": [
-            {
-                "id": "cwd",
-                "type": "path",
-                "label": "Working Directory",
-                "placeholder": "~/project",
-                "default": "~",
-                "required": True,
-                "browse": True,
-            },
-            {
-                "id": "session",
-                "type": "session_picker",
-                "label": "Session",
-                "placeholder": "(new session) or type/paste session ID",
-                "source": f"/api/extensions/{extension_id}/sessions",
-                "resume_endpoint": f"/api/extensions/{extension_id}/sessions/resume",
-                "picker_sort": {
-                    "param": "sort",
-                    "default": "updated_at",
-                    "options": [
-                        {"value": "updated_at", "label": "MRU"},
-                        {"value": "created_at", "label": "Created"},
-                    ],
-                },
-            },
-            {
-                "id": "model",
-                "type": "select",
-                "label": "Model",
-                "options": [],
-                "dynamic_source": f"/api/extensions/{extension_id}/models",
-                "placeholder": "Use server default",
-                "default": "",
-            },
-            {
-                "id": "high_context_400k",
-                "type": "checkbox",
-                "label": "400k Context",
-                "default": False,
-                "model_gate": {
-                    "family": "gpt",
-                    "min_major": 5,
-                    "min_minor": 4,
-                    "label": "GPT-5.4 or newer",
-                },
-            },
-            {
-                "id": "reasoning_effort",
-                "type": "select",
-                "label": "Reasoning Effort",
-                "options": [],
-                "dynamic_source": f"/api/extensions/{extension_id}/models",
-                "dynamic_options_from": {
-                    "source_field": "model",
-                    "match_path": "id",
-                    "options_path": [
-                        "supportedReasoningEfforts",
-                        "supported_reasoning_efforts",
-                        "raw.supportedReasoningEfforts",
-                        "raw.supported_reasoning_efforts",
-                    ],
-                    "option_value_path": "reasoningEffort",
-                    "option_label_path": "reasoningEffort",
-                    "default_path": [
-                        "defaultReasoningEffort",
-                        "default_reasoning_effort",
-                        "raw.defaultReasoningEffort",
-                        "raw.default_reasoning_effort",
-                    ],
-                    "missing_source_placeholder": "Select model first",
-                    "empty_placeholder": "Not supported by selected model",
-                },
-                "placeholder": "Select model first",
-                "default": "",
-                "value_keys": ["effort"],
-            },
-            {
-                "id": "summary",
-                "type": "select",
-                "label": "Reasoning Summary",
-                "options": _schema_options(summary_values),
-                "placeholder": "Use model default",
-                "default": "",
-            },
-            {
-                "id": "approvalPolicy",
-                "type": "select",
-                "label": "Approval Policy",
-                "options": _schema_options(approval_values),
-                "placeholder": "Use server default",
-                "default": "",
-                "runtime_option": {
-                    "kind": "approval",
-                    "footer": True,
-                    "footer_label": "Approval",
-                },
-            },
-            {
-                "id": "sandboxPolicy",
-                "type": "select",
-                "label": "Sandbox Policy",
-                "options": _schema_options(sandbox_values),
-                "placeholder": "Use server default",
-                "default": "",
-                "runtime_option": {
-                    "kind": "sandbox",
-                },
-            },
-            {
-                "id": "mode",
-                "type": "select",
-                "label": "Mode",
-                "options": mode_options,
-                "placeholder": "Use runtime default",
-                "default": "",
-                "runtime_option": {
-                    "kind": "mode",
-                    "footer": True,
-                    "footer_label": "Mode",
-                    "accents": {
-                        "plan": "ok",
-                        "default": "warn",
-                    },
-                },
-            },
-            {
-                "id": "developer_instructions",
-                "type": "textarea",
-                "label": "Developer Instructions",
-                "placeholder": "Additional runtime instructions appended to the Codex thread configuration",
-                "rows": 6,
-                "default": "",
-            },
-        ],
-    }
-    protocol.settings_cache[extension_id] = schema
-    return schema
-
-
 def build_runtime_option_descriptors(
     protocol: RuntimeProtocol,
     settings: SchemaDict,
+    mode_options: Optional[List[SchemaDict]] = None,
 ) -> SchemaDict:
     thread_start = protocol.request_schema("thread/start") or {}
-    turn_start = protocol.request_schema("turn/start") or {}
     thread_props = _schema_properties(thread_start)
-    turn_props = _schema_properties(turn_start)
     approval_options = _schema_options(_schema_string_enums(thread_props.get("approvalPolicy", {}), protocol.definitions))
     sandbox_options = _schema_options(_schema_string_enums(thread_props.get("sandbox", {}), protocol.definitions))
-    collaboration_ref = turn_props.get("collaborationMode")
-    if not _is_schema_dict(collaboration_ref) and _is_schema_dict(protocol.definitions.get("CollaborationMode")):
-        collaboration_ref = {"$ref": "#/definitions/CollaborationMode"}
-    collaboration_schema = _resolve_schema(collaboration_ref or {}, protocol.definitions)
-    collaboration_props = _schema_properties(collaboration_schema)
-    mode_options = _schema_options(_schema_string_enums(collaboration_props.get("mode", {}), protocol.definitions))
 
     approval_value = settings.get("approvalPolicy")
     sandbox_value = settings.get("sandboxPolicy") or settings.get("sandbox")
@@ -1783,13 +1627,9 @@ def build_runtime_option_descriptors(
         "mode": {
             "settingKey": "mode",
             "label": "Mode",
-            "options": mode_options,
+            "options": mode_options or [],
             "current": mode_value if isinstance(mode_value, str) else "",
             "default": "",
-            "accents": {
-                "plan": "ok",
-                "default": "warn",
-            },
         },
     }
 

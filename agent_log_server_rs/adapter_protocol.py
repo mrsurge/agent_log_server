@@ -26,7 +26,6 @@ class AdapterMethod(StrEnum):
     EXTENSION_PACKAGE_REMOVE = "extension.package.remove"
     EXTENSION_DEBUG_PROBE = "extension.debug_probe"
     EXTENSION_WARM_UP = "extension.warm_up"
-    EXTENSION_GET_SETTINGS_SCHEMA = "extension.get_settings_schema"
     EXTENSION_GET_SPLASH_SCHEMA = "extension.get_splash_schema"
     EXTENSION_GET_RUNTIME_OPTIONS = "extension.get_runtime_options"
     EXTENSION_GET_PLAN = "extension.get_plan"

@@ -998,22 +998,6 @@ async def wait_extension_ready(extension_id: str, timeout: float = 60.0) -> bool
     return True
 
 
-async def get_settings_schema(extension_id: str) -> Dict[str, object]:
-    del extension_id
-    schema_path = Path(__file__).with_name("settings_schema.json")
-    with schema_path.open("r", encoding="utf-8") as handle:
-        loaded = cast(object, json.load(handle))
-    if isinstance(loaded, dict):
-        schema: Dict[str, object] = {
-            str(key): value
-            for key, value in cast(Mapping[object, object], loaded).items()
-        }
-    else:
-        schema = {"version": "1", "fields": []}
-    schema["cache"] = "none"
-    return schema
-
-
 async def get_runtime_options(
     extension_id: str,
     conversation_id: Optional[str] = None,
@@ -1024,7 +1008,11 @@ async def get_runtime_options(
         conversation_id or "",
         settings=settings,
     ) if conversation_id else _materialize_runtime_settings(settings or {})
-    result = build_runtime_option_descriptors(protocol, merged)
+    result = build_runtime_option_descriptors(
+        protocol,
+        merged,
+        mode_options=await _collaboration_mode_options(),
+    )
     result["agent"] = extension_id
     return result
 
@@ -1073,6 +1061,29 @@ async def list_models() -> List[Dict[str, object]]:
                 model["name"] = model["id"]
         models.append(model)
     return models
+
+
+async def _collaboration_mode_options() -> List[Dict[str, str]]:
+    transport = await _ensure_transport_ready()
+    result = await transport.rpc_request("collaborationMode/list", params={}, timeout=15.0)
+    items: object = result.get("data")
+    options: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    if not _is_object_list(items):
+        return options
+    for item in items:
+        if not _is_object_dict(item):
+            continue
+        mode = item.get("mode")
+        if not isinstance(mode, str) or not mode or mode in seen:
+            continue
+        name = item.get("name")
+        options.append({
+            "value": mode,
+            "label": name if isinstance(name, str) and name else mode,
+        })
+        seen.add(mode)
+    return options
 
 
 async def list_sessions(cwd: Optional[str] = None, sort: Optional[str] = None) -> List[Dict[str, object]]:

@@ -720,7 +720,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     }
   }
 
-  function liveSessionBinding(): {
+  function liveSessionBinding(schemaExtensionId = ''): {
     conversationId: string;
     extensionId: string;
     providerSessionId: string;
@@ -732,12 +732,12 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     const threadId = trimString(meta.thread_id);
     const providerSessionId = trimString(meta.provider_session_id);
     const bindingId = threadId || providerSessionId;
-    const extensionId = (
-      settingsAgentEl?.value?.trim()
-      || trimString(state.conversationSettings?.agent)
-      || trimString(meta.extension_id)
+    const boundExtensionId = trimString(meta.extension_id)
       || trimString(meta.agent_type)
-    );
+      || trimString(state.conversationSettings?.agent);
+    const requestedExtensionId = schemaExtensionId.trim();
+    if (requestedExtensionId && boundExtensionId && requestedExtensionId !== boundExtensionId) return null;
+    const extensionId = boundExtensionId || requestedExtensionId || settingsAgentEl?.value?.trim() || '';
     if (!conversationId || !extensionId || !bindingId) return null;
     return {
       conversationId,
@@ -768,8 +768,8 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     return 'unknown';
   }
 
-  function renderLiveSessionInfo(field: SchemaField): HTMLDivElement {
-    const binding = liveSessionBinding();
+  function renderLiveSessionInfo(field: SchemaField, schemaExtensionId = ''): HTMLDivElement {
+    const binding = liveSessionBinding(schemaExtensionId);
     const info = document.createElement('div');
     info.className = 'settings-schema-info settings-live-session';
     info.dataset.state = 'unknown';
@@ -888,7 +888,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   /**
    * Render schema fields into the extension fields container
    */
-  function renderSchemaFields(schema: SettingsSchema | null, values: JsonRecord = {}): void {
+  function renderSchemaFields(schema: SettingsSchema | null, values: JsonRecord = {}, schemaExtensionId = ''): void {
     if (!settingsExtensionFields) return;
     settingsExtensionFields.innerHTML = '';
     currentSchemaValues = {};
@@ -898,16 +898,8 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       const state = getCodexAgentState();
       if (state?.pendingNewConversation) return [];
 
-      const meta = state.conversationMeta;
-      if (!meta || typeof meta !== 'object') return [];
-
-      const conversationId = typeof meta.conversation_id === 'string' ? meta.conversation_id.trim() : '';
-      const threadId = typeof meta.thread_id === 'string' ? meta.thread_id.trim() : '';
-      const providerSessionId = typeof meta.provider_session_id === 'string'
-        ? meta.provider_session_id.trim()
-        : '';
-      const bindingId = threadId || providerSessionId;
-      if (!conversationId || !bindingId) return [];
+      const binding = liveSessionBinding(schemaExtensionId);
+      if (!binding) return [];
 
       return [
         {
@@ -920,14 +912,14 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
           id: '__conversation_info_conversation_id',
           type: 'info',
           label: 'Conversation ID',
-          text: conversationId,
+          text: binding.conversationId,
           detail: 'Harness conversation identifier.',
         },
         {
           id: '__conversation_info_provider_thread_id',
           type: 'live_session_info',
           label: 'Provider Session / Thread ID',
-          text: bindingId,
+          text: binding.providerSessionId,
           detail: 'Bound provider session or thread identifier.',
         },
       ];
@@ -1324,7 +1316,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       }
 
       if (field.type === 'live_session_info') {
-        const info = renderLiveSessionInfo(field);
+        const info = renderLiveSessionInfo(field, schemaExtensionId);
         settingsExtensionFields.appendChild(info);
         return;
       }
@@ -1477,7 +1469,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
               if (!field.dynamic_options_from && opts.length) buildOptions(opts);
               if (field.id === 'model') syncModelDependentFields();
             };
-            const selectedAgent = settingsAgentEl?.value?.trim() || '';
+            const selectedAgent = schemaExtensionId || settingsAgentEl?.value?.trim() || '';
             const conversationId = stringValue(getCodexAgentState().conversationMeta?.conversation_id);
             const dynamicSource = typeof field.dynamic_source === 'string' ? field.dynamic_source : '';
             const runtimeOptionsSource = isRuntimeOptionsSource(dynamicSource);
@@ -1665,7 +1657,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
             settings = { cwd: hu.projectRoot };
           }
         }
-        renderSchemaFields(schema, settings);
+        renderSchemaFields(schema, settings, agentId);
       }
     }
   }

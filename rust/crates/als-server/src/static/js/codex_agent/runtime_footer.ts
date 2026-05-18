@@ -73,12 +73,6 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
     windowRef: typeof window !== 'undefined' ? window : null,
   });
 
-  function normalizeApprovalValue(value: string | undefined): string | undefined {
-    if (!value) return value;
-    if (value === 'unlessTrusted') return 'untrusted';
-    return value;
-  }
-
   function normalizeRuntimeOptionDescriptor(kind: RuntimeOptionKind): RuntimeOptionDescriptor | null {
     const { runtimeOptions } = getState();
     const raw = runtimeOptions?.[kind];
@@ -121,21 +115,18 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
 
   function getQuickControlKinds(): string[] {
     const { runtimeOptions } = getState();
-    const configured = Array.isArray(runtimeOptions?.quickControls)
+    return Array.isArray(runtimeOptions?.quickControls)
       ? runtimeOptions.quickControls
           .map((item: unknown) => (typeof item === 'string' ? item.trim() : ''))
           .filter(Boolean)
       : [];
-    if (configured.length) return configured;
-    return ['approval', 'mode'].filter((kind) => Boolean(normalizeRuntimeOptionDescriptor(kind)));
   }
 
   function getFooterSlotKinds(): string[] {
-    const configured = new Set(getQuickControlKinds());
     const kinds: string[] = [];
-    for (const kind of ['approval', 'mode']) {
+    for (const kind of getQuickControlKinds()) {
       const descriptor = normalizeRuntimeOptionDescriptor(kind);
-      if (configured.has(kind) || descriptor?.options?.length) {
+      if (descriptor?.options?.length) {
         kinds.push(kind);
       }
     }
@@ -143,19 +134,16 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
   }
 
   function getFooterRuntimeLabel(kind: RuntimeOptionKind, descriptor: RuntimeOptionDescriptor | null): string {
-    if (kind === 'mode') {
-      return descriptor?.label || descriptor?.footerLabel || 'Mode';
-    }
     return descriptor?.footerLabel || descriptor?.label || kind;
   }
 
-  function getRuntimeSettingKey(kind: RuntimeOptionKind, fallbackKey: string): string {
-    return normalizeRuntimeOptionDescriptor(kind)?.settingKey || fallbackKey;
+  function getRuntimeSettingKey(kind: RuntimeOptionKind): string {
+    return normalizeRuntimeOptionDescriptor(kind)?.settingKey || '';
   }
 
-  function getConversationSettingByRuntimeKey(kind: RuntimeOptionKind, fallbackKey: string): string {
+  function getConversationSettingByRuntimeKey(kind: RuntimeOptionKind): string {
     const { conversationSettings } = getState();
-    const key = getRuntimeSettingKey(kind, fallbackKey);
+    const key = getRuntimeSettingKey(kind);
     if (!key || !conversationSettings || typeof conversationSettings !== 'object') return '';
     const value = conversationSettings[key];
     return typeof value === 'string' ? value : '';
@@ -164,18 +152,18 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
   function getRuntimeOptionLabel(kind: RuntimeOptionKind, value: string): string {
     if (!value) return '';
     const descriptor = normalizeRuntimeOptionDescriptor(kind);
-      const match = descriptor?.options?.find((option: RuntimeOptionChoice) => option.value === value);
+    const match = descriptor?.options?.find((option: RuntimeOptionChoice) => option.value === value);
     return match?.label || value;
   }
 
-  function getRuntimeQuickValue(kind: RuntimeOptionKind, fallbackKey: string): string {
+  function getRuntimeQuickValue(kind: RuntimeOptionKind): string {
     const { activeRuntimeOptionValues } = getState();
     const activeValue = activeRuntimeOptionValues?.[kind];
     if (typeof activeValue === 'string' && activeValue.trim()) {
       return activeValue.trim();
     }
     const descriptor = normalizeRuntimeOptionDescriptor(kind);
-    return getConversationSettingByRuntimeKey(kind, fallbackKey)
+    return getConversationSettingByRuntimeKey(kind)
       || descriptor?.current
       || descriptor?.default
       || '';
@@ -200,8 +188,7 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
       if (!descriptor || !descriptor.options.length) {
         return;
       }
-      const fallbackKey = descriptor.settingKey || kind;
-      const currentValue = getRuntimeQuickValue(kind, fallbackKey);
+      const currentValue = getRuntimeQuickValue(kind);
       const cell = document.createElement('div');
       cell.className = 'status-pill footer-cell footer-runtime-cell';
       cell.dataset.runtimeKind = kind;
@@ -223,7 +210,7 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
       valueBtn.classList.toggle('ok', accentClass === 'ok');
       valueBtn.classList.toggle('warn', accentClass === 'warn');
       valueBtn.classList.toggle('err', accentClass === 'err');
-      valueBtn.textContent = getRuntimeOptionLabel(kind, currentValue) || currentValue || 'default';
+      valueBtn.textContent = getRuntimeOptionLabel(kind, currentValue) || currentValue || 'Unset';
       valueBtn.addEventListener('click', (evt) => {
         evt.preventDefault();
         toggleDropdownMenu(optionsEl);
@@ -240,7 +227,7 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
         btn.textContent = option.label;
         btn.addEventListener('click', async () => {
           closeDropdownMenu(optionsEl);
-          await saveRuntimeOptionQuick(kind, option.value, fallbackKey);
+          await saveRuntimeOptionQuick(kind, option.value);
         });
         optionsEl.appendChild(btn);
       });
@@ -284,15 +271,12 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
   async function saveRuntimeOptionQuick(
     kind: RuntimeOptionKind,
     value: string | undefined,
-    fallbackKey: string,
   ): Promise<void> {
     const state = getState();
-    let nextValue = value?.trim();
-    if (kind === 'approval') {
-      nextValue = normalizeApprovalValue(nextValue);
-    }
+    const nextValue = value?.trim();
     if (!nextValue) return;
-    const settingKey = getRuntimeSettingKey(kind, fallbackKey || kind);
+    const settingKey = getRuntimeSettingKey(kind);
+    if (!settingKey) return;
     const conversationId = typeof state.conversationMeta?.conversation_id === 'string'
       ? state.conversationMeta.conversation_id
       : null;
@@ -337,7 +321,7 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
   }
 
   async function saveApprovalQuick(value: string | undefined): Promise<void> {
-    await saveRuntimeOptionQuick('approval', value, 'approvalPolicy');
+    await saveRuntimeOptionQuick('approval', value);
   }
 
   function applyRuntimeMode(kind: string): void {
@@ -372,7 +356,6 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
   }
 
   return {
-    normalizeApprovalValue,
     renderFooterRuntimeControls,
     saveApprovalQuick,
     applyRuntimeMode,

@@ -499,8 +499,8 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       if (settingsAgentEl) settingsAgentEl.value = resolveAgentId('', state);
     } else {
       if (settingsCwdEl) settingsCwdEl.value = state.conversationSettings?.cwd || '';
-      if (settingsApprovalEl) settingsApprovalEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.approval?.settingKey || '') || state.conversationSettings?.approvalPolicy || '';
-      if (settingsSandboxEl) settingsSandboxEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.sandbox?.settingKey || '') || state.conversationSettings?.sandboxPolicy || '';
+      if (settingsApprovalEl) settingsApprovalEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.approval?.settingKey || '');
+      if (settingsSandboxEl) settingsSandboxEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.sandbox?.settingKey || '');
       if (settingsModelEl) settingsModelEl.value = state.conversationSettings?.model || '';
       updateEffortOptionsForModel(state.conversationSettings?.model);
       if (settingsEffortEl) settingsEffortEl.value = state.conversationSettings?.effort || '';

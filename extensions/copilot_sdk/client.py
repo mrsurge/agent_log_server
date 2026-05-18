@@ -2074,13 +2074,6 @@ def _json_safe(value: object) -> object:
     return str(value)
 
 
-def _load_settings_schema_template() -> PayloadDict:
-    schema_path = Path(__file__).with_name("settings_schema.json")
-    with schema_path.open("r", encoding="utf-8") as handle:
-        loaded = cast(object, json.load(handle))
-    return _object_mapping(loaded) or {}
-
-
 async def get_runtime_options(
     extension_id: str,
     conversation_id: Optional[str] = None,
@@ -2124,11 +2117,6 @@ async def get_runtime_options(
             _DEFAULT_MODE,
         ),
     }
-
-
-async def get_settings_schema(extension_id: str) -> PayloadDict:
-    del extension_id
-    return _load_settings_schema_template()
 
 
 async def read_plan(extension_id: str, conversation_id: str) -> PayloadDict:

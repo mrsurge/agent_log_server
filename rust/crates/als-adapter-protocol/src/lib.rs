@@ -17,7 +17,6 @@ pub mod methods {
     pub const EXTENSION_PACKAGE_REMOVE: &str = "extension.package.remove";
     pub const EXTENSION_DEBUG_PROBE: &str = "extension.debug_probe";
     pub const EXTENSION_WARM_UP: &str = "extension.warm_up";
-    pub const EXTENSION_GET_SETTINGS_SCHEMA: &str = "extension.get_settings_schema";
     pub const EXTENSION_GET_SPLASH_SCHEMA: &str = "extension.get_splash_schema";
     pub const EXTENSION_GET_RUNTIME_OPTIONS: &str = "extension.get_runtime_options";
     pub const EXTENSION_GET_PLAN: &str = "extension.get_plan";

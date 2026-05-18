@@ -78,13 +78,7 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
             json!({"ok": false, "error": format!("{} is not implemented in ALS-RS yet", request.method), "transport": "rpc"}),
         ),
         "extension.settingsSchema.get" => {
-            extension_schema(
-                state,
-                &request.params,
-                methods::EXTENSION_GET_SETTINGS_SCHEMA,
-                SchemaKind::Settings,
-            )
-            .await
+            extension_schema(state, &request.params, "", SchemaKind::Settings).await
         }
         "extension.splashSchema.get" => {
             extension_schema(
@@ -331,13 +325,16 @@ async fn extension_schema(
     let extension_id = require_extension_id(params)?;
     let entry = ensure_registered_extension(state, &extension_id)?;
     if matches!(kind, SchemaKind::Settings) {
-        if let Some(mut schema) = read_extension_schema_file(&entry, "settings_schema.json")? {
-            if let Value::Object(ref mut object) = schema {
-                object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
-                object.insert("schema_source".to_owned(), Value::String("file".to_owned()));
-                return Ok(schema);
-            }
+        let (mut schema, source) = match read_extension_schema_file(&entry, "settings_schema.json")?
+        {
+            Some(schema) => (schema, "file"),
+            None => (json!({"version": "1", "fields": []}), "missing_file"),
+        };
+        if let Value::Object(ref mut object) = schema {
+            object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+            object.insert("schema_source".to_owned(), Value::String(source.to_owned()));
         }
+        return Ok(schema);
     }
     let mut schema = adapter_extension_request(state, &extension_id, adapter_method).await?;
     if let Value::Object(ref mut object) = schema {
