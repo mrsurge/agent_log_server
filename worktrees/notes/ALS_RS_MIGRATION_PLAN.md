@@ -1077,6 +1077,17 @@ Current ALS-RS gap for this contract:
   the method/source/path details explicitly, matching the three-question
   contract above.
 
+KB tool bug to fix or disambiguate:
+
+- `kb_schema` and `kb_search` currently expose the expected numbered section
+  index and search hits, but `kb_read` can resolve an explicit section selector
+  such as a schema number or unique heading title to `<file-root>` instead of
+  the requested section. The tool should either return the selected section or
+  return a selector-resolution error; it must not silently fall back to the file
+  root. Tooltips/dev instructions should also make the selector behavior and
+  failure mode explicit so agents can tell schema discovery, info/range
+  inspection, and body reads apart.
+
 ### Milestone 5.6: conversation metadata persistence and routing
 
 Deliverables:

@@ -8,7 +8,7 @@ import secrets
 import signal
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -143,8 +143,12 @@ def _build_env(args: BootstrapArgs) -> dict[str, str]:
     return env
 
 
-def _server_command(args: BootstrapArgs, env: dict[str, str] | None = None) -> list[str]:
-    env = env if env is not None else os.environ
+def build_env(args: BootstrapArgs) -> dict[str, str]:
+    return _build_env(args)
+
+
+def _server_command(args: BootstrapArgs, env: MutableMapping[str, str] | None = None) -> list[str]:
+    runtime_env = env if env is not None else os.environ
     framework_shell_args = _framework_shell_args(args)
     if args.server_bin:
         return [str(Path(args.server_bin)), *framework_shell_args]
@@ -157,8 +161,8 @@ def _server_command(args: BootstrapArgs, env: dict[str, str] | None = None) -> l
         and packaged_manifest is not None
         and manifest == packaged_manifest
     ):
-        cache_dir = Path(env["ALS_RS_CACHE_DIR"])
-        target_dir = Path(env.setdefault("CARGO_TARGET_DIR", str(cache_dir / "cargo-target")))
+        cache_dir = Path(runtime_env["ALS_RS_CACHE_DIR"])
+        target_dir = Path(runtime_env.setdefault("CARGO_TARGET_DIR", str(cache_dir / "cargo-target")))
 
     debug_binary = (target_dir or manifest.parent / "target") / "debug" / "als-server"
     use_ferrous_framework = _ferrous_framework_enabled(args)
@@ -368,6 +372,10 @@ def _default_static_dir() -> Path:
 
 def _source_root() -> Path:
     return Path(__file__).parent.parent
+
+
+def source_root() -> Path:
+    return _source_root()
 
 
 def _package_root() -> Path:

@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 import asyncio
-import base64
 import difflib
 import hashlib
 import json
 import os
 import sys
 import secrets
-import time
 import contextlib
-import io
 import re
 import tomllib
 from collections.abc import Awaitable, Mapping
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Optional, Protocol, cast, runtime_checkable
+from typing import Optional, Protocol, cast
 
-import socketio
+import socketio  # type: ignore[reportMissingTypeStubs]
 
 from als_deprecated.markdown_sections import SectionNode, normalize_heading as _normalize_heading, parse_markdown
 from als_deprecated.ipc_auth import load_or_create_ipc_secret
@@ -57,19 +52,9 @@ def _ensure_framework_shells_secret() -> None:
 _ensure_framework_shells_secret()
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.session import ServerSession
 
 
-@runtime_checkable
-class _ModelDumpable(Protocol):
-    def model_dump(self) -> object: ...
-
-
-@runtime_checkable
-class _DictDumpable(Protocol):
-    def dict(self) -> object: ...
-
-
-@runtime_checkable
 class _UrlopenResponse(Protocol):
     status: int
 
@@ -78,6 +63,48 @@ class _UrlopenResponse(Protocol):
     def __enter__(self) -> "_UrlopenResponse": ...
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> object: ...
+
+
+class _SocketIOAsyncClient(Protocol):
+    connected: bool
+
+    def on(self, event: str, handler: object, *, namespace: str | None = None) -> object: ...
+
+    def connect(
+        self,
+        url: str,
+        *,
+        auth: ObjectMap | None = None,
+        namespaces: list[str] | None = None,
+        transports: list[str] | None = None,
+        wait_timeout: float | int | None = None,
+    ) -> Awaitable[object]: ...
+
+    def disconnect(self) -> Awaitable[object]: ...
+
+    def call(
+        self,
+        event: str,
+        data: object = None,
+        *,
+        namespace: str | None = None,
+        timeout: float | int | None = None,
+    ) -> Awaitable[object]: ...
+
+    def emit(
+        self,
+        event: str,
+        data: object = None,
+        *,
+        namespace: str | None = None,
+    ) -> Awaitable[object]: ...
+
+
+class _SocketIOModule(Protocol):
+    def AsyncClient(self, **kwargs: object) -> _SocketIOAsyncClient: ...
+
+
+_socketio = cast(_SocketIOModule, socketio)
 
 
 def _json_loads_object(text: str) -> object:
@@ -159,7 +186,7 @@ def _current_project_roots() -> list[Path]:
     return roots
 
 
-def _load_project_config(root: Optional[Path] = None) -> dict:
+def _load_project_config(root: Optional[Path] = None) -> ObjectMap:
     """Load .agent-pty.toml from a directory (defaults to the current project root)."""
     base = _logical_abspath(root) if root is not None else _current_project_root()
     config_path = base / ".agent-pty.toml"
@@ -167,18 +194,21 @@ def _load_project_config(root: Optional[Path] = None) -> dict:
         return {}
     try:
         with open(config_path, "rb") as f:
-            return tomllib.load(f)
+            return coerce_object_map(cast(object, tomllib.load(f)))
     except Exception:
         return {}
 
 
 def _kb_configured_files(root: Optional[Path] = None) -> list[str]:
     """Return the list of knowledge files from config, validated."""
-    raw = _load_project_config(root).get("knowledge", {}).get("files", [])
+    knowledge = coerce_object_map(_load_project_config(root).get("knowledge"))
+    raw = knowledge.get("files", [])
     if isinstance(raw, str):
         raw = [raw]
     result: list[str] = []
-    for f in raw:
+    for f in cast(list[object], raw) if isinstance(raw, list) else []:
+        if not isinstance(f, str):
+            continue
         p = Path(f)
         # Security: no absolute paths, no .. traversal
         if p.is_absolute() or ".." in p.parts:
@@ -189,12 +219,12 @@ def _kb_configured_files(root: Optional[Path] = None) -> list[str]:
 
 _APPSERVER_ORIGIN = os.environ.get("AGENT_LOG_SERVER_ORIGIN", "http://127.0.0.1:12359")
 _APPSERVER_IPC_NAMESPACE = "/ipc"
-_appserver_ipc_sio: Optional[socketio.AsyncClient] = None
+_appserver_ipc_sio: Optional[_SocketIOAsyncClient] = None
 _appserver_ipc_lock = asyncio.Lock()
 _ask_user_pending_requests: dict[str, asyncio.Future[ObjectMap]] = {}
 
 
-async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
+async def _get_appserver_ipc_sio() -> _SocketIOAsyncClient:
     global _appserver_ipc_sio
     async with _appserver_ipc_lock:
         if _appserver_ipc_sio and _appserver_ipc_sio.connected:
@@ -204,10 +234,11 @@ async def _get_appserver_ipc_sio() -> socketio.AsyncClient:
                 await _appserver_ipc_sio.disconnect()
             _appserver_ipc_sio = None
 
-        client = socketio.AsyncClient(
+        client_kwargs = coerce_object_map(cast(object, socketio_client_kwargs()))
+        client = _socketio.AsyncClient(
             reconnection=True,
             reconnection_attempts=3,
-            **socketio_client_kwargs(),
+            **client_kwargs,
         )
 
         async def _on_ask_user_response(data: object) -> None:
@@ -294,8 +325,9 @@ async def _notify_conversation_todo_ipc(conversation_id: str) -> None:
         namespace=_APPSERVER_IPC_NAMESPACE,
         timeout=10,
     )
-    if not isinstance(ack, dict) or not ack.get("ok"):
-        detail = ack.get("error") if isinstance(ack, dict) else ack
+    ack_map = coerce_object_map(cast(object, ack)) if isinstance(ack, dict) else {}
+    if not ack_map.get("ok"):
+        detail: object = ack_map.get("error") if ack_map else cast(object, ack)
         raise RuntimeError(f"conversation_todo_changed IPC failed: {detail}")
 
 
@@ -307,52 +339,8 @@ _DEFAULT_CONVERSATION_DIR = Path(os.path.expanduser("~/.cache/app_server/convers
 _conv_todos.configure(_DEFAULT_CONVERSATION_DIR)
 
 
-def _conversation_dir() -> Path:
-    raw = os.environ.get("AGENT_LOG_SERVER_CONVERSATION_DIR")
-    if raw:
-        return Path(os.path.expanduser(raw))
-    return _DEFAULT_CONVERSATION_DIR
-
-
-def _b64decode(s: str) -> str:
-    try:
-        return base64.b64decode(s.encode("ascii"), validate=False).decode("utf-8", errors="replace")
-    except Exception:
-        return ""
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-def _resolve_section(nodes: list[SectionNode], section_id: str) -> SectionNode | None:
-    """Resolve a section_id to a unique node.
-
-    Returns None if not found. Raises ValueError if ambiguous.
-    """
-    if not isinstance(section_id, str) or not section_id:
-        return None
-
-    by_id = [node for node in nodes if node.id == section_id]
-    if len(by_id) == 1:
-        return by_id[0]
-    if len(by_id) > 1:
-        by_disambiguated = [node for node in nodes if node.id_disambiguated == section_id]
-        if len(by_disambiguated) == 1:
-            return by_disambiguated[0]
-        raise ValueError(f"Ambiguous section_id: {section_id}")
-
-    by_disambiguated = [node for node in nodes if node.id_disambiguated == section_id]
-    if len(by_disambiguated) == 1:
-        return by_disambiguated[0]
-    if len(by_disambiguated) > 1:
-        raise ValueError(f"Ambiguous section_id: {section_id}")
-    return None
-
-
 mcp = FastMCP(name="agent-pty-blocks", instructions="Agent PTY + block store tools (per-conversation).")
 
-_ASK_USER_CARD_KIND = "ask_user"
 _ASK_USER_ANSWER_FIELD = "answer"
 
 
@@ -384,39 +372,12 @@ def _normalize_choice_list(raw_choices: Optional[list[str]]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
     for item in raw_choices:
-        if not isinstance(item, str):
-            continue
         value = item.strip()
         if not value or value in seen:
             continue
         seen.add(value)
         normalized.append(value)
     return normalized
-
-
-def _build_ask_user_requested_schema(
-    *,
-    question: str,
-    choices: list[str],
-    allow_freeform: bool,
-) -> ObjectMap:
-    return {
-        "type": "object",
-        "title": "User Input",
-        "additionalProperties": False,
-        "required": [_ASK_USER_ANSWER_FIELD],
-        "properties": {
-            _ASK_USER_ANSWER_FIELD: {
-                "type": "array",
-                "items": {"type": "string"},
-                "title": "Answer",
-            },
-        },
-        "x-agent-pty-card": _ASK_USER_CARD_KIND,
-        "x-agent-pty-question": question,
-        "x-agent-pty-choices": list(choices),
-        "x-agent-pty-allowFreeform": bool(allow_freeform),
-    }
 
 
 def _extract_ask_user_answers(content: object) -> list[str]:
@@ -428,7 +389,7 @@ def _extract_ask_user_answers(content: object) -> list[str]:
     if not isinstance(raw_answers, list):
         return []
     answers: list[str] = []
-    for item in raw_answers:
+    for item in cast(list[object], raw_answers):
         if not isinstance(item, str):
             continue
         value = item.strip()
@@ -461,7 +422,7 @@ def _extract_ask_user_answers_from_resolution(resolution: object) -> list[str]:
         return [value] if value else []
     if isinstance(answers, list):
         normalized: list[str] = []
-        for item in answers:
+        for item in cast(list[object], answers):
             if not isinstance(item, str):
                 continue
             value = item.strip()
@@ -475,26 +436,10 @@ def _extract_ask_user_answers_from_resolution(resolution: object) -> list[str]:
         return [value] if value else []
     content = payload.get("content")
     if isinstance(content, dict):
-        answers_from_content = _extract_ask_user_answers(content)
+        answers_from_content = _extract_ask_user_answers(cast(object, content))
         if answers_from_content:
             return answers_from_content
     return []
-
-
-def _coerce_mapping(value: object) -> Optional[ObjectMap]:
-    if isinstance(value, dict):
-        return coerce_object_map(value)
-    if isinstance(value, _ModelDumpable):
-        with contextlib.suppress(Exception):
-            dumped = value.model_dump()
-            if isinstance(dumped, dict):
-                return coerce_object_map(dumped)
-    if isinstance(value, _DictDumpable):
-        with contextlib.suppress(Exception):
-            dumped = value.dict()
-            if isinstance(dumped, dict):
-                return coerce_object_map(dumped)
-    return None
 
 
 def _normalize_ask_user_resolution(
@@ -568,7 +513,7 @@ async def ask_user(
     question: str,
     choices: Optional[list[str]] = None,
     allow_freeform: bool = True,
-    ctx: Context | None = None,
+    ctx: Context[ServerSession, object, object] | None = None,
 ) -> ObjectMap:
     question_text = str(question or "").strip()
     if not question_text:
@@ -583,7 +528,6 @@ async def ask_user(
             "ok": False,
             "error": "At least one choice is required when allow_freeform is false",
         }
-    raw_request_id = str(getattr(ctx, "request_id", "") or "").strip()
     request_id = os.environ.get("CONVERSATION_ID", "").strip()
     if not request_id:
         return {"ok": False, "error": "CONVERSATION_ID not available — MCP server not conversation-scoped"}
@@ -598,7 +542,7 @@ async def ask_user(
         existing_future = _ask_user_pending_requests.get(request_id)
         if isinstance(existing_future, asyncio.Future) and not existing_future.done():
             return {"ok": False, "error": f"ask_user request already pending for {request_id}"}
-        result_future = loop.create_future()
+        result_future: asyncio.Future[ObjectMap] = loop.create_future()
         _ask_user_pending_requests[request_id] = result_future
         print(f"[ask_user mcp] waiting request_id={request_id}", file=sys.stderr, flush=True)
         result_event = await _wait_for_ask_user_event(request_id)
@@ -940,7 +884,7 @@ async def agent_log_inbox(limit: int = 10, preview_chars: int = 60) -> ObjectMap
     preview_chars = max(10, min(int(preview_chars), 200))
     
     messages = await _agent_log_fetch(limit)
-    items = []
+    items: ObjectList = []
     for msg in messages:
         msg_num = msg.get("msg_num")
         ts = msg.get("ts", "")
@@ -1053,7 +997,7 @@ async def agent_log_read(limit: int = 10) -> str:
     if not messages:
         return "(no messages)"
     
-    formatted = []
+    formatted: list[str] = []
     for msg in messages:
         msg_num = msg.get("msg_num", "?")
         ts = msg.get("ts", "")
@@ -1215,7 +1159,7 @@ def _kb_resolve_file(file: Optional[str] = None) -> Path | ObjectMap:
                 configured=files,
             )
 
-    if not isinstance(selected, str) or not selected:
+    if not selected:
         return _kb_error("FileNotAllowed", "Invalid file value", configured=files)
     if selected not in files:
         return _kb_error(
@@ -1244,7 +1188,7 @@ def _kb_resolve_target(target: Optional[str] = None) -> Path | ObjectMap:
                 configured=files,
             )
 
-    if not isinstance(selected, str) or not selected:
+    if not selected:
         return _kb_error("FileNotAllowed", "Invalid target value", configured=files)
     if selected not in files:
         return _kb_error(
@@ -1259,12 +1203,12 @@ def _kb_select_target_file(file: Optional[str], target: Optional[str]) -> Option
     """Normalize the KB target/file aliases for read-only tools."""
     if target is None:
         return file
-    if not isinstance(target, str) or not target.strip():
+    if not target.strip():
         return _kb_error("InvalidParameter", "target must be a non-empty string when supplied")
     selected_target = target.strip()
     if file is None:
         return selected_target
-    if not isinstance(file, str) or not file.strip():
+    if not file.strip():
         return _kb_error("InvalidParameter", "file must be a non-empty string when supplied")
     selected_file = file.strip()
     if selected_file != selected_target:
@@ -1451,41 +1395,13 @@ def _save_kb_files_config(files: list[str], *, root: Path) -> None:
 
 def _load_kb_files_config(*, root: Path) -> list[str]:
     cfg = _load_project_config(root)
-    kb = cfg.get("knowledge", {})
+    kb = coerce_object_map(cfg.get("knowledge"))
     raw_files = kb.get("files", [])
     if isinstance(raw_files, str):
         return [raw_files]
     if isinstance(raw_files, list):
-        return [str(x) for x in raw_files if isinstance(x, str)]
+        return [str(x) for x in cast(list[object], raw_files) if isinstance(x, str)]
     return []
-
-
-def _snippet_with_offsets(line: str, match_start: int, match_end: int, context_chars: int) -> tuple[str, int, int]:
-    text = line or ""
-    if context_chars < 20:
-        context_chars = 20
-    if len(text) <= context_chars:
-        return text, match_start, match_end
-
-    center = (match_start + match_end) // 2
-    half = max(1, context_chars // 2)
-    start = max(0, center - half)
-    end = min(len(text), start + context_chars)
-    if end - start < context_chars:
-        start = max(0, end - context_chars)
-    snippet = text[start:end]
-    if start > 0:
-        snippet = "..." + snippet
-        start_adjust = 3
-    else:
-        start_adjust = 0
-    if end < len(text):
-        snippet = snippet + "..."
-    local_start = (match_start - start) + start_adjust
-    local_end = (match_end - start) + start_adjust
-    local_start = max(0, min(local_start, len(snippet)))
-    local_end = max(local_start, min(local_end, len(snippet)))
-    return snippet, local_start, local_end
 
 
 def _kb_depth_value(value: Optional[int]) -> Optional[int]:
@@ -1575,9 +1491,9 @@ def _kb_split_section_specs(sections: Optional[str], id_value: Optional[str] = N
     if raw_sections:
         parsed: object = None
         with contextlib.suppress(Exception):
-            parsed = json.loads(raw_sections)
+            parsed = _json_loads_object(raw_sections)
         if isinstance(parsed, list):
-            specs.extend(str(item).strip() for item in parsed if str(item).strip())
+            specs.extend(str(item).strip() for item in cast(list[object], parsed) if str(item).strip())
         elif isinstance(parsed, str) and parsed.strip():
             specs.append(parsed.strip())
         else:
@@ -1743,7 +1659,7 @@ async def kb_reload_config() -> str:
 
 @mcp.tool(name="kb_add_file", description="Add a file (absolute path) to knowledge.files and hot-reload config.")
 async def kb_add_file(abs_path: str) -> str:
-    if not isinstance(abs_path, str) or not abs_path.strip():
+    if not abs_path.strip():
         return _kb_error_text("InvalidParameter", "abs_path is required")
     p = _logical_abspath(abs_path)
     if not p.is_absolute():
@@ -1786,7 +1702,7 @@ async def kb_add_file(abs_path: str) -> str:
 
 @mcp.tool(name="kb_remove_file", description="Remove a file (absolute path) from knowledge.files and hot-reload config.")
 async def kb_remove_file(abs_path: str) -> str:
-    if not isinstance(abs_path, str) or not abs_path.strip():
+    if not abs_path.strip():
         return _kb_error_text("InvalidParameter", "abs_path is required")
     p = _logical_abspath(abs_path)
     if not p.is_absolute():
@@ -2193,7 +2109,7 @@ async def kb_search_content(
     regex: bool = False,
     from_match: bool = True,
 ) -> str:
-    return await kb_search(
+    return cast(str, await kb_search(
         file=file,
         target=target,
         query=query,
@@ -2201,7 +2117,7 @@ async def kb_search_content(
         max_hits=max_results,
         preview_chars=context_chars,
         from_match=from_match,
-    )
+    ))
 
 
 @mcp.tool(name="kb_help", description="List KB tool modes, section-id forms, and common examples.")

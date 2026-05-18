@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import cast
 
 from setuptools import setup
 from setuptools.command.build_py import build_py as _build_py
@@ -18,7 +19,8 @@ class build_py(_build_py):
         if not (rust_source / "Cargo.toml").is_file():
             return
 
-        package_target = Path(self.build_lib) / "agent_log_server_rs" / "rust"
+        build_lib = cast(str, self.build_lib)
+        package_target = Path(build_lib) / "agent_log_server_rs" / "rust"
         if package_target.exists():
             shutil.rmtree(package_target)
         shutil.copytree(

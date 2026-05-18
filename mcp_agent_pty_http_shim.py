@@ -9,7 +9,7 @@ import sys
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, cast
 
 import httpx
 import uvicorn
@@ -179,9 +179,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await _registry.stop_all()
-        if _http_client is not None:
-            await _http_client.aclose()
-            _http_client = None
+        client = _http_client
+        await client.aclose()
+        _http_client = None
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -271,9 +271,12 @@ def _forward_response_headers(response: httpx.Response) -> dict[str, str]:
 def _allocate_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((DEFAULT_HOST, 0))
-        address: object = sock.getsockname()  # pyright: ignore[reportAny]
-        if not isinstance(address, tuple) or len(address) < 2 or not isinstance(address[1], int):
-            raise RuntimeError(f"unexpected socket address from getsockname(): {address!r}")
+        address_obj = cast(object, sock.getsockname())
+        if not isinstance(address_obj, tuple):
+            raise RuntimeError(f"unexpected socket address from getsockname(): {address_obj!r}")
+        address = cast(tuple[object, ...], address_obj)
+        if len(address) < 2 or not isinstance(address[1], int):
+            raise RuntimeError(f"unexpected socket address from getsockname(): {address_obj!r}")
         return address[1]
 
 
@@ -282,7 +285,7 @@ async def _wait_for_tcp(host: str, port: int, *, timeout_sec: float) -> None:
     last_exc: BaseException | None = None
     while asyncio.get_running_loop().time() < deadline:
         try:
-            reader, writer = await asyncio.open_connection(host, port)
+            _reader, writer = await asyncio.open_connection(host, port)
             writer.close()
             await writer.wait_closed()
             return

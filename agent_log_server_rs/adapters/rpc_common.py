@@ -128,7 +128,7 @@ def optional_path(value: object) -> Path | None:
 def string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, str) and item]
+    return [item for item in cast(list[object], value) if isinstance(item, str) and item]
 
 
 def rpc_id(value: object) -> RpcId:

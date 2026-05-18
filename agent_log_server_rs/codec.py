@@ -27,6 +27,10 @@ class AdapterEncodeError(AdapterCodecError):
     pass
 
 
+def _runtime_type_name(value: object) -> str:
+    return type(value).__name__
+
+
 def decode_json_line(line: str) -> object:
     try:
         return cast(object, _JSON_DECODER.decode(line.encode("utf-8")))
@@ -54,18 +58,22 @@ def to_json_compatible(value: object) -> object:
 
     to_json = getattr(value, "to_json", None)
     if callable(to_json):
-        return to_json_compatible(cast(object, to_json()))
+        return to_json_compatible(to_json())
 
     if is_dataclass(value) and not isinstance(value, type):
-        return to_json_compatible(cast(object, asdict(value)))
+        return to_json_compatible(asdict(value))
 
     if isinstance(value, Mapping):
+        value_map = cast(Mapping[object, object], value)
         return {
             str(key): to_json_compatible(item)
-            for key, item in value.items()
+            for key, item in value_map.items()
         }
 
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, memoryview)):
-        return [to_json_compatible(item) for item in value]
+        value_sequence = cast(Sequence[object], value)
+        return [to_json_compatible(item) for item in value_sequence]
 
-    raise AdapterEncodeError(f"Object of type {type(value).__name__} is not JSON serializable")
+    raise AdapterEncodeError(
+        f"Object of type {_runtime_type_name(cast(object, value))} is not JSON serializable"
+    )

@@ -8,16 +8,19 @@ ToolCardMap: TypeAlias = dict[str, object]
 
 def _copy_jsonish(value: object) -> object:
     if isinstance(value, dict):
-        return {str(key): _copy_jsonish(inner) for key, inner in value.items()}
+        value_map = cast(dict[object, object], value)
+        return {str(key): _copy_jsonish(inner) for key, inner in value_map.items()}
     if isinstance(value, list):
-        return [_copy_jsonish(item) for item in value]
+        value_list = cast(list[object], value)
+        return [_copy_jsonish(item) for item in value_list]
     return value
 
 
 def _copy_object_map(value: object) -> ToolCardMap:
     if not isinstance(value, dict):
         return {}
-    return {str(key): _copy_jsonish(inner) for key, inner in value.items()}
+    value_map = cast(dict[object, object], value)
+    return {str(key): _copy_jsonish(inner) for key, inner in value_map.items()}
 
 
 def _try_parse_json_text(value: object) -> object:
@@ -55,7 +58,7 @@ def build_tool_card_request(server_name: str, tool_name: str, arguments: object)
         return sql_request
 
     if isinstance(arguments, dict):
-        return _copy_object_map(arguments)
+        return _copy_object_map(cast(object, arguments))
     if isinstance(arguments, str) and arguments.strip():
         return {"input": arguments}
     return {}
@@ -68,6 +71,7 @@ def build_tool_card_response(server_name: str, tool_name: str, response: object)
     if server == "te2-mcp" and tool == "te2_console_eval":
         parsed = _try_parse_json_text(response)
         if isinstance(parsed, dict):
+            parsed_map = cast(dict[object, object], parsed)
             normalized: ToolCardMap = {}
             consumed_keys: set[str] = set()
             for source_key, target_key in (
@@ -77,20 +81,20 @@ def build_tool_card_response(server_name: str, tool_name: str, response: object)
                 ("req_id", "reqId"),
                 ("ok", "ok"),
             ):
-                if source_key in parsed:
-                    normalized[target_key] = _copy_jsonish(parsed.get(source_key))
+                if source_key in parsed_map:
+                    normalized[target_key] = _copy_jsonish(parsed_map.get(source_key))
                     consumed_keys.add(source_key)
-            if "value" in parsed:
-                normalized["value"] = _copy_jsonish(parsed.get("value"))
+            if "value" in parsed_map:
+                normalized["value"] = _copy_jsonish(parsed_map.get("value"))
                 consumed_keys.add("value")
             extras = {
                 str(key): _copy_jsonish(value)
-                for key, value in parsed.items()
+                for key, value in parsed_map.items()
                 if key not in consumed_keys
             }
             if "value" not in normalized and extras:
                 normalized["value"] = extras
-            return normalized or {"value": _copy_jsonish(parsed)}
+            return normalized or {"value": _copy_jsonish(parsed_map)}
         if parsed is None:
             return None
         return {"value": _copy_jsonish(parsed)}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import os
 import sys
@@ -9,7 +10,7 @@ import uuid
 from collections.abc import Awaitable, Sequence
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any, cast
+from typing import Protocol, cast
 
 import extensions as ext_loader
 
@@ -19,6 +20,32 @@ from agent_log_server_rs import bootstrap
 SETTINGS_RPC_NAMESPACE = "/rpc/settings"
 RPC_EVENT = "rpc"
 JSONRPC_VERSION = "2.0"
+
+
+class _SocketIOClient(Protocol):
+    def connect(
+        self,
+        url: str,
+        *,
+        namespaces: list[str] | None = None,
+        transports: list[str] | None = None,
+        wait_timeout: float | int | None = None,
+    ) -> object: ...
+
+    def call(
+        self,
+        event: str,
+        data: object = None,
+        *,
+        namespace: str | None = None,
+        timeout: float | int | None = None,
+    ) -> object: ...
+
+    def disconnect(self) -> object: ...
+
+
+class _SocketIOModule(Protocol):
+    def Client(self, **kwargs: object) -> _SocketIOClient: ...
 
 
 def run_extension_cli(argv: Sequence[str] | None = None) -> int:
@@ -138,7 +165,7 @@ def _bootstrap_env(args: argparse.Namespace) -> dict[str, str]:
         framework_shells_fws_socketio_server_pid=os.environ.get("FRAMEWORK_SHELLS_FWS_SOCKETIO_SERVER_PID"),
         framework_shells_run_id=os.environ.get("FRAMEWORK_SHELLS_RUN_ID"),
     )
-    env = bootstrap._build_env(bootstrap_args)
+    env = bootstrap.build_env(bootstrap_args)
     os.environ.update(env)
     return env
 
@@ -157,7 +184,7 @@ def _initialize_loader(env: dict[str, str]) -> None:
     with redirect_stdout(sys.stderr):
         ext_loader.load_extensions(
             extensions_dir=roots,
-            server_root=bootstrap._source_root(),
+            server_root=bootstrap.source_root(),
             fws_getter=_get_framework_shell_manager,
             broadcast_fn=_noop_broadcast,
             transcript_fn=_noop_transcript,
@@ -166,7 +193,7 @@ def _initialize_loader(env: dict[str, str]) -> None:
 
 
 async def _get_framework_shell_manager() -> object:
-    module = __import__("framework_shells")
+    module = importlib.import_module("framework_shells")
     get_manager = getattr(module, "get_manager", None)
     if not callable(get_manager):
         raise RuntimeError("framework_shells.get_manager is unavailable")
@@ -242,11 +269,9 @@ def _run_command(args: argparse.Namespace) -> ObjectMap:
                 ext_loader.reload_extensions([extension_id], force=True)
         return {"ok": bool(result.get("ok")), "result": result, "extensions": ext_loader.list_extensions()}
     if command == "reload":
-        extension_ids = [
-            item
-            for item in getattr(args, "extension_ids", [])
-            if isinstance(item, str) and item.strip()
-        ]
+        raw_extension_ids = getattr(args, "extension_ids", [])
+        extension_id_items = cast(list[object], raw_extension_ids) if isinstance(raw_extension_ids, list) else []
+        extension_ids = [item.strip() for item in extension_id_items if isinstance(item, str) and item.strip()]
         with redirect_stdout(sys.stderr):
             ext_loader.reload_extensions(extension_ids or None, force=bool(getattr(args, "force", False)))
         return {"ok": True, "extensions": ext_loader.list_extensions()}
@@ -291,11 +316,12 @@ def _should_notify_server(args: argparse.Namespace, body: ObjectMap) -> bool:
 def _notify_running_server(args: argparse.Namespace) -> ObjectMap:
     timeout = max(0.1, float(getattr(args, "notify_timeout", 2.0) or 2.0))
     try:
-        import socketio
+        import socketio  # type: ignore[reportMissingTypeStubs]
     except ImportError as exc:
         return {"ok": False, "notified": False, "warning": f"python-socketio unavailable: {exc}"}
 
-    client = socketio.Client(reconnection=False, request_timeout=timeout)
+    socketio_module = cast(_SocketIOModule, socketio)
+    client = socketio_module.Client(reconnection=False, request_timeout=timeout)
     url = f"http://{getattr(args, 'host', bootstrap.DEFAULT_HOST)}:{getattr(args, 'port', bootstrap.DEFAULT_PORT)}"
     try:
         client.connect(
@@ -331,15 +357,17 @@ def _notify_running_server(args: argparse.Namespace) -> ObjectMap:
 def _rpc_error(response: object) -> str | None:
     if not isinstance(response, dict):
         return "invalid RPC response"
-    raw_error = response.get("error")
+    response_map = coerce_object_map(cast(object, response))
+    raw_error = response_map.get("error")
     if not isinstance(raw_error, dict):
         return None
-    message = raw_error.get("message")
+    error_map = coerce_object_map(cast(object, raw_error))
+    message = error_map.get("message")
     return message if isinstance(message, str) and message.strip() else "RPC error"
 
 
 def _rpc_result(response: object) -> object:
-    return response.get("result") if isinstance(response, dict) else None
+    return coerce_object_map(cast(object, response)).get("result") if isinstance(response, dict) else None
 
 
 def _source_payload_from_args(args: argparse.Namespace, *, allow_missing_source: bool) -> ObjectMap:
@@ -420,5 +448,6 @@ def _print_human_result(command: str, body: ObjectMap) -> None:
         else:
             warning = server_notify.get("warning")
             print(f"server_notify: {warning or 'skipped'}")
-    if command in {"list", "reload"} and isinstance(body.get("extensions"), list):
-        print(f"extensions: {len(cast(list[Any], body['extensions']))}")
+    extensions = body.get("extensions")
+    if command in {"list", "reload"} and isinstance(extensions, list):
+        print(f"extensions: {len(cast(list[object], extensions))}")
