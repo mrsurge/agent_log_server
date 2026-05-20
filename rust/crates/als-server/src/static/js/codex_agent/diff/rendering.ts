@@ -691,7 +691,8 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
 
     oldLine = 0;
     newLine = 0;
-    let currentFilePath = filePath || null;
+    const explicitFilePath = filePath || null;
+    let currentFilePath = explicitFilePath;
     const fileGutter = ''.padStart(maxOldLen, ' ') + '│' + ''.padStart(maxNewLen, ' ') + ' ';
     const rows: DiffTableRow[] = [];
     text.split('\n').forEach((line) => {
@@ -706,7 +707,9 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
         if (parts.length >= 4) {
           let bpath = parts[3];
           if (bpath.startsWith('b/')) bpath = bpath.slice(2);
-          currentFilePath = bpath || currentFilePath;
+          if (showFileHeaders || !explicitFilePath) {
+            currentFilePath = bpath || currentFilePath;
+          }
         }
         oldLine = 0;
         newLine = 0;
@@ -744,8 +747,7 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
           const newEnd = Math.max(newStart, newStart + newCount - 1);
           const oldRange = oldCount === 1 ? `${oldStart}` : `${oldStart}-${oldEnd}`;
           const newRange = newCount === 1 ? `${newStart}` : `${newStart}-${newEnd}`;
-          const label = match[5] && match[5].trim() ? ` ${match[5].trim()}` : '';
-          display = `Lines ${oldRange} → ${newRange}${label}`;
+          display = `Lines ${oldRange} → ${newRange}`;
           oldLine = oldStart;
           newLine = newStart;
         }

@@ -45,6 +45,24 @@ Remaining issues are mostly ergonomics rather than blockers.
 
 ## Issues Encountered
 
+### `kb_read` Must Not Silently Fall Back To File Root
+
+`kb_schema` and `kb_search` can expose the expected numbered section index and
+search hits, but `kb_read` previously allowed a missing or lost selector to read
+`<file-root>`.
+
+Impact: an agent can ask for a schema number or unique heading title, accidentally
+drop the selector through a parameter mismatch, and receive the whole file as if
+the requested section resolved correctly.
+
+Expected behavior:
+
+- explicit section selectors such as schema numbers, `L<line>`, heading paths,
+  unique titles, and unique suffixes resolve to the requested section;
+- invalid selectors return a selector-resolution error;
+- file-root reads are explicit (`section=""`, `sections="root"`, or
+  `sections="<file-root>"`) and are not the default.
+
 ### `kb_read` ID Discovery Is Not Obvious
 
 Attempting to read a top-level section by numeric id failed:

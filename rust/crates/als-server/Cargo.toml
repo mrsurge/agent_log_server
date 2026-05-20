@@ -19,6 +19,7 @@ axum.workspace = true
 ferrous_framework.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
+git2.workspace = true
 regex.workspace = true
 rust_socketio.workspace = true
 serde.workspace = true

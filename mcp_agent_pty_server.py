@@ -1485,10 +1485,19 @@ def _kb_apply_max_chars(text: str, max_chars: Optional[int]) -> str:
     return text[: max(0, cap - len(notice))].rstrip() + notice
 
 
-def _kb_split_section_specs(sections: Optional[str], id_value: Optional[str] = None) -> list[str]:
+def _kb_split_section_specs(
+    sections: Optional[str],
+    id_value: Optional[str] = None,
+    section_value: Optional[str] = None,
+) -> list[str]:
     specs: list[str] = []
-    raw_sections = (sections or "").strip()
-    if raw_sections:
+    for raw_value in (sections, section_value):
+        if raw_value is None:
+            continue
+        raw_sections = raw_value.strip()
+        if not raw_sections:
+            specs.append("")
+            continue
         parsed: object = None
         with contextlib.suppress(Exception):
             parsed = _json_loads_object(raw_sections)
@@ -1512,8 +1521,14 @@ def _resolve_section_selector_or_error(
     allow_root: bool = False,
 ) -> SectionNode | ObjectMap:
     raw = (selector or "").strip()
-    if allow_root and raw in {"", "root", "<file-root>"}:
-        return _kb_root_section(total_lines)
+    if raw in {"", "root", "<file-root>"}:
+        if allow_root:
+            return _kb_root_section(total_lines)
+        return _kb_error(
+            "InvalidParameter",
+            "File-root selection is not supported for this operation",
+            section=raw,
+        )
 
     ordinal_match = re.fullmatch(r"#?(\d+)", raw)
     if ordinal_match:
@@ -1546,12 +1561,14 @@ def _resolve_section_list_or_error(
     *,
     total_lines: int,
     allow_root: bool = False,
+    section_value: Optional[str] = None,
 ) -> list[SectionNode] | ObjectMap:
-    specs = _kb_split_section_specs(sections, id_value)
+    specs = _kb_split_section_specs(sections, id_value, section_value)
     if not specs:
+        message = "At least one section selector is required"
         if allow_root:
-            return [_kb_root_section(total_lines)]
-        return _kb_error("InvalidParameter", "At least one section selector is required")
+            message += '; use sections="root" or section="" to read the file root'
+        return _kb_error("InvalidParameter", message)
 
     selected: list[SectionNode] = []
     seen: set[tuple[int, int]] = set()
@@ -1818,6 +1835,7 @@ async def kb_schema(
 async def kb_info(
     file: Optional[str] = None,
     target: Optional[str] = None,
+    section: Optional[str] = None,
     sections: Optional[str] = None,
     id: str = "",
     max_chars: int = 600,
@@ -1840,6 +1858,7 @@ async def kb_info(
         id,
         total_lines=len(lines),
         allow_root=False,
+        section_value=section,
     )
     if isinstance(selected, dict):
         return _kb_dict_to_error_text(selected)
@@ -1888,6 +1907,7 @@ async def kb_info(
 async def kb_read(
     file: Optional[str] = None,
     target: Optional[str] = None,
+    section: Optional[str] = None,
     sections: Optional[str] = None,
     id: str = "",
     include_children: bool = False,
@@ -1911,6 +1931,7 @@ async def kb_read(
         id,
         total_lines=len(lines),
         allow_root=True,
+        section_value=section,
     )
     if isinstance(selected, dict):
         return _kb_dict_to_error_text(selected)
@@ -2126,7 +2147,7 @@ async def kb_help() -> str:
 Section ids:
   - kb_schema(target="...") returns every ATX heading as a numbered index
   - selectors accept schema numbers, L<line>, heading paths, unique titles, or unique trailing path suffixes
-  - section="" targets the file root
+  - kb_read requires an explicit selector; section="" or sections="root" targets the file root
 
 kb_write modes:
   - append: append content to the target section body

@@ -12,6 +12,7 @@ export const UI_RPC_METHODS = {
   filesystemHome: 'filesystem.home',
   filesystemList: 'filesystem.list',
   filesystemSearch: 'filesystem.search',
+  projectSummaryGet: 'project.summary.get',
   fileOpen: 'file.open',
   urlOpen: 'url.open',
 } as const;
@@ -31,5 +32,6 @@ export const UI_RPC_ANCHOR_MODULES = [
   'host/runtime.ts',
   'composer/runtime.ts',
   'conversation_drawer/actions.ts',
+  'project_modal.ts',
   'markdown.js',
 ] as const;

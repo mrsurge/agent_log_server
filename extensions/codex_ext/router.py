@@ -1061,15 +1061,18 @@ def _shell_command_to_search_spec(command: object, cwd: str = "") -> Optional[Ob
         return None
 
     pattern = positional[0]
-    target_path = positional[1] if len(positional) >= 2 else ""
-    if len(positional) > 2:
-        return None
-
-    resolved_path = _resolve_view_path(target_path, cwd) if target_path else str(cwd or "")
+    target_paths = positional[1:]
+    resolved_targets = [_resolve_view_path(target_path, cwd) for target_path in target_paths]
+    if len(resolved_targets) == 1:
+        resolved_path = resolved_targets[0]
+    else:
+        resolved_path = str(cwd or "")
     if pattern:
         args["pattern"] = pattern
     if resolved_path:
         args["path"] = resolved_path
+    if resolved_targets:
+        args["targets"] = resolved_targets
 
     return {
         "mode": cmd,

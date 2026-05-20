@@ -139,7 +139,13 @@
               <label class="toggle-label"><input type="checkbox" id="track-edits-toggle"><span>📝</span></label>
               <label class="toggle-label"><input type="checkbox" id="line-numbers-toggle"><span>#</span></label>
               <span id="agent-ws" class="pill warn">👎</span>
-              <button id="conversation-settings" class="btn">Settings</button>
+              <div class="app-menu">
+                <button id="conversation-menu-toggle" class="btn ghost icon-btn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="conversation-menu" title="Menu">☰</button>
+                <div id="conversation-menu" class="app-menu-panel hidden" role="menu">
+                  <button id="conversation-settings" class="app-menu-item" type="button" role="menuitem">Settings</button>
+                  <button id="conversation-project" class="app-menu-item" type="button" role="menuitem">Project</button>
+                </div>
+              </div>
               <button id="conversation-back" class="btn ghost">Back</button>
               <button id="host-close-drawer" class="btn ghost host-close-btn">×</button>
             </div>
@@ -227,6 +233,7 @@
       <div class="picker-overlay hidden" id="session-picker"><div class="picker-dialog"><div class="picker-header"><h3>Resume Session</h3><button id="session-picker-close" class="btn ghost">×</button></div><div class="picker-body"><div id="session-picker-sort" class="picker-sort-actions" hidden></div><div id="session-picker-list" class="picker-list"></div></div></div></div>
       <div class="settings-overlay hidden" id="warning-modal"><div class="settings-dialog"><div class="settings-header"><h3>Confirm</h3><button id="warning-close" class="btn ghost">×</button></div><div class="settings-body"><p id="warning-body">Are you sure?</p></div><div class="settings-footer"><button id="warning-cancel" class="btn ghost">Cancel</button><button id="warning-confirm" class="btn danger">Continue</button></div></div></div>
       <div class="settings-overlay hidden" id="plan-modal"><div class="settings-dialog"><div class="settings-header"><h3>Plan</h3><button id="plan-close" class="btn ghost">×</button></div><div class="settings-body"><div id="plan-body" class="markdown-body plan-modal-body"></div></div><div class="settings-footer"><button id="plan-dismiss" class="btn primary">Close</button></div></div></div>
+      <div class="settings-overlay hidden" id="project-modal"><div class="settings-dialog project-dialog"><div class="settings-header"><h3>Project</h3><button id="project-close" class="btn ghost">×</button></div><div class="settings-body project-modal-body" id="project-body"></div><div class="settings-footer"><button id="project-refresh" class="btn ghost" type="button">Refresh</button><button id="project-dismiss" class="btn primary" type="button">Close</button></div></div></div>
     </div>
   </body>
 </html>

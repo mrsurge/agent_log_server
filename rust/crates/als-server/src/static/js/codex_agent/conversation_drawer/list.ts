@@ -55,6 +55,7 @@ interface ConversationDrawerListContext {
   selectConversationWithView(conversationId: string, view: string): Awaitable;
   setConversationPins?(conversationIds: string[]): Awaitable;
   openSettingsModal(): void;
+  openProjectModal(path?: string | null): void;
   deleteConversation(conversationId: string): Awaitable;
   documentRef?: Document;
   windowRef?: Window;
@@ -150,6 +151,7 @@ export function createConversationDrawerList(
     selectConversationWithView,
     setConversationPins,
     openSettingsModal,
+    openProjectModal,
     deleteConversation,
     documentRef,
     windowRef,
@@ -399,6 +401,79 @@ export function createConversationDrawerList(
     return Boolean(target.closest('button, a, input, label, select, textarea, summary'));
   }
 
+  function closeConversationMenus(doc: Document): void {
+    doc.querySelectorAll<HTMLElement>('.app-menu-panel').forEach((panel) => {
+      panel.classList.add('hidden');
+    });
+    doc.querySelectorAll<HTMLElement>('.app-menu [aria-expanded="true"]').forEach((toggle) => {
+      toggle.setAttribute('aria-expanded', 'false');
+    });
+  }
+
+  function buildConversationRowMenu(
+    doc: Document,
+    meta: ConversationMeta | null | undefined,
+    conversationId: string,
+  ): HTMLDivElement {
+    const menu = doc.createElement('div');
+    menu.className = 'app-menu conversation-row-menu';
+
+    const toggle = doc.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'btn tiny icon-btn conversation-row-menu-toggle';
+    toggle.setAttribute('aria-haspopup', 'menu');
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.title = 'Conversation menu';
+    toggle.textContent = '☰';
+
+    const panel = doc.createElement('div');
+    panel.className = 'app-menu-panel conversation-row-menu-panel hidden';
+    panel.setAttribute('role', 'menu');
+
+    const settingsItem = doc.createElement('button');
+    settingsItem.type = 'button';
+    settingsItem.className = 'app-menu-item';
+    settingsItem.setAttribute('role', 'menuitem');
+    settingsItem.textContent = 'Settings';
+    settingsItem.addEventListener('click', async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      closeConversationMenus(doc);
+      if (!conversationId) return;
+      await selectConversationWithView(conversationId, 'splash');
+      openSettingsModal();
+    });
+
+    const projectItem = doc.createElement('button');
+    projectItem.type = 'button';
+    projectItem.className = 'app-menu-item';
+    projectItem.setAttribute('role', 'menuitem');
+    projectItem.textContent = 'Project';
+    projectItem.addEventListener('click', (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      closeConversationMenus(doc);
+      const settings = getConversationSettings(meta);
+      const cwd = typeof settings.cwd === 'string' && settings.cwd.trim()
+        ? settings.cwd.trim()
+        : null;
+      openProjectModal(cwd);
+    });
+
+    toggle.addEventListener('click', (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      const willOpen = panel.classList.contains('hidden');
+      closeConversationMenus(doc);
+      panel.classList.toggle('hidden', !willOpen);
+      toggle.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    });
+
+    panel.append(settingsItem, projectItem);
+    menu.append(toggle, panel);
+    return menu;
+  }
+
   function bindConversationRowActivation(
     row: HTMLDivElement,
     conversationId: string,
@@ -450,15 +525,7 @@ export function createConversationDrawerList(
       actions.className = 'conversation-actions';
       actions.appendChild(buildConversationCardControls(doc, meta, row, { includeDragHandle: false }));
 
-      const settingsBtn = doc.createElement('button');
-      settingsBtn.className = 'btn tiny';
-      settingsBtn.textContent = 'Settings';
-      settingsBtn.addEventListener('click', async () => {
-        if (!conversationId) return;
-        await selectConversationWithView(conversationId, 'splash');
-        openSettingsModal();
-      });
-      actions.appendChild(settingsBtn);
+      actions.appendChild(buildConversationRowMenu(doc, meta, conversationId));
 
       const deleteBtn = doc.createElement('button');
       deleteBtn.className = 'btn tiny decline';

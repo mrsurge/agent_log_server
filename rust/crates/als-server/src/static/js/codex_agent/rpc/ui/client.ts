@@ -232,6 +232,31 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     );
   }
 
+  async function getProjectSummary(options: {
+    path?: string | null;
+    maxDiffBytes?: number;
+  } = {}): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {};
+    if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
+    if (Number.isFinite(options.maxDiffBytes)) payload.max_diff_bytes = Number(options.maxDiffBytes);
+    if (!rpcEnabled()) {
+      return normalizeTransport(
+        {
+          ok: false,
+          error: 'Project summary requires /rpc/ui',
+        },
+        'legacy',
+      );
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectSummaryGet,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function openFile(payload: JsonObject): Promise<JsonObject & { transport: TransportTag }> {
     if (!rpcEnabled()) {
       return normalizeTransport(await callLegacy('te2_agent_open', payload), 'legacy');
@@ -301,6 +326,7 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     getFilesystemHome,
     listFilesystem,
     searchFilesystem,
+    getProjectSummary,
     openFile,
     openUrl,
     subscribeLiveNotifications,

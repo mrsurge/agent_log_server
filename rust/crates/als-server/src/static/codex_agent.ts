@@ -42,6 +42,7 @@ import { bindConversationRuntime } from './js/codex_agent/conversation/runtime.t
 import { bindHostRuntime } from './js/codex_agent/host/runtime.ts';
 import { bindWidescreenLayout } from './js/codex_agent/layout/widescreen.ts';
 import { bindPlanRuntime } from './js/codex_agent/plan/runtime.ts';
+import { bindProjectModal } from './js/codex_agent/project_modal.ts';
 import { bindRenderUtils } from './js/codex_agent/render/utils.ts';
 import { bindSubagentsCollapsible } from './js/codex_agent/subagents/collapsible.ts';
 import { bindTimelineRows } from './js/codex_agent/timeline/rows.ts';
@@ -762,6 +763,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   getUserDisplayName = getUserDisplayNameImpl;
   getAssistantDisplayName = getAssistantDisplayNameImpl;
+  let projectModal: ReturnType<typeof bindProjectModal> | null = null;
 
   const {
     renderSplashTabs,
@@ -851,6 +853,9 @@ document.addEventListener('DOMContentLoaded', () => {
     setDrawerOpen,
     applyHostUi,
     openSettingsModal,
+    openProjectModal: (path?: string | null) => {
+      void projectModal?.openProjectModal(path);
+    },
     updateActiveConversationLabel,
     documentRef: document,
     windowRef: window,
@@ -1583,6 +1588,21 @@ document.addEventListener('DOMContentLoaded', () => {
   const uiRpcClient = createUiRpcClient({
     sioCall,
     windowRef: window,
+  });
+  projectModal = bindProjectModal({
+    uiRpc: uiRpcClient,
+    getProjectRoot: () => {
+      if (hostUi?.projectRoot) return hostUi.projectRoot;
+      const settingsCwd = conversationSettings?.cwd;
+      if (typeof settingsCwd === 'string' && settingsCwd.trim()) return settingsCwd.trim();
+      const metaCwd = conversationMeta?.cwd;
+      if (typeof metaCwd === 'string' && metaCwd.trim()) return metaCwd.trim();
+      return null;
+    },
+    toRelativePath,
+    renderDiffBlock,
+    makeCollapsible,
+    documentRef: document,
   });
 
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({

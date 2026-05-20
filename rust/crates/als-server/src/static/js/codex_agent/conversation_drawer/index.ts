@@ -15,6 +15,7 @@ interface ConversationDrawerContext {
   getSplashTab(): string;
   getConversationPreview(conversationId: string): unknown;
   openSettingsModal(): unknown;
+  openProjectModal(path?: string | null): unknown;
   sioCall(event: string, payload: Record<string, unknown>): Promise<unknown>;
   setState(nextState: Partial<CombinedDrawerState>): void;
   resetTimeline(): void;
@@ -53,6 +54,7 @@ export function bindConversationDrawer(ctx: ConversationDrawerContext): Conversa
     selectConversationWithView: (...args) => actionsRef?.selectConversationWithView?.(...args),
     setConversationPins: (...args) => actionsRef?.setConversationPins?.(...args),
     openSettingsModal: ctx.openSettingsModal,
+    openProjectModal: ctx.openProjectModal,
     deleteConversation: (...args) => actionsRef?.deleteConversation?.(...args),
     documentRef: ctx.documentRef,
     windowRef: ctx.windowRef,

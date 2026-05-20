@@ -9,6 +9,7 @@ mod extension_registry;
 mod extension_routes;
 mod http;
 mod ipc;
+mod project_summary;
 mod settings_rpc;
 mod sidebar_ipc;
 mod socketio;

@@ -67,6 +67,7 @@ async fn dispatch_rpc(
         "filesystem.home" => Ok(filesystem_home()),
         "filesystem.list" => filesystem_list(request.params).await,
         "filesystem.search" => filesystem_search(state, request.params).await,
+        "project.summary.get" => project_summary_get(state, request.params).await,
         "file.open" => {
             let sent = sidebar_ipc::emit_agent_open(io, state, request.params.clone()).await;
             Ok(json!({
@@ -207,6 +208,31 @@ async fn filesystem_search(state: &AppState, params: JsonMap) -> Result<Value, R
     tokio::task::spawn_blocking(move || filesystem_search_sync(&config_dir, &params))
         .await
         .map_err(internal_rpc_error)?
+}
+
+async fn project_summary_get(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let host_root = state
+        .host_ui
+        .snapshot()
+        .ok()
+        .and_then(|snapshot| snapshot.project_root);
+    let config_dir = state.config.roots.config_dir.to_string_lossy().into_owned();
+    let fallback = host_root.as_deref().unwrap_or(config_dir.as_str());
+    let start = logical_absolute_path(params.get("path").and_then(Value::as_str), fallback)
+        .map_err(internal_rpc_error)?;
+    let max_diff_bytes = params.get("max_diff_bytes").and_then(Value::as_u64);
+    tokio::task::spawn_blocking(move || {
+        crate::project_summary::project_summary(&start, max_diff_bytes)
+            .map_err(internal_rpc_error)
+            .map(|mut value| {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("transport".to_owned(), json!("rpc"));
+                }
+                value
+            })
+    })
+    .await
+    .map_err(internal_rpc_error)?
 }
 
 fn filesystem_search_sync(config_dir: &Path, params: &JsonMap) -> Result<Value, RpcError> {
