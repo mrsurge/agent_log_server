@@ -211,13 +211,17 @@ async fn filesystem_search(state: &AppState, params: JsonMap) -> Result<Value, R
 }
 
 async fn project_summary_get(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let conversation_cwd = conversation_cwd_from_params(state, &params);
     let host_root = state
         .host_ui
         .snapshot()
         .ok()
         .and_then(|snapshot| snapshot.project_root);
     let config_dir = state.config.roots.config_dir.to_string_lossy().into_owned();
-    let fallback = host_root.as_deref().unwrap_or(config_dir.as_str());
+    let fallback = conversation_cwd
+        .as_deref()
+        .or(host_root.as_deref())
+        .unwrap_or(config_dir.as_str());
     let start = logical_absolute_path(params.get("path").and_then(Value::as_str), fallback)
         .map_err(internal_rpc_error)?;
     let max_diff_bytes = params.get("max_diff_bytes").and_then(Value::as_u64);
@@ -233,6 +237,31 @@ async fn project_summary_get(state: &AppState, params: JsonMap) -> Result<Value,
     })
     .await
     .map_err(internal_rpc_error)?
+}
+
+fn conversation_cwd_from_params(state: &AppState, params: &JsonMap) -> Option<String> {
+    let conversation_id = params
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let meta = state
+        .conversations
+        .load_meta_if_exists(conversation_id)
+        .ok()??;
+    meta.settings
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            meta.cwd
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
 }
 
 fn filesystem_search_sync(config_dir: &Path, params: &JsonMap) -> Result<Value, RpcError> {
@@ -506,7 +535,13 @@ mod tests {
     use crate::state::AppState;
     use als_dto::RuntimeRoots;
     use serde_json::json;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn expands_home_without_resolving_symlinks() {
@@ -549,23 +584,64 @@ mod tests {
     }
 
     #[test]
+    fn project_summary_context_uses_conversation_cwd() {
+        let root = test_root("als-rs-ui-project-test");
+        let state = test_state(&root);
+        let mut settings = JsonMap::new();
+        settings.insert("cwd".to_owned(), json!("/conversation/settings"));
+        state
+            .conversations
+            .create(crate::conversation_store::CreateConversationRequest {
+                conversation_id: Some("conv-project".to_owned()),
+                settings,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let mut params = JsonMap::new();
+        params.insert("conversation_id".to_owned(), json!("conv-project"));
+        assert_eq!(
+            conversation_cwd_from_params(&state, &params).as_deref(),
+            Some("/conversation/settings")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_summary_context_falls_back_to_meta_cwd() {
+        let root = test_root("als-rs-ui-project-test");
+        let state = test_state(&root);
+        state
+            .conversations
+            .create(crate::conversation_store::CreateConversationRequest {
+                conversation_id: Some("conv-project-meta".to_owned()),
+                cwd: Some("/conversation/meta".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut meta = state.conversations.load_meta("conv-project-meta").unwrap();
+        meta.settings.remove("cwd");
+        fs::write(
+            root.join("data/conversations/conv-project-meta/meta.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+
+        let mut params = JsonMap::new();
+        params.insert("conversation_id".to_owned(), json!("conv-project-meta"));
+        assert_eq!(
+            conversation_cwd_from_params(&state, &params).as_deref(),
+            Some("/conversation/meta")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn view_get_and_set_use_shared_ui_selection_state() {
-        let root = std::env::temp_dir().join(format!("als-rs-ui-view-test-{}", unix_millis()));
-        let state = AppState::new(ServerConfig {
-            host: "127.0.0.1".to_owned(),
-            port: 0,
-            extensions_dir: root.join("extensions"),
-            roots: RuntimeRoots {
-                data_dir: root.join("data"),
-                cache_dir: root.join("cache"),
-                config_dir: root.join("config"),
-                static_dir: root.join("static"),
-            },
-            adapters: AdapterConfig {
-                python_bin: "python".to_owned(),
-            },
-            framework_shells: FrameworkShellConfig::default(),
-        });
+        let root = test_root("als-rs-ui-view-test");
+        let state = test_state(&root);
 
         state
             .ui_selection
@@ -585,10 +661,36 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    fn unix_millis() -> u128 {
-        SystemTime::now()
+    fn test_state(root: &Path) -> AppState {
+        AppState::new(ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                python_bin: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        })
+    }
+
+    fn test_root(prefix: &str) -> PathBuf {
+        let sequence = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "{}-{}-{}-{}",
+            prefix,
+            std::process::id(),
+            nanos,
+            sequence
+        ))
     }
 }

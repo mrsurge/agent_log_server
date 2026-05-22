@@ -2,6 +2,7 @@ import {
   applyTranscriptCardMetadata,
   type TranscriptCardMetadata,
 } from './transcript_card_metadata.ts';
+import { createPathScrollLabel } from './path_label.ts';
 
 type ToolPayload = Record<string, unknown>;
 type ToolStructuredValue = ToolPayload | unknown[];
@@ -71,6 +72,7 @@ interface ToolRowEntry {
   interactionEl: HTMLPreElement | null;
   diffLabelEl: HTMLDivElement | null;
   diffBlock: HTMLDivElement | null;
+  truncationNoteEl: HTMLDivElement | null;
 }
 
 interface ToolRenderContext {
@@ -295,6 +297,23 @@ export function bindToolRender(ctx: ToolRenderContext) {
     nodes.forEach((node) => removeNode(node));
   }
 
+  function getServerTruncationNote(payload: ToolPayload | null | undefined): string {
+    if (!payload || payload.truncated !== true) return '';
+    const rawNote = payload.truncation_note ?? payload.truncationNote;
+    return typeof rawNote === 'string' ? rawNote : '';
+  }
+
+  function setToolTruncationNote(entry: Pick<ToolRowEntry, 'body' | 'truncationNoteEl'>, note: string): void {
+    removeNode(entry.truncationNoteEl);
+    entry.truncationNoteEl = null;
+    if (!note) return;
+    const noteEl = document.createElement('div');
+    noteEl.className = 'truncation-note';
+    noteEl.textContent = note;
+    entry.body.appendChild(noteEl);
+    entry.truncationNoteEl = noteEl;
+  }
+
   function getToolRow(
     id: string | undefined,
     label: string | undefined,
@@ -333,6 +352,7 @@ export function bindToolRender(ctx: ToolRenderContext) {
         interactionEl: null,
         diffLabelEl: null,
         diffBlock: null,
+        truncationNoteEl: null,
       };
       toolRows.set(key, entry);
     } else if (parentEl && entry.row.parentElement !== parentEl) {
@@ -456,7 +476,15 @@ export function bindToolRender(ctx: ToolRenderContext) {
     const label = document.createElement('div');
     label.className = 'mcp-tool-arg-label mcp-tool-diff-label';
     const resolvedPath = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : '';
-    label.textContent = resolvedPath ? `Changes: ${toRelativePath(resolvedPath) || resolvedPath}` : 'Changes';
+    if (resolvedPath) {
+      const prefix = document.createElement('span');
+      prefix.textContent = 'Changes: ';
+      label.append(prefix, createPathScrollLabel(document, toRelativePath(resolvedPath) || resolvedPath, {
+        title: resolvedPath,
+      }));
+    } else {
+      label.textContent = 'Changes';
+    }
     const block = document.createElement('div');
     block.className = 'diff-block mcp-tool-diff';
     if (typeof renderDiffBlock === 'function') {
@@ -645,6 +673,13 @@ export function bindToolRender(ctx: ToolRenderContext) {
 
     appendToolResult(body, entry.response ?? entry.result, entry.is_error === true, serverName, toolName);
     setToolFooter({ body, footerEl: null }, readNumber(entry.duration_ms));
+    const replayNote = getServerTruncationNote(entry);
+    if (replayNote) {
+      const noteEl = document.createElement('div');
+      noteEl.className = 'truncation-note';
+      noteEl.textContent = replayNote;
+      body.appendChild(noteEl);
+    }
 
     row.appendChild(body);
     makeCollapsible(row, `tool:${entry.id || entry.item_id || `${entry.server || ''}:${entry.tool || ''}`}`, false);
@@ -710,6 +745,7 @@ export function bindToolRender(ctx: ToolRenderContext) {
     ensureToolDiffPreview(entry, resolveToolCardDiff(toolName, evt), filePath);
     setToolResult(entry, result, isError, serverName, toolName);
     setToolFooter(entry, durationMs);
+    setToolTruncationNote(entry, getServerTruncationNote(evt));
 
     setLastEventType('tool');
     const exitCode = resultRecord?.exit_code ?? resultRecord?.exitCode;

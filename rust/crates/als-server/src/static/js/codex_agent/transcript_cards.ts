@@ -5,6 +5,7 @@ import {
 } from './transcript_card_metadata.ts';
 import { buildShellCommandPreview } from './shell_render.ts';
 import { ansiToHtml, hasAnsiSgr } from './terminal_ansi.ts';
+import { applyPathScrollLabel } from './path_label.ts';
 
 type TranscriptRecord = Record<string, unknown>;
 
@@ -39,6 +40,9 @@ type TranscriptEvent = TranscriptRecord & {
   envelopeJson?: string;
   command_count?: number;
   commandCount?: number;
+  truncated?: boolean;
+  truncation_note?: string;
+  truncationNote?: string;
 };
 
 type TranscriptWarningAction = {
@@ -177,6 +181,13 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     note.className = 'truncation-note';
     note.textContent = text;
     container.appendChild(note);
+  }
+
+  function serverTruncationNote(evt: TranscriptEvent): string {
+    const note = typeof evt.truncation_note === 'string' && evt.truncation_note
+      ? evt.truncation_note
+      : (typeof evt.truncationNote === 'string' ? evt.truncationNote : '');
+    return evt.truncated === true && note ? note : '';
   }
 
   function renderCommandResult(evt: TranscriptEvent, parentEl: HTMLElement | null = null, options: RenderCommandOptions = {}): void {
@@ -361,8 +372,7 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     if (path) {
       const pathLine = document.createElement('div');
       pathLine.className = 'view-card-path';
-      pathLine.textContent = toRelativePath(path);
-      pathLine.title = path;
+      applyPathScrollLabel(pathLine, toRelativePath(path), { title: path });
       pathLine.style.cursor = 'pointer';
       pathLine.dataset.hasClickHandler = 'true';
       pathLine.addEventListener('click', (e: MouseEvent) => {
@@ -390,6 +400,10 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
 
     if (truncated) {
       appendTruncationNote(body, `... (truncated, showing ${truncateLines} of ${totalLineCount} lines)`);
+    }
+    const backendNote = serverTruncationNote(evt);
+    if (backendNote && displayLines) {
+      appendTruncationNote(body, backendNote);
     }
 
     row.appendChild(body);
@@ -523,8 +537,11 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
 
         const pathLine = document.createElement('div');
         pathLine.className = 'search-card-path';
-        pathLine.textContent = entry.line ? `${toRelativePath(entry.path)}:${entry.line}` : toRelativePath(entry.path);
-        pathLine.title = entry.path;
+        applyPathScrollLabel(
+          pathLine,
+          entry.line ? `${toRelativePath(entry.path)}:${entry.line}` : toRelativePath(entry.path),
+          { title: entry.path },
+        );
         pathLine.style.cursor = 'pointer';
         pathLine.dataset.hasClickHandler = 'true';
         pathLine.addEventListener('click', (e: MouseEvent) => {
@@ -559,6 +576,8 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
       }
       body.appendChild(plain);
     }
+
+    appendTruncationNote(body, serverTruncationNote(evt));
 
     row.appendChild(body);
     makeCollapsible(row, `search:${evt.id || pattern || mode}`, false);

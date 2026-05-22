@@ -1,3 +1,10 @@
+import {
+  createPathScrollLabel,
+  pathScrollLabelHtml,
+  scrollPathLabelsToEnd,
+} from '../path_label.ts';
+import type { TranscriptCardMetadata } from '../transcript_card_metadata.ts';
+
 type HighlightResult = {
   value: string;
 };
@@ -192,6 +199,7 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
       path: typeof path === 'string' ? path : '',
     };
     diffBlock.innerHTML = formatDiff(text || '', path);
+    scrollPathLabelsToEnd(diffBlock);
   }
 
   function rerenderKnownDiffBlocks(): void {
@@ -201,6 +209,7 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
       const state = (node as DiffBlockElement).__diffRender;
       if (!state || typeof state !== 'object') return;
       node.innerHTML = formatDiff(state.text || '', state.path || '');
+      scrollPathLabelsToEnd(node);
     });
   }
 
@@ -252,7 +261,11 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
     if (path) {
       const pathLabel = document.createElement('div');
       pathLabel.className = 'declined-label';
-      pathLabel.innerHTML = `<strong>DECLINED:</strong> ${escapeHtml(toRelativePath(path))}`;
+      const prefix = document.createElement('strong');
+      prefix.textContent = 'DECLINED: ';
+      pathLabel.append(prefix, createPathScrollLabel(document, toRelativePath(path), {
+        title: path,
+      }));
       body.appendChild(pathLabel);
     }
     const block = document.createElement('div');
@@ -723,7 +736,10 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
           newLine: '',
           gutterText: fileGutter,
           display: '',
-          codeHtml: `<strong>${escapeHtml(relLabel)}</strong>`,
+          codeHtml: pathScrollLabelHtml(relLabel, escapeHtml, {
+            className: 'diff-file-path-label',
+            strong: true,
+          }),
           activePath: currentFilePath || '',
         });
         return;
@@ -839,4 +855,3 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
     bindDiffClickHandler,
   };
 }
-import type { TranscriptCardMetadata } from '../transcript_card_metadata.ts';

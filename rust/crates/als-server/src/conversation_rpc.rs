@@ -1,5 +1,6 @@
 use crate::{
     adapter_process::AdapterCapturedEvent,
+    card_truncation::{sanitize_live_card_event, sanitize_transcript_card_entry},
     conversation_store::{
         ConversationMeta, ConversationMetaUpdate, CreateConversationRequest, TranscriptOffset,
     },
@@ -722,17 +723,19 @@ async fn forward_adapter_live_event(
     state: &AppState,
     value: Value,
 ) -> Result<(), RpcError> {
-    let Some((conversation_id, event)) = adapter_conversation_object(value) else {
+    let Some((conversation_id, mut event)) = adapter_conversation_object(value) else {
         return Ok(());
     };
     let event_type = event
         .get("type")
         .and_then(Value::as_str)
-        .ok_or_else(|| rpc_error(-32603, "adapter live event is missing type"))?;
-    if should_skip_adapter_event_type(event_type) {
+        .ok_or_else(|| rpc_error(-32603, "adapter live event is missing type"))?
+        .to_owned();
+    sanitize_live_card_event(&mut event);
+    if should_skip_adapter_event_type(&event_type) {
         return Ok(());
     }
-    let Some(method) = notification_method_for_event_type(event_type) else {
+    let Some(method) = notification_method_for_event_type(&event_type) else {
         return Ok(());
     };
     if event_type.trim().eq_ignore_ascii_case("approval") {
@@ -1006,6 +1009,7 @@ fn persist_adapter_transcript_entry(
         return Ok(None);
     }
     strip_internal_adapter_transcript_fields(&mut entry);
+    sanitize_transcript_card_entry(&mut entry);
     state
         .conversations
         .append_transcript(&conversation_id, entry)
@@ -1036,6 +1040,7 @@ fn persist_import_transcript_batch(state: &AppState, value: Value) -> Result<(),
             continue;
         }
         strip_internal_adapter_transcript_fields(&mut entry);
+        sanitize_transcript_card_entry(&mut entry);
         entries.push(entry);
     }
     state
@@ -2120,6 +2125,61 @@ mod tests {
         assert_eq!(rows[1]["text"], "keep");
         assert_eq!(rows[1]["order_id"], 1);
         assert!(rows[1].get("_hydrated_history").is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persist_adapter_transcript_entry_truncates_card_output() {
+        let root = std::env::temp_dir().join(format!("als-rs-rpc-truncate-test-{}", unix_millis()));
+        let state = AppState::new(ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                python_bin: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+        });
+
+        persist_adapter_transcript_entry(
+            &state,
+            json!({
+                "role": "search",
+                "conversation_id": "conv-truncate",
+                "content": format!(
+                    "/repo/file.rs:10:{}",
+                    "x".repeat(crate::card_truncation::MAX_CARD_OUTPUT_BYTES + 100)
+                ),
+            }),
+        )
+        .unwrap();
+
+        let rows = state
+            .conversations
+            .read_transcript("conv-truncate")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["truncated"], true);
+        assert!(
+            rows[0]["content"]
+                .as_str()
+                .expect("content should be a string")
+                .len()
+                <= crate::card_truncation::MAX_CARD_OUTPUT_BYTES
+        );
+        assert!(
+            rows[0]["truncation_note"]
+                .as_str()
+                .expect("truncation_note should be a string")
+                .contains("search output truncated")
+        );
 
         let _ = fs::remove_dir_all(root);
     }

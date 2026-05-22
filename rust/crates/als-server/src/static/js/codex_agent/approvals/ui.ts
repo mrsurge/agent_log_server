@@ -1,5 +1,6 @@
 import { applyTranscriptCardMetadata } from '../transcript_card_metadata.ts';
 import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
+import { createPathScrollLabel } from '../path_label.ts';
 
 type ApprovalDecisionObject = {
   acceptWithExecpolicyAmendment?: boolean;
@@ -587,7 +588,10 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
           diffText = diffText || change.diff;
           filePath = filePath || change.path || null;
           const label = document.createElement('div');
-          label.innerHTML = `<strong>${escapeHtml(toRelativePath(changePath) || 'file')}</strong>`;
+          label.appendChild(createPathScrollLabel(document, toRelativePath(changePath) || 'file', {
+            title: changePath,
+            strong: true,
+          }));
           const diffBlock = document.createElement('div');
           diffBlock.className = 'diff-block';
           if (typeof renderDiffBlock === 'function') {
@@ -610,7 +614,10 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
         diffText = diffText || changeDiff;
         filePath = filePath || resolvedPath;
         const label = document.createElement('div');
-        label.innerHTML = `<strong>${escapeHtml(toRelativePath(resolvedPath) || 'file')}</strong>`;
+        label.appendChild(createPathScrollLabel(document, toRelativePath(resolvedPath) || 'file', {
+          title: resolvedPath,
+          strong: true,
+        }));
         const diffBlock = document.createElement('div');
         diffBlock.className = 'diff-block';
         if (typeof renderDiffBlock === 'function') {

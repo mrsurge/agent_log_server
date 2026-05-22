@@ -1,12 +1,15 @@
 import type { JsonObject } from './rpc/ui/contract.ts';
+import { applyPathScrollLabel } from './path_label.ts';
 
 interface UiRpcProjectClient {
-  getProjectSummary(options?: { path?: string | null; maxDiffBytes?: number }): Promise<JsonObject & { transport: string }>;
+  getProjectSummary(options?: { conversationId?: string | null; path?: string | null; maxDiffBytes?: number }): Promise<JsonObject & { transport: string }>;
   openFile(payload: JsonObject): Promise<JsonObject & { transport: string }>;
 }
 
 interface ProjectModalContext {
   uiRpc: UiRpcProjectClient;
+  getConversationId(): string | null | undefined;
+  getConversationCwd(): string | null | undefined;
   getProjectRoot(): string | null | undefined;
   toRelativePath(path: string | null | undefined): string;
   renderDiffBlock(block: HTMLElement, text: string, filePath: string): void;
@@ -180,8 +183,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     header.className = 'diff-path-label command-ribbon project-file-header';
     const pathLabel = doc.createElement('span');
     pathLabel.className = 'project-file-path';
-    pathLabel.textContent = ctx.toRelativePath(absolutePath) || file.path;
-    pathLabel.title = absolutePath;
+    applyPathScrollLabel(pathLabel, ctx.toRelativePath(absolutePath) || file.path, { title: absolutePath });
 
     const meta = doc.createElement('span');
     meta.className = 'project-file-meta';
@@ -213,7 +215,11 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       });
     } else {
       const note = doc.createElement('div');
-      note.className = 'muted project-file-disabled-note';
+      note.className = 'muted project-file-disabled-note project-file-open-placeholder';
+      note.setAttribute('role', 'button');
+      note.tabIndex = 0;
+      note.dataset.path = absolutePath;
+      note.title = absolutePath;
       note.textContent = 'No text diff available.';
       body.appendChild(note);
     }
@@ -264,9 +270,23 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   }
 
   function bindProjectDiffClickHandler(): void {
+    function openProjectFile(target: HTMLElement, evt: Event): void {
+      if (target.closest('.project-file-card.disabled')) return;
+      const path = target.getAttribute('data-path') || '';
+      if (!path) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      void ctx.uiRpc.openFile({ path, line: 1, column: 1 });
+    }
+
     projectBodyEl?.addEventListener('click', (evt) => {
       const target = evt.target;
       if (!(target instanceof HTMLElement)) return;
+      const fileOpenEl = target.closest('.project-file-open-placeholder');
+      if (fileOpenEl instanceof HTMLElement) {
+        openProjectFile(fileOpenEl, evt);
+        return;
+      }
       const lineEl = target.closest('.diff-line');
       if (!(lineEl instanceof HTMLElement)) return;
       if (lineEl.closest('.project-file-card.disabled')) return;
@@ -282,13 +302,21 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       } catch {}
       void ctx.uiRpc.openFile({ path, line, column: 1 });
     });
+    projectBodyEl?.addEventListener('keydown', (evt) => {
+      if (evt.key !== 'Enter' && evt.key !== ' ') return;
+      const target = evt.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (!target.classList.contains('project-file-open-placeholder')) return;
+      openProjectFile(target, evt);
+    });
   }
 
   async function refreshProjectSummary(): Promise<void> {
     renderMessage('Loading project summary...');
     try {
       const result = await ctx.uiRpc.getProjectSummary({
-        path: selectedProjectPath || ctx.getProjectRoot() || undefined,
+        conversationId: ctx.getConversationId() || undefined,
+        path: selectedProjectPath || ctx.getConversationCwd() || ctx.getProjectRoot() || undefined,
         maxDiffBytes: 15 * 1024,
       });
       renderProjectSummary(normalizeProjectSummary(result));

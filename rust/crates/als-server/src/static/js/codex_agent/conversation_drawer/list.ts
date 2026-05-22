@@ -10,6 +10,7 @@ interface ConversationSettings extends Record<string, unknown> {
 interface ConversationMeta extends Record<string, unknown> {
   conversation_id?: string;
   settings?: ConversationSettings;
+  cwd?: string;
   status?: string;
   pinned?: boolean;
   pending_approvals?: Record<string, unknown>;
@@ -75,6 +76,14 @@ function getConversationSettings(meta: ConversationMeta | null | undefined): Con
   return isRecord(meta?.settings) ? (meta.settings as ConversationSettings) : {};
 }
 
+function conversationCwd(meta: ConversationMeta | null | undefined): string {
+  const settings = getConversationSettings(meta);
+  const settingsCwd = typeof settings.cwd === 'string' ? settings.cwd.trim() : '';
+  if (settingsCwd) return settingsCwd;
+  const metaCwd = typeof meta?.cwd === 'string' ? meta.cwd.trim() : '';
+  return metaCwd;
+}
+
 function conversationMatchesProject(
   meta: ConversationMeta | null | undefined,
   hostUi: HostUiState | null | undefined,
@@ -83,8 +92,7 @@ function conversationMatchesProject(
   if (splashTab !== 'project') return true;
   const projectRoot = hostUi?.projectRoot;
   if (!projectRoot || typeof projectRoot !== 'string') return false;
-  const settings = getConversationSettings(meta);
-  const cwd = typeof settings.cwd === 'string' ? settings.cwd : '';
+  const cwd = conversationCwd(meta);
   if (!cwd) return false;
   return cwd === projectRoot || cwd.startsWith(`${projectRoot}/`);
 }
@@ -121,7 +129,7 @@ function buildConversationDisplay(
   const previewText = normalizePreviewText(
     (typeof getConversationPreview === 'function' ? getConversationPreview(conversationId) : null) || meta?.last_preview,
   );
-  const cwdText = typeof settings.cwd === 'string' ? settings.cwd : '';
+  const cwdText = conversationCwd(meta);
   return {
     conversationId,
     titleText,
@@ -453,10 +461,7 @@ export function createConversationDrawerList(
       evt.preventDefault();
       evt.stopPropagation();
       closeConversationMenus(doc);
-      const settings = getConversationSettings(meta);
-      const cwd = typeof settings.cwd === 'string' && settings.cwd.trim()
-        ? settings.cwd.trim()
-        : null;
+      const cwd = conversationCwd(meta) || null;
       openProjectModal(cwd);
     });
 

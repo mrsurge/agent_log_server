@@ -233,10 +233,14 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
   }
 
   async function getProjectSummary(options: {
+    conversationId?: string | null;
     path?: string | null;
     maxDiffBytes?: number;
   } = {}): Promise<JsonObject & { transport: TransportTag }> {
     const payload: JsonObject = {};
+    if (typeof options.conversationId === 'string' && options.conversationId.trim()) {
+      payload.conversation_id = options.conversationId.trim();
+    }
     if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
     if (Number.isFinite(options.maxDiffBytes)) payload.max_diff_bytes = Number(options.maxDiffBytes);
     if (!rpcEnabled()) {

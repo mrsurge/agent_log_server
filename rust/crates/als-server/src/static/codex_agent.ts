@@ -878,6 +878,16 @@ document.addEventListener('DOMContentLoaded', () => {
 	    return null;
 	  }
 
+  function activeConversationCwd(): string | null {
+    const settingsCwd = conversationSettings?.cwd;
+    if (typeof settingsCwd === 'string' && settingsCwd.trim()) return settingsCwd.trim();
+    const metaSettingsCwd = conversationMeta?.settings?.cwd;
+    if (typeof metaSettingsCwd === 'string' && metaSettingsCwd.trim()) return metaSettingsCwd.trim();
+    const metaCwd = conversationMeta?.cwd;
+    if (typeof metaCwd === 'string' && metaCwd.trim()) return metaCwd.trim();
+    return null;
+  }
+
   setMarkdownLinkHandlers({
     openFilePath: (target) => {
       const next: AnyRecord = target && typeof target === 'object' ? target : { path: target };
@@ -1591,12 +1601,12 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   projectModal = bindProjectModal({
     uiRpc: uiRpcClient,
+    getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
+    getConversationCwd: () => activeConversationCwd(),
     getProjectRoot: () => {
+      const conversationCwd = activeConversationCwd();
+      if (conversationCwd) return conversationCwd;
       if (hostUi?.projectRoot) return hostUi.projectRoot;
-      const settingsCwd = conversationSettings?.cwd;
-      if (typeof settingsCwd === 'string' && settingsCwd.trim()) return settingsCwd.trim();
-      const metaCwd = conversationMeta?.cwd;
-      if (typeof metaCwd === 'string' && metaCwd.trim()) return metaCwd.trim();
       return null;
     },
     toRelativePath,

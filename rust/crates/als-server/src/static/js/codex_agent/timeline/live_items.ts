@@ -5,6 +5,7 @@ import {
   applyTranscriptCardMetadata,
   type TranscriptCardMetadata,
 } from '../transcript_card_metadata.ts';
+import { createPathScrollLabel } from '../path_label.ts';
 import type { UnknownRecord } from '../shared_types.ts';
 
 type AssistantRows = Parameters<typeof bindAssistantStream>[0]['assistantRows'];
@@ -255,7 +256,10 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
       const pathLabel = document.createElement('div');
       pathLabel.className = 'diff-path-label command-ribbon';
       if (path) {
-        pathLabel.innerHTML = `<strong>${escapeHtml(toRelativePath(path))}</strong>`;
+        pathLabel.appendChild(createPathScrollLabel(document, toRelativePath(path), {
+          title: path,
+          strong: true,
+        }));
         pathLabel.style.cursor = 'pointer';
         pathLabel.dataset.hasClickHandler = 'true';
         pathLabel.addEventListener('click', (evt) => {
