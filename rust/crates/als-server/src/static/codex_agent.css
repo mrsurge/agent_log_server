@@ -925,6 +925,30 @@ body.widescreen-resizing * {
   border-bottom: 1px solid var(--border);
 }
 
+.project-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+#project-te2-control {
+  max-width: min(260px, 42vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#project-te2-control.success {
+  color: #7ee787;
+  border-color: rgba(126, 231, 135, 0.35);
+}
+
+#project-te2-control.warning {
+  color: #f2cc60;
+  border-color: rgba(242, 204, 96, 0.4);
+}
+
 .settings-body,
 .picker-body {
   padding: 12px 14px;

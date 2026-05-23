@@ -261,6 +261,69 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function getTe2ProjectStatus(options: {
+    path?: string | null;
+  } = {}): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {};
+    if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
+    if (!rpcEnabled()) {
+      return normalizeTransport(
+        {
+          ok: false,
+          connected: false,
+          action: 'disabled',
+          error: 'TE2 project status requires /rpc/ui',
+        },
+        'legacy',
+      );
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectTe2StatusGet,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function openTe2Project(options: {
+    path?: string | null;
+  } = {}): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {};
+    if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'TE2 project open requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectTe2Open,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function createTe2Project(options: {
+    path?: string | null;
+    adoptExisting?: boolean;
+    open?: boolean;
+  } = {}): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {};
+    if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
+    if (typeof options.adoptExisting === 'boolean') payload.adoptExisting = options.adoptExisting;
+    if (typeof options.open === 'boolean') payload.open = options.open;
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'TE2 project create requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectTe2Create,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function openFile(payload: JsonObject): Promise<JsonObject & { transport: TransportTag }> {
     if (!rpcEnabled()) {
       return normalizeTransport(await callLegacy('te2_agent_open', payload), 'legacy');
@@ -331,6 +394,9 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     listFilesystem,
     searchFilesystem,
     getProjectSummary,
+    getTe2ProjectStatus,
+    openTe2Project,
+    createTe2Project,
     openFile,
     openUrl,
     subscribeLiveNotifications,

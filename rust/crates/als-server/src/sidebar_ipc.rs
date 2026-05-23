@@ -92,6 +92,152 @@ pub async fn emit_agent_open(io: &SocketIo, state: &AppState, payload: JsonMap) 
     }
 }
 
+pub async fn te2_project_status(io: &SocketIo, state: &AppState, params: JsonMap) -> Value {
+    let Some(target_path) = string_field(&params, "path") else {
+        return json!({
+            "ok": false,
+            "connected": false,
+            "action": "disabled",
+            "reason": "missing_path",
+        });
+    };
+    let current_cwd = state
+        .host_ui
+        .snapshot()
+        .ok()
+        .and_then(|snapshot| snapshot.project_root);
+    let Ok(client) = ensure_client(io, state).await else {
+        return te2_project_status_unavailable(&target_path, current_cwd, "connect_failed");
+    };
+    let Some(client) = client else {
+        return te2_project_status_unavailable(&target_path, current_cwd, "sidebar_unavailable");
+    };
+    if current_cwd
+        .as_deref()
+        .is_some_and(|cwd| same_logical_path(cwd, &target_path))
+    {
+        return json!({
+            "ok": true,
+            "connected": true,
+            "target_path": target_path,
+            "current_cwd": current_cwd,
+            "matches_current": true,
+            "action": "current",
+            "lookup": Value::Null,
+        });
+    }
+
+    match sidebar_rpc_call(
+        &client,
+        "sidebar.project.lookup",
+        json!({ "path": target_path }),
+    )
+    .await
+    {
+        Ok(lookup) => {
+            let known = lookup
+                .get("known")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let reason = lookup.get("reason").cloned().unwrap_or(Value::Null);
+            json!({
+                "ok": true,
+                "connected": true,
+                "target_path": target_path,
+                "current_cwd": current_cwd,
+                "matches_current": false,
+                "known": known,
+                "reason": reason,
+                "action": if known { "switch" } else { "create" },
+                "lookup": lookup,
+            })
+        }
+        Err(error) => {
+            warn!(%error, "sidebar.project.lookup RPC failed");
+            state.sidebar_ipc.clear().await;
+            te2_project_status_unavailable(&target_path, current_cwd, "lookup_failed")
+        }
+    }
+}
+
+pub async fn te2_project_open(io: &SocketIo, state: &AppState, params: JsonMap) -> Value {
+    let Some(target_path) = string_field(&params, "path") else {
+        return json!({"ok": false, "error": "missing_path"});
+    };
+    let Ok(Some(client)) = ensure_client(io, state).await else {
+        return json!({"ok": false, "error": "sidebar_unavailable", "path": target_path});
+    };
+    match sidebar_rpc_call(
+        &client,
+        "sidebar.project.open",
+        json!({ "path": target_path }),
+    )
+    .await
+    {
+        Ok(result) if !rpc_result_explicitly_not_ok(&result) => {
+            if let Some(path) =
+                sidebar_project_result_path(&result).or_else(|| Some(target_path.clone()))
+            {
+                if let Err(error) = update_project_root(io, state, path).await {
+                    warn!(%error, "failed to update host UI after sidebar.project.open");
+                }
+            }
+            json!({"ok": true, "path": target_path, "result": result})
+        }
+        Ok(result) => json!({"ok": false, "path": target_path, "result": result}),
+        Err(error) => {
+            warn!(%error, "sidebar.project.open RPC failed");
+            state.sidebar_ipc.clear().await;
+            json!({"ok": false, "path": target_path, "error": error.to_string()})
+        }
+    }
+}
+
+pub async fn te2_project_create(io: &SocketIo, state: &AppState, params: JsonMap) -> Value {
+    let Some(target_path) = string_field(&params, "path") else {
+        return json!({"ok": false, "error": "missing_path"});
+    };
+    let adopt_existing = params
+        .get("adoptExisting")
+        .or_else(|| params.get("adopt_existing"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let open = params.get("open").and_then(Value::as_bool).unwrap_or(true);
+    let Ok(Some(client)) = ensure_client(io, state).await else {
+        return json!({"ok": false, "error": "sidebar_unavailable", "path": target_path});
+    };
+    match sidebar_rpc_call(
+        &client,
+        "sidebar.project.create",
+        json!({
+            "path": target_path,
+            "adoptExisting": adopt_existing,
+            "open": open,
+        }),
+    )
+    .await
+    {
+        Ok(result) if !rpc_result_explicitly_not_ok(&result) => {
+            if open {
+                if let Some(path) =
+                    sidebar_project_result_path(&result).or_else(|| Some(target_path.clone()))
+                {
+                    if let Err(error) = update_project_root(io, state, path).await {
+                        warn!(%error, "failed to update host UI after sidebar.project.create");
+                    }
+                }
+            }
+            json!({"ok": true, "path": target_path, "result": result})
+        }
+        Ok(result) => json!({"ok": false, "path": target_path, "result": result}),
+        Err(error) => {
+            warn!(%error, "sidebar.project.create RPC failed");
+            state.sidebar_ipc.clear().await;
+            json!({"ok": false, "path": target_path, "error": error.to_string()})
+        }
+    }
+}
+
 async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>> {
     if let Some(client) = state.sidebar_ipc.current().await {
         return Ok(Some(client));
@@ -270,6 +416,13 @@ async fn process_rpc_notification(io: &SocketIo, state: &AppState, payload: Payl
                 update_project_root(io, state, cwd).await?;
             }
         }
+        "sidebar.project.opened" => {
+            if let Some(cwd) =
+                string_field(&params, "resolved_path").or_else(|| string_field(&params, "path"))
+            {
+                update_project_root(io, state, cwd).await?;
+            }
+        }
         "sidebar.mention" => {
             process_mention(io, state, params).await?;
         }
@@ -429,6 +582,52 @@ fn cwd_from_value(value: &Value) -> Option<String> {
     }
 }
 
+fn te2_project_status_unavailable(
+    target_path: &str,
+    current_cwd: Option<String>,
+    reason: &str,
+) -> Value {
+    json!({
+        "ok": true,
+        "connected": false,
+        "target_path": target_path,
+        "current_cwd": current_cwd,
+        "matches_current": false,
+        "known": false,
+        "reason": reason,
+        "action": "disabled",
+        "lookup": Value::Null,
+    })
+}
+
+fn sidebar_project_result_path(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(values) => values.iter().find_map(sidebar_project_result_path),
+        Value::Object(object) => string_from_object(object, "resolved_path")
+            .or_else(|| string_from_object(object, "path"))
+            .or_else(|| {
+                object
+                    .get("project")
+                    .and_then(Value::as_object)
+                    .and_then(|project| string_from_object(project, "path"))
+            })
+            .or_else(|| object.get("data").and_then(sidebar_project_result_path)),
+        _ => None,
+    }
+}
+
+fn same_logical_path(left: &str, right: &str) -> bool {
+    fn normalize(value: &str) -> &str {
+        let value = value.trim();
+        if value == "/" {
+            value
+        } else {
+            value.trim_end_matches('/')
+        }
+    }
+    normalize(left) == normalize(right)
+}
+
 fn string_field(map: &JsonMap, key: &str) -> Option<String> {
     map.get(key)
         .and_then(Value::as_str)
@@ -519,7 +718,7 @@ fn positive(value: Option<i64>) -> Option<i64> {
 mod tests {
     use super::{
         cwd_from_value, encode_draft_mention_token, rpc_result_explicitly_not_ok,
-        sidebar_rpc_result, truncated_content,
+        same_logical_path, sidebar_project_result_path, sidebar_rpc_result, truncated_content,
     };
     use serde_json::json;
 
@@ -542,6 +741,29 @@ mod tests {
             Some("/nested-ack-array".to_owned())
         );
         assert_eq!(cwd_from_value(&json!({"data": {"cwd": ""}})), None);
+    }
+
+    #[test]
+    fn same_logical_path_ignores_trailing_slashes_only() {
+        assert!(same_logical_path("/repo/project", "/repo/project/"));
+        assert!(same_logical_path("/", "/"));
+        assert!(!same_logical_path("/repo/project", "/repo/other"));
+    }
+
+    #[test]
+    fn sidebar_project_result_path_accepts_wrapped_shapes() {
+        assert_eq!(
+            sidebar_project_result_path(&json!({"resolved_path": "/repo"})),
+            Some("/repo".to_owned())
+        );
+        assert_eq!(
+            sidebar_project_result_path(&json!({"project": {"path": "/project"}})),
+            Some("/project".to_owned())
+        );
+        assert_eq!(
+            sidebar_project_result_path(&json!({"data": {"path": "/nested"}})),
+            Some("/nested".to_owned())
+        );
     }
 
     #[test]

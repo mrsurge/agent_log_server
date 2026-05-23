@@ -68,6 +68,13 @@ async fn dispatch_rpc(
         "filesystem.list" => filesystem_list(request.params).await,
         "filesystem.search" => filesystem_search(state, request.params).await,
         "project.summary.get" => project_summary_get(state, request.params).await,
+        "project.te2.status.get" => {
+            Ok(sidebar_ipc::te2_project_status(io, state, request.params).await)
+        }
+        "project.te2.open" => Ok(sidebar_ipc::te2_project_open(io, state, request.params).await),
+        "project.te2.create" => {
+            Ok(sidebar_ipc::te2_project_create(io, state, request.params).await)
+        }
         "file.open" => {
             let sent = sidebar_ipc::emit_agent_open(io, state, request.params.clone()).await;
             Ok(json!({

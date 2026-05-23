@@ -3,6 +3,9 @@ import { applyPathScrollLabel } from './path_label.ts';
 
 interface UiRpcProjectClient {
   getProjectSummary(options?: { conversationId?: string | null; path?: string | null; maxDiffBytes?: number }): Promise<JsonObject & { transport: string }>;
+  getTe2ProjectStatus(options?: { path?: string | null }): Promise<JsonObject & { transport: string }>;
+  openTe2Project(options?: { path?: string | null }): Promise<JsonObject & { transport: string }>;
+  createTe2Project(options?: { path?: string | null; adoptExisting?: boolean; open?: boolean }): Promise<JsonObject & { transport: string }>;
   openFile(payload: JsonObject): Promise<JsonObject & { transport: string }>;
 }
 
@@ -14,6 +17,7 @@ interface ProjectModalContext {
   toRelativePath(path: string | null | undefined): string;
   renderDiffBlock(block: HTMLElement, text: string, filePath: string): void;
   makeCollapsible(row: HTMLElement | null, cardId: string, startExpanded: boolean, options?: Record<string, unknown>): void;
+  confirmProjectAction(options: { title: string; body: string; confirmText: string }): Promise<boolean>;
   documentRef?: Document;
 }
 
@@ -48,6 +52,19 @@ interface ProjectSummary {
   error: string;
 }
 
+type Te2ProjectAction = 'current' | 'switch' | 'create' | 'disabled';
+
+interface Te2ProjectState {
+  ok: boolean;
+  connected: boolean;
+  targetPath: string;
+  currentCwd: string;
+  matchesCurrent: boolean;
+  known: boolean;
+  reason: string;
+  action: Te2ProjectAction;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -58,6 +75,15 @@ function stringValue(value: unknown): string {
 
 function numberValue(value: unknown): number {
   return Number.isFinite(Number(value)) ? Number(value) : 0;
+}
+
+function boolValue(value: unknown): boolean {
+  return value === true;
+}
+
+function te2ActionValue(value: unknown): Te2ProjectAction {
+  if (value === 'current' || value === 'switch' || value === 'create' || value === 'disabled') return value;
+  return 'disabled';
 }
 
 function normalizeProjectFile(value: unknown): ProjectFile | null {
@@ -95,6 +121,20 @@ function normalizeProjectSummary(value: unknown): ProjectSummary {
   };
 }
 
+function normalizeTe2ProjectState(value: unknown): Te2ProjectState {
+  const payload = isRecord(value) ? value : {};
+  return {
+    ok: payload.ok !== false,
+    connected: boolValue(payload.connected),
+    targetPath: stringValue(payload.target_path),
+    currentCwd: stringValue(payload.current_cwd),
+    matchesCurrent: boolValue(payload.matches_current),
+    known: boolValue(payload.known),
+    reason: stringValue(payload.reason),
+    action: te2ActionValue(payload.action),
+  };
+}
+
 function formatBytes(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return '';
   if (value < 1024) return `${value} B`;
@@ -119,12 +159,15 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   const projectCloseBtn = doc.getElementById('project-close');
   const projectDismissBtn = doc.getElementById('project-dismiss');
   const projectRefreshBtn = doc.getElementById('project-refresh');
+  const projectTe2Control = doc.getElementById('project-te2-control') as HTMLButtonElement | null;
   const projectBodyEl = doc.getElementById('project-body');
   const conversationMenuToggle = doc.getElementById('conversation-menu-toggle');
   const conversationMenu = doc.getElementById('conversation-menu');
   const conversationProjectBtn = doc.getElementById('conversation-project');
   const conversationSettingsBtn = doc.getElementById('conversation-settings');
   let selectedProjectPath: string | null = null;
+  let currentSummary: ProjectSummary | null = null;
+  let currentTe2State: Te2ProjectState | null = null;
 
   function closeMenus(): void {
     setMenuOpen(conversationMenuToggle, conversationMenu, false);
@@ -170,6 +213,110 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     pill.className = className;
     pill.textContent = value;
     parent.appendChild(pill);
+  }
+
+  function setTe2ControlState(state: Te2ProjectState | null, loading = false): void {
+    if (!projectTe2Control) return;
+    projectTe2Control.classList.remove('success', 'warning');
+    if (loading) {
+      projectTe2Control.disabled = true;
+      projectTe2Control.textContent = 'Checking TE2...';
+      projectTe2Control.title = '';
+      return;
+    }
+    if (!state || !state.connected || state.action === 'disabled') {
+      projectTe2Control.disabled = true;
+      projectTe2Control.textContent = 'TE2 unavailable';
+      projectTe2Control.title = state?.reason || 'TE2 sidebar IPC is unavailable.';
+      return;
+    }
+    if (state.action === 'current') {
+      projectTe2Control.disabled = true;
+      projectTe2Control.classList.add('success');
+      projectTe2Control.textContent = 'TE2 current';
+      projectTe2Control.title = state.currentCwd
+        ? `TE2 is open on ${state.currentCwd}`
+        : 'TE2 is open on this project.';
+      return;
+    }
+    if (state.action === 'switch') {
+      projectTe2Control.disabled = false;
+      projectTe2Control.classList.add('warning');
+      projectTe2Control.textContent = 'Switch TE2';
+      projectTe2Control.title = state.currentCwd
+        ? `Switch TE2 from ${state.currentCwd} to ${state.targetPath}`
+        : `Switch TE2 to ${state.targetPath}`;
+      return;
+    }
+    projectTe2Control.disabled = false;
+    projectTe2Control.classList.add('warning');
+    projectTe2Control.textContent = 'Create TE2 Project';
+    projectTe2Control.title = `Create or adopt ${state.targetPath} in TE2`;
+  }
+
+  async function refreshTe2ProjectState(projectRoot: string | null | undefined): Promise<Te2ProjectState | null> {
+    const root = typeof projectRoot === 'string' && projectRoot.trim() ? projectRoot.trim() : '';
+    if (!root) {
+      currentTe2State = null;
+      setTe2ControlState(null);
+      return null;
+    }
+    setTe2ControlState(currentTe2State, true);
+    try {
+      currentTe2State = normalizeTe2ProjectState(await ctx.uiRpc.getTe2ProjectStatus({ path: root }));
+    } catch {
+      currentTe2State = {
+        ok: true,
+        connected: false,
+        targetPath: root,
+        currentCwd: '',
+        matchesCurrent: false,
+        known: false,
+        reason: 'request_failed',
+        action: 'disabled',
+      };
+    }
+    setTe2ControlState(currentTe2State);
+    return currentTe2State;
+  }
+
+  async function ensureTe2ProjectReady(projectRoot: string | null | undefined): Promise<boolean> {
+    const root = typeof projectRoot === 'string' && projectRoot.trim() ? projectRoot.trim() : '';
+    if (!root) return false;
+    let state = currentTe2State && currentTe2State.targetPath === root
+      ? currentTe2State
+      : await refreshTe2ProjectState(root);
+    if (!state || !state.connected || state.action === 'disabled') {
+      setTe2ControlState(state);
+      return false;
+    }
+    if (state.action === 'current') {
+      return true;
+    }
+    if (state.action === 'switch') {
+      const confirmed = await ctx.confirmProjectAction({
+        title: 'Switch TE2 project?',
+        body: state.currentCwd
+          ? `TE2 is currently open on ${state.currentCwd}. Switch it to ${root}?`
+          : `Switch TE2 to ${root}?`,
+        confirmText: 'Switch',
+      });
+      if (!confirmed) return false;
+      const result = await ctx.uiRpc.openTe2Project({ path: root });
+      if (result.ok === false) return false;
+      state = await refreshTe2ProjectState(root);
+      return state?.action === 'current';
+    }
+    const confirmed = await ctx.confirmProjectAction({
+      title: 'Create TE2 project?',
+      body: `TE2 does not have ${root} in its project database. Create or adopt it and open it now?`,
+      confirmText: 'Create',
+    });
+    if (!confirmed) return false;
+    const result = await ctx.uiRpc.createTe2Project({ path: root, adoptExisting: true, open: true });
+    if (result.ok === false) return false;
+    state = await refreshTe2ProjectState(root);
+    return state?.action === 'current';
   }
 
   function renderProjectFileCard(summary: ProjectSummary, file: ProjectFile): HTMLElement {
@@ -230,6 +377,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
 
   function renderProjectSummary(summary: ProjectSummary): void {
     if (!projectBodyEl) return;
+    currentSummary = summary;
     projectBodyEl.innerHTML = '';
     if (!summary.ok) {
       renderMessage(summary.error || 'Project summary unavailable.');
@@ -270,12 +418,14 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   }
 
   function bindProjectDiffClickHandler(): void {
-    function openProjectFile(target: HTMLElement, evt: Event): void {
+    async function openProjectFile(target: HTMLElement, evt: Event): Promise<void> {
       if (target.closest('.project-file-card.disabled')) return;
       const path = target.getAttribute('data-path') || '';
       if (!path) return;
       evt.preventDefault();
       evt.stopPropagation();
+      const ready = await ensureTe2ProjectReady(currentSummary?.root);
+      if (!ready) return;
       void ctx.uiRpc.openFile({ path, line: 1, column: 1 });
     }
 
@@ -284,7 +434,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       if (!(target instanceof HTMLElement)) return;
       const fileOpenEl = target.closest('.project-file-open-placeholder');
       if (fileOpenEl instanceof HTMLElement) {
-        openProjectFile(fileOpenEl, evt);
+        void openProjectFile(fileOpenEl, evt);
         return;
       }
       const lineEl = target.closest('.diff-line');
@@ -295,19 +445,24 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       const oldLine = lineEl.getAttribute('data-old-line') || '';
       const line = parseInt(newLine || oldLine, 10);
       if (!path || !Number.isFinite(line) || line <= 0) return;
+      evt.preventDefault();
       evt.stopPropagation();
       try {
         lineEl.classList.add('tap-flash');
         setTimeout(() => lineEl.classList.remove('tap-flash'), 180);
       } catch {}
-      void ctx.uiRpc.openFile({ path, line, column: 1 });
+      void (async () => {
+        const ready = await ensureTe2ProjectReady(currentSummary?.root);
+        if (!ready) return;
+        await ctx.uiRpc.openFile({ path, line, column: 1 });
+      })();
     });
     projectBodyEl?.addEventListener('keydown', (evt) => {
       if (evt.key !== 'Enter' && evt.key !== ' ') return;
       const target = evt.target;
       if (!(target instanceof HTMLElement)) return;
       if (!target.classList.contains('project-file-open-placeholder')) return;
-      openProjectFile(target, evt);
+      void openProjectFile(target, evt);
     });
   }
 
@@ -319,8 +474,16 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
         path: selectedProjectPath || ctx.getConversationCwd() || ctx.getProjectRoot() || undefined,
         maxDiffBytes: 15 * 1024,
       });
-      renderProjectSummary(normalizeProjectSummary(result));
+      const summary = normalizeProjectSummary(result);
+      renderProjectSummary(summary);
+      if (summary.ok) {
+        void refreshTe2ProjectState(summary.root);
+      } else {
+        setTe2ControlState(null);
+      }
     } catch (error) {
+      currentSummary = null;
+      setTe2ControlState(null);
       renderMessage(error instanceof Error ? error.message : 'Project summary unavailable.');
     }
   }
@@ -349,6 +512,9 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   projectDismissBtn?.addEventListener('click', closeProjectModal);
   projectRefreshBtn?.addEventListener('click', () => {
     void refreshProjectSummary();
+  });
+  projectTe2Control?.addEventListener('click', () => {
+    void ensureTe2ProjectReady(currentSummary?.root);
   });
   bindProjectDiffClickHandler();
   projectModalEl?.addEventListener('click', (evt) => {

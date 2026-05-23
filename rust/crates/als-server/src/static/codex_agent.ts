@@ -888,6 +888,33 @@ document.addEventListener('DOMContentLoaded', () => {
     return null;
   }
 
+  function confirmProjectAction(options: { title: string; body: string; confirmText: string }): Promise<boolean> {
+    type WarningHelpers = {
+      openWarningModal?: (options: {
+        title?: string;
+        body?: string;
+        confirmText?: string;
+        onConfirm?: () => Promise<void> | void;
+        onCancel?: () => void;
+      }) => void;
+    };
+    const helpers = (window as Window & typeof globalThis & {
+      CodexAgent?: { helpers?: WarningHelpers };
+    }).CodexAgent?.helpers;
+    if (typeof helpers?.openWarningModal !== 'function') {
+      return Promise.resolve(false);
+    }
+    return new Promise<boolean>((resolve) => {
+      helpers.openWarningModal?.({
+        title: options.title,
+        body: options.body,
+        confirmText: options.confirmText,
+        onConfirm: () => resolve(true),
+        onCancel: () => resolve(false),
+      });
+    });
+  }
+
   setMarkdownLinkHandlers({
     openFilePath: (target) => {
       const next: AnyRecord = target && typeof target === 'object' ? target : { path: target };
@@ -1612,6 +1639,7 @@ document.addEventListener('DOMContentLoaded', () => {
     toRelativePath,
     renderDiffBlock,
     makeCollapsible,
+    confirmProjectAction,
     documentRef: document,
   });
 
