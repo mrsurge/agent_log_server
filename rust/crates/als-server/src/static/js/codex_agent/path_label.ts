@@ -4,17 +4,29 @@ type PathLabelOptions = {
   strong?: boolean;
 };
 
+const PATH_SCROLL_RETRY_DELAYS_MS = [0, 50, 150];
+
 export function scrollPathLabelToEnd(el: HTMLElement | null | undefined): void {
   if (!(el instanceof HTMLElement)) return;
   const apply = () => {
-    el.scrollLeft = el.scrollWidth;
+    el.scrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
   };
   apply();
   const win = el.ownerDocument?.defaultView;
-  if (!win || typeof win.requestAnimationFrame !== 'function') return;
-  win.requestAnimationFrame(() => {
+  if (!win) return;
+  const applyAfterPaint = () => {
+    if (typeof win.requestAnimationFrame === 'function') {
+      win.requestAnimationFrame(() => {
+        apply();
+        win.requestAnimationFrame(apply);
+      });
+      return;
+    }
     apply();
-    win.requestAnimationFrame(apply);
+  };
+  applyAfterPaint();
+  PATH_SCROLL_RETRY_DELAYS_MS.forEach((delayMs) => {
+    win.setTimeout(applyAfterPaint, delayMs);
   });
 }
 

@@ -2,6 +2,7 @@ import {
   applyTranscriptCardMetadata,
   type TranscriptCardMetadata,
 } from '../transcript_card_metadata.ts';
+import { scrollPathLabelsToEnd } from '../path_label.ts';
 import type { ToggleableRow, UnknownRecord } from '../shared_types.ts';
 
 interface CollapsibleOptions {
@@ -106,6 +107,15 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       saveExpandedCards();
     }
 
+    function syncExpandedPathLabels(expanded: boolean) {
+      if (!expanded) return;
+      scrollPathLabelsToEnd(rowEl);
+      const win = rowEl.ownerDocument?.defaultView;
+      if (win && typeof win.requestAnimationFrame === 'function') {
+        win.requestAnimationFrame(() => scrollPathLabelsToEnd(rowEl));
+      }
+    }
+
     function toggleCollapse(forceExpanded?: boolean) {
       const expanded = typeof forceExpanded === 'boolean'
         ? forceExpanded
@@ -113,6 +123,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       rowEl.classList.toggle('expanded', expanded);
       persistExpandedState(expanded);
       syncExpandedState(expanded);
+      syncExpandedPathLabels(expanded);
       if (typeof onToggle === 'function') onToggle(expanded);
       maybeAutoScroll();
       return expanded;
@@ -120,6 +131,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
 
     rowEl._toggleCollapse = toggleCollapse;
     syncExpandedState(isExpanded);
+    syncExpandedPathLabels(isExpanded);
 
     twistyEl.style.pointerEvents = 'auto';
     twistyEl.style.cursor = 'pointer';

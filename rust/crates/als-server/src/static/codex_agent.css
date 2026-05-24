@@ -900,6 +900,10 @@ body.widescreen-resizing * {
   display: none;
 }
 
+#warning-modal {
+  z-index: 90;
+}
+
 .settings-dialog,
 .picker-dialog {
   width: min(560px, 92vw);

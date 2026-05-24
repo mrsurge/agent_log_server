@@ -106,12 +106,6 @@ pub async fn te2_project_status(io: &SocketIo, state: &AppState, params: JsonMap
         .snapshot()
         .ok()
         .and_then(|snapshot| snapshot.project_root);
-    let Ok(client) = ensure_client(io, state).await else {
-        return te2_project_status_unavailable(&target_path, current_cwd, "connect_failed");
-    };
-    let Some(client) = client else {
-        return te2_project_status_unavailable(&target_path, current_cwd, "sidebar_unavailable");
-    };
     if current_cwd
         .as_deref()
         .is_some_and(|cwd| same_logical_path(cwd, &target_path))
@@ -126,6 +120,12 @@ pub async fn te2_project_status(io: &SocketIo, state: &AppState, params: JsonMap
             "lookup": Value::Null,
         });
     }
+    let Ok(client) = ensure_client(io, state).await else {
+        return te2_project_status_unavailable(&target_path, current_cwd, "connect_failed");
+    };
+    let Some(client) = client else {
+        return te2_project_status_unavailable(&target_path, current_cwd, "sidebar_unavailable");
+    };
 
     match sidebar_rpc_call(
         &client,
