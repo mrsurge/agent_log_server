@@ -1643,6 +1643,25 @@ document.addEventListener('DOMContentLoaded', () => {
     documentRef: document,
   });
 
+  let reconnectRefreshSerial = 0;
+  async function refreshConversationAfterReconnect(): Promise<void> {
+    const conversationId = clientConversationId || conversationMeta?.conversation_id || null;
+    if (!conversationId) return;
+    const refreshSerial = ++reconnectRefreshSerial;
+    await fetchConversation(conversationId);
+    if (refreshSerial !== reconnectRefreshSerial) return;
+    const currentConversationId = clientConversationId || conversationMeta?.conversation_id || null;
+    if (currentConversationId !== conversationId) return;
+    const shouldRefreshTranscript = activeView === 'conversation' || isWidescreenLayout();
+    if (!shouldRefreshTranscript) return;
+    resetTimeline();
+    await replayTranscript();
+    if (refreshSerial !== reconnectRefreshSerial) return;
+    await refreshPlanSurface();
+    restorePendingApprovals();
+    maybeAutoScroll(true);
+  }
+
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
     getWsState: () => ({ wsOpen, wsReadyResolve, wsReadyPromise, wsReconnectDelay }),
     setWsState: (patch: SocketEventsPatch) => {
@@ -1655,10 +1674,11 @@ document.addEventListener('DOMContentLoaded', () => {
     wsStatusEl,
     setPill,
     syncDraftFromServer,
-    getConversationId: () => conversationMeta?.conversation_id,
+    getConversationId: () => clientConversationId || conversationMeta?.conversation_id,
     getWindow: () => window,
     conversationsRpcClient,
     isRpcTransportEnabled: () => rpcTransportEnabled,
+    onReconnect: refreshConversationAfterReconnect,
   });
 
   const conversationRuntime = bindConversationRuntime({

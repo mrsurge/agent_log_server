@@ -151,7 +151,7 @@ pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Valu
         }
     }
 
-    files.sort_by(|left, right| left.path.cmp(&right.path));
+    sort_project_files(&mut files);
     let changed_files = files.len();
     let truncated_files = changed_files >= MAX_CHANGED_FILES;
     Ok(json!(ProjectSummary {
@@ -241,6 +241,37 @@ fn status_summary(status: Status) -> String {
     }
 }
 
+fn sort_project_files(files: &mut [ProjectFileSummary]) {
+    files.sort_by(|left, right| {
+        status_sort_rank(&left.status)
+            .cmp(&status_sort_rank(&right.status))
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.status.cmp(&right.status))
+    });
+}
+
+fn status_sort_rank(status: &str) -> u8 {
+    let labels = status
+        .split(',')
+        .map(|label| label.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    for (needle, rank) in [
+        ("modified", 0),
+        ("renamed", 1),
+        ("added", 2),
+        ("deleted", 3),
+        ("typechange", 4),
+        ("conflicted", 5),
+        ("unreadable", 6),
+        ("clean", 7),
+    ] {
+        if labels.iter().any(|label| label == needle) {
+            return rank;
+        }
+    }
+    8
+}
+
 fn file_size(root: &Path, rel_path: &str) -> Option<u64> {
     let path = if Path::new(rel_path).is_absolute() {
         PathBuf::from(rel_path)
@@ -252,4 +283,67 @@ fn file_size(root: &Path, rel_path: &str) -> Option<u64> {
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project_file(path: &str, status: &str) -> ProjectFileSummary {
+        ProjectFileSummary {
+            path: path.to_owned(),
+            status: status.to_owned(),
+            additions: 0,
+            deletions: 0,
+            bytes: None,
+            diff_bytes: None,
+            diff_truncated: false,
+            diff_text: None,
+        }
+    }
+
+    #[test]
+    fn status_sort_rank_prefers_requested_category_order() {
+        assert!(status_sort_rank("modified") < status_sort_rank("renamed"));
+        assert!(status_sort_rank("renamed") < status_sort_rank("added"));
+        assert!(status_sort_rank("added") < status_sort_rank("deleted"));
+        assert_eq!(
+            status_sort_rank("added, modified"),
+            status_sort_rank("modified")
+        );
+        assert_eq!(
+            status_sort_rank("renamed, typechange"),
+            status_sort_rank("renamed")
+        );
+    }
+
+    #[test]
+    fn sort_project_files_groups_by_status_then_path() {
+        let mut files = vec![
+            project_file("z-added.rs", "added"),
+            project_file("b-modified.rs", "modified"),
+            project_file("renamed.rs", "renamed"),
+            project_file("a-modified.rs", "modified"),
+            project_file("deleted.rs", "deleted"),
+            project_file("other.rs", "unknown"),
+        ];
+
+        sort_project_files(&mut files);
+
+        let ordered_paths = files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_paths,
+            vec![
+                "a-modified.rs",
+                "b-modified.rs",
+                "renamed.rs",
+                "z-added.rs",
+                "deleted.rs",
+                "other.rs"
+            ]
+        );
+    }
 }

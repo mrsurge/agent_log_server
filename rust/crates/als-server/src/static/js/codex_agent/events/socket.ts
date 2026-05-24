@@ -22,6 +22,7 @@ interface BindSocketEventsContext {
   getWindow: () => Window;
   conversationsRpcClient?: ReturnType<typeof createConversationsRpcClient> | null;
   isRpcTransportEnabled?: () => boolean;
+  onReconnect?: (() => void | Promise<void>) | null;
 }
 
 export function bindSocketEvents(ctx: BindSocketEventsContext) {
@@ -36,8 +37,11 @@ export function bindSocketEvents(ctx: BindSocketEventsContext) {
     getWindow,
     conversationsRpcClient,
     isRpcTransportEnabled,
+    onReconnect,
   } = ctx;
   let unsubscribeRpcNotifications: (() => void) | null = null;
+  let hasConnectedOnce = false;
+  let disconnectedAfterConnect = false;
 
   function resetWsReady() {
     let wsReadyResolve: ((ready: boolean) => void) | null = null;
@@ -88,10 +92,21 @@ export function bindSocketEvents(ctx: BindSocketEventsContext) {
       unsubscribeRpcNotifications = conversationsRpcClient.subscribeLiveNotifications({
         onConnectionChange: (connected) => {
           if (connected) {
+            const shouldRefresh = hasConnectedOnce && disconnectedAfterConnect;
             markWsOpen();
             setPill(wsStatusEl ?? null, '👍', 'ok');
             syncDraftFromServer(getConversationId());
+            hasConnectedOnce = true;
+            disconnectedAfterConnect = false;
+            if (shouldRefresh && typeof onReconnect === 'function') {
+              void Promise.resolve(onReconnect()).catch((error) => {
+                console.warn('conversation rpc reconnect refresh failed', error);
+              });
+            }
             return;
+          }
+          if (hasConnectedOnce) {
+            disconnectedAfterConnect = true;
           }
           resetWsReady();
           setPill(wsStatusEl ?? null, '👎', 'err');
