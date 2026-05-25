@@ -2,8 +2,13 @@ from __future__ import annotations
 
 # pyright: reportPrivateUsage=false
 
+import asyncio
+import tempfile
 import unittest
+from collections.abc import Coroutine
+from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 import mcp_agent_pty_server as kb_server
 from als_deprecated.markdown_sections import SectionNode, parse_markdown
@@ -82,6 +87,55 @@ class KbSelectorContractTests(unittest.TestCase):
         self.assertIsInstance(result, list)
         result_nodes = cast(list[SectionNode], result)
         self.assertEqual(result_nodes[0].title, "Child")
+
+
+class KbSearchContractTests(unittest.TestCase):
+    def _write_kb_root(self, root: Path) -> None:
+        (root / ".agent-pty.toml").write_text(
+            '[knowledge]\nfiles = ["one.md", "two.md"]\n',
+            encoding="utf-8",
+        )
+        (root / "one.md").write_text("# One\n\nneedle one\n", encoding="utf-8")
+        (root / "two.md").write_text("# Two\n\n## Second\n\nneedle two\n", encoding="utf-8")
+
+    def _run_kb_tool(self, value: object) -> str:
+        return asyncio.run(cast(Coroutine[object, object, str], value))
+
+    def test_resolve_search_files_defaults_to_all_configured_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_kb_root(root)
+            with patch.object(kb_server, "_current_project_root", return_value=root):
+                result = kb_server._kb_resolve_search_files(None, None)
+
+        self.assertIsInstance(result, list)
+        paths = [path.name for path in cast(list[Path], result)]
+        self.assertEqual(paths, ["one.md", "two.md"])
+
+    def test_kb_search_without_target_searches_all_files_with_global_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_kb_root(root)
+            with patch.object(kb_server, "_current_project_root", return_value=root):
+                tool_call = cast(object, kb_server.kb_search(query="needle", max_hits=1))
+                result = self._run_kb_tool(tool_call)
+
+        self.assertIn("[search: all KB files", result)
+        self.assertIn("[1] file one.md section", result)
+        self.assertIn("needle one", result)
+        self.assertNotIn("needle two", result)
+
+    def test_kb_search_headers_without_target_searches_all_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_kb_root(root)
+            with patch.object(kb_server, "_current_project_root", return_value=root):
+                tool_call = cast(object, kb_server.kb_search_headers(query="o", max_hits=5))
+                result = self._run_kb_tool(tool_call)
+
+        self.assertIn("[search_headers: all KB files", result)
+        self.assertIn("one.md: 001 H1 L1 # One", result)
+        self.assertIn("two.md: 001 H1 L1 # Two", result)
 
 
 if __name__ == "__main__":

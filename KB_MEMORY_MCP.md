@@ -79,12 +79,14 @@ kb_schema(target="KNOWLEDGE.md", id="Architecture") → list headings in that su
 
 **`kb_search_headers(file?/target?, query, max_hits?)`**
 Case-insensitive substring search across heading titles. Returns matching headings with their section IDs so you can navigate to them.
+- If neither `file` nor `target` is supplied, searches all configured KB files.
 
 **`kb_search(file?/target?, query, regex?, max_hits?, preview_chars?, from_match?)`**
 Section-aware body search.
+- If neither `file` nor `target` is supplied, searches all configured KB files.
 - `regex=false` does a literal case-insensitive search.
 - `regex=true` treats `query` as a Python regular expression.
-- `max_hits` caps results.
+- `max_hits` caps total results across the whole search.
 - `preview_chars` caps each body preview.
 - `from_match=true` starts previews at the match; `false` starts previews at the
   beginning of the section body.
@@ -195,6 +197,8 @@ KB mutations are patch-style text edits:
 - Use `section=""` when you want to patch the file root directly.
 - Use `kb_schema(target="...")` for a full document outline after `kb_list`.
   Use `root_depth=2` only when you intentionally want the outline roots to start at H2.
+- Use `kb_search_headers(query="...")` or `kb_search(query="...")` without a target for broad KB discovery across configured files.
+- Add `target="..."` when you want to limit search to one KB file.
 - Use `kb_search_headers` when you already know a heading fragment and want a targeted lookup.
 - Use `kb_info` after schema/search when you need ranges, child headings, or previews before reading.
 - Use `kb_search` like grep — find the snippet, then `kb_info` or `kb_read` the selected section.

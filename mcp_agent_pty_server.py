@@ -1221,6 +1221,31 @@ def _kb_select_target_file(file: Optional[str], target: Optional[str]) -> Option
     return selected_file
 
 
+def _kb_resolve_search_files(file: Optional[str], target: Optional[str]) -> list[Path] | ObjectMap:
+    """Resolve KB search files. Omitted file/target means all configured KB files."""
+    selected_file = _kb_select_target_file(file, target)
+    if isinstance(selected_file, dict):
+        return selected_file
+    if selected_file is not None:
+        resolved = _kb_resolve_file(selected_file)
+        if isinstance(resolved, dict):
+            return resolved
+        return [resolved]
+
+    root = _current_project_root()
+    files = _kb_configured_files(root)
+    if not files:
+        return _kb_error("NotConfigured", "No knowledge files in .agent-pty.toml")
+    return [_logical_abspath(root / configured_file) for configured_file in files]
+
+
+def _kb_display_path(path: Path) -> str:
+    root = _current_project_root()
+    with contextlib.suppress(ValueError):
+        return str(path.relative_to(root))
+    return path.name
+
+
 def _atomic_write(path: Path, content: str) -> None:
     """Write content atomically: temp file, fsync, rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1983,54 +2008,53 @@ async def kb_search_headers(
     query: str = "",
     max_hits: int = 25,
 ) -> str:
-    selected_file = _kb_select_target_file(file, target)
-    if isinstance(selected_file, dict):
-        return _kb_dict_to_error_text(selected_file)
-    resolved = _kb_resolve_file(selected_file)
+    q = (query or "").strip()
+    resolved = _kb_resolve_search_files(file, target)
     if isinstance(resolved, dict):
         return _kb_dict_to_error_text(resolved)
-    path = resolved
-    text = _read_text_or_error(path)
-    if isinstance(text, dict):
-        return _kb_dict_to_error_text(text)
-    q = (query or "").strip()
+    paths = resolved
+    scope = _kb_display_path(paths[0]) if len(paths) == 1 else "all KB files"
     if not q:
-        return f"[search_headers: {path.name}  query: (empty)]\nNo query provided."
+        return f"[search_headers: {scope}  query: (empty)]\nNo query provided."
     qf = q.casefold()
-    nodes = parse_markdown(text)
-    matches = [node for node in nodes if qf in node.title.casefold()]
     cap = max(1, int(max_hits))
-    number_by_line = _kb_node_number_map(nodes)
-    out = [f"[search_headers: {path.name}  query: {q}  matches: {min(len(matches), cap)}/{len(matches)}]"]
-    for node in matches:
-        if len(out) - 1 >= cap:
-            break
-        out.append(_kb_schema_line(node, number_by_line.get(node.line_start, 0)))
-    if not matches:
+    out: list[str] = []
+    total_matches = 0
+    for path in paths:
+        text = _read_text_or_error(path)
+        if isinstance(text, dict):
+            return _kb_dict_to_error_text(text)
+        nodes = parse_markdown(text)
+        matches = [node for node in nodes if qf in node.title.casefold()]
+        total_matches += len(matches)
+        number_by_line = _kb_node_number_map(nodes)
+        for node in matches:
+            if len(out) >= cap:
+                break
+            line = _kb_schema_line(node, number_by_line.get(node.line_start, 0))
+            if len(paths) > 1:
+                line = f"{_kb_display_path(path)}: {line}"
+            out.append(line)
+    header = (
+        f"[search_headers: {scope}  query: {q}  "
+        f"matches: {len(out)}/{total_matches}  max_hits: {cap}]"
+    )
+    if not out:
         out.append("  (no matches)")
-    return "\n".join(out)
+    return "\n".join([header, *out])
 
 
-def _kb_search_body_matches(
+def _kb_search_body_match_blocks(
     *,
     path: Path,
     text: str,
-    query: str,
-    regex: bool,
+    pattern: re.Pattern[str],
     max_hits: int,
     preview_chars: int,
     from_match: bool,
-) -> str:
-    q = (query or "").strip()
-    if not q:
-        return f"[search: {path.name}  query: (empty)]\nNo query provided."
-
-    flags = re.IGNORECASE | re.MULTILINE
-    try:
-        pattern = re.compile(q if regex else re.escape(q), flags)
-    except re.error as exc:
-        return _kb_error_text("InvalidParameter", f"Invalid regex: {exc}", query=q)
-
+    start_index: int = 1,
+    include_file: bool = False,
+) -> list[str]:
     lines = text.splitlines()
     nodes = parse_markdown(text)
     number_by_line = _kb_node_number_map(nodes)
@@ -2069,24 +2093,19 @@ def _kb_search_body_matches(
                 preview_source = body_text
             preview = _kb_preview_text(preview_source, preview_cap)
             number = number_by_line.get(node.line_start, 0)
+            prefix = f"[{start_index + len(results)}]"
+            if include_file:
+                prefix += f" file {_kb_display_path(path)}"
             results.append(
                 "\n".join(
                     [
-                        f"[{len(results) + 1}] section {number:03d} H{node.depth} match_line L{line_no}",
+                        f"{prefix} section {number:03d} H{node.depth} match_line L{line_no}",
                         f"  id: {node.id_disambiguated}",
                         f"  preview: {preview if preview else '(empty)'}",
                     ]
                 )
             )
-
-    out = [
-        f"[search: {path.name}  query: {q}  regex: {regex}  matches: {len(results)}  max_hits: {cap}]"
-    ]
-    if results:
-        out.extend(results)
-    else:
-        out.append("(no matches)")
-    return "\n".join(out)
+    return results
 
 
 @mcp.tool(name="kb_search", description="Regex-capable section-aware KB body search with previews.")
@@ -2099,25 +2118,50 @@ async def kb_search(
     preview_chars: int = 240,
     from_match: bool = True,
 ) -> str:
-    selected_file = _kb_select_target_file(file, target)
-    if isinstance(selected_file, dict):
-        return _kb_dict_to_error_text(selected_file)
-    resolved = _kb_resolve_file(selected_file)
+    q = (query or "").strip()
+    resolved = _kb_resolve_search_files(file, target)
     if isinstance(resolved, dict):
         return _kb_dict_to_error_text(resolved)
-    path = resolved
-    text = _read_text_or_error(path)
-    if isinstance(text, dict):
-        return _kb_dict_to_error_text(text)
-    return _kb_search_body_matches(
-        path=path,
-        text=text,
-        query=query,
-        regex=regex,
-        max_hits=max_hits,
-        preview_chars=preview_chars,
-        from_match=from_match,
+    paths = resolved
+    scope = _kb_display_path(paths[0]) if len(paths) == 1 else "all KB files"
+    if not q:
+        return f"[search: {scope}  query: (empty)]\nNo query provided."
+
+    flags = re.IGNORECASE | re.MULTILINE
+    try:
+        pattern = re.compile(q if regex else re.escape(q), flags)
+    except re.error as exc:
+        return _kb_error_text("InvalidParameter", f"Invalid regex: {exc}", query=q)
+
+    cap = max(1, int(max_hits))
+    preview_cap = max(20, int(preview_chars))
+    results: list[str] = []
+    for path in paths:
+        if len(results) >= cap:
+            break
+        text = _read_text_or_error(path)
+        if isinstance(text, dict):
+            return _kb_dict_to_error_text(text)
+        results.extend(
+            _kb_search_body_match_blocks(
+                path=path,
+                text=text,
+                pattern=pattern,
+                max_hits=cap - len(results),
+                preview_chars=preview_cap,
+                from_match=from_match,
+                start_index=len(results) + 1,
+                include_file=len(paths) > 1,
+            )
+        )
+
+    out = (
+        f"[search: {scope}  query: {q}  regex: {regex}  "
+        f"matches: {len(results)}  max_hits: {cap}]"
     )
+    if results:
+        return "\n".join([out, *results])
+    return "\n".join([out, "(no matches)"])
 
 
 @mcp.tool(name="kb_search_content", description="Alias for kb_search.")
@@ -2170,7 +2214,8 @@ Discovery:
   - kb_schema(target="...") returns a compact complete heading index for one target file
   - kb_info(target="...", sections="1,L42") shows parent-chain context, ranges, child headings, and body previews
   - kb_read(target="...", sections="1,L42") returns parent heading/body context plus selected target bodies
-  - kb_search(target="...", query="...", regex=true, max_hits=10, preview_chars=240) searches bodies with section-aware previews"""
+  - kb_search(query="...", regex=true, max_hits=10, preview_chars=240) searches all configured files
+  - kb_search(target="...", query="...") limits search to one target file"""
 
 
 @mcp.resource(

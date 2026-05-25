@@ -122,7 +122,8 @@ If KB MCP tools are available (`kb_list`, `kb_help`, `kb_schema`, `kb_info`, `kb
 
 ### During Work
 - Before making architectural decisions, check KB for relevant contracts
-- Use `kb_search` / `kb_search_content` to find prior decisions and patterns, then `kb_info` or `kb_read` the selected section numbers
+- Use `kb_search` / `kb_search_content` without `target` for broad discovery across all configured KB files; add `target="..."` when you want to limit search to one file
+- After search, use `kb_info` or `kb_read` with the selected target file and section numbers
 - After completing verified edits, write durable findings to KB (not just the agent log)
 - Follow the KB-backed memory invariant above: keep `.repo_memory.md` current with durable findings, and mirror any memory-harness or `store_memory` writes into KB-backed repo memory
 - KB section selectors are schema numbers, heading paths, unique visible titles, unique trailing path suffixes, `L<line>` / `line:<line>`, or `section=""` for the file root
