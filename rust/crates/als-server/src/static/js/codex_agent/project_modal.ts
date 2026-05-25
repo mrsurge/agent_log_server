@@ -207,6 +207,18 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     parent.appendChild(stat);
   }
 
+  function appendProjectRoot(parent: HTMLElement, value: string): void {
+    const row = doc.createElement('div');
+    row.className = 'project-root-row';
+    const labelEl = doc.createElement('span');
+    labelEl.className = 'project-stat-label';
+    labelEl.textContent = 'Project Root';
+    const valueEl = doc.createElement('strong');
+    valueEl.textContent = value;
+    row.append(labelEl, valueEl);
+    parent.appendChild(row);
+  }
+
   function appendProjectFilePill(parent: HTMLElement, className: string, value: string): void {
     if (!value) return;
     const pill = doc.createElement('span');
@@ -384,9 +396,10 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       return;
     }
 
+    appendProjectRoot(projectBodyEl, summary.root || '-');
+
     const header = doc.createElement('div');
     header.className = 'project-summary-grid';
-    appendStat(header, 'Root', summary.root || '-');
     appendStat(header, 'Branch', summary.branch || 'detached');
     appendStat(header, 'Commit', summary.headShort || '-');
     appendStat(header, 'Files', String(summary.changedFiles));

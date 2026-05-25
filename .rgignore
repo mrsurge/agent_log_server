@@ -1,0 +1,13 @@
+node_modules/
+build/
+rust/target/
+scripts/schema-extract/node_modules/
+worktrees/**/build/
+agent_log_server/static/dist/
+agent_log_server/static/vendor/
+rust/crates/als-server/src/static/dist/
+als_deprecated.egg-info/
+*.map
+*.min.js
+*.min.css
+*.bundle.js

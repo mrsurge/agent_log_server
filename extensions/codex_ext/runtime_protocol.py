@@ -74,6 +74,7 @@ _CLIENT_RESPONSE_METHODS = frozenset({
     "command/exec",
     "model/list",
     "thread/compact/start",
+    "thread/fork",
     "thread/loaded/list",
     "thread/list",
     "thread/resume",

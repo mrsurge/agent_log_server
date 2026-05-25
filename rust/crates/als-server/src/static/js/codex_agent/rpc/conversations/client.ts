@@ -7,6 +7,7 @@ import {
 } from '../transport.ts';
 import {
   type ConversationDraftResult,
+  type ConversationForkResult,
   type ConversationListResult,
   type ConversationMetaRecord,
   type ConversationMetaResult,
@@ -445,6 +446,28 @@ export function createConversationsRpcClient(
     return normalizeConversationControlResult(result, 'rpc');
   }
 
+  async function forkConversation(options: {
+    conversationId: string;
+    title?: string | null;
+    timeoutMs?: number;
+  }): Promise<ConversationForkResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 30000;
+    const payload: JsonObject = {
+      conversation_id: options.conversationId,
+    };
+    if (typeof options.title === 'string' && options.title.trim()) {
+      payload.title = options.title.trim();
+    }
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.fork,
+      params: payload,
+      timeoutMs,
+      windowRef: getWindowRef(),
+    });
+    return normalizeConversationMetaResult(result, 'rpc') as ConversationForkResult;
+  }
+
   async function setConversationPins(options: {
     pinnedConversationIds: string[];
     timeoutMs?: number;
@@ -664,6 +687,7 @@ export function createConversationsRpcClient(
     selectConversation,
     updateConversation,
     deleteConversation,
+    forkConversation,
     setConversationPins,
     setDraft,
     fetchReplayChunk,

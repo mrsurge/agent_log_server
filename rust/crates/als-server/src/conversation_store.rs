@@ -64,6 +64,85 @@ impl ConversationStore {
         Ok(meta)
     }
 
+    pub fn allocate_conversation_id(&self) -> String {
+        new_conversation_id()
+    }
+
+    pub fn fork_from(&self, request: ForkConversationRequest) -> Result<ConversationMeta> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let source_id = sanitize_conversation_id(&request.source_conversation_id);
+        let target_id = request
+            .conversation_id
+            .map(|value| sanitize_conversation_id(&value))
+            .unwrap_or_else(new_conversation_id);
+        validate_safe_conversation_id(&source_id)?;
+        validate_safe_conversation_id(&target_id)?;
+        if source_id == target_id {
+            bail!("fork target conversation id must differ from source");
+        }
+
+        let source_dir = self.conversation_dir_unlocked(&source_id);
+        let source_meta_path = source_dir.join("meta.json");
+        if !source_meta_path.exists() {
+            bail!("source conversation does not exist: {source_id}");
+        }
+        let target_dir = self.conversation_dir_unlocked(&target_id);
+        if target_dir.exists() {
+            bail!("target conversation already exists: {target_id}");
+        }
+
+        let source = read_meta(&source_meta_path)?;
+        let now = utc_ts();
+        let provider_session_id = nonempty_owned(request.provider_session_id)
+            .or_else(|| source.provider_session_id.clone())
+            .or_else(|| source.thread_id.clone())
+            .ok_or_else(|| anyhow!("fork provider_session_id is required"))?;
+        let source_provider_session_id = source
+            .provider_session_id
+            .clone()
+            .or_else(|| source.thread_id.clone());
+
+        fs::create_dir_all(&target_dir).with_context(|| {
+            format!("failed to create conversation dir {}", target_dir.display())
+        })?;
+        let (line_count, next_order_id) = copy_transcript_for_fork(
+            &source_dir.join("transcript.jsonl"),
+            &target_dir,
+            &target_id,
+        )?;
+
+        let mut meta = source;
+        meta.conversation_id = target_id.clone();
+        meta.title = request.title.or_else(|| {
+            meta.title
+                .as_deref()
+                .map(|title| format!("Fork of {title}"))
+        });
+        meta.thread_id = Some(provider_session_id.clone());
+        meta.provider_session_id = Some(provider_session_id);
+        meta.forked_from_conversation_id = Some(source_id);
+        meta.forked_from_provider_session_id = source_provider_session_id;
+        meta.pinned = false;
+        meta.pinned_order = None;
+        meta.pending_approvals = JsonMap::new();
+        meta.status = "active".to_owned();
+        meta.created_at = now.clone();
+        meta.updated_at = now;
+        if let Some(settings) = request.settings {
+            meta.settings = settings;
+            sync_meta_from_settings(&mut meta);
+        }
+        meta.draft = None;
+        meta.ask_user_msg_counter = 0;
+        meta.next_transcript_order_id = next_order_id;
+        meta.transcript_line_count = Some(line_count);
+        self.write_meta_unlocked(&meta)?;
+        Ok(meta)
+    }
+
     pub fn list(&self) -> Result<Vec<ConversationSummary>> {
         let _guard = self
             .lock
@@ -554,6 +633,8 @@ impl ConversationStore {
             ask_user_msg_counter: 0,
             next_transcript_order_id: 0,
             transcript_line_count: Some(0),
+            forked_from_conversation_id: None,
+            forked_from_provider_session_id: None,
         }
     }
 }
@@ -577,6 +658,19 @@ pub struct CreateConversationRequest {
     pub pinned: bool,
     #[serde(default)]
     pub settings: JsonMap,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ForkConversationRequest {
+    pub source_conversation_id: String,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub provider_session_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub settings: Option<JsonMap>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -619,6 +713,10 @@ pub struct ConversationMeta {
     pub next_transcript_order_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_line_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_provider_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -685,6 +783,10 @@ pub struct ConversationSummary {
     pub next_transcript_order_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_line_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_provider_session_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -724,8 +826,55 @@ impl From<ConversationMeta> for ConversationSummary {
             ask_user_msg_counter: meta.ask_user_msg_counter,
             next_transcript_order_id: meta.next_transcript_order_id,
             transcript_line_count: meta.transcript_line_count,
+            forked_from_conversation_id: meta.forked_from_conversation_id,
+            forked_from_provider_session_id: meta.forked_from_provider_session_id,
         }
     }
+}
+
+fn copy_transcript_for_fork(
+    source_path: &PathBuf,
+    target_dir: &PathBuf,
+    target_conversation_id: &str,
+) -> Result<(usize, u64)> {
+    if !source_path.exists() {
+        return Ok((0, 0));
+    }
+    let source_file = fs::File::open(source_path)
+        .with_context(|| format!("failed to open source transcript {}", source_path.display()))?;
+    let target_path = target_dir.join("transcript.jsonl");
+    let mut target_file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&target_path)
+        .with_context(|| format!("failed to create fork transcript {}", target_path.display()))?;
+    let reader = BufReader::new(source_file);
+    let mut line_count = 0usize;
+    let mut next_order_id = 0u64;
+    for line in reader.lines() {
+        let line = line.context("failed to read source transcript row")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut row: Value =
+            serde_json::from_str(&line).context("invalid source transcript JSONL row")?;
+        if let Some(object) = row.as_object_mut() {
+            object.insert(
+                "conversation_id".to_owned(),
+                Value::String(target_conversation_id.to_owned()),
+            );
+            if let Some(order_id) = object.get("order_id").and_then(Value::as_u64) {
+                next_order_id = next_order_id.max(order_id.saturating_add(1));
+            }
+        }
+        writeln!(target_file, "{}", serde_json::to_string(&row)?)
+            .context("failed to write fork transcript row")?;
+        line_count += 1;
+    }
+    if next_order_id < line_count as u64 {
+        next_order_id = line_count as u64;
+    }
+    Ok((line_count, next_order_id))
 }
 
 fn compare_summaries_for_display(
@@ -1110,6 +1259,58 @@ mod tests {
         assert_eq!(middle.rows.len(), 2);
         assert!(middle.rows[0].contains("\"text\":\"row 1\""));
         assert!(middle.rows[1].contains("\"text\":\"row 2\""));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn forks_conversation_meta_and_rewrites_transcript_conversation_id() {
+        let root = std::env::temp_dir().join(format!("als-rs-store-fork-test-{}", unix_millis()));
+        let store = ConversationStore::new(root.clone());
+        let mut settings = JsonMap::new();
+        settings.insert("agent".to_owned(), json!("codex-ext"));
+        settings.insert("cwd".to_owned(), json!("/repo/project"));
+        store
+            .create(CreateConversationRequest {
+                conversation_id: Some("source-fork".to_owned()),
+                title: Some("Original".to_owned()),
+                thread_id: Some("thread-source".to_owned()),
+                settings,
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+        store
+            .append_transcript(
+                "source-fork",
+                json!({"role": "user", "text": "hi", "conversation_id": "source-fork"}),
+            )
+            .unwrap();
+
+        let forked = store
+            .fork_from(ForkConversationRequest {
+                source_conversation_id: "source-fork".to_owned(),
+                conversation_id: Some("target-fork".to_owned()),
+                provider_session_id: "thread-target".to_owned(),
+                ..ForkConversationRequest::default()
+            })
+            .unwrap();
+
+        assert_eq!(forked.conversation_id, "target-fork");
+        assert_eq!(forked.thread_id.as_deref(), Some("thread-target"));
+        assert_eq!(
+            forked.forked_from_conversation_id.as_deref(),
+            Some("source-fork")
+        );
+        assert_eq!(
+            forked.forked_from_provider_session_id.as_deref(),
+            Some("thread-source")
+        );
+        assert_eq!(forked.pending_approvals.len(), 0);
+        assert_eq!(forked.transcript_line_count, Some(1));
+        assert_eq!(forked.next_transcript_order_id, 1);
+        let rows = store.read_transcript("target-fork").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["conversation_id"], "target-fork");
 
         let _ = fs::remove_dir_all(root);
     }

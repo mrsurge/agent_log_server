@@ -13,6 +13,7 @@ export const CONVERSATIONS_RPC_METHODS = {
   select: 'conversation.select',
   update: 'conversation.update',
   delete: 'conversation.delete',
+  fork: 'conversation.fork',
   pinsSet: 'conversation.pins.set',
   draftSet: 'conversation.draft.set',
   send: 'conversation.send',
@@ -114,6 +115,12 @@ export interface ConversationControlResult extends JsonObject {
   conversation_id?: string;
   thread_id?: string | null;
   turn_id?: string | null;
+}
+
+export interface ConversationForkResult extends ConversationMetaResult {
+  ok?: boolean;
+  source_conversation_id?: string;
+  fork_result?: JsonObject;
 }
 
 export const CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE = {
@@ -260,6 +267,11 @@ export const CONVERSATIONS_RPC_METHOD_DESCRIPTORS: readonly RpcMethodDescriptor<
   },
   {
     name: CONVERSATIONS_RPC_METHODS.delete,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.fork,
     namespace: CONVERSATIONS_RPC_NAMESPACE,
     status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
   },

@@ -2,14 +2,15 @@ use crate::{
     adapter_process::AdapterCapturedEvent,
     card_truncation::{sanitize_live_card_event, sanitize_transcript_card_entry},
     conversation_store::{
-        ConversationMeta, ConversationMetaUpdate, CreateConversationRequest, TranscriptOffset,
+        ConversationMeta, ConversationMetaUpdate, CreateConversationRequest,
+        ForkConversationRequest, TranscriptOffset,
     },
     ipc,
     state::AppState,
 };
 use als_adapter_protocol::{
-    ConversationControlParams, ConversationResumeParams, ConversationSendParams, JsonMap,
-    McpContext, events, methods,
+    ConversationControlParams, ConversationForkParams, ConversationResumeParams,
+    ConversationSendParams, JsonMap, McpContext, events, methods,
 };
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ const METHOD_CREATE: &str = "conversation.create";
 const METHOD_SELECT: &str = "conversation.select";
 const METHOD_UPDATE: &str = "conversation.update";
 const METHOD_DELETE: &str = "conversation.delete";
+const METHOD_FORK: &str = "conversation.fork";
 const METHOD_DRAFT_SET: &str = "conversation.draft.set";
 const METHOD_SEND: &str = "conversation.send";
 const METHOD_REPLAY_GET_CHUNK: &str = "conversation.replay.getChunk";
@@ -109,6 +111,7 @@ async fn dispatch_rpc(
         METHOD_SELECT => conversation_select(&io, &state, &request.params).await,
         METHOD_UPDATE => conversation_update(socket, io, state, request.params).await,
         METHOD_DELETE => conversation_delete(&io, &state, &request.params).await,
+        METHOD_FORK => conversation_fork(&io, &state, &request.params).await,
         METHOD_DRAFT_SET => conversation_draft_set(&io, &state, &request.params).await,
         METHOD_REPLAY_GET_CHUNK => conversation_replay_get_chunk(&state, &request.params),
         METHOD_SEND => conversation_send(socket, io, state, request.params).await,
@@ -450,6 +453,120 @@ async fn conversation_delete(
     Ok(
         json!({"ok": true, "deleted": deleted, "conversation_id": conversation_id, "transport": "rpc"}),
     )
+}
+
+async fn conversation_fork(
+    io: &SocketIo,
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
+    let source_conversation_id = optional_str(params, "conversation_id")
+        .or_else(|| optional_str(params, "source_conversation_id"))
+        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?
+        .to_owned();
+    let source_meta = state
+        .conversations
+        .load_meta_if_exists(&source_conversation_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| rpc_error(-32602, "source conversation does not exist"))?;
+    let extension_id = resolve_extension_id(state, params, &source_meta)
+        .ok_or_else(|| rpc_error(-32603, "No active extension available"))?;
+    let source_provider_session_id = source_meta
+        .provider_session_id
+        .clone()
+        .or_else(|| source_meta.thread_id.clone())
+        .ok_or_else(|| rpc_error(-32602, "conversation has no provider session to fork"))?;
+    let target_conversation_id = optional_str(params, "target_conversation_id")
+        .or_else(|| optional_str(params, "new_conversation_id"))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| state.conversations.allocate_conversation_id());
+    let cwd = resolve_cwd(params, &source_meta);
+    let title = optional_owned(params, "title");
+    let mut settings =
+        optional_map(params, "settings").unwrap_or_else(|| source_meta.settings.clone());
+    if let Some(cwd_text) = cwd.as_ref().and_then(|path| path.to_str()) {
+        settings.insert("cwd".to_owned(), Value::String(cwd_text.to_owned()));
+    }
+    settings
+        .entry("agent".to_owned())
+        .or_insert_with(|| Value::String(extension_id.clone()));
+    let adapter_metadata = optional_map(params, "metadata").unwrap_or_default();
+
+    state
+        .adapter
+        .initialize_extension(&extension_id)
+        .await
+        .map_err(internal_error)?;
+    let adapter_result = state
+        .adapter
+        .client()
+        .await
+        .map_err(internal_error)?
+        .request_value(
+            methods::CONVERSATION_FORK,
+            ConversationForkParams {
+                extension_id: extension_id.clone(),
+                source_conversation_id: source_conversation_id.clone(),
+                conversation_id: target_conversation_id.clone(),
+                provider_session_id: source_provider_session_id.clone(),
+                cwd: cwd.clone(),
+                mcp_context: build_mcp_context(
+                    &state.config,
+                    &target_conversation_id,
+                    Some(&settings),
+                    cwd.as_ref()
+                        .and_then(|path| path.to_str())
+                        .or(source_meta.cwd.as_deref()),
+                ),
+                devins_context: Some(
+                    crate::devins_context::build_devins_context(
+                        Some(&settings),
+                        cwd.as_ref()
+                            .and_then(|path| path.to_str())
+                            .or(source_meta.cwd.as_deref()),
+                    )
+                    .map_err(internal_error)?,
+                ),
+                settings: settings.clone(),
+                metadata: adapter_metadata,
+            },
+        )
+        .await
+        .map_err(internal_error)?;
+    if !adapter_bool(&adapter_result, "ok") && !adapter_bool(&adapter_result, "accepted") {
+        let message = adapter_result
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("provider fork failed");
+        return Err(rpc_error(-32603, message));
+    }
+    let provider_session_id = adapter_provider_session_id(&adapter_result, &target_conversation_id)
+        .ok_or_else(|| rpc_error(-32603, "provider fork did not return a new session id"))?;
+
+    let forked = state
+        .conversations
+        .fork_from(ForkConversationRequest {
+            source_conversation_id: source_conversation_id.clone(),
+            conversation_id: Some(target_conversation_id.clone()),
+            provider_session_id,
+            title,
+            settings: Some(settings),
+        })
+        .map_err(internal_error)?;
+    state
+        .ui_selection
+        .select(
+            Some(forked.conversation_id.clone()),
+            Some("conversation".to_owned()),
+        )
+        .map_err(internal_error)?;
+    emit_meta_updated_to_namespace(io, state, &forked.conversation_id).await;
+    emit_conversation_list_updated(io, state, "forked", Some(&forked.conversation_id), None).await;
+    let mut value = meta_json(forked)?;
+    value["source_conversation_id"] = json!(source_conversation_id);
+    value["fork_result"] = adapter_result;
+    value["active_view"] = json!("conversation");
+    Ok(value)
 }
 
 async fn conversation_draft_set(

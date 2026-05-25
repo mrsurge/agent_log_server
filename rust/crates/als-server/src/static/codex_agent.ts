@@ -2185,6 +2185,7 @@ document.addEventListener('DOMContentLoaded', () => {
       getDiffRenderState,
       setDiffRenderMode,
       sioCall,
+      conversationsRpc: conversationsRpcClient,
       settingsRpc: settingsRpcClient,
       uiRpc: uiRpcClient,
       waitForWs,

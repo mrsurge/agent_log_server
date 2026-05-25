@@ -18,6 +18,7 @@
     "modelListing": true,
     "permissionHandling": true,
     "live_session_request": true,
+    "conversationFork": true,
     "collabAgents": true,
     "hasPlan": false,
     "hasTodo": true,

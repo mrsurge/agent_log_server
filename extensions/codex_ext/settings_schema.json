@@ -46,6 +46,17 @@
       }
     },
     {
+      "id": "__conversation_fork",
+      "type": "action",
+      "label": "Branch Conversation",
+      "text": "Create Branch",
+      "confirm": "Create a new branched conversation from this provider thread?",
+      "semantic": {
+        "role": "conversation_fork",
+        "runtime_key": "conversation_fork"
+      }
+    },
+    {
       "id": "model",
       "type": "select",
       "label": "Model",

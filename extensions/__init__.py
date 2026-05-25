@@ -2901,6 +2901,37 @@ async def resume_session_with_history(
     return {"ok": False, "error": f"Extension {extension_id} does not support session resume"}
 
 
+async def fork_conversation(
+    extension_id: str,
+    source_conversation_id: str,
+    conversation_id: str,
+    provider_session_id: str,
+    cwd: Optional[str] = None,
+    settings: Optional[dict[str, object]] = None,
+    metadata: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
+    """Fork a provider conversation/session into a new local conversation id."""
+    fork_fn = _callable_attr(get_handler(extension_id), "fork_conversation")
+    if fork_fn is None:
+        fork_fn = _callable_attr(get_handler(extension_id), "fork_session")
+    if fork_fn is not None:
+        result = await _invoke_maybe_async(
+            fork_fn,
+            extension_id=extension_id,
+            source_conversation_id=source_conversation_id,
+            conversation_id=conversation_id,
+            target_conversation_id=conversation_id,
+            provider_session_id=provider_session_id,
+            session_id=provider_session_id,
+            cwd=cwd,
+            settings=settings,
+            metadata=metadata or {},
+        )
+        if isinstance(result, dict):
+            return _dict_or_empty(cast(object, result))
+    return {"ok": False, "error": f"Extension {extension_id} does not support conversation fork"}
+
+
 async def hydrate_transcript(
     extension_id: str,
     session_id: str,

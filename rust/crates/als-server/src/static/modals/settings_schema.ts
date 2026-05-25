@@ -35,6 +35,14 @@ type SettingsRpcClient = {
   }) => Promise<unknown>;
 };
 
+type ConversationsRpcClient = {
+  forkConversation?: (options: {
+    conversationId: string;
+    title?: string | null;
+    timeoutMs?: number;
+  }) => Promise<unknown>;
+};
+
 type SchemaField = {
   id: string;
   type?: string;
@@ -59,6 +67,7 @@ type SchemaField = {
   max?: number;
   rows?: number;
   json_kind?: string;
+  confirm?: string;
 };
 
 type SettingsSchema = {
@@ -209,6 +218,7 @@ function normalizeSchemaField(value: unknown): SchemaField | null {
     max: typeof value.max === 'number' ? value.max : undefined,
     rows: typeof value.rows === 'number' ? value.rows : undefined,
     json_kind: typeof value.json_kind === 'string' ? value.json_kind : undefined,
+    confirm: typeof value.confirm === 'string' ? value.confirm : undefined,
   };
 }
 
@@ -296,6 +306,14 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       throw new Error('Settings RPC helper unavailable');
     }
     return client as SettingsRpcClient;
+  }
+
+  function requireConversationsRpc(): ConversationsRpcClient {
+    const client = getHelper(ctx, 'conversationsRpc');
+    if (!client || typeof client !== 'object') {
+      throw new Error('Conversations RPC helper unavailable');
+    }
+    return client as ConversationsRpcClient;
   }
 
   function dynamicSourceErrorMessage(err: unknown): string {
@@ -766,6 +784,10 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     return role === 'provider_status' || role === 'provider_usage';
   }
 
+  function isConversationForkField(field: SchemaField): boolean {
+    return semanticRole(field) === 'conversation_fork';
+  }
+
   function providerInfoTarget(schemaExtensionId = ''): {
     extensionId: string;
     conversationId?: string;
@@ -1018,6 +1040,64 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
 
     void refresh().catch(setFailure);
     return info;
+  }
+
+  function renderConversationForkAction(field: SchemaField, schemaExtensionId = ''): HTMLDivElement {
+    const binding = liveSessionBinding(schemaExtensionId);
+    const row = document.createElement('div');
+    row.className = 'settings-schema-action';
+
+    const label = document.createElement('div');
+    label.className = 'settings-schema-action-label';
+    label.textContent = field.label || 'Branch Conversation';
+    row.appendChild(label);
+
+    const status = document.createElement('div');
+    status.className = 'settings-schema-info-detail';
+    status.textContent = binding ? '' : 'Provider session unavailable.';
+    row.appendChild(status);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn ghost';
+    button.textContent = trimString(field.text) || 'Create Branch';
+    button.disabled = !binding;
+    row.appendChild(button);
+
+    button.addEventListener('click', async () => {
+      if (!binding) return;
+      const confirmText = trimString(field.confirm);
+      if (confirmText && !window.confirm(confirmText)) return;
+      button.disabled = true;
+      status.textContent = 'Branching...';
+      try {
+        const conversationsRpc = requireConversationsRpc();
+        if (typeof conversationsRpc.forkConversation !== 'function') {
+          throw new Error('conversation.fork is unavailable');
+        }
+        const result = asRecord(await conversationsRpc.forkConversation({
+          conversationId: binding.conversationId,
+          timeoutMs: 30000,
+        }));
+        if (result.ok === false) {
+          throw new Error(dynamicSourceErrorMessage(result));
+        }
+        const nextConversationId = trimString(result.conversation_id);
+        if (!nextConversationId) {
+          throw new Error('Fork did not return a conversation id');
+        }
+        callCtxHelper(ctx, 'closeSettingsModal');
+        const opened = callCtxHelper(ctx, 'openSplashConversation', nextConversationId, 'conversation');
+        if (opened && typeof (opened as Promise<unknown>).then === 'function') {
+          await opened;
+        }
+      } catch (error) {
+        status.textContent = dynamicSourceErrorMessage(error);
+        button.disabled = false;
+      }
+    });
+
+    return row;
   }
 
   /**
@@ -1462,6 +1542,13 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       if (field.type === 'live_session_info') {
         const info = renderLiveSessionInfo(field, schemaExtensionId);
         settingsExtensionFields.appendChild(info);
+        return;
+      }
+
+      if (field.type === 'action') {
+        if (isConversationForkField(field)) {
+          settingsExtensionFields.appendChild(renderConversationForkAction(field, schemaExtensionId));
+        }
         return;
       }
 

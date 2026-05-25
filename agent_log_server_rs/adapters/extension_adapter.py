@@ -50,6 +50,7 @@ RpcId: TypeAlias = str | int | None
 IMPORT_TRANSCRIPT_BATCH_SIZE = 1000
 
 CONVERSATION_METHODS = ("init_session", "handle_message", "resume_session_with_history")
+CONVERSATION_FORK_METHODS = ("fork_conversation", "fork_session")
 SESSION_METHODS = ("list_sessions", "resume_session_with_history", "hydrate_transcript")
 LIVE_SESSION_STATE_METHOD = "get_live_session_state"
 LIVE_SESSION_UNLOAD_METHOD = "unload_live_session"
@@ -560,6 +561,8 @@ class ExtensionJsonRpcAdapter:
             return await self._conversation_start(params)
         if method == AdapterMethod.CONVERSATION_RESUME:
             return await self._conversation_resume(params)
+        if method == AdapterMethod.CONVERSATION_FORK:
+            return await self._conversation_fork(params)
         if method == AdapterMethod.CONVERSATION_SEND:
             return await self._conversation_send(params)
         if method == AdapterMethod.CONVERSATION_INTERRUPT:
@@ -606,6 +609,7 @@ class ExtensionJsonRpcAdapter:
         models_supported = _has_callable_attr(handler, "list_models")
         sessions_supported = _has_any_callable_attr(handler, SESSION_METHODS)
         interruption_supported = _has_callable_attr(handler, "abort_session")
+        fork_supported = _has_any_callable_attr(handler, CONVERSATION_FORK_METHODS)
         return ExtensionInitializeResult(
             extension_id=extension_id,
             provider=ext_type or extension_id,
@@ -614,6 +618,7 @@ class ExtensionJsonRpcAdapter:
                 models=models_supported,
                 sessions=sessions_supported,
                 interruption=interruption_supported,
+                conversation_fork=fork_supported,
                 live_events=conversations_supported,
                 transcript_records=conversations_supported,
                 extra={
@@ -1231,6 +1236,63 @@ class ExtensionJsonRpcAdapter:
                 )
         ack["hydrated_count"] = hydrated_count
         return ack
+
+    async def _conversation_fork(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        handler = self._supported_handler(extension_id)
+        fork_fn = getattr(handler, "fork_conversation", None) or getattr(handler, "fork_session", None)
+        if not callable(fork_fn):
+            raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support conversation fork")
+
+        source_conversation_id = required_string(params, "source_conversation_id")
+        conversation_id = required_string(params, "conversation_id")
+        provider_session_id = _provider_session_id_param(params)
+        if not provider_session_id:
+            raise RpcAdapterError(INVALID_PARAMS, "provider_session_id or thread_id is required")
+
+        cwd = optional_string(params.get("cwd")) or str(self._state.cwd)
+        settings = merged_settings(self._state.settings, optional_map(params.get("settings")))
+        _apply_mcp_context(settings, params)
+        _apply_devins_context(settings, params)
+        settings["cwd"] = cwd
+        settings["agent"] = extension_id
+        settings["conversation_id"] = conversation_id
+        self._seed_conversation_meta(
+            source_conversation_id,
+            extension_id=extension_id,
+            settings=settings,
+            cwd=cwd,
+            provider_session_id=provider_session_id,
+        )
+        self._seed_conversation_meta(
+            conversation_id,
+            extension_id=extension_id,
+            settings=settings,
+            cwd=cwd,
+        )
+
+        result = await _invoke_handler_with_supported_kwargs(
+            fork_fn,
+            extension_id=extension_id,
+            source_conversation_id=source_conversation_id,
+            conversation_id=conversation_id,
+            target_conversation_id=conversation_id,
+            provider_session_id=provider_session_id,
+            session_id=provider_session_id,
+            cwd=cwd,
+            settings=settings,
+            metadata=optional_map(params.get("metadata")) or {},
+        )
+        result_map = optional_map(result)
+        if result_map is None:
+            raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid fork result")
+        if optional_string(result_map.get("provider_session_id")) is None:
+            thread_id = optional_string(result_map.get("thread_id")) or optional_string(result_map.get("session_id"))
+            if thread_id:
+                result_map["provider_session_id"] = thread_id
+        payload = _dict_result_with_defaults(result_map, extension_id, conversation_id, params)
+        payload.setdefault("source_conversation_id", source_conversation_id)
+        return payload
 
     async def _conversation_send(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)

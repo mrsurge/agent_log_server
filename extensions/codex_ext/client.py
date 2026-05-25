@@ -1612,6 +1612,83 @@ async def resume_session_with_history(
     }
 
 
+async def fork_conversation(
+    extension_id: str,
+    source_conversation_id: str,
+    conversation_id: str,
+    provider_session_id: str,
+    cwd: Optional[str] = None,
+    settings: Optional[Dict[str, object]] = None,
+    metadata: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    del metadata
+    if not _meta_fns or "save" not in _meta_fns:
+        return {"ok": False, "error": "Manager not initialized"}
+    if not provider_session_id:
+        return {"ok": False, "error": "provider_session_id is required"}
+    if not conversation_id:
+        return {"ok": False, "error": "target conversation_id is required"}
+
+    try:
+        transport = await _ensure_transport_ready()
+        protocol = await get_runtime_protocol()
+        settings_map = settings if _is_object_dict(settings) else {}
+        model_value = settings_map.get("model")
+        merged_settings = _merge_runtime_settings(
+            conversation_id,
+            settings=settings_map,
+            cwd=cwd,
+            model=model_value if isinstance(model_value, str) and model_value.strip() else None,
+        )
+        merged_settings["agent"] = extension_id
+        merged_settings["conversation_id"] = conversation_id
+        params = build_request_params(
+            protocol,
+            "thread/fork",
+            merged_settings,
+            thread_id=provider_session_id,
+            exclude_turns=True,
+        )
+        fork_result = await transport.rpc_request(
+            "thread/fork",
+            params=params,
+            conversation_id=conversation_id,
+            timeout=30.0,
+        )
+        thread_id = _extract_thread_id_from_result(fork_result)
+        if not thread_id:
+            return {"ok": False, "error": "thread/fork did not return a thread id"}
+        transport.mark_thread_ready(thread_id)
+        target_meta = _object_dict(_meta_fns["load"](conversation_id)) if _meta_fns and "load" in _meta_fns else {}
+        target_meta["conversation_id"] = conversation_id
+        target_meta["agent_type"] = extension_id
+        target_meta["extension_id"] = extension_id
+        target_meta["thread_id"] = thread_id
+        target_meta["provider_session_id"] = thread_id
+        target_meta["status"] = "active"
+        target_meta["settings"] = merged_settings
+        target_meta["forked_from_conversation_id"] = source_conversation_id
+        target_meta["forked_from_provider_session_id"] = provider_session_id
+        _save_meta(conversation_id, target_meta)
+        _add_to_raw_buffer(
+            "out",
+            conversation_id,
+            f"thread_fork source={provider_session_id[:8]} target={thread_id[:8]}",
+        )
+        return {
+            "ok": True,
+            "accepted": True,
+            "conversation_id": conversation_id,
+            "source_conversation_id": source_conversation_id,
+            "provider_session_id": thread_id,
+            "thread_id": thread_id,
+            "source_provider_session_id": provider_session_id,
+        }
+    except Exception as exc:
+        _add_to_raw_buffer("err", conversation_id, f"fork_failed {exc}")
+        return {"ok": False, "error": f"Thread fork failed: {exc}"}
+
+
 async def hydrate_transcript(
     session_id: str,
     conversation_id: str,

@@ -36,6 +36,7 @@ class AdapterMethod(StrEnum):
     EXTENSION_SESSION_UNLOAD = "extension.session.unload"
     CONVERSATION_START = "conversation.start"
     CONVERSATION_RESUME = "conversation.resume"
+    CONVERSATION_FORK = "conversation.fork"
     CONVERSATION_SEND = "conversation.send"
     CONVERSATION_INTERRUPT = "conversation.interrupt"
     CONVERSATION_COMPACT = "conversation.compact"
@@ -126,6 +127,7 @@ class AdapterCapabilities:
     approvals: bool = False
     compaction: bool = False
     interruption: bool = False
+    conversation_fork: bool = False
     live_events: bool = False
     transcript_records: bool = False
     extra: JsonMap = field(default_factory=dict)
@@ -138,6 +140,7 @@ class AdapterCapabilities:
             "approvals": self.approvals,
             "compaction": self.compaction,
             "interruption": self.interruption,
+            "conversation_fork": self.conversation_fork,
             "live_events": self.live_events,
             "transcript_records": self.transcript_records,
         }
@@ -336,6 +339,38 @@ class ConversationResumeParams:
             payload["mcp_context"] = self.mcp_context.to_json()
         if self.devins_context is not None:
             payload["devins_context"] = self.devins_context.to_json()
+        return payload
+
+
+@dataclass(frozen=True)
+class ConversationForkParams:
+    extension_id: str
+    source_conversation_id: str
+    conversation_id: str
+    provider_session_id: str
+    cwd: Path | None = None
+    settings: JsonMap = field(default_factory=dict)
+    mcp_context: McpContext | None = None
+    devins_context: DeveloperInstructionsContext | None = None
+    metadata: JsonMap = field(default_factory=dict)
+
+    def to_json(self) -> JsonMap:
+        payload: JsonMap = {
+            "extension_id": self.extension_id,
+            "source_conversation_id": self.source_conversation_id,
+            "conversation_id": self.conversation_id,
+            "provider_session_id": self.provider_session_id,
+        }
+        if self.cwd is not None:
+            payload["cwd"] = str(self.cwd)
+        if self.settings:
+            payload["settings"] = dict(self.settings)
+        if self.mcp_context is not None:
+            payload["mcp_context"] = self.mcp_context.to_json()
+        if self.devins_context is not None:
+            payload["devins_context"] = self.devins_context.to_json()
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
         return payload
 
 

@@ -27,6 +27,7 @@ pub mod methods {
     pub const EXTENSION_SESSION_UNLOAD: &str = "extension.session.unload";
     pub const CONVERSATION_START: &str = "conversation.start";
     pub const CONVERSATION_RESUME: &str = "conversation.resume";
+    pub const CONVERSATION_FORK: &str = "conversation.fork";
     pub const CONVERSATION_SEND: &str = "conversation.send";
     pub const CONVERSATION_INTERRUPT: &str = "conversation.interrupt";
     pub const CONVERSATION_COMPACT: &str = "conversation.compact";
@@ -97,6 +98,8 @@ pub struct AdapterCapabilities {
     pub compaction: bool,
     #[serde(default)]
     pub interruption: bool,
+    #[serde(default)]
+    pub conversation_fork: bool,
     #[serde(default)]
     pub live_events: bool,
     #[serde(default)]
@@ -215,6 +218,24 @@ pub struct ConversationResumeParams {
     pub mcp_context: Option<McpContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devins_context: Option<DeveloperInstructionsContext>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ConversationForkParams {
+    pub extension_id: String,
+    pub source_conversation_id: String,
+    pub conversation_id: String,
+    pub provider_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
+    pub settings: JsonMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_context: Option<McpContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devins_context: Option<DeveloperInstructionsContext>,
+    #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
+    pub metadata: JsonMap,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

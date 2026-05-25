@@ -972,6 +972,24 @@ body.widescreen-resizing * {
   gap: 8px;
 }
 
+.project-root-row {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+}
+
+.project-root-row strong {
+  display: block;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .project-stat {
   min-width: 0;
   padding: 8px 10px;
@@ -1179,6 +1197,23 @@ body.widescreen-resizing * {
 
 .settings-schema-info[data-tone="error"] .settings-schema-info-text {
   color: #f19797;
+}
+
+.settings-schema-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.35rem 0.7rem;
+  padding: 0.65rem 0;
+}
+
+.settings-schema-action-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.settings-schema-action .settings-schema-info-detail {
+  grid-column: 1 / -1;
 }
 
 .settings-live-session {
