@@ -2198,6 +2198,7 @@ kb_write modes:
   - heading: create a child heading after the target section subtree
   - child/create_child: aliases for heading
   - heading_title creates a child heading automatically when mode="append"
+  - spacing="auto" normalizes blank lines for heading creation; spacing="preserve" keeps raw heading/content adjacency
   example: kb_write(target="AGENTS.md", section="12", mode="create_child", heading_title="Auth", content="Notes")
 
 kb_update modes:
@@ -2229,6 +2230,30 @@ async def kb_resource_knowledge() -> str:
     return f"{await kb_list()}\n\n{await kb_help()}"
 
 
+def _kb_heading_insert_lines(
+    existing_lines: list[str],
+    insert_at: int,
+    heading_line: str,
+    content_lines: list[str],
+) -> list[str]:
+    insert_lines: list[str] = []
+    if insert_at > 0 and existing_lines[insert_at - 1].strip():
+        insert_lines.append("")
+    insert_lines.append(heading_line)
+    if content_lines:
+        if content_lines[0].strip():
+            insert_lines.append("")
+        insert_lines.extend(content_lines)
+    if (
+        insert_at < len(existing_lines)
+        and insert_lines
+        and insert_lines[-1].strip()
+        and existing_lines[insert_at].strip()
+    ):
+        insert_lines.append("")
+    return insert_lines
+
+
 @mcp.tool(name="kb_write", description="Append content to one KB section, or create a child heading under it.")
 async def kb_write(
     target: Optional[str] = None,
@@ -2237,6 +2262,7 @@ async def kb_write(
     mode: str = "append",
     heading_title: Optional[str] = None,
     heading_depth: Optional[int] = None,
+    spacing: str = "auto",
     dry_run: bool = False,
 ) -> str:
     resolved = _kb_resolve_target(target)
@@ -2254,12 +2280,24 @@ async def kb_write(
         return _kb_dict_to_error_text(selected)
 
     normalized_mode = str(mode or "append").strip().lower().replace("-", "_")
+    spacing_mode = str(spacing or "auto").strip().lower().replace("-", "_")
+    if spacing_mode not in {"auto", "preserve"}:
+        return _kb_error_text(
+            "InvalidParameter",
+            f"Unsupported spacing '{spacing}'",
+            section=section,
+            mode=mode,
+            allowed_spacing="auto, preserve",
+            example='Use spacing="auto" for Markdown section creation or spacing="preserve" for exact raw insertion.',
+        )
     insert_at = max(0, selected.body_end)
+    is_heading_write = False
     if heading_title and normalized_mode == "append":
         normalized_mode = "heading"
     if normalized_mode == "append":
         insert_lines = (content or "").splitlines()
     elif normalized_mode in {"heading", "child", "create_child"}:
+        is_heading_write = True
         # Insert after the entire subtree, not just the body
         insert_at = max(0, selected.subtree_end)
         if not heading_title:
@@ -2275,9 +2313,11 @@ async def kb_write(
         if not isinstance(depth, int) or depth < 1 or depth > 6:
             return _kb_error_text("InvalidParameter", "heading_depth must be between 1 and 6", section=section, mode=mode)
         heading_line = f"{'#' * depth} {heading_title}"
-        insert_lines = [heading_line]
-        if content:
-            insert_lines.extend(content.splitlines())
+        content_lines = (content or "").splitlines()
+        if spacing_mode == "auto":
+            insert_lines = _kb_heading_insert_lines(lines, insert_at, heading_line, content_lines)
+        else:
+            insert_lines = [heading_line, *content_lines]
     else:
         return _kb_error_text(
             "InvalidParameter",
@@ -2289,7 +2329,7 @@ async def kb_write(
 
     new_lines = lines[:insert_at] + insert_lines + lines[insert_at:]
     new_text = "\n".join(new_lines)
-    if had_trailing_newline:
+    if (had_trailing_newline or (is_heading_write and spacing_mode == "auto")) and not new_text.endswith("\n"):
         new_text += "\n"
 
     diff = _unified_diff(old_text, new_text, str(path))

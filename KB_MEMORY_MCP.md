@@ -98,12 +98,14 @@ Use search to find candidate sections, then `kb_info` or `kb_read` the selected 
 
 ### Writing
 
-**`kb_write(target?, section?, content, mode?, heading_title?, heading_depth?, dry_run?)`**
+**`kb_write(target?, section?, content, mode?, heading_title?, heading_depth?, spacing?, dry_run?)`**
 Returns a status line + unified diff.
 - `mode="append"` (default): appends content at the end of the section body.
 - `mode="heading"`: creates a new child heading with content. **Auto-inferred** when `heading_title` is provided.
 - `mode="child"` and `mode="create_child"` are aliases for `mode="heading"`.
 - `heading_depth`: defaults to parent depth + 1 if omitted.
+- `spacing="auto"` (default): for heading creation, inserts Markdown-safe blank lines around the new heading/body and ensures a final newline.
+- `spacing="preserve"`: for heading creation, inserts exactly the generated heading line followed by caller content lines.
 - `section` accepts schema numbers, `L<line>` / `line:<line>`, heading paths, unique visible titles, unique trailing path suffixes, or `section=""` for the file root.
 - `dry_run=true`: returns the diff without writing.
 - KB writes do not send repo-memory IPC notifications; they report only the durable file mutation result.

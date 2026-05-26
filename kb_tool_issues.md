@@ -24,6 +24,9 @@ checkout on 2026-05-14.
   notification route.
 - `kb_help` and the static `kb://knowledge` MCP resource now expose KB
   availability and mode examples.
+- `kb_write` structured heading creation now defaults to Markdown spacing
+  normalization, supports `spacing="preserve"` for exact insertion, and ensures
+  heading writes leave the target file with a final newline.
 
 ## Follow-up Observations
 
@@ -125,6 +128,46 @@ The write succeeded only after switching to `mode="append"` while still passing
 Impact: the tool description says it can create child headings, but the actual
 operation is encoded as `append` plus heading parameters. That is not obvious
 from either the schema or the error.
+
+### `kb_write` Section Creation Needs Markdown Spacing Normalization
+
+When `kb_write` creates a new heading via `heading_depth` and `heading_title`, it
+can append the heading directly after the previous paragraph without inserting
+Markdown section spacing.
+
+Observed result:
+
+```diff
+ If `agy` reaches login/auth errors, the native runtime is starting and the remaining issue is provider authentication, not the Termux compatibility layer.
++## Known Wrapper Issue: Interrupt Propagation
++Ctrl-C currently interrupts the inner `agy` CLI shell...
+```
+
+This is not specific to `.repo_memory.md`. Repo memory made the issue visible
+because it is frequently updated through KB writes, but the underlying problem is
+generic to any markdown target where a structured heading write is appended next
+to existing body text.
+
+Expected behavior:
+
+- when `heading_depth` / `heading_title` are present, `kb_write` should treat the
+  operation as structured Markdown section creation;
+- the default should insert one blank line before the new heading unless the
+  insertion point is already file start or already preceded by a blank line;
+- the default should insert one blank line after the heading when body content is
+  present;
+- the target file should end with a final newline;
+- raw body-only appends should preserve caller text unless the caller opts into
+  normalization.
+
+Potential API shape:
+
+```text
+spacing = "auto" | "preserve"
+```
+
+`auto` should be the default for section creation. `preserve` should be available
+for exact raw insertions where the caller wants to own whitespace completely.
 
 ### Error Text Can Point At The Wrong Mental Model
 

@@ -138,5 +138,54 @@ class KbSearchContractTests(unittest.TestCase):
         self.assertIn("two.md: 001 H1 L1 # Two", result)
 
 
+class KbWriteContractTests(unittest.TestCase):
+    def _run_kb_tool(self, value: object) -> str:
+        return asyncio.run(cast(Coroutine[object, object, str], value))
+
+    def _write_kb_root(self, root: Path, body: str) -> None:
+        (root / ".agent-pty.toml").write_text(
+            '[knowledge]\nfiles = ["one.md"]\n',
+            encoding="utf-8",
+        )
+        (root / "one.md").write_text(body, encoding="utf-8")
+
+    def test_kb_write_heading_creation_normalizes_markdown_spacing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_kb_root(root, "# Top\n\nbody\n")
+            with patch.object(kb_server, "_current_project_root", return_value=root):
+                tool_call = cast(object, kb_server.kb_write(
+                    target="one.md",
+                    section="Top",
+                    mode="create_child",
+                    heading_title="Child",
+                    content="child body",
+                ))
+                result = self._run_kb_tool(tool_call)
+            text = (root / "one.md").read_text(encoding="utf-8")
+
+        self.assertIn("[kb_write: WRITTEN", result)
+        self.assertEqual(text, "# Top\n\nbody\n\n## Child\n\nchild body\n")
+
+    def test_kb_write_heading_creation_can_preserve_raw_spacing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_kb_root(root, "# Top\n\nbody\n")
+            with patch.object(kb_server, "_current_project_root", return_value=root):
+                tool_call = cast(object, kb_server.kb_write(
+                    target="one.md",
+                    section="Top",
+                    mode="create_child",
+                    heading_title="Child",
+                    content="child body",
+                    spacing="preserve",
+                ))
+                result = self._run_kb_tool(tool_call)
+            text = (root / "one.md").read_text(encoding="utf-8")
+
+        self.assertIn("[kb_write: WRITTEN", result)
+        self.assertEqual(text, "# Top\n\nbody\n## Child\nchild body\n")
+
+
 if __name__ == "__main__":
     unittest.main()

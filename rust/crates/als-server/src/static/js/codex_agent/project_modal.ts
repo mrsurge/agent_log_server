@@ -76,6 +76,11 @@ interface ProjectSummary {
   error: string;
 }
 
+interface ProjectCollapsedState {
+  categories?: Record<string, Record<string, boolean>>;
+  files?: Record<string, boolean>;
+}
+
 type Te2ProjectAction = 'current' | 'switch' | 'create' | 'disabled';
 
 interface Te2ProjectState {
@@ -88,6 +93,19 @@ interface Te2ProjectState {
   reason: string;
   action: Te2ProjectAction;
 }
+
+const PROJECT_MODAL_COLLAPSED_STATE_KEY = 'projectModalCollapsedState';
+const PROJECT_STATUS_CATEGORY_ORDER = [
+  'modified',
+  'renamed',
+  'added',
+  'deleted',
+  'typechange',
+  'conflicted',
+  'unreadable',
+  'clean',
+  'unknown',
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -212,6 +230,25 @@ function setMenuOpen(toggle: HTMLElement | null, panel: HTMLElement | null, open
   toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
+function statusCategory(status: string): string {
+  const labels = status
+    .split(',')
+    .map((label) => label.trim().toLowerCase())
+    .filter(Boolean);
+  for (const category of PROJECT_STATUS_CATEGORY_ORDER) {
+    if (labels.includes(category)) return category;
+  }
+  return labels[0] || 'unknown';
+}
+
+function categoryLabel(category: string): string {
+  if (category === 'agent-edits') return 'Agent edits';
+  if (category === 'overview') return 'Overview';
+  return category.replace(/(^|-)([a-z])/g, (_match, prefix: string, letter: string) => {
+    return `${prefix ? ' ' : ''}${letter.toUpperCase()}`;
+  });
+}
+
 export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding {
   const doc = ctx.documentRef || document;
   const projectModalEl = doc.getElementById('project-modal');
@@ -228,6 +265,57 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   let currentSummary: ProjectSummary | null = null;
   let currentTe2State: Te2ProjectState | null = null;
   let refreshTimer: number | null = null;
+  const projectStorage = (() => {
+    try {
+      return doc.defaultView?.localStorage || null;
+    } catch {
+      return null;
+    }
+  })();
+  let collapsedState = loadProjectCollapsedState();
+
+  function loadProjectCollapsedState(): ProjectCollapsedState {
+    if (!projectStorage) return {};
+    try {
+      const raw = projectStorage.getItem(PROJECT_MODAL_COLLAPSED_STATE_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return isRecord(parsed) ? parsed as ProjectCollapsedState : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveProjectCollapsedState(): void {
+    if (!projectStorage) return;
+    try {
+      projectStorage.setItem(PROJECT_MODAL_COLLAPSED_STATE_KEY, JSON.stringify(collapsedState));
+    } catch {
+      // Ignore private-mode or quota storage failures.
+    }
+  }
+
+  function projectCategoryCollapsed(projectRoot: string, category: string): boolean {
+    return collapsedState.categories?.[projectRoot]?.[category] === true;
+  }
+
+  function setProjectCategoryCollapsed(projectRoot: string, category: string, collapsed: boolean): void {
+    if (!collapsedState.categories) collapsedState.categories = {};
+    if (!collapsedState.categories[projectRoot]) collapsedState.categories[projectRoot] = {};
+    collapsedState.categories[projectRoot][category] = collapsed;
+    saveProjectCollapsedState();
+  }
+
+  function projectFileCollapsed(path: string): boolean {
+    const stored = collapsedState.files?.[path];
+    return typeof stored === 'boolean' ? stored : true;
+  }
+
+  function setProjectFileCollapsed(path: string, collapsed: boolean): void {
+    if (!path) return;
+    if (!collapsedState.files) collapsedState.files = {};
+    collapsedState.files[path] = collapsed;
+    saveProjectCollapsedState();
+  }
 
   function closeMenus(): void {
     setMenuOpen(conversationMenuToggle, conversationMenu, false);
@@ -440,10 +528,11 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       block.className = 'diff-block';
       body.appendChild(block);
       ctx.renderDiffBlock(block, diff.diffText, absolutePath);
-      ctx.makeCollapsible(card, `agent-diff:${diff.conversationId}:${diff.id}`, false, {
+      ctx.makeCollapsible(card, `project-file:${absolutePath}`, !projectFileCollapsed(absolutePath), {
         headerEl: header,
         persist: false,
         fullHeaderToggle: true,
+        onToggle: (expanded: boolean) => setProjectFileCollapsed(absolutePath, !expanded),
       });
     } else {
       const note = doc.createElement('div');
@@ -456,21 +545,14 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     return card;
   }
 
-  function renderAgentDiffs(summary: ProjectSummary): void {
-    if (!summary.agentDiffs.length || !projectBodyEl) return;
-    const section = doc.createElement('section');
-    section.className = 'project-agent-diffs';
-    const heading = doc.createElement('div');
-    heading.className = 'project-section-heading';
-    heading.textContent = 'Agent edits';
-    section.appendChild(heading);
+  function appendAgentDiffs(summary: ProjectSummary, parent: HTMLElement): void {
+    if (!summary.agentDiffs.length) return;
     const list = doc.createElement('div');
     list.className = 'project-file-list project-agent-diff-list';
     summary.agentDiffs.forEach((diff) => {
       list.appendChild(renderAgentDiffCard(summary, diff));
     });
-    section.appendChild(list);
-    projectBodyEl.appendChild(section);
+    parent.appendChild(list);
   }
 
   function renderProjectFileCard(summary: ProjectSummary, file: ProjectFile): HTMLElement {
@@ -509,10 +591,11 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       block.className = 'diff-block';
       body.appendChild(block);
       ctx.renderDiffBlock(block, file.diffText, absolutePath);
-      ctx.makeCollapsible(card, `project-diff:${summary.root}:${file.path}`, false, {
+      ctx.makeCollapsible(card, `project-file:${absolutePath}`, !projectFileCollapsed(absolutePath), {
         headerEl: header,
         persist: false,
         fullHeaderToggle: true,
+        onToggle: (expanded: boolean) => setProjectFileCollapsed(absolutePath, !expanded),
       });
     } else {
       const note = doc.createElement('div');
@@ -529,6 +612,95 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     return card;
   }
 
+  function createProjectCategorySection(
+    summary: ProjectSummary,
+    category: string,
+    detail: string,
+  ): { section: HTMLElement; body: HTMLElement } {
+    const section = doc.createElement('section');
+    section.className = 'project-category-section';
+    section.dataset.projectCategory = category;
+
+    const header = doc.createElement('button');
+    header.className = 'project-category-header';
+    header.type = 'button';
+    const title = doc.createElement('span');
+    title.className = 'project-category-title';
+    title.textContent = categoryLabel(category);
+    const count = doc.createElement('span');
+    count.className = 'project-category-count';
+    count.textContent = detail;
+    const twisty = doc.createElement('span');
+    twisty.className = 'twisty';
+    twisty.textContent = '▶';
+    header.append(title, count, twisty);
+
+    const body = doc.createElement('div');
+    body.className = 'project-category-body';
+    section.append(header, body);
+
+    function sync(collapsed: boolean): void {
+      section.classList.toggle('collapsed', collapsed);
+      header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      twisty.dataset.expanded = collapsed ? 'false' : 'true';
+    }
+
+    sync(projectCategoryCollapsed(summary.root || '-', category));
+    header.addEventListener('click', () => {
+      const collapsed = !section.classList.contains('collapsed');
+      setProjectCategoryCollapsed(summary.root || '-', category, collapsed);
+      sync(collapsed);
+    });
+
+    return { section, body };
+  }
+
+  function appendOverview(summary: ProjectSummary): void {
+    if (!projectBodyEl) return;
+    const { section, body } = createProjectCategorySection(summary, 'overview', summary.dirty ? 'dirty' : 'clean');
+    appendProjectRoot(body, summary.root || '-');
+
+    const header = doc.createElement('div');
+    header.className = 'project-summary-grid';
+    appendStat(header, 'Branch', summary.branch || 'detached');
+    appendStat(header, 'Commit', summary.headShort || '-');
+    appendStat(header, 'Files', String(summary.changedFiles));
+    appendStat(header, 'Added', `+${summary.additions}`);
+    appendStat(header, 'Deleted', `-${summary.deletions}`);
+    body.appendChild(header);
+    projectBodyEl.appendChild(section);
+  }
+
+  function appendFileCategories(summary: ProjectSummary): void {
+    if (!projectBodyEl) return;
+    const groups = new Map<string, ProjectFile[]>();
+    summary.files.forEach((file) => {
+      const category = statusCategory(file.status);
+      const items = groups.get(category) || [];
+      items.push(file);
+      groups.set(category, items);
+    });
+
+    const categories = [...groups.keys()].sort((left, right) => {
+      const leftRank = PROJECT_STATUS_CATEGORY_ORDER.indexOf(left);
+      const rightRank = PROJECT_STATUS_CATEGORY_ORDER.indexOf(right);
+      return (leftRank === -1 ? 999 : leftRank) - (rightRank === -1 ? 999 : rightRank)
+        || left.localeCompare(right);
+    });
+
+    categories.forEach((category) => {
+      const files = groups.get(category) || [];
+      const { section, body } = createProjectCategorySection(summary, category, String(files.length));
+      const list = doc.createElement('div');
+      list.className = 'project-file-list';
+      files.forEach((file) => {
+        list.appendChild(renderProjectFileCard(summary, file));
+      });
+      body.appendChild(list);
+      projectBodyEl.appendChild(section);
+    });
+  }
+
   function renderProjectSummary(summary: ProjectSummary): void {
     if (!projectBodyEl) return;
     currentSummary = summary;
@@ -538,33 +710,26 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       return;
     }
 
-    appendProjectRoot(projectBodyEl, summary.root || '-');
+    appendOverview(summary);
 
-    const header = doc.createElement('div');
-    header.className = 'project-summary-grid';
-    appendStat(header, 'Branch', summary.branch || 'detached');
-    appendStat(header, 'Commit', summary.headShort || '-');
-    appendStat(header, 'Files', String(summary.changedFiles));
-    appendStat(header, 'Added', `+${summary.additions}`);
-    appendStat(header, 'Deleted', `-${summary.deletions}`);
-    projectBodyEl.appendChild(header);
-    renderAgentDiffs(summary);
+    if (summary.agentDiffs.length) {
+      const { section, body } = createProjectCategorySection(summary, 'agent-edits', String(summary.agentDiffs.length));
+      appendAgentDiffs(summary, body);
+      projectBodyEl.appendChild(section);
+    }
 
     if (!summary.files.length) {
       if (summary.agentDiffs.length) return;
+      const { section, body } = createProjectCategorySection(summary, 'clean', '0');
       const empty = doc.createElement('div');
       empty.className = 'muted project-empty';
       empty.textContent = 'Working tree clean.';
-      projectBodyEl.appendChild(empty);
+      body.appendChild(empty);
+      projectBodyEl.appendChild(section);
       return;
     }
 
-    const list = doc.createElement('div');
-    list.className = 'project-file-list';
-    summary.files.forEach((file) => {
-      list.appendChild(renderProjectFileCard(summary, file));
-    });
-    projectBodyEl.appendChild(list);
+    appendFileCategories(summary);
 
     if (summary.truncatedFiles) {
       const note = doc.createElement('div');
