@@ -92,6 +92,26 @@ pub async fn emit_agent_open(io: &SocketIo, state: &AppState, payload: JsonMap) 
     }
 }
 
+pub async fn emit_agent_edit(io: &SocketIo, state: &AppState, payload: JsonMap) -> bool {
+    let Ok(Some(client)) = ensure_client(io, state).await else {
+        return false;
+    };
+    match sidebar_rpc_call(&client, "sidebar.file.edit", Value::Object(payload.clone())).await {
+        Ok(value) if !rpc_result_explicitly_not_ok(&value) => true,
+        Ok(value) => {
+            warn!(
+                ?value,
+                "sidebar.file.edit RPC returned an unsuccessful result"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(%error, "sidebar.file.edit RPC failed");
+            false
+        }
+    }
+}
+
 pub async fn te2_project_status(io: &SocketIo, state: &AppState, params: JsonMap) -> Value {
     let Some(target_path) = string_field(&params, "path") else {
         return json!({

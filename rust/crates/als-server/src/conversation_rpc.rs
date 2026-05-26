@@ -5,7 +5,7 @@ use crate::{
         ConversationMeta, ConversationMetaUpdate, CreateConversationRequest,
         ForkConversationRequest, TranscriptOffset,
     },
-    ipc,
+    ipc, sidebar_ipc,
     state::AppState,
 };
 use als_adapter_protocol::{
@@ -855,6 +855,15 @@ async fn forward_adapter_live_event(
     let Some(method) = notification_method_for_event_type(&event_type) else {
         return Ok(());
     };
+    if event_type.trim().eq_ignore_ascii_case("diff") {
+        if let Some(entry) = state
+            .agent_edits
+            .record_live_diff(&state.conversations, &conversation_id, &event)
+            .map_err(internal_error)?
+        {
+            let _ = sidebar_ipc::emit_agent_edit(io, state, entry.sidebar_payload()).await;
+        }
+    }
     if event_type.trim().eq_ignore_ascii_case("approval") {
         persist_pending_approval_event(state, &conversation_id, &event)?;
         emit_rpc_notification_to_namespace(io, method, event).await;

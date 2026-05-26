@@ -1,4 +1,5 @@
 use crate::adapter_process::{AdapterEventSink, AdapterSupervisor};
+use crate::agent_edits::AgentEditLedger;
 use crate::agent_log::AgentLogStore;
 use crate::config::ServerConfig;
 use crate::conversation_store::ConversationStore;
@@ -22,6 +23,7 @@ const APP_UI_STATE_FILE: &str = "app_state.json";
 #[derive(Clone)]
 pub struct AppState {
     pub adapter: AdapterSupervisor,
+    pub agent_edits: AgentEditLedger,
     pub agent_log: AgentLogStore,
     pub config: ServerConfig,
     pub conversations: ConversationStore,
@@ -37,6 +39,7 @@ impl AppState {
     pub fn new(config: ServerConfig) -> Self {
         let events = AdapterEventSink::default();
         let adapter = AdapterSupervisor::new(config.clone(), events);
+        let agent_edits = AgentEditLedger::default();
         let agent_log = AgentLogStore::with_cache_dir(config.roots.cache_dir.clone());
         let conversations = ConversationStore::new(config.roots.data_dir.clone());
         let extensions = ExtensionRegistry::load_with_config(
@@ -61,6 +64,7 @@ impl AppState {
         let ui_selection = UiSelectionStore::with_cache_dir(config.roots.cache_dir.clone());
         Self {
             adapter,
+            agent_edits,
             agent_log,
             config,
             conversations,

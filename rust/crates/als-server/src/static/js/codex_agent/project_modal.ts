@@ -3,6 +3,8 @@ import { applyPathScrollLabel } from './path_label.ts';
 
 interface UiRpcProjectClient {
   getProjectSummary(options?: { conversationId?: string | null; path?: string | null; maxDiffBytes?: number }): Promise<JsonObject & { transport: string }>;
+  acceptAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
+  rejectAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
   getTe2ProjectStatus(options?: { path?: string | null }): Promise<JsonObject & { transport: string }>;
   openTe2Project(options?: { path?: string | null }): Promise<JsonObject & { transport: string }>;
   createTe2Project(options?: { path?: string | null; adoptExisting?: boolean; open?: boolean }): Promise<JsonObject & { transport: string }>;
@@ -37,6 +39,23 @@ interface ProjectFile {
   diffText: string;
 }
 
+interface AgentDiff {
+  id: string;
+  conversationId: string;
+  path: string;
+  abs: string;
+  rel: string;
+  line: number;
+  column: number;
+  source: string;
+  createdAt: string;
+  repoRoot: string;
+  diffText: string;
+  diffBytes: number;
+  additions: number;
+  deletions: number;
+}
+
 interface ProjectSummary {
   ok: boolean;
   root: string;
@@ -48,6 +67,7 @@ interface ProjectSummary {
   deletions: number;
   maxDiffBytes: number;
   files: ProjectFile[];
+  agentDiffs: AgentDiff[];
   truncatedFiles: boolean;
   error: string;
 }
@@ -81,6 +101,12 @@ function boolValue(value: unknown): boolean {
   return value === true;
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  if (typeof error === 'string' && error.trim()) return error.trim();
+  return 'Agent diff action failed.';
+}
+
 function te2ActionValue(value: unknown): Te2ProjectAction {
   if (value === 'current' || value === 'switch' || value === 'create' || value === 'disabled') return value;
   return 'disabled';
@@ -102,9 +128,33 @@ function normalizeProjectFile(value: unknown): ProjectFile | null {
   };
 }
 
+function normalizeAgentDiff(value: unknown): AgentDiff | null {
+  if (!isRecord(value)) return null;
+  const id = stringValue(value.id);
+  const conversationId = stringValue(value.conversation_id);
+  if (!id || !conversationId) return null;
+  return {
+    id,
+    conversationId,
+    path: stringValue(value.path),
+    abs: stringValue(value.abs),
+    rel: stringValue(value.rel),
+    line: numberValue(value.line) || 1,
+    column: numberValue(value.column) || 1,
+    source: stringValue(value.source),
+    createdAt: stringValue(value.created_at),
+    repoRoot: stringValue(value.repo_root),
+    diffText: stringValue(value.diff_text),
+    diffBytes: numberValue(value.diff_bytes),
+    additions: numberValue(value.additions),
+    deletions: numberValue(value.deletions),
+  };
+}
+
 function normalizeProjectSummary(value: unknown): ProjectSummary {
   const payload = isRecord(value) ? value : {};
   const rawFiles = Array.isArray(payload.files) ? payload.files : [];
+  const rawAgentDiffs = Array.isArray(payload.agent_diffs) ? payload.agent_diffs : [];
   return {
     ok: payload.ok !== false,
     root: stringValue(payload.root),
@@ -116,6 +166,7 @@ function normalizeProjectSummary(value: unknown): ProjectSummary {
     deletions: numberValue(payload.deletions),
     maxDiffBytes: numberValue(payload.max_diff_bytes) || 15 * 1024,
     files: rawFiles.map(normalizeProjectFile).filter((file): file is ProjectFile => Boolean(file)),
+    agentDiffs: rawAgentDiffs.map(normalizeAgentDiff).filter((diff): diff is AgentDiff => Boolean(diff)),
     truncatedFiles: payload.truncated_files === true,
     error: stringValue(payload.error),
   };
@@ -145,6 +196,10 @@ function formatBytes(value: number | null): string {
 function absoluteProjectPath(root: string, path: string): string {
   if (!path || path.startsWith('/')) return path;
   return `${root.replace(/\/+$/, '')}/${path.replace(/^\.?\//, '')}`;
+}
+
+function absoluteAgentDiffPath(summary: ProjectSummary, diff: AgentDiff): string {
+  return diff.abs || absoluteProjectPath(summary.root, diff.rel || diff.path);
 }
 
 function setMenuOpen(toggle: HTMLElement | null, panel: HTMLElement | null, open: boolean): void {
@@ -331,6 +386,88 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     return state?.action === 'current';
   }
 
+  function renderAgentDiffCard(summary: ProjectSummary, diff: AgentDiff): HTMLElement {
+    const absolutePath = absoluteAgentDiffPath(summary, diff);
+    const card = doc.createElement('div');
+    card.className = 'timeline-row command-result terminal-card diff project-file-card project-agent-diff-card';
+    const body = doc.createElement('div');
+    body.className = 'body';
+
+    const header = doc.createElement('div');
+    header.className = 'diff-path-label command-ribbon project-file-header project-agent-diff-header';
+    const pathLabel = doc.createElement('span');
+    pathLabel.className = 'project-file-path';
+    applyPathScrollLabel(pathLabel, ctx.toRelativePath(absolutePath) || diff.rel || diff.path || diff.id, {
+      title: absolutePath || diff.path || diff.id,
+    });
+
+    const meta = doc.createElement('span');
+    meta.className = 'project-file-meta';
+    appendProjectFilePill(meta, 'project-status-pill', 'tracked');
+    appendProjectFilePill(meta, 'project-file-stats', `+${diff.additions} -${diff.deletions}`);
+    if (diff.diffBytes > 0) {
+      appendProjectFilePill(meta, 'project-file-bytes', formatBytes(diff.diffBytes));
+    }
+
+    const actions = doc.createElement('span');
+    actions.className = 'project-agent-diff-actions';
+    const acceptBtn = doc.createElement('button');
+    acceptBtn.className = 'btn ghost project-agent-diff-action accept';
+    acceptBtn.type = 'button';
+    acceptBtn.textContent = 'Accept';
+    acceptBtn.dataset.agentDiffAction = 'accept';
+    acceptBtn.dataset.conversationId = diff.conversationId;
+    acceptBtn.dataset.diffId = diff.id;
+    const rejectBtn = doc.createElement('button');
+    rejectBtn.className = 'btn ghost project-agent-diff-action reject';
+    rejectBtn.type = 'button';
+    rejectBtn.textContent = 'Reject';
+    rejectBtn.dataset.agentDiffAction = 'reject';
+    rejectBtn.dataset.conversationId = diff.conversationId;
+    rejectBtn.dataset.diffId = diff.id;
+    actions.append(acceptBtn, rejectBtn);
+
+    header.append(pathLabel, meta, actions);
+    body.appendChild(header);
+
+    if (diff.diffText) {
+      const block = doc.createElement('div');
+      block.className = 'diff-block';
+      body.appendChild(block);
+      ctx.renderDiffBlock(block, diff.diffText, absolutePath);
+      ctx.makeCollapsible(card, `agent-diff:${diff.conversationId}:${diff.id}`, false, {
+        headerEl: header,
+        persist: false,
+        fullHeaderToggle: true,
+      });
+    } else {
+      const note = doc.createElement('div');
+      note.className = 'muted project-file-disabled-note';
+      note.textContent = 'No text diff available.';
+      body.appendChild(note);
+    }
+
+    card.appendChild(body);
+    return card;
+  }
+
+  function renderAgentDiffs(summary: ProjectSummary): void {
+    if (!summary.agentDiffs.length || !projectBodyEl) return;
+    const section = doc.createElement('section');
+    section.className = 'project-agent-diffs';
+    const heading = doc.createElement('div');
+    heading.className = 'project-section-heading';
+    heading.textContent = 'Agent edits';
+    section.appendChild(heading);
+    const list = doc.createElement('div');
+    list.className = 'project-file-list project-agent-diff-list';
+    summary.agentDiffs.forEach((diff) => {
+      list.appendChild(renderAgentDiffCard(summary, diff));
+    });
+    section.appendChild(list);
+    projectBodyEl.appendChild(section);
+  }
+
   function renderProjectFileCard(summary: ProjectSummary, file: ProjectFile): HTMLElement {
     const absolutePath = absoluteProjectPath(summary.root, file.path);
     const card = doc.createElement('div');
@@ -406,8 +543,10 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     appendStat(header, 'Added', `+${summary.additions}`);
     appendStat(header, 'Deleted', `-${summary.deletions}`);
     projectBodyEl.appendChild(header);
+    renderAgentDiffs(summary);
 
     if (!summary.files.length) {
+      if (summary.agentDiffs.length) return;
       const empty = doc.createElement('div');
       empty.className = 'muted project-empty';
       empty.textContent = 'Working tree clean.';
@@ -431,6 +570,67 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   }
 
   function bindProjectDiffClickHandler(): void {
+    function clearAgentDiffActionError(target: HTMLElement): void {
+      const card = target.closest('.project-agent-diff-card');
+      if (!(card instanceof HTMLElement)) return;
+      card.querySelectorAll('.project-agent-diff-error').forEach((node) => node.remove());
+    }
+
+    function showAgentDiffActionError(target: HTMLElement, message: string): void {
+      const card = target.closest('.project-agent-diff-card');
+      if (!(card instanceof HTMLElement)) return;
+      clearAgentDiffActionError(target);
+      const body = card.querySelector('.body');
+      if (!(body instanceof HTMLElement)) return;
+      const note = doc.createElement('div');
+      note.className = 'project-agent-diff-error';
+      note.textContent = message;
+      const header = body.querySelector('.project-agent-diff-header');
+      if (header instanceof HTMLElement) {
+        header.insertAdjacentElement('afterend', note);
+      } else {
+        body.prepend(note);
+      }
+    }
+
+    async function handleAgentDiffAction(target: HTMLElement, evt: Event): Promise<void> {
+      const action = target.dataset.agentDiffAction || '';
+      const conversationId = target.dataset.conversationId || '';
+      const diffId = target.dataset.diffId || '';
+      if (!conversationId || !diffId) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      clearAgentDiffActionError(target);
+      target.setAttribute('disabled', 'true');
+      try {
+        if (action === 'accept') {
+          await ctx.uiRpc.acceptAgentDiff({ conversationId, diffId });
+          await refreshProjectSummary();
+          return;
+        }
+        if (action === 'reject') {
+          const confirmed = await ctx.confirmProjectAction({
+            title: 'Reject tracked edit?',
+            body: 'This will apply the reverse patch to the working tree.',
+            confirmText: 'Reject',
+          });
+          if (!confirmed) return;
+          await ctx.uiRpc.rejectAgentDiff({ conversationId, diffId });
+          await refreshProjectSummary();
+        }
+      } catch (error) {
+        console.warn('[project-modal] agent diff action failed', {
+          action,
+          conversationId,
+          diffId,
+          error,
+        });
+        showAgentDiffActionError(target, errorMessage(error));
+      } finally {
+        target.removeAttribute('disabled');
+      }
+    }
+
     async function openProjectFile(target: HTMLElement, evt: Event): Promise<void> {
       if (target.closest('.project-file-card.disabled')) return;
       const path = target.getAttribute('data-path') || '';
@@ -445,6 +645,11 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     projectBodyEl?.addEventListener('click', (evt) => {
       const target = evt.target;
       if (!(target instanceof HTMLElement)) return;
+      const actionEl = target.closest('.project-agent-diff-action');
+      if (actionEl instanceof HTMLElement) {
+        void handleAgentDiffAction(actionEl, evt);
+        return;
+      }
       const fileOpenEl = target.closest('.project-file-open-placeholder');
       if (fileOpenEl instanceof HTMLElement) {
         void openProjectFile(fileOpenEl, evt);

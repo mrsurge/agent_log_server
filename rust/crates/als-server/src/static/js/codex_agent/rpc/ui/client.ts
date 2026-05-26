@@ -261,6 +261,46 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function acceptAgentDiff(options: {
+    conversationId: string;
+    diffId: string;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {
+      conversation_id: options.conversationId,
+      diff_id: options.diffId,
+    };
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'Agent diff accept requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectAgentDiffAccept,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function rejectAgentDiff(options: {
+    conversationId: string;
+    diffId: string;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {
+      conversation_id: options.conversationId,
+      diff_id: options.diffId,
+    };
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'Agent diff reject requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectAgentDiffReject,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function getTe2ProjectStatus(options: {
     path?: string | null;
   } = {}): Promise<JsonObject & { transport: TransportTag }> {
@@ -394,6 +434,8 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     listFilesystem,
     searchFilesystem,
     getProjectSummary,
+    acceptAgentDiff,
+    rejectAgentDiff,
     getTe2ProjectStatus,
     openTe2Project,
     createTe2Project,

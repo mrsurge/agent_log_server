@@ -1,4 +1,5 @@
 mod adapter_process;
+mod agent_edits;
 mod agent_log;
 mod card_truncation;
 mod config;

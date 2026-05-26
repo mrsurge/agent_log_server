@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+use tracing::warn;
 
 const RPC_EVENT: &str = "rpc";
 const JSONRPC_VERSION: &str = "2.0";
@@ -68,6 +69,8 @@ async fn dispatch_rpc(
         "filesystem.list" => filesystem_list(request.params).await,
         "filesystem.search" => filesystem_search(state, request.params).await,
         "project.summary.get" => project_summary_get(state, request.params).await,
+        "project.agentDiff.accept" => project_agent_diff_accept(state, request.params).await,
+        "project.agentDiff.reject" => project_agent_diff_reject(state, request.params).await,
         "project.te2.status.get" => {
             Ok(sidebar_ipc::te2_project_status(io, state, request.params).await)
         }
@@ -218,6 +221,21 @@ async fn filesystem_search(state: &AppState, params: JsonMap) -> Result<Value, R
 }
 
 async fn project_summary_get(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let conversation_id = params
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let agent_diffs = if let Some(conversation_id) = conversation_id.as_deref() {
+        state
+            .agent_edits
+            .list(conversation_id)
+            .map(crate::agent_edits::agent_diffs_json)
+            .map_err(internal_rpc_error)?
+    } else {
+        Value::Array(Vec::new())
+    };
     let conversation_cwd = conversation_cwd_from_params(state, &params);
     let host_root = state
         .host_ui
@@ -238,12 +256,73 @@ async fn project_summary_get(state: &AppState, params: JsonMap) -> Result<Value,
             .map(|mut value| {
                 if let Some(object) = value.as_object_mut() {
                     object.insert("transport".to_owned(), json!("rpc"));
+                    object.insert("agent_diffs".to_owned(), agent_diffs);
                 }
                 value
             })
     })
     .await
     .map_err(internal_rpc_error)?
+}
+
+async fn project_agent_diff_accept(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let conversation_id = required_string(&params, "conversation_id")?;
+    let diff_id = required_string(&params, "diff_id")?;
+    let removed = state
+        .agent_edits
+        .accept(&conversation_id, &diff_id)
+        .map_err(internal_rpc_error)?;
+    Ok(json!({
+        "ok": true,
+        "conversation_id": conversation_id,
+        "diff_id": diff_id,
+        "accepted": removed.is_some(),
+        "transport": "rpc",
+    }))
+}
+
+async fn project_agent_diff_reject(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let conversation_id = required_string(&params, "conversation_id")?;
+    let diff_id = required_string(&params, "diff_id")?;
+    let entry = state
+        .agent_edits
+        .get(&conversation_id, &diff_id)
+        .map_err(internal_rpc_error)?
+        .ok_or_else(|| rpc_error(-32044, "Tracked diff not found"))?;
+    let repo_root = entry
+        .repo_root
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| conversation_cwd_from_params(state, &params).map(PathBuf::from))
+        .ok_or_else(|| rpc_error(-32602, "Tracked diff has no project root"))?;
+    let diff_text = entry.diff_text.clone();
+    let repo_root_for_log = path_to_string(&repo_root);
+    let apply_result = tokio::task::spawn_blocking(move || {
+        crate::agent_edits::apply_reverse_patch(&repo_root, &diff_text).map_err(internal_rpc_error)
+    })
+    .await
+    .map_err(internal_rpc_error)?;
+    if let Err(error) = apply_result {
+        warn!(
+            conversation_id = %conversation_id,
+            diff_id = %diff_id,
+            repo_root = %repo_root_for_log,
+            error = %error.message,
+            "project agent diff reject failed"
+        );
+        return Err(error);
+    }
+    let removed = state
+        .agent_edits
+        .remove(&conversation_id, &diff_id)
+        .map_err(internal_rpc_error)?;
+    Ok(json!({
+        "ok": true,
+        "conversation_id": conversation_id,
+        "diff_id": diff_id,
+        "rejected": removed.is_some(),
+        "transport": "rpc",
+    }))
 }
 
 fn conversation_cwd_from_params(state: &AppState, params: &JsonMap) -> Option<String> {
@@ -269,6 +348,16 @@ fn conversation_cwd_from_params(state: &AppState, params: &JsonMap) -> Option<St
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
         })
+}
+
+fn required_string(params: &JsonMap, key: &str) -> Result<String, RpcError> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| rpc_error(-32602, format!("{key} is required")))
 }
 
 fn filesystem_search_sync(config_dir: &Path, params: &JsonMap) -> Result<Value, RpcError> {

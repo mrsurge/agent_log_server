@@ -13,6 +13,8 @@ export const UI_RPC_METHODS = {
   filesystemList: 'filesystem.list',
   filesystemSearch: 'filesystem.search',
   projectSummaryGet: 'project.summary.get',
+  projectAgentDiffAccept: 'project.agentDiff.accept',
+  projectAgentDiffReject: 'project.agentDiff.reject',
   projectTe2StatusGet: 'project.te2.status.get',
   projectTe2Open: 'project.te2.open',
   projectTe2Create: 'project.te2.create',
