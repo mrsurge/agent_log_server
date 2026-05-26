@@ -9,6 +9,10 @@ interface UiRpcProjectClient {
   openTe2Project(options?: { path?: string | null }): Promise<JsonObject & { transport: string }>;
   createTe2Project(options?: { path?: string | null; adoptExisting?: boolean; open?: boolean }): Promise<JsonObject & { transport: string }>;
   openFile(payload: JsonObject): Promise<JsonObject & { transport: string }>;
+  subscribeLiveNotifications?(options: {
+    onNotification: (method: string, params: JsonObject) => void;
+    onError?: (error: unknown) => void;
+  }): () => void;
 }
 
 interface ProjectModalContext {
@@ -223,6 +227,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   let selectedProjectPath: string | null = null;
   let currentSummary: ProjectSummary | null = null;
   let currentTe2State: Te2ProjectState | null = null;
+  let refreshTimer: number | null = null;
 
   function closeMenus(): void {
     setMenuOpen(conversationMenuToggle, conversationMenu, false);
@@ -684,8 +689,14 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     });
   }
 
-  async function refreshProjectSummary(): Promise<void> {
-    renderMessage('Loading project summary...');
+  async function refreshProjectSummary(options: { showLoading?: boolean } = {}): Promise<void> {
+    if (refreshTimer !== null) {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = null;
+    }
+    if (options.showLoading !== false) {
+      renderMessage('Loading project summary...');
+    }
     try {
       const result = await ctx.uiRpc.getProjectSummary({
         conversationId: ctx.getConversationId() || undefined,
@@ -704,6 +715,23 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       setTe2ControlState(null);
       renderMessage(error instanceof Error ? error.message : 'Project summary unavailable.');
     }
+  }
+
+  function scheduleProjectSummaryRefresh(): void {
+    if (!projectModalEl || projectModalEl.classList.contains('hidden')) return;
+    if (refreshTimer !== null) return;
+    refreshTimer = window.setTimeout(() => {
+      refreshTimer = null;
+      void refreshProjectSummary({ showLoading: false });
+    }, 80);
+  }
+
+  function handleProjectNotification(method: string, params: JsonObject): void {
+    if (method !== 'project.agentDiff.added' && method !== 'project.agentDiff.removed') return;
+    const conversationId = stringValue(params.conversation_id);
+    const activeConversationId = ctx.getConversationId();
+    if (conversationId && activeConversationId && conversationId !== activeConversationId) return;
+    scheduleProjectSummaryRefresh();
   }
 
   async function openProjectModal(path?: string | null): Promise<void> {
@@ -733,6 +761,12 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   });
   projectTe2Control?.addEventListener('click', () => {
     void ensureTe2ProjectReady(currentSummary?.root);
+  });
+  ctx.uiRpc.subscribeLiveNotifications?.({
+    onNotification: handleProjectNotification,
+    onError: (error) => {
+      console.warn('[project-modal] UI RPC notification handling failed', error);
+    },
   });
   bindProjectDiffClickHandler();
   projectModalEl?.addEventListener('click', (evt) => {

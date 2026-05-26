@@ -1,4 +1,4 @@
-use crate::{sidebar_ipc, state::AppState};
+use crate::{agent_edits::TrackedAgentDiff, sidebar_ipc, state::AppState};
 use als_adapter_protocol::JsonMap;
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
 use regex::RegexBuilder;
@@ -17,6 +17,8 @@ use std::{
 use tracing::warn;
 
 const RPC_EVENT: &str = "rpc";
+const RPC_NOTIFY_EVENT: &str = "rpc.notify";
+const UI_RPC_NAMESPACE: &str = "/rpc/ui";
 const JSONRPC_VERSION: &str = "2.0";
 const DEFAULT_SEARCH_LIMIT: usize = 200;
 const MAX_SEARCH_LIMIT: usize = 1000;
@@ -69,8 +71,8 @@ async fn dispatch_rpc(
         "filesystem.list" => filesystem_list(request.params).await,
         "filesystem.search" => filesystem_search(state, request.params).await,
         "project.summary.get" => project_summary_get(state, request.params).await,
-        "project.agentDiff.accept" => project_agent_diff_accept(state, request.params).await,
-        "project.agentDiff.reject" => project_agent_diff_reject(state, request.params).await,
+        "project.agentDiff.accept" => project_agent_diff_accept(io, state, request.params).await,
+        "project.agentDiff.reject" => project_agent_diff_reject(io, state, request.params).await,
         "project.te2.status.get" => {
             Ok(sidebar_ipc::te2_project_status(io, state, request.params).await)
         }
@@ -265,13 +267,20 @@ async fn project_summary_get(state: &AppState, params: JsonMap) -> Result<Value,
     .map_err(internal_rpc_error)?
 }
 
-async fn project_agent_diff_accept(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+async fn project_agent_diff_accept(
+    io: &SocketIo,
+    state: &AppState,
+    params: JsonMap,
+) -> Result<Value, RpcError> {
     let conversation_id = required_string(&params, "conversation_id")?;
     let diff_id = required_string(&params, "diff_id")?;
     let removed = state
         .agent_edits
         .accept(&conversation_id, &diff_id)
         .map_err(internal_rpc_error)?;
+    if let Some(entry) = removed.as_ref() {
+        emit_project_agent_diff_removed(io, entry).await;
+    }
     Ok(json!({
         "ok": true,
         "conversation_id": conversation_id,
@@ -281,7 +290,11 @@ async fn project_agent_diff_accept(state: &AppState, params: JsonMap) -> Result<
     }))
 }
 
-async fn project_agent_diff_reject(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+async fn project_agent_diff_reject(
+    io: &SocketIo,
+    state: &AppState,
+    params: JsonMap,
+) -> Result<Value, RpcError> {
     let conversation_id = required_string(&params, "conversation_id")?;
     let diff_id = required_string(&params, "diff_id")?;
     let entry = state
@@ -316,6 +329,9 @@ async fn project_agent_diff_reject(state: &AppState, params: JsonMap) -> Result<
         .agent_edits
         .remove(&conversation_id, &diff_id)
         .map_err(internal_rpc_error)?;
+    if let Some(entry) = removed.as_ref() {
+        emit_project_agent_diff_removed(io, entry).await;
+    }
     Ok(json!({
         "ok": true,
         "conversation_id": conversation_id,
@@ -323,6 +339,41 @@ async fn project_agent_diff_reject(state: &AppState, params: JsonMap) -> Result<
         "rejected": removed.is_some(),
         "transport": "rpc",
     }))
+}
+
+pub async fn emit_project_agent_diff_added(io: &SocketIo, entry: &TrackedAgentDiff) {
+    emit_rpc_notification(io, "project.agentDiff.added", json!(entry)).await;
+}
+
+async fn emit_project_agent_diff_removed(io: &SocketIo, entry: &TrackedAgentDiff) {
+    emit_rpc_notification(
+        io,
+        "project.agentDiff.removed",
+        json!({
+            "id": entry.id,
+            "conversation_id": entry.conversation_id,
+            "path": entry.path,
+            "abs": entry.abs,
+            "rel": entry.rel,
+            "repo_root": entry.repo_root,
+        }),
+    )
+    .await;
+}
+
+async fn emit_rpc_notification(io: &SocketIo, method: &str, params: Value) {
+    let notification = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "method": method,
+        "params": params,
+    });
+    let Some(namespace) = io.of(UI_RPC_NAMESPACE) else {
+        warn!("UI RPC namespace is unavailable for project event fanout");
+        return;
+    };
+    if let Err(error) = namespace.emit(RPC_NOTIFY_EVENT, &notification).await {
+        warn!(error = %error, method, "failed to emit project event over UI RPC");
+    }
 }
 
 fn conversation_cwd_from_params(state: &AppState, params: &JsonMap) -> Option<String> {

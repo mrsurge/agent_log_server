@@ -28,6 +28,8 @@ export type UiRpcMethod =
 export const UI_RPC_NOTIFICATION_METHODS = [
   'view.changed',
   'hostUi.updated',
+  'project.agentDiff.added',
+  'project.agentDiff.removed',
 ] as const;
 
 export type UiRpcNotificationMethod =

@@ -862,6 +862,7 @@ async fn forward_adapter_live_event(
             .map_err(internal_error)?
         {
             let _ = sidebar_ipc::emit_agent_edit(io, state, entry.sidebar_payload()).await;
+            crate::ui_rpc::emit_project_agent_diff_added(io, &entry).await;
         }
     }
     if event_type.trim().eq_ignore_ascii_case("approval") {
