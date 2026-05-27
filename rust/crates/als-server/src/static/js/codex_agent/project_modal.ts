@@ -5,6 +5,9 @@ interface UiRpcProjectClient {
   getProjectSummary(options?: { conversationId?: string | null; path?: string | null; maxDiffBytes?: number }): Promise<JsonObject & { transport: string }>;
   acceptAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
   rejectAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
+  stageProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
+  restoreProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
+  commitProject(options: { path?: string | null; message: string }): Promise<JsonObject & { transport: string }>;
   getTe2ProjectStatus(options?: { path?: string | null }): Promise<JsonObject & { transport: string }>;
   openTe2Project(options?: { path?: string | null }): Promise<JsonObject & { transport: string }>;
   createTe2Project(options?: { path?: string | null; adoptExisting?: boolean; open?: boolean }): Promise<JsonObject & { transport: string }>;
@@ -34,7 +37,11 @@ interface ProjectModalBinding {
 
 interface ProjectFile {
   path: string;
+  oldPath: string;
   status: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
   additions: number;
   deletions: number;
   bytes: number | null;
@@ -67,6 +74,9 @@ interface ProjectSummary {
   headShort: string | null;
   dirty: boolean;
   changedFiles: number;
+  stagedFiles: number;
+  unstagedFiles: number;
+  untrackedFiles: number;
   additions: number;
   deletions: number;
   maxDiffBytes: number;
@@ -126,7 +136,7 @@ function boolValue(value: unknown): boolean {
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) return error.message.trim();
   if (typeof error === 'string' && error.trim()) return error.trim();
-  return 'Agent diff action failed.';
+  return 'Project action failed.';
 }
 
 function te2ActionValue(value: unknown): Te2ProjectAction {
@@ -140,7 +150,11 @@ function normalizeProjectFile(value: unknown): ProjectFile | null {
   if (!path) return null;
   return {
     path,
+    oldPath: stringValue(value.old_path),
     status: stringValue(value.status) || 'modified',
+    staged: value.staged === true,
+    unstaged: value.unstaged === true,
+    untracked: value.untracked === true,
     additions: numberValue(value.additions),
     deletions: numberValue(value.deletions),
     bytes: Number.isFinite(Number(value.bytes)) ? Number(value.bytes) : null,
@@ -184,6 +198,9 @@ function normalizeProjectSummary(value: unknown): ProjectSummary {
     headShort: stringValue(payload.head_short) || null,
     dirty: payload.dirty === true,
     changedFiles: numberValue(payload.changed_files),
+    stagedFiles: numberValue(payload.staged_files),
+    unstagedFiles: numberValue(payload.unstaged_files),
+    untrackedFiles: numberValue(payload.untracked_files),
     additions: numberValue(payload.additions),
     deletions: numberValue(payload.deletions),
     maxDiffBytes: numberValue(payload.max_diff_bytes) || 15 * 1024,
@@ -375,6 +392,28 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     parent.appendChild(pill);
   }
 
+  function createProjectActionButton(label: string, action: string, className = ''): HTMLButtonElement {
+    const button = doc.createElement('button');
+    button.className = `btn ghost project-action-btn ${className}`.trim();
+    button.type = 'button';
+    button.textContent = label;
+    button.dataset.projectAction = action;
+    return button;
+  }
+
+  function clearProjectActionError(): void {
+    projectBodyEl?.querySelectorAll('.project-action-error').forEach((node) => node.remove());
+  }
+
+  function showProjectActionError(message: string): void {
+    if (!projectBodyEl) return;
+    clearProjectActionError();
+    const note = doc.createElement('div');
+    note.className = 'project-action-error';
+    note.textContent = message;
+    projectBodyEl.prepend(note);
+  }
+
   function setTe2ControlState(state: Te2ProjectState | null, loading = false): void {
     if (!projectTe2Control) return;
     projectTe2Control.classList.remove('success', 'warning');
@@ -488,11 +527,17 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
 
     const header = doc.createElement('div');
     header.className = 'diff-path-label command-ribbon project-file-header project-agent-diff-header';
+    const pathRow = doc.createElement('div');
+    pathRow.className = 'project-file-path-row';
     const pathLabel = doc.createElement('span');
     pathLabel.className = 'project-file-path';
     applyPathScrollLabel(pathLabel, ctx.toRelativePath(absolutePath) || diff.rel || diff.path || diff.id, {
       title: absolutePath || diff.path || diff.id,
     });
+    pathRow.appendChild(pathLabel);
+
+    const detailRow = doc.createElement('div');
+    detailRow.className = 'project-file-detail-row';
 
     const meta = doc.createElement('span');
     meta.className = 'project-file-meta';
@@ -520,7 +565,8 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     rejectBtn.dataset.diffId = diff.id;
     actions.append(acceptBtn, rejectBtn);
 
-    header.append(pathLabel, meta, actions);
+    detailRow.append(meta, actions);
+    header.append(pathRow, detailRow);
     body.appendChild(header);
 
     if (diff.diffText) {
@@ -564,13 +610,21 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
 
     const header = doc.createElement('div');
     header.className = 'diff-path-label command-ribbon project-file-header';
+    const pathRow = doc.createElement('div');
+    pathRow.className = 'project-file-path-row';
     const pathLabel = doc.createElement('span');
     pathLabel.className = 'project-file-path';
     applyPathScrollLabel(pathLabel, ctx.toRelativePath(absolutePath) || file.path, { title: absolutePath });
+    pathRow.appendChild(pathLabel);
+
+    const detailRow = doc.createElement('div');
+    detailRow.className = 'project-file-detail-row';
 
     const meta = doc.createElement('span');
     meta.className = 'project-file-meta';
     appendProjectFilePill(meta, 'project-status-pill', file.status);
+    if (file.staged) appendProjectFilePill(meta, 'project-file-state staged', 'staged');
+    if (file.unstaged) appendProjectFilePill(meta, 'project-file-state unstaged', file.untracked ? 'untracked' : 'unstaged');
     appendProjectFilePill(meta, 'project-file-stats', `+${file.additions} -${file.deletions}`);
     if (file.diffTruncated) {
       appendProjectFilePill(meta, 'project-file-truncated', `>${formatBytes(summary.maxDiffBytes)}`);
@@ -578,7 +632,19 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       appendProjectFilePill(meta, 'project-file-bytes', formatBytes(file.diffBytes));
     }
 
-    header.append(pathLabel, meta);
+    const actions = doc.createElement('span');
+    actions.className = 'project-file-actions';
+    const actionPaths = projectFileActionPaths(file);
+    const stageBtn = createProjectActionButton('Stage', 'stage-file');
+    stageBtn.dataset.paths = JSON.stringify(actionPaths);
+    stageBtn.disabled = !file.unstaged;
+    const restoreBtn = createProjectActionButton('Restore', 'restore-file', 'danger');
+    restoreBtn.dataset.paths = JSON.stringify(actionPaths);
+    restoreBtn.dataset.path = file.path;
+    actions.append(stageBtn, restoreBtn);
+
+    detailRow.append(meta, actions);
+    header.append(pathRow, detailRow);
     body.appendChild(header);
 
     if (file.diffTruncated) {
@@ -616,14 +682,16 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     summary: ProjectSummary,
     category: string,
     detail: string,
-  ): { section: HTMLElement; body: HTMLElement } {
+  ): { section: HTMLElement; body: HTMLElement; actions: HTMLElement } {
     const section = doc.createElement('section');
     section.className = 'project-category-section';
     section.dataset.projectCategory = category;
 
-    const header = doc.createElement('button');
+    const header = doc.createElement('div');
     header.className = 'project-category-header';
-    header.type = 'button';
+    const toggle = doc.createElement('button');
+    toggle.className = 'project-category-toggle';
+    toggle.type = 'button';
     const title = doc.createElement('span');
     title.className = 'project-category-title';
     title.textContent = categoryLabel(category);
@@ -633,7 +701,10 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     const twisty = doc.createElement('span');
     twisty.className = 'twisty';
     twisty.textContent = '▶';
-    header.append(title, count, twisty);
+    toggle.append(title, count, twisty);
+    const actions = doc.createElement('span');
+    actions.className = 'project-category-actions';
+    header.append(toggle, actions);
 
     const body = doc.createElement('div');
     body.className = 'project-category-body';
@@ -641,23 +712,26 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
 
     function sync(collapsed: boolean): void {
       section.classList.toggle('collapsed', collapsed);
-      header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       twisty.dataset.expanded = collapsed ? 'false' : 'true';
     }
 
     sync(projectCategoryCollapsed(summary.root || '-', category));
-    header.addEventListener('click', () => {
+    toggle.addEventListener('click', () => {
       const collapsed = !section.classList.contains('collapsed');
       setProjectCategoryCollapsed(summary.root || '-', category, collapsed);
       sync(collapsed);
     });
 
-    return { section, body };
+    return { section, body, actions };
   }
 
   function appendOverview(summary: ProjectSummary): void {
     if (!projectBodyEl) return;
-    const { section, body } = createProjectCategorySection(summary, 'overview', summary.dirty ? 'dirty' : 'clean');
+    const { section, body, actions } = createProjectCategorySection(summary, 'overview', summary.dirty ? 'dirty' : 'clean');
+    const commitBtn = createProjectActionButton(summary.stagedFiles > 0 ? 'Commit' : 'Stage & Commit', 'commit-project', 'primary');
+    commitBtn.disabled = summary.changedFiles === 0;
+    actions.appendChild(commitBtn);
     appendProjectRoot(body, summary.root || '-');
 
     const header = doc.createElement('div');
@@ -665,6 +739,8 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     appendStat(header, 'Branch', summary.branch || 'detached');
     appendStat(header, 'Commit', summary.headShort || '-');
     appendStat(header, 'Files', String(summary.changedFiles));
+    appendStat(header, 'Staged', String(summary.stagedFiles));
+    appendStat(header, 'Unstaged', String(summary.unstagedFiles));
     appendStat(header, 'Added', `+${summary.additions}`);
     appendStat(header, 'Deleted', `-${summary.deletions}`);
     body.appendChild(header);
@@ -690,7 +766,13 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
 
     categories.forEach((category) => {
       const files = groups.get(category) || [];
-      const { section, body } = createProjectCategorySection(summary, category, String(files.length));
+      const { section, body, actions } = createProjectCategorySection(summary, category, String(files.length));
+      const stageBtn = createProjectActionButton('Stage all', 'stage-category');
+      stageBtn.dataset.category = category;
+      stageBtn.disabled = !files.some((file) => file.unstaged);
+      const restoreBtn = createProjectActionButton('Restore all', 'restore-category', 'danger');
+      restoreBtn.dataset.category = category;
+      actions.append(stageBtn, restoreBtn);
       const list = doc.createElement('div');
       list.className = 'project-file-list';
       files.forEach((file) => {
@@ -713,7 +795,11 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     appendOverview(summary);
 
     if (summary.agentDiffs.length) {
-      const { section, body } = createProjectCategorySection(summary, 'agent-edits', String(summary.agentDiffs.length));
+      const { section, body, actions } = createProjectCategorySection(summary, 'agent-edits', String(summary.agentDiffs.length));
+      actions.append(
+        createProjectActionButton('Accept all', 'accept-agent-all', 'accept'),
+        createProjectActionButton('Reject all', 'reject-agent-all', 'reject'),
+      );
       appendAgentDiffs(summary, body);
       projectBodyEl.appendChild(section);
     }
@@ -739,6 +825,127 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     }
   }
 
+  function filesForCategory(summary: ProjectSummary, category: string): ProjectFile[] {
+    return summary.files.filter((file) => statusCategory(file.status) === category);
+  }
+
+  function projectFileActionPaths(file: ProjectFile): string[] {
+    return [file.path, file.oldPath].filter((path, index, paths): path is string => {
+      return Boolean(path) && paths.indexOf(path) === index;
+    });
+  }
+
+  function pathsForFiles(files: ProjectFile[]): string[] {
+    const paths: string[] = [];
+    files.forEach((file) => {
+      projectFileActionPaths(file).forEach((path) => {
+        if (!paths.includes(path)) paths.push(path);
+      });
+    });
+    return paths;
+  }
+
+  function pathsFromActionTarget(target: HTMLElement): string[] {
+    const raw = target.dataset.paths || '';
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+        }
+      } catch {
+        // Fall through to the single-path dataset.
+      }
+    }
+    const path = target.dataset.path || '';
+    return path ? [path] : [];
+  }
+
+  function commitSummaryText(summary: ProjectSummary): string {
+    return [
+      `${summary.stagedFiles} staged file${summary.stagedFiles === 1 ? '' : 's'}`,
+      `${summary.unstagedFiles} unstaged file${summary.unstagedFiles === 1 ? '' : 's'}`,
+      `${summary.untrackedFiles} untracked file${summary.untrackedFiles === 1 ? '' : 's'}`,
+      `+${summary.additions} -${summary.deletions}`,
+    ].join(' · ');
+  }
+
+  function openCommitDialog(summary: ProjectSummary): Promise<string | null> {
+    return new Promise((resolve) => {
+      const overlay = doc.createElement('div');
+      overlay.className = 'settings-overlay project-commit-overlay';
+      const dialog = doc.createElement('div');
+      dialog.className = 'settings-dialog project-commit-dialog';
+      const header = doc.createElement('div');
+      header.className = 'settings-header';
+      const title = doc.createElement('h3');
+      title.textContent = 'Commit staged changes';
+      const closeBtn = doc.createElement('button');
+      closeBtn.className = 'btn ghost';
+      closeBtn.type = 'button';
+      closeBtn.textContent = '×';
+      header.append(title, closeBtn);
+
+      const body = doc.createElement('div');
+      body.className = 'settings-body project-commit-body';
+      const summaryEl = doc.createElement('div');
+      summaryEl.className = 'project-commit-summary';
+      summaryEl.textContent = commitSummaryText(summary);
+      const textarea = doc.createElement('textarea');
+      textarea.className = 'project-commit-message';
+      textarea.placeholder = 'Commit message';
+      textarea.rows = 4;
+      const errorEl = doc.createElement('div');
+      errorEl.className = 'project-commit-error hidden';
+      body.append(summaryEl, textarea, errorEl);
+
+      const footer = doc.createElement('div');
+      footer.className = 'settings-footer';
+      const cancelBtn = doc.createElement('button');
+      cancelBtn.className = 'btn ghost';
+      cancelBtn.type = 'button';
+      cancelBtn.textContent = 'Cancel';
+      const commitBtn = doc.createElement('button');
+      commitBtn.className = 'btn primary';
+      commitBtn.type = 'button';
+      commitBtn.textContent = 'Commit';
+      footer.append(cancelBtn, commitBtn);
+      dialog.append(header, body, footer);
+      overlay.appendChild(dialog);
+      doc.body.appendChild(overlay);
+
+      function close(value: string | null): void {
+        overlay.remove();
+        resolve(value);
+      }
+
+      function submit(): void {
+        const message = textarea.value.trim();
+        if (!message) {
+          errorEl.textContent = 'Commit message is required.';
+          errorEl.classList.remove('hidden');
+          textarea.focus();
+          return;
+        }
+        close(message);
+      }
+
+      closeBtn.addEventListener('click', () => close(null));
+      cancelBtn.addEventListener('click', () => close(null));
+      commitBtn.addEventListener('click', submit);
+      overlay.addEventListener('click', (evt) => {
+        if (evt.target === overlay) close(null);
+      });
+      textarea.addEventListener('keydown', (evt) => {
+        if ((evt.ctrlKey || evt.metaKey) && evt.key === 'Enter') {
+          evt.preventDefault();
+          submit();
+        }
+      });
+      window.setTimeout(() => textarea.focus(), 0);
+    });
+  }
+
   function bindProjectDiffClickHandler(): void {
     function clearAgentDiffActionError(target: HTMLElement): void {
       const card = target.closest('.project-agent-diff-card');
@@ -760,6 +967,116 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
         header.insertAdjacentElement('afterend', note);
       } else {
         body.prepend(note);
+      }
+    }
+
+    async function stageProjectPaths(paths: string[]): Promise<void> {
+      if (!currentSummary) return;
+      await ctx.uiRpc.stageProjectPaths({ path: currentSummary.root, paths });
+      await refreshProjectSummary({ showLoading: false });
+    }
+
+    async function restoreProjectPaths(paths: string[], label: string): Promise<void> {
+      if (!currentSummary || !paths.length) return;
+      const confirmed = await ctx.confirmProjectAction({
+        title: 'Restore changes?',
+        body: `This will discard local changes for ${label}. This cannot be undone.`,
+        confirmText: 'Restore',
+      });
+      if (!confirmed) return;
+      await ctx.uiRpc.restoreProjectPaths({ path: currentSummary.root, paths });
+      await refreshProjectSummary({ showLoading: false });
+    }
+
+    async function handleCommitAction(): Promise<void> {
+      let summary = currentSummary;
+      if (!summary || !summary.ok) return;
+      if (summary.stagedFiles <= 0) {
+        if (summary.changedFiles <= 0) return;
+        const confirmed = await ctx.confirmProjectAction({
+          title: 'Stage all changes?',
+          body: 'Nothing is staged. Stage every changed file before opening the commit dialog?',
+          confirmText: 'Stage all',
+        });
+        if (!confirmed) return;
+        await ctx.uiRpc.stageProjectPaths({ path: summary.root });
+        await refreshProjectSummary({ showLoading: false });
+        summary = currentSummary;
+        if (!summary || summary.stagedFiles <= 0) {
+          throw new Error('Nothing is staged.');
+        }
+      }
+      const message = await openCommitDialog(summary);
+      if (!message) return;
+      await ctx.uiRpc.commitProject({ path: summary.root, message });
+      await refreshProjectSummary();
+    }
+
+    async function handleBulkAgentAction(action: string): Promise<void> {
+      const summary = currentSummary;
+      if (!summary?.agentDiffs.length) return;
+      if (action === 'reject-agent-all') {
+        const confirmed = await ctx.confirmProjectAction({
+          title: 'Reject all tracked edits?',
+          body: `This will apply reverse patches for ${summary.agentDiffs.length} tracked edit${summary.agentDiffs.length === 1 ? '' : 's'}.`,
+          confirmText: 'Reject all',
+        });
+        if (!confirmed) return;
+      }
+      for (const diff of summary.agentDiffs) {
+        if (action === 'accept-agent-all') {
+          await ctx.uiRpc.acceptAgentDiff({ conversationId: diff.conversationId, diffId: diff.id });
+        } else if (action === 'reject-agent-all') {
+          await ctx.uiRpc.rejectAgentDiff({ conversationId: diff.conversationId, diffId: diff.id });
+        }
+      }
+      await refreshProjectSummary({ showLoading: false });
+    }
+
+    async function handleProjectAction(target: HTMLElement, evt: Event): Promise<void> {
+      const action = target.dataset.projectAction || '';
+      if (!action) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      clearProjectActionError();
+      target.setAttribute('disabled', 'true');
+      try {
+        if (action === 'commit-project') {
+          await handleCommitAction();
+          return;
+        }
+        if (action === 'accept-agent-all' || action === 'reject-agent-all') {
+          await handleBulkAgentAction(action);
+          return;
+        }
+        const summary = currentSummary;
+        if (!summary) return;
+        if (action === 'stage-file') {
+          const paths = pathsFromActionTarget(target);
+          if (paths.length) await stageProjectPaths(paths);
+          return;
+        }
+        if (action === 'restore-file') {
+          const paths = pathsFromActionTarget(target);
+          const path = target.dataset.path || paths[0] || '';
+          if (paths.length) await restoreProjectPaths(paths, path);
+          return;
+        }
+        if (action === 'stage-category' || action === 'restore-category') {
+          const category = target.dataset.category || '';
+          const files = filesForCategory(summary, category);
+          const paths = pathsForFiles(files);
+          if (action === 'stage-category') {
+            await stageProjectPaths(paths);
+          } else {
+            await restoreProjectPaths(paths, `${categoryLabel(category)} files`);
+          }
+        }
+      } catch (error) {
+        console.warn('[project-modal] project action failed', { action, error });
+        showProjectActionError(errorMessage(error));
+      } finally {
+        target.removeAttribute('disabled');
       }
     }
 
@@ -815,6 +1132,11 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     projectBodyEl?.addEventListener('click', (evt) => {
       const target = evt.target;
       if (!(target instanceof HTMLElement)) return;
+      const projectActionEl = target.closest('[data-project-action]');
+      if (projectActionEl instanceof HTMLElement) {
+        void handleProjectAction(projectActionEl, evt);
+        return;
+      }
       const actionEl = target.closest('.project-agent-diff-action');
       if (actionEl instanceof HTMLElement) {
         void handleAgentDiffAction(actionEl, evt);

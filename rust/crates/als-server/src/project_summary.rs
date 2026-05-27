@@ -20,6 +20,9 @@ struct ProjectSummary {
     head_short: Option<String>,
     dirty: bool,
     changed_files: usize,
+    staged_files: usize,
+    unstaged_files: usize,
+    untracked_files: usize,
     additions: usize,
     deletions: usize,
     max_diff_bytes: u64,
@@ -30,7 +33,11 @@ struct ProjectSummary {
 #[derive(Debug, Serialize)]
 struct ProjectFileSummary {
     path: String,
+    old_path: Option<String>,
     status: String,
+    staged: bool,
+    unstaged: bool,
+    untracked: bool,
     additions: usize,
     deletions: usize,
     bytes: Option<u64>,
@@ -91,6 +98,8 @@ pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Valu
         else {
             continue;
         };
+        let old_path = delta.old_file().path().map(path_to_string);
+        let old_path = old_path.filter(|value| value != &path);
         let patch_summary = Patch::from_diff(&diff, idx)?
             .map(|patch| summarize_patch(patch, max_diff_bytes))
             .transpose()?;
@@ -105,9 +114,9 @@ pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Valu
         additions += file_additions;
         deletions += file_deletions;
         let bytes = file_size(&repo_root, &path);
-        let status = status_map
-            .get(&path)
-            .map(|status| status_summary(*status))
+        let raw_status = status_map.get(&path).copied();
+        let status = raw_status
+            .map(status_summary)
             .filter(|label| !label.is_empty())
             .unwrap_or_else(|| format!("{:?}", delta.status()).to_lowercase());
         let diff_bytes = patch_summary.as_ref().map(|summary| summary.diff_bytes);
@@ -118,7 +127,11 @@ pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Valu
         let diff_text = patch_summary.and_then(|summary| summary.diff_text);
         files.push(ProjectFileSummary {
             path,
+            old_path,
             status,
+            staged: raw_status.map(has_index_change).unwrap_or(false),
+            unstaged: raw_status.map(has_worktree_change).unwrap_or(false),
+            untracked: raw_status.map(is_untracked).unwrap_or(false),
             additions: file_additions,
             deletions: file_deletions,
             bytes,
@@ -138,7 +151,11 @@ pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Valu
         let bytes = file_size(&repo_root, &path);
         files.push(ProjectFileSummary {
             path,
+            old_path: None,
             status: status_summary(status),
+            staged: has_index_change(status),
+            unstaged: has_worktree_change(status),
+            untracked: is_untracked(status),
             additions: 0,
             deletions: 0,
             bytes,
@@ -153,6 +170,9 @@ pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Valu
 
     sort_project_files(&mut files);
     let changed_files = files.len();
+    let staged_files = files.iter().filter(|file| file.staged).count();
+    let unstaged_files = files.iter().filter(|file| file.unstaged).count();
+    let untracked_files = files.iter().filter(|file| file.untracked).count();
     let truncated_files = changed_files >= MAX_CHANGED_FILES;
     Ok(json!(ProjectSummary {
         ok: true,
@@ -162,6 +182,9 @@ pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Valu
         head_short,
         dirty: changed_files > 0,
         changed_files,
+        staged_files,
+        unstaged_files,
+        untracked_files,
         additions,
         deletions,
         max_diff_bytes,
@@ -241,6 +264,33 @@ fn status_summary(status: Status) -> String {
     }
 }
 
+fn has_index_change(status: Status) -> bool {
+    status.intersects(
+        Status::INDEX_NEW
+            | Status::INDEX_MODIFIED
+            | Status::INDEX_DELETED
+            | Status::INDEX_RENAMED
+            | Status::INDEX_TYPECHANGE
+            | Status::CONFLICTED,
+    )
+}
+
+fn has_worktree_change(status: Status) -> bool {
+    status.intersects(
+        Status::WT_NEW
+            | Status::WT_MODIFIED
+            | Status::WT_DELETED
+            | Status::WT_RENAMED
+            | Status::WT_TYPECHANGE
+            | Status::WT_UNREADABLE
+            | Status::CONFLICTED,
+    )
+}
+
+fn is_untracked(status: Status) -> bool {
+    status.contains(Status::WT_NEW) && !status.contains(Status::INDEX_NEW)
+}
+
 fn sort_project_files(files: &mut [ProjectFileSummary]) {
     files.sort_by(|left, right| {
         status_sort_rank(&left.status)
@@ -292,7 +342,11 @@ mod tests {
     fn project_file(path: &str, status: &str) -> ProjectFileSummary {
         ProjectFileSummary {
             path: path.to_owned(),
+            old_path: None,
             status: status.to_owned(),
+            staged: false,
+            unstaged: false,
+            untracked: false,
             additions: 0,
             deletions: 0,
             bytes: None,

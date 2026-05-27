@@ -301,6 +301,64 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function stageProjectPaths(options: {
+    path?: string | null;
+    paths?: string[];
+  } = {}): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {};
+    if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
+    if (Array.isArray(options.paths)) payload.paths = options.paths;
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'Project git stage requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectGitStage,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function restoreProjectPaths(options: {
+    path?: string | null;
+    paths?: string[];
+  } = {}): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {};
+    if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
+    if (Array.isArray(options.paths)) payload.paths = options.paths;
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'Project git restore requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectGitRestore,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
+  async function commitProject(options: {
+    path?: string | null;
+    message: string;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {
+      message: options.message,
+    };
+    if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'Project git commit requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectGitCommit,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function getTe2ProjectStatus(options: {
     path?: string | null;
   } = {}): Promise<JsonObject & { transport: TransportTag }> {
@@ -436,6 +494,9 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     getProjectSummary,
     acceptAgentDiff,
     rejectAgentDiff,
+    stageProjectPaths,
+    restoreProjectPaths,
+    commitProject,
     getTe2ProjectStatus,
     openTe2Project,
     createTe2Project,

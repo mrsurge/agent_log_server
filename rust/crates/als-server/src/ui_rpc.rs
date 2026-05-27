@@ -73,6 +73,9 @@ async fn dispatch_rpc(
         "project.summary.get" => project_summary_get(state, request.params).await,
         "project.agentDiff.accept" => project_agent_diff_accept(io, state, request.params).await,
         "project.agentDiff.reject" => project_agent_diff_reject(io, state, request.params).await,
+        "project.git.stage" => project_git_stage(state, request.params).await,
+        "project.git.restore" => project_git_restore(state, request.params).await,
+        "project.git.commit" => project_git_commit(state, request.params).await,
         "project.te2.status.get" => {
             Ok(sidebar_ipc::te2_project_status(io, state, request.params).await)
         }
@@ -238,19 +241,7 @@ async fn project_summary_get(state: &AppState, params: JsonMap) -> Result<Value,
     } else {
         Value::Array(Vec::new())
     };
-    let conversation_cwd = conversation_cwd_from_params(state, &params);
-    let host_root = state
-        .host_ui
-        .snapshot()
-        .ok()
-        .and_then(|snapshot| snapshot.project_root);
-    let config_dir = state.config.roots.config_dir.to_string_lossy().into_owned();
-    let fallback = conversation_cwd
-        .as_deref()
-        .or(host_root.as_deref())
-        .unwrap_or(config_dir.as_str());
-    let start = logical_absolute_path(params.get("path").and_then(Value::as_str), fallback)
-        .map_err(internal_rpc_error)?;
+    let start = project_start_from_params(state, &params)?;
     let max_diff_bytes = params.get("max_diff_bytes").and_then(Value::as_u64);
     tokio::task::spawn_blocking(move || {
         crate::project_summary::project_summary(&start, max_diff_bytes)
@@ -262,6 +253,36 @@ async fn project_summary_get(state: &AppState, params: JsonMap) -> Result<Value,
                 }
                 value
             })
+    })
+    .await
+    .map_err(internal_rpc_error)?
+}
+
+async fn project_git_stage(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let start = project_start_from_params(state, &params)?;
+    let paths = paths_from_params(&params);
+    tokio::task::spawn_blocking(move || {
+        crate::project_git::stage_paths(&start, &paths).map_err(internal_rpc_error)
+    })
+    .await
+    .map_err(internal_rpc_error)?
+}
+
+async fn project_git_restore(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let start = project_start_from_params(state, &params)?;
+    let paths = paths_from_params(&params);
+    tokio::task::spawn_blocking(move || {
+        crate::project_git::restore_paths(&start, &paths).map_err(internal_rpc_error)
+    })
+    .await
+    .map_err(internal_rpc_error)?
+}
+
+async fn project_git_commit(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let start = project_start_from_params(state, &params)?;
+    let message = required_string(&params, "message")?;
+    tokio::task::spawn_blocking(move || {
+        crate::project_git::commit_staged(&start, &message).map_err(internal_rpc_error)
     })
     .await
     .map_err(internal_rpc_error)?
@@ -399,6 +420,38 @@ fn conversation_cwd_from_params(state: &AppState, params: &JsonMap) -> Option<St
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
         })
+}
+
+fn project_start_from_params(state: &AppState, params: &JsonMap) -> Result<PathBuf, RpcError> {
+    let conversation_cwd = conversation_cwd_from_params(state, params);
+    let host_root = state
+        .host_ui
+        .snapshot()
+        .ok()
+        .and_then(|snapshot| snapshot.project_root);
+    let config_dir = state.config.roots.config_dir.to_string_lossy().into_owned();
+    let fallback = conversation_cwd
+        .as_deref()
+        .or(host_root.as_deref())
+        .unwrap_or(config_dir.as_str());
+    logical_absolute_path(params.get("path").and_then(Value::as_str), fallback)
+        .map_err(internal_rpc_error)
+}
+
+fn paths_from_params(params: &JsonMap) -> Vec<String> {
+    params
+        .get("paths")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn required_string(params: &JsonMap, key: &str) -> Result<String, RpcError> {

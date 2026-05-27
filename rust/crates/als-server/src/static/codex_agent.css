@@ -968,7 +968,7 @@ body.widescreen-resizing * {
 
 .project-summary-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -989,13 +989,33 @@ body.widescreen-resizing * {
   display: flex;
   align-items: center;
   gap: 10px;
+  justify-content: space-between;
+  flex-wrap: wrap;
   padding: 2px 0;
+}
+
+.project-category-toggle {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
   border: 0;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
   font: inherit;
   text-align: left;
+}
+
+.project-category-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .project-category-title {
@@ -1025,7 +1045,7 @@ body.widescreen-resizing * {
   transition: transform 0.12s ease;
 }
 
-.project-category-header[aria-expanded="true"] .twisty {
+.project-category-toggle[aria-expanded="true"] .twisty {
   transform: rotate(90deg);
 }
 
@@ -1121,14 +1141,23 @@ body.widescreen-resizing * {
 
 .project-file-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 38px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-height: 54px;
   cursor: pointer;
 }
 
-.project-agent-diff-header {
+.project-file-path-row,
+.project-file-detail-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.project-file-detail-row {
+  justify-content: space-between;
   align-items: flex-start;
 }
 
@@ -1161,6 +1190,16 @@ body.widescreen-resizing * {
   font-size: 12px;
 }
 
+.project-action-error {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(241, 151, 151, 0.35);
+  border-radius: 8px;
+  color: #f19797;
+  background: rgba(241, 151, 151, 0.08);
+  font-size: 12px;
+}
+
 .project-file-card.disabled {
   border-left-color: #6e7681;
 }
@@ -1190,16 +1229,41 @@ body.widescreen-resizing * {
 }
 
 .project-file-meta {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 6px;
   color: var(--muted);
   font-size: 11px;
 }
 
+.project-file-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.project-action-btn {
+  width: auto;
+  min-height: 24px;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.project-action-btn.danger,
+.project-action-btn.reject {
+  color: #f19797;
+}
+
+.project-action-btn.accept {
+  color: #7fe6b1;
+}
+
 .project-status-pill,
+.project-file-state,
 .project-file-stats,
 .project-file-bytes,
 .project-file-truncated {
@@ -1210,6 +1274,14 @@ body.widescreen-resizing * {
 }
 
 .project-file-truncated {
+  color: #f2cc60;
+}
+
+.project-file-state.staged {
+  color: #7fe6b1;
+}
+
+.project-file-state.unstaged {
   color: #f2cc60;
 }
 
@@ -1233,6 +1305,44 @@ body.widescreen-resizing * {
 .project-empty,
 .project-truncated-note {
   padding: 8px 0;
+}
+
+.project-commit-overlay {
+  z-index: 1300;
+}
+
+.project-commit-dialog {
+  max-width: min(520px, 94vw);
+}
+
+.project-commit-body {
+  gap: 10px;
+}
+
+.project-commit-summary {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-commit-message {
+  width: 100%;
+  resize: vertical;
+  min-height: 92px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.project-commit-error {
+  color: #f19797;
+  font-size: 12px;
 }
 
 .settings-row {
@@ -2711,6 +2821,10 @@ textarea {
 @media (max-width: 480px) {
   .composer { flex-direction: column; }
   .btn { width: 100%; text-align: center; }
+  .project-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .project-category-header { align-items: flex-start; }
+  .project-category-actions .btn,
+  .project-file-actions .btn { width: auto; }
 }
 
 /* Command Result Styling */
