@@ -36,6 +36,16 @@ body.drawer-open {
   overflow: hidden;
 }
 
+body.conversation-reorder-dragging,
+body.conversation-reorder-dragging * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+.conversation-reorder-scroll-lock {
+  overscroll-behavior: contain;
+}
+
 .appshell {
   min-height: 100vh;
   height: 100dvh;
@@ -306,6 +316,8 @@ body.drawer-open {
   font-size: 16px;
   line-height: 1;
   user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
   cursor: grab;
 }
 
@@ -385,6 +397,9 @@ body.drawer-open {
 
 .conversation-drag-handle {
   min-width: 34px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
   cursor: grab;
 }
 

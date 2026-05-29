@@ -63,6 +63,26 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
     }
   }
 
+  function isInteractiveHeaderTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return false;
+    return Boolean(target.closest([
+      'button',
+      'a[href]',
+      'input',
+      'select',
+      'textarea',
+      'summary',
+      '[role="button"]',
+      '[data-project-action]',
+      '[data-agent-diff-action]',
+      '.project-file-actions',
+      '.project-agent-diff-actions',
+      '.project-category-actions',
+      '.twisty',
+      '.ribbon-toggle-zone',
+    ].join(',')));
+  }
+
   function makeCollapsible(
     row: HTMLElement | null,
     cardId: string,
@@ -155,8 +175,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
 
     if (fullHeaderToggle) {
       headerNode.addEventListener('click', (event) => {
-        const target = event.target;
-        if (target instanceof Element && (target.closest('.twisty') || target.closest('.ribbon-toggle-zone'))) return;
+        if (isInteractiveHeaderTarget(event.target)) return;
         toggleCollapse();
       });
     }

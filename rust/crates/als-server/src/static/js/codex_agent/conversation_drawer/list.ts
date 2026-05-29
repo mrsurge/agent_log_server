@@ -68,6 +68,32 @@ interface ConversationDrawerListBinding {
   renderSplashTabs(): void;
 }
 
+const LONG_PRESS_DRAG_MS = 420;
+const LONG_PRESS_MOVE_CANCEL_PX = 8;
+const LONG_PRESS_EDGE_SCROLL_ZONE_PX = 52;
+const LONG_PRESS_EDGE_SCROLL_MAX_PX = 18;
+const CONVERSATION_INTERACTIVE_TARGET_SELECTOR = [
+  'button',
+  'a',
+  'input',
+  'label',
+  'select',
+  'textarea',
+  'summary',
+  '.conversation-row-handle',
+  '.conversation-drag-handle',
+  '.conversation-card-controls',
+  '.conversation-actions',
+  '.conversation-row-menu',
+].join(',');
+
+interface EdgeScrollState {
+  container: HTMLElement;
+  frame: number | null;
+  pointerY: number;
+  win: Window;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object';
 }
@@ -166,6 +192,9 @@ export function createConversationDrawerList(
   } = ctx;
 
   let draggingConversationId: string | null = null;
+  let longPressDragCleanup: (() => void) | null = null;
+  let edgeScrollState: EdgeScrollState | null = null;
+  const suppressedLongPressActivations = new WeakSet<HTMLElement>();
 
   function getConversationListState(): ConversationMeta[] {
     const state = getState();
@@ -189,6 +218,11 @@ export function createConversationDrawerList(
   }
 
   function clearPinnedDragState(doc: Document | null | undefined): void {
+    if (longPressDragCleanup) {
+      const cleanup = longPressDragCleanup;
+      longPressDragCleanup = null;
+      cleanup();
+    }
     draggingConversationId = null;
     clearPinnedDragMarkers(doc);
   }
@@ -222,6 +256,7 @@ export function createConversationDrawerList(
     const canDrag = Boolean(canPersistPins && meta?.pinned === true && conversationId);
     handle.draggable = canDrag;
     if (!canDrag) return;
+    bindPinnedLongPressDragSource(handle, row, conversationId, doc);
     handle.addEventListener('dragstart', (evt) => {
       if (!evt.dataTransfer) {
         evt.preventDefault();
@@ -237,6 +272,18 @@ export function createConversationDrawerList(
     });
   }
 
+  function bindPinnedLongPressDragSurface(
+    surface: HTMLElement,
+    row: HTMLDivElement,
+    meta: ConversationMeta | null | undefined,
+    doc: Document | null | undefined,
+  ): void {
+    const canPersistPins = typeof setConversationPins === 'function';
+    const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
+    if (!canPersistPins || meta?.pinned !== true || !conversationId) return;
+    bindPinnedLongPressDragSource(surface, row, conversationId, doc);
+  }
+
   function reorderPinnedConversationIds(targetConversationId: string): string[] | null {
     const targetId = typeof targetConversationId === 'string' ? targetConversationId : '';
     const draggedId = typeof draggingConversationId === 'string' ? draggingConversationId : '';
@@ -249,6 +296,236 @@ export function createConversationDrawerList(
     nextPinnedIds.splice(fromIndex, 1);
     nextPinnedIds.splice(toIndex, 0, draggedId);
     return nextPinnedIds;
+  }
+
+  function rowConversationId(row: Element | null | undefined): string {
+    return row instanceof HTMLElement ? row.dataset.conversationId || '' : '';
+  }
+
+  function conversationRowFromPoint(doc: Document, x: number, y: number): HTMLDivElement | null {
+    const target = doc.elementFromPoint(x, y);
+    const row = target?.closest('.conversation-row, .conversation-mini-row');
+    return row instanceof HTMLDivElement ? row : null;
+  }
+
+  function setLongPressDragTarget(doc: Document, targetRow: HTMLDivElement | null, draggedId: string): void {
+    doc.querySelectorAll('.conversation-row.drag-over, .conversation-mini-row.drag-over')
+      .forEach((el) => el.classList.remove('drag-over'));
+    if (!targetRow) return;
+    if (!targetRow.classList.contains('pinned')) return;
+    const targetId = rowConversationId(targetRow);
+    if (!targetId || targetId === draggedId) return;
+    targetRow.classList.add('drag-over');
+  }
+
+  function getLongPressScrollContainer(row: HTMLElement): HTMLElement | null {
+    const miniList = row.closest('.conversation-mini-list');
+    if (miniList instanceof HTMLElement) return miniList;
+    const list = row.closest('.conversation-list');
+    if (list instanceof HTMLElement) {
+      const scroller = list.parentElement;
+      if (scroller instanceof HTMLElement && scroller.classList.contains('conversation-list-scroller')) {
+        return scroller;
+      }
+      return list;
+    }
+    return null;
+  }
+
+  function stopLongPressEdgeScroll(): void {
+    const state = edgeScrollState;
+    edgeScrollState = null;
+    if (state && state.frame !== null) {
+      state.win.cancelAnimationFrame(state.frame);
+      state.frame = null;
+    }
+  }
+
+  function getEdgeScrollDelta(container: HTMLElement, pointerY: number): number {
+    const rect = container.getBoundingClientRect();
+    if (!rect.height || container.scrollHeight <= container.clientHeight) return 0;
+    const topDistance = pointerY - rect.top;
+    const bottomDistance = rect.bottom - pointerY;
+    if (topDistance >= 0 && topDistance < LONG_PRESS_EDGE_SCROLL_ZONE_PX) {
+      const ratio = 1 - (topDistance / LONG_PRESS_EDGE_SCROLL_ZONE_PX);
+      return -Math.ceil(ratio * LONG_PRESS_EDGE_SCROLL_MAX_PX);
+    }
+    if (bottomDistance >= 0 && bottomDistance < LONG_PRESS_EDGE_SCROLL_ZONE_PX) {
+      const ratio = 1 - (bottomDistance / LONG_PRESS_EDGE_SCROLL_ZONE_PX);
+      return Math.ceil(ratio * LONG_PRESS_EDGE_SCROLL_MAX_PX);
+    }
+    return 0;
+  }
+
+  function scheduleLongPressEdgeScroll(state: EdgeScrollState): void {
+    if (state.frame !== null) return;
+    state.frame = state.win.requestAnimationFrame(() => {
+      state.frame = null;
+      if (edgeScrollState !== state) return;
+      const delta = getEdgeScrollDelta(state.container, state.pointerY);
+      if (!delta) return;
+      state.container.scrollTop += delta;
+      scheduleLongPressEdgeScroll(state);
+    });
+  }
+
+  function updateLongPressEdgeScroll(pointerY: number): void {
+    if (!edgeScrollState) return;
+    edgeScrollState.pointerY = pointerY;
+    scheduleLongPressEdgeScroll(edgeScrollState);
+  }
+
+  function startLongPressEdgeScroll(container: HTMLElement | null, pointerY: number, win: Window): void {
+    stopLongPressEdgeScroll();
+    if (!container) return;
+    edgeScrollState = {
+      container,
+      frame: null,
+      pointerY,
+      win,
+    };
+    scheduleLongPressEdgeScroll(edgeScrollState);
+  }
+
+  function installLongPressScrollLock(doc: Document, scrollContainer: HTMLElement | null): () => void {
+    const onTouchMove = (evt: TouchEvent): void => {
+      if (!draggingConversationId) return;
+      evt.preventDefault();
+    };
+    doc.addEventListener('touchmove', onTouchMove, { capture: true, passive: false });
+    doc.body?.classList.add('conversation-reorder-dragging');
+    scrollContainer?.classList.add('conversation-reorder-scroll-lock');
+    return () => {
+      doc.removeEventListener('touchmove', onTouchMove, { capture: true });
+      doc.body?.classList.remove('conversation-reorder-dragging');
+      scrollContainer?.classList.remove('conversation-reorder-scroll-lock');
+    };
+  }
+
+  function suppressNextLongPressActivation(surface: HTMLElement, win: Window): void {
+    suppressedLongPressActivations.add(surface);
+    win.setTimeout(() => {
+      suppressedLongPressActivations.delete(surface);
+    }, 400);
+  }
+
+  function consumeSuppressedLongPressActivation(surface: HTMLElement, evt: Event): boolean {
+    if (!suppressedLongPressActivations.has(surface)) return false;
+    suppressedLongPressActivations.delete(surface);
+    evt.preventDefault();
+    evt.stopPropagation();
+    return true;
+  }
+
+  function bindPinnedLongPressDragSource(
+    surface: HTMLElement,
+    row: HTMLDivElement,
+    conversationId: string,
+    doc: Document | null | undefined,
+  ): void {
+    const localDoc = doc || surface.ownerDocument;
+    const localWin = localDoc.defaultView || windowRef;
+    if (!localWin) return;
+    const dragWindow = localWin;
+    surface.addEventListener('pointerdown', (evt) => {
+      if (evt.button !== 0 || !evt.isPrimary) return;
+      const target = evt.target;
+      if (target instanceof Element && shouldIgnoreLongPressDragTarget(target, surface)) return;
+      const startX = evt.clientX;
+      const startY = evt.clientY;
+      const pointerId = evt.pointerId;
+      let active = false;
+      let finished = false;
+      let scrollLockCleanup: (() => void) | null = null;
+      let timer: number | null = dragWindow.setTimeout(() => {
+        timer = null;
+        active = true;
+        draggingConversationId = conversationId;
+        row.classList.add('dragging');
+        const scrollContainer = getLongPressScrollContainer(row);
+        scrollLockCleanup = installLongPressScrollLock(localDoc, scrollContainer);
+        startLongPressEdgeScroll(scrollContainer, startY, dragWindow);
+        try {
+          surface.setPointerCapture(pointerId);
+        } catch {
+          // Pointer capture is best-effort on GeckoView.
+        }
+        setLongPressDragTarget(localDoc, conversationRowFromPoint(localDoc, startX, startY), conversationId);
+      }, LONG_PRESS_DRAG_MS);
+
+      function removeListeners(): void {
+        localDoc.removeEventListener('pointermove', onPointerMove);
+        localDoc.removeEventListener('pointerup', onPointerUp);
+        localDoc.removeEventListener('pointercancel', onPointerCancel);
+        if (timer !== null) {
+          dragWindow.clearTimeout(timer);
+          timer = null;
+        }
+      }
+
+      function cleanup(): void {
+        if (longPressDragCleanup === cleanup) longPressDragCleanup = null;
+        removeListeners();
+        if (active) {
+          draggingConversationId = null;
+          scrollLockCleanup?.();
+          scrollLockCleanup = null;
+          stopLongPressEdgeScroll();
+          clearPinnedDragMarkers(localDoc);
+        }
+      }
+
+      function cancel(): void {
+        if (finished) return;
+        finished = true;
+        cleanup();
+      }
+
+      function onPointerMove(moveEvt: PointerEvent): void {
+        if (moveEvt.pointerId !== pointerId) return;
+        const dx = Math.abs(moveEvt.clientX - startX);
+        const dy = Math.abs(moveEvt.clientY - startY);
+        if (!active && Math.max(dx, dy) > LONG_PRESS_MOVE_CANCEL_PX) {
+          cancel();
+          return;
+        }
+        if (!active) return;
+        moveEvt.preventDefault();
+        updateLongPressEdgeScroll(moveEvt.clientY);
+        setLongPressDragTarget(
+          localDoc,
+          conversationRowFromPoint(localDoc, moveEvt.clientX, moveEvt.clientY),
+          conversationId,
+        );
+      }
+
+      async function onPointerUp(upEvt: PointerEvent): Promise<void> {
+        if (upEvt.pointerId !== pointerId) return;
+        if (finished) return;
+        finished = true;
+        if (!active) {
+          cleanup();
+          return;
+        }
+        upEvt.preventDefault();
+        suppressNextLongPressActivation(surface, dragWindow);
+        const targetRow = conversationRowFromPoint(localDoc, upEvt.clientX, upEvt.clientY);
+        const nextPinnedIds = reorderPinnedConversationIds(rowConversationId(targetRow));
+        cleanup();
+        if (nextPinnedIds) await persistPinnedConversationOrder(nextPinnedIds);
+      }
+
+      function onPointerCancel(cancelEvt: PointerEvent): void {
+        if (cancelEvt.pointerId !== pointerId) return;
+        cancel();
+      }
+
+      if (longPressDragCleanup) longPressDragCleanup();
+      longPressDragCleanup = cleanup;
+      localDoc.addEventListener('pointermove', onPointerMove);
+      localDoc.addEventListener('pointerup', onPointerUp);
+      localDoc.addEventListener('pointercancel', onPointerCancel);
+    });
   }
 
   function bindPinnedDropTarget(
@@ -406,7 +683,16 @@ export function createConversationDrawerList(
     if (hasActiveTextSelection()) return true;
     const target = evt.target;
     if (!(target instanceof Element)) return false;
-    return Boolean(target.closest('button, a, input, label, select, textarea, summary'));
+    return shouldIgnoreRowActivationTarget(target);
+  }
+
+  function shouldIgnoreRowActivationTarget(target: Element): boolean {
+    return Boolean(target.closest(CONVERSATION_INTERACTIVE_TARGET_SELECTOR));
+  }
+
+  function shouldIgnoreLongPressDragTarget(target: Element, surface: HTMLElement): boolean {
+    const interactiveTarget = target.closest(CONVERSATION_INTERACTIVE_TARGET_SELECTOR);
+    return Boolean(interactiveTarget && interactiveTarget !== surface);
   }
 
   function closeConversationMenus(doc: Document): void {
@@ -487,6 +773,7 @@ export function createConversationDrawerList(
     row.tabIndex = 0;
     row.setAttribute('role', 'button');
     row.addEventListener('click', (evt) => {
+      if (consumeSuppressedLongPressActivation(row, evt)) return;
       if (shouldIgnoreRowActivation(evt)) return;
       void selectConversation(conversationId);
     });
@@ -517,9 +804,11 @@ export function createConversationDrawerList(
       const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
       const row = doc.createElement('div');
       row.className = 'conversation-row';
+      row.dataset.conversationId = conversationId;
       if (conversationId && conversationId === activeConversationId) row.classList.add('active');
       if (meta?.pinned === true) row.classList.add('pinned');
       bindConversationRowActivation(row, conversationId);
+      bindPinnedLongPressDragSurface(row, row, meta, doc);
 
       row.appendChild(buildConversationRowHandle(doc, meta, row));
 
@@ -563,6 +852,7 @@ export function createConversationDrawerList(
       const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
       const row = doc.createElement('div');
       row.className = 'conversation-mini-row';
+      row.dataset.conversationId = conversationId;
       if (conversationId && conversationId === activeConversationId) row.classList.add('active');
       if (meta?.pinned === true) row.classList.add('pinned');
 
@@ -581,11 +871,13 @@ export function createConversationDrawerList(
         mainButton.disabled = true;
         mainButton.title = unavailableDetail;
       } else {
-        mainButton.addEventListener('click', () => {
+        mainButton.addEventListener('click', (evt) => {
+          if (consumeSuppressedLongPressActivation(mainButton, evt)) return;
           if (!conversationId) return;
           void selectConversation(conversationId);
         });
       }
+      bindPinnedLongPressDragSurface(mainButton, row, meta, doc);
 
       const info = buildConversationInfo(doc, meta, { compact: true });
       mainButton.appendChild(info);
