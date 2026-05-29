@@ -74,6 +74,7 @@ async fn dispatch_rpc(
         "project.agentDiff.accept" => project_agent_diff_accept(io, state, request.params).await,
         "project.agentDiff.reject" => project_agent_diff_reject(io, state, request.params).await,
         "project.git.stage" => project_git_stage(state, request.params).await,
+        "project.git.unstage" => project_git_unstage(state, request.params).await,
         "project.git.restore" => project_git_restore(state, request.params).await,
         "project.git.commit" => project_git_commit(state, request.params).await,
         "project.te2.status.get" => {
@@ -263,6 +264,16 @@ async fn project_git_stage(state: &AppState, params: JsonMap) -> Result<Value, R
     let paths = paths_from_params(&params);
     tokio::task::spawn_blocking(move || {
         crate::project_git::stage_paths(&start, &paths).map_err(internal_rpc_error)
+    })
+    .await
+    .map_err(internal_rpc_error)?
+}
+
+async fn project_git_unstage(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    let start = project_start_from_params(state, &params)?;
+    let paths = paths_from_params(&params);
+    tokio::task::spawn_blocking(move || {
+        crate::project_git::unstage_paths(&start, &paths).map_err(internal_rpc_error)
     })
     .await
     .map_err(internal_rpc_error)?

@@ -1253,13 +1253,18 @@ body.widescreen-resizing * {
   font-size: 11px;
 }
 
-.project-action-btn.danger,
-.project-action-btn.reject {
+.btn.ghost.project-action-btn.danger,
+.btn.ghost.project-action-btn.reject {
   color: #f19797;
 }
 
-.project-action-btn.accept {
+.btn.ghost.project-action-btn.accept {
   color: #7fe6b1;
+}
+
+.btn.ghost.project-action-btn.unstage {
+  color: #f2cc60;
+  border-color: rgba(242, 204, 96, 0.55);
 }
 
 .project-status-pill,

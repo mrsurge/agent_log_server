@@ -16,6 +16,7 @@ export const UI_RPC_METHODS = {
   projectAgentDiffAccept: 'project.agentDiff.accept',
   projectAgentDiffReject: 'project.agentDiff.reject',
   projectGitStage: 'project.git.stage',
+  projectGitUnstage: 'project.git.unstage',
   projectGitRestore: 'project.git.restore',
   projectGitCommit: 'project.git.commit',
   projectTe2StatusGet: 'project.te2.status.get',

@@ -35,6 +35,24 @@ pub fn stage_paths(start: &Path, raw_paths: &[String]) -> Result<Value> {
     }))
 }
 
+pub fn unstage_paths(start: &Path, raw_paths: &[String]) -> Result<Value> {
+    let repo = discover_project_repo(start)?;
+    let paths = if raw_paths.is_empty() {
+        status_paths(&repo.root)?
+    } else {
+        validate_targets(raw_paths)?
+    };
+    if !paths.is_empty() {
+        run_git_pathspec(&repo.root, &["reset", "--quiet", "--"], &paths)?;
+    }
+    Ok(json!({
+        "ok": true,
+        "root": path_to_string(&repo.root),
+        "paths": paths,
+        "transport": "rpc",
+    }))
+}
+
 pub fn restore_paths(start: &Path, raw_paths: &[String]) -> Result<Value> {
     let repo = discover_project_repo(start)?;
     let paths = if raw_paths.is_empty() {

@@ -6,6 +6,7 @@ interface UiRpcProjectClient {
   acceptAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
   rejectAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
   stageProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
+  unstageProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
   restoreProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
   commitProject(options: { path?: string | null; message: string }): Promise<JsonObject & { transport: string }>;
   getTe2ProjectStatus(options?: { path?: string | null }): Promise<JsonObject & { transport: string }>;
@@ -635,9 +636,11 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     const actions = doc.createElement('span');
     actions.className = 'project-file-actions';
     const actionPaths = projectFileActionPaths(file);
-    const stageBtn = createProjectActionButton('Stage', 'stage-file');
+    const stageBtn = file.staged
+      ? createProjectActionButton('Unstage', 'unstage-file', 'unstage')
+      : createProjectActionButton('Stage', 'stage-file');
     stageBtn.dataset.paths = JSON.stringify(actionPaths);
-    stageBtn.disabled = !file.unstaged;
+    stageBtn.disabled = file.staged ? false : !file.unstaged;
     const restoreBtn = createProjectActionButton('Restore', 'restore-file', 'danger');
     restoreBtn.dataset.paths = JSON.stringify(actionPaths);
     restoreBtn.dataset.path = file.path;
@@ -976,6 +979,12 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       await refreshProjectSummary({ showLoading: false });
     }
 
+    async function unstageProjectPaths(paths: string[]): Promise<void> {
+      if (!currentSummary) return;
+      await ctx.uiRpc.unstageProjectPaths({ path: currentSummary.root, paths });
+      await refreshProjectSummary({ showLoading: false });
+    }
+
     async function restoreProjectPaths(paths: string[], label: string): Promise<void> {
       if (!currentSummary || !paths.length) return;
       const confirmed = await ctx.confirmProjectAction({
@@ -1054,6 +1063,11 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
         if (action === 'stage-file') {
           const paths = pathsFromActionTarget(target);
           if (paths.length) await stageProjectPaths(paths);
+          return;
+        }
+        if (action === 'unstage-file') {
+          const paths = pathsFromActionTarget(target);
+          if (paths.length) await unstageProjectPaths(paths);
           return;
         }
         if (action === 'restore-file') {

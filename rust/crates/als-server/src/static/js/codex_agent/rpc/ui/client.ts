@@ -339,6 +339,25 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function unstageProjectPaths(options: {
+    path?: string | null;
+    paths?: string[];
+  } = {}): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {};
+    if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
+    if (Array.isArray(options.paths)) payload.paths = options.paths;
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'Project git unstage requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectGitUnstage,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function commitProject(options: {
     path?: string | null;
     message: string;
@@ -495,6 +514,7 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     acceptAgentDiff,
     rejectAgentDiff,
     stageProjectPaths,
+    unstageProjectPaths,
     restoreProjectPaths,
     commitProject,
     getTe2ProjectStatus,
