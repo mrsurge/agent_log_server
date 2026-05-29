@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 const RPC_EVENT: &str = "rpc";
 const RPC_NOTIFY_EVENT: &str = "rpc.notify";
@@ -85,7 +85,19 @@ async fn dispatch_rpc(
             Ok(sidebar_ipc::te2_project_create(io, state, request.params).await)
         }
         "file.open" => {
-            let sent = sidebar_ipc::emit_agent_open(io, state, request.params.clone()).await;
+            let forwarded_params = file_open_sidebar_params(&request.params);
+            info!(
+                namespace = UI_RPC_NAMESPACE,
+                event = RPC_EVENT,
+                method = "file.open",
+                path = ?request.params.get("path"),
+                line = ?request.params.get("line"),
+                column = ?request.params.get("column"),
+                params = ?request.params,
+                forwarded_params = ?forwarded_params,
+                "received UI RPC file.open request"
+            );
+            let sent = sidebar_ipc::emit_agent_open(io, state, forwarded_params.clone()).await;
             Ok(json!({
                 "ok": true,
                 "sent": sent,
@@ -105,6 +117,20 @@ async fn dispatch_rpc(
             format!("Unsupported method: {}", request.method),
         )),
     }
+}
+
+fn file_open_sidebar_params(params: &JsonMap) -> JsonMap {
+    let mut forwarded = JsonMap::new();
+    if let Some(path) = params.get("path") {
+        forwarded.insert("path".to_owned(), path.clone());
+    }
+    if let Some(line) = params.get("line") {
+        forwarded.insert("line".to_owned(), line.clone());
+    }
+    if let Some(column) = params.get("column") {
+        forwarded.insert("column".to_owned(), column.clone());
+    }
+    forwarded
 }
 
 fn view_get(state: &AppState) -> Result<Value, RpcError> {

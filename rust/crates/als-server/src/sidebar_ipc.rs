@@ -17,7 +17,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::Mutex as AsyncMutex, sync::oneshot, time::timeout};
-use tracing::warn;
+use tracing::{info, warn};
 
 const SIDEBAR_NAMESPACE: &str = "/sidebar_ipc";
 const SIDEBAR_SOCKET_PATH: &str = "/ui_ipc_ws/socket.io/";
@@ -74,19 +74,40 @@ pub async fn recheck_status(io: &SocketIo, state: &AppState) -> Value {
 
 pub async fn emit_agent_open(io: &SocketIo, state: &AppState, payload: JsonMap) -> bool {
     let Ok(Some(client)) = ensure_client(io, state).await else {
+        warn!(
+            namespace = SIDEBAR_NAMESPACE,
+            socket_path = SIDEBAR_SOCKET_PATH,
+            event = RPC_EVENT,
+            method = "sidebar.file.open",
+            payload = ?payload,
+            "cannot send sidebar.file.open RPC because sidebar IPC client is unavailable"
+        );
         return false;
     };
     match sidebar_rpc_call(&client, "sidebar.file.open", Value::Object(payload.clone())).await {
         Ok(value) if !rpc_result_explicitly_not_ok(&value) => true,
         Ok(value) => {
             warn!(
+                namespace = SIDEBAR_NAMESPACE,
+                socket_path = SIDEBAR_SOCKET_PATH,
+                event = RPC_EVENT,
+                method = "sidebar.file.open",
+                payload = ?payload,
                 ?value,
-                "sidebar.file.open RPC returned an unsuccessful result; legacy sidebar transport is disabled"
+                "sidebar.file.open RPC returned an unsuccessful result"
             );
             false
         }
         Err(error) => {
-            warn!(%error, "sidebar.file.open RPC failed; legacy sidebar transport is disabled");
+            warn!(
+                namespace = SIDEBAR_NAMESPACE,
+                socket_path = SIDEBAR_SOCKET_PATH,
+                event = RPC_EVENT,
+                method = "sidebar.file.open",
+                payload = ?payload,
+                %error,
+                "sidebar.file.open RPC failed"
+            );
             false
         }
     }
@@ -341,6 +362,15 @@ async fn sidebar_rpc_call(client: &Client, method: &str, params: Value) -> Resul
         "method": method,
         "params": params,
     });
+    info!(
+        namespace = SIDEBAR_NAMESPACE,
+        socket_path = SIDEBAR_SOCKET_PATH,
+        event = RPC_EVENT,
+        method,
+        request_id = %request_id,
+        request = ?request,
+        "sending sidebar IPC RPC request"
+    );
     let (tx, rx) = oneshot::channel::<Option<Value>>();
     let tx = Arc::new(Mutex::new(Some(tx)));
     let tx_for_ack = tx.clone();
@@ -367,6 +397,15 @@ async fn sidebar_rpc_call(client: &Client, method: &str, params: Value) -> Resul
     let Some(value) = timeout(Duration::from_secs(5), rx).await?? else {
         bail!("sidebar RPC {method} returned no ack payload");
     };
+    info!(
+        namespace = SIDEBAR_NAMESPACE,
+        socket_path = SIDEBAR_SOCKET_PATH,
+        event = RPC_EVENT,
+        method,
+        request_id = %request_id,
+        ack = ?value,
+        "received sidebar IPC RPC ack"
+    );
     sidebar_rpc_result(method, value)
 }
 

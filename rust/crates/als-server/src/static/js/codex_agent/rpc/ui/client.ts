@@ -442,9 +442,6 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
   }
 
   async function openFile(payload: JsonObject): Promise<JsonObject & { transport: TransportTag }> {
-    if (!rpcEnabled()) {
-      return normalizeTransport(await callLegacy('te2_agent_open', payload), 'legacy');
-    }
     const result = await callRpcNamespace<JsonObject>({
       namespace: UI_RPC_NAMESPACE,
       method: UI_RPC_METHODS.fileOpen,

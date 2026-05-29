@@ -64,7 +64,6 @@ interface HostRuntimeContext {
   splashConsoleWorkerIdEl: HTMLElement | null;
   documentRef: Document;
   windowRef: Window;
-  getSocketConnected(): boolean;
 }
 
 export function bindHostRuntime(ctx: HostRuntimeContext) {
@@ -83,7 +82,6 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     splashConsoleWorkerIdEl,
     documentRef,
     windowRef,
-    getSocketConnected,
   } = ctx;
   const settingsRpcClient = createSettingsRpcClient({
     sioCall,
@@ -184,11 +182,8 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
   }
 
   async function postTe2OpenRequest({ path, line, column }: { path?: unknown; line?: unknown; column?: unknown }) {
-    const { conversationMeta, conversationSettings } = getState();
-      const payload: UnknownRecord = {
-        source: 'codex-agent',
-        conversation_id: conversationMeta?.conversation_id || null,
-      };
+    const { conversationSettings } = getState();
+    const payload: UnknownRecord = {};
     if (typeof path === 'string' && path) {
       let nextPath = path;
       if (!nextPath.startsWith('/') && /^(?:data|home|tmp|usr|var|etc|storage)\//.test(nextPath)) {
@@ -203,13 +198,9 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     }
     if (Number.isFinite(line)) payload.line = Number(line);
     if (Number.isFinite(column)) payload.column = Number(column);
-    console.log('[TE2_OPEN] payload:', JSON.stringify(payload), 'socket_connected:', getSocketConnected());
     try {
-      const result = await uiRpcClient.openFile(payload);
-      console.log('[TE2_OPEN] result:', JSON.stringify(result));
-    } catch (err) {
-      console.warn('[TE2_OPEN] error:', err);
-    }
+      await uiRpcClient.openFile(payload);
+    } catch {}
   }
 
   async function postExternalUrlOpenRequest(url: unknown) {

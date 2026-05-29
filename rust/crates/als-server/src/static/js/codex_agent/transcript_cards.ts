@@ -377,8 +377,14 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
       pathLine.dataset.hasClickHandler = 'true';
       pathLine.addEventListener('click', (e: MouseEvent) => {
         e.stopPropagation();
-        const preferredLine = displayLines?.[0]?.line_no
-          ?? (Array.isArray(viewRange) && Number.isFinite(Number(viewRange[0])) ? Number(viewRange[0]) : 1);
+        const eventLine = Number(evt.line);
+        const displayLine = Number(displayLines?.[0]?.line_no);
+        const rangeLine = Array.isArray(viewRange) ? Number(viewRange[0]) : NaN;
+        const preferredLine = Number.isFinite(eventLine) && eventLine > 0
+          ? eventLine
+          : (Number.isFinite(displayLine) && displayLine > 0
+              ? displayLine
+              : (Number.isFinite(rangeLine) && rangeLine > 0 ? rangeLine : 1));
         postTe2OpenRequest({ path, line: preferredLine, column: 1 });
       });
       body.appendChild(pathLine);

@@ -739,7 +739,6 @@ document.addEventListener('DOMContentLoaded', () => {
     splashConsoleWorkerIdEl,
     documentRef: document,
     windowRef: window,
-    getSocketConnected: () => Boolean(_socket && _socket.connected),
   });
 
   const {
