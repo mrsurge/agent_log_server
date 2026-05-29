@@ -27,6 +27,10 @@ checkout on 2026-05-14.
 - `kb_write` structured heading creation now defaults to Markdown spacing
   normalization, supports `spacing="preserve"` for exact insertion, and ensures
   heading writes leave the target file with a final newline.
+- `kb_update` body/subtree replacement now defaults to deterministic Markdown
+  spacing, supports `spacing="preserve"` for exact raw replacement, and preserves
+  the blank heading/body boundary for section-body replacements even when the
+  replacement content starts immediately with body text or is empty.
 
 ## Follow-up Observations
 

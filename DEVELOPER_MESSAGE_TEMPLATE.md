@@ -260,6 +260,19 @@ Use sidebar integration for:
 Sidebar integration is a UI integration surface.
 It is not the structured debugging/tool surface.
 
+### Sidebar Draft Safety Before Editing
+
+When `agent-pty-blocks` exposes TE2 sidebar draft tools, use them before editing existing files:
+
+1. For one target file, call `sidebar_draft_state_get` with `includeContent=false` to check whether TE2 has user draft content for that file.
+2. If the file has a draft, call `sidebar_draft_content_get` for that file before deciding how to proceed.
+3. If the draft content looks meaningful or anything other than arbitrary/noise, use `ask_user` to ask how to resolve the conflict before editing the file.
+4. If the file has no draft, proceed with the planned edit normally.
+
+For multi-file edits, call `sidebar_drafts_list` for the project first. This checks the project clean/dirty draft state without reading draft contents. Only request per-file draft content for files that are actually dirty and relevant to the planned edit.
+
+`sidebar_draft_clear` is destructive to user draft state. Use it only after explicit user approval for the specific file.
+
 ### 2. MCP integration (`te2-mcp`)
 
 Use MCP integration for:

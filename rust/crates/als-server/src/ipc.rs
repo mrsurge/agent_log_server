@@ -1,4 +1,4 @@
-use crate::{conversation_rpc, state::AppState};
+use crate::{conversation_rpc, sidebar_ipc, state::AppState};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Map, Value, json};
 use socketioxide::{
@@ -15,6 +15,11 @@ use std::{
 use tracing::warn;
 
 const IPC_NAMESPACE: &str = "/ipc";
+const SIDEBAR_RPC_DRAFT_METHODS: &[&str] = &[
+    "sidebar.drafts.list",
+    "sidebar.draftState.get",
+    "sidebar.draft.clear",
+];
 
 #[derive(Clone, Default)]
 pub struct IpcClientStore {
@@ -55,6 +60,7 @@ pub fn register_ipc_namespace(io: &SocketIo) {
             let sid = socket.id.to_string();
             state.ipc_clients.insert(sid.clone());
             socket.on("ask_user_ack", handle_ask_user_ack);
+            socket.on("sidebar_rpc", handle_sidebar_rpc);
             socket.on_disconnect(
                 async |socket: SocketRef,
                        State(state): State<AppState>,
@@ -64,6 +70,50 @@ pub fn register_ipc_namespace(io: &SocketIo) {
             );
         },
     );
+}
+
+async fn handle_sidebar_rpc(
+    socket: SocketRef,
+    State(state): State<AppState>,
+    io: SocketIo,
+    Data(data): Data<Value>,
+    ack: AckSender,
+) {
+    let sid = socket.id.to_string();
+    if !state.ipc_clients.contains(&sid) {
+        let _ = ack.send(&json!({"ok": false, "error": "unauthorized"}));
+        return;
+    }
+
+    let Some((method, params)) = sidebar_rpc_request_from_payload(&data) else {
+        let _ = ack.send(&json!({"ok": false, "error": "method is required"}));
+        return;
+    };
+    if !SIDEBAR_RPC_DRAFT_METHODS.contains(&method.as_str()) {
+        let _ = ack.send(&json!({
+            "ok": false,
+            "error": "sidebar RPC method is not allowed from MCP IPC",
+            "method": method,
+        }));
+        return;
+    }
+
+    match sidebar_ipc::proxy_sidebar_rpc(&io, &state, &method, params).await {
+        Ok(result) => {
+            let _ = ack.send(&json!({
+                "ok": true,
+                "method": method,
+                "result": result,
+            }));
+        }
+        Err(error) => {
+            let _ = ack.send(&json!({
+                "ok": false,
+                "method": method,
+                "error": error.to_string(),
+            }));
+        }
+    }
 }
 
 pub async fn emit_ask_user_response(
@@ -147,6 +197,24 @@ fn request_id_from_payload(data: &Value) -> Option<String> {
         }
     }
     None
+}
+
+fn sidebar_rpc_request_from_payload(data: &Value) -> Option<(String, Value)> {
+    let payload = data.as_object()?;
+    let method = payload
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_owned();
+    let params = payload
+        .get("params")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    if !params.is_object() {
+        return None;
+    }
+    Some((method, params))
 }
 
 fn load_or_create_ipc_secret() -> Result<String> {

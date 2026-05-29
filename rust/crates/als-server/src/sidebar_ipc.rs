@@ -133,6 +133,18 @@ pub async fn emit_agent_edit(io: &SocketIo, state: &AppState, payload: JsonMap) 
     }
 }
 
+pub async fn proxy_sidebar_rpc(
+    io: &SocketIo,
+    state: &AppState,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let Some(client) = ensure_client(io, state).await? else {
+        bail!("sidebar_unavailable");
+    };
+    sidebar_rpc_call(&client, method, params).await
+}
+
 pub async fn te2_project_status(io: &SocketIo, state: &AppState, params: JsonMap) -> Value {
     let Some(target_path) = string_field(&params, "path") else {
         return json!({

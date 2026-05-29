@@ -217,8 +217,11 @@ def _kb_configured_files(root: Optional[Path] = None) -> list[str]:
     return result
 
 
-_APPSERVER_ORIGIN = os.environ.get("AGENT_LOG_SERVER_ORIGIN", "http://127.0.0.1:12359")
+_APPSERVER_ORIGIN = os.environ.get("AGENT_LOG_SERVER_ORIGIN", "").strip()
 _APPSERVER_IPC_NAMESPACE = "/ipc"
+_SIDEBAR_DRAFTS_LIST_METHOD = "sidebar.drafts.list"
+_SIDEBAR_DRAFT_STATE_GET_METHOD = "sidebar.draftState.get"
+_SIDEBAR_DRAFT_CLEAR_METHOD = "sidebar.draft.clear"
 _appserver_ipc_sio: Optional[_SocketIOAsyncClient] = None
 _appserver_ipc_lock = asyncio.Lock()
 _ask_user_pending_requests: dict[str, asyncio.Future[ObjectMap]] = {}
@@ -227,6 +230,8 @@ _ask_user_pending_requests: dict[str, asyncio.Future[ObjectMap]] = {}
 async def _get_appserver_ipc_sio() -> _SocketIOAsyncClient:
     global _appserver_ipc_sio
     async with _appserver_ipc_lock:
+        if not _APPSERVER_ORIGIN:
+            raise RuntimeError("AGENT_LOG_SERVER_ORIGIN is required for agent-pty-blocks IPC")
         if _appserver_ipc_sio and _appserver_ipc_sio.connected:
             return _appserver_ipc_sio
         if _appserver_ipc_sio:
@@ -329,6 +334,57 @@ async def _notify_conversation_todo_ipc(conversation_id: str) -> None:
     if not ack_map.get("ok"):
         detail: object = ack_map.get("error") if ack_map else cast(object, ack)
         raise RuntimeError(f"conversation_todo_changed IPC failed: {detail}")
+
+
+async def _call_appserver_ipc(event: str, payload: ObjectMap, *, timeout_seconds: int = 10) -> ObjectMap:
+    client = await _get_appserver_ipc_sio()
+    ack = await client.call(
+        event,
+        payload,
+        namespace=_APPSERVER_IPC_NAMESPACE,
+        timeout=timeout_seconds,
+    )
+    ack_map = coerce_object_map(ack)
+    if not ack_map:
+        return {
+            "ok": False,
+            "error": f"{event} IPC returned invalid ack",
+            "ack": ack,
+        }
+    return ack_map
+
+
+async def _call_sidebar_draft_rpc(method: str, params: ObjectMap) -> ObjectMap:
+    ack = await _call_appserver_ipc(
+        "sidebar_rpc",
+        {
+            "method": method,
+            "params": params,
+        },
+        timeout_seconds=10,
+    )
+    if not ack.get("ok"):
+        return {
+            "ok": False,
+            "method": method,
+            "error": str(ack.get("error") or "sidebar draft RPC failed"),
+        }
+    result = ack.get("result")
+    if isinstance(result, dict):
+        result_map = coerce_object_map(cast(object, result))
+        result_map.setdefault("method", method)
+        return result_map
+    return {
+        "ok": True,
+        "method": method,
+        "result": result,
+    }
+
+
+def _add_optional_text(params: ObjectMap, key: str, value: Optional[str]) -> None:
+    text = str(value or "").strip()
+    if text:
+        params[key] = text
 
 
 def _render_kb_result(header: str, diff: str) -> str:
@@ -596,6 +652,88 @@ async def ask_user(
 async def conv_id() -> ObjectMap:
     cid = os.environ.get("CONVERSATION_ID", "")
     return {"ok": bool(cid), "conversation_id": cid}
+
+
+@mcp.tool(
+    name="sidebar_drafts_list",
+    description="List TE2 user draft files for a project through the ALS-RS sidebar IPC proxy. Does not return draft content.",
+)
+async def sidebar_drafts_list(project_path: Optional[str] = None) -> ObjectMap:
+    params: ObjectMap = {}
+    _add_optional_text(params, "projectPath", project_path)
+    return await _call_sidebar_draft_rpc(_SIDEBAR_DRAFTS_LIST_METHOD, params)
+
+
+@mcp.tool(
+    name="sidebar_draft_state_get",
+    description="Get TE2 draft state for a project or target file without returning draft content by default.",
+)
+async def sidebar_draft_state_get(
+    scope: str = "file",
+    project_path: Optional[str] = None,
+    target_file: Optional[str] = None,
+    include_disk_content: bool = False,
+    include_hunks: bool = False,
+) -> ObjectMap:
+    params: ObjectMap = {
+        "scope": str(scope or "file").strip() or "file",
+        "includeContent": False,
+        "includeDiskContent": bool(include_disk_content),
+        "includeHunks": bool(include_hunks),
+    }
+    _add_optional_text(params, "projectPath", project_path)
+    _add_optional_text(params, "targetFile", target_file)
+    return await _call_sidebar_draft_rpc(_SIDEBAR_DRAFT_STATE_GET_METHOD, params)
+
+
+@mcp.tool(
+    name="sidebar_draft_content_get",
+    description="Explicitly read TE2 draft content for one target file after draft discovery indicates a draft exists.",
+)
+async def sidebar_draft_content_get(
+    target_file: str,
+    project_path: Optional[str] = None,
+    include_disk_content: bool = False,
+    include_hunks: bool = False,
+) -> ObjectMap:
+    target_text = str(target_file or "").strip()
+    if not target_text:
+        return {"ok": False, "error": "target_file is required"}
+    params: ObjectMap = {
+        "scope": "file",
+        "targetFile": target_text,
+        "includeContent": True,
+        "includeDiskContent": bool(include_disk_content),
+        "includeHunks": bool(include_hunks),
+    }
+    _add_optional_text(params, "projectPath", project_path)
+    return await _call_sidebar_draft_rpc(_SIDEBAR_DRAFT_STATE_GET_METHOD, params)
+
+
+@mcp.tool(
+    name="sidebar_draft_clear",
+    description="Clear one TE2 user draft through sidebar IPC. Use only after explicit user approval.",
+)
+async def sidebar_draft_clear(
+    target_file: str,
+    project_path: Optional[str] = None,
+    request_id: Optional[str] = None,
+    confirmed: bool = False,
+) -> ObjectMap:
+    if not confirmed:
+        return {
+            "ok": False,
+            "error": "sidebar_draft_clear requires confirmed=true after explicit user approval",
+        }
+    target_text = str(target_file or "").strip()
+    if not target_text:
+        return {"ok": False, "error": "target_file is required"}
+    params: ObjectMap = {
+        "targetFile": target_text,
+    }
+    _add_optional_text(params, "projectPath", project_path)
+    _add_optional_text(params, "requestId", request_id)
+    return await _call_sidebar_draft_rpc(_SIDEBAR_DRAFT_CLEAR_METHOD, params)
 
 
 # ── Conversation Todo MCP tools ──────────────────────────────────────
@@ -1290,7 +1428,10 @@ def _extract_line_range(lines: list[str], start: int, end: int) -> str:
 
 
 def _replace_line_range(lines: list[str], start: int, end: int, replacement: str) -> list[str]:
-    rep = (replacement or "").splitlines()
+    return _replace_line_range_with_lines(lines, start, end, (replacement or "").splitlines())
+
+
+def _replace_line_range_with_lines(lines: list[str], start: int, end: int, rep: list[str]) -> list[str]:
     if start < 1:
         start = 1
     insert_at = max(0, start - 1)
@@ -1299,6 +1440,77 @@ def _replace_line_range(lines: list[str], start: int, end: int, replacement: str
     left = lines[:insert_at]
     right = lines[min(end, len(lines)):]
     return left + rep + right
+
+
+_KB_ATX_HEADING_RE = re.compile(r"^(#{1,6})\s+\S.*$")
+_KB_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
+def _strip_outer_blank_lines(lines: list[str]) -> list[str]:
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return lines[start:end]
+
+
+def _kb_normalize_markdown_spacing(lines: list[str]) -> list[str]:
+    normalized: list[str] = []
+    in_fence = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        fence_match = _KB_FENCE_RE.match(line)
+        if fence_match:
+            normalized.append(line)
+            in_fence = not in_fence
+            i += 1
+            continue
+        if not in_fence and _KB_ATX_HEADING_RE.match(line):
+            if normalized and normalized[-1].strip():
+                normalized.append("")
+            normalized.append(line)
+            i += 1
+            while i < len(lines) and not lines[i].strip():
+                i += 1
+            normalized.append("")
+            continue
+        normalized.append(line)
+        i += 1
+    return normalized
+
+
+def _kb_auto_body_lines(content: str, *, has_heading: bool) -> list[str]:
+    body_lines = _kb_normalize_markdown_spacing(
+        _strip_outer_blank_lines((content or "").splitlines())
+    )
+    if not has_heading:
+        return body_lines
+    if not body_lines:
+        return [""]
+    return ["", *body_lines]
+
+
+def _kb_auto_append_lines(existing_lines: list[str], insert_at: int, content: str) -> list[str]:
+    content_lines = _kb_normalize_markdown_spacing(
+        _strip_outer_blank_lines((content or "").splitlines())
+    )
+    if not content_lines:
+        return []
+    insert_lines: list[str] = []
+    if insert_at > 0 and existing_lines[insert_at - 1].strip():
+        insert_lines.append("")
+    insert_lines.extend(content_lines)
+    if (
+        insert_at < len(existing_lines)
+        and insert_lines
+        and insert_lines[-1].strip()
+        and existing_lines[insert_at].strip()
+    ):
+        insert_lines.append("")
+    return insert_lines
 
 
 def _kb_root_section(total_lines: int) -> SectionNode:
@@ -2205,6 +2417,7 @@ kb_update modes:
   - body: replace only the section body
   - replace: alias for body
   - subtree: replace the heading and all descendants
+  - spacing="auto" normalizes one blank line after headings; spacing="preserve" keeps exact raw replacement
 
 kb_remove modes:
   - subtree: remove the heading and descendants
@@ -2240,10 +2453,10 @@ def _kb_heading_insert_lines(
     if insert_at > 0 and existing_lines[insert_at - 1].strip():
         insert_lines.append("")
     insert_lines.append(heading_line)
-    if content_lines:
-        if content_lines[0].strip():
-            insert_lines.append("")
-        insert_lines.extend(content_lines)
+    insert_lines.append("")
+    normalized_content = _kb_normalize_markdown_spacing(_strip_outer_blank_lines(content_lines))
+    if normalized_content:
+        insert_lines.extend(normalized_content)
     if (
         insert_at < len(existing_lines)
         and insert_lines
@@ -2327,6 +2540,9 @@ async def kb_write(
             example='Use mode="create_child" with heading_title for a new child heading, or mode="append" to append body text.',
         )
 
+    if normalized_mode == "append" and spacing_mode == "auto":
+        insert_lines = _kb_auto_append_lines(lines, insert_at, content)
+
     new_lines = lines[:insert_at] + insert_lines + lines[insert_at:]
     new_text = "\n".join(new_lines)
     if (had_trailing_newline or (is_heading_write and spacing_mode == "auto")) and not new_text.endswith("\n"):
@@ -2345,6 +2561,7 @@ async def kb_update(
     section: str = "",
     content: str = "",
     mode: str = "body",
+    spacing: str = "auto",
     dry_run: bool = False,
 ) -> str:
     resolved = _kb_resolve_target(target)
@@ -2364,11 +2581,31 @@ async def kb_update(
     normalized_mode = str(mode or "body").strip().lower()
     if normalized_mode == "replace":
         normalized_mode = "body"
+    spacing_mode = str(spacing or "auto").strip().lower().replace("-", "_")
+    if spacing_mode not in {"auto", "preserve"}:
+        return _kb_error_text(
+            "InvalidParameter",
+            f"Unsupported spacing '{spacing}'",
+            section=section,
+            mode=mode,
+            allowed_spacing="auto, preserve",
+            example='Use spacing="auto" for deterministic Markdown spacing or spacing="preserve" for exact raw replacement.',
+        )
 
     if normalized_mode == "body":
         start, end = selected.body_start, selected.body_end
+        if spacing_mode == "auto":
+            replacement_lines = _kb_auto_body_lines(content, has_heading=selected.depth > 0)
+        else:
+            replacement_lines = (content or "").splitlines()
     elif normalized_mode == "subtree":
         start, end = selected.line_start, selected.subtree_end
+        if spacing_mode == "auto":
+            replacement_lines = _kb_normalize_markdown_spacing(
+                _strip_outer_blank_lines((content or "").splitlines())
+            )
+        else:
+            replacement_lines = (content or "").splitlines()
     else:
         return _kb_error_text(
             "InvalidParameter",
@@ -2377,7 +2614,7 @@ async def kb_update(
             allowed_modes="body, replace, subtree",
         )
 
-    new_lines = _replace_line_range(lines, start, end, content)
+    new_lines = _replace_line_range_with_lines(lines, start, end, replacement_lines)
     new_text = "\n".join(new_lines)
     if had_trailing_newline:
         new_text += "\n"
