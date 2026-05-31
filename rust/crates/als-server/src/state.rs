@@ -4,6 +4,7 @@ use crate::agent_log::AgentLogStore;
 use crate::config::ServerConfig;
 use crate::conversation_store::ConversationStore;
 use crate::extension_registry::ExtensionRegistry;
+use crate::inline_agent_edits::InlineAgentEditLedger;
 use crate::ipc::IpcClientStore;
 use crate::sidebar_ipc::SidebarIpcStore;
 use anyhow::{Result, anyhow};
@@ -29,6 +30,7 @@ pub struct AppState {
     pub conversations: ConversationStore,
     pub extensions: ExtensionRegistry,
     pub host_ui: HostUiStore,
+    pub inline_agent_edits: InlineAgentEditLedger,
     pub ipc_clients: IpcClientStore,
     pub list_revision: Arc<AtomicU64>,
     pub sidebar_ipc: SidebarIpcStore,
@@ -58,6 +60,7 @@ impl AppState {
             )
         });
         let host_ui = HostUiStore::default();
+        let inline_agent_edits = InlineAgentEditLedger::default();
         let ipc_clients = IpcClientStore::default();
         let list_revision = Arc::new(AtomicU64::new(0));
         let sidebar_ipc = SidebarIpcStore::default();
@@ -70,6 +73,7 @@ impl AppState {
             conversations,
             extensions,
             host_ui,
+            inline_agent_edits,
             ipc_clients,
             list_revision,
             sidebar_ipc,

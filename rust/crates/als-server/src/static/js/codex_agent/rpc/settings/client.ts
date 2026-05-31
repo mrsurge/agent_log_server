@@ -259,6 +259,26 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function getExtensionSettingsSchemaFragment(options: {
+    extensionId: string;
+    target: string;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    if (!rpcEnabled()) {
+      throw new Error('Schema fragments require settings RPC transport');
+    }
+    const params = {
+      extension_id: options.extensionId,
+      target: options.target,
+    };
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionSettingsSchemaFragmentGet,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function getRuntimeOptions(options: {
     conversationId?: string | null;
     agent?: string | null;
@@ -576,6 +596,7 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     getExtensionSplashSchema,
     runExtensionSplashAction,
     getExtensionSettingsSchema,
+    getExtensionSettingsSchemaFragment,
     getRuntimeOptions,
     getExtensionProviderInfo,
     getExtensionRequestCards,

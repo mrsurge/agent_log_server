@@ -10,7 +10,7 @@ shells:
       - json
       - jsonrpc
     command:
-      - /data/data/com.termux/files/home/.local/share/copilot_runtime_manager/runtime/lib/node_modules/@github/copilot/index.js
+      - copilot
       - --headless
       - --no-auto-update
       - --log-level

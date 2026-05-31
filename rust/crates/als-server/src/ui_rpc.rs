@@ -73,6 +73,11 @@ async fn dispatch_rpc(
         "project.summary.get" => project_summary_get(state, request.params).await,
         "project.agentDiff.accept" => project_agent_diff_accept(io, state, request.params).await,
         "project.agentDiff.reject" => project_agent_diff_reject(io, state, request.params).await,
+        "agentEdits.documentState.get" => inline_agent_edits_document_state(state, request.params),
+        "agentEdits.publish" => inline_agent_edits_publish(state, request.params),
+        "agentEdits.decide" => inline_agent_edits_decide(state, request.params),
+        "agentEdits.clear" => inline_agent_edits_clear(state, request.params),
+        "agentEdits.list" => inline_agent_edits_list(state, request.params),
         "project.git.stage" => project_git_stage(state, request.params).await,
         "project.git.unstage" => project_git_unstage(state, request.params).await,
         "project.git.restore" => project_git_restore(state, request.params).await,
@@ -117,6 +122,41 @@ async fn dispatch_rpc(
             format!("Unsupported method: {}", request.method),
         )),
     }
+}
+
+fn inline_agent_edits_document_state(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    state
+        .inline_agent_edits
+        .document_state(&params)
+        .map_err(internal_rpc_error)
+}
+
+fn inline_agent_edits_publish(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    state
+        .inline_agent_edits
+        .publish(&params)
+        .map_err(internal_rpc_error)
+}
+
+fn inline_agent_edits_decide(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    state
+        .inline_agent_edits
+        .decide(&params)
+        .map_err(internal_rpc_error)
+}
+
+fn inline_agent_edits_clear(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    state
+        .inline_agent_edits
+        .clear(&params)
+        .map_err(internal_rpc_error)
+}
+
+fn inline_agent_edits_list(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {
+    state
+        .inline_agent_edits
+        .list(&params)
+        .map_err(internal_rpc_error)
 }
 
 fn file_open_sidebar_params(params: &JsonMap) -> JsonMap {
@@ -325,7 +365,7 @@ async fn project_git_commit(state: &AppState, params: JsonMap) -> Result<Value, 
     .map_err(internal_rpc_error)?
 }
 
-async fn project_agent_diff_accept(
+pub(crate) async fn project_agent_diff_accept(
     io: &SocketIo,
     state: &AppState,
     params: JsonMap,
@@ -348,7 +388,7 @@ async fn project_agent_diff_accept(
     }))
 }
 
-async fn project_agent_diff_reject(
+pub(crate) async fn project_agent_diff_reject(
     io: &SocketIo,
     state: &AppState,
     params: JsonMap,

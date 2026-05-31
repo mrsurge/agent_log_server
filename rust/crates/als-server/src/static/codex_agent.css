@@ -1460,6 +1460,48 @@ body.widescreen-resizing * {
   grid-column: 1 / -1;
 }
 
+.settings-schema-submenu {
+  display: grid;
+  gap: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-schema-submenu[open] {
+  gap: 0.65rem;
+}
+
+.settings-schema-submenu-summary {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.7rem 0.8rem;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.settings-schema-submenu-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.settings-schema-submenu-detail {
+  color: var(--muted);
+  font-size: 0.83rem;
+  line-height: 1.4;
+}
+
+.settings-schema-submenu-body {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0 0.8rem 0.8rem;
+}
+
+.settings-schema-submenu.is-disabled,
+label.is-disabled {
+  opacity: 0.65;
+}
+
 .settings-live-session {
   border-color: rgba(255, 255, 255, 0.1);
 }

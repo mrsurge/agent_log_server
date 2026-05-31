@@ -861,6 +861,35 @@ async fn forward_adapter_live_event(
             .record_live_diff(&state.conversations, &conversation_id, &event)
             .map_err(internal_error)?
         {
+            if let Some(inline_publish) = entry.inline_publish_payload() {
+                match state.inline_agent_edits.publish(&inline_publish) {
+                    Ok(_) => {
+                        if let Some(document_params) = entry.inline_document_state_params() {
+                            match state.inline_agent_edits.document_state(&document_params) {
+                                Ok(Value::Object(projection)) => {
+                                    let _ = sidebar_ipc::publish_agent_edits(io, state, projection)
+                                        .await;
+                                }
+                                Ok(value) => {
+                                    warn!(
+                                        ?value,
+                                        "inline agent edit document state was not an object"
+                                    );
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        %error,
+                                        "failed to build inline agent edit document state"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warn!(%error, "failed to publish live diff into inline agent edit ledger");
+                    }
+                }
+            }
             let _ = sidebar_ipc::emit_agent_edit(io, state, entry.sidebar_payload()).await;
             crate::ui_rpc::emit_project_agent_diff_added(io, &entry).await;
         }

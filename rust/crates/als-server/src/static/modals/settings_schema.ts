@@ -15,6 +15,7 @@ type CodexAgentModuleApi = {
 
 type SettingsRpcClient = {
   getExtensionSettingsSchema: (extensionId: string) => Promise<unknown>;
+  getExtensionSettingsSchemaFragment?: (options: { extensionId: string; target: string }) => Promise<unknown>;
   listExtensionSessions: (options: { extensionId: string; cwd: string | null; extraParams?: JsonRecord | null }) => Promise<unknown>;
   listExtensionModels: (options: { extensionId: string }) => Promise<unknown>;
   getRuntimeOptions: (options: { conversationId: string | null; agent: string | null }) => Promise<unknown>;
@@ -59,6 +60,14 @@ type SchemaField = {
   dynamic_options_from?: JsonRecord;
   value_keys?: unknown[];
   model_gate?: JsonRecord;
+  visible_if?: JsonRecord;
+  enabled_if?: JsonRecord;
+  clear_when_hidden?: boolean;
+  schema_ref?: JsonRecord;
+  fields?: SchemaField[];
+  presentation?: string;
+  default_open?: boolean;
+  initial_open?: boolean;
   semantic?: JsonRecord;
   source?: string;
   picker_sort?: JsonRecord;
@@ -210,6 +219,15 @@ function normalizeSchemaField(value: unknown): SchemaField | null {
     dynamic_source: typeof value.dynamic_source === 'string' ? value.dynamic_source : undefined,
     dynamic_options_key: typeof value.dynamic_options_key === 'string' ? value.dynamic_options_key : undefined,
     dynamic_options_from: isRecord(value.dynamic_options_from) ? value.dynamic_options_from : undefined,
+    model_gate: isRecord(value.model_gate) ? value.model_gate : undefined,
+    visible_if: isRecord(value.visible_if) ? value.visible_if : undefined,
+    enabled_if: isRecord(value.enabled_if) ? value.enabled_if : undefined,
+    clear_when_hidden: value.clear_when_hidden === true,
+    schema_ref: isRecord(value.schema_ref) ? value.schema_ref : undefined,
+    fields: normalizeSchemaFields(value.fields),
+    presentation: typeof value.presentation === 'string' ? value.presentation : undefined,
+    default_open: value.default_open === true,
+    initial_open: value.initial_open === true,
     semantic: isRecord(value.semantic) ? value.semantic : undefined,
     source: typeof value.source === 'string' ? value.source : undefined,
     picker_sort: isRecord(value.picker_sort) ? value.picker_sort : undefined,
@@ -222,11 +240,16 @@ function normalizeSchemaField(value: unknown): SchemaField | null {
   };
 }
 
+function normalizeSchemaFields(value: unknown): SchemaField[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(normalizeSchemaField)
+    .filter((field): field is SchemaField => Boolean(field));
+}
+
 function normalizeSchema(value: unknown): SettingsSchema | null {
   if (!isRecord(value)) return null;
-  const fields = Array.isArray(value.fields)
-    ? value.fields.map(normalizeSchemaField).filter((field): field is SchemaField => Boolean(field))
-    : [];
+  const fields = normalizeSchemaFields(value.fields);
   return {
     ...value,
     fields,
@@ -1196,11 +1219,16 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
 
     const renderFields = getRenderFields();
     if (!renderFields.length) return;
-    const providerInfoPromise = renderFields.some(isProviderInfoField)
-      ? loadProviderInfo(schemaExtensionId)
-      : null;
     const selectControls: Record<string, SelectControl> = {};
     let modelItems: JsonRecord[] = [];
+    const conditionalRows: Array<{
+      field: SchemaField;
+      element: HTMLElement;
+      input?: SchemaInput | null;
+    }> = [];
+    let providerInfoPromise = renderFields.some(isProviderInfoField)
+      ? loadProviderInfo(schemaExtensionId)
+      : null;
 
     const fieldValueKeys = (field: SchemaField): string[] => {
       const extraKeys = Array.isArray(field?.value_keys)
@@ -1219,6 +1247,13 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
         }
       }
       return field.default ?? '';
+    };
+
+    const getProviderInfoPromise = (): Promise<JsonRecord> => {
+      if (!providerInfoPromise) {
+        providerInfoPromise = loadProviderInfo(schemaExtensionId);
+      }
+      return providerInfoPromise;
     };
 
     const readPath = (source: unknown, path: unknown): unknown => {
@@ -1357,6 +1392,155 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       return { items: items.filter(isRecord), options, current: '', defaultValue: '' };
     };
 
+    const currentValueForFieldId = (fieldId: string): unknown => {
+      const entry = currentSchemaValues[fieldId];
+      if (entry?.input) {
+        if (entry.type === 'checkbox') {
+          return entry.input instanceof HTMLInputElement ? entry.input.checked : false;
+        }
+        return entry.input.value;
+      }
+      if (Object.prototype.hasOwnProperty.call(values, fieldId)) {
+        return values[fieldId];
+      }
+      return undefined;
+    };
+
+    const conditionValueString = (value: unknown): string => {
+      if (typeof value === 'string') return value;
+      if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+      return '';
+    };
+
+    const isEmptyConditionValue = (value: unknown): boolean => {
+      if (value === undefined || value === null) return true;
+      if (typeof value === 'string') return value.trim() === '';
+      if (Array.isArray(value)) return value.length === 0;
+      return false;
+    };
+
+    const compareConditionValue = (actual: unknown, expected: unknown): boolean => {
+      if (typeof expected === 'boolean') return actual === expected;
+      if (typeof expected === 'number') return Number(actual) === expected;
+      return conditionValueString(actual) === conditionValueString(expected);
+    };
+
+    const conditionList = (value: unknown): unknown[] => {
+      return Array.isArray(value) ? value : [value];
+    };
+
+    const fieldConditionMatches = (condition: JsonRecord): boolean => {
+      const fieldId = trimString(condition.field || condition.source_field || condition.id);
+      if (!fieldId) return true;
+      const actual = currentValueForFieldId(fieldId);
+      const op = trimString(condition.op || condition.operator) || 'truthy';
+      switch (op) {
+        case 'eq':
+        case 'equals':
+        case 'is':
+          return compareConditionValue(actual, condition.value);
+        case 'neq':
+        case 'not_eq':
+        case 'not_equals':
+          return !compareConditionValue(actual, condition.value);
+        case 'in':
+          return conditionList(condition.values ?? condition.value).some((item) => compareConditionValue(actual, item));
+        case 'not_in':
+          return !conditionList(condition.values ?? condition.value).some((item) => compareConditionValue(actual, item));
+        case 'empty':
+          return isEmptyConditionValue(actual);
+        case 'not_empty':
+          return !isEmptyConditionValue(actual);
+        case 'falsy':
+          return actual === false || isEmptyConditionValue(actual);
+        case 'matches': {
+          const pattern = trimString(condition.value ?? condition.pattern);
+          if (!pattern) return true;
+          try {
+            return new RegExp(pattern).test(conditionValueString(actual));
+          } catch {
+            return false;
+          }
+        }
+        case 'truthy':
+        default:
+          return actual === true || !isEmptyConditionValue(actual);
+      }
+    };
+
+    const conditionMatches = (condition: unknown): boolean => {
+      if (!condition) return true;
+      if (Array.isArray(condition)) return condition.every(conditionMatches);
+      if (!isRecord(condition)) return true;
+      if (Array.isArray(condition.all)) return condition.all.every(conditionMatches);
+      if (Array.isArray(condition.any)) return condition.any.some(conditionMatches);
+      if (Object.prototype.hasOwnProperty.call(condition, 'not')) return !conditionMatches(condition.not);
+      return fieldConditionMatches(condition);
+    };
+
+    const isSchemaSubmenuField = (field: SchemaField): boolean => {
+      return field.type === 'submenu' || field.type === 'group';
+    };
+
+    const schemaFragmentTarget = (field: SchemaField): string => {
+      const ref = asRecord(field.schema_ref);
+      return trimString(ref.target || ref.path || ref.file);
+    };
+
+    const setFieldDisabledReason = (
+      element: HTMLElement,
+      input: SchemaInput | null | undefined,
+      source: 'condition' | 'model',
+      disabled: boolean,
+      hint = '',
+    ): void => {
+      if (source === 'condition') {
+        element.dataset.conditionDisabled = disabled ? 'true' : 'false';
+        element.dataset.conditionHint = disabled ? hint : '';
+      } else {
+        element.dataset.modelGateDisabled = disabled ? 'true' : 'false';
+        element.dataset.modelGateHint = disabled ? hint : '';
+      }
+      const disabledByCondition = element.dataset.conditionDisabled === 'true';
+      const disabledByModel = element.dataset.modelGateDisabled === 'true';
+      const disabledHint = disabledByCondition
+        ? element.dataset.conditionHint || ''
+        : (disabledByModel ? element.dataset.modelGateHint || '' : '');
+      const isDisabled = disabledByCondition || disabledByModel;
+      if (input) {
+        input.disabled = isDisabled;
+        if (disabledHint) {
+          input.title = disabledHint;
+        } else {
+          input.removeAttribute('title');
+        }
+      }
+      element.classList.toggle('is-disabled', isDisabled);
+      if (disabledHint) {
+        element.title = disabledHint;
+      } else {
+        element.removeAttribute('title');
+      }
+    };
+
+    const syncConditionalState = (): void => {
+      conditionalRows.forEach(({ field, element, input }) => {
+        const visible = conditionMatches(field.visible_if);
+        element.hidden = !visible;
+        element.classList.toggle('is-hidden-by-condition', !visible);
+        if (!visible && field.clear_when_hidden === true && input) {
+          resetModelGatedInput(input, field.type);
+        }
+        if (isRecord(field.enabled_if)) {
+          const enabled = visible && conditionMatches(field.enabled_if);
+          const hint = enabled ? '' : 'Unavailable for the current settings selection.';
+          setFieldDisabledReason(element, input, 'condition', !enabled, hint);
+        } else if (element.dataset.conditionDisabled === 'true') {
+          setFieldDisabledReason(element, input, 'condition', false);
+        }
+      });
+    };
+
     const setSelectOptions = (control: SelectControl | undefined, options: SelectOption[] | string[] | undefined): void => {
       if (!control?.listDiv || !control?.input) return;
       control.listDiv.innerHTML = '';
@@ -1377,6 +1561,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
             control.listDiv.classList.remove('open');
           }
           if (control.field?.id === 'model') syncModelDependentFields();
+          syncConditionalState();
         });
         control.listDiv.appendChild(optBtn);
       });
@@ -1407,28 +1592,18 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
         const modelGate = entry?.field?.model_gate;
         if (!isRecord(modelGate) || !entry?.input) return;
         const input = entry.input;
-        const label = input.closest('label');
+        const fieldElement = input.closest('[data-schema-field-id]') as HTMLElement | null;
+        const label = fieldElement || input.closest('label') as HTMLElement | null;
         const enabled = modelMatchesGate(selectedModelId, modelGate);
         const gateLabel = typeof modelGate.label === 'string' && modelGate.label.trim()
           ? modelGate.label.trim()
           : 'a supported model';
         const hint = enabled ? '' : `Available only when Model is ${gateLabel}`;
-        input.disabled = !enabled;
         if (!enabled) {
           resetModelGatedInput(input, entry.type);
         }
         if (label) {
-          label.classList.toggle('is-disabled', !enabled);
-          if (hint) {
-            label.title = hint;
-          } else {
-            label.removeAttribute('title');
-          }
-        }
-        if (hint) {
-          input.title = hint;
-        } else {
-          input.removeAttribute('title');
+          setFieldDisabledReason(label, input, 'model', !enabled, hint);
         }
       });
     };
@@ -1480,12 +1655,106 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     const syncModelDependentFields = (): void => {
       syncReasoningEffortOptions();
       syncModelGatedFields();
+      syncConditionalState();
     };
     
-    renderFields.forEach((field: SchemaField) => {
+    const renderField = (field: SchemaField, container: HTMLElement): void => {
+      if (isSchemaSubmenuField(field)) {
+        const details = document.createElement('details');
+        details.className = 'settings-schema-submenu';
+        details.dataset.schemaFieldId = field.id;
+        if (field.default_open || field.initial_open) {
+          details.open = true;
+        }
+
+        const summary = document.createElement('summary');
+        summary.className = 'settings-schema-submenu-summary';
+
+        const summaryText = document.createElement('span');
+        summaryText.className = 'settings-schema-submenu-title';
+        summaryText.textContent = field.label || field.id || 'Settings';
+        summary.appendChild(summaryText);
+
+        if (field.description || field.detail) {
+          const summaryDetail = document.createElement('span');
+          summaryDetail.className = 'settings-schema-submenu-detail';
+          summaryDetail.textContent = field.description || field.detail || '';
+          summary.appendChild(summaryDetail);
+        }
+
+        const body = document.createElement('div');
+        body.className = 'settings-schema-submenu-body';
+
+        const setSubmenuMessage = (message: string, tone = ''): void => {
+          body.innerHTML = '';
+          const info = document.createElement('div');
+          info.className = 'settings-schema-info';
+          if (tone) info.dataset.tone = tone;
+          const text = document.createElement('div');
+          text.className = 'settings-schema-info-text';
+          text.textContent = message;
+          info.appendChild(text);
+          body.appendChild(info);
+        };
+
+        let fragmentLoaded = false;
+        let fragmentLoading = false;
+        const loadSchemaFragment = async (): Promise<void> => {
+          if (fragmentLoaded || fragmentLoading) return;
+          const target = schemaFragmentTarget(field);
+          if (!target) return;
+          fragmentLoading = true;
+          setSubmenuMessage('Loading...');
+          try {
+            const settingsRpc = requireSettingsRpc();
+            if (typeof settingsRpc.getExtensionSettingsSchemaFragment !== 'function') {
+              throw new Error('Schema fragment RPC is unavailable');
+            }
+            const fragment = normalizeSchema(await settingsRpc.getExtensionSettingsSchemaFragment({
+              extensionId: schemaExtensionId || settingsAgentEl?.value?.trim() || '',
+              target,
+            }));
+            body.innerHTML = '';
+            if (!fragment?.fields?.length) {
+              setSubmenuMessage('No settings available.');
+            } else {
+              renderFieldList(fragment.fields, body);
+            }
+            fragmentLoaded = true;
+            syncModelDependentFields();
+          } catch (error) {
+            setSubmenuMessage(dynamicSourceErrorMessage(error), 'error');
+          } finally {
+            fragmentLoading = false;
+          }
+        };
+
+        if (field.fields?.length) {
+          renderFieldList(field.fields, body);
+          fragmentLoaded = true;
+        } else if (schemaFragmentTarget(field)) {
+          if (details.open) {
+            void loadSchemaFragment();
+          } else {
+            setSubmenuMessage('Open to load settings.');
+          }
+          details.addEventListener('toggle', () => {
+            if (details.open) void loadSchemaFragment();
+          });
+        } else {
+          setSubmenuMessage('No settings available.');
+        }
+
+        details.append(summary, body);
+        conditionalRows.push({ field, element: details, input: null });
+        container.appendChild(details);
+        return;
+      }
+
       if (field.type === 'section') {
         const section = document.createElement('div');
         section.className = 'settings-schema-section';
+        section.dataset.schemaFieldId = field.id;
 
         const title = document.createElement('div');
         title.className = 'settings-schema-section-title';
@@ -1499,19 +1768,23 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
           section.appendChild(description);
         }
 
-        settingsExtensionFields.appendChild(section);
+        conditionalRows.push({ field, element: section, input: null });
+        container.appendChild(section);
         return;
       }
 
       if (field.type === 'info') {
         if (isProviderInfoField(field)) {
-          const info = renderProviderInfo(field, providerInfoPromise);
-          settingsExtensionFields.appendChild(info);
+          const info = renderProviderInfo(field, getProviderInfoPromise());
+          info.dataset.schemaFieldId = field.id;
+          conditionalRows.push({ field, element: info, input: null });
+          container.appendChild(info);
           return;
         }
 
         const info = document.createElement('div');
         info.className = 'settings-schema-info';
+        info.dataset.schemaFieldId = field.id;
         if (typeof field.tone === 'string' && field.tone.trim()) {
           info.dataset.tone = field.tone.trim();
         }
@@ -1535,24 +1808,31 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
           info.appendChild(infoDetail);
         }
 
-        settingsExtensionFields.appendChild(info);
+        conditionalRows.push({ field, element: info, input: null });
+        container.appendChild(info);
         return;
       }
 
       if (field.type === 'live_session_info') {
         const info = renderLiveSessionInfo(field, schemaExtensionId);
-        settingsExtensionFields.appendChild(info);
+        info.dataset.schemaFieldId = field.id;
+        conditionalRows.push({ field, element: info, input: null });
+        container.appendChild(info);
         return;
       }
 
       if (field.type === 'action') {
         if (isConversationForkField(field)) {
-          settingsExtensionFields.appendChild(renderConversationForkAction(field, schemaExtensionId));
+          const action = renderConversationForkAction(field, schemaExtensionId);
+          action.dataset.schemaFieldId = field.id;
+          conditionalRows.push({ field, element: action, input: null });
+          container.appendChild(action);
         }
         return;
       }
 
       const label = document.createElement('label');
+      label.dataset.schemaFieldId = field.id;
       const span = document.createElement('span');
       span.textContent = field.label || field.id;
       label.appendChild(span);
@@ -1597,7 +1877,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
           // Once a conversation is bound to a session, this field disappears.
           const state = getCodexAgentState();
           const hasThread = !state.pendingNewConversation && Boolean(state.conversationMeta?.thread_id);
-          if (hasThread) break; // Already bound — hide picker
+          if (hasThread) return; // Already bound — hide picker
 
           const sessionDiv = document.createElement('div');
           sessionDiv.className = 'settings-row';
@@ -1699,6 +1979,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
               }
               if (!field.dynamic_options_from && opts.length) buildOptions(opts);
               if (field.id === 'model') syncModelDependentFields();
+              syncConditionalState();
             };
             const selectedAgent = schemaExtensionId || settingsAgentEl?.value?.trim() || '';
             const conversationId = stringValue(getCodexAgentState().conversationMeta?.conversation_id);
@@ -1805,12 +2086,22 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       // Track for save (only if input was created)
       if (input) {
         currentSchemaValues[field.id] = { input, type: field.type, field };
+        input.addEventListener('input', syncConditionalState);
+        input.addEventListener('change', syncConditionalState);
       }
       
-      settingsExtensionFields.appendChild(label);
-    });
+      conditionalRows.push({ field, element: label, input });
+      container.appendChild(label);
+    };
+
+    const renderFieldList = (fields: SchemaField[], container: HTMLElement): void => {
+      fields.forEach((field) => renderField(field, container));
+    };
+
+    renderFieldList(renderFields, settingsExtensionFields);
 
     syncModelDependentFields();
+    syncConditionalState();
   }
   
   /**

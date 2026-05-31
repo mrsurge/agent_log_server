@@ -133,6 +133,72 @@ pub async fn emit_agent_edit(io: &SocketIo, state: &AppState, payload: JsonMap) 
     }
 }
 
+pub async fn publish_agent_edits(io: &SocketIo, state: &AppState, payload: JsonMap) -> bool {
+    let Ok(Some(client)) = ensure_client(io, state).await else {
+        warn!(
+            namespace = SIDEBAR_NAMESPACE,
+            socket_path = SIDEBAR_SOCKET_PATH,
+            event = RPC_EVENT,
+            method = "sidebar.agentEdits.publish",
+            payload = ?payload,
+            "cannot send sidebar.agentEdits.publish RPC because sidebar IPC client is unavailable"
+        );
+        return false;
+    };
+    publish_agent_edits_with_client(&client, payload).await
+}
+
+async fn publish_agent_edits_with_current_client(state: &AppState, payload: JsonMap) -> bool {
+    let Some(client) = state.sidebar_ipc.current().await else {
+        warn!(
+            namespace = SIDEBAR_NAMESPACE,
+            socket_path = SIDEBAR_SOCKET_PATH,
+            event = RPC_EVENT,
+            method = "sidebar.agentEdits.publish",
+            payload = ?payload,
+            "cannot send sidebar.agentEdits.publish RPC because sidebar IPC client is unavailable"
+        );
+        return false;
+    };
+    publish_agent_edits_with_client(&client, payload).await
+}
+
+async fn publish_agent_edits_with_client(client: &Client, payload: JsonMap) -> bool {
+    match sidebar_rpc_call(
+        client,
+        "sidebar.agentEdits.publish",
+        Value::Object(payload.clone()),
+    )
+    .await
+    {
+        Ok(value) if !rpc_result_explicitly_not_ok(&value) => true,
+        Ok(value) => {
+            warn!(
+                namespace = SIDEBAR_NAMESPACE,
+                socket_path = SIDEBAR_SOCKET_PATH,
+                event = RPC_EVENT,
+                method = "sidebar.agentEdits.publish",
+                payload = ?payload,
+                ?value,
+                "sidebar.agentEdits.publish RPC returned an unsuccessful result"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(
+                namespace = SIDEBAR_NAMESPACE,
+                socket_path = SIDEBAR_SOCKET_PATH,
+                event = RPC_EVENT,
+                method = "sidebar.agentEdits.publish",
+                payload = ?payload,
+                %error,
+                "sidebar.agentEdits.publish RPC failed"
+            );
+            false
+        }
+    }
+}
+
 pub async fn proxy_sidebar_rpc(
     io: &SocketIo,
     state: &AppState,
@@ -342,6 +408,7 @@ async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>
     };
 
     state.sidebar_ipc.set(client.clone()).await;
+    register_sidebar_client(&client).await;
     Ok(Some(client))
 }
 
@@ -364,6 +431,50 @@ async fn query_initial_cwd(
         return Ok(Some(cwd));
     }
     Ok(None)
+}
+
+async fn register_sidebar_client(client: &Client) {
+    let payload = json!({
+        "role": "host",
+        "app": "als-rs",
+        "app_id": "als-rs",
+        "appId": "als-rs",
+        "client_id": "als-rs",
+        "agentEdits": true,
+        "capabilities": ["agentEdits", "sidebar.agentEdits"],
+    });
+    match sidebar_rpc_call(client, "sidebar.register", payload).await {
+        Ok(value) if !rpc_result_explicitly_not_ok(&value) => {
+            info!(
+                namespace = SIDEBAR_NAMESPACE,
+                socket_path = SIDEBAR_SOCKET_PATH,
+                event = RPC_EVENT,
+                method = "sidebar.register",
+                ?value,
+                "registered ALS-RS sidebar IPC client"
+            );
+        }
+        Ok(value) => {
+            warn!(
+                namespace = SIDEBAR_NAMESPACE,
+                socket_path = SIDEBAR_SOCKET_PATH,
+                event = RPC_EVENT,
+                method = "sidebar.register",
+                ?value,
+                "sidebar.register RPC returned an unsuccessful result"
+            );
+        }
+        Err(error) => {
+            warn!(
+                namespace = SIDEBAR_NAMESPACE,
+                socket_path = SIDEBAR_SOCKET_PATH,
+                event = RPC_EVENT,
+                method = "sidebar.register",
+                %error,
+                "sidebar.register RPC failed"
+            );
+        }
+    }
 }
 
 async fn sidebar_rpc_call(client: &Client, method: &str, params: Value) -> Result<Value> {
@@ -497,11 +608,131 @@ async fn process_rpc_notification(io: &SocketIo, state: &AppState, payload: Payl
         "sidebar.mention" => {
             process_mention(io, state, params).await?;
         }
+        "sidebar.agentEdits.documentState.get" => {
+            publish_inline_agent_document_state(io, state, params).await?;
+        }
+        "sidebar.agentEdits.decide" => {
+            publish_inline_agent_decision(io, state, params).await?;
+        }
         _ => {
             warn!(method, "ignored sidebar RPC notification");
         }
     }
     Ok(())
+}
+
+async fn publish_inline_agent_document_state(
+    _io: &SocketIo,
+    state: &AppState,
+    params: JsonMap,
+) -> Result<()> {
+    match state.inline_agent_edits.document_state(&params) {
+        Ok(Value::Object(projection)) => {
+            let _ = publish_agent_edits_with_current_client(state, projection).await;
+        }
+        Ok(value) => {
+            warn!(
+                ?value,
+                "inline agent edit document state notification did not produce an object"
+            );
+        }
+        Err(error) => {
+            warn!(%error, "inline agent edit document state notification failed");
+        }
+    }
+    Ok(())
+}
+
+async fn publish_inline_agent_decision(
+    io: &SocketIo,
+    state: &AppState,
+    params: JsonMap,
+) -> Result<()> {
+    let decision = string_field(&params, "decision").unwrap_or_default();
+    let document_params = inline_agent_decision_document_params(&params);
+    let project_params = match inline_agent_decision_project_params(&params) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(decision, %error, "inline agent edit decision rejected");
+            return Ok(());
+        }
+    };
+    let project_result = match decision.as_str() {
+        "accept" | "accepted" => {
+            crate::ui_rpc::project_agent_diff_accept(io, state, project_params).await
+        }
+        "reject" | "rejected" => {
+            crate::ui_rpc::project_agent_diff_reject(io, state, project_params).await
+        }
+        other => {
+            warn!(
+                decision = other,
+                "inline agent edit decision must be accept or reject"
+            );
+            return Ok(());
+        }
+    };
+
+    if let Err(error) = project_result {
+        warn!(
+            code = error.code,
+            message = %error.message,
+            "inline agent edit decision failed through project diff path"
+        );
+        publish_inline_agent_document_state(io, state, document_params).await?;
+        return Ok(());
+    }
+
+    match state.inline_agent_edits.clear(&params) {
+        Ok(_) => publish_inline_agent_document_state(io, state, document_params).await?,
+        Err(error) => {
+            warn!(%error, "inline agent edit decision clear failed");
+            publish_inline_agent_document_state(io, state, document_params).await?;
+        }
+    }
+    Ok(())
+}
+
+fn inline_agent_decision_document_params(params: &JsonMap) -> JsonMap {
+    let mut document_params = JsonMap::new();
+    for key in [
+        "uri",
+        "projectPath",
+        "project_path",
+        "conversationId",
+        "conversation_id",
+        "sessionId",
+        "session_id",
+        "threadId",
+        "thread_id",
+    ] {
+        if let Some(value) = params.get(key) {
+            document_params.insert(key.to_owned(), value.clone());
+        }
+    }
+    document_params
+}
+
+fn inline_agent_decision_project_params(params: &JsonMap) -> Result<JsonMap> {
+    let conversation_id = string_field(params, "conversationId")
+        .or_else(|| string_field(params, "conversation_id"))
+        .ok_or_else(|| anyhow!("conversationId is required"))?;
+    let diff_id = string_field(params, "diffId")
+        .or_else(|| string_field(params, "diff_id"))
+        .or_else(|| string_field(params, "editId"))
+        .or_else(|| string_field(params, "edit_id"))
+        .or_else(|| string_field(params, "id"))
+        .ok_or_else(|| anyhow!("editId is required"))?;
+    let mut project_params = JsonMap::new();
+    project_params.insert("conversation_id".to_owned(), Value::String(conversation_id));
+    project_params.insert("diff_id".to_owned(), Value::String(diff_id));
+    if let Some(project_path) = string_field(params, "projectPath")
+        .or_else(|| string_field(params, "project_path"))
+        .or_else(|| string_field(params, "cwd"))
+    {
+        project_params.insert("cwd".to_owned(), Value::String(project_path));
+    }
+    Ok(project_params)
 }
 
 async fn emit_host_ui_updated(io: &SocketIo, state: &AppState) {

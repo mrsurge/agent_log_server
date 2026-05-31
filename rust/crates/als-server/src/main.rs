@@ -10,6 +10,7 @@ mod devins_context;
 mod extension_registry;
 mod extension_routes;
 mod http;
+mod inline_agent_edits;
 mod ipc;
 mod project_git;
 mod project_summary;

@@ -1,5 +1,9 @@
 # Schema settings contract
 
+<!-- ALS inline review test edit: 2026-05-31. -->
+<!-- ALS inline review second canary: no functional content. -->
+<!-- ALS inline review third canary: reject path retest. -->
+
 ## Purpose
 
 ALS-RS settings UI must be schema-driven and provider-neutral. The shared
@@ -129,6 +133,111 @@ The same model applies to any dynamic select or picker:
 - value/label paths
 - current/default paths
 - identity path for binding-like selections
+
+## Dynamic submenu and fragment contract
+
+Schemas can split complex settings into generic submenu/group fields without
+teaching ALS-RS provider-specific layout rules. A submenu can declare inline
+child fields or a lazily loaded schema fragment.
+
+Inline submenu example:
+
+```json
+{
+  "id": "advanced",
+  "type": "submenu",
+  "label": "Advanced",
+  "fields": [
+    {
+      "id": "reasoning_summary",
+      "type": "select",
+      "label": "Reasoning Summary",
+      "options": [
+        { "value": "auto", "label": "Auto" },
+        { "value": "none", "label": "None" }
+      ]
+    }
+  ]
+}
+```
+
+Fragment submenu example:
+
+```json
+{
+  "id": "model_extras",
+  "type": "submenu",
+  "label": "Model Extras",
+  "visible_if": {
+    "field": "model",
+    "op": "matches",
+    "value": "^gpt-5"
+  },
+  "schema_ref": {
+    "target": "settings/model_extras.json"
+  }
+}
+```
+
+`schema_ref.target` is a relative file path under the extension's registered
+source root/path. ALS-RS reads it through `/rpc/settings` method
+`extension.settingsSchema.fragment.get`; it rejects absolute paths, parent/root
+components, path prefixes, and symlink traversal. A fragment should normally be
+a JSON object with a `fields` array, though a raw array can be normalized as
+`fields`.
+
+Submenu child fields follow the same contract as top-level fields:
+
+- nested fields persist by their own `id`
+- nested fields can use dynamic sources, dependent options, semantic roles, and
+  provider info roles
+- the shared renderer treats inline and fragment-loaded children the same after
+  loading
+- missing or failed fragments are shown as generic schema errors, not
+  provider-specific fallback UI
+
+## Conditional visibility and enabled state
+
+Schema fields can declare provider-neutral conditions. Conditions read other
+schema field values by `id` and do not infer provider meaning from field names.
+
+Examples:
+
+```json
+{
+  "id": "model_extras",
+  "type": "submenu",
+  "label": "Model Extras",
+  "visible_if": { "field": "model", "op": "not_empty" }
+}
+```
+
+```json
+{
+  "id": "deep_reasoning",
+  "type": "checkbox",
+  "label": "Deep Reasoning",
+  "enabled_if": {
+    "all": [
+      { "field": "model", "op": "matches", "value": "^gpt-5" },
+      { "field": "reasoning_effort", "op": "in", "values": ["high", "xhigh"] }
+    ]
+  },
+  "clear_when_hidden": true
+}
+```
+
+Supported condition concepts:
+
+- single field predicate: `field`, `op`, and optional `value` / `values`
+- compounds: `all`, `any`, and `not`
+- operators: `eq`, `neq`, `in`, `not_in`, `truthy`, `falsy`, `empty`,
+  `not_empty`, and `matches`
+
+`visible_if` controls whether the field/submenu is displayed. `enabled_if`
+controls whether the input is interactive. `clear_when_hidden` explicitly opts a
+hidden input into clearing its transient value; otherwise hidden values are
+preserved so existing settings are not destroyed by a temporary condition.
 
 ## Conversation binding role
 

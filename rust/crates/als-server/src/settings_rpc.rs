@@ -80,6 +80,9 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
         "extension.settingsSchema.get" => {
             extension_schema(state, &request.params, "", SchemaKind::Settings).await
         }
+        "extension.settingsSchema.fragment.get" => {
+            extension_schema_fragment(state, &request.params).await
+        }
         "extension.splashSchema.get" => {
             extension_schema(
                 state,
@@ -358,6 +361,48 @@ async fn extension_schema(
     }
 }
 
+async fn extension_schema_fragment(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let extension_id = require_extension_id(params)?;
+    let target = params
+        .get("target")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| rpc_error(-32602, "target is required"))?;
+    let entry = ensure_registered_extension(state, &extension_id)?;
+    let Some(path) = extension_root_relative_file_path(&entry, target) else {
+        return Err(rpc_error(-32602, "invalid schema fragment target"));
+    };
+    if !path.is_file() {
+        return Err(rpc_error(
+            -32602,
+            format!("schema fragment not found: {target}"),
+        ));
+    }
+    let raw = fs::read_to_string(&path).map_err(|error| {
+        internal_rpc_error(format!("failed to read {}: {error}", path.display()))
+    })?;
+    let mut parsed: Value = serde_json::from_str(&raw).map_err(|error| {
+        internal_rpc_error(format!("failed to parse {}: {error}", path.display()))
+    })?;
+    if let Value::Array(fields) = parsed {
+        parsed = json!({ "fields": fields });
+    }
+    if let Value::Object(ref mut object) = parsed {
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        object.insert(
+            "schema_source".to_owned(),
+            Value::String("fragment_file".to_owned()),
+        );
+        object.insert("schema_target".to_owned(), Value::String(target.to_owned()));
+        return Ok(parsed);
+    }
+    Err(internal_rpc_error(format!(
+        "{} must contain a JSON object or fields array",
+        path.display()
+    )))
+}
+
 fn read_extension_schema_file(
     entry: &ExtensionRegistryEntry,
     file_name: &str,
@@ -384,7 +429,7 @@ fn read_extension_schema_file(
     }
 }
 
-fn extension_root_file_path(entry: &ExtensionRegistryEntry, file_name: &str) -> Option<PathBuf> {
+fn extension_root_dir(entry: &ExtensionRegistryEntry) -> Option<PathBuf> {
     let mut path = entry.source_root.clone();
     for component in Path::new(&entry.path).components() {
         match component {
@@ -405,12 +450,47 @@ fn extension_root_file_path(entry: &ExtensionRegistryEntry, file_name: &str) -> 
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
         }
     }
+    Some(path)
+}
+
+fn extension_root_file_path(entry: &ExtensionRegistryEntry, file_name: &str) -> Option<PathBuf> {
+    let mut path = extension_root_dir(entry)?;
     path.push(file_name);
     if fs::symlink_metadata(&path)
         .ok()
         .is_some_and(|metadata| metadata.file_type().is_symlink())
     {
         return None;
+    }
+    Some(path)
+}
+
+fn extension_root_relative_file_path(
+    entry: &ExtensionRegistryEntry,
+    relative_target: &str,
+) -> Option<PathBuf> {
+    if relative_target.trim().is_empty() {
+        return None;
+    }
+    let mut path = extension_root_dir(entry)?;
+    for component in Path::new(relative_target).components() {
+        match component {
+            Component::Normal(part) => {
+                let text = part.to_str()?.trim();
+                if text.is_empty() {
+                    return None;
+                }
+                path.push(text);
+                if fs::symlink_metadata(&path)
+                    .ok()
+                    .is_some_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    return None;
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
     }
     Some(path)
 }
@@ -1495,6 +1575,46 @@ enum RpcAck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_extension_entry() -> ExtensionRegistryEntry {
+        ExtensionRegistryEntry {
+            id: "test-ext".to_owned(),
+            name: "Test Extension".to_owned(),
+            extension_type: "adapter".to_owned(),
+            path: "test_ext".to_owned(),
+            source_root: PathBuf::from("extensions"),
+            source_kind: "builtin".to_owned(),
+            enabled: true,
+            active: true,
+            version: "0.1.0".to_owned(),
+            dependency_ok: true,
+            dependency_status: "ok".to_owned(),
+            dependency_message: String::new(),
+            dependency_details: Map::new(),
+            has_dependency_check: false,
+            has_dependency_install: false,
+            install_source: Map::new(),
+            installer_meta: Map::new(),
+            manifest: Map::new(),
+            capabilities: Map::new(),
+            ui: Map::new(),
+        }
+    }
+
+    #[test]
+    fn schema_fragment_targets_stay_under_extension_root() {
+        let entry = test_extension_entry();
+
+        assert_eq!(
+            extension_root_relative_file_path(&entry, "settings/model_extras.json"),
+            Some(PathBuf::from(
+                "extensions/test_ext/settings/model_extras.json"
+            ))
+        );
+        assert!(extension_root_relative_file_path(&entry, "../settings.json").is_none());
+        assert!(extension_root_relative_file_path(&entry, "settings/../model.json").is_none());
+        assert!(extension_root_relative_file_path(&entry, "/settings/model.json").is_none());
+    }
 
     #[test]
     fn normalizes_tool_render_policy_aliases_and_specs() {
