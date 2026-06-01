@@ -14,6 +14,7 @@ mod inline_agent_edits;
 mod ipc;
 mod project_git;
 mod project_summary;
+mod reverse_patch;
 mod settings_rpc;
 mod sidebar_ipc;
 mod socketio;

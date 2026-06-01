@@ -24,6 +24,16 @@ type SettingsRpcClient = {
     conversationId?: string | null;
     providerSessionId?: string | null;
   }) => Promise<unknown>;
+  runSchemaInteraction?: (options: {
+    extensionId: string;
+    interactionId: string;
+    action?: string | null;
+    inputs?: JsonRecord | null;
+    values?: JsonRecord | null;
+    params?: JsonRecord | null;
+    conversationId?: string | null;
+    settings?: JsonRecord | null;
+  }) => Promise<unknown>;
   getExtensionSessionState?: (options: {
     extensionId: string;
     conversationId: string;
@@ -65,11 +75,21 @@ type SchemaField = {
   clear_when_hidden?: boolean;
   schema_ref?: JsonRecord;
   fields?: SchemaField[];
+  persist?: boolean;
+  transient?: boolean;
+  secret?: boolean;
+  sensitive?: boolean;
+  input?: JsonRecord;
+  inputs?: unknown[];
+  trigger?: JsonRecord;
+  output?: JsonRecord;
+  interaction?: JsonRecord;
+  write_back?: JsonRecord;
   presentation?: string;
   default_open?: boolean;
   initial_open?: boolean;
   semantic?: JsonRecord;
-  source?: string;
+  source?: string | JsonRecord;
   picker_sort?: JsonRecord;
   browse?: boolean;
   min?: number;
@@ -225,11 +245,21 @@ function normalizeSchemaField(value: unknown): SchemaField | null {
     clear_when_hidden: value.clear_when_hidden === true,
     schema_ref: isRecord(value.schema_ref) ? value.schema_ref : undefined,
     fields: normalizeSchemaFields(value.fields),
+    persist: typeof value.persist === 'boolean' ? value.persist : undefined,
+    transient: value.transient === true,
+    secret: value.secret === true,
+    sensitive: value.sensitive === true,
+    input: isRecord(value.input) ? value.input : undefined,
+    inputs: Array.isArray(value.inputs) ? value.inputs : undefined,
+    trigger: isRecord(value.trigger) ? value.trigger : undefined,
+    output: isRecord(value.output) ? value.output : undefined,
+    interaction: isRecord(value.interaction) ? value.interaction : undefined,
+    write_back: isRecord(value.write_back) ? value.write_back : undefined,
     presentation: typeof value.presentation === 'string' ? value.presentation : undefined,
     default_open: value.default_open === true,
     initial_open: value.initial_open === true,
     semantic: isRecord(value.semantic) ? value.semantic : undefined,
-    source: typeof value.source === 'string' ? value.source : undefined,
+    source: typeof value.source === 'string' || isRecord(value.source) ? value.source : undefined,
     picker_sort: isRecord(value.picker_sort) ? value.picker_sort : undefined,
     browse: value.browse === true,
     min: typeof value.min === 'number' ? value.min : undefined,
@@ -296,6 +326,18 @@ function normalizeStaticOptions(options: unknown[] | undefined): SelectOption[] 
     if (!value) return null;
     return { value, label: trimString(itemMap.label || itemMap.name || itemMap.value || itemMap.id) || value };
   }).filter((option): option is SelectOption => Boolean(option));
+}
+
+function schemaFieldSourceString(field: SchemaField | null | undefined): string {
+  return typeof field?.source === 'string' ? field.source : '';
+}
+
+function schemaFieldPersists(field: SchemaField | null | undefined): boolean {
+  if (!field) return true;
+  if (field.persist === false) return false;
+  if (field.transient === true || field.secret === true || field.sensitive === true) return false;
+  if (field.type === 'secret') return false;
+  return true;
 }
 
 window.CodexAgentModules = window.CodexAgentModules || [];
@@ -544,7 +586,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
           if (!_sessionPickerTarget || option.value === _sessionPickerSortValue) return;
           _sessionPickerSortValue = option.value;
           renderSessionPickerSort(_sessionPickerTarget.field);
-          void fetchAndRenderSessions(_sessionPickerTarget.field.source || '', _sessionPickerTarget.field);
+          void fetchAndRenderSessions(schemaFieldSourceString(_sessionPickerTarget.field), _sessionPickerTarget.field);
         });
         sortGroup.appendChild(button);
       });
@@ -608,7 +650,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     _sessionPickerItems = [];
     renderSessionPickerSort(field);
     sessionPickerOverlay.classList.remove('hidden');
-    fetchAndRenderSessions(field.source || '', field);
+    fetchAndRenderSessions(schemaFieldSourceString(field), field);
   }
   
   function closeSessionPicker(): void {
@@ -1487,6 +1529,209 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       return trimString(ref.target || ref.path || ref.file);
     };
 
+    const schemaInteractionSource = (field: SchemaField): JsonRecord => {
+      if (isRecord(field.interaction)) return field.interaction;
+      if (isRecord(field.source)) return field.source;
+      return {};
+    };
+
+    const schemaInteractionInputSpecs = (field: SchemaField): JsonRecord[] => {
+      if (Array.isArray(field.inputs)) {
+        const specs = field.inputs.filter(isRecord);
+        if (specs.length) return specs;
+      }
+      if (isRecord(field.input)) return [field.input];
+      return [{ id: 'query' }];
+    };
+
+    const resolveInteractionToken = (token: string, inputs: JsonRecord): unknown => {
+      if (token.startsWith('$input.')) {
+        return readPath(inputs, token.slice('$input.'.length));
+      }
+      if (token === '$input') return inputs;
+      if (token.startsWith('$field.')) {
+        return currentValueForFieldId(token.slice('$field.'.length));
+      }
+      if (token === '$values') return collectSchemaValues(false);
+      if (token === '$context.cwd') {
+        return currentValueForFieldId('cwd')
+          || trimString(getCodexAgentState().conversationSettings?.cwd);
+      }
+      if (token === '$context.conversation_id') {
+        return trimString(getCodexAgentState().conversationMeta?.conversation_id);
+      }
+      if (token === '$context.provider_session_id') {
+        const meta = getCodexAgentState().conversationMeta;
+        return trimString(meta?.provider_session_id) || trimString(meta?.thread_id);
+      }
+      return token;
+    };
+
+    const resolveInteractionValue = (value: unknown, inputs: JsonRecord): unknown => {
+      if (typeof value === 'string' && value.startsWith('$')) {
+        return resolveInteractionToken(value, inputs);
+      }
+      if (Array.isArray(value)) {
+        return value.map((item) => resolveInteractionValue(item, inputs));
+      }
+      if (isRecord(value)) {
+        return Object.fromEntries(
+          Object.entries(value).map(([key, item]) => [key, resolveInteractionValue(item, inputs)]),
+        );
+      }
+      return value;
+    };
+
+    const buildInteractionParams = (field: SchemaField, inputs: JsonRecord): JsonRecord => {
+      const source = schemaInteractionSource(field);
+      const rawParams = asRecord(source.params);
+      return Object.fromEntries(
+        Object.entries(rawParams).map(([key, value]) => [key, resolveInteractionValue(value, inputs)]),
+      );
+    };
+
+    const interactionInputId = (spec: JsonRecord, index: number): string => {
+      const id = trimString(spec.id || spec.name || spec.key);
+      if (id) return id;
+      return index === 0 ? 'query' : `input_${index + 1}`;
+    };
+
+    const interactionInputType = (spec: JsonRecord): string => {
+      const kind = trimString(spec.type || spec.input_type || spec.kind).toLowerCase();
+      if (spec.secret === true || spec.sensitive === true || kind === 'secret') return 'password';
+      if (['password', 'number', 'checkbox', 'textarea', 'text'].includes(kind)) return kind;
+      return 'text';
+    };
+
+    const interactionInputValue = (input: SchemaInput, type: string, spec: JsonRecord): unknown => {
+      if (type === 'checkbox') {
+        return input instanceof HTMLInputElement ? input.checked : false;
+      }
+      const rawValue = input.value;
+      if (type === 'number') {
+        const trimmed = rawValue.trim();
+        if (!trimmed) return '';
+        const numeric = Number(trimmed);
+        return Number.isFinite(numeric) ? numeric : trimmed;
+      }
+      return spec.preserve_whitespace === true ? rawValue : rawValue.trim();
+    };
+
+    const setSchemaInputValue = (target: SchemaValueEntry | undefined, value: unknown): void => {
+      if (!target?.input) return;
+      if (target.type === 'checkbox' && target.input instanceof HTMLInputElement) {
+        target.input.checked = value === true || value === 'true';
+      } else {
+        target.input.value = value == null ? '' : String(value);
+      }
+      target.input.dispatchEvent(new Event('input', { bubbles: true }));
+      target.input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+
+    const applyInteractionWriteBack = (field: SchemaField, item: unknown): void => {
+      const writeBack = asRecord(field.write_back);
+      const onSelect = Array.isArray(writeBack.on_select) ? writeBack.on_select : [];
+      onSelect.forEach((rawRule) => {
+        const rule = asRecord(rawRule);
+        const targetField = trimString(rule.field);
+        if (!targetField) return;
+        const sourcePath = rule.path || rule.value_path || rule.source_path || '$item';
+        const value = sourcePath === '$item' ? item : firstPathValue(item, sourcePath);
+        setSchemaInputValue(currentSchemaValues[targetField], value);
+      });
+      syncConditionalState();
+    };
+
+    const renderInteractionOutput = (
+      field: SchemaField,
+      outputEl: HTMLElement,
+      payload: unknown,
+    ): void => {
+      outputEl.innerHTML = '';
+      const payloadMap = asRecord(payload);
+      const output = asRecord(field.output);
+      if (payloadMap.ok === false) {
+        const error = document.createElement('div');
+        error.className = 'settings-schema-info';
+        error.dataset.tone = 'error';
+        const text = document.createElement('div');
+        text.className = 'settings-schema-info-text';
+        text.textContent = dynamicSourceErrorMessage(payloadMap);
+        error.appendChild(text);
+        outputEl.appendChild(error);
+        return;
+      }
+
+      const kind = trimString(output.kind) || 'list';
+      if (kind === 'json') {
+        const pre = document.createElement('pre');
+        pre.className = 'settings-schema-interaction-json';
+        pre.textContent = JSON.stringify(payload, null, 2);
+        outputEl.appendChild(pre);
+        return;
+      }
+
+      if (kind === 'info') {
+        const info = document.createElement('div');
+        info.className = 'settings-schema-info';
+        const tone = trimString(firstPathValue(payload, output.tone_path));
+        if (tone) info.dataset.tone = tone;
+        const text = document.createElement('div');
+        text.className = 'settings-schema-info-text';
+        text.textContent = trimString(firstPathValue(payload, output.text_path || 'text'))
+          || trimString(output.empty_text)
+          || 'No result.';
+        info.appendChild(text);
+        const detail = trimString(firstPathValue(payload, output.detail_path || 'detail'));
+        if (detail) {
+          const detailEl = document.createElement('div');
+          detailEl.className = 'settings-schema-info-detail';
+          detailEl.textContent = detail;
+          info.appendChild(detailEl);
+        }
+        outputEl.appendChild(info);
+        return;
+      }
+
+      const rawItems = firstPathValue(payload, output.items_path || 'items');
+      const items = Array.isArray(rawItems) ? rawItems : [];
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'settings-schema-info';
+        const text = document.createElement('div');
+        text.className = 'settings-schema-info-text';
+        text.textContent = trimString(output.empty_text) || 'No results.';
+        empty.appendChild(text);
+        outputEl.appendChild(empty);
+        return;
+      }
+      const list = document.createElement('div');
+      list.className = 'settings-schema-interaction-list';
+      items.forEach((item) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'settings-schema-interaction-result';
+        const label = document.createElement('span');
+        label.className = 'settings-schema-interaction-result-label';
+        label.textContent = trimString(firstPathValue(item, output.label_path || output.name_path || 'label'))
+          || trimString(firstPathValue(item, output.id_path || 'id'))
+          || 'Result';
+        row.appendChild(label);
+        const detail = trimString(firstPathValue(item, output.detail_path || 'detail'));
+        if (detail) {
+          const detailEl = document.createElement('span');
+          detailEl.className = 'settings-schema-interaction-result-detail';
+          detailEl.textContent = detail;
+          row.appendChild(detailEl);
+        }
+        row.addEventListener('click', () => {
+          applyInteractionWriteBack(field, item);
+        });
+        list.appendChild(row);
+      });
+      outputEl.appendChild(list);
+    };
+
     const setFieldDisabledReason = (
       element: HTMLElement,
       input: SchemaInput | null | undefined,
@@ -1659,6 +1904,173 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     };
     
     const renderField = (field: SchemaField, container: HTMLElement): void => {
+      if (field.type === 'interaction') {
+        const source = schemaInteractionSource(field);
+        const inputSpecs = schemaInteractionInputSpecs(field);
+        const trigger = asRecord(field.trigger);
+        const interaction = document.createElement('div');
+        interaction.className = 'settings-schema-interaction';
+        interaction.dataset.schemaFieldId = field.id;
+
+        const header = document.createElement('div');
+        header.className = 'settings-schema-interaction-header';
+        const title = document.createElement('div');
+        title.className = 'settings-schema-action-label';
+        title.textContent = field.label || field.id || 'Lookup';
+        header.appendChild(title);
+        if (field.description || field.detail) {
+          const detail = document.createElement('div');
+          detail.className = 'settings-schema-info-detail';
+          detail.textContent = field.description || field.detail || '';
+          header.appendChild(detail);
+        }
+        interaction.appendChild(header);
+
+        const inputsEl = document.createElement('div');
+        inputsEl.className = 'settings-schema-interaction-inputs';
+        const interactionInputs: Array<{ id: string; input: SchemaInput; type: string; spec: JsonRecord }> = [];
+        inputSpecs.forEach((inputSpec, index) => {
+          const inputId = interactionInputId(inputSpec, index);
+          const inputType = interactionInputType(inputSpec);
+          const wrapper = document.createElement('label');
+          wrapper.className = 'settings-schema-interaction-input';
+          const inputLabel = trimString(inputSpec.label || inputSpec.title);
+          if (inputLabel) {
+            const labelText = document.createElement('span');
+            labelText.className = 'settings-schema-interaction-input-label';
+            labelText.textContent = inputLabel;
+            wrapper.appendChild(labelText);
+          }
+          let input: SchemaInput;
+          if (inputType === 'textarea') {
+            const textarea = document.createElement('textarea');
+            textarea.rows = Number.isFinite(inputSpec.rows) ? Number(inputSpec.rows) : 3;
+            input = textarea;
+          } else {
+            const inputEl = document.createElement('input');
+            inputEl.type = inputType === 'checkbox' ? 'checkbox' : inputType;
+            if (inputType === 'checkbox' && inputSpec.default === true) {
+              inputEl.checked = true;
+            }
+            input = inputEl;
+          }
+          input.placeholder = trimString(inputSpec.placeholder) || (index === 0 ? field.placeholder || '' : '');
+          if (inputType !== 'checkbox') {
+            input.value = inputSpec.default == null ? '' : String(inputSpec.default);
+          }
+          if (inputType === 'password') {
+            input.setAttribute('autocomplete', 'off');
+            input.setAttribute('spellcheck', 'false');
+          }
+          input.id = `settings-ext-${field.id}-${inputId}`;
+          wrapper.appendChild(input);
+          inputsEl.appendChild(wrapper);
+          interactionInputs.push({ id: inputId, input, type: inputType, spec: inputSpec });
+        });
+        interaction.appendChild(inputsEl);
+
+        const row = document.createElement('div');
+        row.className = 'settings-schema-interaction-row';
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn ghost';
+        button.textContent = trimString(trigger.label) || 'Search';
+        row.appendChild(button);
+        interaction.appendChild(row);
+
+        const outputEl = document.createElement('div');
+        outputEl.className = 'settings-schema-interaction-output';
+        interaction.appendChild(outputEl);
+
+        let requestSeq = 0;
+        const setInteractionMessage = (message: string, tone = ''): void => {
+          outputEl.innerHTML = '';
+          const info = document.createElement('div');
+          info.className = 'settings-schema-info';
+          if (tone) info.dataset.tone = tone;
+          const text = document.createElement('div');
+          text.className = 'settings-schema-info-text';
+          text.textContent = message;
+          info.appendChild(text);
+          outputEl.appendChild(info);
+        };
+
+        const runInteraction = async (): Promise<void> => {
+          const minLength = Number.isFinite(trigger.min_length)
+            ? Number(trigger.min_length)
+            : Number(trigger.minLength);
+          const primaryInput = interactionInputs[0]?.input;
+          const primaryInputLength = primaryInput ? primaryInput.value.trim().length : 0;
+          if (Number.isFinite(minLength) && primaryInputLength < minLength) {
+            setInteractionMessage(`Enter at least ${minLength} characters.`, 'warning');
+            return;
+          }
+          const settingsRpc = requireSettingsRpc();
+          if (typeof settingsRpc.runSchemaInteraction !== 'function') {
+            setInteractionMessage('Schema interaction RPC is unavailable.', 'error');
+            return;
+          }
+          const seq = requestSeq + 1;
+          requestSeq = seq;
+          button.disabled = true;
+          interactionInputs.forEach((entry) => { entry.input.disabled = true; });
+          setInteractionMessage('Loading...');
+          const inputs: JsonRecord = Object.fromEntries(
+            interactionInputs.map((entry) => [
+              entry.id,
+              interactionInputValue(entry.input, entry.type, entry.spec),
+            ]),
+          );
+          const values = collectSchemaValues(false);
+          const mappedParams = buildInteractionParams(field, inputs);
+          const params = Object.keys(mappedParams).length ? mappedParams : { ...inputs };
+          try {
+            const result = await settingsRpc.runSchemaInteraction({
+              extensionId: schemaExtensionId || settingsAgentEl?.value?.trim() || '',
+              interactionId: field.id,
+              action: trimString(source.action),
+              inputs,
+              values,
+              params,
+              conversationId: trimString(getCodexAgentState().conversationMeta?.conversation_id) || null,
+              settings: asRecord(getCodexAgentState().conversationSettings),
+            });
+            if (seq !== requestSeq) return;
+            renderInteractionOutput(field, outputEl, result);
+          } catch (error) {
+            if (seq !== requestSeq) return;
+            setInteractionMessage(dynamicSourceErrorMessage(error), 'error');
+          } finally {
+            if (seq === requestSeq) {
+              button.disabled = false;
+              interactionInputs.forEach((entry) => { entry.input.disabled = false; });
+            }
+          }
+        };
+
+        button.addEventListener('click', () => {
+          void runInteraction();
+        });
+        interactionInputs.forEach((entry) => {
+          entry.input.addEventListener('keydown', (event) => {
+            const keyEvent = event as KeyboardEvent;
+            if (keyEvent.key === 'Enter' && entry.type !== 'textarea') {
+              event.preventDefault();
+              void runInteraction();
+            }
+            if (keyEvent.key === 'Enter' && keyEvent.ctrlKey && entry.type === 'textarea') {
+              event.preventDefault();
+              void runInteraction();
+            }
+          });
+        });
+
+        conditionalRows.push({ field, element: interaction, input: null });
+        container.appendChild(interaction);
+        return;
+      }
+
       if (isSchemaSubmenuField(field)) {
         const details = document.createElement('details');
         details.className = 'settings-schema-submenu';
@@ -2072,13 +2484,29 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
           label.appendChild(input);
           break;
           
-        case 'text':
-        default:
+        case 'password':
+        case 'secret':
           input = document.createElement('input');
-          input.type = 'text';
+          input.type = 'password';
           input.id = `settings-ext-${field.id}`;
           input.placeholder = field.placeholder || '';
           input.value = String(value ?? '');
+          input.setAttribute('autocomplete', 'off');
+          input.setAttribute('spellcheck', 'false');
+          label.appendChild(input);
+          break;
+
+        case 'text':
+        default:
+          input = document.createElement('input');
+          input.type = field.secret === true || field.sensitive === true ? 'password' : 'text';
+          input.id = `settings-ext-${field.id}`;
+          input.placeholder = field.placeholder || '';
+          input.value = String(value ?? '');
+          if (input.type === 'password') {
+            input.setAttribute('autocomplete', 'off');
+            input.setAttribute('spellcheck', 'false');
+          }
           label.appendChild(input);
           break;
       }
@@ -2111,6 +2539,10 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     const values: JsonRecord = {};
     Object.entries(currentSchemaValues).forEach(([id, { input, type, field }]) => {
       if (!input) return;
+      if (!schemaFieldPersists(field)) {
+        values[id] = null;
+        return;
+      }
       if (type === 'session_picker') {
         values[id] = input.value || input.dataset.sessionId || '';
         return;

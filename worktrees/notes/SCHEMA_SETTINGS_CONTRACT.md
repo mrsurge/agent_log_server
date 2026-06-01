@@ -2,8 +2,6 @@
 
 <!-- ALS inline review test edit: 2026-05-31. -->
 <!-- ALS inline review second canary: no functional content. -->
-<!-- ALS inline review third canary: reject path retest. -->
-
 ## Purpose
 
 ALS-RS settings UI must be schema-driven and provider-neutral. The shared
@@ -239,6 +237,112 @@ controls whether the input is interactive. `clear_when_hidden` explicitly opts a
 hidden input into clearing its transient value; otherwise hidden values are
 preserved so existing settings are not destroyed by a temporary condition.
 
+## Schema interaction fields
+
+Provider lookups, external API searches, and other request/response settings
+flows use a schema-declared `interaction` field. ALS-RS owns the generic UI and
+RPC routing; the extension owns the provider/API call and returned DTO.
+
+Example concept:
+
+```json
+{
+  "id": "provider_lookup",
+  "type": "interaction",
+  "label": "Provider Lookup",
+  "inputs": [
+    {
+      "id": "query",
+      "type": "text",
+      "placeholder": "Search provider..."
+    }
+  ],
+  "trigger": {
+    "label": "Search",
+    "mode": "submit",
+    "min_length": 2
+  },
+  "source": {
+    "method": "extension.schemaInteraction.run",
+    "action": "provider.lookup",
+    "params": {
+      "query": "$input.query",
+      "model": "$field.model",
+      "cwd": "$context.cwd"
+    }
+  },
+  "output": {
+    "kind": "list",
+    "items_path": "items",
+    "id_path": "id",
+    "label_path": "name",
+    "detail_path": "description",
+    "empty_text": "No results"
+  },
+  "write_back": {
+    "on_select": [
+      { "field": "provider_resource_id", "path": "id" },
+      { "field": "provider_resource_label", "path": "name" }
+    ]
+  }
+}
+```
+
+ALS-RS sends `/rpc/settings` method `extension.schemaInteraction.run` and
+forwards to adapter method `extension.schema_interaction.run`. The Python
+adapter calls extension hook `run_schema_interaction(...)`.
+
+Request DTO:
+
+```json
+{
+  "extension_id": "some-extension",
+  "interaction_id": "provider_lookup",
+  "action": "provider.lookup",
+  "inputs": { "query": "abc" },
+  "values": { "model": "gpt-5.1" },
+  "params": { "query": "abc", "model": "gpt-5.1", "cwd": "/repo" },
+  "conversation_id": "optional"
+}
+```
+
+The response DTO is extension-owned and schema-mapped. Render kinds are `list`,
+`info`, and `json`. `write_back.on_select` can copy values from a selected result
+into ordinary schema fields by field id. Interaction inputs are transient unless
+the schema explicitly writes returned values into normal settings fields.
+
+Interaction fields may declare either one `input` or multiple `inputs`. Supported
+input kinds are `text`, `password`, `secret`, `number`, `checkbox`, and
+`textarea`; `secret: true`, `sensitive: true`, or `type: "secret"` are rendered
+as password-style inputs and are only sent to the extension call.
+
+Ordinary schema fields can also opt out of persistence:
+
+```json
+{
+  "id": "openrouter_api_key",
+  "type": "text",
+  "label": "API key",
+  "secret": true,
+  "persist": false
+}
+```
+
+Fields with `persist: false`, `transient: true`, `secret: true`, or
+`sensitive: true` are excluded from `meta.settings` and are sent as a null
+settings patch on save so stale previously persisted values are removed. They
+can still be referenced by interaction param tokens such as
+`"$field.openrouter_api_key"` while the modal is open.
+
+Supported param tokens:
+
+- `$input.<id>` reads the interaction input value
+- `$field.<id>` reads another schema field's current value
+- `$context.cwd` reads the current schema/conversation cwd
+- `$context.conversation_id` reads the active harness conversation id
+- `$context.provider_session_id` reads the bound provider session/thread id
+- `$values` sends the current schema values map
+
 ## Conversation binding role
 
 Provider session/thread/rollout pickers are a shared conversation binding
@@ -392,6 +496,8 @@ Conversation metadata is generic and stable:
 - `provider_session_id` is the semantic provider bind id.
 - `thread_id` is a compatibility mirror while legacy paths still use it.
 - `settings` stores extension settings by schema-declared field `id`.
+- fields marked `persist: false`, `transient: true`, `secret: true`, or
+  `sensitive: true` are stripped from persisted `meta.settings`.
 - transient picker fields are stripped unless explicitly declared persistent.
 - null and empty-string settings remove prior values.
 - new conversations must not preserve arbitrary settings from the previously

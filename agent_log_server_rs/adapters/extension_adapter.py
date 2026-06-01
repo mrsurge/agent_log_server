@@ -439,6 +439,19 @@ class ExtensionLoaderModule(Protocol):
         settings: JsonMap | None = None,
     ) -> JsonMap: ...
 
+    async def run_schema_interaction(
+        self,
+        extension_id: str,
+        *,
+        interaction_id: str,
+        action: str | None = None,
+        inputs: JsonMap | None = None,
+        values: JsonMap | None = None,
+        params: JsonMap | None = None,
+        conversation_id: str | None = None,
+        settings: JsonMap | None = None,
+    ) -> JsonMap: ...
+
     async def read_plan(self, extension_id: str, conversation_id: str) -> JsonMap: ...
 
     async def interrupt_session(self, extension_id: str, conversation_id: str) -> JsonMap: ...
@@ -549,6 +562,8 @@ class ExtensionJsonRpcAdapter:
             return await self._provider_info(params)
         if method == AdapterMethod.EXTENSION_GET_PLAN:
             return await self._read_plan(params)
+        if method == AdapterMethod.EXTENSION_SCHEMA_INTERACTION_RUN:
+            return await self._schema_interaction(params)
         if method == AdapterMethod.EXTENSION_LIST_MODELS:
             return await self._list_models(params)
         if method == AdapterMethod.EXTENSION_LIST_SESSIONS:
@@ -1063,6 +1078,39 @@ class ExtensionJsonRpcAdapter:
             "conversation_id": conversation_id,
             "provider_session_id": provider_session_id,
             "error": "Invalid provider info response",
+        }
+
+    async def _schema_interaction(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        self._extension_info(extension_id)
+        interaction_id = required_string(params, "interaction_id")
+        action = optional_string(params.get("action"))
+        conversation_id = optional_string(params.get("conversation_id"))
+        settings = merged_settings(self._state.settings, optional_map(params.get("settings")))
+        result = await self._loader.run_schema_interaction(
+            extension_id,
+            interaction_id=interaction_id,
+            action=action,
+            inputs=optional_map(params.get("inputs")) or {},
+            values=optional_map(params.get("values")) or {},
+            params=optional_map(params.get("params")) or {},
+            conversation_id=conversation_id,
+            settings=settings,
+        )
+        result_map = optional_map(result)
+        if result_map is not None:
+            result_map.setdefault("extension_id", extension_id)
+            result_map.setdefault("interaction_id", interaction_id)
+            if conversation_id is not None:
+                result_map.setdefault("conversation_id", conversation_id)
+            return result_map
+        return {
+            "ok": False,
+            "supported": True,
+            "extension_id": extension_id,
+            "interaction_id": interaction_id,
+            "conversation_id": conversation_id,
+            "error": "Invalid schema interaction response",
         }
 
     async def _read_plan(self, params: JsonMap) -> JsonMap:

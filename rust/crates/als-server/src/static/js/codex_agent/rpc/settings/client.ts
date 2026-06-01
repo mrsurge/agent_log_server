@@ -323,6 +323,44 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function runSchemaInteraction(options: {
+    extensionId: string;
+    interactionId: string;
+    action?: string | null;
+    inputs?: JsonObject | null;
+    values?: JsonObject | null;
+    params?: JsonObject | null;
+    conversationId?: string | null;
+    settings?: JsonObject | null;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    if (!rpcEnabled()) {
+      throw new Error('Schema interactions require settings RPC transport');
+    }
+    const params: JsonObject = {
+      extension_id: options.extensionId,
+      interaction_id: options.interactionId,
+      inputs: options.inputs ?? {},
+      values: options.values ?? {},
+      params: options.params ?? {},
+    };
+    if (typeof options.action === 'string' && options.action.trim()) {
+      params.action = options.action.trim();
+    }
+    if (typeof options.conversationId === 'string' && options.conversationId.trim()) {
+      params.conversation_id = options.conversationId.trim();
+    }
+    if (options.settings && typeof options.settings === 'object') {
+      params.settings = options.settings;
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: SETTINGS_RPC_NAMESPACE,
+      method: SETTINGS_RPC_METHODS.extensionSchemaInteractionRun,
+      params,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function getExtensionRequestCards(options: {
     extensionId: string;
   }): Promise<JsonObject & { transport: TransportTag }> {
@@ -599,6 +637,7 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
     getExtensionSettingsSchemaFragment,
     getRuntimeOptions,
     getExtensionProviderInfo,
+    runSchemaInteraction,
     getExtensionRequestCards,
     getExtensionUiFeatures,
     getExtensionPlan,

@@ -146,19 +146,6 @@ def _ensure_dict_list(container: ObjectDict, key: str) -> List[ObjectDict]:
     return items
 
 
-def _ensure_string_set(container: ObjectDict, key: str) -> set[str]:
-    value = container.get(key)
-    if isinstance(value, set):
-        raw_items = cast(set[object], value)
-        if all(isinstance(item, str) for item in raw_items):
-            return cast(set[str], value)
-        normalized = {item for item in raw_items if isinstance(item, str)}
-    else:
-        normalized = set[str]()
-    container[key] = normalized
-    return normalized
-
-
 def _string_value(value: object, default: str = "") -> str:
     if isinstance(value, str) and value:
         return value
@@ -1267,39 +1254,29 @@ def _diff_is_new_file(diff_text: Optional[str]) -> bool:
     return from_dev_null and to_real_path
 
 
-def _diff_signature(diff_text: str) -> str:
-    if not diff_text:
-        return "empty"
-    files: List[str] = []
-    hunks: List[str] = []
-    for line in diff_text.splitlines():
-        if line.startswith("+++ ") or line.startswith("--- "):
-            files.append(line.strip())
-        elif line.startswith("@@"):
-            hunks.append(line.strip())
-    signature = "\n".join(files + hunks) + "\n" + diff_text
-    return hashlib.sha1(signature.encode("utf-8")).hexdigest()
+def _diff_id_token(value: Optional[str], fallback: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    token = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    return token or fallback
 
 
-def _split_unified_diff_by_file(diff_text: str) -> List[Tuple[Optional[str], str]]:
-    if not diff_text.strip():
-        return []
-    lines = diff_text.splitlines(keepends=True)
-    start_idxs: List[int] = []
-    for idx, line in enumerate(lines):
-        if line.startswith("diff --git "):
-            start_idxs.append(idx)
-    if not start_idxs:
-        return [(_extract_path_from_diff(diff_text), diff_text.strip())]
-
-    sections: List[Tuple[Optional[str], str]] = []
-    for idx, start in enumerate(start_idxs):
-        end = start_idxs[idx + 1] if (idx + 1) < len(start_idxs) else len(lines)
-        section = "".join(lines[start:end]).strip()
-        if not section:
-            continue
-        sections.append((_extract_path_from_diff(section), section))
-    return sections
+def _atomic_filechange_diff_id(
+    *,
+    thread_id: Optional[str],
+    turn_id: Optional[str],
+    item_id: Optional[str],
+    change_index: int,
+    path: Optional[str],
+) -> str:
+    path_fingerprint = hashlib.sha1((path or "").encode("utf-8")).hexdigest()[:12]
+    return ":".join([
+        _diff_id_token(thread_id, "unknown-thread"),
+        _diff_id_token(turn_id, "unknown-turn"),
+        _diff_id_token(item_id, "unknown-item"),
+        str(change_index),
+        path_fingerprint,
+    ])
 
 
 def _paths_from_changes(changes: object) -> List[str]:
@@ -1415,7 +1392,6 @@ class CodexEventRouter:
         new_state: ObjectDict = {
             "thread_id": thread_id,
             "turn_id": turn_id,
-            "diff_hashes": set[str](),
             "plan_steps": list[object](),
             "plan_signature": None,
             "plan_explanation": None,
@@ -2074,51 +2050,6 @@ class CodexEventRouter:
             "transcript_entries": [transcript_entry],
         }
 
-    def _emit_diff_entries(
-        self,
-        result: ObjectDict,
-        *,
-        diff_text: str,
-        path: Optional[str],
-        thread_id: Optional[str],
-        turn_id: Optional[str],
-        item_id: Optional[str],
-        event_name: str,
-    ) -> None:
-        turn_state = self._get_turn_state(thread_id, turn_id)
-        diff_hashes = _ensure_string_set(turn_state, "diff_hashes")
-        subagent_id = self._subagent_id_for_context(thread_id)
-        event_entries = _ensure_dict_list(result, "events")
-        transcript_entries = _ensure_dict_list(result, "transcript_entries")
-        for section_path, section_text in _split_unified_diff_by_file(diff_text):
-            if not section_text:
-                continue
-            diff_hash = _diff_signature(section_text)
-            if diff_hash in diff_hashes:
-                continue
-            diff_hashes.add(diff_hash)
-            effective_path = section_path or path
-            if thread_id or turn_id:
-                diff_id = f"{thread_id or 'unknown'}:{turn_id or 'unknown'}:{diff_hash[:12]}"
-            elif item_id:
-                diff_id = f"item:{item_id}:{diff_hash[:12]}"
-            else:
-                diff_id = f"diff:{diff_hash[:12]}"
-            event_entries.append(self._decorate_event({
-                "type": "diff",
-                "id": diff_id,
-                "text": section_text,
-                "path": effective_path,
-            }, subagent_id))
-            transcript_entries.append(self._decorate_transcript_entry({
-                "role": "diff",
-                "text": section_text,
-                "path": effective_path,
-                "item_id": diff_id,
-                "turn_id": turn_id,
-                "event": event_name,
-            }, subagent_id))
-
     def _emit_filechange_diff_entries(
         self,
         result: ObjectDict,
@@ -2132,35 +2063,39 @@ class CodexEventRouter:
         event_name: str,
     ) -> None:
         turn_state = self._get_turn_state(thread_id, turn_id)
-        emitted_from_changes = False
+        subagent_id = self._subagent_id_for_context(thread_id)
+        event_entries = _ensure_dict_list(result, "events")
+        transcript_entries = _ensure_dict_list(result, "transcript_entries")
+        sections = _diff_sections_from_changes_with_headers(changes)
+        if not sections and diff_text:
+            sections = [(path or _extract_path_from_diff(diff_text), _diff_with_file_header(path, diff_text))]
         emitted_any = False
-        for change_path, change_diff in _diff_sections_from_changes_with_headers(changes):
-            before_count = len(_ensure_dict_list(result, "transcript_entries"))
-            self._emit_diff_entries(
-                result,
-                diff_text=change_diff,
-                path=change_path or path,
+        for change_index, (change_path, change_diff) in enumerate(sections):
+            if not change_diff:
+                continue
+            effective_path = change_path or path or _extract_path_from_diff(change_diff)
+            diff_id = _atomic_filechange_diff_id(
                 thread_id=thread_id,
                 turn_id=turn_id,
                 item_id=item_id,
-                event_name=event_name,
+                change_index=change_index,
+                path=effective_path,
             )
-            emitted_from_changes = True
-            if len(_ensure_dict_list(result, "transcript_entries")) > before_count:
-                emitted_any = True
-        if not emitted_from_changes and diff_text:
-            before_count = len(_ensure_dict_list(result, "transcript_entries"))
-            self._emit_diff_entries(
-                result,
-                diff_text=diff_text,
-                path=path,
-                thread_id=thread_id,
-                turn_id=turn_id,
-                item_id=item_id,
-                event_name=event_name,
-            )
-            if len(_ensure_dict_list(result, "transcript_entries")) > before_count:
-                emitted_any = True
+            event_entries.append(self._decorate_event({
+                "type": "diff",
+                "id": diff_id,
+                "text": change_diff,
+                "path": effective_path,
+            }, subagent_id))
+            transcript_entries.append(self._decorate_transcript_entry({
+                "role": "diff",
+                "text": change_diff,
+                "path": effective_path,
+                "item_id": diff_id,
+                "turn_id": turn_id,
+                "event": event_name,
+            }, subagent_id))
+            emitted_any = True
         if emitted_any:
             turn_state["filechange_diff_emitted"] = True
 
@@ -2420,22 +2355,7 @@ class CodexEventRouter:
             (notification_spec and notification_spec.category == "turn" and notification_spec.subject == "diff" and notification_spec.phase == "updated")
             or label_lower == "codex/event/turn_diff"
         ) and _is_object_dict(payload):
-            diff_text, path = _extract_diff_with_path(payload)
-            if diff_text:
-                turn_state = self._get_turn_state(thread_id, turn_id)
-                if turn_state.get("filechange_diff_emitted"):
-                    return {"handled": True, "events": [], "transcript_entries": []}
-                result["handled"] = True
-                self._emit_diff_entries(
-                    result,
-                    diff_text=diff_text,
-                    path=path,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
-                    item_id=None,
-                    event_name=label_lower,
-                )
-            return result if result["handled"] else {"handled": True, "events": [], "transcript_entries": []}
+            return {"handled": True, "events": [], "transcript_entries": []}
 
         if (
             (notification_spec and notification_spec.category == "thread" and notification_spec.subject == "tokenusage" and notification_spec.phase == "updated")
@@ -3237,7 +3157,7 @@ class CodexEventRouter:
                         "event": label_lower,
                     }],
                 }
-                if item_state.get("patch_updated_seen"):
+                if not is_error:
                     self._emit_filechange_diff_entries(
                         routed,
                         changes=changes,

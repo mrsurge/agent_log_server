@@ -18,6 +18,7 @@ export const SETTINGS_RPC_METHODS = {
   extensionSettingsSchemaFragmentGet: 'extension.settingsSchema.fragment.get',
   extensionRuntimeOptionsGet: 'extension.runtimeOptions.get',
   extensionProviderInfoGet: 'extension.providerInfo.get',
+  extensionSchemaInteractionRun: 'extension.schemaInteraction.run',
   extensionRequestCardsGet: 'extension.requestCards.get',
   extensionUiFeaturesGet: 'extension.uiFeatures.get',
   extensionPlanGet: 'extension.plan.get',

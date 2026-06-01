@@ -406,10 +406,11 @@ pub(crate) async fn project_agent_diff_reject(
         .map(PathBuf::from)
         .or_else(|| conversation_cwd_from_params(state, &params).map(PathBuf::from))
         .ok_or_else(|| rpc_error(-32602, "Tracked diff has no project root"))?;
-    let diff_text = entry.diff_text.clone();
+    let entry_for_apply = entry.clone();
     let repo_root_for_log = path_to_string(&repo_root);
     let apply_result = tokio::task::spawn_blocking(move || {
-        crate::agent_edits::apply_reverse_patch(&repo_root, &diff_text).map_err(internal_rpc_error)
+        crate::agent_edits::apply_reverse_patch(&repo_root, &entry_for_apply)
+            .map_err(internal_rpc_error)
     })
     .await
     .map_err(internal_rpc_error)?;
@@ -418,6 +419,14 @@ pub(crate) async fn project_agent_diff_reject(
             conversation_id = %conversation_id,
             diff_id = %diff_id,
             repo_root = %repo_root_for_log,
+            path = entry.path.as_deref().unwrap_or(""),
+            abs = entry.abs.as_deref().unwrap_or(""),
+            rel = entry.rel.as_deref().unwrap_or(""),
+            source = %entry.source,
+            diff_bytes = entry.diff_bytes,
+            additions = entry.additions,
+            deletions = entry.deletions,
+            diff_preview = %diff_log_preview(&entry.diff_text),
             error = %error.message,
             "project agent diff reject failed"
         );
@@ -770,6 +779,40 @@ fn sort_items(items: &mut [FilesystemItem]) {
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn diff_log_preview(diff_text: &str) -> String {
+    const MAX_LINES: usize = 24;
+    const MAX_CHARS_PER_LINE: usize = 220;
+
+    let mut out = Vec::new();
+    let mut total_lines = 0usize;
+    for line in diff_text.lines() {
+        total_lines += 1;
+        if out.len() < MAX_LINES {
+            out.push(truncate_preview_line(line, MAX_CHARS_PER_LINE));
+        }
+    }
+    if total_lines > MAX_LINES {
+        out.push(format!("... ({} more lines)", total_lines - MAX_LINES));
+    }
+    if out.is_empty() {
+        "<empty>".to_owned()
+    } else {
+        out.join("\\n")
+    }
+}
+
+fn truncate_preview_line(line: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in line.chars().enumerate() {
+        if index >= max_chars {
+            out.push_str("...");
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[derive(Clone, Debug, Serialize)]

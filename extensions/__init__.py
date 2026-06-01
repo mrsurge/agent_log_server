@@ -2525,6 +2525,57 @@ async def get_provider_info(
     }
 
 
+async def run_schema_interaction(
+    extension_id: str,
+    interaction_id: str,
+    action: Optional[str] = None,
+    inputs: Optional[dict[str, object]] = None,
+    values: Optional[dict[str, object]] = None,
+    params: Optional[dict[str, object]] = None,
+    conversation_id: Optional[str] = None,
+    settings: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
+    """Run a schema-declared settings interaction against an extension."""
+    run_fn = _callable_attr(get_handler(extension_id), "run_schema_interaction")
+    if run_fn is None:
+        return {
+            "ok": False,
+            "supported": False,
+            "extension_id": extension_id,
+            "interaction_id": interaction_id,
+            "conversation_id": conversation_id,
+            "error": "Extension does not implement schema interactions",
+        }
+    raw_result = await _invoke_maybe_async(
+        run_fn,
+        extension_id=extension_id,
+        interaction_id=interaction_id,
+        action=action,
+        inputs=inputs if isinstance(inputs, dict) else {},
+        values=values if isinstance(values, dict) else {},
+        params=params if isinstance(params, dict) else {},
+        conversation_id=conversation_id,
+        settings=settings if isinstance(settings, dict) else {},
+    )
+    if isinstance(raw_result, dict):
+        normalized = _dict_or_empty(cast(object, raw_result))
+        normalized.setdefault("ok", True)
+        normalized.setdefault("supported", True)
+        normalized.setdefault("extension_id", extension_id)
+        normalized.setdefault("interaction_id", interaction_id)
+        if conversation_id is not None:
+            normalized.setdefault("conversation_id", conversation_id)
+        return normalized
+    return {
+        "ok": False,
+        "supported": True,
+        "extension_id": extension_id,
+        "interaction_id": interaction_id,
+        "conversation_id": conversation_id,
+        "error": "Extension returned an invalid schema interaction DTO",
+    }
+
+
 def _runtime_option_from_schema_field(
     field: Optional[dict[str, object]],
     settings: Optional[dict[str, object]] = None,

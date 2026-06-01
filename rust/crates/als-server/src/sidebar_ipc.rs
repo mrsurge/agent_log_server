@@ -674,9 +674,28 @@ async fn publish_inline_agent_decision(
     };
 
     if let Err(error) = project_result {
+        let failure_conversation_id = string_field(&params, "conversationId")
+            .or_else(|| string_field(&params, "conversation_id"))
+            .unwrap_or_default();
+        let failure_edit_id = string_field(&params, "editId")
+            .or_else(|| string_field(&params, "edit_id"))
+            .or_else(|| string_field(&params, "diffId"))
+            .or_else(|| string_field(&params, "diff_id"))
+            .or_else(|| string_field(&params, "id"))
+            .unwrap_or_default();
+        let failure_uri = string_field(&params, "uri").unwrap_or_default();
+        let failure_project_path = string_field(&params, "projectPath")
+            .or_else(|| string_field(&params, "project_path"))
+            .or_else(|| string_field(&params, "cwd"))
+            .unwrap_or_default();
         warn!(
             code = error.code,
             message = %error.message,
+            decision,
+            conversation_id = %failure_conversation_id,
+            edit_id = %failure_edit_id,
+            uri = %failure_uri,
+            project_path = %failure_project_path,
             "inline agent edit decision failed through project diff path"
         );
         publish_inline_agent_document_state(io, state, document_params).await?;

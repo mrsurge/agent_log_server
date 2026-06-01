@@ -334,7 +334,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
     }
     const isMention = mode === 'mention';
     if (pickerSelectBtn instanceof HTMLElement) pickerSelectBtn.style.display = isMention ? 'none' : '';
-    if (pickerUpBtn instanceof HTMLElement) pickerUpBtn.style.display = isMention ? 'none' : '';
+    if (pickerUpBtn instanceof HTMLElement) pickerUpBtn.style.display = '';
   }
 
   function applyPickedCwd(path: unknown): void {
@@ -931,7 +931,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
   async function fetchPickerSearch(query: unknown): Promise<PickerItem[]> {
     try {
       const state = getState();
-      const root = state.conversationSettings?.cwd || settingsCwdEl?.value || state.pickerPath || '~';
+      const root = state.pickerPath || state.conversationSettings?.cwd || settingsCwdEl?.value || '~';
       const data = await uiRpcClient.searchFilesystem({
         query: typeof query === 'string' ? query : '',
         root,
@@ -1015,7 +1015,6 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
 
   pickerCloseBtn?.addEventListener('click', closePicker);
   pickerUpBtn?.addEventListener('click', () => {
-    if (getState().pickerMode === 'mention') return;
     const currentPath = getState().pickerPath || getActiveCwdValue({ fallbackToSaved: true }) || '~';
     void fetchPicker(parentPickerPath(currentPath));
   });

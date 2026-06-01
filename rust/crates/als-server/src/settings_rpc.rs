@@ -95,6 +95,9 @@ async fn dispatch_rpc(state: &AppState, request: JsonRpcRequest) -> Result<Value
         "extension.splashAction.run" => Ok(json!({"ok": false, "transport": "rpc"})),
         "extension.runtimeOptions.get" => extension_runtime_options(state, &request.params).await,
         "extension.providerInfo.get" => extension_provider_info(state, &request.params).await,
+        "extension.schemaInteraction.run" => {
+            extension_schema_interaction(state, &request.params).await
+        }
         "extension.requestCards.get" => {
             let extension_id = extension_id_param(&request.params);
             let cards = extension_id
@@ -688,6 +691,55 @@ async fn extension_provider_info(state: &AppState, params: &JsonMap) -> Result<V
         "provider_session_id": request.provider_session_id,
         "transport": "rpc",
         "error": "Invalid provider info response"
+    }))
+}
+
+async fn extension_schema_interaction(
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
+    let extension_id = require_extension_id(params)?;
+    ensure_registered_extension(state, &extension_id)?;
+    let interaction_id = params
+        .get("interaction_id")
+        .or_else(|| params.get("interactionId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| rpc_error(-32602, "interaction_id is required"))?
+        .to_owned();
+    let mut request_params = params.clone();
+    request_params.insert(
+        "extension_id".to_owned(),
+        Value::String(extension_id.clone()),
+    );
+    request_params.insert(
+        "interaction_id".to_owned(),
+        Value::String(interaction_id.clone()),
+    );
+    let mut result = adapter_extension_request_with_params(
+        state,
+        methods::EXTENSION_SCHEMA_INTERACTION_RUN,
+        request_params,
+    )
+    .await?;
+    if let Value::Object(ref mut object) = result {
+        object
+            .entry("extension_id")
+            .or_insert_with(|| Value::String(extension_id));
+        object
+            .entry("interaction_id")
+            .or_insert_with(|| Value::String(interaction_id));
+        object.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+        return Ok(result);
+    }
+    Ok(json!({
+        "ok": false,
+        "supported": true,
+        "extension_id": extension_id,
+        "interaction_id": interaction_id,
+        "error": "Invalid schema interaction response",
+        "transport": "rpc"
     }))
 }
 

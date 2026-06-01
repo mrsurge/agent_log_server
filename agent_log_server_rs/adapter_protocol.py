@@ -30,6 +30,7 @@ class AdapterMethod(StrEnum):
     EXTENSION_GET_RUNTIME_OPTIONS = "extension.get_runtime_options"
     EXTENSION_GET_PROVIDER_INFO = "extension.get_provider_info"
     EXTENSION_GET_PLAN = "extension.get_plan"
+    EXTENSION_SCHEMA_INTERACTION_RUN = "extension.schema_interaction.run"
     EXTENSION_LIST_MODELS = "extension.list_models"
     EXTENSION_LIST_SESSIONS = "extension.list_sessions"
     EXTENSION_SESSION_STATE_GET = "extension.session.state.get"

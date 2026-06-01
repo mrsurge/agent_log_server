@@ -1,15 +1,12 @@
 use crate::conversation_store::ConversationStore;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use git2::Repository;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::{
-    borrow::Cow,
     collections::HashMap,
     hash::{Hash, Hasher},
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -263,56 +260,13 @@ impl TrackedAgentDiff {
     }
 }
 
-pub fn apply_reverse_patch(repo_root: &Path, diff_text: &str) -> Result<()> {
-    let diff_text = normalized_patch_text(diff_text);
-    run_git_apply(repo_root, diff_text.as_ref(), true)?;
-    run_git_apply(repo_root, diff_text.as_ref(), false)
-}
-
-fn normalized_patch_text(diff_text: &str) -> Cow<'_, str> {
-    if diff_text.ends_with('\n') {
-        Cow::Borrowed(diff_text)
-    } else {
-        Cow::Owned(format!("{diff_text}\n"))
-    }
-}
-
-fn run_git_apply(repo_root: &Path, diff_text: &str, check: bool) -> Result<()> {
-    let mut command = Command::new("git");
-    command
-        .arg("apply")
-        .arg("--reverse")
-        .current_dir(repo_root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if check {
-        command.arg("--check");
-    }
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to start git apply in {}", repo_root.display()))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("git apply stdin unavailable"))?;
-    stdin.write_all(diff_text.as_bytes())?;
-    drop(stdin);
-    let output = child.wait_with_output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = stderr.trim();
-    if !detail.is_empty() {
-        bail!("{detail}");
-    }
-    let detail = stdout.trim();
-    if !detail.is_empty() {
-        bail!("{detail}");
-    }
-    bail!("git apply --reverse failed");
+pub fn apply_reverse_patch(repo_root: &Path, entry: &TrackedAgentDiff) -> Result<()> {
+    let path_hint = entry
+        .rel
+        .as_deref()
+        .or(entry.abs.as_deref())
+        .or(entry.path.as_deref());
+    crate::reverse_patch::apply_reverse_patch(repo_root, path_hint, &entry.diff_text)
 }
 
 fn repo_root_from_path(path: &Path) -> Option<PathBuf> {
@@ -852,17 +806,5 @@ mod tests {
         assert_eq!(hunks[1]["kind"], "added");
         assert_eq!(hunks[1]["originalLines"], json!([]));
         assert_eq!(hunks[1]["modifiedLines"], json!(["added text"]));
-    }
-
-    #[test]
-    fn normalizes_patch_text_with_trailing_newline() {
-        assert_eq!(
-            normalized_patch_text("diff --git a/file b/file").as_ref(),
-            "diff --git a/file b/file\n"
-        );
-        assert!(matches!(
-            normalized_patch_text("diff --git a/file b/file\n"),
-            Cow::Borrowed(_)
-        ));
     }
 }
