@@ -12,7 +12,7 @@ use std::{
     collections::HashSet,
     env, fs, io,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 use tracing::{info, warn};
 
@@ -112,11 +112,7 @@ async fn dispatch_rpc(
                 "transport": "rpc"
             }))
         }
-        "url.open" => Ok(json!({
-            "ok": false,
-            "error": format!("{} is not implemented in ALS-RS yet", request.method),
-            "transport": "rpc"
-        })),
+        "url.open" => url_open(request.params),
         _ => Err(rpc_error(
             -32601,
             format!("Unsupported method: {}", request.method),
@@ -129,6 +125,49 @@ fn inline_agent_edits_document_state(state: &AppState, params: JsonMap) -> Resul
         .inline_agent_edits
         .document_state(&params)
         .map_err(internal_rpc_error)
+}
+
+fn url_open(params: JsonMap) -> Result<Value, RpcError> {
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if url.is_empty() {
+        return Err(rpc_error(-32602, "url.open requires a non-empty url"));
+    }
+    let lower = url.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return Err(rpc_error(
+            -32602,
+            "url.open only supports http and https URLs",
+        ));
+    }
+    if url.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return Err(rpc_error(
+            -32602,
+            "url.open rejects URLs with whitespace or control characters",
+        ));
+    }
+    Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            rpc_error(
+                -32603,
+                format!("Failed to launch xdg-open for url.open: {error}"),
+            )
+        })?;
+    Ok(json!({
+        "ok": true,
+        "url": url,
+        "source": params.get("source").cloned().unwrap_or(Value::Null),
+        "conversation_id": params.get("conversation_id").cloned().unwrap_or(Value::Null),
+        "transport": "rpc"
+    }))
 }
 
 fn inline_agent_edits_publish(state: &AppState, params: JsonMap) -> Result<Value, RpcError> {

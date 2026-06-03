@@ -46,6 +46,14 @@ type SettingsRpcClient = {
   }) => Promise<unknown>;
 };
 
+type UiRpcClient = {
+  openUrl?: (payload: {
+    url: string;
+    source?: string | null;
+    conversation_id?: string | null;
+  }) => Promise<unknown>;
+};
+
 type ConversationsRpcClient = {
   forkConversation?: (options: {
     conversationId: string;
@@ -119,6 +127,7 @@ type SchemaValueEntry = {
 type SelectOption = {
   value: string;
   label: string;
+  raw?: unknown;
 };
 
 type ModelVersion = {
@@ -141,6 +150,8 @@ type SelectControl = {
   initialValue: string;
   initialValueApplied: boolean;
   dynamicItems: JsonRecord[];
+  selectedOption?: unknown;
+  options: SelectOption[];
 };
 
 type DynamicSourceOptions = {
@@ -352,6 +363,8 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
    
   // Current schema field values (for save)
   let currentSchemaValues: Record<string, SchemaValueEntry> = {};
+  let currentSchemaWriteBackValues: JsonRecord = {};
+  let currentSchemaFields: Record<string, SchemaField> = {};
    
   // Session picker overlay elements (reuse HTML already in template)
   const sessionPickerOverlay = document.getElementById('session-picker');
@@ -379,6 +392,14 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       throw new Error('Conversations RPC helper unavailable');
     }
     return client as ConversationsRpcClient;
+  }
+
+  function requireUiRpc(): UiRpcClient {
+    const client = getHelper(ctx, 'uiRpc');
+    if (!client || typeof client !== 'object') {
+      throw new Error('UI RPC helper unavailable');
+    }
+    return client as UiRpcClient;
   }
 
   function dynamicSourceErrorMessage(err: unknown): string {
@@ -1172,6 +1193,8 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     if (!settingsExtensionFields) return;
     settingsExtensionFields.innerHTML = '';
     currentSchemaValues = {};
+    currentSchemaWriteBackValues = {};
+    currentSchemaFields = {};
     
     if (!schema || !Array.isArray(schema.fields)) return;
     const getConversationInfoFields = (): SchemaField[] => {
@@ -1325,12 +1348,12 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       labelPath: unknown,
     ): SelectOption | null => {
       if (typeof item === 'string') {
-        return item ? { value: item, label: item } : null;
+        return item ? { value: item, label: item, raw: item } : null;
       }
       const value = trimString(firstPathValue(item, valuePath) ?? (isRecord(item) ? item.value : ''));
       if (!value) return null;
       const label = trimString(firstPathValue(item, labelPath) ?? value) || value;
-      return { value, label };
+      return { value, label, raw: item };
     };
 
     const selectedDependencyValue = (field: SchemaField): string => {
@@ -1405,13 +1428,14 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
         const descriptor = asRecord(dataMap[field.dynamic_options_key]);
         const items = Array.isArray(descriptor.options) ? descriptor.options : [];
         const options = items.map((item: unknown): SelectOption | null => {
-          if (typeof item === 'string') return { value: item, label: item };
+          if (typeof item === 'string') return { value: item, label: item, raw: item };
           const itemMap = asRecord(item);
           const value = trimString(itemMap.value);
           if (!value) return null;
           return {
             value,
             label: trimString(itemMap.label) || value,
+            raw: item,
           };
         }).filter((option): option is SelectOption => Boolean(option));
         return {
@@ -1426,10 +1450,10 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       const options = items.map((item: unknown): SelectOption => {
         if (isRecord(item)) {
           const value = trimString(item.id || item.value);
-          return { value, label: trimString(item.name || item.label || item.id || item.value) || value };
+          return { value, label: trimString(item.name || item.label || item.id || item.value) || value, raw: item };
         }
         const value = String(item ?? '');
-        return { value, label: value };
+        return { value, label: value, raw: item };
       }).filter((option) => option.value);
       return { items: items.filter(isRecord), options, current: '', defaultValue: '' };
     };
@@ -1441,6 +1465,9 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
           return entry.input instanceof HTMLInputElement ? entry.input.checked : false;
         }
         return entry.input.value;
+      }
+      if (Object.prototype.hasOwnProperty.call(currentSchemaWriteBackValues, fieldId)) {
+        return currentSchemaWriteBackValues[fieldId];
       }
       if (Object.prototype.hasOwnProperty.call(values, fieldId)) {
         return values[fieldId];
@@ -1617,7 +1644,12 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       return spec.preserve_whitespace === true ? rawValue : rawValue.trim();
     };
 
-    const setSchemaInputValue = (target: SchemaValueEntry | undefined, value: unknown): void => {
+    const setSchemaInputValue = (
+      targetField: string,
+      target: SchemaValueEntry | undefined,
+      value: unknown,
+    ): void => {
+      currentSchemaWriteBackValues[targetField] = value == null ? null : value;
       if (!target?.input) return;
       if (target.type === 'checkbox' && target.input instanceof HTMLInputElement) {
         target.input.checked = value === true || value === 'true';
@@ -1628,17 +1660,42 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       target.input.dispatchEvent(new Event('change', { bubbles: true }));
     };
 
-    const applyInteractionWriteBack = (field: SchemaField, item: unknown): void => {
-      const writeBack = asRecord(field.write_back);
-      const onSelect = Array.isArray(writeBack.on_select) ? writeBack.on_select : [];
-      onSelect.forEach((rawRule) => {
+    const schemaFieldById = (fieldId: unknown): SchemaField | null => {
+      const id = trimString(fieldId);
+      if (!id) return null;
+      return currentSchemaFields[id]
+        || currentSchemaValues[id]?.field
+        || selectControls[id]?.field
+        || null;
+    };
+
+    const markSchemaDirty = (): void => {
+      if (settingsExtensionFields) {
+        settingsExtensionFields.dataset.dirty = 'true';
+        settingsExtensionFields.dispatchEvent(new CustomEvent('settings-schema-dirty', { bubbles: true }));
+      }
+    };
+
+    const applyWriteBackRules = (rules: unknown[], item: unknown): void => {
+      rules.forEach((rawRule) => {
         const rule = asRecord(rawRule);
         const targetField = trimString(rule.field);
         if (!targetField) return;
         const sourcePath = rule.path || rule.value_path || rule.source_path || '$item';
-        const value = sourcePath === '$item' ? item : firstPathValue(item, sourcePath);
-        setSchemaInputValue(currentSchemaValues[targetField], value);
+        const fallbackPath = rule.fallback_path || rule.fallbackPath || rule.fallback_value_path;
+        const sourcePaths = Array.isArray(sourcePath)
+          ? sourcePath
+          : [sourcePath, fallbackPath].filter((path) => path !== undefined && path !== null && path !== '');
+        const value = sourcePath === '$item' ? item : firstPathValue(item, sourcePaths);
+        setSchemaInputValue(targetField, currentSchemaValues[targetField], value);
       });
+      markSchemaDirty();
+    };
+
+    const applyFieldWriteBack = (field: SchemaField, item: unknown): void => {
+      const writeBack = asRecord(field.write_back);
+      const onSelect = Array.isArray(writeBack.on_select) ? writeBack.on_select : [];
+      applyWriteBackRules(onSelect, item);
       syncConditionalState();
     };
 
@@ -1725,7 +1782,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
           row.appendChild(detailEl);
         }
         row.addEventListener('click', () => {
-          applyInteractionWriteBack(field, item);
+          applyFieldWriteBack(field, item);
         });
         list.appendChild(row);
       });
@@ -1786,27 +1843,62 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       });
     };
 
+    const normalizeSelectControlOption = (option: SelectOption | string): SelectOption => {
+      if (typeof option === 'string') {
+        return { value: option, label: option, raw: option };
+      }
+      return {
+        value: option.value,
+        label: option.label || option.value,
+        raw: option.raw ?? option,
+      };
+    };
+
+    const selectOptionByValue = (
+      control: SelectControl,
+      value: string,
+      options: SelectOption[] = control.options,
+      applyWriteBack = true,
+      sync = true,
+    ): boolean => {
+      const option = options.find((candidate) => candidate.value === value);
+      if (!option) {
+        control.selectedOption = undefined;
+        return false;
+      }
+      control.input.value = option.value;
+      control.selectedOption = option.raw ?? option;
+      if (applyWriteBack) {
+        applyFieldWriteBack(control.field, control.selectedOption);
+      }
+      if (sync) {
+        syncDependentSelectOptions(control.field.id);
+        if (control.field?.id === 'model') syncModelDependentFields();
+        syncConditionalState();
+      }
+      return true;
+    };
+
     const setSelectOptions = (control: SelectControl | undefined, options: SelectOption[] | string[] | undefined): void => {
       if (!control?.listDiv || !control?.input) return;
+      control.options = (options || []).map(normalizeSelectControlOption).filter((option) => option.value);
       control.listDiv.innerHTML = '';
-      (options || []).forEach((opt: SelectOption | string) => {
-        const optValue = typeof opt === 'object' ? opt.value : opt;
-        const optLabel = typeof opt === 'object' ? (opt.label || opt.value) : opt;
+      control.options.forEach((opt: SelectOption) => {
+        const optValue = opt.value;
+        const optLabel = opt.label || opt.value;
         if (!optValue) return;
         const optBtn = document.createElement('button');
         optBtn.type = 'button';
         optBtn.className = 'dropdown-item';
         optBtn.textContent = optLabel;
         optBtn.addEventListener('click', () => {
-          control.input.value = optValue;
+          selectOptionByValue(control, optValue, control.options, true);
           const closeDropdownMenu = getHelper(ctx, 'closeDropdownMenu');
           if (typeof closeDropdownMenu === 'function') {
             closeDropdownMenu(control.listDiv);
           } else {
             control.listDiv.classList.remove('open');
           }
-          if (control.field?.id === 'model') syncModelDependentFields();
-          syncConditionalState();
         });
         control.listDiv.appendChild(optBtn);
       });
@@ -1821,12 +1913,134 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       control.listDiv.appendChild(messageRow);
     };
 
+    const selectControlOptionFromItem = (item: unknown, action: JsonRecord = {}): SelectOption | null => {
+      if (typeof item === 'string') {
+        const value = item.trim();
+        return value ? { value, label: value, raw: item } : null;
+      }
+      const valuePath = action.value_path || action.valuePath || action.id_path || action.idPath || ['value', 'id'];
+      const labelPath = action.label_path || action.labelPath || action.name_path || action.namePath || ['label', 'name', 'value', 'id'];
+      const value = trimString(firstPathValue(item, valuePath));
+      if (!value) return null;
+      const label = trimString(firstPathValue(item, labelPath)) || value;
+      return { value, label, raw: item };
+    };
+
+    const upsertSelectOption = (control: SelectControl, item: unknown, action: JsonRecord = {}): SelectOption | null => {
+      const option = selectControlOptionFromItem(item, action);
+      if (!option) return null;
+      const nextOptions = control.options.filter((candidate) => candidate.value !== option.value);
+      nextOptions.push(option);
+      setSelectOptions(control, nextOptions);
+      if (isRecord(item)) {
+        control.dynamicItems = control.dynamicItems.filter((candidate) => {
+          const candidateValue = trimString(firstPathValue(candidate, ['value', 'id']));
+          return candidateValue !== option.value;
+        });
+        control.dynamicItems.push(item);
+      }
+      return option;
+    };
+
+    const refreshSelectOptions = async (
+      control: SelectControl,
+      selectedValue = '',
+      applyWriteBack = true,
+    ): Promise<void> => {
+      const field = control.field;
+      if (field.dynamic_options_from) {
+        syncDependentSelectOptions();
+        if (selectedValue) {
+          selectOptionByValue(control, selectedValue, control.options, applyWriteBack);
+        }
+        return;
+      }
+      const dynamicSource = typeof field.dynamic_source === 'string' ? field.dynamic_source : '';
+      if (!dynamicSource) return;
+      const selectedAgent = schemaExtensionId || settingsAgentEl?.value?.trim() || '';
+      const conversationId = stringValue(getCodexAgentState().conversationMeta?.conversation_id);
+      const runtimeOptionsSource = isRuntimeOptionsSource(dynamicSource);
+      const extensionModelsSource = Boolean(extensionIdFromApiPath(dynamicSource, 'models'));
+      const extensionSessionsSource = Boolean(extensionIdFromApiPath(dynamicSource, 'sessions'));
+      if (!runtimeOptionsSource && !extensionModelsSource && !extensionSessionsSource) {
+        const errorMessage = `Unsupported dynamic source: ${field.dynamic_source}`;
+        control.input.title = errorMessage;
+        setSelectMessage(control, 'Unable to load options');
+        throw new Error(errorMessage);
+      }
+      const data = await fetchDynamicSource(dynamicSource, {
+        conversationId,
+        agent: selectedAgent,
+      });
+      const { items, options, current, defaultValue } = normalizeDynamicSelectOptions(field, data);
+      control.dynamicItems = items;
+      control.input.removeAttribute('title');
+      setSelectOptions(control, options);
+      const nextValue = selectedValue || control.input.value || current || defaultValue;
+      if (nextValue) {
+        selectOptionByValue(control, nextValue, control.options, applyWriteBack, false);
+      }
+      if (field.id === 'model') {
+        modelItems = items;
+        syncModelDependentFields();
+      } else {
+        syncDependentSelectOptions(field.id);
+        syncConditionalState();
+      }
+    };
+
     const resetModelGatedInput = (input: SchemaInput, type: string | undefined): void => {
       if (type === 'checkbox') {
         if (input instanceof HTMLInputElement) input.checked = false;
         return;
       }
       input.value = '';
+    };
+
+    const syncDependentSelectOptions = (changedFieldId = ''): void => {
+      Object.values(selectControls).forEach((control) => {
+        const dynamicOptions = asRecord(control.field.dynamic_options_from);
+        const sourceField = trimString(dynamicOptions.source_field);
+        if (!sourceField) return;
+        if (changedFieldId && sourceField !== changedFieldId) return;
+        if (control.field.id === 'reasoning_effort') return;
+        if (!selectedDependencyValue(control.field)) {
+          setSelectOptions(control, []);
+          control.input.value = '';
+          control.selectedOption = undefined;
+          control.input.placeholder = trimString(dynamicOptions.missing_source_placeholder)
+            || control.field.placeholder
+            || 'Select source first';
+          return;
+        }
+
+        const { options, defaultValue } = optionsFromDependentSource(control.field);
+        setSelectOptions(control, options);
+        if (!options.length) {
+          control.input.value = '';
+          control.selectedOption = undefined;
+          control.input.placeholder = trimString(dynamicOptions.empty_placeholder)
+            || control.field.placeholder
+            || 'No options available';
+          return;
+        }
+
+        control.input.placeholder = control.field.placeholder || '';
+        const currentValue = control.input.value;
+        if (currentValue && selectOptionByValue(control, currentValue, options, false, false)) {
+          return;
+        }
+
+        const nextValue = defaultValue && options.some((option) => option.value === defaultValue)
+          ? defaultValue
+          : '';
+        if (nextValue) {
+          selectOptionByValue(control, nextValue, options, true, false);
+        } else {
+          control.input.value = '';
+          control.selectedOption = undefined;
+        }
+      });
     };
 
     const syncModelGatedFields = (): void => {
@@ -1898,12 +2112,163 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     };
 
     const syncModelDependentFields = (): void => {
+      syncDependentSelectOptions();
       syncReasoningEffortOptions();
       syncModelGatedFields();
       syncConditionalState();
     };
+
+    const schemaActionFieldId = (action: JsonRecord): string => {
+      return trimString(action.field || action.field_id || action.fieldId || action.target || action.target_field || action.targetField);
+    };
+
+    const actionItem = (action: JsonRecord, payload: unknown): unknown => {
+      const itemPath = action.item_path || action.itemPath || action.path;
+      return itemPath ? firstPathValue(payload, itemPath) : payload;
+    };
+
+    const actionValue = (action: JsonRecord, payload: unknown): unknown => {
+      if (Object.prototype.hasOwnProperty.call(action, 'value')) return action.value;
+      const valuePath = action.value_path || action.valuePath;
+      if (valuePath) return firstPathValue(payload, valuePath);
+      return undefined;
+    };
+
+    const schemaFieldElement = (fieldId: string): HTMLElement | null => {
+      if (!settingsExtensionFields) return null;
+      const nodes = settingsExtensionFields.querySelectorAll('[data-schema-field-id]');
+      for (const node of Array.from(nodes)) {
+        if (node instanceof HTMLElement && node.dataset.schemaFieldId === fieldId) {
+          return node;
+        }
+      }
+      return null;
+    };
+
+    const setSchemaFieldOpen = (fieldId: string, open: boolean): void => {
+      const element = schemaFieldElement(fieldId);
+      if (element instanceof HTMLDetailsElement) {
+        element.open = open;
+        return;
+      }
+      const details = element?.closest('details');
+      if (details instanceof HTMLDetailsElement) {
+        details.open = open;
+      }
+    };
+
+    const openSchemaActionUrl = async (action: JsonRecord, payload: unknown): Promise<void> => {
+      const directUrl = trimString(action.url || action.href);
+      const urlPath = action.url_path || action.urlPath || action.href_path || action.hrefPath;
+      const url = directUrl || trimString(urlPath ? firstPathValue(payload, urlPath) : firstPathValue(payload, ['open_url', 'openUrl', 'url']));
+      if (!url) return;
+      const uiRpc = requireUiRpc();
+      if (typeof uiRpc.openUrl !== 'function') {
+        throw new Error('URL open RPC is unavailable');
+      }
+      const result = await uiRpc.openUrl({
+        url,
+        source: trimString(action.source) || 'settings-schema',
+        conversation_id: trimString(getCodexAgentState().conversationMeta?.conversation_id) || null,
+      });
+      if (isRecord(result) && result.ok === false) {
+        throw new Error(dynamicSourceErrorMessage(result));
+      }
+    };
+
+    const applySchemaInteractionAction = async (
+      interactionField: SchemaField,
+      rawAction: unknown,
+      payload: unknown,
+    ): Promise<void> => {
+      const action = asRecord(rawAction);
+      const actionType = trimString(action.type || action.action).toLowerCase();
+      if (!actionType) return;
+      const fieldId = schemaActionFieldId(action);
+      if (actionType === 'refresh_options' || actionType === 'refresh-options') {
+        const control = selectControls[fieldId];
+        if (!control) throw new Error(`No select field found for ${fieldId || '(missing field)'}`);
+        const selectedValue = trimString(actionValue(action, payload));
+        await refreshSelectOptions(control, selectedValue, action.apply_write_back !== false && action.applyWriteBack !== false);
+        return;
+      }
+      if (actionType === 'upsert_option' || actionType === 'upsert-option') {
+        const control = selectControls[fieldId];
+        if (!control) throw new Error(`No select field found for ${fieldId || '(missing field)'}`);
+        const option = upsertSelectOption(control, actionItem(action, payload), action);
+        if (!option) throw new Error(`Unable to build option for ${fieldId}`);
+        syncConditionalState();
+        return;
+      }
+      if (actionType === 'select_option' || actionType === 'select-option') {
+        const control = selectControls[fieldId];
+        if (!control) throw new Error(`No select field found for ${fieldId || '(missing field)'}`);
+        let value = trimString(actionValue(action, payload));
+        if (!value) {
+          const option = selectControlOptionFromItem(actionItem(action, payload), action);
+          value = option?.value || '';
+          if (option && !control.options.some((candidate) => candidate.value === option.value)) {
+            upsertSelectOption(control, actionItem(action, payload), action);
+          }
+        }
+        if (!value || !selectOptionByValue(control, value, control.options, action.apply_write_back !== false && action.applyWriteBack !== false)) {
+          throw new Error(`Unable to select option ${value || '(empty)'} for ${fieldId}`);
+        }
+        return;
+      }
+      if (actionType === 'write_back' || actionType === 'write-back' || actionType === 'apply_write_back' || actionType === 'apply-write-back') {
+        const ownerField = fieldId ? schemaFieldById(fieldId) : interactionField;
+        if (!ownerField) throw new Error(`No schema field found for ${fieldId || '(interaction)'}`);
+        const item = actionItem(action, payload);
+        const writeBack = asRecord(action.write_back || action.writeBack);
+        const rules = Array.isArray(action.rules) ? action.rules
+          : (Array.isArray(writeBack.on_select) ? writeBack.on_select : null);
+        if (rules) {
+          applyWriteBackRules(rules, item);
+          syncConditionalState();
+        } else {
+          applyFieldWriteBack(ownerField, item);
+        }
+        return;
+      }
+      if (actionType === 'collapse' || actionType === 'close') {
+        if (fieldId) setSchemaFieldOpen(fieldId, false);
+        return;
+      }
+      if (actionType === 'open' || actionType === 'expand') {
+        if (fieldId) setSchemaFieldOpen(fieldId, true);
+        return;
+      }
+      if (actionType === 'mark_dirty' || actionType === 'mark-dirty') {
+        markSchemaDirty();
+        return;
+      }
+      if (actionType === 'open_url' || actionType === 'open-url' || actionType === 'url.open') {
+        await openSchemaActionUrl(action, payload);
+      }
+    };
+
+    const interactionResultActions = (payload: unknown): unknown[] => {
+      const payloadMap = asRecord(payload);
+      const actions = Array.isArray(payloadMap.actions) ? payloadMap.actions : [];
+      const openUrl = payloadMap.open_url || payloadMap.openUrl;
+      if (openUrl) {
+        return [...actions, isRecord(openUrl) ? { type: 'open_url', ...openUrl } : { type: 'open_url', url: openUrl }];
+      }
+      return actions;
+    };
+
+    const applyInteractionResultActions = async (field: SchemaField, payload: unknown): Promise<void> => {
+      const payloadMap = asRecord(payload);
+      if (payloadMap.ok === false) return;
+      for (const action of interactionResultActions(payload)) {
+        await applySchemaInteractionAction(field, action, payload);
+      }
+    };
     
     const renderField = (field: SchemaField, container: HTMLElement): void => {
+      currentSchemaFields[field.id] = field;
+
       if (field.type === 'interaction') {
         const source = schemaInteractionSource(field);
         const inputSpecs = schemaInteractionInputSpecs(field);
@@ -2038,6 +2403,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
             });
             if (seq !== requestSeq) return;
             renderInteractionOutput(field, outputEl, result);
+            await applyInteractionResultActions(field, result);
           } catch (error) {
             if (seq !== requestSeq) return;
             setInteractionMessage(dynamicSourceErrorMessage(error), 'error');
@@ -2348,6 +2714,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
             initialValue: selectInput.value,
             initialValueApplied: false,
             dynamicItems: [],
+            options: [],
           };
           selectControls[field.id] = selectControl;
           
@@ -2383,13 +2750,23 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
                 buildOptions(dependent.options);
                 if (!selectInput.value) {
                   selectInput.placeholder = dependent.defaultValue || field.placeholder || '';
-                  if (dependent.defaultValue) selectInput.value = dependent.defaultValue;
+                  if (dependent.defaultValue) {
+                    selectOptionByValue(selectControl, dependent.defaultValue, selectControl.options, true, false);
+                  }
                 }
               } else if (!selectInput.value) {
                 selectInput.placeholder = defaultValue || field.placeholder || '';
-                if (current) selectInput.value = current;
               }
               if (!field.dynamic_options_from && opts.length) buildOptions(opts);
+              if (!field.dynamic_options_from) {
+                const selectedValue = selectInput.value || current || defaultValue;
+                if (selectedValue) {
+                  selectOptionByValue(selectControl, selectedValue, selectControl.options, true, false);
+                }
+              }
+              if (field.dynamic_options_from) {
+                syncDependentSelectOptions();
+              }
               if (field.id === 'model') syncModelDependentFields();
               syncConditionalState();
             };
@@ -2536,7 +2913,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
    * Get current values from schema fields
    */
   function collectSchemaValues(parseStructured = false): JsonRecord {
-    const values: JsonRecord = {};
+    const values: JsonRecord = { ...currentSchemaWriteBackValues };
     Object.entries(currentSchemaValues).forEach(([id, { input, type, field }]) => {
       if (!input) return;
       if (!schemaFieldPersists(field)) {
@@ -2594,6 +2971,8 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
       settingsExtensionFields.innerHTML = '';
     }
     currentSchemaValues = {};
+    currentSchemaWriteBackValues = {};
+    currentSchemaFields = {};
     
     if (!isCodex) {
       // Load and render schema for this extension

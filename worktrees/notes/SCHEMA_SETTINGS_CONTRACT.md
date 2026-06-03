@@ -132,6 +132,35 @@ The same model applies to any dynamic select or picker:
 - current/default paths
 - identity path for binding-like selections
 
+Dynamic selects can also declare multi-field write-back from the selected option.
+The renderer must preserve the selected raw option metadata, not just the
+normalized `{ value, label }`, so schema paths can copy extension-owned metadata
+into ordinary settings fields:
+
+```json
+{
+  "id": "model",
+  "type": "select",
+  "source_method": "extension.models.list",
+  "write_back": {
+    "on_select": [
+      { "field": "model", "path": "id" },
+      { "field": "provider", "path": "capabilities.provider", "fallback_path": "family" }
+    ]
+  }
+}
+```
+
+This is provider-neutral. ALS-RS does not know what `provider` means; it only
+copies schema-declared paths from the selected option into schema-declared
+fields. Target fields may be visible inputs or hidden ordinary fields. Values
+written to hidden ordinary fields are included in the final settings patch.
+
+When a select depends on another field through `dynamic_options_from`, the
+renderer updates its local option set when the source value changes. If the
+current selected value is no longer present in the refreshed option set, the
+renderer clears it or applies the schema-declared default value.
+
 ## Dynamic submenu and fragment contract
 
 Schemas can split complex settings into generic submenu/group fields without
@@ -310,6 +339,53 @@ The response DTO is extension-owned and schema-mapped. Render kinds are `list`,
 `info`, and `json`. `write_back.on_select` can copy values from a selected result
 into ordinary schema fields by field id. Interaction inputs are transient unless
 the schema explicitly writes returned values into normal settings fields.
+
+Interaction responses can also return provider-neutral success actions. ALS-RS
+does not interpret provider semantics; it only follows action `type`, schema
+field ids, and JSON paths into the returned DTO.
+
+Example:
+
+```json
+{
+  "ok": true,
+  "config": {
+    "id": "openrouter-custom-abc123",
+    "label": "OpenRouter / Gemma",
+    "provider": "openrouter-custom-abc123",
+    "model": "google/gemma-4-26b-a4b-it"
+  },
+  "actions": [
+    { "type": "refresh_options", "field": "config" },
+    { "type": "upsert_option", "field": "config", "item_path": "config" },
+    {
+      "type": "select_option",
+      "field": "config",
+      "value_path": "config.id",
+      "apply_write_back": true
+    },
+    { "type": "collapse", "field": "config_generator" },
+    { "type": "mark_dirty" }
+  ]
+}
+```
+
+Supported generic action types:
+
+- `refresh_options`: refetch or locally refresh a select field's option set.
+- `upsert_option`: insert or replace one select option from `item_path`.
+- `select_option`: select an option by `value` / `value_path`; by default this
+  runs the target select field's `write_back.on_select` rules.
+- `write_back` / `apply_write_back`: apply a field's write-back rules, or an
+  action-local `rules` / `write_back.on_select` block, to the result payload.
+- `collapse` / `open`: close or open a submenu/group field by field id.
+- `mark_dirty`: marks the modal as having schema-driven pending changes.
+- `open_url`: open an `http` / `https` URL through the generic `url.open` UI RPC.
+
+`open_url` may also be returned as a top-level `open_url` / `openUrl` value for
+simple cases. The UI RPC handler launches the URL through `xdg-open`; extensions
+should still keep OAuth/API credential state transient and should not persist raw
+secrets into conversation metadata.
 
 Interaction fields may declare either one `input` or multiple `inputs`. Supported
 input kinds are `text`, `password`, `secret`, `number`, `checkbox`, and
@@ -523,6 +599,11 @@ Existing pieces that align with this contract:
 
 - schema rendering is driven by extension `settings_schema.json`
 - `dynamic_options_from` already handles dependent select options
+- dynamic select options preserve selected raw metadata for schema-declared
+  `write_back.on_select` rules
+- schema interaction submit results can run generic action blocks for option
+  refresh/upsert/select, submit-result write-back, submenu collapse/open,
+  dirty marking, and `url.open`
 - generic runtime option descriptors exist in `extensions/__init__.py`
 - ALS-RS persists both `provider_session_id` and compatibility `thread_id`
 - the settings save flow strips `settings.session` before persistence
