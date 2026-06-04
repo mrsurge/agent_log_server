@@ -20,6 +20,7 @@ mod sidebar_ipc;
 mod socketio;
 mod state;
 mod static_assets;
+mod te2_readiness;
 mod ui_rpc;
 
 use crate::config::ServerConfig;

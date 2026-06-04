@@ -27,6 +27,7 @@ pub fn routes(static_dir: &Path) -> Router<AppState> {
 }
 
 async fn index() -> Html<&'static str> {
+    crate::te2_readiness::post_ready_after_index_served();
     Html(include_str!("index.html"))
 }
 
