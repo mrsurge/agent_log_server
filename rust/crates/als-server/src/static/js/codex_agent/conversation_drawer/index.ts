@@ -23,6 +23,7 @@ interface ConversationDrawerContext {
   replayTranscript(): Promise<unknown>;
   refreshPlanSurface?(): Promise<unknown>;
   restorePendingApprovals(): void;
+  publishSidebarWindowState?(): Promise<unknown> | unknown;
   resetConversationUiState(): void;
   setDrawerOpen(open: boolean): void;
   applyHostUi(): void;
@@ -69,6 +70,7 @@ export function bindConversationDrawer(ctx: ConversationDrawerContext): Conversa
     replayTranscript: ctx.replayTranscript,
     refreshPlanSurface: ctx.refreshPlanSurface,
     restorePendingApprovals: ctx.restorePendingApprovals,
+    publishSidebarWindowState: ctx.publishSidebarWindowState,
     resetConversationUiState: ctx.resetConversationUiState,
     setDrawerOpen: ctx.setDrawerOpen,
     applyHostUi: ctx.applyHostUi,

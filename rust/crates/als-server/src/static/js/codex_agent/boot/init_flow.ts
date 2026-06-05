@@ -89,6 +89,7 @@ interface BootInitFlowContext {
   replayTranscript: () => Promise<unknown>;
   refreshPlanSurface?: () => Promise<unknown> | unknown;
   restorePendingApprovals: () => void;
+  publishSidebarWindowState?: () => Promise<unknown> | unknown;
   maybeAutoScroll: (force?: boolean) => void;
   ensureActivityRow: () => void;
   fetchStatus: () => Promise<unknown>;
@@ -133,6 +134,7 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
     replayTranscript,
     refreshPlanSurface,
     restorePendingApprovals,
+    publishSidebarWindowState,
     maybeAutoScroll,
     ensureActivityRow,
     fetchStatus,
@@ -208,6 +210,7 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
         await replayTranscript();
         await refreshPlanSurface?.();
         restorePendingApprovals();
+        await publishSidebarWindowState?.();
         setTimeout(() => {
           if (activeConversationView) setDrawerOpen(true);
           maybeAutoScroll(true);

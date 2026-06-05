@@ -157,11 +157,49 @@ type ConversationPreviewEntry = {
 type ConversationPreviewCache = Record<string, ConversationPreviewEntry | null>;
 type RootRuntimeOptions = UnknownRecord & { quickControls?: unknown[]; fields?: Record<string, unknown> };
 
+interface SidebarWindowContext {
+  hostId: string | null;
+  tokenId: string | null;
+  consoleWorkerId: string | null;
+  conversationId: string | null;
+  view: string;
+  stateful: boolean;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const getById = document.getElementById.bind(document);
   const queryOne = document.querySelector.bind(document);
   const byId = <T extends HTMLElement = HTMLElement>(id: string): T | null => getById(id) as T | null;
   const query = <T extends Element = Element>(selector: string): T | null => queryOne(selector) as T | null;
+  const launchParams = new URLSearchParams(window.location.search);
+
+  function queryParam(name: string): string | null {
+    const value = launchParams.get(name);
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+
+  function normalizeLaunchView(value: string | null): string {
+    if (value === 'conversation' || value === 'splash' || value === 'project') return value;
+    return 'conversation';
+  }
+
+  function readSidebarWindowContext(): SidebarWindowContext {
+    const hostId = queryParam('te2_host_id');
+    const tokenId = queryParam('te2_token_id');
+    const consoleWorkerId = queryParam('te2_console_worker_id');
+    const conversationId = queryParam('conversation_id') || queryParam('conversationId');
+    const view = normalizeLaunchView(queryParam('view'));
+    return {
+      hostId,
+      tokenId,
+      consoleWorkerId,
+      conversationId,
+      view,
+      stateful: Boolean(hostId),
+    };
+  }
 
   const statusEl = byId('agent-status');
   const wsStatusEl = byId('agent-ws');
@@ -271,16 +309,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const enableMobileScale = storedMobile === '1';
   document.body.classList.toggle('mobile-scale', enableMobileScale);
 
+  const sidebarWindowContext = readSidebarWindowContext();
   let conversationMeta: RootConversationMeta = {};
   let conversationSettings: RootConversationSettings = {};
   let conversationList: NonNullable<ConversationDrawerState['conversationList']> = [];
   let conversationListRevision = 0;
   let conversationPreviewCache: ConversationPreviewCache = {};
   let appConfig: RootAppConfig = {};
-  let activeView = 'splash';
+  let activeView = sidebarWindowContext.conversationId ? sidebarWindowContext.view : 'splash';
   // Client-local selection (do not treat SSOT active conversation as an authority after boot).
-  let clientConversationId: string | null = null;
-  let clientActiveView: string | null = null;
+  let clientConversationId: string | null = sidebarWindowContext.conversationId;
+  let clientActiveView: string | null = sidebarWindowContext.conversationId ? sidebarWindowContext.view : null;
   let miniConversationDrawerOpen = false;
   let hostUi: RootHostUi = { showClose: false, parentOrigin: null };
   let homePrefix: string | null = null;
@@ -328,6 +367,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let settingsUi: SettingsUiBinding | null = null;
   let markdownEnabled = true; // Toggle for markdown rendering
   let trackEditsEnabled = false; // Toggle for TE2 edit tracking per conversation
+  let publishSidebarWindowState: () => Promise<void> = async () => {};
   let lineNumbersEnabled = false; // Toggle for transcript gutter line numbers
   let viewWrapEnabled = false; // Toggle for wrapped view/read cards
   let diffSyntaxHighlight = false; // Toggle for syntax highlighting in diffs
@@ -846,6 +886,7 @@ document.addEventListener('DOMContentLoaded', () => {
     replayTranscript: (...args) => replayTranscript(...args),
     refreshPlanSurface: (...args) => refreshPlanSurface(...args),
     restorePendingApprovals,
+    publishSidebarWindowState: () => publishSidebarWindowState(),
     resetConversationUiState: () => {
       resetRuntimeFooterState();
     },
@@ -1625,6 +1666,45 @@ document.addEventListener('DOMContentLoaded', () => {
     sioCall,
     windowRef: window,
   });
+
+  function currentConversationTitle(): string | null {
+    const settingsTitle = conversationSettings.alias || conversationSettings.label;
+    if (typeof settingsTitle === 'string' && settingsTitle.trim()) return settingsTitle.trim();
+    const metaSettings = conversationMeta?.settings;
+    const metaTitle = metaSettings?.alias || metaSettings?.label;
+    if (typeof metaTitle === 'string' && metaTitle.trim()) return metaTitle.trim();
+    const conversationId = clientConversationId || conversationMeta?.conversation_id || null;
+    const listed = conversationId
+      ? conversationList.find((item) => item.conversation_id === conversationId)
+      : null;
+    const listedSettings = listed?.settings;
+    const listedTitle = listedSettings?.alias || listedSettings?.label;
+    if (typeof listedTitle === 'string' && listedTitle.trim()) return listedTitle.trim();
+    return conversationId;
+  }
+
+  publishSidebarWindowState = async () => {
+    if (!sidebarWindowContext.stateful || !sidebarWindowContext.hostId) return;
+    const conversationId = clientConversationId || conversationMeta?.conversation_id || null;
+    if (!conversationId) return;
+    try {
+      const result = await uiRpcClient.publishAppWindowState({
+        hostId: sidebarWindowContext.hostId,
+        tokenId: sidebarWindowContext.tokenId || sidebarWindowContext.consoleWorkerId || conversationId,
+        consoleWorkerId: sidebarWindowContext.consoleWorkerId,
+        conversationId,
+        view: clientActiveView || activeView || 'conversation',
+        title: currentConversationTitle(),
+        ready: true,
+      });
+      if (result.ok === false) {
+        console.warn('stateful ALS-RS window state publish failed', result);
+      }
+    } catch (error) {
+      console.warn('stateful ALS-RS window state publish failed', error);
+    }
+  };
+
   projectModal = bindProjectModal({
     uiRpc: uiRpcClient,
     getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
@@ -1658,6 +1738,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (refreshSerial !== reconnectRefreshSerial) return;
     await refreshPlanSurface();
     restorePendingApprovals();
+    await publishSidebarWindowState();
     maybeAutoScroll(true);
   }
 
@@ -2146,6 +2227,7 @@ document.addEventListener('DOMContentLoaded', () => {
     replayTranscript,
     refreshPlanSurface,
     restorePendingApprovals,
+    publishSidebarWindowState,
     maybeAutoScroll,
     ensureActivityRow,
     fetchStatus,

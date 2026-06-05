@@ -441,6 +441,46 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function publishAppWindowState(options: {
+    hostId: string;
+    tokenId?: string | null;
+    consoleWorkerId?: string | null;
+    conversationId: string;
+    view?: string | null;
+    title?: string | null;
+    ready?: boolean;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {
+      host_id: options.hostId,
+      conversation_id: options.conversationId,
+    };
+    if (typeof options.tokenId === 'string' && options.tokenId.trim()) {
+      payload.token_id = options.tokenId.trim();
+    }
+    if (typeof options.consoleWorkerId === 'string' && options.consoleWorkerId.trim()) {
+      payload.console_worker_id = options.consoleWorkerId.trim();
+    }
+    if (typeof options.view === 'string' && options.view.trim()) {
+      payload.view = options.view.trim();
+    }
+    if (typeof options.title === 'string' && options.title.trim()) {
+      payload.title = options.title.trim();
+    }
+    if (typeof options.ready === 'boolean') {
+      payload.ready = options.ready;
+    }
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'App window state requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.appWindowStatePublish,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function openFile(payload: JsonObject): Promise<JsonObject & { transport: TransportTag }> {
     const result = await callRpcNamespace<JsonObject>({
       namespace: UI_RPC_NAMESPACE,
@@ -517,6 +557,7 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     getTe2ProjectStatus,
     openTe2Project,
     createTe2Project,
+    publishAppWindowState,
     openFile,
     openUrl,
     subscribeLiveNotifications,

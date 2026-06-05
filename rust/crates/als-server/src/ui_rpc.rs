@@ -1,5 +1,6 @@
 use crate::{agent_edits::TrackedAgentDiff, sidebar_ipc, state::AppState};
 use als_adapter_protocol::JsonMap;
+use als_dto::APP_ID;
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,7 @@ async fn dispatch_rpc(
         "project.te2.create" => {
             Ok(sidebar_ipc::te2_project_create(io, state, request.params).await)
         }
+        "app.windowState.publish" => app_window_state_publish(io, state, request.params).await,
         "file.open" => {
             let forwarded_params = file_open_sidebar_params(&request.params);
             info!(
@@ -167,6 +169,89 @@ fn url_open(params: JsonMap) -> Result<Value, RpcError> {
         "source": params.get("source").cloned().unwrap_or(Value::Null),
         "conversation_id": params.get("conversation_id").cloned().unwrap_or(Value::Null),
         "transport": "rpc"
+    }))
+}
+
+async fn app_window_state_publish(
+    io: &SocketIo,
+    state: &AppState,
+    params: JsonMap,
+) -> Result<Value, RpcError> {
+    let host_id = required_string_any(&params, &["host_id", "hostId"])?;
+    let conversation_id = required_string_any(&params, &["conversation_id", "conversationId"])?;
+    let meta = state
+        .conversations
+        .load_meta_if_exists(&conversation_id)
+        .map_err(internal_rpc_error)?
+        .ok_or_else(|| rpc_error(-32044, "Conversation not found"))?;
+    let view = optional_string_any(&params, &["view"])
+        .filter(|value| value == "conversation" || value == "splash" || value == "project")
+        .unwrap_or_else(|| "conversation".to_owned());
+    let token_id =
+        optional_string_any(&params, &["token_id", "tokenId"]).unwrap_or_else(|| APP_ID.to_owned());
+    let console_worker_id = optional_string_any(&params, &["console_worker_id", "consoleWorkerId"]);
+    let title = optional_string_any(&params, &["title", "label"])
+        .or_else(|| meta.alias.clone())
+        .or_else(|| meta.label.clone())
+        .or_else(|| setting_string(&meta.settings, "alias"))
+        .or_else(|| setting_string(&meta.settings, "label"))
+        .or_else(|| meta.title.clone())
+        .unwrap_or_else(|| meta.conversation_id.clone());
+    let base_url = format!("/app/{APP_ID}");
+    let url = build_stateful_conversation_url(
+        &base_url,
+        &host_id,
+        &token_id,
+        console_worker_id.as_deref(),
+        &conversation_id,
+        &view,
+    );
+    let query_state = json!({
+        "conversation_id": conversation_id.clone(),
+        "view": view.clone(),
+    });
+    let sidebar_payload = json!({
+        "lane": {
+            "app_id": APP_ID,
+            "base_url": base_url.clone(),
+        },
+        "app_id": APP_ID,
+        "base_url": base_url.clone(),
+        "host_id": host_id.clone(),
+        "token_id": token_id.clone(),
+        "console_worker_id": console_worker_id.clone().unwrap_or_default(),
+        "state_kind": "conversation",
+        "query_state": query_state,
+        "url": url.clone(),
+        "restore_url": url.clone(),
+        "label": title.clone(),
+        "title": title,
+        "activate": false,
+        "source": "als_rs_backend",
+    });
+    let sidebar = match sidebar_ipc::proxy_sidebar_rpc(
+        io,
+        state,
+        "sidebar.window.state.update",
+        sidebar_payload,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => json!({
+            "ok": false,
+            "error": error.to_string(),
+        }),
+    };
+    let sidebar_ok = sidebar.get("ok").and_then(Value::as_bool) != Some(false);
+    Ok(json!({
+        "ok": sidebar_ok,
+        "transport": "rpc",
+        "host_id": host_id,
+        "conversation_id": conversation_id,
+        "view": view,
+        "url": url,
+        "sidebar": sidebar,
     }))
 }
 
@@ -589,6 +674,70 @@ fn required_string(params: &JsonMap, key: &str) -> Result<String, RpcError> {
         .ok_or_else(|| rpc_error(-32602, format!("{key} is required")))
 }
 
+fn required_string_any(params: &JsonMap, keys: &[&str]) -> Result<String, RpcError> {
+    optional_string_any(params, keys)
+        .ok_or_else(|| rpc_error(-32602, format!("{} is required", keys.join(" or "))))
+}
+
+fn optional_string_any(params: &JsonMap, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| params.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn setting_string(settings: &JsonMap, key: &str) -> Option<String> {
+    settings
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn build_stateful_conversation_url(
+    base_url: &str,
+    host_id: &str,
+    token_id: &str,
+    console_worker_id: Option<&str>,
+    conversation_id: &str,
+    view: &str,
+) -> String {
+    let mut params = vec![
+        ("embed", "1".to_owned()),
+        ("te2_host_id", host_id.to_owned()),
+        ("te2_token_id", token_id.to_owned()),
+    ];
+    if let Some(console_worker_id) = console_worker_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        params.push(("te2_console_worker_id", console_worker_id.to_owned()));
+    }
+    params.push(("conversation_id", conversation_id.to_owned()));
+    params.push(("view", view.to_owned()));
+    let query = params
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", percent_encode_query_value(&value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{base_url}?{query}")
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        let ch = *byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+            encoded.push(ch);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 fn filesystem_search_sync(config_dir: &Path, params: &JsonMap) -> Result<Value, RpcError> {
     let query = params
         .get("query")
@@ -940,6 +1089,22 @@ mod tests {
         let value = filesystem_home();
         assert_eq!(value["ok"], json!(true));
         assert!(value["home"].as_str().is_some());
+    }
+
+    #[test]
+    fn builds_stateful_conversation_url() {
+        let value = build_stateful_conversation_url(
+            "/app/als-rs",
+            "slot:als-rs:als_rs:a1b2",
+            "als_rs",
+            Some("als_rs:a1b2"),
+            "conv 1",
+            "conversation",
+        );
+        assert_eq!(
+            value,
+            "/app/als-rs?embed=1&te2_host_id=slot%3Aals-rs%3Aals_rs%3Aa1b2&te2_token_id=als_rs&te2_console_worker_id=als_rs%3Aa1b2&conversation_id=conv%201&view=conversation"
+        );
     }
 
     #[test]

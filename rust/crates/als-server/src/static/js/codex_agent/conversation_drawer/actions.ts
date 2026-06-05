@@ -52,6 +52,7 @@ interface ConversationDrawerActionsContext {
   replayTranscript(): Awaitable;
   refreshPlanSurface?(): Awaitable;
   restorePendingApprovals(): void;
+  publishSidebarWindowState?(): Awaitable;
   resetConversationUiState(): void;
   setDrawerOpen(open: boolean): void;
   applyHostUi(): void;
@@ -124,6 +125,7 @@ export function createConversationDrawerActions(
     replayTranscript,
     refreshPlanSurface,
     restorePendingApprovals,
+    publishSidebarWindowState,
     resetConversationUiState,
     setDrawerOpen,
     applyHostUi,
@@ -264,6 +266,7 @@ export function createConversationDrawerActions(
     await replayTranscript();
     await refreshPlanSurface?.();
     restorePendingApprovals();
+    await publishSidebarWindowState?.();
     setDrawerOpen(view === 'conversation');
     setState({
       activeView: view,
@@ -297,6 +300,7 @@ export function createConversationDrawerActions(
     await replayTranscript();
     await refreshPlanSurface?.();
     restorePendingApprovals();
+    await publishSidebarWindowState?.();
     setDrawerOpen(true);
     setState({ activeView: 'conversation' });
     applyHostUi();

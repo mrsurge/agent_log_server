@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
             })
             .await
     });
+    te2_readiness::post_ready_after_server_started();
 
     wait_for_shutdown_signal().await;
     info!("ALS-RS shutdown signal received");

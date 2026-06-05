@@ -22,7 +22,7 @@ struct ReadinessTarget {
     host_header: String,
 }
 
-pub fn post_ready_after_index_served() {
+pub fn post_ready_after_server_started() {
     let Some(target) = ReadinessTarget::from_env() else {
         return;
     };

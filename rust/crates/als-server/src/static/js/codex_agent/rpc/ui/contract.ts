@@ -22,6 +22,7 @@ export const UI_RPC_METHODS = {
   projectTe2StatusGet: 'project.te2.status.get',
   projectTe2Open: 'project.te2.open',
   projectTe2Create: 'project.te2.create',
+  appWindowStatePublish: 'app.windowState.publish',
   fileOpen: 'file.open',
   urlOpen: 'url.open',
 } as const;

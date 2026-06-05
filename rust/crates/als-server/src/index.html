@@ -76,9 +76,11 @@
         try {
           const isProxied = window.location.pathname.startsWith('/api/app/') || window.location.pathname.startsWith('/app/');
           const directTe2Origin = `${window.location.protocol}//${window.location.hostname || '127.0.0.1'}:8089`;
+          const query = new URLSearchParams(window.location.search);
+          const statefulWorkerId = (query.get('te2_console_worker_id') || '').trim();
           const bridge = initConsoleBridge({
             workerLabel: 'als_rs',
-            uniquePerWindow: true,
+            ...(statefulWorkerId ? { workerId: statefulWorkerId } : { uniquePerWindow: true }),
             ...(isProxied ? {} : { socketOrigin: directTe2Origin }),
           });
           if (!bridge && attempt < 40) {
