@@ -501,8 +501,23 @@ fn extension_root_relative_file_path(
 async fn extension_models(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
     let extension_id = require_extension_id(params)?;
     ensure_registered_extension(state, &extension_id)?;
-    let mut result =
-        adapter_extension_request(state, &extension_id, methods::EXTENSION_LIST_MODELS).await?;
+    let mut request_params = JsonMap::new();
+    for (key, value) in params {
+        if key == "extension_id" {
+            continue;
+        }
+        request_params.insert(key.clone(), value.clone());
+    }
+    request_params.insert(
+        "extension_id".to_owned(),
+        Value::String(extension_id.clone()),
+    );
+    let mut result = adapter_extension_request_with_params(
+        state,
+        methods::EXTENSION_LIST_MODELS,
+        request_params,
+    )
+    .await?;
     if let Value::Object(ref mut object) = result {
         object
             .entry("models")

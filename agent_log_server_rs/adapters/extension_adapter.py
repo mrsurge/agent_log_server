@@ -845,7 +845,12 @@ class ExtensionJsonRpcAdapter:
                 "supported": False,
                 "reason": f"Extension is not active: {extension_id}",
             }
-        result = await self._loader.list_models(extension_id)
+        request_params: JsonMap = {
+            key: value
+            for key, value in params.items()
+            if key != "extension_id"
+        }
+        result = await self._loader.list_models(extension_id, **request_params)
         result_map = optional_map(result)
         if result_map is not None:
             models = _json_map_list(result_map.get("models"))

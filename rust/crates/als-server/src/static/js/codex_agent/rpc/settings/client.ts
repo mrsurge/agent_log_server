@@ -421,8 +421,17 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
 
   async function listExtensionModels(options: {
     extensionId: string;
+    extraParams?: JsonObject | null;
   }): Promise<{ models: JsonObject[]; transport: TransportTag } & JsonObject> {
-    const params = { extension_id: options.extensionId };
+    const params: JsonObject = { extension_id: options.extensionId };
+    const extraParams = asObject(options.extraParams);
+    if (extraParams) {
+      Object.entries(extraParams).forEach(([key, value]) => {
+        if (value !== undefined) {
+          params[key] = value;
+        }
+      });
+    }
     if (!rpcEnabled()) {
       const rawLegacy = await deps.sioCall('get_extension_models', params);
       const legacy = Array.isArray(rawLegacy) ? null : normalizeLegacyResult(rawLegacy);

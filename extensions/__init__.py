@@ -2321,10 +2321,23 @@ def requires_eager_session_init(extension_id: str) -> bool:
     return False
 
 
-async def list_models(extension_id: str) -> object:
+async def list_models(extension_id: str, **params: object) -> object:
     """List models for an extension. Handler must implement list_models()."""
     list_models_fn = _callable_attr(get_handler(extension_id), "list_models")
     if list_models_fn is not None:
+        if params:
+            signature = inspect.signature(list_models_fn)
+            allows_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+            call_kwargs = {
+                key: value
+                for key, value in params.items()
+                if allows_kwargs or key in signature.parameters
+            }
+            if call_kwargs:
+                return await _invoke_maybe_async(list_models_fn, **call_kwargs)
         return await _invoke_maybe_async(list_models_fn)
     return {"models": []}
 

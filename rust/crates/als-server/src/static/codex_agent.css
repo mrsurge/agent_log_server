@@ -1831,6 +1831,21 @@ label.is-disabled {
   border-left: 3px solid var(--accent);
 }
 
+.schema-option-picker-item {
+  width: 100%;
+  background: transparent;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.schema-option-picker-item .picker-item-text {
+  width: 100%;
+}
+
 .rollout-item {
   display: grid;
   grid-template-columns: 72px 1fr;

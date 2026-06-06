@@ -156,10 +156,242 @@ copies schema-declared paths from the selected option into schema-declared
 fields. Target fields may be visible inputs or hidden ordinary fields. Values
 written to hidden ordinary fields are included in the final settings patch.
 
+Write-back is non-destructive by default. If a schema path cannot be resolved,
+or resolves to an empty string/null value, the renderer skips that target instead
+of clearing an existing field. A schema can explicitly opt into clearing with a
+rule flag such as `clear: true`, `allow_empty: true`, or `allow_null: true`.
+Writing the same value back into a field should not be treated as a dependency
+change that refetches downstream options.
+
 When a select depends on another field through `dynamic_options_from`, the
 renderer updates its local option set when the source value changes. If the
 current selected value is no longer present in the refreshed option set, the
 renderer clears it or applies the schema-declared default value.
+This is field-id neutral: `reasoning_effort`, OpenCode-style `variant`, or any
+other extension-owned dependent select must use the same `dynamic_options_from`
+contract rather than a hardcoded frontend field name.
+
+Dynamic source calls can also pass schema-declared request params. Params use
+the same token language as schema interactions:
+
+```json
+{
+  "id": "model",
+  "type": "select",
+  "label": "Model",
+  "dynamic_source": "/api/extensions/opencode-app-server/models",
+  "source_method": "extension.models.list",
+  "source_params": {
+    "provider": "$field.provider",
+    "cwd": "$context.cwd"
+  },
+  "depends_on": ["provider"],
+  "refresh_on": ["provider"]
+}
+```
+
+`depends_on` means the field is gated until the listed fields have values.
+`refresh_on` means the field should refetch when those fields change. The
+renderer may also derive refresh dependencies from `$field.*` tokens in
+`source_params`, but schema authors should declare `depends_on` when an empty
+dependency should suppress the backend request.
+
+The `/rpc/settings` method `extension.models.list` forwards these params through
+the Rust server and Python adapter to extension handlers that opt into them by
+named parameters or `**kwargs`. Existing no-argument model list handlers remain
+valid.
+
+Dynamic sources may use a schema interaction as their option source when an
+extension needs a provider-native list that is not the generic model/session
+list:
+
+```json
+{
+  "id": "provider",
+  "type": "select",
+  "label": "Provider",
+  "source_method": "extension.schemaInteraction.run",
+  "source": {
+    "action": "provider.list",
+    "params": {
+      "cwd": "$context.cwd"
+    }
+  },
+  "options_path": "items",
+  "option_value_path": "id",
+  "option_label_path": "label",
+  "semantic": {
+    "role": "provider",
+    "runtime_key": "provider"
+  }
+}
+```
+
+This is still provider-neutral. ALS-RS routes the declared generic RPC and reads
+only the schema-declared response paths.
+
+## Provider and model hierarchy
+
+Extensions that expose provider-specific catalogs can opt into a semantic
+provider/model hierarchy without ALS-RS understanding the provider's native
+meaning.
+
+Provider fields use:
+
+```json
+"semantic": {
+  "role": "provider",
+  "runtime_key": "provider"
+}
+```
+
+Model fields use:
+
+```json
+"semantic": {
+  "role": "model",
+  "runtime_key": "model"
+}
+```
+
+The semantic role makes the field discoverable to shared UI surfaces. The
+dependency relationship is still declared mechanically through `source_params`,
+`depends_on`, and `refresh_on`. For example, OpenCode can expose a flat provider
+list and a provider-filtered model list while OpenCode remains responsible for
+auth state, provider configuration, and final app-server request shaping.
+
+## Provider auth field
+
+Provider auth/configuration is a schema-declared interaction workflow, not a
+conversation setting and not a provider-specific frontend branch.
+
+A schema can declare a provider auth launcher:
+
+```json
+{
+  "id": "provider_auth",
+  "type": "provider_auth",
+  "label": "Connect Provider",
+  "source": {
+    "method": "extension.schemaInteraction.run",
+    "actions": {
+      "list": "provider.auth.methods",
+      "start": "provider.auth.start",
+      "status": "provider.auth.status",
+      "complete": "provider.auth.complete"
+    },
+    "params": {
+      "cwd": "$context.cwd"
+    }
+  }
+}
+```
+
+The list action returns provider items. Each provider can include zero or more
+auth methods:
+
+```json
+{
+  "items": [
+    {
+      "id": "openrouter",
+      "label": "OpenRouter",
+      "connected": false,
+      "auth_methods": [
+        {
+          "id": "api-key",
+          "type": "api_key",
+          "label": "API Key",
+          "prompts": [
+            {
+              "id": "api_key",
+              "type": "secret",
+              "label": "API Key",
+              "persist": false
+            }
+          ]
+        },
+        {
+          "id": "oauth",
+          "type": "oauth",
+          "label": "OAuth"
+        }
+      ]
+    }
+  ]
+}
+```
+
+ALS-RS renders a modal that lets the user select a provider, select one of its
+auth methods, fill transient prompt fields, and submit. It sends:
+
+```json
+{
+  "provider_id": "openrouter",
+  "method_id": "api-key",
+  "method_type": "api_key",
+  "inputs": {
+    "api_key": "..."
+  }
+}
+```
+
+Prompt values are transient and must not be persisted into `meta.settings`.
+Extensions own durable credential storage and should return safe provider/model
+settings or success actions only.
+
+Auth responses can reuse the generic schema action contract. For API-key style
+success:
+
+```json
+{
+  "ok": true,
+  "provider": {
+    "id": "openrouter",
+    "label": "OpenRouter",
+    "connected": true
+  },
+  "actions": [
+    { "type": "refresh_options", "field": "provider" },
+    { "type": "upsert_option", "field": "provider", "item_path": "provider" },
+    { "type": "select_option", "field": "provider", "value_path": "provider.id" },
+    { "type": "refresh_options", "field": "model" },
+    { "type": "mark_dirty" }
+  ]
+}
+```
+
+For OAuth start:
+
+```json
+{
+  "ok": true,
+  "mode": "oauth",
+  "auth_flow_id": "flow_123",
+  "url": "https://example.test/oauth/start",
+  "callback_mode": "code",
+  "actions": [
+    { "type": "open_url", "url_path": "url" }
+  ]
+}
+```
+
+The modal can call the declared `status` or `complete` actions with
+`auth_flow_id`; code completion also sends the pasted `code`.
+
+## Large select picker
+
+Schema selects with more than ten loaded options should not render a large
+inline dropdown. The renderer turns those fields into a read-only value plus a
+button that opens a settings option picker.
+
+The option picker:
+
+- filters loaded options with a regex input
+- searches option label, value, and detail text
+- selects through the same code path as the normal dropdown
+- runs the same `write_back.on_select` and dependency refresh behavior
+- has no filesystem parent-directory behavior
 
 ## Dynamic submenu and fragment contract
 
