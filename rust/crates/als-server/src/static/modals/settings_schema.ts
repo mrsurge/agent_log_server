@@ -1564,8 +1564,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
 
     const schemaInteractionInputSpecs = (field: SchemaField): JsonRecord[] => {
       if (Array.isArray(field.inputs)) {
-        const specs = field.inputs.filter(isRecord);
-        if (specs.length) return specs;
+        return field.inputs.filter(isRecord);
       }
       if (isRecord(field.input)) return [field.input];
       return [{ id: 'query' }];

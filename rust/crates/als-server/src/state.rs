@@ -29,6 +29,7 @@ pub struct AppState {
     pub config: ServerConfig,
     pub conversations: ConversationStore,
     pub extensions: ExtensionRegistry,
+    pub focused_window: FocusedWindowStore,
     pub host_ui: HostUiStore,
     pub inline_agent_edits: InlineAgentEditLedger,
     pub ipc_clients: IpcClientStore,
@@ -59,6 +60,7 @@ impl AppState {
                 Some(config.roots.config_dir.clone()),
             )
         });
+        let focused_window = FocusedWindowStore::default();
         let host_ui = HostUiStore::default();
         let inline_agent_edits = InlineAgentEditLedger::default();
         let ipc_clients = IpcClientStore::default();
@@ -72,6 +74,7 @@ impl AppState {
             config,
             conversations,
             extensions,
+            focused_window,
             host_ui,
             inline_agent_edits,
             ipc_clients,
@@ -87,6 +90,47 @@ impl AppState {
 
     pub fn bump_list_revision(&self) -> u64 {
         self.list_revision.fetch_add(1, Ordering::SeqCst) + 1
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FocusedWindowSnapshot {
+    pub host_id: Option<String>,
+    pub conversation_id: String,
+    pub state_kind: Option<String>,
+    pub url: Option<String>,
+    pub restore_url: Option<String>,
+    pub token_id: Option<String>,
+    pub console_worker_id: Option<String>,
+    pub source: Option<String>,
+    pub ts: Option<i64>,
+}
+
+#[derive(Clone, Default)]
+pub struct FocusedWindowStore {
+    inner: Arc<Mutex<Option<FocusedWindowSnapshot>>>,
+}
+
+impl FocusedWindowStore {
+    pub fn snapshot(&self) -> Result<Option<FocusedWindowSnapshot>> {
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("focused window lock poisoned"))?;
+        Ok(state.clone())
+    }
+
+    pub fn set(&self, snapshot: FocusedWindowSnapshot) -> Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("focused window lock poisoned"))?;
+        *state = Some(snapshot);
+        Ok(())
+    }
+
+    pub fn conversation_id(&self) -> Result<Option<String>> {
+        Ok(self.snapshot()?.map(|snapshot| snapshot.conversation_id))
     }
 }
 

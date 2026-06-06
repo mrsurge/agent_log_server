@@ -1380,6 +1380,11 @@ body.widescreen-resizing * {
   min-height: 140px;
 }
 
+#settings-extension-fields [hidden],
+#settings-extension-fields .is-hidden-by-condition {
+  display: none !important;
+}
+
 .settings-schema-section {
   display: grid;
   gap: 0.25rem;

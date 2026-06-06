@@ -1,7 +1,7 @@
 use crate::{
     conversation_rpc,
     conversation_store::ConversationMetaUpdate,
-    state::{AppState, HostUiSnapshot},
+    state::{AppState, FocusedWindowSnapshot, HostUiSnapshot},
 };
 use als_adapter_protocol::JsonMap;
 use anyhow::{Result, anyhow, bail};
@@ -435,13 +435,14 @@ async fn query_initial_cwd(
 
 async fn register_sidebar_client(client: &Client) {
     let payload = json!({
-        "role": "host",
+        "role": "iframe",
         "app": "als-rs",
         "app_id": "als-rs",
         "appId": "als-rs",
-        "client_id": "als-rs",
+        "client_id": "als-rs-backend",
+        "clientId": "als-rs-backend",
         "agentEdits": true,
-        "capabilities": ["agentEdits", "sidebar.agentEdits"],
+        "capabilities": ["agentEdits", "sidebar.agentEdits", "sidebar.window.focused"],
     });
     match sidebar_rpc_call(client, "sidebar.register", payload).await {
         Ok(value) if !rpc_result_explicitly_not_ok(&value) => {
@@ -608,6 +609,9 @@ async fn process_rpc_notification(io: &SocketIo, state: &AppState, payload: Payl
         "sidebar.mention" => {
             process_mention(io, state, params).await?;
         }
+        "sidebar.window.focused" => {
+            process_focused_window(state, params)?;
+        }
         "sidebar.agentEdits.documentState.get" => {
             publish_inline_agent_document_state(io, state, params).await?;
         }
@@ -619,6 +623,121 @@ async fn process_rpc_notification(io: &SocketIo, state: &AppState, payload: Payl
         }
     }
     Ok(())
+}
+
+fn process_focused_window(state: &AppState, params: JsonMap) -> Result<()> {
+    if let Some(app_id) = string_field(&params, "app_id").or_else(|| string_field(&params, "appId"))
+    {
+        if app_id != "als-rs" {
+            return Ok(());
+        }
+    }
+    if params.get("focused").and_then(Value::as_bool) == Some(false) {
+        return Ok(());
+    }
+    let Some(snapshot) = focused_window_snapshot_from_params(&params) else {
+        warn!(
+            host_id = ?string_field(&params, "host_id").or_else(|| string_field(&params, "hostId")),
+            "sidebar.window.focused notification did not include a conversation target"
+        );
+        return Ok(());
+    };
+    let conversation_id = snapshot.conversation_id.clone();
+    let host_id = snapshot.host_id.clone();
+    state.focused_window.set(snapshot)?;
+    info!(
+        conversation_id = %conversation_id,
+        host_id = ?host_id,
+        "updated focused ALS-RS sidebar window target"
+    );
+    Ok(())
+}
+
+fn focused_window_snapshot_from_params(params: &JsonMap) -> Option<FocusedWindowSnapshot> {
+    let conversation_id = focused_conversation_id_from_params(params)?;
+    Some(FocusedWindowSnapshot {
+        host_id: string_field(params, "host_id").or_else(|| string_field(params, "hostId")),
+        conversation_id,
+        state_kind: string_field(params, "state_kind")
+            .or_else(|| string_field(params, "stateKind")),
+        url: string_field(params, "url"),
+        restore_url: string_field(params, "restore_url")
+            .or_else(|| string_field(params, "restoreUrl")),
+        token_id: string_field(params, "token_id").or_else(|| string_field(params, "tokenId")),
+        console_worker_id: string_field(params, "console_worker_id")
+            .or_else(|| string_field(params, "consoleWorkerId")),
+        source: string_field(params, "source"),
+        ts: int_field(params, "ts"),
+    })
+}
+
+fn focused_conversation_id_from_params(params: &JsonMap) -> Option<String> {
+    conversation_id_from_query_state(params.get("query_state"))
+        .or_else(|| conversation_id_from_query_state(params.get("queryState")))
+        .or_else(|| {
+            string_field(params, "restore_url")
+                .or_else(|| string_field(params, "restoreUrl"))
+                .and_then(|url| conversation_id_from_url(&url))
+        })
+        .or_else(|| string_field(params, "url").and_then(|url| conversation_id_from_url(&url)))
+}
+
+fn conversation_id_from_query_state(value: Option<&Value>) -> Option<String> {
+    let object = value?.as_object()?;
+    string_from_object(object, "conversation_id")
+        .or_else(|| string_from_object(object, "conversationId"))
+}
+
+fn conversation_id_from_url(url: &str) -> Option<String> {
+    let query = url.split_once('?')?.1.split('#').next().unwrap_or_default();
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = decode_query_component(key);
+        if key == "conversation_id" || key == "conversationId" {
+            let value = decode_query_component(value);
+            if !value.trim().is_empty() {
+                return Some(value.trim().to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn decode_query_component(value: &str) -> String {
+    fn hex(value: u8) -> Option<u8> {
+        match value {
+            b'0'..=b'9' => Some(value - b'0'),
+            b'a'..=b'f' => Some(value - b'a' + 10),
+            b'A'..=b'F' => Some(value - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                    output.push((high << 4) | low);
+                    index += 3;
+                    continue;
+                }
+                output.push(bytes[index]);
+                index += 1;
+            }
+            b'+' => {
+                output.push(b' ');
+                index += 1;
+            }
+            byte => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 async fn publish_inline_agent_document_state(
@@ -791,7 +910,35 @@ async fn process_mention(io: &SocketIo, state: &AppState, payload: JsonMap) -> R
         bail!("mention path cannot contain backticks");
     }
     let selection = state.ui_selection.snapshot()?;
-    let conversation_id = string_field(&payload, "conversation_id")
+    let explicit_conversation_id = string_field(&payload, "conversation_id")
+        .or_else(|| string_field(&payload, "conversationId"));
+    let focused_conversation_id = state.focused_window.conversation_id()?;
+    let focused_conversation_is_valid = match explicit_conversation_id.as_ref() {
+        Some(_) => false,
+        None => match focused_conversation_id.as_ref() {
+            Some(conversation_id) => state
+                .conversations
+                .load_meta_if_exists(conversation_id)?
+                .is_some(),
+            None => false,
+        },
+    };
+    if explicit_conversation_id.is_none()
+        && focused_conversation_id.is_some()
+        && !focused_conversation_is_valid
+    {
+        warn!(
+            conversation_id = ?focused_conversation_id,
+            "focused sidebar window conversation is stale; falling back to active conversation"
+        );
+    }
+    let conversation_id = explicit_conversation_id
+        .clone()
+        .or_else(|| {
+            focused_conversation_is_valid
+                .then(|| focused_conversation_id.clone())
+                .flatten()
+        })
         .or(selection.active_conversation_id.clone())
         .ok_or_else(|| anyhow!("no active conversation selected"))?;
     let Some(meta) = state.conversations.load_meta_if_exists(&conversation_id)? else {
@@ -822,7 +969,8 @@ async fn process_mention(io: &SocketIo, state: &AppState, payload: JsonMap) -> R
     }
 
     let active_conversation = selection.active_conversation_id.as_deref() == Some(&conversation_id);
-    if selection.active_view == "conversation" && active_conversation {
+    let focused_conversation = focused_conversation_id.as_deref() == Some(&conversation_id);
+    if focused_conversation || (selection.active_view == "conversation" && active_conversation) {
         emit_rpc_notification(
             io,
             CONVERSATIONS_RPC_NAMESPACE,
@@ -1038,8 +1186,10 @@ fn positive(value: Option<i64>) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cwd_from_value, encode_draft_mention_token, rpc_result_explicitly_not_ok,
-        same_logical_path, sidebar_project_result_path, sidebar_rpc_result, truncated_content,
+        conversation_id_from_url, cwd_from_value, encode_draft_mention_token,
+        focused_conversation_id_from_params, focused_window_snapshot_from_params,
+        rpc_result_explicitly_not_ok, same_logical_path, sidebar_project_result_path,
+        sidebar_rpc_result, truncated_content,
     };
     use serde_json::json;
 
@@ -1085,6 +1235,78 @@ mod tests {
             sidebar_project_result_path(&json!({"data": {"path": "/nested"}})),
             Some("/nested".to_owned())
         );
+    }
+
+    #[test]
+    fn focused_window_snapshot_prefers_query_state() {
+        let params = json!({
+            "app_id": "als-rs",
+            "host_id": "slot:als-rs:als_rs:a1b2",
+            "state_kind": "conversation",
+            "query_state": {"conversation_id": "conv-query"},
+            "restore_url": "/app/als-rs?conversation_id=conv-restore",
+            "url": "/app/als-rs?conversation_id=conv-url",
+            "token_id": "als_rs",
+            "console_worker_id": "als_rs:a1b2",
+            "source": "header_icon",
+            "ts": 1778220000000i64,
+        })
+        .as_object()
+        .expect("params should be object")
+        .clone();
+
+        let snapshot = focused_window_snapshot_from_params(&params)
+            .expect("focused window snapshot should parse");
+        assert_eq!(snapshot.conversation_id, "conv-query");
+        assert_eq!(snapshot.host_id.as_deref(), Some("slot:als-rs:als_rs:a1b2"));
+        assert_eq!(snapshot.state_kind.as_deref(), Some("conversation"));
+        assert_eq!(snapshot.token_id.as_deref(), Some("als_rs"));
+        assert_eq!(snapshot.console_worker_id.as_deref(), Some("als_rs:a1b2"));
+        assert_eq!(snapshot.source.as_deref(), Some("header_icon"));
+        assert_eq!(snapshot.ts, Some(1778220000000));
+    }
+
+    #[test]
+    fn focused_conversation_id_accepts_camel_query_state_and_urls() {
+        let params = json!({
+            "queryState": {"conversationId": "conv-camel"},
+            "restoreUrl": "/app/als-rs?conversation_id=conv-restore",
+            "url": "/app/als-rs?conversation_id=conv-url",
+        })
+        .as_object()
+        .expect("params should be object")
+        .clone();
+        assert_eq!(
+            focused_conversation_id_from_params(&params),
+            Some("conv-camel".to_owned())
+        );
+
+        let params = json!({
+            "restoreUrl": "/app/als-rs?embed=1&conversation_id=conv%20restore",
+            "url": "/app/als-rs?conversation_id=conv-url",
+        })
+        .as_object()
+        .expect("params should be object")
+        .clone();
+        assert_eq!(
+            focused_conversation_id_from_params(&params),
+            Some("conv restore".to_owned())
+        );
+    }
+
+    #[test]
+    fn conversation_id_from_url_decodes_query_values() {
+        assert_eq!(
+            conversation_id_from_url(
+                "/app/als-rs?embed=1&conversation_id=conv%3A123+with+space#ignored"
+            ),
+            Some("conv:123 with space".to_owned())
+        );
+        assert_eq!(
+            conversation_id_from_url("/app/als-rs?conversationId=conv-camel"),
+            Some("conv-camel".to_owned())
+        );
+        assert_eq!(conversation_id_from_url("/app/als-rs?embed=1"), None);
     }
 
     #[test]
