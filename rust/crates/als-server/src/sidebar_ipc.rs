@@ -148,7 +148,54 @@ pub async fn publish_agent_edits(io: &SocketIo, state: &AppState, payload: JsonM
     publish_agent_edits_with_client(&client, payload).await
 }
 
-async fn publish_agent_edits_with_current_client(state: &AppState, payload: JsonMap) -> bool {
+pub async fn clear_agent_edits(state: &AppState, payload: JsonMap) -> bool {
+    let Some(client) = state.sidebar_ipc.current().await else {
+        warn!(
+            namespace = SIDEBAR_NAMESPACE,
+            socket_path = SIDEBAR_SOCKET_PATH,
+            event = RPC_EVENT,
+            method = "sidebar.agentEdits.clear",
+            payload = ?payload,
+            "cannot send sidebar.agentEdits.clear RPC because sidebar IPC client is unavailable"
+        );
+        return false;
+    };
+    match sidebar_rpc_call(
+        &client,
+        "sidebar.agentEdits.clear",
+        Value::Object(payload.clone()),
+    )
+    .await
+    {
+        Ok(value) if !rpc_result_explicitly_not_ok(&value) => true,
+        Ok(value) => {
+            warn!(
+                namespace = SIDEBAR_NAMESPACE,
+                socket_path = SIDEBAR_SOCKET_PATH,
+                event = RPC_EVENT,
+                method = "sidebar.agentEdits.clear",
+                payload = ?payload,
+                ?value,
+                "sidebar.agentEdits.clear RPC returned an unsuccessful result"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(
+                namespace = SIDEBAR_NAMESPACE,
+                socket_path = SIDEBAR_SOCKET_PATH,
+                event = RPC_EVENT,
+                method = "sidebar.agentEdits.clear",
+                payload = ?payload,
+                %error,
+                "sidebar.agentEdits.clear RPC failed"
+            );
+            false
+        }
+    }
+}
+
+pub async fn publish_agent_edits_with_current_client(state: &AppState, payload: JsonMap) -> bool {
     let Some(client) = state.sidebar_ipc.current().await else {
         warn!(
             namespace = SIDEBAR_NAMESPACE,

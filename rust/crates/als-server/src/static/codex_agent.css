@@ -3203,10 +3203,10 @@ textarea {
 }
 
 /* Tribute (@ mention) dropdown: basename + path */
-.tribute-container .tribute-item-name {
+body .tribute-container .tribute-item-name {
   font-weight: 600;
 }
-.tribute-container .tribute-item-path {
+body .tribute-container .tribute-item-path {
   font-size: 0.85em;
   opacity: 0.75;
   word-break: break-all;
@@ -3528,7 +3528,7 @@ body.line-numbers-enabled .transcript-line-no {
 }
 
 /* Tribute.js mention dropdown */
-.tribute-container {
+body .tribute-container {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -3536,38 +3536,38 @@ body.line-numbers-enabled .transcript-line-no {
   max-height: 200px;
   overflow-y: auto;
 }
-.tribute-container ul {
+body .tribute-container ul {
   background: transparent;
   margin: 0;
   padding: 4px;
 }
-.tribute-container li {
+body .tribute-container li {
   padding: 8px 12px;
   border-radius: 4px;
   color: var(--text);
   font-size: 13px;
 }
-.tribute-container li.highlight {
+body .tribute-container li.highlight {
   background: var(--highlight);
 }
-.tribute-container li.tribute-no-match {
+body .tribute-container li.tribute-no-match {
   color: var(--muted);
   font-style: italic;
 }
-.tribute-container li.tribute-separator {
+body .tribute-container li.tribute-separator {
   padding: 0;
   margin: 4px 8px;
   pointer-events: none;
 }
-.tribute-container li.tribute-separator hr {
+body .tribute-container li.tribute-separator hr {
   border: none;
   border-top: 1px solid var(--border);
   margin: 0;
 }
-.tribute-dir {
+body .tribute-container .tribute-dir {
   color: var(--accent);
 }
-.tribute-file {
+body .tribute-container .tribute-file {
   color: var(--text);
 }
 

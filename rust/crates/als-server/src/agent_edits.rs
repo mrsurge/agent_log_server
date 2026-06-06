@@ -252,6 +252,26 @@ impl TrackedAgentDiff {
         Some(params)
     }
 
+    pub fn inline_clear_payload(&self) -> Option<Map<String, Value>> {
+        let uri = self.file_uri()?;
+        let mut params = Map::new();
+        params.insert("uri".to_owned(), Value::String(uri));
+        params.insert("editId".to_owned(), Value::String(self.id.clone()));
+        params.insert("diffId".to_owned(), Value::String(self.id.clone()));
+        params.insert(
+            "conversationId".to_owned(),
+            Value::String(self.conversation_id.clone()),
+        );
+        if let Some(project_path) = self.repo_root.as_ref() {
+            params.insert(
+                "projectPath".to_owned(),
+                Value::String(project_path.clone()),
+            );
+        }
+        params.insert("source".to_owned(), Value::String(self.source.clone()));
+        Some(params)
+    }
+
     fn file_uri(&self) -> Option<String> {
         self.abs
             .as_ref()
@@ -733,6 +753,35 @@ mod tests {
         let edits = payload["edits"].as_array().unwrap();
         assert_eq!(edits[0]["editId"], "diff-1");
         assert_eq!(edits[0]["hunks"][0]["modifiedRange"]["startLineNumber"], 20);
+    }
+
+    #[test]
+    fn builds_inline_clear_payload() {
+        let diff = TrackedAgentDiff {
+            id: "diff-1".to_owned(),
+            conversation_id: "conv-a".to_owned(),
+            path: Some("src/lib.rs".to_owned()),
+            abs: Some("/repo/src/lib.rs".to_owned()),
+            rel: Some("src/lib.rs".to_owned()),
+            line: 20,
+            column: 1,
+            source: "appserver_diff".to_owned(),
+            created_at: "unix_ms:1".to_owned(),
+            repo_root: Some("/repo".to_owned()),
+            diff_text:
+                "diff --git a/src/lib.rs b/src/lib.rs\n@@ -10,2 +20,4 @@ fn example() {\n+added"
+                    .to_owned(),
+            diff_bytes: 80,
+            additions: 1,
+            deletions: 0,
+        };
+        let payload = diff.inline_clear_payload().unwrap();
+        assert_eq!(payload["uri"], "file:///repo/src/lib.rs");
+        assert_eq!(payload["editId"], "diff-1");
+        assert_eq!(payload["diffId"], "diff-1");
+        assert_eq!(payload["conversationId"], "conv-a");
+        assert_eq!(payload["projectPath"], "/repo");
+        assert_eq!(payload["source"], "appserver_diff");
     }
 
     #[test]

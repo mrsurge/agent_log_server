@@ -501,7 +501,7 @@ pub(crate) async fn project_agent_diff_accept(
         .accept(&conversation_id, &diff_id)
         .map_err(internal_rpc_error)?;
     if let Some(entry) = removed.as_ref() {
-        emit_project_agent_diff_removed(io, entry).await;
+        emit_project_agent_diff_removed(io, state, entry).await;
     }
     Ok(json!({
         "ok": true,
@@ -561,7 +561,7 @@ pub(crate) async fn project_agent_diff_reject(
         .remove(&conversation_id, &diff_id)
         .map_err(internal_rpc_error)?;
     if let Some(entry) = removed.as_ref() {
-        emit_project_agent_diff_removed(io, entry).await;
+        emit_project_agent_diff_removed(io, state, entry).await;
     }
     Ok(json!({
         "ok": true,
@@ -576,7 +576,11 @@ pub async fn emit_project_agent_diff_added(io: &SocketIo, entry: &TrackedAgentDi
     emit_rpc_notification(io, "project.agentDiff.added", json!(entry)).await;
 }
 
-async fn emit_project_agent_diff_removed(io: &SocketIo, entry: &TrackedAgentDiff) {
+async fn emit_project_agent_diff_removed(
+    io: &SocketIo,
+    state: &AppState,
+    entry: &TrackedAgentDiff,
+) {
     emit_rpc_notification(
         io,
         "project.agentDiff.removed",
@@ -590,6 +594,37 @@ async fn emit_project_agent_diff_removed(io: &SocketIo, entry: &TrackedAgentDiff
         }),
     )
     .await;
+    clear_inline_agent_edit_widget(state, entry).await;
+}
+
+async fn clear_inline_agent_edit_widget(state: &AppState, entry: &TrackedAgentDiff) {
+    let Some(clear_params) = entry.inline_clear_payload() else {
+        return;
+    };
+    match state.inline_agent_edits.clear(&clear_params) {
+        Ok(_) => {}
+        Err(error) => {
+            warn!(%error, "inline agent edit ledger clear failed after project diff removal");
+        }
+    }
+    let _ = sidebar_ipc::clear_agent_edits(state, clear_params).await;
+    let Some(document_params) = entry.inline_document_state_params() else {
+        return;
+    };
+    match state.inline_agent_edits.document_state(&document_params) {
+        Ok(Value::Object(projection)) => {
+            let _ = sidebar_ipc::publish_agent_edits_with_current_client(state, projection).await;
+        }
+        Ok(value) => {
+            warn!(
+                ?value,
+                "inline agent edit document state was not an object after clear"
+            );
+        }
+        Err(error) => {
+            warn!(%error, "failed to publish inline agent edit document state after clear");
+        }
+    }
 }
 
 async fn emit_rpc_notification(io: &SocketIo, method: &str, params: Value) {
