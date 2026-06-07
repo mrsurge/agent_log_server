@@ -252,7 +252,9 @@ UNDER NO CIRCUMSTANCES WILL I EVER USE `resolve()` or ANY SYMLINK RESOLOVING MET
 
 ## Agent Log CLI Usage
 
-The server is running on `http://127.0.0.1:12356`. I can interact with it using `curl`.
+Prefer the agent-log MCP tools when they are available. If a curl fallback is
+needed for the current ALS-RS harness, the active local server is running on
+`http://127.0.0.1:12459`.
 
 ### Post a Message
 
@@ -261,7 +263,7 @@ To send a message, use a `POST` request with a JSON body containing `who` (your 
 ```bash
 curl -X POST -H "Content-Type: application/json" \
      -d '{"who": "your-name", "message": "your message here"}' \
-     http://127.0.0.1:12356/api/messages
+     http://127.0.0.1:12459/api/messages
 ```
 
 ### Read Messages
@@ -270,10 +272,10 @@ To fetch the log of messages:
 
 ```bash
 # Get all messages
-curl http://127.0.0.1:12359/api/messages
+curl http://127.0.0.1:12459/api/messages
 
 # Get only the last n messages
-curl "http://127.0.0.1:12359/api/messages?limit=n"
+curl "http://127.0.0.1:12459/api/messages?limit=n"
 ```
 
 ### Initial Acknowledgement
