@@ -10,6 +10,13 @@ from extensions.codex_ext.runtime_protocol import ProtocolSemanticSpec, RuntimeP
 class _FakeProtocol:
     def __init__(self) -> None:
         self._notifications = {
+            "item/started": ProtocolSemanticSpec(
+                name="item/started",
+                category="item",
+                subject="item",
+                phase="started",
+                properties=("item", "threadId", "turnId"),
+            ),
             "item/completed": ProtocolSemanticSpec(
                 name="item/completed",
                 category="item",
@@ -41,24 +48,27 @@ class CodexAtomicDiffRouterTests(unittest.TestCase):
         self.router = CodexEventRouter()
         self.protocol = cast(RuntimeProtocol, _FakeProtocol())
 
-    def _completed_filechange(self, item_id: str, diff_text: str) -> ObjectDict:
+    def _filechange_payload(self, item_id: str, diff_text: str, kind: object = "update") -> ObjectDict:
+        return {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "item": {
+                "id": item_id,
+                "type": "fileChange",
+                "status": "completed",
+                "changes": [{
+                    "path": "src/example.ts",
+                    "kind": kind,
+                    "diff": diff_text,
+                }],
+            },
+        }
+
+    def _completed_filechange(self, item_id: str, diff_text: str, kind: object = "update") -> ObjectDict:
         return self.router.route_event(
             self.protocol,
             label="item/completed",
-            payload={
-                "threadId": "thread-1",
-                "turnId": "turn-1",
-                "item": {
-                    "id": item_id,
-                    "type": "fileChange",
-                    "status": "completed",
-                    "changes": [{
-                        "path": "src/example.ts",
-                        "kind": "update",
-                        "diff": diff_text,
-                    }],
-                },
-            },
+            payload=self._filechange_payload(item_id, diff_text, kind),
             thread_id="thread-1",
             turn_id="turn-1",
         )
@@ -93,6 +103,48 @@ class CodexAtomicDiffRouterTests(unittest.TestCase):
         self.assertNotEqual(first_diff["item_id"], second_diff["item_id"])
         self.assertIn("call-one", cast(str, first_diff["item_id"]))
         self.assertIn("call-two", cast(str, second_diff["item_id"]))
+
+    def test_add_filechange_raw_content_becomes_new_file_diff(self) -> None:
+        result = self._completed_filechange(
+            "call-add",
+            "# Example\n\n- markdown bullet\nplain text\n",
+            {"type": "add"},
+        )
+
+        entries = cast(list[ObjectDict], result["transcript_entries"])
+        tool_entry = entries[0]
+        diff_entry = [
+            entry
+            for entry in entries
+            if entry.get("role") == "diff"
+        ][0]
+        diff_text = cast(str, diff_entry["text"])
+
+        self.assertTrue(tool_entry["new_file"])
+        self.assertIn("--- /dev/null", diff_text)
+        self.assertIn("+++ src/example.ts", diff_text)
+        self.assertIn("@@ -0,0 +1,4 @@", diff_text)
+        self.assertIn("+# Example", diff_text)
+        self.assertIn("+- markdown bullet", diff_text)
+        self.assertNotIn("\n# Example", diff_text)
+
+    def test_started_add_filechange_raw_content_becomes_new_file_diff(self) -> None:
+        result = self.router.route_event(
+            self.protocol,
+            label="item/started",
+            payload=self._filechange_payload("call-add-start", "# Example\n", {"type": "add"}),
+            thread_id="thread-1",
+            turn_id="turn-1",
+        )
+
+        events = cast(list[ObjectDict], result["events"])
+        tool_begin = events[0]
+        diff_text = cast(str, tool_begin["diff"])
+
+        self.assertEqual(tool_begin["type"], "tool_begin")
+        self.assertTrue(tool_begin["new_file"])
+        self.assertIn("--- /dev/null", diff_text)
+        self.assertIn("+# Example", diff_text)
 
     def test_turn_diff_updated_is_not_a_conversation_diff_row(self) -> None:
         result = self.router.route_event(

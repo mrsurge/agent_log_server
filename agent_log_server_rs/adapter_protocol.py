@@ -321,6 +321,7 @@ class ConversationResumeParams:
     extension_id: str
     conversation_id: str
     provider_session_id: str
+    hydrate_transcript: bool = False
     cwd: Path | None = None
     settings: JsonMap = field(default_factory=dict)
     mcp_context: McpContext | None = None
@@ -331,6 +332,7 @@ class ConversationResumeParams:
             "extension_id": self.extension_id,
             "conversation_id": self.conversation_id,
             "provider_session_id": self.provider_session_id,
+            "hydrate_transcript": self.hydrate_transcript,
         }
         if self.cwd is not None:
             payload["cwd"] = str(self.cwd)

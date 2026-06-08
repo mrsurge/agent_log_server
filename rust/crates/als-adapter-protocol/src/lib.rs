@@ -211,6 +211,8 @@ pub struct ConversationResumeParams {
     pub extension_id: String,
     pub conversation_id: String,
     pub provider_session_id: String,
+    #[serde(default)]
+    pub hydrate_transcript: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
@@ -554,6 +556,52 @@ mod tests {
             json!({
                 "extension_id": "codex-ext",
                 "conversation_id": "conv-1"
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_conversation_resume_hydration_flag() {
+        let default_params = ConversationResumeParams {
+            extension_id: "codex-ext".to_owned(),
+            conversation_id: "conv-1".to_owned(),
+            provider_session_id: "thread-1".to_owned(),
+            hydrate_transcript: false,
+            cwd: None,
+            settings: JsonMap::new(),
+            mcp_context: None,
+            devins_context: None,
+        };
+        assert_eq!(
+            serde_json::to_value(default_params).unwrap(),
+            json!({
+                "extension_id": "codex-ext",
+                "conversation_id": "conv-1",
+                "provider_session_id": "thread-1",
+                "hydrate_transcript": false
+            })
+        );
+
+        let import_params = ConversationResumeParams {
+            hydrate_transcript: true,
+            ..ConversationResumeParams {
+                extension_id: "codex-ext".to_owned(),
+                conversation_id: "conv-2".to_owned(),
+                provider_session_id: "thread-2".to_owned(),
+                hydrate_transcript: false,
+                cwd: None,
+                settings: JsonMap::new(),
+                mcp_context: None,
+                devins_context: None,
+            }
+        };
+        assert_eq!(
+            serde_json::to_value(import_params).unwrap(),
+            json!({
+                "extension_id": "codex-ext",
+                "conversation_id": "conv-2",
+                "provider_session_id": "thread-2",
+                "hydrate_transcript": true
             })
         );
     }

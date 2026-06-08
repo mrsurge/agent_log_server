@@ -376,6 +376,8 @@ Router expectations:
 
 - normalize structured upstream file-change payloads into unified diff text before emitting `diff`
 - when upstream per-file changes provide hunks without file headers, add `diff --git`, `---`, and `+++` headers so path extraction and highlighting work during live render and replay
+- when upstream add/new-file changes provide raw file content in a field named `diff`, synthesize a real new-file unified diff (`--- /dev/null`, `+++ <path>`, hunk header, and `+`-prefixed body lines) before emitting `diff` or embedding diff metadata on the related tool card
+- do not create fake diff cards by prepending `diff --git`, `---`, and `+++` to arbitrary raw file content; raw Markdown bullets and ordinary text must never be interpreted as deletion/context lines because of a header-only wrapper
 - split multi-file unified diffs into per-file diff cards when the upstream shape provides independent file changes or when doing so preserves path-specific rendering
 - avoid duplicate standalone diff cards when a provider emits the same patch through both file-change items and later aggregate turn-diff notifications
 

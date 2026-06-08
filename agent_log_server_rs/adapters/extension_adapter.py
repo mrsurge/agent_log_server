@@ -1203,8 +1203,9 @@ class ExtensionJsonRpcAdapter:
             return ack
 
         hydrated_count = 0
+        hydrate_requested = params.get("hydrate_transcript") is True
         hydrate_transcript = getattr(handler, "hydrate_transcript", None)
-        if callable(hydrate_transcript):
+        if hydrate_requested and callable(hydrate_transcript):
             await self._send_import_started(
                 conversation_id,
                 extension_id=extension_id,

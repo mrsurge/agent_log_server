@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from agent_log_server_rs.adapter_protocol import ConversationResumeParams
 from agent_log_server_rs.codec import (
     AdapterDecodeError,
     AdapterEncodeError,
@@ -56,6 +57,35 @@ class AdapterCodecTests(unittest.TestCase):
 
         with self.assertRaises(AdapterEncodeError):
             encode_json_line({"value": Unsupported()})
+
+    def test_conversation_resume_params_serialize_hydration_flag(self) -> None:
+        self.assertEqual(
+            ConversationResumeParams(
+                extension_id="codex-ext",
+                conversation_id="conv-1",
+                provider_session_id="thread-1",
+            ).to_json(),
+            {
+                "extension_id": "codex-ext",
+                "conversation_id": "conv-1",
+                "provider_session_id": "thread-1",
+                "hydrate_transcript": False,
+            },
+        )
+        self.assertEqual(
+            ConversationResumeParams(
+                extension_id="codex-ext",
+                conversation_id="conv-2",
+                provider_session_id="thread-2",
+                hydrate_transcript=True,
+            ).to_json(),
+            {
+                "extension_id": "codex-ext",
+                "conversation_id": "conv-2",
+                "provider_session_id": "thread-2",
+                "hydrate_transcript": True,
+            },
+        )
 
 
 if __name__ == "__main__":

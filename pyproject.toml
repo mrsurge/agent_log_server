@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-log-server"
-version = "0.2.99"
+version = "0.2.100"
 description = "ALS-RS agent harness, extension adapter, KB/MCP tools, and TE2 integration."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,7 +17,7 @@ codex-agent = "als_deprecated.server:main"
 
 [tool.setuptools]
 include-package-data = true
-py-modules = ["agent_index", "mcp_agent_pty_server", "mcp_agent_pty_http_shim", "shell_manager", "te2_runtime"]
+py-modules = ["mcp_agent_pty_server", "mcp_agent_pty_http_shim", "te2_runtime"]
 zip-safe = false
 
 [tool.setuptools.packages.find]
@@ -59,7 +59,6 @@ reportAny = "warning"
 reportExplicitAny = "warning"
 include = [
   "*.py",
-  "agent_index",
   "agent_log_server_rs",
   "extensions",
 ]

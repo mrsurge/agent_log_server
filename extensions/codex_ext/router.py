@@ -1179,7 +1179,8 @@ def _diff_sections_from_changes(changes: object) -> List[Tuple[Optional[str], st
             if not isinstance(text, str) or not text.strip():
                 continue
             path = change.get("path") or change.get("file_path") or _extract_path_from_diff(text)
-            sections.append((path if isinstance(path, str) else None, text))
+            section_path = path if isinstance(path, str) else None
+            sections.append((section_path, _normalized_change_diff(section_path, change, text)))
     elif _is_object_dict(changes):
         for change_path, change in changes.items():
             if not _is_object_dict(change):
@@ -1188,8 +1189,47 @@ def _diff_sections_from_changes(changes: object) -> List[Tuple[Optional[str], st
             if not isinstance(text, str) or not text.strip():
                 continue
             path = change.get("path") or change.get("file_path") or change_path or _extract_path_from_diff(text)
-            sections.append((path if isinstance(path, str) else None, text))
+            section_path = path if isinstance(path, str) else None
+            sections.append((section_path, _normalized_change_diff(section_path, change, text)))
     return sections
+
+
+def _change_kind_type(change: ObjectDict) -> str:
+    kind = change.get("kind")
+    if isinstance(kind, str):
+        return kind.strip().lower()
+    if _is_object_dict(kind):
+        kind_type = kind.get("type")
+        if isinstance(kind_type, str):
+            return kind_type.strip().lower()
+    return ""
+
+
+def _diff_text_has_file_headers(text: str) -> bool:
+    lines = [line for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines[:-1]):
+        if line.startswith("--- ") and lines[index + 1].startswith("+++ "):
+            return True
+    return False
+
+
+def _diff_text_has_hunk_header(text: str) -> bool:
+    return any(line.startswith("@@ ") for line in text.splitlines())
+
+
+def _diff_text_has_git_header(text: str) -> bool:
+    return any(line.startswith("diff --git ") for line in text.splitlines())
+
+
+def _normalized_change_diff(path: Optional[str], change: ObjectDict, text: str) -> str:
+    if _change_kind_type(change) != "add":
+        return text
+    if _diff_text_has_git_header(text) or _diff_text_has_file_headers(text):
+        return text
+    header_path = _diff_header_path(path or _extract_path_from_diff(text))
+    if _diff_text_has_hunk_header(text):
+        return f"--- /dev/null\n+++ {_prefix_diff_path('b', header_path)}\n{text}"
+    return _build_new_file_diff(header_path, text)
 
 
 def _diff_header_path(path: Optional[str]) -> str:

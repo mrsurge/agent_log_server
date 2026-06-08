@@ -269,7 +269,7 @@ async fn conversation_create(
         match extension_id {
             Some(extension_id) => {
                 let bind_result =
-                    bind_provider_session(&state, &meta, &extension_id, session_id).await;
+                    bind_provider_session(&state, &meta, &extension_id, session_id, true).await;
                 if let Some(bound_session_id) =
                     adapter_provider_session_id(&bind_result, &meta.conversation_id)
                 {
@@ -369,7 +369,8 @@ async fn conversation_update(
         match extension_id {
             Some(extension_id) => {
                 let bind_result =
-                    bind_provider_session(&state, &meta, &extension_id, session_id.clone()).await;
+                    bind_provider_session(&state, &meta, &extension_id, session_id.clone(), false)
+                        .await;
                 if let Some(bound_session_id) =
                     adapter_provider_session_id(&bind_result, conversation_id)
                 {
@@ -1222,6 +1223,7 @@ async fn bind_provider_session(
     meta: &ConversationMeta,
     extension_id: &str,
     session_id: String,
+    hydrate_transcript: bool,
 ) -> Value {
     let conversation_id = meta.conversation_id.clone();
     let attempt: Result<Value, RpcError> = async {
@@ -1241,6 +1243,7 @@ async fn bind_provider_session(
                     extension_id: extension_id.to_owned(),
                     conversation_id: conversation_id.clone(),
                     provider_session_id: session_id,
+                    hydrate_transcript,
                     cwd: meta.cwd.clone().map(PathBuf::from),
                     mcp_context: build_mcp_context(
                         &state.config,

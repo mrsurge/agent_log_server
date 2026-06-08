@@ -239,6 +239,48 @@ def _legacy_schema_bundle_path(cache_dir: Path) -> Path:
     return cache_dir / "codex_app_server_protocol.schemas.json"
 
 
+_SCHEMA_EXPERIMENTAL_MARKER = ".experimental-api-schema"
+_SCHEMA_REQUIRED_EXPERIMENTAL_PROPERTIES: Tuple[Tuple[str, str], ...] = (
+    ("ThreadResumeParams", "excludeTurns"),
+)
+
+
+def _schema_experimental_marker_path(cache_dir: Path) -> Path:
+    return cache_dir / _SCHEMA_EXPERIMENTAL_MARKER
+
+
+def _schema_bundle_has_required_experimental_fields(schema_path: Path) -> bool:
+    try:
+        schema = _load_json_object(schema_path)
+    except Exception:
+        return False
+    definitions_obj = schema.get("definitions")
+    if not _is_schema_dict(definitions_obj):
+        return False
+    definitions = definitions_obj
+    for definition_name, property_name in _SCHEMA_REQUIRED_EXPERIMENTAL_PROPERTIES:
+        definition_obj = definitions.get(definition_name)
+        if not _is_schema_dict(definition_obj):
+            return False
+        properties_obj = definition_obj.get("properties")
+        if not _is_schema_dict(properties_obj) or property_name not in properties_obj:
+            return False
+    return True
+
+
+def _schema_cache_has_experimental_bundle(cache_dir: Path) -> bool:
+    schema_path = _schema_bundle_path(cache_dir)
+    if not schema_path.exists():
+        return False
+    if not _schema_bundle_has_required_experimental_fields(schema_path):
+        return False
+    marker_path = _schema_experimental_marker_path(cache_dir)
+    if not marker_path.exists():
+        with contextlib.suppress(OSError):
+            marker_path.write_text("experimental-api\n", encoding="utf-8")
+    return True
+
+
 def _version_key(raw_version: str) -> str:
     match = re.search(r"(\d+\.\d+\.\d+)", raw_version)
     token = match.group(1) if match else raw_version.strip()
@@ -387,9 +429,11 @@ async def _ensure_schema_bundle() -> tuple[str, str, Path]:
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_dir = cache_root / version_key
     schema_path = _schema_bundle_path(cache_dir)
-    if schema_path.exists():
+    if _schema_cache_has_experimental_bundle(cache_dir):
         _cleanup_old_cache_dirs(cache_root, keep_name=version_key)
         return version_raw, version_key, schema_path
+    if schema_path.exists():
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
     temp_dir = cache_root / f".tmp-{version_key}-{uuid.uuid4().hex}"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -399,6 +443,7 @@ async def _ensure_schema_bundle() -> tuple[str, str, Path]:
                 "codex",
                 "app-server",
                 "generate-json-schema",
+                "--experimental",
                 "--out",
                 str(temp_dir),
                 timeout=60.0,
@@ -426,6 +471,8 @@ async def _ensure_schema_bundle() -> tuple[str, str, Path]:
         if cache_dir.exists():
             shutil.rmtree(cache_dir, ignore_errors=True)
         temp_dir.rename(cache_dir)
+        with contextlib.suppress(OSError):
+            _schema_experimental_marker_path(cache_dir).write_text("experimental-api\n", encoding="utf-8")
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise

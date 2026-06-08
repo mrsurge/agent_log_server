@@ -1424,6 +1424,7 @@ async def resume_session(
             protocol=protocol,
             merged_settings=merged_settings,
             meta=meta,
+            exclude_turns=True,
         )
         _add_to_raw_buffer("out", conversation_id, f"thread_resumed {thread_id[:8]}")
         return {"ok": True, "provider_session_id": thread_id, "session_id": thread_id}
