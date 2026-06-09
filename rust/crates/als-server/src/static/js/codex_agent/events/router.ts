@@ -368,10 +368,18 @@ export function bindEventRouter(ctx: EventRouterContext) {
     const currentMeta = state.conversationMeta && typeof state.conversationMeta === 'object'
       ? state.conversationMeta
       : null;
-    const activeConversationId = state.clientConversationId || currentMeta?.conversation_id || null;
+    const clientConversationId = typeof state.clientConversationId === 'string' && state.clientConversationId.trim()
+      ? state.clientConversationId.trim()
+      : null;
+    const currentMetaId = typeof currentMeta?.conversation_id === 'string' && currentMeta.conversation_id.trim()
+      ? currentMeta.conversation_id.trim()
+      : null;
+    const activeConversationId = clientConversationId || currentMetaId || null;
     const nextState: Partial<RouterState> = { conversationList: nextList };
-    if (currentMeta?.conversation_id === conversationId) {
-      const nextMeta = { ...currentMeta, ...patch };
+    const fullMetaPatch = patch.conversation_id === conversationId
+      || (patch.settings && typeof patch.settings === 'object' && !Array.isArray(patch.settings));
+    if (currentMetaId === conversationId || (clientConversationId === conversationId && fullMetaPatch)) {
+      const nextMeta = { ...(currentMeta || {}), ...patch };
       nextState.conversationMeta = nextMeta;
       if (nextMeta.settings && typeof nextMeta.settings === 'object' && !Array.isArray(nextMeta.settings)) {
         nextState.conversationSettings = { ...(nextMeta.settings as JsonObject) };

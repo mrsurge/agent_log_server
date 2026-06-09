@@ -15,6 +15,7 @@ export const UI_RPC_METHODS = {
   projectSummaryGet: 'project.summary.get',
   projectAgentDiffAccept: 'project.agentDiff.accept',
   projectAgentDiffReject: 'project.agentDiff.reject',
+  projectAgentDiffRejectAll: 'project.agentDiff.rejectAll',
   projectGitStage: 'project.git.stage',
   projectGitUnstage: 'project.git.unstage',
   projectGitRestore: 'project.git.restore',

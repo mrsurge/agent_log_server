@@ -16,6 +16,8 @@ type BootInitState = {
   messageCount?: number;
   tokenCount?: number;
   activeView?: string;
+  clientConversationId?: string | null;
+  clientActiveView?: string | null;
   conversationSettings?: ConversationSettingsState | null;
   conversationMeta?: ConversationMetaState | null;
   homePrefix?: string | null;
@@ -83,13 +85,14 @@ interface BootInitFlowContext {
   bindPickerFilter: () => void;
   setDrawerOpen: (open: boolean) => void;
   isWidescreenLayout?: () => boolean;
-  fetchConversation: () => Promise<unknown>;
+  fetchConversation: (conversationId?: string | null) => Promise<unknown>;
   fetchConversations: () => Promise<unknown>;
   resetTimeline: () => void;
   replayTranscript: () => Promise<unknown>;
   refreshPlanSurface?: () => Promise<unknown> | unknown;
   restorePendingApprovals: () => void;
   publishSidebarWindowState?: () => Promise<unknown> | unknown;
+  isStatefulSidebarWindow?: () => boolean;
   maybeAutoScroll: (force?: boolean) => void;
   ensureActivityRow: () => void;
   fetchStatus: () => Promise<unknown>;
@@ -135,6 +138,7 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
     refreshPlanSurface,
     restorePendingApprovals,
     publishSidebarWindowState,
+    isStatefulSidebarWindow,
     maybeAutoScroll,
     ensureActivityRow,
     fetchStatus,
@@ -197,7 +201,20 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
       await fetchHostUi();
       await fetchHomePrefix?.();
       await fetchAppConfig();
-      await fetchConversation();
+      const prefetchState = getState();
+      const scopedConversationId = typeof prefetchState.clientConversationId === 'string' && prefetchState.clientConversationId.trim()
+        ? prefetchState.clientConversationId.trim()
+        : null;
+      if (isStatefulSidebarWindow?.() === true && !scopedConversationId) {
+        setState({
+          activeView: 'splash',
+          clientActiveView: 'splash',
+        });
+        await fetchConversations();
+        ensureActivityRow();
+        return;
+      }
+      await fetchConversation(scopedConversationId);
       await fetchConversations();
       const hydratedState = getState();
       const hasConversationId = typeof hydratedState.conversationMeta?.conversation_id === 'string'
@@ -238,9 +255,15 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
     setupDropdown(settingsAgentEl, settingsAgentToggle, settingsAgentOptions, []);
     loadAgentOptions();
     loadModelOptions();
+    const state = getState();
+    const scopedConversationId = typeof state.clientConversationId === 'string' && state.clientConversationId.trim()
+      ? state.clientConversationId.trim()
+      : (typeof state.conversationMeta?.conversation_id === 'string' && state.conversationMeta.conversation_id.trim()
+        ? state.conversationMeta.conversation_id.trim()
+        : null);
     loadRuntimeOptions(
-      getState().conversationSettings?.agent || getState().conversationMeta?.settings?.agent || null,
-      getState().conversationMeta?.conversation_id,
+      state.conversationSettings?.agent || state.conversationMeta?.settings?.agent || null,
+      scopedConversationId,
     );
     if (settingsModelEl) {
       settingsModelEl.addEventListener('input', () => {

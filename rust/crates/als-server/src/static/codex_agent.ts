@@ -625,7 +625,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const composerRuntime = bindComposerRuntime({
     getState: () => ({
       conversationMeta: {
-        conversation_id: conversationMeta.conversation_id ?? null,
+        conversation_id: clientConversationId || conversationMeta.conversation_id || null,
         draft: typeof conversationMeta.draft === 'string' ? conversationMeta.draft : undefined,
         cwd: typeof conversationMeta.cwd === 'string' ? conversationMeta.cwd : undefined,
       },
@@ -980,6 +980,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const runtimeFooter = bindRuntimeFooter({
     getState: () => ({
+      clientConversationId,
       conversationMeta,
       conversationSettings,
       runtimeOptions: runtimeOptions as RuntimeFooterContext['getState'] extends () => infer S ? S extends { runtimeOptions?: infer T } ? T : never : never,
@@ -1100,6 +1101,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   settingsUi = bindSettingsUiFlow({
     getState: () => ({
+      clientConversationId,
       conversationMeta: conversationMeta as SettingsUiState['conversationMeta'],
       conversationSettings: conversationSettings as SettingsUiState['conversationSettings'],
       pendingNewConversation,
@@ -1243,6 +1245,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const planRuntime = bindPlanRuntime({
     getState: () => ({
+      clientConversationId,
       conversationMeta,
       conversationSettings,
       runtimeOptions,
@@ -1385,7 +1388,7 @@ document.addEventListener('DOMContentLoaded', () => {
     detectLangFromCommand: (command: string) => detectLangFromCommand(command) || '',
     isDiffSyntaxEnabled,
     sioCall,
-    getConversationId: () => conversationMeta?.conversation_id || null,
+    getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
     getConversationMeta: () => conversationMeta as Parameters<typeof bindTimelineLiveItems>[0]['getConversationMeta'] extends () => infer T ? T : never,
     setConversationMeta: (nextMeta) => { conversationMeta = nextMeta as RootConversationMeta; },
     getCurrentExtensionId: () => currentExtensionId(),
@@ -1583,7 +1586,7 @@ document.addEventListener('DOMContentLoaded', () => {
     waitForWs: (...args: Parameters<typeof waitForWs>) => waitForWs(...args),
     sioCall,
     getPending: () => pending,
-    getConversationId: () => conversationMeta?.conversation_id || null,
+    getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
   });
 
   const saveSettingsSioCall: SaveFlowContext['sioCall'] = async (event, payload) => {
@@ -1597,6 +1600,8 @@ document.addEventListener('DOMContentLoaded', () => {
     getState: () => ({
       conversationSettings,
       conversationMeta,
+      clientConversationId,
+      clientActiveView,
       pendingNewConversation,
       pendingRollout,
       trackEditsEnabled,
@@ -1831,6 +1836,7 @@ document.addEventListener('DOMContentLoaded', () => {
   } = bindSessionFlow({
     getState: () => ({
       initialized,
+      clientConversationId,
       conversationSettings: conversationSettings as SessionFlowContext['getState'] extends () => infer S ? S extends { conversationSettings?: infer T } ? T : never : never,
       conversationMeta: conversationMeta as SessionFlowContext['getState'] extends () => infer S ? S extends { conversationMeta?: infer T } ? T : never : never,
       autoScroll,
@@ -2156,6 +2162,8 @@ document.addEventListener('DOMContentLoaded', () => {
       messageCount,
       tokenCount,
       activeView,
+      clientConversationId,
+      clientActiveView,
       pendingNewConversation,
       pendingRollout,
       conversationMeta: conversationMeta as BootInitState['conversationMeta'],
@@ -2169,6 +2177,9 @@ document.addEventListener('DOMContentLoaded', () => {
       openDropdownEl,
     }),
     setState: (patch: BootInitPatch) => {
+      if (patch.activeView !== undefined) activeView = patch.activeView || activeView;
+      if (patch.clientConversationId !== undefined) clientConversationId = patch.clientConversationId;
+      if (patch.clientActiveView !== undefined) clientActiveView = patch.clientActiveView;
       if (patch.pendingNewConversation !== undefined) pendingNewConversation = patch.pendingNewConversation;
       if (patch.pendingRollout !== undefined) {
         pendingRollout = patch.pendingRollout && typeof patch.pendingRollout === 'object' && !Array.isArray(patch.pendingRollout)
@@ -2228,6 +2239,7 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshPlanSurface,
     restorePendingApprovals,
     publishSidebarWindowState,
+    isStatefulSidebarWindow: () => sidebarWindowContext.stateful,
     maybeAutoScroll,
     ensureActivityRow,
     fetchStatus,
@@ -2324,6 +2336,7 @@ document.addEventListener('DOMContentLoaded', () => {
       commandRunning,
       applyingDraft,
       draftDirty,
+      clientConversationId,
       conversationSettings,
       conversationMeta,
       isMobile,

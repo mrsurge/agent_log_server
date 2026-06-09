@@ -124,6 +124,7 @@ type ExtensionModel = {
 };
 
 type SettingsUiState = {
+  clientConversationId?: string | null;
   conversationMeta?: ConversationMeta | null;
   conversationSettings?: ConversationSettings | null;
   pendingNewConversation?: boolean;
@@ -140,6 +141,16 @@ type SettingsUiState = {
   extensionCatalog?: ExtensionCatalogEntry[];
   rolloutPickerProvider?: RolloutPickerProvider | null;
 };
+
+function scopedConversationId(state: SettingsUiState): string | null {
+  const clientConversationId = typeof state.clientConversationId === 'string' && state.clientConversationId.trim()
+    ? state.clientConversationId.trim()
+    : null;
+  const metaConversationId = typeof state.conversationMeta?.conversation_id === 'string' && state.conversationMeta.conversation_id.trim()
+    ? state.conversationMeta.conversation_id.trim()
+    : null;
+  return clientConversationId || metaConversationId;
+}
 
 type RolloutProviderArgs = {
   cwd: string;
@@ -803,7 +814,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       await onAgentChange(resolvedAgent);
     }
     await loadModelOptions(resolvedAgent);
-    await loadRuntimeOptions(resolvedAgent, getState().conversationMeta?.conversation_id);
+    await loadRuntimeOptions(resolvedAgent, scopedConversationId(getState()));
   }
 
   function normalizeModelEfforts(model: ExtensionModel | null | undefined): string[] {

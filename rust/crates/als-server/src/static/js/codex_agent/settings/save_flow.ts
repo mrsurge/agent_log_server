@@ -26,6 +26,16 @@ type RuntimeOptionsState = {
 
 const DEFAULT_COMMAND_OUTPUT_LINES = 500;
 
+function scopedConversationId(state: SettingsSaveState): string | null {
+  const clientConversationId = typeof state.clientConversationId === 'string' && state.clientConversationId.trim()
+    ? state.clientConversationId.trim()
+    : null;
+  const metaConversationId = typeof state.conversationMeta?.conversation_id === 'string' && state.conversationMeta.conversation_id.trim()
+    ? state.conversationMeta.conversation_id.trim()
+    : null;
+  return clientConversationId || metaConversationId;
+}
+
 type ConversationSettingsState = Record<string, unknown> & {
   cwd?: string | null;
 };
@@ -149,7 +159,7 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
     };
 
     let nextState = getState();
-    const isNewConversation = nextState.pendingNewConversation || !nextState.conversationMeta?.conversation_id;
+    const isNewConversation = nextState.pendingNewConversation || !scopedConversationId(nextState);
     const commandLinesVal = parseInt(settingsCommandLinesEl?.value?.trim() || String(DEFAULT_COMMAND_OUTPUT_LINES), 10);
     const viewWrapEnabled = settingsViewWrapEl?.checked === true;
     const mdEnabled = settingsMarkdownEl?.checked !== false;
@@ -293,13 +303,14 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
     }
 
     nextState = getState();
+    const conversationId = scopedConversationId(nextState);
     await conversationsRpcClient.updateConversation({
-      conversationId: nextState.conversationMeta?.conversation_id || null,
+      conversationId,
       settings,
     });
 
     closeSettingsModal();
-    await fetchConversation(getState().conversationMeta?.conversation_id);
+    await fetchConversation(scopedConversationId(getState()));
     await fetchConversations();
     if (isNewConversation) {
       resetTimeline();

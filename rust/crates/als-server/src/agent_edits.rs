@@ -121,6 +121,12 @@ impl AgentEditLedger {
         Ok(guard.get(conversation_id).cloned().unwrap_or_default())
     }
 
+    pub fn list_newest_first(&self, conversation_id: &str) -> Result<Vec<TrackedAgentDiff>> {
+        let mut entries = self.list(conversation_id)?;
+        entries.reverse();
+        Ok(entries)
+    }
+
     pub fn accept(&self, conversation_id: &str, diff_id: &str) -> Result<Option<TrackedAgentDiff>> {
         self.remove(conversation_id, diff_id)
     }
@@ -693,6 +699,27 @@ pub fn agent_diffs_json(entries: Vec<TrackedAgentDiff>) -> Value {
 mod tests {
     use super::*;
 
+    fn tracked_diff(id: &str) -> TrackedAgentDiff {
+        TrackedAgentDiff {
+            id: id.to_owned(),
+            conversation_id: "conv-a".to_owned(),
+            path: Some("src/lib.rs".to_owned()),
+            abs: Some("/repo/src/lib.rs".to_owned()),
+            rel: Some("src/lib.rs".to_owned()),
+            line: 20,
+            column: 1,
+            source: "appserver_diff".to_owned(),
+            created_at: "unix_ms:1".to_owned(),
+            repo_root: Some("/repo".to_owned()),
+            diff_text:
+                "diff --git a/src/lib.rs b/src/lib.rs\n@@ -10,2 +20,4 @@ fn example() {\n+added"
+                    .to_owned(),
+            diff_bytes: 80,
+            additions: 1,
+            deletions: 0,
+        }
+    }
+
     #[test]
     fn extracts_first_new_line_from_hunk() {
         assert_eq!(
@@ -728,25 +755,29 @@ mod tests {
     }
 
     #[test]
+    fn lists_tracked_diffs_newest_first_for_bulk_reject() {
+        let ledger = AgentEditLedger::default();
+        {
+            let mut guard = ledger.inner.lock().unwrap();
+            guard.insert(
+                "conv-a".to_owned(),
+                vec![tracked_diff("oldest"), tracked_diff("newest")],
+            );
+        }
+
+        let ids: Vec<String> = ledger
+            .list_newest_first("conv-a")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+
+        assert_eq!(ids, vec!["newest", "oldest"]);
+    }
+
+    #[test]
     fn builds_inline_publish_payload() {
-        let diff = TrackedAgentDiff {
-            id: "diff-1".to_owned(),
-            conversation_id: "conv-a".to_owned(),
-            path: Some("src/lib.rs".to_owned()),
-            abs: Some("/repo/src/lib.rs".to_owned()),
-            rel: Some("src/lib.rs".to_owned()),
-            line: 20,
-            column: 1,
-            source: "appserver_diff".to_owned(),
-            created_at: "unix_ms:1".to_owned(),
-            repo_root: Some("/repo".to_owned()),
-            diff_text:
-                "diff --git a/src/lib.rs b/src/lib.rs\n@@ -10,2 +20,4 @@ fn example() {\n+added"
-                    .to_owned(),
-            diff_bytes: 80,
-            additions: 1,
-            deletions: 0,
-        };
+        let diff = tracked_diff("diff-1");
         let payload = diff.inline_publish_payload().unwrap();
         assert_eq!(payload["conversationId"], "conv-a");
         assert_eq!(payload["uri"], "file:///repo/src/lib.rs");
@@ -757,24 +788,7 @@ mod tests {
 
     #[test]
     fn builds_inline_clear_payload() {
-        let diff = TrackedAgentDiff {
-            id: "diff-1".to_owned(),
-            conversation_id: "conv-a".to_owned(),
-            path: Some("src/lib.rs".to_owned()),
-            abs: Some("/repo/src/lib.rs".to_owned()),
-            rel: Some("src/lib.rs".to_owned()),
-            line: 20,
-            column: 1,
-            source: "appserver_diff".to_owned(),
-            created_at: "unix_ms:1".to_owned(),
-            repo_root: Some("/repo".to_owned()),
-            diff_text:
-                "diff --git a/src/lib.rs b/src/lib.rs\n@@ -10,2 +20,4 @@ fn example() {\n+added"
-                    .to_owned(),
-            diff_bytes: 80,
-            additions: 1,
-            deletions: 0,
-        };
+        let diff = tracked_diff("diff-1");
         let payload = diff.inline_clear_payload().unwrap();
         assert_eq!(payload["uri"], "file:///repo/src/lib.rs");
         assert_eq!(payload["editId"], "diff-1");

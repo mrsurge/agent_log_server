@@ -10,6 +10,7 @@ interface SessionFlowState {
   rpcTransportEnabled?: boolean;
   autoScroll?: boolean;
   transcriptHistoryMode?: boolean;
+  clientConversationId?: string | null;
   conversationMeta?: SessionConversationMeta | null;
 }
 
@@ -53,6 +54,16 @@ function asObject(value: unknown): JsonObject | null {
   return value as JsonObject;
 }
 
+function scopedConversationId(state: SessionFlowState): string | null {
+  const clientConversationId = typeof state.clientConversationId === 'string' && state.clientConversationId.trim()
+    ? state.clientConversationId.trim()
+    : null;
+  const metaConversationId = typeof state.conversationMeta?.conversation_id === 'string' && state.conversationMeta.conversation_id.trim()
+    ? state.conversationMeta.conversation_id.trim()
+    : null;
+  return clientConversationId || metaConversationId;
+}
+
 function normalizeShellExecResponse(value: unknown): ShellExecResponse {
   return asObject(value) ?? {};
 }
@@ -88,7 +99,7 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
   async function sendUserMessage(text: string) {
     if (!text) return;
     const state = getState();
-    const convoId = state.conversationMeta?.conversation_id;
+    const convoId = scopedConversationId(state);
     if (!convoId) {
       setActivity('save settings first', true);
       return;
@@ -119,13 +130,14 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
       .trim();
     if (!command) return;
     const state = getState();
-    if (!state.conversationMeta?.conversation_id) {
+    const convoId = scopedConversationId(state);
+    if (!convoId) {
       setActivity('save settings first', true);
       return;
     }
     try {
       const resp = normalizeShellExecResponse(await activeConversationsRpcClient.executeShellCommand({
-        conversationId: String(state.conversationMeta?.conversation_id),
+        conversationId: convoId,
         command,
       }));
       const callId = typeof resp.callId === 'string' ? resp.callId : null;
@@ -151,7 +163,7 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
     try {
       setActivity('interrupt', true);
       const state = getState();
-      const convoId = state.conversationMeta?.conversation_id || null;
+      const convoId = scopedConversationId(state);
       const result = await activeConversationsRpcClient.interruptConversation({ conversationId: convoId });
       if (result?.ok === false) {
         throw new Error(String(result?.error || 'interrupt failed'));

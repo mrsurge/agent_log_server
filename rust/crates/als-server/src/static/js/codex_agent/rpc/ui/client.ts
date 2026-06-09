@@ -301,6 +301,26 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }
 
+  async function rejectAllAgentDiffs(options: {
+    conversationId: string;
+    path?: string | null;
+  }): Promise<JsonObject & { transport: TransportTag }> {
+    const payload: JsonObject = {
+      conversation_id: options.conversationId,
+    };
+    if (typeof options.path === 'string' && options.path.trim()) payload.path = options.path.trim();
+    if (!rpcEnabled()) {
+      return normalizeTransport({ ok: false, error: 'Agent diff reject all requires /rpc/ui' }, 'legacy');
+    }
+    const result = await callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectAgentDiffRejectAll,
+      params: payload,
+      windowRef: getWindowRef(deps.windowRef),
+    });
+    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+  }
+
   async function stageProjectPaths(options: {
     path?: string | null;
     paths?: string[];
@@ -550,6 +570,7 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     getProjectSummary,
     acceptAgentDiff,
     rejectAgentDiff,
+    rejectAllAgentDiffs,
     stageProjectPaths,
     unstageProjectPaths,
     restoreProjectPaths,

@@ -15,8 +15,19 @@ type ConversationMetaState = {
   conversation_id?: string | null;
 };
 
+function scopedConversationId(state: InputFlowState): string | null {
+  const clientConversationId = typeof state.clientConversationId === 'string' && state.clientConversationId.trim()
+    ? state.clientConversationId.trim()
+    : null;
+  const metaConversationId = typeof state.conversationMeta?.conversation_id === 'string' && state.conversationMeta.conversation_id.trim()
+    ? state.conversationMeta.conversation_id.trim()
+    : null;
+  return clientConversationId || metaConversationId;
+}
+
 type InputFlowState = {
   isMobile?: boolean;
+  clientConversationId?: string | null;
   applyingDraft?: boolean;
   draftDirty?: boolean;
   transcriptLoading?: boolean;
@@ -316,12 +327,13 @@ export function bindInputFlow(ctx: InputFlowContext) {
     if (state.conversationSettings && typeof state.conversationSettings === 'object') {
       state.conversationSettings.markdown = enabled;
     }
-    if (state.conversationMeta?.conversation_id) {
+    const conversationId = scopedConversationId(state);
+    if (conversationId) {
       await conversationsRpcClient.updateConversation({
-        conversationId: state.conversationMeta.conversation_id,
+        conversationId,
         settings: { ...state.conversationSettings, markdown: enabled },
       });
-      await fetchConversation(state.conversationMeta.conversation_id);
+      await fetchConversation(conversationId);
     }
     resetTimeline();
     await replayTranscript();
@@ -336,9 +348,10 @@ export function bindInputFlow(ctx: InputFlowContext) {
     if (state.conversationSettings && typeof state.conversationSettings === 'object') {
       state.conversationSettings.trackEdits = enabled;
     }
-    if (state.conversationMeta?.conversation_id) {
+    const conversationId = scopedConversationId(state);
+    if (conversationId) {
       await conversationsRpcClient.updateConversation({
-        conversationId: state.conversationMeta.conversation_id,
+        conversationId,
         settings: { ...state.conversationSettings, trackEdits: enabled },
       });
     }
@@ -350,12 +363,13 @@ export function bindInputFlow(ctx: InputFlowContext) {
     if (state.conversationSettings && typeof state.conversationSettings === 'object') {
       state.conversationSettings.lineNumbers = enabled;
     }
-    if (state.conversationMeta?.conversation_id) {
+    const conversationId = scopedConversationId(state);
+    if (conversationId) {
       await conversationsRpcClient.updateConversation({
-        conversationId: state.conversationMeta.conversation_id,
+        conversationId,
         settings: { ...state.conversationSettings, lineNumbers: enabled },
       });
-      await fetchConversation(state.conversationMeta.conversation_id);
+      await fetchConversation(conversationId);
     }
     resetTimeline();
     await replayTranscript();

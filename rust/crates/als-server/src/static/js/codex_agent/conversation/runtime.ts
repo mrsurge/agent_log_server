@@ -120,6 +120,11 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     conversationsRpcClient,
   } = ctx;
   const settingsRpcClient = createSettingsRpcClient({ sioCall });
+  let fetchConversationSerial = 0;
+
+  function normalizeConversationId(value: unknown): string | null {
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  }
 
   function currentExtensionId() {
     const { conversationSettings = {}, conversationMeta = {}, runtimeOptions = {} } = getState();
@@ -201,19 +206,34 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
   async function fetchConversation(conversationId: string | null = null) {
     try {
       const state = getState();
-      const cid = conversationId || state.clientConversationId;
+      const requestedConversationId = normalizeConversationId(conversationId)
+        || normalizeConversationId(state.clientConversationId);
+      const requestSerial = ++fetchConversationSerial;
       const result = await conversationsRpcClient.getConversation({
-        conversationId: cid || null,
+        conversationId: requestedConversationId,
       });
       if (!isRecord(result) || result.ok === false) return;
 
       const nextConversationMeta: ConversationMetaState = result;
+      const responseConversationId = normalizeConversationId(nextConversationMeta.conversation_id);
+      const latestState = getState();
+      const currentClientConversationId = normalizeConversationId(latestState.clientConversationId);
+      if (requestSerial !== fetchConversationSerial) return;
+      if (requestedConversationId && !responseConversationId) return;
+      if (requestedConversationId && responseConversationId !== requestedConversationId) return;
+      if (
+        requestedConversationId
+        && currentClientConversationId
+        && currentClientConversationId !== requestedConversationId
+      ) {
+        return;
+      }
       const nextConversationSettings = isRecord(nextConversationMeta.settings)
         ? nextConversationMeta.settings as ConversationSettingsState
         : {};
       const nextPlanCollapsed = nextConversationSettings?.planOverlayCollapsed === true;
-      const nextClientConversationId = state.clientConversationId || nextConversationMeta?.conversation_id || null;
-      const nextClientActiveView = state.clientActiveView || nextConversationMeta?.active_view || null;
+      const nextClientConversationId = currentClientConversationId || responseConversationId || null;
+      const nextClientActiveView = latestState.clientActiveView || nextConversationMeta?.active_view || null;
       const nextActiveView = nextClientActiveView || nextConversationMeta?.active_view || 'splash';
 
       setState({
@@ -224,7 +244,7 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
         activeView: nextActiveView,
         activeRuntimeOptionValues: {},
         planCollapsed: nextPlanCollapsed,
-        miniConversationDrawerOpen: nextActiveView !== 'conversation' ? false : state.miniConversationDrawerOpen,
+        miniConversationDrawerOpen: nextActiveView !== 'conversation' ? false : latestState.miniConversationDrawerOpen,
       });
       syncPlanOverlayUi();
 
@@ -276,7 +296,9 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
 
   async function requestContextCompact() {
     try {
-      const convoId = getState().conversationMeta?.conversation_id || null;
+      const state = getState();
+      const convoId = normalizeConversationId(state.clientConversationId)
+        || normalizeConversationId(state.conversationMeta?.conversation_id);
       const result = await conversationsRpcClient.compactConversation({ conversationId: convoId });
       if (isRecord(result) && result.ok === false) {
         throw new Error(String(result.error || 'compact failed'));

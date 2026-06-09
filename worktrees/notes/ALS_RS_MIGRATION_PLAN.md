@@ -188,6 +188,13 @@ Bootstrap responsibilities:
    - otherwise `cargo run -p als-server`
    Packaged wheel launches set `CARGO_TARGET_DIR` under the ALS-RS cache root so
    cargo does not write build output into site-packages.
+   Future release/optimized binary support should be an explicit opt-in
+   bootstrap mode such as `--release` or `ALS_RS_CARGO_PROFILE=release`, not
+   the default development path. The first release build will create a
+   separate `target/release` tree and can take materially longer on Termux, so
+   keep the initial implementation profile-only and avoid enabling LTO or
+   heavier size-optimization settings until the compile-time and disk impact
+   is measured in this checkout.
    Bootstrap also exports `ALS_RS_EXTENSIONS_DIR` to the packaged/source
    builtin `extensions/` root so Rust discovery does not rely on Cargo's
    rust-workspace-relative default.

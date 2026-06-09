@@ -33,6 +33,7 @@ interface PlanFetchResult extends PlanRuntimeRecord {
 }
 
 interface PlanRuntimeState {
+  clientConversationId?: string | null;
   conversationMeta?: PlanRuntimeRecord;
   conversationSettings?: PlanRuntimeRecord;
   runtimeOptions?: PlanRuntimeRecord;
@@ -66,6 +67,16 @@ function asObject(value: unknown): PlanRuntimeRecord | null {
     return null;
   }
   return value as PlanRuntimeRecord;
+}
+
+function scopedConversationId(state: PlanRuntimeState): string | null {
+  const clientConversationId = typeof state.clientConversationId === 'string' && state.clientConversationId.trim()
+    ? state.clientConversationId.trim()
+    : null;
+  const metaConversationId = typeof state.conversationMeta?.conversation_id === 'string' && state.conversationMeta.conversation_id.trim()
+    ? state.conversationMeta.conversation_id.trim()
+    : null;
+  return clientConversationId || metaConversationId;
 }
 
 function isPlanStep(value: PlanStep | null): value is PlanStep {
@@ -191,7 +202,8 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
   });
 
   async function persistPlanCollapsedState(collapsed: boolean) {
-    const { conversationMeta = {}, conversationSettings = {} } = getState();
+    const state = getState();
+    const { conversationMeta = {}, conversationSettings = {} } = state;
     const nextPlanCollapsed = Boolean(collapsed);
     const nextConversationSettings = {
       ...(conversationSettings || {}),
@@ -208,9 +220,7 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
       conversationSettings: nextConversationSettings,
       conversationMeta: nextConversationMeta,
     });
-    const convoId = typeof conversationMeta?.conversation_id === 'string'
-      ? conversationMeta.conversation_id
-      : null;
+    const convoId = scopedConversationId(state);
     if (!convoId) return;
     try {
       await conversationsRpcClient.updateConversation({
@@ -372,10 +382,9 @@ export function bindPlanRuntime(ctx: PlanRuntimeContext) {
   }
 
   async function fetchPlanState(force = false) {
-    const { conversationMeta = {}, runtimeOptions = {} } = getState();
-    const convoId = typeof conversationMeta?.conversation_id === 'string'
-      ? conversationMeta.conversation_id
-      : null;
+    const state = getState();
+    const { runtimeOptions = {} } = state;
+    const convoId = scopedConversationId(state);
     const extensionId = currentExtensionId();
     const hasPlanCapability = Boolean(runtimeOptions?.has_plan);
     const hasTodoCapability = Boolean(runtimeOptions?.has_todo);

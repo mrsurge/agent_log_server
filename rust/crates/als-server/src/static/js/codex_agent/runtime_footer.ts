@@ -34,6 +34,7 @@ interface RuntimeFooterState {
   conversationSettings?: JsonObject;
   activeRuntimeOptionValues?: Record<string, string>;
   conversationMeta?: JsonObject;
+  clientConversationId?: string | null;
 }
 
 interface RuntimeFooterContext {
@@ -54,6 +55,16 @@ function asObject(value: unknown): JsonObject | null {
 
 function isRuntimeOptionChoice(value: RuntimeOptionChoice | null): value is RuntimeOptionChoice {
   return Boolean(value);
+}
+
+function scopedConversationId(state: RuntimeFooterState): string | null {
+  const clientConversationId = typeof state.clientConversationId === 'string' && state.clientConversationId.trim()
+    ? state.clientConversationId.trim()
+    : null;
+  const metaConversationId = typeof state.conversationMeta?.conversation_id === 'string' && state.conversationMeta.conversation_id.trim()
+    ? state.conversationMeta.conversation_id.trim()
+    : null;
+  return clientConversationId || metaConversationId;
 }
 
 export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
@@ -277,9 +288,7 @@ export function bindRuntimeFooter(ctx: RuntimeFooterContext) {
     if (!nextValue) return;
     const settingKey = getRuntimeSettingKey(kind);
     if (!settingKey) return;
-    const conversationId = typeof state.conversationMeta?.conversation_id === 'string'
-      ? state.conversationMeta.conversation_id
-      : null;
+    const conversationId = scopedConversationId(state);
     const metaSettings = asObject(state.conversationMeta?.settings);
     const agentId = typeof state.runtimeOptions?.agent === 'string' && state.runtimeOptions.agent.trim()
       ? state.runtimeOptions.agent.trim()

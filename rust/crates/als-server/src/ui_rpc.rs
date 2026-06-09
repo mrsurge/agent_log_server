@@ -74,6 +74,9 @@ async fn dispatch_rpc(
         "project.summary.get" => project_summary_get(state, request.params).await,
         "project.agentDiff.accept" => project_agent_diff_accept(io, state, request.params).await,
         "project.agentDiff.reject" => project_agent_diff_reject(io, state, request.params).await,
+        "project.agentDiff.rejectAll" => {
+            project_agent_diff_reject_all(io, state, request.params).await
+        }
         "agentEdits.documentState.get" => inline_agent_edits_document_state(state, request.params),
         "agentEdits.publish" => inline_agent_edits_publish(state, request.params),
         "agentEdits.decide" => inline_agent_edits_decide(state, request.params),
@@ -524,38 +527,8 @@ pub(crate) async fn project_agent_diff_reject(
         .get(&conversation_id, &diff_id)
         .map_err(internal_rpc_error)?
         .ok_or_else(|| rpc_error(-32044, "Tracked diff not found"))?;
-    let repo_root = entry
-        .repo_root
-        .as_deref()
-        .map(PathBuf::from)
-        .or_else(|| conversation_cwd_from_params(state, &params).map(PathBuf::from))
-        .ok_or_else(|| rpc_error(-32602, "Tracked diff has no project root"))?;
-    let entry_for_apply = entry.clone();
-    let repo_root_for_log = path_to_string(&repo_root);
-    let apply_result = tokio::task::spawn_blocking(move || {
-        crate::agent_edits::apply_reverse_patch(&repo_root, &entry_for_apply)
-            .map_err(internal_rpc_error)
-    })
-    .await
-    .map_err(internal_rpc_error)?;
-    if let Err(error) = apply_result {
-        warn!(
-            conversation_id = %conversation_id,
-            diff_id = %diff_id,
-            repo_root = %repo_root_for_log,
-            path = entry.path.as_deref().unwrap_or(""),
-            abs = entry.abs.as_deref().unwrap_or(""),
-            rel = entry.rel.as_deref().unwrap_or(""),
-            source = %entry.source,
-            diff_bytes = entry.diff_bytes,
-            additions = entry.additions,
-            deletions = entry.deletions,
-            diff_preview = %diff_log_preview(&entry.diff_text),
-            error = %error.message,
-            "project agent diff reject failed"
-        );
-        return Err(error);
-    }
+    let repo_root = repo_root_for_agent_diff(state, &params, &entry)?;
+    apply_project_agent_diff_reverse(&conversation_id, &entry, repo_root).await?;
     let removed = state
         .agent_edits
         .remove(&conversation_id, &diff_id)
@@ -570,6 +543,83 @@ pub(crate) async fn project_agent_diff_reject(
         "rejected": removed.is_some(),
         "transport": "rpc",
     }))
+}
+
+pub(crate) async fn project_agent_diff_reject_all(
+    io: &SocketIo,
+    state: &AppState,
+    params: JsonMap,
+) -> Result<Value, RpcError> {
+    let conversation_id = required_string(&params, "conversation_id")?;
+    let entries = state
+        .agent_edits
+        .list_newest_first(&conversation_id)
+        .map_err(internal_rpc_error)?;
+    let requested_count = entries.len();
+    let mut rejected_ids = Vec::new();
+
+    for snapshot_entry in entries {
+        let Some(entry) = state
+            .agent_edits
+            .get(&conversation_id, &snapshot_entry.id)
+            .map_err(internal_rpc_error)?
+        else {
+            continue;
+        };
+        let repo_root = repo_root_for_agent_diff(state, &params, &entry)?;
+        apply_project_agent_diff_reverse(&conversation_id, &entry, repo_root).await?;
+        let removed = state
+            .agent_edits
+            .remove(&conversation_id, &entry.id)
+            .map_err(internal_rpc_error)?;
+        if let Some(entry) = removed.as_ref() {
+            rejected_ids.push(entry.id.clone());
+            emit_project_agent_diff_removed(io, state, entry).await;
+        }
+    }
+
+    Ok(json!({
+        "ok": true,
+        "conversation_id": conversation_id,
+        "requested_count": requested_count,
+        "rejected_count": rejected_ids.len(),
+        "rejected_ids": rejected_ids,
+        "transport": "rpc",
+    }))
+}
+
+async fn apply_project_agent_diff_reverse(
+    conversation_id: &str,
+    entry: &TrackedAgentDiff,
+    repo_root: PathBuf,
+) -> Result<(), RpcError> {
+    let entry_for_apply = entry.clone();
+    let repo_root_for_log = path_to_string(&repo_root);
+    let apply_result = tokio::task::spawn_blocking(move || {
+        crate::agent_edits::apply_reverse_patch(&repo_root, &entry_for_apply)
+            .map_err(internal_rpc_error)
+    })
+    .await
+    .map_err(internal_rpc_error)?;
+    if let Err(error) = apply_result {
+        warn!(
+            conversation_id = %conversation_id,
+            diff_id = %entry.id.as_str(),
+            repo_root = %repo_root_for_log,
+            path = entry.path.as_deref().unwrap_or(""),
+            abs = entry.abs.as_deref().unwrap_or(""),
+            rel = entry.rel.as_deref().unwrap_or(""),
+            source = %entry.source,
+            diff_bytes = entry.diff_bytes,
+            additions = entry.additions,
+            deletions = entry.deletions,
+            diff_preview = %diff_log_preview(&entry.diff_text),
+            error = %error.message,
+            "project agent diff reject failed"
+        );
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub async fn emit_project_agent_diff_added(io: &SocketIo, entry: &TrackedAgentDiff) {
@@ -665,6 +715,33 @@ fn conversation_cwd_from_params(state: &AppState, params: &JsonMap) -> Option<St
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
         })
+}
+
+fn repo_root_for_agent_diff(
+    state: &AppState,
+    params: &JsonMap,
+    entry: &TrackedAgentDiff,
+) -> Result<PathBuf, RpcError> {
+    if let Some(repo_root) = entry
+        .repo_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(PathBuf::from(repo_root));
+    }
+    if params
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        return project_start_from_params(state, params);
+    }
+    conversation_cwd_from_params(state, params)
+        .map(PathBuf::from)
+        .ok_or_else(|| rpc_error(-32602, "Tracked diff has no project root"))
 }
 
 fn project_start_from_params(state: &AppState, params: &JsonMap) -> Result<PathBuf, RpcError> {

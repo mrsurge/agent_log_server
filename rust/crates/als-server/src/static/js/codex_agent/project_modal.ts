@@ -5,6 +5,7 @@ interface UiRpcProjectClient {
   getProjectSummary(options?: { conversationId?: string | null; path?: string | null; maxDiffBytes?: number }): Promise<JsonObject & { transport: string }>;
   acceptAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
   rejectAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
+  rejectAllAgentDiffs(options: { conversationId: string; path?: string | null }): Promise<JsonObject & { transport: string }>;
   stageProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
   unstageProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
   restoreProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
@@ -283,6 +284,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   let currentSummary: ProjectSummary | null = null;
   let currentTe2State: Te2ProjectState | null = null;
   let refreshTimer: number | null = null;
+  let projectAgentRejectOverlayEl: HTMLElement | null = null;
   const projectStorage = (() => {
     try {
       return doc.defaultView?.localStorage || null;
@@ -350,6 +352,50 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     const willOpen = panel.classList.contains('hidden');
     closeMenus();
     setMenuOpen(toggle, panel, willOpen);
+  }
+
+  function ensureProjectAgentRejectOverlay(): HTMLElement {
+    if (projectAgentRejectOverlayEl) {
+      return projectAgentRejectOverlayEl;
+    }
+    const overlay = doc.createElement('div');
+    overlay.id = 'project-agent-reject-overlay';
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.zIndex = '9999';
+    overlay.style.display = 'none';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.background = 'rgba(0, 0, 0, 0.45)';
+    overlay.style.backdropFilter = 'blur(2px)';
+    overlay.innerHTML = `
+      <div style="max-width: min(420px, calc(100vw - 32px)); padding: 22px 24px; border: 1px solid rgba(255,255,255,0.16); border-radius: 14px; background: rgba(18, 22, 30, 0.96); color: var(--text, #f4f6fb); box-shadow: 0 18px 60px rgba(0,0,0,0.45); text-align: center;">
+        <div style="width: 34px; height: 34px; margin: 0 auto 14px; border: 3px solid rgba(255,255,255,0.22); border-top-color: var(--accent, #6ea8fe); border-radius: 999px; animation: project-agent-reject-spin 900ms linear infinite;"></div>
+        <div style="font-weight: 700; margin-bottom: 8px;">Rejecting tracked edits</div>
+        <div data-agent-reject-message style="color: var(--muted, #aab2c0); font-size: 13px; line-height: 1.45;">Applying reverse patches.</div>
+      </div>
+    `;
+    const style = doc.createElement('style');
+    style.textContent = '@keyframes project-agent-reject-spin { to { transform: rotate(360deg); } }';
+    overlay.appendChild(style);
+    doc.body.appendChild(overlay);
+    projectAgentRejectOverlayEl = overlay;
+    return overlay;
+  }
+
+  function showProjectAgentRejectOverlay(count: number): void {
+    const overlay = ensureProjectAgentRejectOverlay();
+    const messageEl = overlay.querySelector('[data-agent-reject-message]');
+    if (messageEl) {
+      messageEl.textContent = `Applying reverse patches for ${count} tracked edit${count === 1 ? '' : 's'}.`;
+    }
+    overlay.style.display = 'flex';
+  }
+
+  function hideProjectAgentRejectOverlay(): void {
+    if (projectAgentRejectOverlayEl) {
+      projectAgentRejectOverlayEl.style.display = 'none';
+    }
   }
 
   function renderMessage(message: string): void {
@@ -1031,12 +1077,32 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
           confirmText: 'Reject all',
         });
         if (!confirmed) return;
+        const conversationId = summary.agentDiffs[0]?.conversationId || ctx.getConversationId() || '';
+        if (!conversationId) {
+          throw new Error('Reject all requires a conversation id.');
+        }
+        let actionError: unknown = null;
+        showProjectAgentRejectOverlay(summary.agentDiffs.length);
+        try {
+          await ctx.uiRpc.rejectAllAgentDiffs({ conversationId, path: summary.root });
+        } catch (error) {
+          actionError = error;
+        } finally {
+          hideProjectAgentRejectOverlay();
+          try {
+            await refreshProjectSummary({ showLoading: false });
+          } catch (refreshError) {
+            console.warn('[project-modal] project summary refresh failed after reject all', refreshError);
+          }
+        }
+        if (actionError) {
+          throw actionError;
+        }
+        return;
       }
       for (const diff of summary.agentDiffs) {
         if (action === 'accept-agent-all') {
           await ctx.uiRpc.acceptAgentDiff({ conversationId: diff.conversationId, diffId: diff.id });
-        } else if (action === 'reject-agent-all') {
-          await ctx.uiRpc.rejectAgentDiff({ conversationId: diff.conversationId, diffId: diff.id });
         }
       }
       await refreshProjectSummary({ showLoading: false });
