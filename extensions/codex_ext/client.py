@@ -654,16 +654,16 @@ def _looks_like_mcp_startup_error(message: object) -> bool:
     )
 
 
-def _looks_like_thread_not_loaded_error(message: object) -> bool:
+def _looks_like_thread_not_loaded_error(message: object, thread_id: Optional[str] = None) -> bool:
     text = str(message or "").strip().lower()
     if not text:
         return False
+    thread_text = str(thread_id or "").strip().lower()
+    if "thread not found" in text:
+        return not thread_text or thread_text in text
     return any(
         token in text
         for token in (
-            "thread not found",
-            "conversation not found",
-            "no rollout found",
             "thread not loaded",
             "not loaded in memory",
         )
@@ -688,11 +688,6 @@ def _build_send_failure_result(error_message: object) -> Dict[str, object]:
     }
 
 
-# Thread resume can legitimately take longer than a normal RPC round-trip while the
-# app-server finishes startup work and emits the idle virtual ack.
-_THREAD_RESUME_TIMEOUT_SECONDS = 45.0
-
-
 async def _resume_thread_for_rpc_server(
     *,
     conversation_id: str,
@@ -710,11 +705,10 @@ async def _resume_thread_for_rpc_server(
         thread_id=thread_id,
         exclude_turns=exclude_turns,
     )
-    await transport.rpc_request(
-        "thread/resume",
+    await transport.resume_thread_until_idle(
         params=resume_params,
         conversation_id=conversation_id,
-        timeout=_THREAD_RESUME_TIMEOUT_SECONDS,
+        thread_id=thread_id,
     )
     transport.mark_thread_ready(thread_id)
     meta["status"] = "active"
@@ -1483,7 +1477,7 @@ async def handle_message(
                 meta["settings"] = merged_settings
                 _save_meta(conversation_id, meta)
             except Exception as exc:
-                if not _looks_like_thread_not_loaded_error(exc):
+                if not _looks_like_thread_not_loaded_error(exc, thread_id):
                     raise
                 _add_to_raw_buffer(
                     "out",
@@ -1818,7 +1812,7 @@ async def compact_session(conversation_id: str) -> Dict[str, object]:
             meta["settings"] = merged_settings
             _save_meta(conversation_id, meta)
         except Exception as exc:
-            if not _looks_like_thread_not_loaded_error(exc):
+            if not _looks_like_thread_not_loaded_error(exc, thread_id):
                 raise
             await _resume_thread_for_rpc_server(
                 conversation_id=conversation_id,

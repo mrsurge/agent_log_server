@@ -22,7 +22,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{Mutex, broadcast, oneshot},
+    sync::{Mutex, broadcast, mpsc, oneshot},
     time::{Duration, timeout},
 };
 use tracing::{debug, error, warn};
@@ -671,6 +671,7 @@ async fn fail_all_pending(pending: &PendingMap, message: &str) {
 pub struct AdapterEventSink {
     inner: Arc<Mutex<AdapterEventSinkInner>>,
     stream: broadcast::Sender<AdapterCapturedEvent>,
+    lossless_streams: Arc<Mutex<Vec<mpsc::UnboundedSender<AdapterCapturedEvent>>>>,
 }
 
 impl Default for AdapterEventSink {
@@ -679,6 +680,7 @@ impl Default for AdapterEventSink {
         Self {
             inner: Arc::new(Mutex::new(AdapterEventSinkInner::default())),
             stream,
+            lossless_streams: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -716,7 +718,7 @@ impl AdapterEventSink {
             let mut guard = self.inner.lock().await;
             push_capped(&mut guard.live, value.clone());
         }
-        let _ = self.stream.send(AdapterCapturedEvent::Live(value));
+        self.publish(AdapterCapturedEvent::Live(value)).await;
     }
 
     async fn push_transcript(&self, value: Value) {
@@ -724,7 +726,7 @@ impl AdapterEventSink {
             let mut guard = self.inner.lock().await;
             push_capped(&mut guard.transcript, value.clone());
         }
-        let _ = self.stream.send(AdapterCapturedEvent::Transcript(value));
+        self.publish(AdapterCapturedEvent::Transcript(value)).await;
     }
 
     async fn push_other(&self, method: String, params: Value) {
@@ -733,7 +735,13 @@ impl AdapterEventSink {
             let mut guard = self.inner.lock().await;
             push_capped(&mut guard.other, event.clone());
         }
-        let _ = self.stream.send(AdapterCapturedEvent::Other(event));
+        self.publish(AdapterCapturedEvent::Other(event)).await;
+    }
+
+    async fn publish(&self, event: AdapterCapturedEvent) {
+        let _ = self.stream.send(event.clone());
+        let mut guard = self.lossless_streams.lock().await;
+        guard.retain(|sender| sender.send(event.clone()).is_ok());
     }
 
     pub async fn snapshot(&self) -> AdapterEventSnapshot {
@@ -747,6 +755,12 @@ impl AdapterEventSink {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AdapterCapturedEvent> {
         self.stream.subscribe()
+    }
+
+    pub async fn subscribe_lossless(&self) -> mpsc::UnboundedReceiver<AdapterCapturedEvent> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.lossless_streams.lock().await.push(sender);
+        receiver
     }
 }
 
@@ -828,6 +842,27 @@ mod tests {
                 assert_eq!(value, json!({"role": "assistant", "text": "pong"}));
             }
             other => panic!("unexpected adapter event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lossless_subscription_receives_events_beyond_broadcast_limit() {
+        let sink = AdapterEventSink::default();
+        let mut stream = sink.subscribe_lossless().await;
+        let count = EVENT_STREAM_LIMIT + 10;
+
+        for seq in 0..count {
+            sink.push_live(json!({"type": "assistant_delta", "seq": seq}))
+                .await;
+        }
+
+        for seq in 0..count {
+            match timeout(Duration::from_secs(1), stream.recv()).await {
+                Ok(Some(AdapterCapturedEvent::Live(value))) => {
+                    assert_eq!(value["seq"], json!(seq));
+                }
+                other => panic!("unexpected adapter event at seq {seq}: {other:?}"),
+            }
         }
     }
 }

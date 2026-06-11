@@ -55,6 +55,14 @@ SESSION_METHODS = ("list_sessions", "resume_session_with_history", "hydrate_tran
 LIVE_SESSION_STATE_METHOD = "get_live_session_state"
 LIVE_SESSION_UNLOAD_METHOD = "unload_live_session"
 DEVINS_CONTEXT_SETTINGS_KEY = "__als_devins_context__"
+ORDERED_ADAPTER_METHODS = frozenset({
+    AdapterMethod.EXTENSION_SHUTDOWN,
+    AdapterMethod.EXTENSION_RELOAD,
+    AdapterMethod.EXTENSION_INSTALL_DEPENDENCIES,
+    AdapterMethod.EXTENSION_PACKAGE_INSTALL,
+    AdapterMethod.EXTENSION_PACKAGE_UPDATE,
+    AdapterMethod.EXTENSION_PACKAGE_REMOVE,
+})
 
 
 class _FrameworkShellRecord(Protocol):
@@ -480,6 +488,7 @@ class ExtensionJsonRpcAdapter:
         self._loader_initialized = False
         self._stdout: TextIO | None = None
         self._write_lock = asyncio.Lock()
+        self._initialize_lock = asyncio.Lock()
         self._shutdown_requested = False
 
     async def run_stdio(
@@ -488,29 +497,62 @@ class ExtensionJsonRpcAdapter:
         stdout: TextIO = sys.stdout,
     ) -> int:
         self._stdout = stdout
+        pending_tasks: set[asyncio.Task[None]] = set()
         while True:
             line = await asyncio.to_thread(stdin.readline)
             if line == "":
+                await self._drain_tasks(pending_tasks)
                 return 0
             line = line.strip()
             if not line:
                 continue
-            await self._handle_line(line)
+            message = await self._decode_line(line)
+            if message is None:
+                continue
+            method = message.get("method") if isinstance(message.get("method"), str) else ""
+            if method in ORDERED_ADAPTER_METHODS:
+                await self._drain_tasks(pending_tasks)
+                await self._handle_message(message)
+            else:
+                task = asyncio.create_task(self._handle_message(message))
+                pending_tasks.add(task)
+
+                def discard_task(done: asyncio.Task[None]) -> None:
+                    pending_tasks.discard(done)
+
+                task.add_done_callback(discard_task)
             if self._shutdown_requested:
+                await self._drain_tasks(pending_tasks)
                 return 0
 
-    async def _handle_line(self, line: str) -> None:
+    async def _drain_tasks(self, tasks: set[asyncio.Task[None]]) -> None:
+        if not tasks:
+            return
+        pending = tuple(tasks)
+        tasks.clear()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _decode_line(self, line: str) -> JsonMap | None:
         try:
             raw = decode_json_line(line)
         except AdapterDecodeError as exc:
             await self._send_error(None, PARSE_ERROR, "Parse error", str(exc))
-            return
+            return None
 
         if not isinstance(raw, dict):
             await self._send_error(None, INVALID_REQUEST, "Invalid request")
+            return None
+
+        return cast(JsonMap, raw)
+
+    async def _handle_line(self, line: str) -> None:
+        message = await self._decode_line(line)
+        if message is None:
             return
 
-        message = cast(JsonMap, raw)
+        await self._handle_message(message)
+
+    async def _handle_message(self, message: JsonMap) -> None:
         request_id = rpc_id(message.get("id"))
         try:
             result = await self._dispatch(message)
@@ -588,61 +630,62 @@ class ExtensionJsonRpcAdapter:
         raise RpcAdapterError(METHOD_NOT_FOUND, f"Unsupported method: {method}")
 
     async def _initialize(self, params: JsonMap) -> JsonMap:
-        extension_id = optional_string(params.get("extension_id"))
-        if extension_id is None:
-            raise RpcAdapterError(INVALID_PARAMS, "extension_id is required")
-        cwd = optional_path(params.get("cwd")) or _safe_cwd()
-        data_dir = optional_path(params.get("data_dir")) or cwd
-        cache_dir = optional_path(params.get("cache_dir")) or data_dir
-        config_dir = optional_path(params.get("config_dir")) or data_dir
-        extension_roots = optional_path_list(params.get("extensions_dirs"))
-        legacy_extensions_dir = optional_path(params.get("extensions_dir"))
-        if not extension_roots and legacy_extensions_dir is not None:
-            extension_roots = [legacy_extensions_dir]
-        if not extension_roots:
-            extension_roots = list(self._state.extension_roots) or [self._state.extensions_dir]
-        extensions_dir = extension_roots[0]
-        settings = optional_map(params.get("settings")) or {}
+        async with self._initialize_lock:
+            extension_id = optional_string(params.get("extension_id"))
+            if extension_id is None:
+                raise RpcAdapterError(INVALID_PARAMS, "extension_id is required")
+            cwd = optional_path(params.get("cwd")) or _safe_cwd()
+            data_dir = optional_path(params.get("data_dir")) or cwd
+            cache_dir = optional_path(params.get("cache_dir")) or data_dir
+            config_dir = optional_path(params.get("config_dir")) or data_dir
+            extension_roots = optional_path_list(params.get("extensions_dirs"))
+            legacy_extensions_dir = optional_path(params.get("extensions_dir"))
+            if not extension_roots and legacy_extensions_dir is not None:
+                extension_roots = [legacy_extensions_dir]
+            if not extension_roots:
+                extension_roots = list(self._state.extension_roots) or [self._state.extensions_dir]
+            extensions_dir = extension_roots[0]
+            settings = optional_map(params.get("settings")) or {}
 
-        self._state = AdapterState(
-            extension_id=extension_id,
-            cwd=cwd,
-            data_dir=data_dir,
-            cache_dir=cache_dir,
-            config_dir=config_dir,
-            extensions_dir=extensions_dir,
-            extension_roots=extension_roots,
-            settings=settings,
-            meta=self._state.meta,
-        )
-        self._ensure_loader_initialized()
-        info = self._extension_info(extension_id)
-        ext_type = optional_string(info.get("type")) or ""
-        active = info.get("active") is True
-        handler = self._loader.get_handler(extension_id) if active else None
-        conversations_supported = _has_any_callable_attr(handler, CONVERSATION_METHODS)
-        models_supported = _has_callable_attr(handler, "list_models")
-        sessions_supported = _has_any_callable_attr(handler, SESSION_METHODS)
-        interruption_supported = _has_callable_attr(handler, "abort_session")
-        fork_supported = _has_any_callable_attr(handler, CONVERSATION_FORK_METHODS)
-        return ExtensionInitializeResult(
-            extension_id=extension_id,
-            provider=ext_type or extension_id,
-            capabilities=AdapterCapabilities(
-                conversations=conversations_supported,
-                models=models_supported,
-                sessions=sessions_supported,
-                interruption=interruption_supported,
-                conversation_fork=fork_supported,
-                live_events=conversations_supported,
-                transcript_records=conversations_supported,
-                extra={
-                    "supported": active and handler is not None,
-                    "type": ext_type,
-                    "manifest": info.get("manifest", {}),
-                },
-            ),
-        ).to_json()
+            self._state = AdapterState(
+                extension_id=extension_id,
+                cwd=cwd,
+                data_dir=data_dir,
+                cache_dir=cache_dir,
+                config_dir=config_dir,
+                extensions_dir=extensions_dir,
+                extension_roots=extension_roots,
+                settings=settings,
+                meta=self._state.meta,
+            )
+            self._ensure_loader_initialized()
+            info = self._extension_info(extension_id)
+            ext_type = optional_string(info.get("type")) or ""
+            active = info.get("active") is True
+            handler = self._loader.get_handler(extension_id) if active else None
+            conversations_supported = _has_any_callable_attr(handler, CONVERSATION_METHODS)
+            models_supported = _has_callable_attr(handler, "list_models")
+            sessions_supported = _has_any_callable_attr(handler, SESSION_METHODS)
+            interruption_supported = _has_callable_attr(handler, "abort_session")
+            fork_supported = _has_any_callable_attr(handler, CONVERSATION_FORK_METHODS)
+            return ExtensionInitializeResult(
+                extension_id=extension_id,
+                provider=ext_type or extension_id,
+                capabilities=AdapterCapabilities(
+                    conversations=conversations_supported,
+                    models=models_supported,
+                    sessions=sessions_supported,
+                    interruption=interruption_supported,
+                    conversation_fork=fork_supported,
+                    live_events=conversations_supported,
+                    transcript_records=conversations_supported,
+                    extra={
+                        "supported": active and handler is not None,
+                        "type": ext_type,
+                        "manifest": info.get("manifest", {}),
+                    },
+                ),
+            ).to_json()
 
     async def _reload(self, params: JsonMap) -> JsonMap:
         self._ensure_loader_initialized()

@@ -23,7 +23,6 @@ use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::broadcast::error::RecvError;
 use tracing::warn;
 
 const RPC_EVENT: &str = "rpc";
@@ -61,19 +60,11 @@ pub fn register_conversations_rpc_namespace(io: &SocketIo) {
 }
 
 pub fn start_adapter_event_fanout(io: SocketIo, state: AppState) {
-    let mut adapter_events = state.adapter.events().subscribe();
     tokio::spawn(async move {
-        loop {
-            match adapter_events.recv().await {
-                Ok(event) => {
-                    if let Err(error) = handle_adapter_event(&io, &state, event).await {
-                        warn!(error = %error.message, "failed to fan out adapter event");
-                    }
-                }
-                Err(RecvError::Lagged(count)) => {
-                    warn!(count, "ALS-RS adapter event fanout lagged");
-                }
-                Err(RecvError::Closed) => break,
+        let mut adapter_events = state.adapter.events().subscribe_lossless().await;
+        while let Some(event) = adapter_events.recv().await {
+            if let Err(error) = handle_adapter_event(&io, &state, event).await {
+                warn!(error = %error.message, "failed to fan out adapter event");
             }
         }
     });
