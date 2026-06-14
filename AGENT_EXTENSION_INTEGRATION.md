@@ -285,6 +285,7 @@ The extension system is intentionally small. Implement only the hooks your backe
 | `handle_message(conversation_id, text, agent_type, settings)` | send-message path in `server.py` | Send user input through the backend |
 | `get_settings_schema(extension_id)` | `GET /api/extensions/{id}/settings_schema` | Return a dynamic schema when runtime-generated |
 | `get_runtime_options(extension_id, conversation_id=None, settings=None)` | `GET /api/appserver/runtime_options` | Expose shared runtime quick controls/current values such as plan or collaboration mode |
+| `read_plan(extension_id, conversation_id)` | `/rpc/settings` `extension.plan.get` | Return provider-neutral plan/todo state for the shared plan overlay and modal |
 | `list_models()` | `GET /api/extensions/{id}/models` | Populate schema-driven model selectors |
 | `list_sessions(cwd=None)` | `GET /api/extensions/{id}/sessions` | Populate `session_picker` browse flows |
 | `resume_session_with_history(...)` | session bind/import endpoint | Bind a backend session/thread to a local conversation; ordinary existing-conversation reload still stays cold until first-send lazy resume |
@@ -300,6 +301,11 @@ The extension system is intentionally small. Implement only the hooks your backe
 Most extension hooks are wrapped by `ext_loader`, but the send path still directly fetches the handler and calls `handle_message(...)` from `server.py`.
 
 That is still generic because `server.py` does not import a concrete extension module; it asks `ext_loader` for the active handler and calls the shared method name.
+
+Planning/todo state is also a generic extension-owned surface. Providers that
+support it should normalize their native plan files, todo stores, or plan events
+to `read_plan(...)` plus live `plan_state` / `plan_update` events. See
+`EXTENSION_PLANNING_CONTRACT.md` for the DTO and replay rules.
 
 ## Server integration points
 
@@ -849,8 +855,6 @@ The extension architecture is now the intended long-term path.
 
 - `copilot-sdk` is the mature example
 - `codex-ext` is the live runtime-schema-driven, extension-owned Codex path
-- `codex-ext-exp` is the experimental fork for dynamic context injection and patched app-server work
-- `codex-ext-testing` remains a compatibility alias to `codex-ext`
 - the next major Codex slices continue to be tool/render parity and approval-path parity
 
 ## Rename note

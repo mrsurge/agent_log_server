@@ -522,13 +522,14 @@ pub(crate) async fn project_agent_diff_reject(
 ) -> Result<Value, RpcError> {
     let conversation_id = required_string(&params, "conversation_id")?;
     let diff_id = required_string(&params, "diff_id")?;
+    let force = params.get("force").and_then(Value::as_bool) == Some(true);
     let entry = state
         .agent_edits
         .get(&conversation_id, &diff_id)
         .map_err(internal_rpc_error)?
         .ok_or_else(|| rpc_error(-32044, "Tracked diff not found"))?;
     let repo_root = repo_root_for_agent_diff(state, &params, &entry)?;
-    apply_project_agent_diff_reverse(&conversation_id, &entry, repo_root).await?;
+    apply_project_agent_diff_reverse(&conversation_id, &entry, repo_root, force).await?;
     let removed = state
         .agent_edits
         .remove(&conversation_id, &diff_id)
@@ -567,7 +568,7 @@ pub(crate) async fn project_agent_diff_reject_all(
             continue;
         };
         let repo_root = repo_root_for_agent_diff(state, &params, &entry)?;
-        apply_project_agent_diff_reverse(&conversation_id, &entry, repo_root).await?;
+        apply_project_agent_diff_reverse(&conversation_id, &entry, repo_root, false).await?;
         let removed = state
             .agent_edits
             .remove(&conversation_id, &entry.id)
@@ -592,16 +593,26 @@ async fn apply_project_agent_diff_reverse(
     conversation_id: &str,
     entry: &TrackedAgentDiff,
     repo_root: PathBuf,
+    force: bool,
 ) -> Result<(), RpcError> {
     let entry_for_apply = entry.clone();
     let repo_root_for_log = path_to_string(&repo_root);
     let apply_result = tokio::task::spawn_blocking(move || {
-        crate::agent_edits::apply_reverse_patch(&repo_root, &entry_for_apply)
-            .map_err(internal_rpc_error)
+        let mode = if force {
+            crate::reverse_patch::ReversePatchMode::Fuzzy
+        } else {
+            crate::reverse_patch::ReversePatchMode::Strict
+        };
+        crate::agent_edits::apply_reverse_patch_with_mode(&repo_root, &entry_for_apply, mode)
     })
     .await
     .map_err(internal_rpc_error)?;
     if let Err(error) = apply_result {
+        if !force {
+            if let Some(mismatch) = reverse_patch_mismatch(&error) {
+                return Err(agent_diff_metadata_mismatch_error(entry, mismatch));
+            }
+        }
         warn!(
             conversation_id = %conversation_id,
             diff_id = %entry.id.as_str(),
@@ -614,12 +625,42 @@ async fn apply_project_agent_diff_reverse(
             additions = entry.additions,
             deletions = entry.deletions,
             diff_preview = %diff_log_preview(&entry.diff_text),
-            error = %error.message,
+            error = %error,
             "project agent diff reject failed"
         );
-        return Err(error);
+        return Err(internal_rpc_error(error));
     }
     Ok(())
+}
+
+fn reverse_patch_mismatch(
+    error: &anyhow::Error,
+) -> Option<&crate::reverse_patch::ReversePatchMismatch> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::reverse_patch::ReversePatchMismatch>())
+}
+
+fn agent_diff_metadata_mismatch_error(
+    entry: &TrackedAgentDiff,
+    mismatch: &crate::reverse_patch::ReversePatchMismatch,
+) -> RpcError {
+    RpcError::new(
+        -32062,
+        "The diff metadata does not match the file metadata on disk.",
+        Some(json!({
+            "kind": "agent_diff_metadata_mismatch",
+            "diff_id": entry.id,
+            "path": entry.path,
+            "abs": entry.abs,
+            "rel": entry.rel,
+            "line": entry.line,
+            "column": entry.column,
+            "modified_start": mismatch.modified_start,
+            "detail": mismatch.detail,
+            "message": "The diff metadata does not match the file metadata on disk, probably because of a recent change to the file.",
+        })),
+    )
 }
 
 pub async fn emit_project_agent_diff_added(io: &SocketIo, entry: &TrackedAgentDiff) {

@@ -248,6 +248,9 @@ impl AdapterClient {
                 "observed".to_owned(),
             ],
             shellspec_path,
+            shellspec_entry: Some("extension_adapter".to_owned()),
+            python_module: Some("framework_shells.ferrous_framework".to_owned()),
+            python_class: Some("FerrousFrameworkPipe".to_owned()),
         })?;
         let shell_id = pipe.shell_id().ok();
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));

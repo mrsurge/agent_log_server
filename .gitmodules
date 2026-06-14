@@ -1,0 +1,3 @@
+[submodule "rust/crates/ferrous_framework"]
+	path = rust/crates/ferrous_framework
+	url = https://github.com/mrsurge/ferrous-framework.git

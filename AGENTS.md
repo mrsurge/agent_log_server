@@ -252,7 +252,7 @@ UNDER NO CIRCUMSTANCES WILL I EVER USE `resolve()` or ANY SYMLINK RESOLOVING MET
 
 ## Agent Log CLI Usage
 
-Prefer the agent-log MCP tools when they are available. If a curl fallback is
+Prefer the agent-log MCP tools when they are available. (that means check to see if its available FIRST) If a curl fallback is
 needed for the current ALS-RS harness, the active local server is running on
 `http://127.0.0.1:12459`.
 

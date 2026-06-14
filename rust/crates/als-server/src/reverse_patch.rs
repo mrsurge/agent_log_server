@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use std::{
-    fs,
+    error::Error,
+    fmt, fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -29,10 +30,40 @@ enum LineEnding {
     Crlf,
 }
 
-pub fn apply_reverse_patch(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReversePatchMode {
+    Strict,
+    Fuzzy,
+}
+
+#[derive(Debug)]
+pub struct ReversePatchMismatch {
+    pub modified_start: u64,
+    pub detail: String,
+}
+
+impl fmt::Display for ReversePatchMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "diff metadata does not match file contents at +{}: {}",
+            self.modified_start, self.detail
+        )
+    }
+}
+
+impl Error for ReversePatchMismatch {}
+
+#[cfg(test)]
+fn apply_reverse_patch(repo_root: &Path, path_hint: Option<&str>, diff_text: &str) -> Result<()> {
+    apply_reverse_patch_with_mode(repo_root, path_hint, diff_text, ReversePatchMode::Strict)
+}
+
+pub fn apply_reverse_patch_with_mode(
     repo_root: &Path,
     path_hint: Option<&str>,
     diff_text: &str,
+    mode: ReversePatchMode,
 ) -> Result<()> {
     let patches = parse_unified_diff(diff_text)?;
     let target_rel = target_rel_path(repo_root, path_hint, &patches)?;
@@ -71,8 +102,20 @@ pub fn apply_reverse_patch(
     let mut indexed_hunks: Vec<(usize, Hunk)> = hunks.into_iter().enumerate().collect();
     indexed_hunks.sort_by_key(|(index, hunk)| (hunk.modified_start, *index));
     for (_index, hunk) in indexed_hunks.into_iter().rev() {
-        reverse_hunk(&mut lines, &hunk)
-            .with_context(|| format!("failed to reverse hunk at +{}", hunk.modified_start))?;
+        match reverse_hunk_at_recorded_line(&mut lines, &hunk) {
+            Ok(()) => {}
+            Err(error) if mode == ReversePatchMode::Fuzzy => {
+                reverse_hunk_by_content_search(&mut lines, &hunk)
+                    .with_context(|| format!("failed to reverse hunk at +{}", hunk.modified_start))
+                    .with_context(|| error.to_string())?;
+            }
+            Err(error) => {
+                return Err(anyhow!(error).context(format!(
+                    "failed to reverse hunk at +{}",
+                    hunk.modified_start
+                )));
+            }
+        }
     }
 
     let next_content = join_text_lines(&lines, trailing_newline, line_ending);
@@ -153,42 +196,107 @@ fn flush_patch(patches: &mut Vec<FilePatch>, current: &mut FilePatch) {
     }
 }
 
-fn reverse_hunk(lines: &mut Vec<String>, hunk: &Hunk) -> Result<()> {
-    let start = hunk_start_index(hunk.modified_start)?;
+fn reverse_hunk_at_recorded_line(
+    lines: &mut Vec<String>,
+    hunk: &Hunk,
+) -> std::result::Result<(), ReversePatchMismatch> {
+    let start = hunk_start_index(hunk.modified_start)
+        .map_err(|error| hunk_mismatch(hunk, error.to_string()))?;
     let expected = modified_side_lines(hunk);
     if start > lines.len() {
-        bail!(
-            "hunk starts at line {}, but file has {} lines",
-            hunk.modified_start,
-            lines.len()
-        );
+        return Err(hunk_mismatch(
+            hunk,
+            format!(
+                "hunk starts at line {}, but file has {} lines",
+                hunk.modified_start,
+                lines.len()
+            ),
+        ));
     }
     if start + expected.len() > lines.len() {
-        bail!(
-            "hunk expects {} line{} at line {}, but file has {} line{}",
-            expected.len(),
-            plural(expected.len()),
-            hunk.modified_start,
-            lines.len(),
-            plural(lines.len())
-        );
+        return Err(hunk_mismatch(
+            hunk,
+            format!(
+                "hunk expects {} line{} at line {}, but file has {} line{}",
+                expected.len(),
+                plural(expected.len()),
+                hunk.modified_start,
+                lines.len(),
+                plural(lines.len())
+            ),
+        ));
     }
 
     let actual = &lines[start..start + expected.len()];
     for (offset, (actual_line, expected_line)) in actual.iter().zip(expected.iter()).enumerate() {
         if !line_matches_whitespace_tolerant(actual_line, expected_line) {
-            bail!(
-                "line {} mismatch: expected {:?}, found {:?}",
-                start + offset + 1,
-                expected_line,
-                actual_line
-            );
+            return Err(hunk_mismatch(
+                hunk,
+                format!(
+                    "line {} mismatch: expected {:?}, found {:?}",
+                    start + offset + 1,
+                    expected_line,
+                    actual_line
+                ),
+            ));
         }
     }
 
     let replacement = original_side_lines_preserving_context(hunk, actual);
     lines.splice(start..start + expected.len(), replacement);
     Ok(())
+}
+
+fn reverse_hunk_by_content_search(lines: &mut Vec<String>, hunk: &Hunk) -> Result<()> {
+    let expected = modified_side_lines(hunk);
+    if expected.is_empty() {
+        bail!("content fallback cannot locate an empty modified side");
+    }
+    if expected.len() > lines.len() {
+        bail!(
+            "content fallback expects {} line{} but file has {} line{}",
+            expected.len(),
+            plural(expected.len()),
+            lines.len(),
+            plural(lines.len())
+        );
+    }
+
+    let mut matches = Vec::new();
+    for start in 0..=lines.len() - expected.len() {
+        let actual = &lines[start..start + expected.len()];
+        if actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual_line, expected_line)| {
+                line_matches_whitespace_tolerant(actual_line, expected_line)
+            })
+        {
+            matches.push(start);
+            if matches.len() > 1 {
+                break;
+            }
+        }
+    }
+
+    match matches.as_slice() {
+        [start] => {
+            let start = *start;
+            let actual = lines[start..start + expected.len()].to_vec();
+            let replacement = original_side_lines_preserving_context(hunk, &actual);
+            lines.splice(start..start + expected.len(), replacement);
+            Ok(())
+        }
+        [] => bail!("content fallback could not find the modified hunk contents"),
+        _ => bail!("content fallback found multiple possible hunk matches"),
+    }
+}
+
+fn hunk_mismatch(hunk: &Hunk, detail: String) -> ReversePatchMismatch {
+    ReversePatchMismatch {
+        modified_start: hunk.modified_start,
+        detail,
+    }
 }
 
 fn modified_side_lines(hunk: &Hunk) -> Vec<String> {
@@ -478,6 +586,43 @@ mod tests {
             read_file(&root, "notes.md"),
             "alpha\nsomething else\nomega\n"
         );
+    }
+
+    #[test]
+    fn strict_mode_reports_metadata_mismatch_when_recorded_line_is_wrong() {
+        let root = temp_repo("strict_mode_reports_metadata_mismatch_when_recorded_line_is_wrong");
+        write_file(&root, "notes.md", "header\nalpha\n<!-- canary -->\nomega\n");
+        let error = apply_reverse_patch(
+            &root,
+            Some("notes.md"),
+            "@@ -1,2 +1,3 @@\n alpha\n+<!-- canary -->\n omega",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.downcast_ref::<ReversePatchMismatch>().is_some()),
+            "{error:#}"
+        );
+        assert_eq!(
+            read_file(&root, "notes.md"),
+            "header\nalpha\n<!-- canary -->\nomega\n"
+        );
+    }
+
+    #[test]
+    fn fuzzy_mode_reverses_by_unique_modified_content_after_metadata_mismatch() {
+        let root =
+            temp_repo("fuzzy_mode_reverses_by_unique_modified_content_after_metadata_mismatch");
+        write_file(&root, "notes.md", "header\nalpha\n<!-- canary -->\nomega\n");
+        apply_reverse_patch_with_mode(
+            &root,
+            Some("notes.md"),
+            "@@ -1,2 +1,3 @@\n alpha\n+<!-- canary -->\n omega",
+            ReversePatchMode::Fuzzy,
+        )
+        .unwrap();
+        assert_eq!(read_file(&root, "notes.md"), "header\nalpha\nomega\n");
     }
 
     #[test]

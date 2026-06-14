@@ -286,13 +286,22 @@ impl TrackedAgentDiff {
     }
 }
 
-pub fn apply_reverse_patch(repo_root: &Path, entry: &TrackedAgentDiff) -> Result<()> {
+pub fn apply_reverse_patch_with_mode(
+    repo_root: &Path,
+    entry: &TrackedAgentDiff,
+    mode: crate::reverse_patch::ReversePatchMode,
+) -> Result<()> {
     let path_hint = entry
         .rel
         .as_deref()
         .or(entry.abs.as_deref())
         .or(entry.path.as_deref());
-    crate::reverse_patch::apply_reverse_patch(repo_root, path_hint, &entry.diff_text)
+    crate::reverse_patch::apply_reverse_patch_with_mode(
+        repo_root,
+        path_hint,
+        &entry.diff_text,
+        mode,
+    )
 }
 
 fn repo_root_from_path(path: &Path) -> Option<PathBuf> {

@@ -171,8 +171,8 @@ als-rs-extension-adapter = "agent_log_server_rs.adapters.extension_adapter:main"
 ```
 
 The installed console script must not collide with the current `codex-agent`
-command. The older `als-rs-copilot-adapter` script remains as a focused pilot
-entrypoint, but the Rust server now uses the generic extension adapter module.
+command. ALS-RS exposes only the generic `als-rs-extension-adapter` entrypoint;
+provider-specific adapter console scripts are not part of the current runtime.
 
 Bootstrap responsibilities:
 
@@ -476,14 +476,9 @@ Validation currently covers:
 - Python mirror smoke test for the same `assistant_delta` and `assistant`
   transcript shapes.
 
-## Generic extension adapter and Copilot pilot
+## Generic extension adapter and runtime support
 
-The original focused Copilot adapter pilot still lives in:
-
-- `agent_log_server_rs/adapters/copilot_sdk_adapter.py`
-- console script: `als-rs-copilot-adapter`
-
-The current Rust runtime path uses the generic adapter:
+The Rust runtime path uses the generic adapter:
 
 - `agent_log_server_rs/adapters/extension_adapter.py`
 - console script: `als-rs-extension-adapter`
@@ -491,23 +486,33 @@ The current Rust runtime path uses the generic adapter:
 
 The generic adapter initializes the existing Python extension loader
 (`extensions.load_extensions(...)`) with ALS-RS callbacks and dispatches methods
-by `extension_id`. Runtime conversation/model support is intentionally limited to
-extension type `copilot_sdk` in the current slice. Codex/Codex-exp are visible in
-metadata but return explicit unsupported errors for conversation/model methods
-until their adapter runtime paths are wired.
+by `extension_id`. Runtime support is provider-neutral at the adapter boundary:
+`copilot-sdk` and `codex-ext` both use the same JSON-RPC DTO lane, while
+provider-native session, model, plan, approval, interrupt, MCP, and
+event-translation behavior remains inside extension packages. `codex-ext-exp`
+has been removed from the active registry/runtime surface.
 
-Supported Copilot scope:
+Supported runtime scope:
 
 | Method | Behavior |
 | --- | --- |
-| `extension.initialize` | Initializes the loader, returns capabilities for the selected extension, and reports unsupported runtime capabilities for non-Copilot types. |
-| `extension.list_models` | For `copilot-sdk`, calls the existing Copilot SDK extension `list_models()` and normalizes each model into `AdapterModelInfo`. |
+| `extension.initialize` | Initializes the loader, returns capabilities/runtime metadata for the selected extension, and applies the current ALS-RS registry/enablement view. |
+| `extension.list_models` | Delegates to the selected extension's `list_models()` hook through the generic loader and returns normalized model metadata. |
+| `extension.list_sessions` | Delegates to the selected extension's `list_sessions()` hook through the generic loader for schema session/rollout picker data. |
+| `extension.get_runtime_options` | Delegates to the loader's schema/provider runtime-option merger for footer controls and quick runtime state. |
+| `extension.get_provider_info` | Delegates provider status/usage reads to extension-owned account/quota logic. |
+| `extension.schema_interaction.run` | Runs provider-owned schema interactions such as provider auth, model search, and config writes. |
+| `extension.get_plan` | Reads provider-owned planning/todo state through the generic plan contract and returns the frontend header/overlay shape. |
 | `extension.package.validate` | Validates a path/zip/git extension source through the existing Python installer helpers. |
 | `extension.package.install` | Installs a third-party extension into `${ALS_RS_DATA_DIR}/extensions`, updates that root's `extensions.json`, then reloads Rust and adapter registry state. |
 | `extension.package.update` | Updates a user-installed extension from an explicit or recorded source, then reloads Rust and adapter registry state. |
 | `extension.package.remove` | Removes only user-installed extensions; builtin extensions are refused. |
-| `conversation.start` | For `copilot-sdk`, calls the existing Copilot SDK extension `init_session()` and returns `ConversationAckResult`. |
-| `conversation.send` | For `copilot-sdk`, calls the existing Copilot SDK extension `handle_message()` and returns `ConversationAckResult`. |
+| `conversation.start` | Starts provider sessions through the selected extension's `init_session()` hook and returns `ConversationAckResult`. |
+| `conversation.resume` | Resumes/imports a provider-bound conversation through extension-owned resume/hydration hooks. |
+| `conversation.fork` | Forks a provider conversation when the extension advertises the capability, then lets Rust copy local transcript state. |
+| `conversation.send` | Sends turns through the selected extension's `handle_message()` hook and returns `ConversationAckResult`. |
+| `conversation.interrupt` | Delegates interrupt/abort to extension-owned runtime logic. |
+| `approval.respond` | Delegates provider approval responses through the extension loader; MCP ask-user responses are bridged by ALS-RS IPC before handoff persistence. |
 | `extension.shutdown` | Stops supported extension handlers. |
 
 First physical transport:
@@ -515,26 +520,25 @@ First physical transport:
 - newline-delimited JSON-RPC 2.0 over adapter stdin/stdout
 - one JSON object per line
 - Rust can later replace this transport without changing adapter DTO names
-- live events from the existing Copilot router are forwarded as `event.live`
+- live events from extension routers are forwarded as `event.live`
   notifications
 - transcript writes are forwarded as `event.transcript_record` notifications
 
-The pilot intentionally reuses the existing Copilot extension client through the
-generic extension loader instead of calling the vendored SDK directly. This keeps
-the first Rust migration slice focused on process/DTO boundaries while preserving
-existing Copilot runtime behavior, event routing, lazy session creation, model
-metadata normalization, and transcript generation.
-
-The pilot uses an in-memory meta store for now. That is sufficient for a single
-adapter process smoke path, but Rust should provide durable conversation metadata
-when it owns the conversation store.
+The original Copilot pilot proved the process/DTO boundary by reusing an existing
+extension client through the loader instead of calling the provider SDK directly.
+That pattern is now the live contract: Rust owns durable conversation metadata
+and transcript storage, while the adapter receives conversation/provider
+identifiers from Rust and emits normalized live events / transcript records back
+to Rust.
 
 ## Rust adapter runtime wiring
 
 The first Rust-side adapter runtime lives in:
 
 - `rust/crates/als-server/src/adapter_process.rs`
-- `rust/crates/als-server/src/adapter_routes.rs`
+- `rust/crates/als-server/src/settings_rpc.rs`
+- `rust/crates/als-server/src/conversation_rpc.rs`
+- `rust/crates/als-server/src/extension_routes.rs`
 
 Runtime behavior:
 
@@ -578,15 +582,14 @@ Runtime behavior:
   values to `/rpc/conversations` `rpc.notify` methods and persists transcript
   records into the Rust conversation store.
 
-Smoke routes:
+Current route/RPC surfaces:
 
-| Route | Purpose |
+| Surface | Purpose |
 | --- | --- |
-| `POST /api/adapter/copilot/initialize` | Spawn/initialize the Copilot adapter and return capabilities. |
-| `GET /api/adapter/copilot/models` | Call `extension.list_models` through the adapter. |
-| `POST /api/adapter/copilot/conversations/{conversation_id}/start` | Call `conversation.start` through the adapter. |
-| `POST /api/adapter/copilot/conversations/{conversation_id}/send` | Call `conversation.send` through the adapter. |
-| `GET /api/adapter/copilot/events` | Inspect the temporary live/transcript notification sink. |
+| `/rpc/settings` | Extension registry, schema, runtime options, provider info, session/model lists, schema interactions, package operations, and plan reads. |
+| `/rpc/conversations` | Conversation create/list/get/select/update/delete/pin/draft/replay/send/fork/approval/interrupt and live event fanout. |
+| `POST /api/extensions/{extension_id}/reload` | Targeted extension reload through the safe adapter reload path after registry verification. |
+| `extension.debug.probe` | Redacted Rust/adapter/FWS diagnostics, including recent adapter event snapshots. |
 
 Validation currently covers:
 
@@ -595,10 +598,9 @@ Validation currently covers:
 - Focused Python py_compile/basedpyright checks for the adapter executable and
   DTO mirror.
 - Live Rust smoke tests against temporary ALS-RS servers:
-  - `POST /api/adapter/copilot/initialize`
-  - `GET /api/adapter/copilot/events`
   - `/rpc/settings` registry metadata, request cards, and UI features
-  - `/rpc/conversations` Copilot-backed send with assistant finalization and
+  - `/rpc/settings` extension schema/model/session/runtime-option/plan surfaces
+  - `/rpc/conversations` extension-backed send with assistant finalization and
     persisted replay rows
 
 ## Extension registry and lifecycle bridge
@@ -617,11 +619,11 @@ Current behavior:
 | Settings RPC | `extensions.list` returns the Rust registry snapshot. `extensions.reload` rescans the registry from disk and asks a running adapter loader to reload. Request-card and UI-feature RPC methods use registry metadata and preserve frontend parity fields such as `module_url`. |
 | Python adapter loader | The generic adapter initializes `extensions.load_extensions(...)` once in the adapter process with ALS-RS callbacks and the same `extensions_dir` root. |
 | Runtime selection | `conversation.send` chooses the selected extension from request params, then persisted conversation metadata/settings (`extension_id`, `agent_type`, `settings.agent`), then the first active registry entry. The frontend normally sends only `conversation_id` and `text`, so persisted metadata is the routing source of truth. |
-| Runnable support | `copilot-sdk` is the only supported runtime type for model/conversation methods in this slice. Non-Copilot extension types are metadata-visible but return explicit unsupported errors for runtime methods. |
+| Runnable support | `copilot-sdk` and `codex-ext` are live through the generic adapter for model/conversation/session/runtime-option/plan surfaces. Unsupported extension types remain metadata-visible and return generic unsupported errors for runtime methods they do not implement. |
 | Enablement overlay | `extension.enabled.set` persists ALS-RS-local enablement state in `${ALS_RS_CONFIG_DIR}/extensions_state.json`, updates Rust registry active state, and asks a running adapter loader to reload. It does not mutate extension package manifests or `extensions.json`. |
 | Dependency/readiness mediation | A running adapter reload applies Rust enablement overrides to the Python loader, calls extension-owned dependency checks, merges `dependency_status`, `dependency_ok`, `dependency_message`, and `dependency_details` back into Rust registry state, and waits for readiness when enabling an active extension. |
 | Dependency install | `extension.install` routes through the generic adapter to extension-owned `install_extension_dependencies()`, then rechecks dependencies and merges the resulting runtime state back into the Rust registry. |
-| Codex model discovery | The generic adapter now supplies a real framework-shell manager callback to the Python extension loader, so `codex-ext`/`codex-ext-exp` model listing can use their existing FWS-owned app-server transport instead of being metadata-only. |
+| Codex model discovery | The generic adapter now supplies a real framework-shell manager callback to the Python extension loader, so `codex-ext` model listing can use its existing FWS-owned app-server transport instead of being metadata-only. |
 | FWS runtime adoption | The TE2 bootstrap now passes framework-shell runtime identity to `als-server` as explicit CLI arguments, Rust stores those values in `ServerConfig`, and adapter spawn forwards that config-backed environment to Python. Env fallback remains for standalone/manual launches. |
 | Extension debug probe | `/rpc/settings` method `extension.debug.probe` now returns a redacted Rust/adapter/FWS diagnostic snapshot, with optional `ensure_manager: true` to force framework-shell manager creation/adoption without launching provider model commands. |
 | Extension shell grouping | ALS-RS-launched extension shellspecs now use the `als-rs` framework-shell subgroup instead of the legacy `codex_agent` subgroup, while preserving provider-specific groups like `codex`, `codex_exp`, and `copilot`. |
@@ -629,19 +631,20 @@ Current behavior:
 | Copilot pipe readiness | Copilot FWS pipe adoption now waits briefly for framework-shell pipe state/stdin after shell launch instead of failing immediately with `copilot sdk pipe not available`. |
 | Copilot shell adoption | Copilot FWS shell adoption now ignores stale shell records whose `app_id`/subgroups do not match the current TE app, preventing ALS-RS from attaching to the older `codex_agent` Copilot stdio shell. |
 
-Current lifecycle limitations:
+Remaining lifecycle limitations:
 
-- `extension.enabled.set`, `extension.install`, and `extension.session.bind` are
-  still explicit not-implemented responses in ALS-RS.
 - `extensions.reload` now rescans disk into the mutable Rust registry and asks a
   running Python adapter loader to `extension.reload` with `force=true`. If the
   adapter has not been spawned yet, the next adapter initialize loads from the
   current extension root.
-- Rust does not run extension dependency checks yet. It treats manifest
-  version/presence as the basic active/readiness gate.
+- `extension.enabled.set`, `extension.install`, dependency checks/readiness, and
+  targeted reload are implemented through the Rust registry plus Python adapter
+  loader contract.
+- `extension.session.bind` still returns an explicit not-implemented response.
+  Provider session binding currently happens through conversation create/update
+  normalization and adapter resume/hydration.
 - Python extension handlers are initialized coarsely inside one long-lived adapter
   process rather than per-extension process ownership.
-- Codex/Codex-exp runtime methods are not wired through ALS-RS yet.
 
 ## Rust conversation store groundwork
 
@@ -732,16 +735,22 @@ Backend-driven list sync:
   `conversation.draft.updated` row-level channel instead of broadcasting a full
   list snapshot on every keystroke.
 
-Known follow-up:
+Current status and remaining follow-up:
 
 - Full async assistant fanout from adapter `event.live` into `/rpc/conversations`
-  `rpc.notify` is implemented for the Copilot pilot. The fanout task also
-  persists adapter transcript records under ALS-RS conversation roots and skips
-  duplicate adapter user echoes because Rust owns local user rows.
+  `rpc.notify` is implemented through the generic adapter event sink. The fanout
+  task persists adapter transcript records under ALS-RS conversation roots and
+  skips duplicate adapter user echoes because Rust owns local live user rows.
+- Adapter fanout now uses a lossless subscription for the main conversation
+  persistence path, so debug snapshots can stay bounded without becoming the
+  authoritative event stream.
 - Replay hydration now supports JSONL chunk frames over RPC without changing the
   persisted `transcript.jsonl` format.
-- `conversation.interrupt`, `conversation.compact`,
-  `conversation.approval.respond`, and `conversation.shell.exec` return explicit
+- `conversation.approval.respond` is implemented for provider approvals and the
+  ALS-RS `/ipc` MCP ask-user bridge.
+- `conversation.interrupt` is implemented through the generic adapter
+  `conversation.interrupt` hook and extension-owned abort logic.
+- `conversation.compact` and `conversation.shell.exec` still return explicit
   not-implemented control results for now.
 - Legacy Python intent was used as a parity guide, not a logic template: the
   Python server rendered splash cards from full `meta.json`, stored
@@ -989,7 +998,7 @@ Current status:
   `/rpc/settings` `extension.debug.probe`, allowing frontend console evals to
   compare Rust config, adapter env, loader state, handler state, and optional
   framework-shell manager/store/shell metadata.
-- Updated Codex, Codex-exp, and Copilot extension shellspec subgroups so
+- Updated Codex and Copilot extension shellspec subgroups so
   ALS-RS-launched provider runtimes group under `als-rs` in framework-shells
   instead of being grouped with the legacy Python `codex_agent` app.
 - Added generic adapter `extension.warm_up` and ALS-RS background startup warmup
@@ -1075,11 +1084,11 @@ fresh provider-start mode:
   noise for that import flow. Rust must only persist normalized adapter transcript
   records and provider binding ids; it must not parse Codex rollout semantics.
 
-Current ALS-RS gap for this contract:
+Current ALS-RS status for this contract:
 
-- `/rpc/settings` `extension.sessions.list` still needs to route through the
-  generic adapter `extension.list_sessions` DTO path instead of returning a
-  placeholder empty list.
+- `/rpc/settings` `extension.sessions.list` routes through the generic adapter
+  `extension.list_sessions` DTO path instead of returning a placeholder empty
+  list.
 - Extension schemas should be reviewed so session/rollout picker fields declare
   the method/source/path details explicitly, matching the three-question
   contract above.
@@ -1104,8 +1113,8 @@ Deliverables:
 
 Acceptance:
 
-- Starting a conversation from the schema settings modal and choosing Codex,
-  Codex-exp, or Copilot routes the first send to that selected extension.
+- Starting a conversation from the schema settings modal and choosing Codex or
+  Copilot routes the first send to that selected extension.
 - Splash and drawer cards show label/alias/agent/cwd/pin state from ALS-RS
   metadata without an ALS-RS-specific frontend path.
 - Rust tests cover metadata persistence/list serialization and selected-extension
@@ -1166,6 +1175,16 @@ Current status:
   - The PyO3 embed feature is gated as `ferrous-framework-pyo3`; optional feature
     validation targets Python 3.13 because the ambient `PYO3_CONFIG_FILE` points
     at a separate Python 3.14t config.
+  - The crate is now ALS-agnostic but framework-shells-specific: it has explicit
+    standalone Cargo metadata/dependencies, defaults its Python bridge module to
+    `framework_shells.ferrous_framework`, and lets callers supply the Python
+    bridge module/class plus shellspec entry. ALS-RS preserves current behavior
+    by explicitly passing `framework_shells.ferrous_framework`,
+    `FerrousFrameworkPipe`, and `extension_adapter`.
+  - The crate now has a public standalone origin at
+    `https://github.com/mrsurge/ferrous-framework.git`, and ALS-RS consumes it
+    as a submodule at `rust/crates/ferrous_framework`. Future crate edits land
+    in the submodule repo first, then ALS-RS updates the gitlink pointer.
 - Added the ALS-RS cwd-picker backend slice:
   - `/rpc/ui` `filesystem.list` now returns picker-compatible directory entries
     with `path`, `parent`, sorted `items`, `type`, and `is_symlink`.
@@ -1177,7 +1196,7 @@ Current status:
 - Tightened the schema settings dynamic-options contract:
   - dependent selects can declare `dynamic_options_from` with source field, source
     match path, option path, option value/label paths, and default path.
-  - Codex and Codex-exp generated schemas now declare reasoning-effort options
+  - Codex schema declarations now declare reasoning-effort options
     from their extension-facing model-list response shape instead of relying on
     renderer-side Codex metadata guesses.
   - Copilot's static schema uses the same contract, so provider differences stay
@@ -1202,16 +1221,14 @@ Current status:
     generic adapter resume/hydrate hook, persist the normalized binding and
     transcript rows it receives, and leave Copilot/Codex hydration-ignore/import
     details inside the extensions.
-- Clarified the active-view parity issue:
-  - The frontend can keep an active conversation in browser memory and filters
-    multiplexed live events by that id, so live operation can appear correct.
-  - `conversation.list`, `conversation.select`, `/rpc/ui view.get`, and
-    `/rpc/ui view.set` still need one ALS-RS source of truth for open-last-state
-    restoration. Without that, refresh/new-client boot can report splash/null
-    even though `conversation.get` can load a real active conversation.
-  - This is a generic correctness/restoration issue, not a provider/session
-    issue. The intended fix is small Rust-side UI selection state, not
-    extension-specific routing.
+- Landed active-view parity:
+  - `UiSelectionStore` is the ALS-RS source of truth for
+    `active_conversation` / `active_view` in `${ALS_RS_CACHE_DIR}/app_state.json`.
+  - `conversation.select`, `conversation.list`, `/rpc/ui view.get`, and
+    `/rpc/ui view.set` all read/write the shared store, and
+    `conversation.get` without an explicit id hydrates the persisted active
+    conversation when one exists.
+  - The fix is generic Rust UI state, not extension-specific routing.
 - Landed the session/rollout picker and Codex MCP stability snapshot:
   - shared schema session picker now has generic MRU/Created controls, a CWD
     filter button, richer row rendering, `$HOME`-relative CWD display, and active
@@ -1297,6 +1314,18 @@ Current status:
   - The frontend receives the same `{ ok, conversation_id, transport: "rpc" }`
     control-result shape as other conversation controls; there is no
     provider-specific frontend or Rust branch.
+- Fixed Codex lazy resume event delivery:
+  - `codex-ext` resume now waits for provider `thread/status/changed` with
+    `status.type == "idle"` before releasing the buffered retrying `turn/start`
+    after a cold `thread/resume`.
+  - The idle wait has no artificial timeout in the extension path; transport
+    stop/restart/failure still cancels the waiter with an explicit failure.
+  - The Python adapter dispatches unordered JSON-RPC requests concurrently so a
+    long resume/read operation cannot block unrelated event delivery.
+  - Rust conversation fanout subscribes to a lossless adapter event stream before
+    bounded debug snapshots, preserving `event.live` and
+    `event.transcript_record` notifications for transcript persistence and
+    frontend delivery.
 - Added the ALS-RS TE2 sidebar IPC client slice:
   - Rust uses a best-effort Socket.IO client to the current TE2 legacy
     `/sidebar_ipc` namespace at `/ui_ipc_ws/socket.io/`, matching the existing
@@ -1367,18 +1396,20 @@ Acceptance:
 
 ## Open design decisions
 
-1. Whether Rust should reuse the current frontend bundle path exactly or only the
-   current frontend checkout/contract while packaging it under an ALS-RS-specific
-   static layout.
-2. Extension lifecycle mediation boundaries.
-   - Rust should own registry state, settings RPC, install/reload/dependency
-     state, and adapter process supervision.
-   - The Python adapter should own provider-specific handler initialization and
-     event translation.
-   - The exact reload/synchronization handshake between Rust registry state and
-     the adapter loader still needs to be implemented.
-3. How to wire Codex/Codex-exp runtime support through the generic adapter without
-   reintroducing server-owned Codex fallback logic.
+1. Extension process ownership granularity.
+   - Current state: one long-lived Python adapter process owns provider-specific
+     handler initialization and event translation for all active extensions.
+   - Open question: whether future isolation requires per-extension adapter
+     processes or whether the current shared adapter plus targeted reload remains
+     sufficient.
+2. Remaining conversation controls.
+   - `conversation.compact` and `conversation.shell.exec` still need generic
+     adapter/Rust/frontend contracts before they can be enabled in ALS-RS.
+3. Static packaging policy.
+   - Current source-checkout builds serve the Rust-owned static tree and bundled
+     frontend from `rust/crates/als-server/src/static`.
+   - Future packaged builds should keep the source-checkout vs packaged static
+     layout explicit so install-time assets do not drift from build-time assets.
 
 ## Risks
 
@@ -1406,14 +1437,13 @@ Acceptance:
    - Follow-up: adjust draft semantics so unbound conversations stay memory-only
      until a provider thread/session id binds, or clear any unbound persisted
      draft records on launch during the migration window.
-   - Follow-up: wire `/rpc/settings` `extension.sessions.list` through the
-     adapter `extension.list_sessions` DTO path and review extension picker
-     schemas for the three-question method/source/path contract.
+   - Follow-up: review extension picker schemas for the three-question
+     method/source/path contract now that `/rpc/settings`
+     `extension.sessions.list` routes through the adapter DTO path.
    - Follow-up: live TE2 smoke with schema-modal-created conversations for each
      active extension.
-   - Follow-up: persist or remember active conversation/view state through
-     `conversation.select`, `conversation.list`, `/rpc/ui view.get`, and
-     `/rpc/ui view.set` so refresh/open-last-state works coherently.
+   - Active conversation/view restore is implemented through `UiSelectionStore`;
+     keep it in the regression set when changing stateful-window or splash boot.
 2. Implement schema settings modal support:
    - Completed for adapter-backed schema and model retrieval.
    - Follow-up: schema-driven splash actions still return explicit not-implemented
@@ -1464,28 +1494,27 @@ Acceptance:
      ALS-RS now rejects any adapter/provider binding id that equals the harness
      `conversation_id`, so cold-resume/send retries cannot poison
      `provider_session_id` with a `conv_*` value.
-    - schema-modal port-in history import now preserves hydrated `role: "user"`
-      transcript rows while still suppressing normal live adapter user echoes.
-      Rust keeps ownership of user rows for live `conversation.send`, but
-      adapter-driven `conversation.resume` / `resume_session_with_history()`
-      imports mark hydrated history rows so they persist into transcript replay.
-    - large provider transcript import now has a source-level transaction path:
-      the Python adapter emits `event.import_*` notifications and transcript
-      batches around `hydrate_transcript()`, Rust persists those batches through
-      bulk transcript append without per-row live fanout, and the frontend source
-      reacts to `conversation.import.*` notifications with a conversation-scoped
-      busy overlay plus coarse activity/status updates. The current slice was
-      intentionally not rebuilt/transpiled before user smoke testing.
-    - generic MCP contract: implemented first ALS-RS-to-extension DTO slice.
-      `als-adapter-protocol` now carries a generic `mcp_context` on
-     conversation start/resume/send, Rust builds a provider-neutral default
-     context (`conversation_id`, `cwd`, requested `mcp_servers`, always-on
-     stdio `agent-pty-blocks` with eager tool exposure intent, and optional
-     `te2-mcp` intent when enabled),
-     the Python extension adapter passes that through as `settings.mcp_context`,
-     and extension-owned `mcp_contract.py` modules now map that generic DTO into
-     provider-native Copilot/Codex MCP config without adding provider-specific
-     logic to ALS-RS itself.
+   - schema-modal port-in history import now preserves hydrated `role: "user"`
+     transcript rows while still suppressing normal live adapter user echoes.
+     Rust keeps ownership of user rows for live `conversation.send`, but
+     adapter-driven `conversation.resume` / `resume_session_with_history()`
+     imports mark hydrated history rows so they persist into transcript replay.
+   - large provider transcript import now has a source-level transaction path:
+     the Python adapter emits `event.import_*` notifications and transcript
+     batches around `hydrate_transcript()`, Rust persists those batches through
+     bulk transcript append without per-row live fanout, and the frontend source
+     reacts to `conversation.import.*` notifications with a conversation-scoped
+     busy overlay plus coarse activity/status updates. The current slice was
+     intentionally not rebuilt/transpiled before user smoke testing.
+   - generic MCP contract: implemented first ALS-RS-to-extension DTO slice.
+     `als-adapter-protocol` now carries a generic `mcp_context` on conversation
+     start/resume/send, Rust builds a provider-neutral default context
+     (`conversation_id`, `cwd`, requested `mcp_servers`, always-on stdio
+     `agent-pty-blocks` with eager tool exposure intent, and optional `te2-mcp`
+     intent when enabled), the Python extension adapter passes that through as
+     `settings.mcp_context`, and extension-owned `mcp_contract.py` modules now
+     map that generic DTO into provider-native Copilot/Codex MCP config without
+     adding provider-specific logic to ALS-RS itself.
    - ask-user IPC bridge: ALS-RS now owns the `/ipc` Socket.IO namespace used by
      `mcp_agent_pty_server.py` when `agent-pty-blocks` runs over stdio. The MCP
      process remains the Socket.IO client, authenticates with the shared
@@ -1496,36 +1525,36 @@ Acceptance:
      `conversation.approval.respond` special-cases
      `request_method == "agent-pty/ask-user"` to emit the submitted response
      over IPC and only writes/removes the approval handoff after the MCP ack.
-- repo-memory/dev-instruction refresh: ALS-RS does not implement the old
-  `pending_context` queue from the removed `codex-ext-exp` dynamic-devins
-  fork. Rust owns prompt-context construction at adapter request boundaries:
-  every conversation start/resume/send gets a fresh `devins_context` assembled
-  from the raw `developer_instructions` setting, TE2 developer template when
-  `te2_mcp_integration` is enabled, and the current `.repo_memory.md` snapshot
-  discovered from the effective cwd. The adapter passes that context through as
-  `settings.__als_devins_context__`; Copilot and Codex extension-local
-  `devins_contract.py` modules consume the already-computed `effective` string
-  and no longer import the deprecated Python prompt-context helper. This gives
-  next-turn/resume/compact freshness without a mid-turn push and keeps repo
-  memory concatenation server-owned.
-    - TE2 sidebar IPC/RPC: Rust now speaks the typed JSON-RPC contract over the
-      existing `/sidebar_ipc` logical namespace and `/ui_ipc_ws/socket.io`
-      physical path. UI RPC `hostUi.recheck` best-effort calls
-      `sidebar.cwd.get` and syncs CWD, `file.open` calls `sidebar.file.open`,
-      and `rpc.notify` handles `sidebar.cwd.set` / `sidebar.mention`; narrow
-      legacy `sidebar:*` fallback remains only for older TE2 instances during
-      the cutover.
-    - synced composer drafts: ALS-RS now broadcasts
-      `conversation.draft.updated` after `conversation.draft.set` and after
-      queued sidebar mentions update an inactive conversation draft, so other
-      clients can hydrate live draft changes through the existing frontend
-      `draft_update` path.
-    - conversation splash/minibar sync: ALS-RS now broadcasts backend-owned
-      `conversation.list.updated` snapshots with monotonic revisions after
-      create/select/update/session-bind/delete/pin and provider metadata
-      mutations, while keeping high-frequency composer draft edits on the
-      narrower `conversation.draft.updated` channel.
-   - interrupt
-   - compact
-   - shell/tool card parity for the Copilot pilot
+   - repo-memory/dev-instruction refresh: ALS-RS does not implement the old
+     `pending_context` queue from the removed `codex-ext-exp` dynamic-devins
+     fork. Rust owns prompt-context construction at adapter request boundaries:
+     every conversation start/resume/send gets a fresh `devins_context`
+     assembled from the raw `developer_instructions` setting, TE2 developer
+     template when `te2_mcp_integration` is enabled, and the current
+     `.repo_memory.md` snapshot discovered from the effective cwd. The adapter
+     passes that context through as `settings.__als_devins_context__`; Copilot
+     and Codex extension-local `devins_contract.py` modules consume the
+     already-computed `effective` string and no longer import the deprecated
+     Python prompt-context helper. This gives next-turn/resume/compact freshness
+     without a mid-turn push and keeps repo memory concatenation server-owned.
+   - TE2 sidebar IPC/RPC: Rust now speaks the typed JSON-RPC contract over the
+     existing `/sidebar_ipc` logical namespace and `/ui_ipc_ws/socket.io`
+     physical path. UI RPC `hostUi.recheck` best-effort calls `sidebar.cwd.get`
+     and syncs CWD, `file.open` calls `sidebar.file.open`, and `rpc.notify`
+     handles `sidebar.cwd.set` / `sidebar.mention`; narrow legacy `sidebar:*`
+     fallback remains only for older TE2 instances during the cutover.
+   - synced composer drafts: ALS-RS now broadcasts `conversation.draft.updated`
+     after `conversation.draft.set` and after queued sidebar mentions update an
+     inactive conversation draft, so other clients can hydrate live draft changes
+     through the existing frontend `draft_update` path.
+   - conversation splash/minibar sync: ALS-RS now broadcasts backend-owned
+     `conversation.list.updated` snapshots with monotonic revisions after
+     create/select/update/session-bind/delete/pin and provider metadata
+     mutations, while keeping high-frequency composer draft edits on the narrower
+     `conversation.draft.updated` channel.
+   - interrupt: implemented through the generic adapter `conversation.interrupt`
+     path.
+   - compact: still needs the generic ALS-RS control contract.
+   - shell/tool card parity: continue validating via provider-owned router events
+     and transcript mirror rules instead of Copilot-pilot-only assumptions.
 5. Keep this migration plan current after each ALS-RS phase lands.

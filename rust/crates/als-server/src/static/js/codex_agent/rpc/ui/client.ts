@@ -284,11 +284,13 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
   async function rejectAgentDiff(options: {
     conversationId: string;
     diffId: string;
+    force?: boolean;
   }): Promise<JsonObject & { transport: TransportTag }> {
     const payload: JsonObject = {
       conversation_id: options.conversationId,
       diff_id: options.diffId,
     };
+    if (options.force === true) payload.force = true;
     if (!rpcEnabled()) {
       return normalizeTransport({ ok: false, error: 'Agent diff reject requires /rpc/ui' }, 'legacy');
     }

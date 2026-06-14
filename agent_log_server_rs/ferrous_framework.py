@@ -94,6 +94,7 @@ class FerrousFrameworkPipe:
         spec_id: str,
         subgroups: Sequence[str],
         shellspec_path: str | None = None,
+        shellspec_entry: str | None = None,
     ) -> None:
         self._command = list(command)
         self._cwd = cwd
@@ -102,6 +103,7 @@ class FerrousFrameworkPipe:
         self._spec_id = spec_id
         self._subgroups = list(subgroups)
         self._shellspec_path = shellspec_path
+        self._shellspec_entry = shellspec_entry
         self._lines: "queue.Queue[str | None]" = queue.Queue()
         self._ready = threading.Event()
         self._ready_error: BaseException | None = None
@@ -226,7 +228,12 @@ class FerrousFrameworkPipe:
         )
 
         specs = shellspec.load_shellspec(Path(self._shellspec_path))
-        spec = specs.get("extension_adapter") or next(iter(specs.values()))
+        entry = self._shellspec_entry or self._spec_id
+        spec = specs.get(entry) if entry else None
+        if spec is None and self._shellspec_entry:
+            raise KeyError(f"shellspec entry not found: {self._shellspec_entry}")
+        if spec is None:
+            spec = next(iter(specs.values()))
         rendered = shellspec.render_shellspec(
             spec,
             ctx={

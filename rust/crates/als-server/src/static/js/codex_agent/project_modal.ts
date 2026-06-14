@@ -4,7 +4,7 @@ import { applyPathScrollLabel } from './path_label.ts';
 interface UiRpcProjectClient {
   getProjectSummary(options?: { conversationId?: string | null; path?: string | null; maxDiffBytes?: number }): Promise<JsonObject & { transport: string }>;
   acceptAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
-  rejectAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
+  rejectAgentDiff(options: { conversationId: string; diffId: string; force?: boolean }): Promise<JsonObject & { transport: string }>;
   rejectAllAgentDiffs(options: { conversationId: string; path?: string | null }): Promise<JsonObject & { transport: string }>;
   stageProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
   unstageProjectPaths(options?: { path?: string | null; paths?: string[] }): Promise<JsonObject & { transport: string }>;
@@ -139,6 +139,19 @@ function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) return error.message.trim();
   if (typeof error === 'string' && error.trim()) return error.trim();
   return 'Project action failed.';
+}
+
+function errorData(error: unknown): JsonObject | null {
+  if (!isRecord(error)) return null;
+  const data = error.data;
+  return isRecord(data) ? data : null;
+}
+
+function isAgentDiffMetadataMismatch(error: unknown): boolean {
+  const data = errorData(error);
+  if (data?.kind === 'agent_diff_metadata_mismatch') return true;
+  if (!isRecord(error)) return false;
+  return Number(error.code) === -32062;
 }
 
 function te2ActionValue(value: unknown): Te2ProjectAction {
@@ -395,6 +408,23 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   function hideProjectAgentRejectOverlay(): void {
     if (projectAgentRejectOverlayEl) {
       projectAgentRejectOverlayEl.style.display = 'none';
+    }
+  }
+
+  async function rejectAgentDiffWithFallbackPrompt(conversationId: string, diffId: string): Promise<boolean> {
+    try {
+      await ctx.uiRpc.rejectAgentDiff({ conversationId, diffId });
+      return true;
+    } catch (error) {
+      if (!isAgentDiffMetadataMismatch(error)) throw error;
+      const confirmed = await ctx.confirmProjectAction({
+        title: 'Diff metadata mismatch',
+        body: 'The diff metadata does not match the file metadata on disk, probably because of a recent change to the file. Do you wish to continue with a content-based fallback?',
+        confirmText: 'Continue',
+      });
+      if (!confirmed) return false;
+      await ctx.uiRpc.rejectAgentDiff({ conversationId, diffId, force: true });
+      return true;
     }
   }
 
@@ -1182,8 +1212,8 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
             confirmText: 'Reject',
           });
           if (!confirmed) return;
-          await ctx.uiRpc.rejectAgentDiff({ conversationId, diffId });
-          await refreshProjectSummary();
+          const rejected = await rejectAgentDiffWithFallbackPrompt(conversationId, diffId);
+          if (rejected) await refreshProjectSummary();
         }
       } catch (error) {
         console.warn('[project-modal] agent diff action failed', {
@@ -1294,6 +1324,12 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   }
 
   function handleProjectNotification(method: string, params: JsonObject): void {
+    if (method === 'hostUi.updated') {
+      if (currentSummary?.root) {
+        void refreshTe2ProjectState(currentSummary.root);
+      }
+      return;
+    }
     if (method !== 'project.agentDiff.added' && method !== 'project.agentDiff.removed') return;
     const conversationId = stringValue(params.conversation_id);
     const activeConversationId = ctx.getConversationId();

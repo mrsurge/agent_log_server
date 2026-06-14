@@ -290,7 +290,11 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
     }
 
     if (isNewConversation) {
-      const meta = await conversationsRpcClient.createConversation();
+      const pickedProviderSession = normalizeStringSetting(settings.session);
+      const meta = await conversationsRpcClient.createConversation({
+        settings,
+        timeoutMs: typeof pickedProviderSession === 'string' ? 120000 : 10000,
+      });
       if (meta?.conversation_id) {
         setState({
           clientConversationId: meta.conversation_id,
@@ -302,12 +306,14 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
       setState({ pendingNewConversation: false });
     }
 
-    nextState = getState();
-    const conversationId = scopedConversationId(nextState);
-    await conversationsRpcClient.updateConversation({
-      conversationId,
-      settings,
-    });
+    if (!isNewConversation) {
+      nextState = getState();
+      const conversationId = scopedConversationId(nextState);
+      await conversationsRpcClient.updateConversation({
+        conversationId,
+        settings,
+      });
+    }
 
     closeSettingsModal();
     await fetchConversation(scopedConversationId(getState()));
