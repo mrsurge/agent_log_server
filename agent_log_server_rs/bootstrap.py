@@ -137,9 +137,6 @@ def _build_env(args: BootstrapArgs) -> dict[str, str]:
     env.setdefault("ALS_RS_EXTENSIONS_DIR", str(_default_extensions_dir()))
     env["ALS_RS_PYTHON_BIN"] = sys.executable
     _ensure_framework_shells_env(env, args, data_dir)
-    if _ferrous_framework_enabled(args):
-        env.pop("PYO3_CONFIG_FILE", None)
-        env["PYO3_PYTHON"] = sys.executable
     return env
 
 
@@ -177,8 +174,6 @@ def _server_command(args: BootstrapArgs, env: MutableMapping[str, str] | None = 
         "-p",
         "als-server",
     ]
-    if use_ferrous_framework:
-        command.extend(["--features", "ferrous-framework-pyo3"])
     command.extend(["--", *framework_shell_args])
     return command
 

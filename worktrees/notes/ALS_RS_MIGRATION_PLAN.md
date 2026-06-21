@@ -247,8 +247,9 @@ Suggested crate roles:
   - owns request/response/event envelopes exchanged with Python extension
     adapter processes.
 - `ferrous_framework`
-  - owns the optional PyO3/framework-shell native-pipe adapter transport so
-    observed adapter read/write plumbing stays outside `als-server`.
+  - owns the optional native stdio transport/introspection/orchestration layer
+    so observed adapter process lifecycle and pipe plumbing stay outside
+    `als-server`.
 
 Early Rust server surfaces to mirror:
 
@@ -337,14 +338,13 @@ replaced later by Unix sockets, framework-shell pipes, PyO3/shared-memory, or
 another byte channel without changing DTO method/event names.
 
 Current observed transport direction: keep the JSON-RPC DTO shape, but move the
-adapter process under framework-shell native pipes through the optional
-`ferrous_framework` crate. Rust talks to that crate through in-process PyO3
-calls, while `framework_shells` owns/tees adapter stdout/stderr for observability.
-The adapter JSON-RPC stream must never be forwarded through the Rust CLI stdout.
-Default ALS-RS builds retain the direct child stdin/stdout fallback. The PyO3
-path is enabled with `als-server --features ferrous-framework-pyo3`; in this
-Termux environment, build that feature with the non-`t` Python 3.13 interpreter
-instead of the ambient Python 3.14t PyO3 config.
+adapter process under the native `ferrous_framework` stdio transport
+introspection/orchestration layer when framework-shell context is present. ALS-RS
+uses Ferrous' async native pipe facade for adapter writes and a single
+ALS-owned reader task over Ferrous stdout bytes/chunks for JSON-RPC line
+framing. The adapter JSON-RPC stream must never be forwarded through the Rust
+CLI stdout. Default ALS-RS builds retain the direct child stdin/stdout fallback
+when Ferrous cannot start.
 
 The adapter shellspec is:
 
@@ -352,10 +352,10 @@ The adapter shellspec is:
 agent_log_server_rs/shellspec/extension_adapter.yaml
 ```
 
-For source-checkout launches, the Python bootstrap enables
-`ferrous-framework-pyo3` automatically when framework-shell context is present,
-clears ambient `PYO3_CONFIG_FILE`, and sets `PYO3_PYTHON` to the bootstrap
-interpreter so the build targets Python 3.13.
+For source-checkout launches, the Python bootstrap still forces `cargo run` when
+framework-shell context is present so a stale `target/debug/als-server` binary
+does not hide adapter transport changes. There is no ALS-side PyO3 feature gate
+or PyO3 interpreter selection for this path anymore.
 
 Reasons to prefer JSON-RPC shape:
 
@@ -565,12 +565,23 @@ Runtime behavior:
   root 1 is the ALS-RS user-installed extension root at
   `${ALS_RS_DATA_DIR}/extensions`.
 - Adapter transport is newline-delimited JSON-RPC 2.0 on stdin/stdout.
-- If `ferrous-framework-pyo3` is enabled and framework-shell config is present,
-  `als-server` prefers the `ferrous_framework` transport: a PyO3-backed
-  in-process wrapper over `framework_shells.spawn_shell_pipe()`,
-  `subscribe_output_bytes()`, and `write_to_shell()` that starts the adapter as
-  an observed native-pipe shell labeled `als-rs-extension-adapter`.
+- If framework-shell config is present, `als-server` prefers the
+  `ferrous_framework` transport: a native async manager/pipe facade that starts
+  the adapter as an observed native-pipe shell and uses direct async
+  `write_to_shell(..., append_newline=true)` for JSON-RPC requests.
   The shell shape comes from `agent_log_server_rs/shellspec/extension_adapter.yaml`.
+- ALS-RS owns JSON-RPC line framing over the Ferrous byte/chunk read path;
+  Ferrous owns process launch, stdin writes, stdout/stderr logs, FWS-compatible
+  records/capabilities, and shell termination.
+- The current Ferrous pin also exposes an FWS Socket.IO peer/control-plane lane
+  (`native_peer`, `peer_protocol`, `/fws_ws/socket.io` on namespace `/fws`).
+  ALS-RS does not use that lane for extension-adapter JSON-RPC; it remains an
+  introspection/control-plane capability of Ferrous, separate from ALS's adapter
+  protocol.
+- The current Ferrous pin is `5f9e0de` / `0.2.7`; it also includes native
+  lifecycle event subscriptions and procfs-backed tree shutdown. Those are
+  Ferrous/FWS control-plane semantics and do not change ALS-RS adapter
+  request/response framing.
 - Rust keeps stdout as protocol-only and the Python adapter redirects provider
   logs to stderr so Copilot client `print(...)` output cannot corrupt JSON-RPC.
 - Requests are correlated by JSON-RPC `id`; when adapter stdout closes, pending
@@ -1160,27 +1171,31 @@ Current status:
 - `conversation.send` now includes any existing Rust-owned provider binding in
   adapter params so Codex/Copilot lazy resume can see the selected provider
   thread/session after adapter restart or reload.
-- Added the `ferrous_framework` adapter transport slice:
-  - new Rust crate `rust/crates/ferrous_framework` owns the optional PyO3 bridge
-    to framework-shell native pipes.
-  - new Python helper `agent_log_server_rs/ferrous_framework.py` owns the
-    background event loop and native-pipe read/write calls.
-  - `als-server` prefers that transport when framework-shell context is present
-    and the feature is enabled, emits `adapter.transport.started` /
+- Updated the `ferrous_framework` adapter transport slice:
+  - ALS-RS now pins the standalone submodule at `5f9e0de` / `0.2.7`, the native
+    facade plus FWS peer/control-plane and lifecycle/tree-shutdown commit, and
+    no longer builds a PyO3 bridge feature.
+  - `als-server` prefers the Ferrous native async manager when framework-shell
+    context is present, emits `adapter.transport.started` /
     `adapter.transport.fallback` diagnostics for that path, and otherwise keeps
     the direct child transport as the default.
   - The source-checkout bootstrap skips stale `target/debug/als-server` binaries
-    when framework-shell context is present and launches `cargo run --features
-    ferrous-framework-pyo3` so the adapter framework shell can actually appear.
-  - The PyO3 embed feature is gated as `ferrous-framework-pyo3`; optional feature
-    validation targets Python 3.13 because the ambient `PYO3_CONFIG_FILE` points
-    at a separate Python 3.14t config.
-  - The crate is now ALS-agnostic but framework-shells-specific: it has explicit
-    standalone Cargo metadata/dependencies, defaults its Python bridge module to
-    `framework_shells.ferrous_framework`, and lets callers supply the Python
-    bridge module/class plus shellspec entry. ALS-RS preserves current behavior
-    by explicitly passing `framework_shells.ferrous_framework`,
-    `FerrousFrameworkPipe`, and `extension_adapter`.
+    when framework-shell context is present and launches plain `cargo run`; no
+    `ferrous-framework-pyo3`, `PYO3_CONFIG_FILE`, or `PYO3_PYTHON` handling is
+    needed.
+  - The deleted Python helper `agent_log_server_rs/ferrous_framework.py` is no
+    longer part of ALS-RS runtime. Ferrous owns native process/pipe lifecycle;
+    ALS owns JSON-RPC line framing, request matching, and DTO routing.
+  - The crate is now ALS-agnostic and framework-shells-compatible without being
+    an ALS-specific bridge. ALS-RS remains a consumer that supplies its adapter
+    command, roots/env, shellspec entry, and protocol handling at the call site.
+  - The latest pinned crate also includes FWS Socket.IO peer/control-plane
+    interop (`native_peer` / `peer_protocol`) for controller-peer testing and
+    introspection. That does not change the ALS extension-adapter protocol,
+    which stays newline-delimited JSON-RPC over Ferrous-owned stdio pipes.
+  - The same pin exposes native lifecycle events and procfs-backed tree
+    shutdown for FWS orchestration. ALS-RS does not need new adapter call-site
+    code for those surfaces.
   - The crate now has a public standalone origin at
     `https://github.com/mrsurge/ferrous-framework.git`, and ALS-RS consumes it
     as a submodule at `rust/crates/ferrous_framework`. Future crate edits land
@@ -1388,9 +1403,9 @@ Acceptance:
 6. Extension pilot direction: start by shaping a provider-neutral contract around
    `copilot-sdk`.
 7. Adapter transport: newline-delimited JSON-RPC 2.0 over direct child stdio for
-   the default fallback, with optional `ferrous_framework` PyO3/native-pipe
-   transport for observed framework-shell launches; DTOs remain
-   transport-disposable.
+   the default fallback, with optional native `ferrous_framework` pipe transport
+   for observed framework-shell launches; DTOs remain transport-disposable and
+   ALS owns protocol framing.
 8. Extension registry direction: read the existing `extensions/extensions.json`
    registry plus manifests rather than creating an ALS-RS-only registry format.
 
