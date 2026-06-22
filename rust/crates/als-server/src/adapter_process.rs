@@ -6,8 +6,8 @@ use als_jsonrpc::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use ferrous_framework::{
-    FerrousNativeManager, FerrousNativePipeConfig, FerrousNativeShellRecord,
-    FerrousNativeShellStatus, ferrous_native_enabled,
+    FerrousNativeLifecycleEventKind, FerrousNativeManager, FerrousNativePipeConfig,
+    FerrousNativeShellRecord, FerrousNativeShellStatus, ferrous_native_enabled,
     shellspec::{ShellspecRenderInput, render_shellspec_entry},
 };
 use serde::Serialize;
@@ -190,12 +190,6 @@ enum AdapterWriter {
 struct FerrousAdapterTransport {
     manager: FerrousNativeManager,
     shell_id: String,
-}
-
-enum FerrousAdapterReadMessage {
-    Line(String),
-    Closed,
-    Failed(String),
 }
 
 impl AdapterClient {
@@ -618,108 +612,87 @@ async fn read_ferrous_adapter_stdout(
     pending: PendingMap,
     events: AdapterEventSink,
 ) {
-    let (sender, mut receiver) = mpsc::unbounded_channel();
-    let pump_transport = transport.clone();
-    let pump = tokio::task::spawn_blocking(move || {
-        pump_ferrous_adapter_stdout(pump_transport, sender);
-    });
-    let mut terminal_message = false;
+    let shell_id = transport.shell_id.clone();
+    let mut lifecycle = transport.manager.subscribe_lifecycle();
+    let mut buffer = Vec::<u8>::new();
 
-    while let Some(message) = receiver.recv().await {
-        match message {
-            FerrousAdapterReadMessage::Line(line) => {
-                if let Err(err) = handle_adapter_line(&line, &pending, &events).await {
-                    warn!(error = %err, "failed to handle ferrous_framework adapter JSON-RPC line");
-                    events
-                        .push_other(
-                            "adapter.ferrous_framework.invalid_json".to_owned(),
-                            json!({
-                                "error": err.to_string(),
-                                "line": truncate_log_line(&line),
-                            }),
-                        )
-                        .await;
+    loop {
+        tokio::select! {
+            result = transport.manager.read_stdout_available(&shell_id, 64) => {
+                match result {
+                    Ok(chunks) if chunks.is_empty() => {
+                        drain_ferrous_buffer(&mut buffer, &pending, &events).await;
+                        events
+                            .push_other("adapter.ferrous_framework.closed".to_owned(), json!({}))
+                            .await;
+                        fail_all_pending(&pending, "ferrous_framework adapter pipe closed").await;
+                        break;
+                    }
+                    Ok(chunks) => {
+                        for chunk in chunks {
+                            buffer.extend_from_slice(&chunk);
+                            while let Some(line) = take_line_from_buffer(&mut buffer) {
+                                if let Err(err) = handle_adapter_line(&line, &pending, &events).await {
+                                    warn!(error = %err, "failed to handle ferrous_framework adapter JSON-RPC line");
+                                    events
+                                        .push_other(
+                                            "adapter.ferrous_framework.invalid_json".to_owned(),
+                                            json!({
+                                                "error": err.to_string(),
+                                                "line": truncate_log_line(&line),
+                                            }),
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        error!(error = %err, "ferrous_framework adapter pipe read failed");
+                        events
+                            .push_other(
+                                "adapter.ferrous_framework.read_failed".to_owned(),
+                                json!({"error": err.to_string()}),
+                            )
+                            .await;
+                        fail_all_pending(&pending, "ferrous_framework adapter pipe read failed").await;
+                        break;
+                    }
                 }
             }
-            FerrousAdapterReadMessage::Closed => {
-                terminal_message = true;
-                events
-                    .push_other("adapter.ferrous_framework.closed".to_owned(), json!({}))
-                    .await;
-                fail_all_pending(&pending, "ferrous_framework adapter pipe closed").await;
-                break;
-            }
-            FerrousAdapterReadMessage::Failed(error) => {
-                terminal_message = true;
-                error!(error = %error, "ferrous_framework adapter pipe read failed");
-                events
-                    .push_other(
-                        "adapter.ferrous_framework.read_failed".to_owned(),
-                        json!({"error": error}),
-                    )
-                    .await;
-                fail_all_pending(&pending, "ferrous_framework adapter pipe read failed").await;
-                break;
+            Ok(event) = lifecycle.recv() => {
+                if event.kind == FerrousNativeLifecycleEventKind::Exited
+                    && event.shell_id == shell_id
+                {
+                    drain_ferrous_buffer(&mut buffer, &pending, &events).await;
+                    events
+                        .push_other("adapter.ferrous_framework.closed".to_owned(), json!({}))
+                        .await;
+                    fail_all_pending(&pending, "ferrous_framework adapter pipe closed").await;
+                    break;
+                }
             }
         }
-    }
-
-    match pump.await {
-        Ok(()) => {}
-        Err(err) if !terminal_message => {
-            error!(error = %err, "ferrous_framework adapter pipe task failed");
-            events
-                .push_other(
-                    "adapter.ferrous_framework.task_failed".to_owned(),
-                    json!({"error": err.to_string()}),
-                )
-                .await;
-            fail_all_pending(&pending, "ferrous_framework adapter pipe task failed").await;
-        }
-        Err(_) => {}
     }
 }
 
-fn pump_ferrous_adapter_stdout(
-    transport: FerrousAdapterTransport,
-    sender: mpsc::UnboundedSender<FerrousAdapterReadMessage>,
+async fn drain_ferrous_buffer(
+    buffer: &mut Vec<u8>,
+    pending: &PendingMap,
+    events: &AdapterEventSink,
 ) {
-    let mut buffer = Vec::<u8>::new();
-    loop {
-        match transport
-            .manager
-            .read_stdout_chunk_blocking(&transport.shell_id, Duration::from_millis(250))
-        {
-            Ok(Some(chunk)) => {
-                buffer.extend_from_slice(&chunk);
-                while let Some(line) = take_line_from_buffer(&mut buffer) {
-                    if sender.send(FerrousAdapterReadMessage::Line(line)).is_err() {
-                        return;
-                    }
-                }
-            }
-            Ok(None) => match transport.manager.get_shell(&transport.shell_id) {
-                Ok(Some(record)) if record.status != FerrousNativeShellStatus::Exited => {}
-                Ok(_) => {
-                    if !buffer.is_empty() {
-                        let line = String::from_utf8_lossy(&buffer).into_owned();
-                        buffer.clear();
-                        if sender.send(FerrousAdapterReadMessage::Line(line)).is_err() {
-                            return;
-                        }
-                    }
-                    let _ = sender.send(FerrousAdapterReadMessage::Closed);
-                    return;
-                }
-                Err(err) => {
-                    let _ = sender.send(FerrousAdapterReadMessage::Failed(err.to_string()));
-                    return;
-                }
-            },
-            Err(err) => {
-                let _ = sender.send(FerrousAdapterReadMessage::Failed(err.to_string()));
-                return;
-            }
+    while let Some(line) = take_line_from_buffer(buffer) {
+        if let Err(err) = handle_adapter_line(&line, pending, events).await {
+            warn!(error = %err, "failed to handle ferrous_framework adapter JSON-RPC line (drain)");
+            events
+                .push_other(
+                    "adapter.ferrous_framework.invalid_json".to_owned(),
+                    json!({
+                        "error": err.to_string(),
+                        "line": truncate_log_line(&line),
+                    }),
+                )
+                .await;
         }
     }
 }
