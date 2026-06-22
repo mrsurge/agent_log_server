@@ -39,13 +39,18 @@ class AdapterCodecTests(unittest.TestCase):
 
         self.assertEqual(
             encoded,
-            '{"jsonrpc":"2.0","method":"event.live","params":{"path":"/repo/file.py","text":"hello","nested":{"path":"/repo/other.py"}}}\n',
+            b'{"jsonrpc":"2.0","method":"event.live","params":{"path":"/repo/file.py","text":"hello","nested":{"path":"/repo/other.py"}}}\n',
         )
 
     def test_decode_json_line_returns_plain_python_values(self) -> None:
         decoded = decode_json_line('{"jsonrpc":"2.0","id":1,"params":{"ok":true}}\n')
 
         self.assertEqual(decoded, {"jsonrpc": "2.0", "id": 1, "params": {"ok": True}})
+
+    def test_decode_json_line_accepts_bytes(self) -> None:
+        decoded = decode_json_line(b'{"jsonrpc":"2.0","id":2,"params":{"ok":true}}\n')
+
+        self.assertEqual(decoded, {"jsonrpc": "2.0", "id": 2, "params": {"ok": True}})
 
     def test_decode_error_is_adapter_specific(self) -> None:
         with self.assertRaises(AdapterDecodeError):

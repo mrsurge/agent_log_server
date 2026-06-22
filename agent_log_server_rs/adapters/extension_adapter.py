@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import importlib
 import inspect
 import os
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, TextIO, TypeAlias, cast
@@ -498,11 +500,7 @@ class ExtensionJsonRpcAdapter:
     ) -> int:
         self._stdout = stdout
         pending_tasks: set[asyncio.Task[None]] = set()
-        while True:
-            line = await asyncio.to_thread(stdin.readline)
-            if line == "":
-                await self._drain_tasks(pending_tasks)
-                return 0
+        async for line in self._iter_stdin_lines(stdin):
             line = line.strip()
             if not line:
                 continue
@@ -524,6 +522,84 @@ class ExtensionJsonRpcAdapter:
             if self._shutdown_requested:
                 await self._drain_tasks(pending_tasks)
                 return 0
+        await self._drain_tasks(pending_tasks)
+        return 0
+
+    async def _iter_stdin_lines(self, stdin: TextIO) -> AsyncIterator[bytes]:
+        try:
+            async for line in self._iter_stdin_lines_fd(stdin):
+                yield line
+            return
+        except (AttributeError, OSError, RuntimeError, io.UnsupportedOperation, NotImplementedError):
+            pass
+
+        while True:
+            line = await asyncio.to_thread(stdin.readline)
+            if line == "":
+                return
+            if isinstance(line, bytes):
+                yield line
+            else:
+                yield line.encode("utf-8")
+
+    async def _iter_stdin_lines_fd(self, stdin: TextIO) -> AsyncIterator[bytes]:
+        stdin_buffer = getattr(stdin, "buffer", stdin)
+        fd = stdin_buffer.fileno()
+        loop = asyncio.get_running_loop()
+        was_blocking = os.get_blocking(fd)
+        queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        pending = bytearray()
+        eof_queued = False
+
+        def queue_eof() -> None:
+            nonlocal eof_queued
+            if eof_queued:
+                return
+            if pending:
+                queue.put_nowait(bytes(pending))
+                pending.clear()
+            eof_queued = True
+            queue.put_nowait(None)
+
+        def on_stdin_ready() -> None:
+            while True:
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    return
+                except InterruptedError:
+                    continue
+                except OSError:
+                    queue_eof()
+                    return
+                if not chunk:
+                    queue_eof()
+                    return
+                pending.extend(chunk)
+                while True:
+                    newline = pending.find(b"\n")
+                    if newline < 0:
+                        break
+                    line = bytes(pending[:newline])
+                    del pending[: newline + 1]
+                    queue.put_nowait(line)
+
+        os.set_blocking(fd, False)
+        reader_added = False
+        try:
+            loop.add_reader(fd, on_stdin_ready)
+            reader_added = True
+            while True:
+                line = await queue.get()
+                if line is None:
+                    return
+                yield line
+        finally:
+            if reader_added:
+                with contextlib.suppress(Exception):
+                    loop.remove_reader(fd)
+            with contextlib.suppress(Exception):
+                os.set_blocking(fd, was_blocking)
 
     async def _drain_tasks(self, tasks: set[asyncio.Task[None]]) -> None:
         if not tasks:
@@ -532,7 +608,7 @@ class ExtensionJsonRpcAdapter:
         tasks.clear()
         await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _decode_line(self, line: str) -> JsonMap | None:
+    async def _decode_line(self, line: bytes | str) -> JsonMap | None:
         try:
             raw = decode_json_line(line)
         except AdapterDecodeError as exc:
@@ -1776,8 +1852,36 @@ class ExtensionJsonRpcAdapter:
             return
         encoded = encode_json_line(payload)
         async with self._write_lock:
-            self._stdout.write(encoded)
-            self._stdout.flush()
+            if _write_bytes_to_text_stream(self._stdout, encoded):
+                return
+            write_all_fd(self._stdout.fileno(), encoded)
+
+
+def write_all_fd(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    offset = 0
+    while offset < len(view):
+        try:
+            written = os.write(fd, view[offset:])
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise RuntimeError("adapter stdout write made no progress")
+        offset += written
+
+
+def _write_bytes_to_text_stream(stdout: TextIO, data: bytes) -> bool:
+    try:
+        fd = stdout.fileno()
+    except (AttributeError, OSError, io.UnsupportedOperation):
+        stdout.write(data.decode("utf-8"))
+        stdout.flush()
+        return True
+    if fd < 0:
+        stdout.write(data.decode("utf-8"))
+        stdout.flush()
+        return True
+    return False
 
 
 def _positive_float(value: object, default: float) -> float:
