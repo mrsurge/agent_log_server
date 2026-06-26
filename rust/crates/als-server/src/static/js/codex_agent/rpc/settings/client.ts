@@ -319,6 +319,7 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
       method: SETTINGS_RPC_METHODS.extensionProviderInfoGet,
       params,
       windowRef: getWindowRef(deps.windowRef),
+      timeoutMs: 45000,
     });
     return normalizeTransport(asObject(result) ?? {}, 'rpc');
   }

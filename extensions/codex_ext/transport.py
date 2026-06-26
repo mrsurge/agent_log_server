@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Protocol, TypeGuard, TypedDict, cast
 
+import msgspec
+
 from .router import CodexEventRouter
 from .runtime_protocol import (
     build_initialize_params,
@@ -23,6 +25,7 @@ _CONFIG_ROOT = Path(os.path.expanduser("~/.cache/app_server"))
 _CONVERSATION_DIR = _CONFIG_ROOT / "conversations"
 _META_ENVELOPE_START = "\x1eCODEX_META "
 _META_ENVELOPE_END = "\x1f"
+_APP_SERVER_JSON_DECODER = msgspec.json.Decoder()
 
 
 class _PipeWriter(Protocol):
@@ -93,6 +96,15 @@ class MetaFns(TypedDict, total=False):
     upsert_pending_approval: Callable[[str, Dict[str, object]], None]
 
 
+class _TransportEvent(TypedDict):
+    label: str
+    payload: object
+    conversation_id: Optional[str]
+    thread_id: Optional[str]
+    turn_id: Optional[str]
+    request_id: Optional[str]
+
+
 def _is_object_dict(value: object) -> TypeGuard[Dict[str, object]]:
     return isinstance(value, dict)
 
@@ -108,6 +120,14 @@ def _object_dict(value: object) -> Dict[str, object]:
     for key, item_value in cast(Iterable[tuple[object, object]], value.items()):
         result[str(key)] = item_value
     return result
+
+
+def _decode_app_server_json_line(raw: bytes | bytearray | memoryview) -> object:
+    return cast(object, _APP_SERVER_JSON_DECODER.decode(bytes(raw)))
+
+
+def _line_text(raw: bytes | bytearray | memoryview) -> str:
+    return bytes(raw).decode("utf-8", errors="replace")
 
 
 def _load_orchestrator_factory() -> _OrchestratorFactory:
@@ -226,6 +246,8 @@ class CodexAppServerTransport:
         self._lock = asyncio.Lock()
         self._shell_id: Optional[str] = None
         self._reader_task: Optional[asyncio.Task[None]] = None
+        self._event_router_task: Optional[asyncio.Task[None]] = None
+        self._event_queue: Optional[asyncio.Queue[_TransportEvent]] = None
         self._initialized = False
         self._rpc_waiters: Dict[str, asyncio.Future[Dict[str, object]]] = {}
         self._request_conversations: Dict[str, Optional[str]] = {}
@@ -625,6 +647,7 @@ class CodexAppServerTransport:
 
     async def _ensure_reader(self, shell_id: str) -> None:
         if self._reader_task and not self._reader_task.done():
+            self._ensure_event_router()
             return
         mgr = await self._fws_getter()
         state = mgr.get_pipe_state(shell_id)
@@ -633,10 +656,32 @@ class CodexAppServerTransport:
         self._stdin = state.process.stdin
         subscription = await mgr.subscribe_output_bytes(shell_id)
         self._stdout_subscription = subscription
+        self._ensure_event_router()
         self._reader_task = asyncio.create_task(
             self._reader_loop(shell_id, subscription),
             name="codex-extension-reader",
         )
+
+    def _ensure_event_router(self) -> None:
+        if self._event_queue is None:
+            self._event_queue = asyncio.Queue()
+        if self._event_router_task and not self._event_router_task.done():
+            return
+        self._event_router_task = asyncio.create_task(
+            self._event_router_loop(self._event_queue),
+            name="codex-extension-event-router",
+        )
+
+    async def _terminate_event_router(self) -> None:
+        task = self._event_router_task
+        self._event_router_task = None
+        self._event_queue = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def _terminate_reader(self) -> None:
         task = self._reader_task
@@ -655,6 +700,7 @@ class CodexAppServerTransport:
                 await mgr.unsubscribe_output_bytes(shell_id, subscription)
             if self._stdout_subscription is subscription:
                 self._stdout_subscription = None
+        await self._terminate_event_router()
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
@@ -696,121 +742,171 @@ class CodexAppServerTransport:
             self._stdin = None
             raise RuntimeError("codex extension transport pipe not available") from exc
 
+    def _enqueue_transport_event(
+        self,
+        label: str,
+        payload: object,
+        *,
+        conversation_id: Optional[str],
+        thread_id: Optional[str],
+        turn_id: Optional[str],
+        request_id: Optional[str],
+    ) -> None:
+        self._ensure_event_router()
+        queue = self._event_queue
+        if queue is None:
+            self._raw_log_fn("err", conversation_id or self.get_raw_label(), "event_router_unavailable")
+            return
+        queue.put_nowait({
+            "label": label,
+            "payload": payload,
+            "conversation_id": conversation_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "request_id": request_id,
+        })
+
+    async def _event_router_loop(self, queue: asyncio.Queue[_TransportEvent]) -> None:
+        while True:
+            event = await queue.get()
+            try:
+                conversation_id = event["conversation_id"]
+                thread_id = event["thread_id"]
+                if conversation_id and thread_id:
+                    self._persist_thread_id(conversation_id, thread_id)
+                await self._route_transport_event(
+                    event["label"],
+                    event["payload"],
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    turn_id=event["turn_id"],
+                    request_id=event["request_id"],
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._raw_log_fn("err", self.get_raw_label(), f"event_router_failed {exc}")
+
+    async def _process_incoming_line(
+        self,
+        raw_line: bytes | bytearray | memoryview,
+        pending_label: Optional[str],
+    ) -> Optional[str]:
+        raw = bytes(raw_line).strip()
+        if not raw:
+            return pending_label
+
+        next_pending_label = pending_label
+        if b"{" in raw and not raw.lstrip().startswith(b"{"):
+            prefix, rest = raw.split(b"{", 1)
+            if prefix.strip() and rest.strip().startswith(b"{"):
+                next_pending_label = _line_text(prefix.strip()).strip()
+                raw = b"{" + rest
+
+        text = _line_text(raw)
+        try:
+            parsed_value = _decode_app_server_json_line(raw)
+        except msgspec.DecodeError:
+            self._raw_log_fn("in", self.get_raw_label(), text)
+            if "/" in text or text.endswith("started") or text.endswith("completed"):
+                next_pending_label = text
+            return next_pending_label
+        parsed = _object_dict(parsed_value)
+
+        if parsed and "id" in parsed and ("result" in parsed or "error" in parsed) and "method" not in parsed:
+            req_id = str(parsed.get("id"))
+            conversation_id = self._request_conversations.get(req_id)
+            self._raw_log_fn("in", conversation_id or self.get_raw_label(), text)
+            waiter = self._rpc_waiters.get(req_id)
+            if waiter and not waiter.done():
+                waiter.set_result(parsed)
+            return next_pending_label
+
+        label = None
+        payload: object = parsed_value
+        raw_conversation_id: Optional[str] = None
+        request_id: Optional[str] = None
+
+        if next_pending_label:
+            label = next_pending_label
+            next_pending_label = None
+            msg = _object_dict(parsed.get("msg"))
+            if msg:
+                payload = msg
+                raw_conversation = parsed.get("conversationId")
+                raw_conversation_id = raw_conversation if isinstance(raw_conversation, str) and raw_conversation else None
+            else:
+                payload = parsed_value
+        elif parsed:
+            if "method" in parsed:
+                label_value = parsed.get("method")
+                label = label_value if isinstance(label_value, str) else None
+                params_obj = parsed.get("params", parsed_value)
+                params = _object_dict(params_obj)
+                payload = params
+                if params:
+                    param_conversation_id = params.get("conversationId")
+                    if isinstance(param_conversation_id, str) and param_conversation_id:
+                        raw_conversation_id = param_conversation_id
+                    if (
+                        label is not None
+                        and label.startswith("codex/event/collab_")
+                        and isinstance(params.get("msg"), dict)
+                    ):
+                        payload = _object_dict(params["msg"])
+                        for key in ("id", "conversationId", "conversation_id", "threadId", "thread_id", "turnId", "turn_id"):
+                            value = params.get(key)
+                            payload_dict = _object_dict(payload)
+                            if value is not None and payload_dict.get(key) is None:
+                                payload_dict[key] = value
+                                payload = payload_dict
+                if parsed.get("id") is not None:
+                    request_id = str(parsed.get("id"))
+            elif isinstance(parsed.get("msg"), dict):
+                msg = _object_dict(parsed.get("msg"))
+                label = f"codex/event/{msg.get('type', 'event')}"
+                payload = msg
+                raw_conversation = parsed.get("conversationId")
+                raw_conversation_id = raw_conversation if isinstance(raw_conversation, str) and raw_conversation else None
+            elif "type" in parsed:
+                label = str(parsed.get("type"))
+                payload = parsed
+
+        raw_conversation = parsed.get("conversationId")
+        if isinstance(raw_conversation, str) and raw_conversation:
+            raw_conversation_id = raw_conversation
+
+        conversation_id = self._resolve_conversation_id(raw_conversation_id, payload)
+        self._raw_log_fn("in", conversation_id or raw_conversation_id or self.get_raw_label(), text)
+
+        if not label:
+            return next_pending_label
+
+        thread_id = self._get_thread_id(payload, fallback=raw_conversation_id)
+        turn_id = self._get_turn_id(payload)
+        if conversation_id:
+            self._remember_bindings(conversation_id=conversation_id, thread_id=thread_id, turn_id=turn_id)
+        self._note_resume_idle_event(
+            conversation_id=conversation_id,
+            thread_id=thread_id,
+            label=label,
+            payload=payload,
+        )
+        self._enqueue_transport_event(
+            label,
+            payload,
+            conversation_id=conversation_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            request_id=request_id,
+        )
+        return next_pending_label
+
     async def _reader_loop(self, shell_id: str, subscription: _OutputSubscription) -> None:
         pending_label: Optional[str] = None
         buffer = b""
         max_buffer = 4_000_000
         mgr = await self._fws_getter()
-
-        async def _process_line(text: str) -> None:
-            nonlocal pending_label
-            text = text.strip()
-            if not text:
-                return
-
-            if "{" in text and not text.lstrip().startswith("{"):
-                prefix, rest = text.split("{", 1)
-                if prefix.strip() and rest.strip().startswith("{"):
-                    pending_label = prefix.strip()
-                    text = "{" + rest
-
-            try:
-                parsed_value = cast(object, json.loads(text))
-            except Exception:
-                self._raw_log_fn("in", self.get_raw_label(), text)
-                if "/" in text or text.endswith("started") or text.endswith("completed"):
-                    pending_label = text
-                return
-            parsed = _object_dict(parsed_value)
-
-            if parsed and "id" in parsed and ("result" in parsed or "error" in parsed) and "method" not in parsed:
-                req_id = str(parsed.get("id"))
-                conversation_id = self._request_conversations.get(req_id)
-                self._raw_log_fn("in", conversation_id or self.get_raw_label(), text)
-                waiter = self._rpc_waiters.get(req_id)
-                if waiter and not waiter.done():
-                    waiter.set_result(parsed)
-                return
-
-            label = None
-            payload: object = parsed_value
-            raw_conversation_id: Optional[str] = None
-            request_id: Optional[str] = None
-
-            if pending_label:
-                label = pending_label
-                pending_label = None
-                msg = _object_dict(parsed.get("msg"))
-                if msg:
-                    payload = msg
-                    raw_conversation = parsed.get("conversationId")
-                    raw_conversation_id = raw_conversation if isinstance(raw_conversation, str) and raw_conversation else None
-                else:
-                    payload = parsed_value
-            elif parsed:
-                if "method" in parsed:
-                    label_value = parsed.get("method")
-                    label = label_value if isinstance(label_value, str) else None
-                    params_obj = parsed.get("params", parsed_value)
-                    params = _object_dict(params_obj)
-                    payload = params
-                    if params:
-                        param_conversation_id = params.get("conversationId")
-                        if isinstance(param_conversation_id, str) and param_conversation_id:
-                            raw_conversation_id = param_conversation_id
-                        if (
-                            label is not None
-                            and label.startswith("codex/event/collab_")
-                            and isinstance(params.get("msg"), dict)
-                        ):
-                            payload = _object_dict(params["msg"])
-                            for key in ("id", "conversationId", "conversation_id", "threadId", "thread_id", "turnId", "turn_id"):
-                                value = params.get(key)
-                                payload_dict = _object_dict(payload)
-                                if value is not None and payload_dict.get(key) is None:
-                                    payload_dict[key] = value
-                                    payload = payload_dict
-                    if parsed.get("id") is not None:
-                        request_id = str(parsed.get("id"))
-                elif isinstance(parsed.get("msg"), dict):
-                    msg = _object_dict(parsed.get("msg"))
-                    label = f"codex/event/{msg.get('type', 'event')}"
-                    payload = msg
-                    raw_conversation = parsed.get("conversationId")
-                    raw_conversation_id = raw_conversation if isinstance(raw_conversation, str) and raw_conversation else None
-                elif "type" in parsed:
-                    label = str(parsed.get("type"))
-                    payload = parsed
-
-            raw_conversation = parsed.get("conversationId")
-            if isinstance(raw_conversation, str) and raw_conversation:
-                raw_conversation_id = raw_conversation
-
-            conversation_id = self._resolve_conversation_id(raw_conversation_id, payload)
-            self._raw_log_fn("in", conversation_id or raw_conversation_id or self.get_raw_label(), text)
-
-            if not label:
-                return
-
-            thread_id = self._get_thread_id(payload, fallback=raw_conversation_id)
-            if conversation_id and thread_id:
-                self._persist_thread_id(conversation_id, thread_id)
-            turn_id = self._get_turn_id(payload)
-            self._note_resume_idle_event(
-                conversation_id=conversation_id,
-                thread_id=thread_id,
-                label=label,
-                payload=payload,
-            )
-
-            await self._route_transport_event(
-                label,
-                payload,
-                conversation_id=conversation_id,
-                thread_id=thread_id,
-                turn_id=turn_id,
-                request_id=request_id,
-            )
 
         try:
             while True:
@@ -834,16 +930,17 @@ class CodexAppServerTransport:
                 while b"\n" in buffer:
                     line, buffer = buffer.split(b"\n", 1)
                     try:
-                        await _process_line(line.decode("utf-8", errors="replace"))
+                        pending_label = await self._process_incoming_line(line, pending_label)
                     except Exception as exc:
                         self._raw_log_fn("err", self.get_raw_label(), f"reader_process_failed {exc}")
                         continue
             if buffer:
                 try:
-                    await _process_line(buffer.decode("utf-8", errors="replace"))
+                    await self._process_incoming_line(buffer, pending_label)
                 except Exception as exc:
                     self._raw_log_fn("err", self.get_raw_label(), f"reader_process_failed {exc}")
         finally:
+            await self._terminate_event_router()
             with contextlib.suppress(Exception):
                 await mgr.unsubscribe_output_bytes(shell_id, subscription)
             if self._stdout_subscription is subscription:

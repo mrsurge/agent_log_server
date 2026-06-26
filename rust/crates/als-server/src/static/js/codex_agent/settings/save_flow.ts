@@ -272,7 +272,7 @@ export function bindSettingsSaveFlow(ctx: SettingsSaveFlowContext) {
       settings.model = normalizeStringSetting(settingsModelEl?.value);
     }
     if (!schemaManages('reasoning_effort')) {
-      settings.effort = normalizeStringSetting(settingsEffortEl?.value);
+      settings.reasoning_effort = normalizeStringSetting(settingsEffortEl?.value);
     }
     if (!schemaManages('summary')) {
       settings.summary = normalizeStringSetting(settingsSummaryEl?.value);

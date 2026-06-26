@@ -48,6 +48,7 @@ type ConversationSettings = {
   sandboxPolicy?: string;
   model?: string;
   effort?: string;
+  reasoning_effort?: string;
   summary?: string;
   developer_instructions?: string;
   label?: string;
@@ -514,7 +515,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       if (settingsSandboxEl) settingsSandboxEl.value = getSettingValueByKey(state.conversationSettings, state.runtimeOptions?.sandbox?.settingKey || '');
       if (settingsModelEl) settingsModelEl.value = state.conversationSettings?.model || '';
       updateEffortOptionsForModel(state.conversationSettings?.model);
-      if (settingsEffortEl) settingsEffortEl.value = state.conversationSettings?.effort || '';
+      if (settingsEffortEl) settingsEffortEl.value = state.conversationSettings?.reasoning_effort || state.conversationSettings?.effort || '';
       if (settingsSummaryEl) settingsSummaryEl.value = state.conversationSettings?.summary || '';
       if (settingsDeveloperInstructionsEl) settingsDeveloperInstructionsEl.value = state.conversationSettings?.developer_instructions || '';
       if (settingsLabelEl) settingsLabelEl.value = state.conversationSettings?.label || '';
@@ -874,7 +875,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
     }
     const currentEffort = settingsEffortEl?.value;
     const defaultEffort = model.defaultReasoningEffort || model.default_reasoning_effort || efforts[0] || '';
-    if (settingsEffortEl && (!currentEffort || !efforts.includes(currentEffort))) {
+    if (settingsEffortEl && !currentEffort) {
       settingsEffortEl.value = defaultEffort;
     }
   }

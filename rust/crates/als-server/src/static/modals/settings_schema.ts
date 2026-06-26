@@ -276,6 +276,7 @@ function normalizeSchemaField(value: unknown): SchemaField | null {
     default_path: value.default_path,
     refresh_on: Array.isArray(value.refresh_on) ? value.refresh_on : (Array.isArray(value.refreshOn) ? value.refreshOn : undefined),
     depends_on: Array.isArray(value.depends_on) ? value.depends_on : (Array.isArray(value.dependsOn) ? value.dependsOn : undefined),
+    value_keys: Array.isArray(value.value_keys) ? value.value_keys : (Array.isArray(value.valueKeys) ? value.valueKeys : undefined),
     model_gate: isRecord(value.model_gate) ? value.model_gate : undefined,
     visible_if: isRecord(value.visible_if) ? value.visible_if : undefined,
     enabled_if: isRecord(value.enabled_if) ? value.enabled_if : undefined,
@@ -2338,6 +2339,13 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
         if (changedFieldId && sourceField !== changedFieldId) return;
         if (!selectedDependencyValue(control.field)) {
           setSelectOptions(control, []);
+          if (!changedFieldId && control.input.value) {
+            control.selectedOption = undefined;
+            control.input.placeholder = trimString(dynamicOptions.missing_source_placeholder)
+              || control.field.placeholder
+              || 'Select source first';
+            return;
+          }
           control.input.value = '';
           control.selectedOption = undefined;
           control.input.placeholder = trimString(dynamicOptions.missing_source_placeholder)
@@ -2349,6 +2357,13 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
         const { options, defaultValue } = optionsFromDependentSource(control.field);
         setSelectOptions(control, options);
         if (!options.length) {
+          if (!changedFieldId && control.input.value) {
+            control.selectedOption = undefined;
+            control.input.placeholder = trimString(dynamicOptions.empty_placeholder)
+              || control.field.placeholder
+              || 'No options available';
+            return;
+          }
           control.input.value = '';
           control.selectedOption = undefined;
           control.input.placeholder = trimString(dynamicOptions.empty_placeholder)
@@ -2360,6 +2375,10 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
         control.input.placeholder = control.field.placeholder || '';
         const currentValue = control.input.value;
         if (currentValue && selectOptionByValue(control, currentValue, options, false, false)) {
+          return;
+        }
+        if (currentValue) {
+          control.selectedOption = undefined;
           return;
         }
 

@@ -151,17 +151,9 @@ def _server_command(args: BootstrapArgs, env: MutableMapping[str, str] | None = 
         return [str(Path(args.server_bin)), *framework_shell_args]
 
     manifest = Path(args.cargo_manifest) if args.cargo_manifest else _default_rust_manifest()
-    packaged_manifest = _packaged_rust_manifest()
-    target_dir = None
-    if (
-        not args.cargo_manifest
-        and packaged_manifest is not None
-        and manifest == packaged_manifest
-    ):
-        cache_dir = Path(runtime_env["ALS_RS_CACHE_DIR"])
-        target_dir = Path(runtime_env.setdefault("CARGO_TARGET_DIR", str(cache_dir / "cargo-target")))
+    target_dir = _bootstrap_cargo_target_dir(manifest, runtime_env)
 
-    debug_binary = (target_dir or manifest.parent / "target") / "debug" / "als-server"
+    debug_binary = target_dir / "debug" / "als-server"
     use_ferrous_framework = _ferrous_framework_enabled(args)
     if debug_binary.exists() and not use_ferrous_framework:
         return [str(debug_binary), *framework_shell_args]
@@ -176,6 +168,19 @@ def _server_command(args: BootstrapArgs, env: MutableMapping[str, str] | None = 
     ]
     command.extend(["--", *framework_shell_args])
     return command
+
+
+def _bootstrap_cargo_target_dir(manifest: Path, runtime_env: MutableMapping[str, str]) -> Path:
+    configured_target_dir = runtime_env.get("CARGO_TARGET_DIR")
+    if configured_target_dir:
+        return Path(configured_target_dir)
+
+    cache_dir = Path(runtime_env.get("ALS_RS_CACHE_DIR") or _default_cache_dir())
+    runtime_env.setdefault("ALS_RS_CACHE_DIR", str(cache_dir))
+    manifest_key = hashlib.sha256(str(manifest.parent).encode("utf-8")).hexdigest()[:16]
+    target_dir = cache_dir / "cargo-target" / manifest_key
+    runtime_env["CARGO_TARGET_DIR"] = str(target_dir)
+    return target_dir
 
 
 def _framework_shell_args(args: BootstrapArgs) -> list[str]:
