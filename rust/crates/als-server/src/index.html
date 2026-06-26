@@ -69,7 +69,7 @@
       }
     </style>
     <script>window.AGENT_LOG_SOCKETIO_SERIALIZER = "json";</script>
-    <script src="/static/dist/codex_agent.js" type="module"></script>
+    <script src="/static/vendor/socket.io/socket.io.min.js"></script>
     <script type="module">
       import { initConsoleBridge } from '/static/js/console_bridge.js';
       const startAlsRsConsoleBridge = (attempt = 0) => {
@@ -92,6 +92,7 @@
       };
       startAlsRsConsoleBridge();
     </script>
+    <script src="/static/dist/codex_agent.js" type="module"></script>
   </head>
   <body>
     <div class="appshell">
