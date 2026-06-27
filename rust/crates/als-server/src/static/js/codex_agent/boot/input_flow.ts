@@ -1,6 +1,8 @@
 import { TRANSCRIPT_PRELOAD_ROWS } from '../transcript_config.ts';
 import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 
+const INTERRUPT_ARM_TIMEOUT_MS = 10_000;
+
 type TextValueElement = HTMLElement & { value: string };
 
 type ConversationSettingsState = {
@@ -147,6 +149,8 @@ export function bindInputFlow(ctx: InputFlowContext) {
   const conversationsRpcClient = createConversationsRpcClient({
     windowRef,
   });
+  let interruptArmed = false;
+  let interruptArmTimeout: number | null = null;
 
   const {
     sendBtn,
@@ -377,6 +381,45 @@ export function bindInputFlow(ctx: InputFlowContext) {
     restorePendingApprovals();
   }
 
+  function clearInterruptArmTimeout() {
+    if (interruptArmTimeout === null) return;
+    windowRef.clearTimeout(interruptArmTimeout);
+    interruptArmTimeout = null;
+  }
+
+  function renderInterruptArmState() {
+    if (!interruptBtn) return;
+    interruptBtn.classList.remove('danger');
+    interruptBtn.classList.add('interrupt-safe');
+    interruptBtn.classList.toggle('interrupt-armed', interruptArmed);
+    interruptBtn.setAttribute('aria-pressed', interruptArmed ? 'true' : 'false');
+    interruptBtn.title = interruptArmed
+      ? 'Click again within 10 seconds to interrupt'
+      : 'Click once to arm interrupt';
+  }
+
+  function resetInterruptArm() {
+    interruptArmed = false;
+    clearInterruptArmTimeout();
+    renderInterruptArmState();
+  }
+
+  function armInterrupt() {
+    interruptArmed = true;
+    clearInterruptArmTimeout();
+    renderInterruptArmState();
+    interruptArmTimeout = windowRef.setTimeout(resetInterruptArm, INTERRUPT_ARM_TIMEOUT_MS);
+  }
+
+  async function handleInterruptClick() {
+    if (!interruptArmed) {
+      armInterrupt();
+      return;
+    }
+    resetInterruptArm();
+    await interruptTurn();
+  }
+
   function syncMarkdownFromSettings() {
     const enabled = getState().conversationSettings?.markdown !== false;
     setMarkdownEnabled(enabled);
@@ -423,9 +466,8 @@ export function bindInputFlow(ctx: InputFlowContext) {
       }
     });
 
-    interruptBtn?.addEventListener('click', async () => {
-      await interruptTurn();
-    });
+    renderInterruptArmState();
+    interruptBtn?.addEventListener('click', handleInterruptClick);
 
     scrollContainer?.addEventListener('scroll', handleScroll);
     scrollBtn?.addEventListener('click', handleScrollToggle);
