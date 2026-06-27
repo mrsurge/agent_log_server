@@ -75,15 +75,47 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="als-rs extension",
         description="Manage ALS-RS extension packages in the user extension root.",
+        epilog=(
+            "Examples:\n"
+            "  als-rs extension list\n"
+            "  als-rs extension validate --path /path/to/extension\n"
+            "  als-rs extension install --path /path/to/extension --install-dependencies\n"
+            "  als-rs extension update my-extension --git https://example.invalid/repo.git --ref main\n"
+            "  als-rs extension reload my-extension --force"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     commands = parser.add_subparsers(dest="extension_command", required=True)
 
-    validate_parser = commands.add_parser("validate", help="Validate an extension package source")
+    validate_parser = commands.add_parser(
+        "validate",
+        help="Validate an extension package source",
+        description="Validate an extension package source without installing it.",
+        epilog=(
+            "Examples:\n"
+            "  als-rs extension validate --path /path/to/extension\n"
+            "  als-rs extension validate --zip /path/to/extension.zip --id my-extension\n"
+            "  als-rs extension validate --git https://example.invalid/repo.git --ref main"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_common_flags(validate_parser)
     _add_source_flags(validate_parser, required=True)
     validate_parser.add_argument("--id", dest="extension_id", help="Expected extension id")
 
-    install_parser = commands.add_parser("install", help="Install an extension package")
+    install_parser = commands.add_parser(
+        "install",
+        help="Install an extension package",
+        description="Install an extension package from a directory, zip archive, or git source.",
+        epilog=(
+            "Examples:\n"
+            "  als-rs extension install --path /path/to/extension --install-dependencies\n"
+            "  als-rs extension install --zip /path/to/extension.zip --id my-extension\n"
+            "  als-rs extension install --git https://example.invalid/repo.git --ref main\n"
+            "  als-rs extension install --path /path/to/extension --no-notify-server"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_common_flags(install_parser)
     _add_source_flags(install_parser, required=True)
     install_parser.add_argument("--id", dest="extension_id", help="Expected extension id")
@@ -94,7 +126,18 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Run dependency installation locally after package install if supported",
     )
 
-    update_parser = commands.add_parser("update", help="Update an installed extension")
+    update_parser = commands.add_parser(
+        "update",
+        help="Update an installed extension",
+        description="Update an installed user extension from its recorded source or a new source.",
+        epilog=(
+            "Examples:\n"
+            "  als-rs extension update my-extension\n"
+            "  als-rs extension update my-extension --path /path/to/extension --install-dependencies\n"
+            "  als-rs extension update my-extension --git https://example.invalid/repo.git --ref main"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_common_flags(update_parser)
     update_parser.add_argument("extension_id", help="Installed extension id")
     _add_source_flags(update_parser, required=False)
@@ -104,16 +147,39 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Run dependency installation locally after package update if supported",
     )
 
-    remove_parser = commands.add_parser("remove", help="Remove an installed user extension")
+    remove_parser = commands.add_parser(
+        "remove",
+        help="Remove an installed user extension",
+        description="Remove an installed user extension from the user extension root.",
+        epilog="Example:\n  als-rs extension remove my-extension",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_common_flags(remove_parser)
     remove_parser.add_argument("extension_id", help="Installed extension id")
 
-    reload_parser = commands.add_parser("reload", help="Reload local and running-server extension discovery")
+    reload_parser = commands.add_parser(
+        "reload",
+        help="Reload local and running-server extension discovery",
+        description="Reload local extension discovery and best-effort notify a running ALS-RS server.",
+        epilog=(
+            "Examples:\n"
+            "  als-rs extension reload\n"
+            "  als-rs extension reload my-extension --force\n"
+            "  als-rs extension reload --no-notify-server"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_common_flags(reload_parser)
     reload_parser.add_argument("extension_ids", nargs="*", help="Optional extension ids to target")
     reload_parser.add_argument("--force", action="store_true", help="Force local reload")
 
-    list_parser = commands.add_parser("list", help="List locally discovered ALS-RS extensions")
+    list_parser = commands.add_parser(
+        "list",
+        help="List locally discovered ALS-RS extensions",
+        description="List builtin and user-installed ALS-RS extensions discovered locally.",
+        epilog="Example:\n  als-rs extension list --json",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_common_flags(list_parser)
 
     return parser.parse_args(argv)

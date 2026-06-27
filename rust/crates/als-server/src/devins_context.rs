@@ -196,13 +196,7 @@ fn template_path() -> Result<PathBuf> {
 
 fn template_candidates() -> Vec<PathBuf> {
     let root = compile_time_repo_root();
-    vec![
-        root.join("als_deprecated").join(TEMPLATE_FILENAME),
-        root.join(TEMPLATE_FILENAME),
-        root.parent()
-            .map(|parent| parent.join("als_deprecated").join(TEMPLATE_FILENAME))
-            .unwrap_or_else(|| root.join("als_deprecated").join(TEMPLATE_FILENAME)),
-    ]
+    vec![root.join(TEMPLATE_FILENAME), root.join("agent_log_server_rs").join(TEMPLATE_FILENAME)]
 }
 
 fn compile_time_repo_root() -> PathBuf {
@@ -316,6 +310,15 @@ mod tests {
             .as_deref(),
             Some("Template\n\nUser\n\nRepo memory")
         );
+    }
+
+    #[test]
+    fn packaged_template_candidate_prefers_current_template() {
+        let root = compile_time_repo_root();
+        let candidates = template_candidates();
+        assert_eq!(candidates.first(), Some(&root.join(TEMPLATE_FILENAME)));
+        assert!(candidates.contains(&root.join("agent_log_server_rs").join(TEMPLATE_FILENAME)));
+        assert!(!candidates.contains(&root.join("als_deprecated").join(TEMPLATE_FILENAME)));
     }
 
     #[test]

@@ -54,7 +54,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
     parser = argparse.ArgumentParser(
         prog="als-rs",
-        description="Launch the ALS-RS Rust server with isolated runtime roots.",
+        usage=(
+            "als-rs [options]\n"
+            "       als-rs extension {validate,install,update,remove,reload,list} ..."
+        ),
+        description=(
+            "Launch the ALS-RS Rust server with isolated runtime roots.\n\n"
+            "Subcommands:\n"
+            "  extension   Manage extension packages. Run `als-rs extension -h` for details."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  als-rs\n"
+            "  als-rs --port 12459\n"
+            "  als-rs extension list\n"
+            "  als-rs extension install --path /path/to/extension --install-dependencies\n"
+            "  als-rs extension validate --git https://example.invalid/repo.git --ref main"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--host", default=os.environ.get("ALS_RS_HOST", DEFAULT_HOST))
     parser.add_argument("--port", default=os.environ.get("ALS_RS_PORT", DEFAULT_PORT))
@@ -135,6 +152,9 @@ def _build_env(args: BootstrapArgs) -> dict[str, str]:
     env["ALS_RS_CONFIG_DIR"] = str(config_dir)
     env["ALS_RS_STATIC_DIR"] = str(static_dir)
     env.setdefault("ALS_RS_EXTENSIONS_DIR", str(_default_extensions_dir()))
+    template_path = _default_developer_message_template_path()
+    if template_path.is_file():
+        env.setdefault("TE2_DEVELOPER_MESSAGE_TEMPLATE_PATH", str(template_path))
     env["ALS_RS_PYTHON_BIN"] = sys.executable
     _ensure_framework_shells_env(env, args, data_dir)
     return env
@@ -368,6 +388,16 @@ def _default_static_dir() -> Path:
         return source_static
     packaged_static = _package_root() / "rust" / "crates" / "als-server" / "src" / "static"
     return packaged_static
+
+
+def _default_developer_message_template_path() -> Path:
+    packaged_template = _package_root() / "DEVELOPER_MESSAGE_TEMPLATE.md"
+    if packaged_template.is_file():
+        return packaged_template
+    source_template = _source_root() / "DEVELOPER_MESSAGE_TEMPLATE.md"
+    if source_template.is_file():
+        return source_template
+    return packaged_template
 
 
 def _source_root() -> Path:

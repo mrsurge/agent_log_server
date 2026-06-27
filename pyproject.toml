@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-log-server"
-version = "0.2.105"
+version = "0.2.106"
 description = "ALS-RS agent harness, extension adapter, KB/MCP tools, and TE2 integration."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,7 +25,6 @@ include = ["als_deprecated*", "agent_log_server_rs*", "extensions*"]
 
 [tool.setuptools.package-data]
 als_deprecated = [
-  "DEVELOPER_MESSAGE_TEMPLATE.md",
   "templates/*",
   "templates/**/*",
   "shellspec/*",
@@ -34,6 +33,7 @@ als_deprecated = [
   "te2_assets/**/*",
 ]
 agent_log_server_rs = [
+  "DEVELOPER_MESSAGE_TEMPLATE.md",
   "shellspec/*",
   "shellspec/**/*",
   "rust/*",

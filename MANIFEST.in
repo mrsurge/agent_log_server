@@ -1,5 +1,6 @@
 include README.md
 include requirements.txt
+include DEVELOPER_MESSAGE_TEMPLATE.md
 graft rust
 prune rust/target
 recursive-include rust/crates/als-server/src/static *
