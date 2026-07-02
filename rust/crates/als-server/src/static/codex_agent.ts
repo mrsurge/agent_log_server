@@ -201,6 +201,20 @@ document.addEventListener('DOMContentLoaded', () => {
     };
   }
 
+  function releaseBootLayoutSettling(): void {
+    const release = () => {
+      document.documentElement.classList.remove('boot-layout-settling', 'boot-drawer-open');
+      document.body.classList.remove('boot-layout-settling');
+    };
+    if (typeof window.requestAnimationFrame !== 'function') {
+      window.setTimeout(release, 0);
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(release);
+    });
+  }
+
   const statusEl = byId('agent-status');
   const wsStatusEl = byId('agent-ws');
   const timelineEl = byId('agent-timeline');
@@ -2326,6 +2340,7 @@ document.addEventListener('DOMContentLoaded', () => {
   bindWidescreenResizer();
   updateWidescreenLayout();
   initializeBoot(handleSocketEvent);
+  releaseBootLayoutSettling();
   setupSettingsBoot();
   installCodexAgentGlobal();
   bindStartStopButtons();

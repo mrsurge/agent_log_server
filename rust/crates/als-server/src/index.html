@@ -7,6 +7,25 @@
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#0d0f13">
     <link rel="icon" type="image/svg+xml" href="/static/codexas-icon.svg">
+    <script>
+      (function () {
+        var query = new URLSearchParams(window.location.search);
+        var conversationId = (query.get('conversation_id') || query.get('conversationId') || '').trim();
+        var view = (query.get('view') || '').trim();
+        if (view !== 'conversation' && view !== 'splash' && view !== 'project') {
+          view = 'conversation';
+        }
+        document.documentElement.classList.add('boot-layout-settling');
+        if (conversationId && view === 'conversation') {
+          document.documentElement.classList.add('boot-drawer-open');
+        }
+        window.__ALS_RS_BOOT_LAYOUT__ = {
+          conversationId: conversationId || null,
+          view: view,
+          drawerOpen: Boolean(conversationId && view === 'conversation')
+        };
+      })();
+    </script>
     <link rel="stylesheet" href="/static/vendor/fonts/jetbrains-mono.css">
     <link rel="stylesheet" href="/static/codex_agent.css">
     <style id="als-rs-session-picker-style">

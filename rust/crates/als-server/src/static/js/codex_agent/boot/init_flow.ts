@@ -189,7 +189,7 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
     resetWsReady();
     connectWS(handleEvent);
     bindPickerFilter();
-    setDrawerOpen(false);
+    setDrawerOpen(state.activeView === 'conversation');
     void (async () => {
       const ready = await waitForWs(10000);
       if (!ready) {
@@ -229,7 +229,6 @@ export function bindBootInitFlow(ctx: BootInitFlowContext) {
         restorePendingApprovals();
         await publishSidebarWindowState?.();
         setTimeout(() => {
-          if (activeConversationView) setDrawerOpen(true);
           maybeAutoScroll(true);
         }, 50);
       } else {

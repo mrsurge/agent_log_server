@@ -36,6 +36,10 @@ body.drawer-open {
   overflow: hidden;
 }
 
+html.boot-drawer-open body {
+  overflow: hidden;
+}
+
 body.conversation-reorder-dragging,
 body.conversation-reorder-dragging * {
   user-select: none !important;
@@ -483,7 +487,15 @@ body.conversation-reorder-dragging * {
   transition: transform 0.25s ease;
 }
 
+html.boot-layout-settling .conversation-drawer {
+  transition: none;
+}
+
 .conversation-drawer.open {
+  transform: translateX(0);
+}
+
+html.boot-drawer-open .conversation-drawer {
   transform: translateX(0);
 }
 
@@ -605,6 +617,47 @@ body.widescreen-resizing * {
 
   body.widescreen-layout .conversation-body {
     min-height: 0;
+  }
+}
+
+@media (min-width: 1280px) {
+  html.boot-layout-settling body {
+    overflow: hidden;
+  }
+
+  html.boot-layout-settling .grid {
+    grid-template-columns: minmax(320px, var(--codex-widescreen-splash-width)) 10px minmax(0, 1fr);
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  html.boot-layout-settling .splash-view {
+    grid-column: 1;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    max-height: 100%;
+    overflow: hidden;
+  }
+
+  html.boot-layout-settling .widescreen-resizer {
+    display: block;
+    grid-column: 2;
+    position: relative;
+    align-self: stretch;
+  }
+
+  html.boot-layout-settling .conversation-drawer {
+    grid-column: 3;
+    position: relative;
+    inset: auto;
+    transform: none;
+    z-index: 1;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    box-shadow: none;
+    overflow: hidden;
   }
 }
 
