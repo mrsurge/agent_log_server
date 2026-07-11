@@ -1353,6 +1353,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         })
     }
 

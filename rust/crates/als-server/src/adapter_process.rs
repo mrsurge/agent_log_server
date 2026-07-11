@@ -1,4 +1,6 @@
-use crate::config::{FrameworkShellConfig, ServerConfig};
+use crate::config::{
+    FrameworkShellConfig, SOCKETIO_SERIALIZER_ENV, ServerConfig, SocketIoSerializer,
+};
 use als_adapter_protocol::{ExtensionInitializeParams, JsonMap, events, methods};
 use als_dto::RuntimeRoots;
 use als_jsonrpc::{
@@ -70,6 +72,7 @@ impl AdapterSupervisor {
                 self.config.extensions_dir.parent().map(Path::to_path_buf),
                 self.config.roots.clone(),
                 self.config.framework_shells.clone(),
+                self.config.socketio_serializer,
                 self.events.clone(),
             )
             .await?,
@@ -198,6 +201,7 @@ impl AdapterClient {
         python_path_root: Option<PathBuf>,
         roots: RuntimeRoots,
         framework_shells: FrameworkShellConfig,
+        socketio_serializer: SocketIoSerializer,
         events: AdapterEventSink,
     ) -> Result<Self> {
         if framework_shells.is_configured() && ferrous_native_enabled() {
@@ -206,6 +210,7 @@ impl AdapterClient {
                 python_path_root.clone(),
                 &roots,
                 &framework_shells,
+                socketio_serializer,
                 events.clone(),
             )
             .await
@@ -232,7 +237,14 @@ impl AdapterClient {
                 }
             }
         }
-        Self::spawn_direct(python, python_path_root, &roots, &framework_shells, events)
+        Self::spawn_direct(
+            python,
+            python_path_root,
+            &roots,
+            &framework_shells,
+            socketio_serializer,
+            events,
+        )
     }
 
     async fn spawn_ferrous(
@@ -240,6 +252,7 @@ impl AdapterClient {
         python_path_root: Option<PathBuf>,
         roots: &RuntimeRoots,
         framework_shells: &FrameworkShellConfig,
+        socketio_serializer: SocketIoSerializer,
         events: AdapterEventSink,
     ) -> Result<Self> {
         let cwd = adapter_working_dir(python_path_root.as_deref(), roots);
@@ -247,7 +260,12 @@ impl AdapterClient {
             .as_ref()
             .map(|root| root.join("agent_log_server_rs/shellspec/extension_adapter.yaml"))
             .filter(|path| path.is_file());
-        let env = adapter_env_overrides(python_path_root.as_deref(), roots, framework_shells);
+        let env = adapter_env_overrides(
+            python_path_root.as_deref(),
+            roots,
+            framework_shells,
+            socketio_serializer,
+        );
         let manager = FerrousNativeManager::try_with_env_map(&env)
             .context("failed to initialize ferrous_framework native manager")?;
         let command = vec![
@@ -324,6 +342,7 @@ impl AdapterClient {
         python_path_root: Option<PathBuf>,
         roots: &RuntimeRoots,
         framework_shells: &FrameworkShellConfig,
+        socketio_serializer: SocketIoSerializer,
         events: AdapterEventSink,
     ) -> Result<Self> {
         let mut command = Command::new(&python);
@@ -334,9 +353,12 @@ impl AdapterClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        for (key, value) in
-            adapter_env_overrides(python_path_root.as_deref(), roots, framework_shells)
-        {
+        for (key, value) in adapter_env_overrides(
+            python_path_root.as_deref(),
+            roots,
+            framework_shells,
+            socketio_serializer,
+        ) {
             command.env(key, value);
         }
         command.current_dir(adapter_working_dir(python_path_root.as_deref(), roots));
@@ -479,6 +501,7 @@ fn adapter_env_overrides(
     python_path_root: Option<&Path>,
     roots: &RuntimeRoots,
     framework_shells: &FrameworkShellConfig,
+    socketio_serializer: SocketIoSerializer,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
     if let Some(root) = python_path_root {
@@ -506,6 +529,10 @@ fn adapter_env_overrides(
     env.insert(
         "ALS_RS_STATIC_DIR".to_owned(),
         roots.static_dir.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        SOCKETIO_SERIALIZER_ENV.to_owned(),
+        socketio_serializer.as_str().to_owned(),
     );
     env
 }
@@ -946,6 +973,26 @@ fn truncate_log_line(line: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn adapter_env_carries_the_server_socketio_serializer() {
+        let roots = RuntimeRoots {
+            data_dir: PathBuf::from("data"),
+            cache_dir: PathBuf::from("cache"),
+            config_dir: PathBuf::from("config"),
+            static_dir: PathBuf::from("static"),
+        };
+        let env = adapter_env_overrides(
+            None,
+            &roots,
+            &FrameworkShellConfig::default(),
+            SocketIoSerializer::Msgpack,
+        );
+        assert_eq!(
+            env.get(SOCKETIO_SERIALIZER_ENV).map(String::as_str),
+            Some("msgpack")
+        );
+    }
 
     #[tokio::test]
     async fn correlates_success_response_by_request_id() {

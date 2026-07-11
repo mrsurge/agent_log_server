@@ -6,6 +6,38 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+pub const SOCKETIO_SERIALIZER_ENV: &str = "AGENT_LOG_SOCKETIO_SERIALIZER";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SocketIoSerializer {
+    Json,
+    Msgpack,
+}
+
+impl SocketIoSerializer {
+    fn from_raw(raw: Option<&str>) -> Result<Self> {
+        match raw
+            .unwrap_or("msgpack")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "json" => Ok(Self::Json),
+            "msgpack" | "messagepack" => Ok(Self::Msgpack),
+            value => {
+                bail!("invalid {SOCKETIO_SERIALIZER_ENV} value: {value}; expected msgpack or json")
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Msgpack => "msgpack",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub host: String,
@@ -14,6 +46,7 @@ pub struct ServerConfig {
     pub roots: RuntimeRoots,
     pub adapters: AdapterConfig,
     pub framework_shells: FrameworkShellConfig,
+    pub socketio_serializer: SocketIoSerializer,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +81,8 @@ impl ServerConfig {
 
         let mut framework_shells = FrameworkShellConfig::from_env();
         framework_shells.apply_args(args)?;
+        let socketio_serializer =
+            SocketIoSerializer::from_raw(env::var(SOCKETIO_SERIALIZER_ENV).ok().as_deref())?;
 
         let config = Self {
             host,
@@ -63,6 +98,7 @@ impl ServerConfig {
                 python_bin: env::var("ALS_RS_PYTHON_BIN").unwrap_or_else(|_| "python".to_owned()),
             },
             framework_shells,
+            socketio_serializer,
         };
         config.ensure_roots()?;
         Ok(config)
@@ -249,6 +285,23 @@ fn home_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socketio_serializer_defaults_to_msgpack_and_accepts_json_debug_mode() {
+        assert_eq!(
+            SocketIoSerializer::from_raw(None).unwrap(),
+            SocketIoSerializer::Msgpack
+        );
+        assert_eq!(
+            SocketIoSerializer::from_raw(Some("messagepack")).unwrap(),
+            SocketIoSerializer::Msgpack
+        );
+        assert_eq!(
+            SocketIoSerializer::from_raw(Some("json")).unwrap(),
+            SocketIoSerializer::Json
+        );
+        assert!(SocketIoSerializer::from_raw(Some("other")).is_err());
+    }
 
     #[test]
     fn framework_shell_args_override_env_config() {

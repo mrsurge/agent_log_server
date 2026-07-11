@@ -6,12 +6,19 @@ use crate::static_assets;
 use crate::{conversation_routes, conversation_rpc, extension_routes};
 use als_dto::{APP_ID, HealthResponse, HealthStatus};
 use axum::{Json, Router, routing::get};
-use socketioxide::SocketIo;
+use socketioxide::{ParserConfig, SocketIo};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 pub fn build_router(state: AppState) -> Router {
-    let (socket_layer, io) = SocketIo::builder().with_state(state.clone()).build_layer();
+    let socket_builder = SocketIo::builder().with_state(state.clone());
+    let socket_builder = match state.config.socketio_serializer {
+        crate::config::SocketIoSerializer::Json => socket_builder,
+        crate::config::SocketIoSerializer::Msgpack => {
+            socket_builder.with_parser(ParserConfig::msgpack())
+        }
+    };
+    let (socket_layer, io) = socket_builder.build_layer();
     register_socket_namespaces(&io);
     conversation_rpc::start_adapter_event_fanout(io.clone(), state.clone());
     agent_log::start_socketio_fanout(io.clone(), state.clone());

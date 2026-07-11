@@ -111,14 +111,21 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
     updateScrollButton();
     maybeAutoScroll(true);
     setActivity('sending', true);
-    await ensureInitialized();
-    const result = await activeConversationsRpcClient.sendMessage({
-      conversationId: convoId,
-      text,
-    });
-    if (result?.accepted === false || result?.ok === false) {
-      console.error('sendUserMessage failed:', result?.error);
-      setActivity(result?.error || 'send failed', true);
+    try {
+      await ensureInitialized();
+      const result = await activeConversationsRpcClient.sendMessage({
+        conversationId: convoId,
+        text,
+      });
+      if (result?.accepted === false || result?.ok === false) {
+        console.error('sendUserMessage failed:', result?.error);
+        setActivity(result?.error || 'send failed', true);
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error || 'send failed');
+      console.error('sendUserMessage failed:', error);
+      setStatusDot('error');
+      setActivity(message, true);
     }
   }
 

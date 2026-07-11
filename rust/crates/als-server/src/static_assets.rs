@@ -12,6 +12,8 @@ use tower_http::services::ServeDir;
 
 use crate::state::AppState;
 
+const SOCKETIO_SERIALIZER_PLACEHOLDER: &str = "__ALS_RS_SOCKETIO_SERIALIZER__";
+
 pub fn routes(static_dir: &Path) -> Router<AppState> {
     Router::new()
         .route("/", get(index))
@@ -26,12 +28,25 @@ pub fn routes(static_dir: &Path) -> Router<AppState> {
         .nest_service("/static", ServeDir::new(static_dir))
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("index.html"))
+async fn index(State(state): State<AppState>) -> Html<String> {
+    Html(render_page(
+        include_str!("index.html"),
+        state.config.socketio_serializer,
+    ))
 }
 
-async fn agent_log() -> Html<&'static str> {
-    Html(include_str!("agent_log.html"))
+async fn agent_log(State(state): State<AppState>) -> Html<String> {
+    Html(render_page(
+        include_str!("agent_log.html"),
+        state.config.socketio_serializer,
+    ))
+}
+
+fn render_page(template: &str, serializer: crate::config::SocketIoSerializer) -> String {
+    template.replace(
+        SOCKETIO_SERIALIZER_PLACEHOLDER,
+        &serde_json::to_string(serializer.as_str()).expect("serializer mode should encode as JSON"),
+    )
 }
 
 async fn manifest() -> Json<serde_json::Value> {
@@ -131,7 +146,21 @@ fn content_type_for_path(path: &Path) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_asset_components;
+    use super::{render_page, safe_asset_components};
+    use crate::config::SocketIoSerializer;
+
+    #[test]
+    fn renders_socketio_serializer_before_browser_boot() {
+        let template = "window.AGENT_LOG_SOCKETIO_SERIALIZER = __ALS_RS_SOCKETIO_SERIALIZER__;";
+        assert_eq!(
+            render_page(template, SocketIoSerializer::Msgpack),
+            "window.AGENT_LOG_SOCKETIO_SERIALIZER = \"msgpack\";"
+        );
+        assert_eq!(
+            render_page(template, SocketIoSerializer::Json),
+            "window.AGENT_LOG_SOCKETIO_SERIALIZER = \"json\";"
+        );
+    }
 
     #[test]
     fn accepts_extension_ui_asset_paths() {

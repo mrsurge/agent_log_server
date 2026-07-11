@@ -2164,6 +2164,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         };
 
         let mut settings = JsonMap::new();
@@ -2241,6 +2242,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         });
 
         persist_adapter_transcript_entry(
@@ -2296,6 +2298,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         });
 
         persist_adapter_transcript_entry(
@@ -2351,6 +2354,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         });
         let mut settings = JsonMap::new();
         settings.insert("agent".to_owned(), json!("other-ext"));
@@ -2401,6 +2405,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         });
         state
             .conversations
@@ -2455,6 +2460,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         });
 
         assert_eq!(conversation_list(&state).unwrap()["revision"], json!(0));
@@ -2484,6 +2490,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         };
         let state = AppState::new(config.clone());
         state
@@ -2526,6 +2533,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         });
         let mut settings = JsonMap::new();
         settings.insert("agent".to_owned(), json!("other-ext"));
@@ -2616,6 +2624,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         });
         let mut settings = JsonMap::new();
         settings.insert("agent".to_owned(), json!("other-ext"));
@@ -2695,6 +2704,7 @@ mod tests {
                 python_bin: "python".to_owned(),
             },
             framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
         };
         let context = build_mcp_context(&config, "conv-origin", None, Some("/repo"))
             .expect("mcp context should be built");

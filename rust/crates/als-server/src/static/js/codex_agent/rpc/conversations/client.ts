@@ -545,14 +545,17 @@ export function createConversationsRpcClient(
       ? options.conversationId
       : null;
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const params: JsonObject = {
+      conversation_id: conversationId,
+      text: options.text,
+    };
+    if (options.toastContext) {
+      params.toast_context = options.toastContext;
+    }
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.send,
-      params: {
-        conversation_id: conversationId,
-        text: options.text,
-        toast_context: options.toastContext ?? undefined,
-      },
+      params,
       timeoutMs,
       windowRef: getWindowRef(),
     });

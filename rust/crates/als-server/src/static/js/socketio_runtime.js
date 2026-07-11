@@ -1,6 +1,6 @@
 (function () {
   function serializerMode() {
-    return String(window.AGENT_LOG_SOCKETIO_SERIALIZER || 'json').trim().toLowerCase();
+    return String(window.AGENT_LOG_SOCKETIO_SERIALIZER || 'msgpack').trim().toLowerCase();
   }
 
   function msgpackParser() {

@@ -108,6 +108,44 @@ function asJsonObject(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+function normalizeJsonCompatibleValue(value: unknown, arrayItem = false): unknown {
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') {
+    return arrayItem ? null : undefined;
+  }
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    return null;
+  }
+  if (typeof value === 'bigint') {
+    throw new TypeError('JSON-RPC payloads cannot contain bigint values');
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeJsonCompatibleValue(item, true));
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+  const jsonValue = value as { toJSON?: () => unknown };
+  if (typeof jsonValue.toJSON === 'function') {
+    return normalizeJsonCompatibleValue(jsonValue.toJSON(), arrayItem);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return value;
+  }
+  const normalized: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const normalizedItem = normalizeJsonCompatibleValue(item);
+    if (normalizedItem !== undefined) {
+      normalized[key] = normalizedItem;
+    }
+  }
+  return normalized;
+}
+
+export function normalizeJsonRpcParams(params: Record<string, unknown>): Record<string, unknown> {
+  return asJsonObject(normalizeJsonCompatibleValue(params)) ?? {};
+}
+
 function getSessionStorage(win: SessionStorageWindow): Storage | null {
   if (!win) return null;
   try {
@@ -329,7 +367,7 @@ export async function callRpcNamespace<
         jsonrpc: '2.0',
         id: requestId,
         method: options.method,
-        params: options.params ?? {},
+        params: normalizeJsonRpcParams(options.params ?? {}),
       },
       (ack: unknown) => {
         clearTimeout(timer);

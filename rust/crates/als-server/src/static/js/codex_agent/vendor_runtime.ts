@@ -45,7 +45,7 @@ function installStyle(id: string, cssText: string): void {
 }
 
 function serializerMode(): string {
-  return String(runtimeGlobal.AGENT_LOG_SOCKETIO_SERIALIZER || 'json').trim().toLowerCase();
+  return String(runtimeGlobal.AGENT_LOG_SOCKETIO_SERIALIZER || 'msgpack').trim().toLowerCase();
 }
 
 function msgpackSocketParser(): typeof msgpackParser | null {
@@ -89,4 +89,3 @@ runtimeGlobal.agentLogSocketIoOptions = (options: Readonly<SocketOptions>): Sock
 
 installStyle('vendor-highlight-github-dark', highlightThemeCss);
 installStyle('vendor-tribute', tributeCss);
-
