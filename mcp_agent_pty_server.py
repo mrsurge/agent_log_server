@@ -53,6 +53,7 @@ _ensure_framework_shells_secret()
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+from mcp.types import ToolAnnotations
 
 
 class _UrlopenResponse(Protocol):
@@ -564,6 +565,7 @@ def _normalize_ask_user_terminal(
 @mcp.tool(
     name="ask_user",
     description="Ask the user a question and wait for a response. Supports choices and optional freeform input.",
+    annotations=ToolAnnotations(readOnlyHint=False),
 )
 async def ask_user(
     question: str,

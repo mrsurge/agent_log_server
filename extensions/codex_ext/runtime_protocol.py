@@ -1497,6 +1497,7 @@ def _build_agent_pty_blocks_mcp_server(
         "cwd": launch_cwd,
         "env": env,
         "tool_timeout_sec": tool_timeout_sec,
+        "supports_parallel_tool_calls": False,
         "enabled_tools": list(_agent_pty_blocks_tool_names()),
     }
     return server

@@ -29,6 +29,21 @@ class CodexSearchCardContractTests(unittest.TestCase):
         self.assertEqual(arguments["targets"], ["/repo/src/a.py", "/repo/src/b.py"])
 
 
+class AskUserToolContractTests(unittest.TestCase):
+    def test_ask_user_explicitly_advertises_non_read_only(self) -> None:
+        async def scenario() -> object:
+            tools = await kb_server.mcp.list_tools()
+            for tool in tools:
+                if tool.name == "ask_user":
+                    return tool.annotations
+            self.fail("ask_user tool was not registered")
+
+        annotations = asyncio.run(scenario())
+
+        self.assertIsNotNone(annotations)
+        self.assertIs(getattr(annotations, "readOnlyHint", None), False)
+
+
 class KbSelectorContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.text = "# Top\n\nintro\n\n## Child\n\nbody\n"

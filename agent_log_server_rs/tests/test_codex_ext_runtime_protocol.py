@@ -92,6 +92,18 @@ class CodexRuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(params["threadId"], "thread_123")
         self.assertIs(params["excludeTurns"], True)
 
+    def test_agent_pty_blocks_config_forces_parallel_tool_calls_off(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = runtime_protocol.build_agent_pty_blocks_mcp_server(
+                cwd=tmp,
+                conversation_id="conv-123",
+                existing_server={"supports_parallel_tool_calls": True},
+            )
+
+        self.assertIsNotNone(server)
+        assert server is not None
+        self.assertIs(server["supports_parallel_tool_calls"], False)
+
 
 if __name__ == "__main__":
     unittest.main()
