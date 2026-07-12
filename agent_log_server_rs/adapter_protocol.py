@@ -92,7 +92,6 @@ class AdapterLiveEventType(StrEnum):
     TOKEN_COUNT = "token_count"
     APPROVAL = "approval"
     APPROVAL_HANDOFF = "approval_handoff"
-    TOAST = "toast"
     PLAN = "plan"
     PLAN_STATE = "plan_state"
     PLAN_UPDATE = "plan_update"
@@ -387,7 +386,6 @@ class ConversationSendParams:
     turn_id: str | None = None
     cwd: Path | None = None
     attachments: list[JsonMap] = field(default_factory=list)
-    toast_context: JsonMap | None = None
     settings: JsonMap = field(default_factory=dict)
     mcp_context: McpContext | None = None
     devins_context: DeveloperInstructionsContext | None = None
@@ -408,8 +406,6 @@ class ConversationSendParams:
             payload["cwd"] = str(self.cwd)
         if self.attachments:
             payload["attachments"] = [dict(item) for item in self.attachments]
-        if self.toast_context:
-            payload["toast_context"] = dict(self.toast_context)
         if self.settings:
             payload["settings"] = dict(self.settings)
         if self.mcp_context is not None:

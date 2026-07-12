@@ -467,9 +467,6 @@ Important DTO choices:
   snapshot; the Python adapter injects that DTO into extension settings under
   `__als_devins_context__`, and extensions use local `devins_contract.py`
   modules to place the already-computed string into provider-native fields.
-- `ConversationSendParams` includes optional `toast_context`, matching the
-  existing conversations RPC send contract for reply-capable toast flows.
-
 Validation currently covers:
 
 - Rust unit tests for live event and transcript record serialization.

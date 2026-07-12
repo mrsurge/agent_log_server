@@ -1462,6 +1462,7 @@ def _build_agent_pty_blocks_mcp_server(
     existing_server: object = None,
     conversation_id: object = None,
     appserver_origin: object = None,
+    socketio_serializer: object = None,
 ) -> Optional[SchemaDict]:
     launch_cwd = _expand_path(cwd)
     if not launch_cwd:
@@ -1484,6 +1485,8 @@ def _build_agent_pty_blocks_mcp_server(
     env["CONVERSATION_ID"] = conversation_id.strip()
     if isinstance(appserver_origin, str) and appserver_origin.strip():
         env["AGENT_LOG_SERVER_ORIGIN"] = appserver_origin.strip()
+    if isinstance(socketio_serializer, str) and socketio_serializer.strip():
+        env["AGENT_LOG_SOCKETIO_SERIALIZER"] = socketio_serializer.strip()
 
     merged_without_transport_keys: SchemaDict = {
         key: value

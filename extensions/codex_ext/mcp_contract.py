@@ -154,6 +154,8 @@ def apply_mcp_context(
             or _optional_string(context.get("conversation_id")),
             appserver_origin=_optional_string(agent_defaults.get("appserver_origin"))
             or _optional_string(context.get("appserver_origin")),
+            socketio_serializer=_optional_string(agent_defaults.get("socketio_serializer"))
+            or _optional_string(context.get("socketio_serializer")),
         )
         if agent_server is not None:
             mcp_servers[AGENT_PTY_BLOCKS_MCP_SERVER_NAME] = agent_server

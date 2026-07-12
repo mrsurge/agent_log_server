@@ -28,6 +28,7 @@ def build_agent_pty_blocks_local_mcp_server(
     cwd: Optional[str] = None,
     conversation_id: Optional[str] = None,
     appserver_origin: Optional[str] = None,
+    socketio_serializer: Optional[str] = None,
 ) -> ObjectMap:
     command = sys.executable.strip() or "python3"
     server: ObjectMap = {
@@ -44,6 +45,8 @@ def build_agent_pty_blocks_local_mcp_server(
         env["CONVERSATION_ID"] = conversation_id.strip()
     if isinstance(appserver_origin, str) and appserver_origin.strip():
         env["AGENT_LOG_SERVER_ORIGIN"] = appserver_origin.strip()
+    if isinstance(socketio_serializer, str) and socketio_serializer.strip():
+        env["AGENT_LOG_SOCKETIO_SERIALIZER"] = socketio_serializer.strip()
     if env:
         server["env"] = env
     return server

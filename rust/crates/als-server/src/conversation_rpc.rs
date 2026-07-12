@@ -685,7 +685,6 @@ async fn conversation_send(
         turn_id: optional_str(&params, "turn_id").map(ToOwned::to_owned),
         cwd,
         attachments: Vec::new(),
-        toast_context: None,
         mcp_context: build_mcp_context(
             &state.config,
             &conversation_id,
@@ -1403,7 +1402,6 @@ fn notification_method_for_event_type(event_type: &str) -> Option<&'static str> 
         "subagent_end" => Some("conversation.subagent.end"),
         "subagent_start" => Some("conversation.subagent.start"),
         "thought" => Some("conversation.thought"),
-        "toast" => Some("conversation.toast"),
         "token_count" => Some("conversation.token.updated"),
         "tool_interaction" => Some("conversation.tool.interaction"),
         "tool_begin" => Some("conversation.tool.begin"),
@@ -1963,6 +1961,10 @@ fn build_mcp_context(
     agent_pty_defaults.insert(
         "appserver_origin".to_owned(),
         Value::String(appserver_origin(config)),
+    );
+    agent_pty_defaults.insert(
+        "socketio_serializer".to_owned(),
+        Value::String(config.socketio_serializer.as_str().to_owned()),
     );
     agent_pty_defaults.insert(
         "conversation_id".to_owned(),
@@ -2715,6 +2717,7 @@ mod tests {
             .expect("agent-pty defaults should exist");
         assert_eq!(agent_defaults["appserver_origin"], "http://127.0.0.1:12459");
         assert_eq!(agent_defaults["conversation_id"], "conv-origin");
+        assert_eq!(agent_defaults["socketio_serializer"], "msgpack");
 
         let _ = fs::remove_dir_all(root);
     }

@@ -256,8 +256,6 @@ pub struct ConversationSendParams {
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AdapterAttachment>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub toast_context: Option<ToastContext>,
     #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
     pub settings: JsonMap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,16 +273,6 @@ pub struct AdapterAttachment {
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
     pub metadata: JsonMap,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ToastContext {
-    pub toast_id: String,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assistant_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

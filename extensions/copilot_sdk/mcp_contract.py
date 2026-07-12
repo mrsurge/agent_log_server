@@ -43,6 +43,8 @@ def apply_mcp_context(settings: object) -> ObjectMap:
             conversation_id=agent_conversation_id,
             appserver_origin=_optional_string(agent_defaults.get("appserver_origin"))
             or _optional_string(context.get("appserver_origin")),
+            socketio_serializer=_optional_string(agent_defaults.get("socketio_serializer"))
+            or _optional_string(context.get("socketio_serializer")),
         )
 
     te2_defaults = _optional_map(defaults.get(TE2_MCP_SERVER_NAME))

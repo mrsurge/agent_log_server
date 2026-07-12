@@ -538,7 +538,6 @@ export function createConversationsRpcClient(
   async function sendMessage(options: {
     conversationId?: string | null;
     text: string;
-    toastContext?: JsonObject | null;
     timeoutMs?: number;
   }): Promise<ConversationSendResult> {
     const conversationId = typeof options.conversationId === 'string' && options.conversationId
@@ -549,9 +548,6 @@ export function createConversationsRpcClient(
       conversation_id: conversationId,
       text: options.text,
     };
-    if (options.toastContext) {
-      params.toast_context = options.toastContext;
-    }
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.send,

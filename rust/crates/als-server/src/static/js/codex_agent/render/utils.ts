@@ -118,6 +118,8 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
     const shCMatch = command.match(/sh\s+-[lc]+\s+['"](.+)['"]\s*$/);
     const innerCmd = shCMatch ? shCMatch[1] : command;
 
+    if (commandContainsGitDiff(command)) return 'diff';
+
     const catMatch = innerCmd.match(/\b(?:cat|head|tail|less|more|bat)\s+['"]*([^\s'"]+)/);
     if (catMatch) {
       const lang = detectLangFromPath(catMatch[1]);
@@ -426,4 +428,29 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
     toRelativePath,
     setPill,
   };
+}
+
+export function commandContainsGitDiff(command: string | null | undefined): boolean {
+  if (!command) return false;
+  const shellWrapper = command.match(
+    /(?:^|\s)(?:[^\s'"]*\/)?(?:ba|da|z)?sh\s+-[lc]+\s+(['"])([\s\S]*)\1\s*$/i,
+  );
+  const candidate = shellWrapper ? shellWrapper[2] : command;
+  const tokens = candidate.match(/(?:'[^']*'|"[^"]*"|`[^`]*`|&&|\|\||[|;]|[^\s]+)/g) || [];
+  let sawGit = false;
+  for (const rawToken of tokens) {
+    const token = rawToken.replace(/^[('"`]+|[)'"`;]+$/g, '');
+    if (!token) continue;
+    if (token === '&&' || token === '||' || token === '|' || token === ';') {
+      sawGit = false;
+      continue;
+    }
+    if (!sawGit) {
+      const executable = token.split('/').pop()?.toLowerCase();
+      sawGit = executable === 'git';
+      continue;
+    }
+    if (token.toLowerCase() === 'diff') return true;
+  }
+  return false;
 }

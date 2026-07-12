@@ -104,6 +104,12 @@ type CopyButton = HTMLButtonElement & {
 
 const streamingMarkdown = smd as unknown as StreamingMarkdownRuntime;
 
+const FENCE_LANGUAGE_ALIASES: Record<string, string> = {
+  sh: 'bash',
+  shell: 'bash',
+  zsh: 'bash',
+};
+
 let markdownLinkHandlers: MarkdownLinkHandlers = {
   openFilePath: null,
   openExternalUrl: null,
@@ -271,6 +277,13 @@ export function highlightCode(container: HTMLElement | null | undefined): void {
   if (!container) return;
   container.querySelectorAll('pre code').forEach((block) => {
     if (typeof hljs !== 'undefined') {
+      const explicitLanguage = Array.from(block.classList)
+        .map((className) => className.replace(/^lang(?:uage)?-/i, ''))
+        .map((language) => normalizeFenceLanguage(language))
+        .find((language) => language && hljs.getLanguage(language));
+      if (explicitLanguage) {
+        block.classList.add(`language-${explicitLanguage}`);
+      }
       hljs.highlightElement(block);
     }
   });
@@ -305,16 +318,15 @@ function escapeHtmlText(text: unknown): string {
   return value.innerHTML;
 }
 
+function normalizeFenceLanguage(lang: unknown): string {
+  const rawLang = typeof lang === 'string' ? lang.trim() : '';
+  const requested = rawLang ? rawLang.split(/\s+/, 1)[0].toLowerCase() : '';
+  return FENCE_LANGUAGE_ALIASES[requested] || requested;
+}
+
 function renderHighlightedFenceHtml(source: unknown, lang: unknown): string {
   const normalizedSource = source == null ? '' : String(source);
-  const rawLang = typeof lang === 'string' ? lang.trim() : '';
-  const requestedLangRaw = rawLang ? rawLang.split(/\s+/, 1)[0].toLowerCase() : '';
-  const languageAliasMap: Record<string, string> = {
-    sh: 'bash',
-    shell: 'bash',
-    zsh: 'bash',
-  };
-  const requestedLang = languageAliasMap[requestedLangRaw] || requestedLangRaw;
+  const requestedLang = normalizeFenceLanguage(lang);
   if (typeof hljs === 'undefined') {
     const languageClass = requestedLang ? ` language-${requestedLang}` : '';
     return `<pre><code class="hljs${languageClass}">${escapeHtmlText(normalizedSource)}</code></pre>`;

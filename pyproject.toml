@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-log-server"
-version = "0.2.110"
+version = "0.2.111"
 description = "ALS-RS agent harness, extension adapter, KB/MCP tools, and TE2 integration."
 readme = "README.md"
 requires-python = ">=3.11"

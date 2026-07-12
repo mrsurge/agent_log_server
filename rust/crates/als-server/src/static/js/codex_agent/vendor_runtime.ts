@@ -8,6 +8,7 @@ import javascript from 'highlight.js/lib/languages/javascript';
 import json from 'highlight.js/lib/languages/json';
 import kotlin from 'highlight.js/lib/languages/kotlin';
 import markdown from 'highlight.js/lib/languages/markdown';
+import plaintext from 'highlight.js/lib/languages/plaintext';
 import python from 'highlight.js/lib/languages/python';
 import rust from 'highlight.js/lib/languages/rust';
 import scss from 'highlight.js/lib/languages/scss';
@@ -15,6 +16,7 @@ import sql from 'highlight.js/lib/languages/sql';
 import typescript from 'highlight.js/lib/languages/typescript';
 import xml from 'highlight.js/lib/languages/xml';
 import yaml from 'highlight.js/lib/languages/yaml';
+import diffModule from 'highlightjs-diff';
 import MarkdownIt from 'markdown-it';
 import { io } from 'socket.io-client';
 import * as msgpackParser from 'socket.io-msgpack-parser';
@@ -23,6 +25,7 @@ import highlightThemeCss from 'highlight.js/styles/github-dark.min.css';
 import tributeCss from 'tributejs/dist/tribute.css';
 
 type SocketOptions = Record<string, unknown>;
+type HighlightLanguageDefinition = Parameters<typeof hljs.registerLanguage>[1];
 
 type VendorGlobal = typeof globalThis & {
   AGENT_LOG_SOCKETIO_SERIALIZER?: unknown;
@@ -35,6 +38,16 @@ type VendorGlobal = typeof globalThis & {
 };
 
 const runtimeGlobal = globalThis as VendorGlobal;
+const diffModuleRuntime = diffModule as unknown as (
+  HighlightLanguageDefinition | { default?: HighlightLanguageDefinition }
+);
+const diffLanguage = typeof diffModuleRuntime === 'function'
+  ? diffModuleRuntime
+  : diffModuleRuntime.default;
+
+if (typeof diffLanguage !== 'function') {
+  throw new TypeError('highlightjs-diff did not export a language definition');
+}
 
 function installStyle(id: string, cssText: string): void {
   if (!cssText || typeof document === 'undefined' || document.getElementById(id)) return;
@@ -69,11 +82,13 @@ hljs.registerLanguage('kotlin', kotlin);
 hljs.registerLanguage('css', css);
 hljs.registerLanguage('scss', scss);
 hljs.registerLanguage('markdown', markdown);
+hljs.registerLanguage('plaintext', plaintext);
 hljs.registerLanguage('xml', xml);
 hljs.registerLanguage('ini', ini);
 hljs.registerLanguage('yaml', yaml);
 hljs.registerLanguage('sql', sql);
 hljs.registerLanguage('dockerfile', dockerfile);
+hljs.registerLanguage('diff', diffLanguage);
 
 runtimeGlobal.hljs = hljs;
 runtimeGlobal.io = io;
