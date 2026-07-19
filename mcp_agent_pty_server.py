@@ -226,6 +226,8 @@ _SIDEBAR_DRAFT_CLEAR_METHOD = "sidebar.draft.clear"
 _appserver_ipc_sio: Optional[_SocketIOAsyncClient] = None
 _appserver_ipc_lock = asyncio.Lock()
 _ask_user_pending_requests: dict[str, asyncio.Future[ObjectMap]] = {}
+_ask_user_active_by_requestor: dict[str, str] = {}
+_ask_user_registration_lock = asyncio.Lock()
 
 
 async def _get_appserver_ipc_sio() -> _SocketIOAsyncClient:
@@ -299,6 +301,7 @@ async def _get_appserver_ipc_sio() -> _SocketIOAsyncClient:
                         "error": "ask_user IPC disconnected",
                     })
             _ask_user_pending_requests.clear()
+            _ask_user_active_by_requestor.clear()
 
         client.on("ask_user_response", _on_ask_user_response, namespace=_APPSERVER_IPC_NAMESPACE)
         client.on("ask_user_terminal", _on_ask_user_terminal, namespace=_APPSERVER_IPC_NAMESPACE)
@@ -463,12 +466,7 @@ async def _wait_for_ask_user_event(request_id: str) -> ObjectMap:
     if future is None:
         future = asyncio.get_running_loop().create_future()
         _ask_user_pending_requests[request_id_text] = future
-    try:
-        return await future
-    finally:
-        current = _ask_user_pending_requests.get(request_id_text)
-        if current is future:
-            _ask_user_pending_requests.pop(request_id_text, None)
+    return await future
 
 
 def _extract_ask_user_answers_from_resolution(resolution: object) -> list[str]:
@@ -586,68 +584,123 @@ async def ask_user(
             "ok": False,
             "error": "At least one choice is required when allow_freeform is false",
         }
-    request_id = os.environ.get("CONVERSATION_ID", "").strip()
-    if not request_id:
+    requestor_id = os.environ.get("CONVERSATION_ID", "").strip()
+    if not requestor_id:
         return {"ok": False, "error": "CONVERSATION_ID not available — MCP server not conversation-scoped"}
+    request_id = f"ask_user_{secrets.token_hex(16)}"
     print(
-        f"[ask_user mcp] start request_id={request_id} question={question_text!r} choices={normalized_choices!r} allow_freeform={allow_freeform_value}",
+        f"[ask_user mcp] start requestor_id={requestor_id} request_id={request_id} question={question_text!r} choices={normalized_choices!r} allow_freeform={allow_freeform_value}",
         file=sys.stderr,
         flush=True,
     )
+    client: _SocketIOAsyncClient | None = None
+    result_future: asyncio.Future[ObjectMap] | None = None
+    registered = False
+    terminal = False
+
+    def release_request() -> None:
+        current = _ask_user_pending_requests.get(request_id)
+        if current is result_future:
+            _ask_user_pending_requests.pop(request_id, None)
+        if _ask_user_active_by_requestor.get(requestor_id) == request_id:
+            _ask_user_active_by_requestor.pop(requestor_id, None)
+
     try:
-        client = await _get_appserver_ipc_sio()
         loop = asyncio.get_running_loop()
-        existing_future = _ask_user_pending_requests.get(request_id)
-        if isinstance(existing_future, asyncio.Future) and not existing_future.done():
-            return {"ok": False, "error": f"ask_user request already pending for {request_id}"}
-        result_future: asyncio.Future[ObjectMap] = loop.create_future()
-        _ask_user_pending_requests[request_id] = result_future
+        async with _ask_user_registration_lock:
+            active_request_id = _ask_user_active_by_requestor.get(requestor_id)
+            if active_request_id:
+                active_future = _ask_user_pending_requests.get(active_request_id)
+                if isinstance(active_future, asyncio.Future) and not active_future.done():
+                    return {"ok": False, "error": f"ask_user request already pending for {requestor_id}"}
+                _ask_user_active_by_requestor.pop(requestor_id, None)
+            result_future = loop.create_future()
+            _ask_user_pending_requests[request_id] = result_future
+            _ask_user_active_by_requestor[requestor_id] = request_id
+            registered = True
+        client = await _get_appserver_ipc_sio()
+        begin_result = coerce_object_map(await client.call(
+            "ask_user_begin",
+            {
+                "request_id": request_id,
+                "requestor_id": requestor_id,
+                "question": question_text,
+                "choices": normalized_choices,
+                "allow_freeform": allow_freeform_value,
+            },
+            namespace=_APPSERVER_IPC_NAMESPACE,
+        ))
+        if begin_result.get("ok") is not True:
+            raise RuntimeError(str(begin_result.get("error") or "ask_user registration failed"))
         print(f"[ask_user mcp] waiting request_id={request_id}", file=sys.stderr, flush=True)
         result_event = await _wait_for_ask_user_event(request_id)
+        terminal = True
     except Exception as exc:
-        if "request_id" in locals() and request_id:
-            _ask_user_pending_requests.pop(request_id, None)
         print(f"[ask_user mcp] error request_id={request_id or '-'} error={exc!r}", file=sys.stderr, flush=True)
         return {"ok": False, "error": str(exc)}
-    if isinstance(result_event.get("response"), dict):
-        print(
-            f"[ask_user mcp] got_response request_id={request_id} response={result_event.get('response')!r}",
-            file=sys.stderr,
-            flush=True,
-        )
-        with contextlib.suppress(Exception):
-            await client.emit(
-                "ask_user_ack",
-                {"request_id": request_id},
-                namespace=_APPSERVER_IPC_NAMESPACE,
+    finally:
+        if not terminal:
+            release_request()
+        if registered and not terminal and client is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(client.call(
+                    "ask_user_cancel",
+                    {
+                        "request_id": request_id,
+                        "requestor_id": requestor_id,
+                        "reason": "request_aborted",
+                    },
+                    namespace=_APPSERVER_IPC_NAMESPACE,
+                    timeout=2,
+                ))
+
+    if client is None:
+        release_request()
+        return {"ok": False, "error": "ask_user IPC client unavailable"}
+    try:
+        if isinstance(result_event.get("response"), dict):
+            print(
+                f"[ask_user mcp] got_response request_id={request_id} response={result_event.get('response')!r}",
+                file=sys.stderr,
+                flush=True,
             )
-            print(f"[ask_user mcp] ack_sent request_id={request_id}", file=sys.stderr, flush=True)
-        return _normalize_ask_user_resolution(
-            result_event.get("response"),
+            with contextlib.suppress(Exception):
+                await client.call(
+                    "ask_user_ack",
+                    {"request_id": request_id, "requestor_id": requestor_id},
+                    namespace=_APPSERVER_IPC_NAMESPACE,
+                    timeout=5,
+                )
+                print(f"[ask_user mcp] ack_sent request_id={request_id}", file=sys.stderr, flush=True)
+            return _normalize_ask_user_resolution(
+                result_event.get("response"),
+                choices=normalized_choices,
+            )
+        if isinstance(result_event.get("result"), dict):
+            print(
+                f"[ask_user mcp] got_legacy_result request_id={request_id} result={result_event.get('result')!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            with contextlib.suppress(Exception):
+                await client.call(
+                    "ask_user_ack",
+                    {"request_id": request_id, "requestor_id": requestor_id},
+                    namespace=_APPSERVER_IPC_NAMESPACE,
+                    timeout=5,
+                )
+                print(f"[ask_user mcp] ack_sent request_id={request_id}", file=sys.stderr, flush=True)
+            return _normalize_ask_user_resolution(
+                result_event.get("result"),
+                choices=normalized_choices,
+            )
+        print(f"[ask_user mcp] terminal request_id={request_id} event={result_event!r}", file=sys.stderr, flush=True)
+        return _normalize_ask_user_terminal(
+            result_event,
             choices=normalized_choices,
         )
-    if isinstance(result_event.get("result"), dict):
-        print(
-            f"[ask_user mcp] got_legacy_result request_id={request_id} result={result_event.get('result')!r}",
-            file=sys.stderr,
-            flush=True,
-        )
-        with contextlib.suppress(Exception):
-            await client.emit(
-                "ask_user_ack",
-                {"request_id": request_id},
-                namespace=_APPSERVER_IPC_NAMESPACE,
-            )
-            print(f"[ask_user mcp] ack_sent request_id={request_id}", file=sys.stderr, flush=True)
-        return _normalize_ask_user_resolution(
-            result_event.get("result"),
-            choices=normalized_choices,
-        )
-    print(f"[ask_user mcp] terminal request_id={request_id} event={result_event!r}", file=sys.stderr, flush=True)
-    return _normalize_ask_user_terminal(
-        result_event,
-        choices=normalized_choices,
-    )
+    finally:
+        release_request()
 
 
 @mcp.tool(name="conv_id", description="Return the conversation ID for this MCP session.")

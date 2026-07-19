@@ -40,8 +40,34 @@ Provider-native user-input prompts use the same approval event lane. Examples:
 - Codex tool user input: `request_method: "item/tool/requestUserInput"`.
 - Generic MCP ask-user: `request_method: "agent-pty/ask-user"`.
 
-The MCP ask-user request method is not special at the browser/server transport
-boundary; it is one request method carried by the same generic approval DTO.
+The MCP ask-user request method uses the same browser-facing approval DTO, but
+its live resolver is the private `/ipc` bridge rather than an extension
+`approval.respond` handler.
+
+### MCP ask-user identity and lifetime
+
+`agent-pty-blocks.ask_user` is an approval pause button. The MCP call may wait
+indefinitely for a mobile user to return; there is no user-response timeout.
+
+Each invocation has two identities:
+
+- `requestor_id` is the stable harness conversation ID from `CONVERSATION_ID`.
+- `request_id` is a random, unique ID generated for that one MCP invocation.
+
+The MCP process registers the request through `/ipc` event `ask_user_begin`
+before waiting. ALS-RS then owns the pending descriptor and publishes the live
+approval card. Provider extensions suppress their generic MCP tool card for
+this tool and must not create a second ask-user approval descriptor.
+
+ALS-RS permits one live `agent-pty/ask-user` request per `requestor_id`. A new
+registration atomically replaces an older pending ask-user descriptor for the
+same requestor, emits `conversation.approval.invalidated` for the old card, and
+sends an `ask_user_terminal` result to its old waiter when that waiter still
+exists. Other provider approvals in the conversation are not replaced.
+
+Cancellation or IPC disconnect removes the owned pending descriptor and emits
+the same invalidation notification. Invalidation removes actionable UI state
+without appending an approval handoff or another transcript row.
 
 ## Custom request-card assets
 
@@ -101,6 +127,7 @@ live render trigger. The descriptor mirrors the Python legacy shape:
 ```json
 {
   "request_id": "approval_or_tool_id",
+  "requestor_id": "conversation-id-for-ask-user-only",
   "agent": "codex-ext",
   "kind": "command",
   "request_method": "provider.request.method",
@@ -122,6 +149,9 @@ live render trigger. The descriptor mirrors the Python legacy shape:
 frontend. On reload, the frontend restores pending approval cards from this
 descriptor instead of asking the extension to replay history.
 
+`requestor_id` is required for `agent-pty/ask-user` descriptors and omitted for
+provider approvals that do not use the requestor-slot contract.
+
 ## Approval response
 
 The frontend responds over `/rpc/conversations` method
@@ -136,9 +166,15 @@ The frontend responds over `/rpc/conversations` method
 }
 ```
 
-ALS-RS resolves the pending descriptor, routes to the selected extension, and
-calls adapter method `approval.respond` with the same `conversation_id`,
-`request_id`, `extension_id`, and normalized `result`.
+For provider approvals, ALS-RS resolves the pending descriptor, routes to the
+selected extension, and calls adapter method `approval.respond` with the same
+`conversation_id`, `request_id`, `extension_id`, and normalized `result`.
+
+For `agent-pty/ask-user`, ALS-RS first verifies that the exact `request_id` is
+still owned by the live IPC client for `requestor_id`. It then emits
+`ask_user_response` over `/ipc` and waits for `ask_user_ack` before appending the
+handoff and removing the pending descriptor. If no live owner exists, ALS-RS
+invalidates the stale card instead of routing it through an extension.
 
 Extensions own provider-specific fulfillment. The boundary return is:
 
@@ -176,10 +212,15 @@ present) is merged into the live handoff before broadcasting.
 
 ## Enforcement points
 
-- Extensions emit one generic `type: "approval"` request shape.
-- ALS-RS persists `pending_approvals` from that live event; extensions do not
-  write Rust `meta.json` directly.
+- Extensions emit one generic `type: "approval"` request shape for
+  provider-owned approvals. The private IPC bridge creates the same shape for
+  `agent-pty/ask-user`.
+- ALS-RS persists `pending_approvals` from the live event or IPC registration;
+  extensions do not write Rust `meta.json` directly.
 - `conversation.approval.respond` is the only frontend response method.
-- Adapter method `approval.respond` is the only extension fulfillment method.
+- Adapter method `approval.respond` is the provider-extension fulfillment
+  method; `agent-pty/ask-user` fulfillment uses `/ipc` response and ack events.
 - Successful responses append a `role: "approval"` transcript row before
   removing the pending descriptor.
+- Superseded, cancelled, disconnected, or otherwise stale ask-user requests are
+  invalidated without creating a resolved transcript row.

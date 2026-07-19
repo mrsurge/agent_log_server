@@ -627,23 +627,6 @@ def _optional_string(value: object) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
-def _coerce_copilot_tool_arguments(raw_args: object) -> PayloadDict:
-    direct_args = _object_mapping(raw_args)
-    if direct_args is not None:
-        return dict(direct_args)
-    if isinstance(raw_args, str):
-        text = raw_args.strip()
-        if text.startswith("{") and text.endswith("}"):
-            try:
-                parsed = cast(object, json.loads(text))
-            except Exception:
-                parsed = None
-            parsed_args = _object_mapping(parsed)
-            if parsed_args is not None:
-                return dict(parsed_args)
-    return {}
-
-
 def _copilot_mcp_tool_identity(data: object) -> Tuple[str, str]:
     raw_tool_name = _optional_string(getattr(data, "tool_name", None)) or ""
     server_name = _optional_string(getattr(data, "mcp_server_name", None)) or ""
@@ -685,24 +668,6 @@ def _normalize_string_list(value: object, *, field_name: str) -> List[str]:
     if not all(isinstance(item, str) for item in values):
         raise ValueError(f"{field_name} must be a list of strings")
     return [item for item in values if isinstance(item, str)]
-
-
-def _normalize_choice_list(value: object) -> list[str]:
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in cast(list[object], value):
-        if not isinstance(item, str):
-            continue
-        choice = item.strip()
-        if not choice or choice in seen:
-            continue
-        normalized.append(choice)
-        seen.add(choice)
-    return normalized
 
 
 def _normalize_string_dict(value: object, *, field_name: str) -> Dict[str, str]:
@@ -2697,82 +2662,7 @@ async def _start_mcp_ask_user_request(conversation_id: str, event: SessionEvent)
         return
     data = event.data
     tool_call_id = _optional_string(getattr(data, "tool_call_id", None)) or _optional_string(event.id) or request_id
-    arguments = _coerce_copilot_tool_arguments(cast(object, getattr(data, "arguments", None)))
-    question = str(arguments.get("question") or "").strip()
-    choices = _normalize_choice_list(arguments.get("choices"))
-    allow_freeform = bool(arguments.get("allow_freeform", arguments.get("allowFreeform", True)))
-    if not question:
-        return
-
     _pending_mcp_ask_user_tools.setdefault(conversation_id, {})[tool_call_id] = request_id
-
-    existing_future = _pending_approvals.get(request_id)
-    if isinstance(existing_future, asyncio.Future) and not existing_future.done():
-        return
-
-    loop = asyncio.get_running_loop()
-    _pending_approvals[request_id] = loop.create_future()
-    request_params: PayloadDict = {
-        "requestId": request_id,
-        "question": question,
-        "choices": list(choices),
-        "allowFreeform": allow_freeform,
-    }
-    _pending_request_specs[request_id] = {
-        "type": "user_input",
-        "request_method": _AGENT_PTY_ASK_USER_REQUEST_METHOD,
-        "request_params": request_params,
-        "choices": list(choices),
-    }
-
-    router = _routers.get(conversation_id)
-    session = _sessions.get(conversation_id)
-    runtime_signature = _runtime_signatures.get(conversation_id) or _runtime_signature(conversation_id)
-    turn_id = _string_or_empty(router.current_turn_id if router else "")
-    created_at = datetime.now(timezone.utc).isoformat()
-    payload: PayloadDict = {
-        "requestId": request_id,
-        "question": question,
-        "choices": list(choices),
-        "allowFreeform": allow_freeform,
-        "message": question,
-        "tool_call_id": tool_call_id,
-    }
-    approval_event: PayloadDict = {
-        "type": "approval",
-        "conversation_id": conversation_id,
-        "id": request_id,
-        "request_id": request_id,
-        "card_id": tool_call_id,
-        "kind": "user_input",
-        "tool_call_id": tool_call_id,
-        "turn_id": turn_id,
-        "request_method": _AGENT_PTY_ASK_USER_REQUEST_METHOD,
-        "request_params": request_params,
-        "payload": payload,
-        "created_at": created_at,
-    }
-    session_thread_id = _optional_string(getattr(session, "session_id", None))
-    transcript_anchor: PayloadDict = {"turn_id": turn_id}
-    descriptor: ApprovalDescriptor = {}
-    descriptor["request_id"] = request_id
-    descriptor["agent"] = "copilot-sdk"
-    descriptor["kind"] = "user_input"
-    descriptor["payload"] = payload
-    descriptor["request_method"] = _AGENT_PTY_ASK_USER_REQUEST_METHOD
-    descriptor["request_params"] = request_params
-    descriptor["thread_id"] = session_thread_id
-    descriptor["turn_id"] = turn_id
-    descriptor["runtime_signature"] = runtime_signature
-    descriptor["runtime_instance_id"] = session_thread_id
-    descriptor["transcript_anchor"] = transcript_anchor
-    descriptor["source"] = "live"
-    descriptor["created_at"] = created_at
-    descriptor["render_event"] = approval_event
-    _upsert_pending_approval(conversation_id, descriptor)
-
-    if _broadcast_fn:
-        await _broadcast_fn(approval_event)
 
 
 async def _complete_mcp_ask_user_request(conversation_id: str, event: SessionEvent) -> None:
@@ -2783,17 +2673,10 @@ async def _complete_mcp_ask_user_request(conversation_id: str, event: SessionEve
         or ""
     )
     tool_calls = _pending_mcp_ask_user_tools.get(conversation_id)
-    request_id = tool_calls.pop(tool_call_id, None) if isinstance(tool_calls, dict) else None
+    if isinstance(tool_calls, dict):
+        tool_calls.pop(tool_call_id, None)
     if isinstance(tool_calls, dict) and not tool_calls:
         _pending_mcp_ask_user_tools.pop(conversation_id, None)
-    resolved_request_id = request_id or conversation_id.strip()
-    if not resolved_request_id:
-        return
-
-    pending_future = _pending_approvals.pop(resolved_request_id, None)
-    if isinstance(pending_future, asyncio.Future) and not pending_future.done():
-        pending_future.cancel()
-    _pending_request_specs.pop(resolved_request_id, None)
 
 
 async def _handle_mcp_ask_user_event(conversation_id: str, event: SessionEvent) -> bool:

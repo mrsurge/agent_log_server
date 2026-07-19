@@ -1,4 +1,5 @@
 import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
+import type { ComposerSelectionState, JsonObject } from '../rpc/conversations/contract.ts';
 import { createUiRpcClient } from '../rpc/ui/client.ts';
 import type {
   ClipboardWindow,
@@ -14,6 +15,11 @@ declare const Tribute: TributeConstructor | undefined;
 interface ComposerConversationMeta {
   conversation_id?: string | null;
   draft?: string;
+  draft_revision?: number;
+  draft_selection?: ComposerSelectionState;
+  selection_revision?: number;
+  origin_client_id?: string;
+  client_sequence?: number;
   cwd?: string;
 }
 
@@ -29,6 +35,7 @@ interface DraftMentionOptions {
   col?: unknown;
   endCol?: unknown;
   content?: unknown;
+  operationId?: unknown;
 }
 
 interface DraftMentionPayload {
@@ -108,8 +115,22 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
 
   let tributeInstance: TributeInstance | null = null;
   let explicitMentionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let selectionSyncTimer: ReturnType<typeof setTimeout> | null = null;
   let lastComposerSelectionRange: Range | null = null;
   let lastComposerSelectionConversationId: string | null = null;
+  let lastSelectionSignature: string | null = null;
+  let draftRevision = 0;
+  let selectionRevision = 0;
+  let clientSequence = 0;
+  let applyingRemoteSelection = false;
+  const appliedMentionOperations = new Set<string>();
+  const composerClientId = createComposerClientId();
+
+  function createComposerClientId(): string {
+    const randomUuid = windowRef.crypto?.randomUUID?.bind(windowRef.crypto);
+    if (randomUuid) return `composer_${randomUuid()}`;
+    return `composer_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  }
 
   function appendTextWithBreaks(parent: HTMLElement, text: unknown) {
     if (!parent || text === null || text === undefined) return;
@@ -171,6 +192,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
   function clearStoredComposerSelection() {
     lastComposerSelectionRange = null;
     lastComposerSelectionConversationId = null;
+    lastSelectionSignature = null;
   }
 
   function isPromptRangeNode(node: Node | null): boolean {
@@ -182,8 +204,8 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     }
   }
 
-  function rememberComposerSelection(): boolean {
-    if (!promptEl || getState().applyingDraft) return false;
+  function rememberComposerSelection(sync = true): boolean {
+    if (!promptEl || getState().applyingDraft || applyingRemoteSelection) return false;
     const selection = windowRef.getSelection?.();
     if (!selection || selection.rangeCount < 1) return false;
     const range = selection.getRangeAt(0);
@@ -194,10 +216,68 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     try {
       lastComposerSelectionRange = range.cloneRange();
       lastComposerSelectionConversationId = getState().conversationMeta?.conversation_id || null;
+      if (sync) queueSelectionSync();
       return true;
     } catch {
       return false;
     }
+  }
+
+  function draftOffsetForPoint(node: Node | null, offset: number): number | null {
+    if (!promptEl || !node || !isPromptRangeNode(node)) return null;
+    try {
+      const prefix = documentRef.createRange();
+      prefix.setStart(promptEl, 0);
+      prefix.setEnd(node, offset);
+      const fragment = prefix.cloneContents();
+      let serialized = '';
+      fragment.childNodes.forEach((child) => {
+        serialized += serializePromptNodeForDraft(child);
+      });
+      return serialized.length;
+    } catch {
+      return null;
+    }
+  }
+
+  function getComposerSelectionState(): ComposerSelectionState | null {
+    if (!promptEl) return null;
+    const selection = windowRef.getSelection?.();
+    if (!selection || !selection.anchorNode || !selection.focusNode) return null;
+    if (!isPromptRangeNode(selection.anchorNode) || !isPromptRangeNode(selection.focusNode)) return null;
+    const anchor = draftOffsetForPoint(selection.anchorNode, selection.anchorOffset);
+    const focus = draftOffsetForPoint(selection.focusNode, selection.focusOffset);
+    if (anchor === null || focus === null) return null;
+    return { anchor, focus };
+  }
+
+  function queueSelectionSync() {
+    if (getState().applyingDraft || applyingRemoteSelection) return;
+    const conversationId = getState().conversationMeta?.conversation_id;
+    const selection = getComposerSelectionState();
+    if (!conversationId || !selection) return;
+    const signature = `${conversationId}:${selection.anchor}:${selection.focus}`;
+    if (signature === lastSelectionSignature) return;
+    lastSelectionSignature = signature;
+    if (selectionSyncTimer) clearTimeout(selectionSyncTimer);
+    selectionSyncTimer = setTimeout(() => {
+      selectionSyncTimer = null;
+      const currentConversationId = getState().conversationMeta?.conversation_id;
+      const currentSelection = getComposerSelectionState();
+      if (!currentConversationId || currentConversationId !== conversationId || !currentSelection) return;
+      const sequence = ++clientSequence;
+      void conversationsRpcClient.setDraftSelection({
+        conversationId,
+        clientId: composerClientId,
+        clientSequence: sequence,
+        selection: currentSelection,
+      }).then((result) => {
+        applyComposerRevisions(result);
+      }).catch((error) => {
+        lastSelectionSignature = null;
+        console.warn('Composer selection sync failed:', error);
+      });
+    }, 80);
   }
 
   function getStoredComposerSelectionRange(): Range | null {
@@ -434,6 +514,146 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     return text;
   }
 
+  function locateDraftPoint(parent: Node, targetOffset: number): { node: Node; offset: number } {
+    const children = Array.from(parent.childNodes);
+    let consumed = 0;
+    for (let index = 0; index < children.length; index += 1) {
+      const child = children[index];
+      const serialized = serializePromptNodeForDraft(child);
+      const end = consumed + serialized.length;
+      if (targetOffset > end) {
+        consumed = end;
+        continue;
+      }
+      const localOffset = Math.max(0, targetOffset - consumed);
+      if (child.nodeType === Node.TEXT_NODE) {
+        return {
+          node: child,
+          offset: Math.min(localOffset, child.textContent?.length ?? 0),
+        };
+      }
+      if (child.nodeType === Node.ELEMENT_NODE) {
+        const element = child as HTMLElement;
+        if (element.classList.contains('mention-token') || element.tagName === 'BR') {
+          return { node: parent, offset: localOffset === 0 ? index : index + 1 };
+        }
+        const trailingLength = element.tagName === 'DIV' || element.tagName === 'P' ? 1 : 0;
+        const contentLength = Math.max(0, serialized.length - trailingLength);
+        if (localOffset <= contentLength) {
+          return locateDraftPoint(child, localOffset);
+        }
+        return { node: parent, offset: index + 1 };
+      }
+      return { node: parent, offset: localOffset === 0 ? index : index + 1 };
+    }
+    return { node: parent, offset: children.length };
+  }
+
+  function parseComposerSelection(value: unknown): ComposerSelectionState | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const record = value as JsonObject;
+    const anchor = Number(record.anchor);
+    const focus = Number(record.focus);
+    if (!Number.isSafeInteger(anchor) || anchor < 0 || !Number.isSafeInteger(focus) || focus < 0) {
+      return null;
+    }
+    return { anchor, focus };
+  }
+
+  function applyComposerSelection(selectionState: ComposerSelectionState | null) {
+    if (!promptEl || !selectionState) return;
+    const draftLength = getPromptDraftText().length;
+    const anchorPoint = locateDraftPoint(promptEl, Math.min(selectionState.anchor, draftLength));
+    const focusPoint = locateDraftPoint(promptEl, Math.min(selectionState.focus, draftLength));
+    const selection = windowRef.getSelection?.();
+    if (!selection) return;
+    applyingRemoteSelection = true;
+    try {
+      selection.setBaseAndExtent(
+        anchorPoint.node,
+        anchorPoint.offset,
+        focusPoint.node,
+        focusPoint.offset,
+      );
+    } catch {
+      try {
+        const range = documentRef.createRange();
+        range.setStart(anchorPoint.node, anchorPoint.offset);
+        range.setEnd(focusPoint.node, focusPoint.offset);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch {
+        return;
+      }
+    } finally {
+      applyingRemoteSelection = false;
+    }
+    lastSelectionSignature = `${getState().conversationMeta?.conversation_id || ''}:${selectionState.anchor}:${selectionState.focus}`;
+    rememberComposerSelection(false);
+  }
+
+  function applyComposerRevisions(value: unknown) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    const record = value as JsonObject;
+    const nextDraftRevision = Number(record.draft_revision);
+    const nextSelectionRevision = Number(record.selection_revision);
+    if (Number.isSafeInteger(nextDraftRevision) && nextDraftRevision >= 0) {
+      draftRevision = Math.max(draftRevision, nextDraftRevision);
+    }
+    if (Number.isSafeInteger(nextSelectionRevision) && nextSelectionRevision >= 0) {
+      selectionRevision = Math.max(selectionRevision, nextSelectionRevision);
+    }
+  }
+
+  function applyDraftUpdate(event: JsonObject) {
+    if (!promptEl) return;
+    const conversationId = getState().conversationMeta?.conversation_id;
+    if (!conversationId || (event.conversation_id && event.conversation_id !== conversationId)) return;
+    const incomingRevision = Number(event.draft_revision);
+    if (Number.isSafeInteger(incomingRevision) && incomingRevision < draftRevision) return;
+    const draft = event.draft;
+    if (typeof draft !== 'string') return;
+    const incomingHash = getDraftHash(draft);
+    const sameOrigin = event.origin_client_id === composerClientId;
+    const incomingSequence = Number(event.client_sequence);
+    const localText = getPromptDraftText();
+    const localSequenceIsNewer = (sameOrigin
+      && Number.isSafeInteger(incomingSequence)
+      && incomingSequence < clientSequence)
+      || (sameOrigin && getState().draftDirty === true && draft !== localText);
+    const rendered = draft !== localText && !localSequenceIsNewer;
+    if (rendered) renderPromptFromText(draft);
+
+    const state = getState();
+    const nextMeta = state.conversationMeta ? { ...state.conversationMeta, draft } : undefined;
+    if (nextMeta && Number.isSafeInteger(incomingRevision) && incomingRevision >= 0) {
+      nextMeta.draft_revision = incomingRevision;
+    }
+    const incomingSelectionRevision = Number(event.selection_revision);
+    if (nextMeta && Number.isSafeInteger(incomingSelectionRevision) && incomingSelectionRevision >= 0) {
+      nextMeta.selection_revision = incomingSelectionRevision;
+    }
+    if (nextMeta) setState({ conversationMeta: nextMeta });
+    if (!localSequenceIsNewer) {
+      setState({ lastDraftHash: incomingHash, draftDirty: false });
+    }
+    applyComposerRevisions(event);
+    const incomingSelection = parseComposerSelection(event.draft_selection);
+    if (incomingSelection && (rendered || !sameOrigin) && !localSequenceIsNewer) {
+      applyComposerSelection(incomingSelection);
+    }
+  }
+
+  function applySelectionUpdate(event: JsonObject) {
+    const conversationId = getState().conversationMeta?.conversation_id;
+    if (!conversationId || (event.conversation_id && event.conversation_id !== conversationId)) return;
+    const incomingRevision = Number(event.selection_revision);
+    if (Number.isSafeInteger(incomingRevision) && incomingRevision < selectionRevision) return;
+    applyComposerRevisions(event);
+    if (event.origin_client_id === composerClientId) return;
+    applyComposerSelection(parseComposerSelection(event.draft_selection));
+  }
+
   function clearPrompt() {
     if (!promptEl) return;
     promptEl.innerHTML = '';
@@ -467,13 +687,19 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       return Promise.resolve();
     }
     setState({ lastDraftHash: hash });
+    const selection = getComposerSelectionState();
+    const sequence = ++clientSequence;
     return conversationsRpcClient.setDraft({
       conversationId: convoId,
       draft: text,
-    }).then(() => {
+      clientId: composerClientId,
+      clientSequence: sequence,
+      selection,
+    }).then((result) => {
+      applyComposerRevisions(result);
       const latestState = getState();
       if (latestState.conversationMeta && latestState.conversationMeta.conversation_id === convoId) {
-        latestState.conversationMeta.draft = text;
+        setState({ conversationMeta: { ...latestState.conversationMeta, draft: text } });
       }
       setState({ draftDirty: false });
     }).catch((err) => {
@@ -505,13 +731,19 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       if (hash === currentState.lastDraftHash) return;
       setState({ lastDraftHash: hash });
       try {
-        await conversationsRpcClient.setDraft({
+        const selection = getComposerSelectionState();
+        const sequence = ++clientSequence;
+        const result = await conversationsRpcClient.setDraft({
           conversationId: convoId,
           draft: text,
+          clientId: composerClientId,
+          clientSequence: sequence,
+          selection,
         });
+        applyComposerRevisions(result);
         const latestState = getState();
         if (latestState.conversationMeta && latestState.conversationMeta.conversation_id === convoId) {
-          latestState.conversationMeta.draft = text;
+          setState({ conversationMeta: { ...latestState.conversationMeta, draft: text } });
         }
         setState({ draftDirty: false });
       } catch (err) {
@@ -533,17 +765,22 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     promptEl.addEventListener('mouseup', remember);
     promptEl.addEventListener('focus', remember);
     mentionPillEl?.addEventListener('pointerdown', remember);
+    windowRef.addEventListener('focus', remember);
   }
 
   function restoreDraft() {
     if (!promptEl) return;
-    const draft = getState().conversationMeta?.draft;
+    const meta = getState().conversationMeta;
+    const draft = meta?.draft;
+    draftRevision = Number.isSafeInteger(meta?.draft_revision) ? Number(meta?.draft_revision) : 0;
+    selectionRevision = Number.isSafeInteger(meta?.selection_revision) ? Number(meta?.selection_revision) : 0;
     if (typeof draft === 'string' && draft.trim()) {
       renderPromptFromText(draft);
       setState({
         draftDirty: false,
         lastDraftHash: getDraftHash(draft),
       });
+      applyComposerSelection(parseComposerSelection(meta?.draft_selection));
       return;
     }
     clearPrompt();
@@ -560,9 +797,13 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     });
     const convoId = getState().conversationMeta?.conversation_id;
     if (convoId) {
+      const sequence = ++clientSequence;
       conversationsRpcClient.setDraft({
         conversationId: convoId,
         draft: '',
+        clientId: composerClientId,
+        clientSequence: sequence,
+        selection: { anchor: 0, focus: 0 },
       }).catch(() => {});
     }
   }
@@ -575,15 +816,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       if (!meta || meta.ok === false || meta.conversation_id !== convoId) return;
       const serverDraft = meta.draft;
       if (typeof serverDraft !== 'string') return;
-      const localText = getPromptDraftText();
-      if (serverDraft === localText) return;
-      renderPromptFromText(serverDraft);
-      const state = getState();
-      if (state.conversationMeta) state.conversationMeta.draft = serverDraft;
-      setState({
-        draftDirty: false,
-        lastDraftHash: getDraftHash(serverDraft),
-      });
+      applyDraftUpdate(meta);
     } catch {
       // ignore
     }
@@ -683,6 +916,15 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
 
   function insertMention(path: string, opts: DraftMentionOptions = {}) {
     if (!promptEl || !path) return;
+    const operationId = typeof opts.operationId === 'string' ? opts.operationId.trim() : '';
+    if (operationId) {
+      if (appliedMentionOperations.has(operationId)) return;
+      appliedMentionOperations.add(operationId);
+      if (appliedMentionOperations.size > 256) {
+        const oldest = appliedMentionOperations.values().next().value;
+        if (typeof oldest === 'string') appliedMentionOperations.delete(oldest);
+      }
+    }
     const token = createMentionToken(path, {
       line: opts.lineNo,
       endLine: opts.endLineNo,
@@ -723,6 +965,8 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     restoreDraft,
     clearDraft,
     syncDraftFromServer,
+    applyDraftUpdate,
+    applySelectionUpdate,
     initTribute,
     insertMention,
   };

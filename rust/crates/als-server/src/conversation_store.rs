@@ -1,3 +1,4 @@
+use crate::composer_sync::ComposerSelection;
 use als_adapter_protocol::JsonMap;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -136,6 +137,8 @@ impl ConversationStore {
             sync_meta_from_settings(&mut meta);
         }
         meta.draft = None;
+        meta.draft_revision = 0;
+        meta.draft_selection = None;
         meta.ask_user_msg_counter = 0;
         meta.next_transcript_order_id = next_order_id;
         meta.transcript_line_count = Some(line_count);
@@ -248,6 +251,27 @@ impl ConversationStore {
         Ok(meta)
     }
 
+    pub fn set_draft(
+        &self,
+        conversation_id: &str,
+        draft: String,
+        selection: Option<ComposerSelection>,
+    ) -> Result<ConversationMeta> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let mut meta = self.load_or_default_meta_unlocked(conversation_id)?;
+        meta.draft = Some(draft);
+        meta.draft_revision = meta.draft_revision.saturating_add(1);
+        if let Some(selection) = selection {
+            meta.draft_selection = Some(selection);
+        }
+        meta.updated_at = utc_ts();
+        self.write_meta_unlocked(&meta)?;
+        Ok(meta)
+    }
+
     pub fn upsert_pending_approval(
         &self,
         conversation_id: &str,
@@ -282,6 +306,90 @@ impl ConversationStore {
         meta.updated_at = utc_ts();
         self.write_meta_unlocked(&meta)?;
         Ok(meta)
+    }
+
+    pub fn replace_pending_approval_for_requestor(
+        &self,
+        conversation_id: &str,
+        request_id: &str,
+        requestor_id: &str,
+        request_method: &str,
+        mut descriptor: JsonMap,
+    ) -> Result<(ConversationMeta, Vec<JsonMap>)> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let mut meta = self.load_or_default_meta_unlocked(conversation_id)?;
+        let request_id = request_id.trim();
+        let requestor_id = requestor_id.trim();
+        let request_method = request_method.trim();
+        if request_id.is_empty() {
+            bail!("request_id is required");
+        }
+        if requestor_id.is_empty() {
+            bail!("requestor_id is required");
+        }
+        if request_method.is_empty() {
+            bail!("request_method is required");
+        }
+
+        let stale_ids = meta
+            .pending_approvals
+            .iter()
+            .filter_map(|(pending_id, value)| {
+                let pending = value.as_object()?;
+                let pending_method = pending
+                    .get("request_method")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if !pending_method.eq_ignore_ascii_case(request_method) {
+                    return None;
+                }
+                let pending_requestor = pending
+                    .get("requestor_id")
+                    .or_else(|| pending.get("requestorId"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(meta.conversation_id.as_str());
+                (pending_requestor == requestor_id && pending_id != request_id)
+                    .then(|| pending_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut replaced = Vec::with_capacity(stale_ids.len());
+        for stale_id in stale_ids {
+            if let Some(value) = meta.pending_approvals.remove(&stale_id)
+                && let Some(pending) = value.as_object().cloned()
+            {
+                replaced.push(pending);
+            }
+        }
+
+        descriptor.insert(
+            "request_id".to_owned(),
+            Value::String(request_id.to_owned()),
+        );
+        descriptor.insert(
+            "requestor_id".to_owned(),
+            Value::String(requestor_id.to_owned()),
+        );
+        descriptor
+            .entry("conversation_id".to_owned())
+            .or_insert_with(|| Value::String(meta.conversation_id.clone()));
+        descriptor
+            .entry("status".to_owned())
+            .or_insert_with(|| Value::String("pending".to_owned()));
+        descriptor
+            .entry("created_at".to_owned())
+            .or_insert_with(|| Value::String(utc_ts()));
+        descriptor.insert("updated_at".to_owned(), Value::String(utc_ts()));
+        meta.pending_approvals
+            .insert(request_id.to_owned(), Value::Object(descriptor));
+        meta.updated_at = utc_ts();
+        self.write_meta_unlocked(&meta)?;
+        Ok((meta, replaced))
     }
 
     pub fn remove_pending_approval(
@@ -630,6 +738,8 @@ impl ConversationStore {
             updated_at: now,
             settings: JsonMap::new(),
             draft: None,
+            draft_revision: 0,
+            draft_selection: None,
             ask_user_msg_counter: 0,
             next_transcript_order_id: 0,
             transcript_line_count: Some(0),
@@ -708,6 +818,10 @@ pub struct ConversationMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<String>,
     #[serde(default)]
+    pub draft_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_selection: Option<ComposerSelection>,
+    #[serde(default)]
     pub ask_user_msg_counter: u64,
     #[serde(default)]
     pub next_transcript_order_id: u64,
@@ -778,6 +892,10 @@ pub struct ConversationSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<String>,
     #[serde(default)]
+    pub draft_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_selection: Option<ComposerSelection>,
+    #[serde(default)]
     pub ask_user_msg_counter: u64,
     #[serde(default)]
     pub next_transcript_order_id: u64,
@@ -823,6 +941,8 @@ impl From<ConversationMeta> for ConversationSummary {
             updated_at: meta.updated_at,
             settings: meta.settings,
             draft: meta.draft,
+            draft_revision: meta.draft_revision,
+            draft_selection: meta.draft_selection,
             ask_user_msg_counter: meta.ask_user_msg_counter,
             next_transcript_order_id: meta.next_transcript_order_id,
             transcript_line_count: meta.transcript_line_count,
@@ -1212,6 +1332,46 @@ mod tests {
         let rows = store.read_transcript("test/conversation").unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(store.list().unwrap().len(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn draft_updates_increment_revision_and_persist_selection() {
+        let root = std::env::temp_dir().join(format!("als-rs-store-draft-test-{}", unix_millis()));
+        let store = ConversationStore::new(root.clone());
+        store
+            .create(CreateConversationRequest {
+                conversation_id: Some("draft-test".to_owned()),
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+
+        let first = store
+            .set_draft(
+                "draft-test",
+                "hello".to_owned(),
+                Some(ComposerSelection {
+                    anchor: 2,
+                    focus: 2,
+                }),
+            )
+            .unwrap();
+        let second = store
+            .set_draft(
+                "draft-test",
+                "hello world".to_owned(),
+                Some(ComposerSelection {
+                    anchor: 11,
+                    focus: 11,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(first.draft_revision, 1);
+        assert_eq!(second.draft_revision, 2);
+        assert_eq!(second.draft.as_deref(), Some("hello world"));
+        assert_eq!(second.draft_selection.unwrap().focus, 11);
 
         let _ = fs::remove_dir_all(root);
     }

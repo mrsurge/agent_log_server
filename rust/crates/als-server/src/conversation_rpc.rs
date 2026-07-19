@@ -1,6 +1,7 @@
 use crate::{
     adapter_process::AdapterCapturedEvent,
     card_truncation::{sanitize_live_card_event, sanitize_transcript_card_entry},
+    composer_sync::{ComposerSelection, ComposerSyncSnapshot},
     conversation_store::{
         ConversationMeta, ConversationMetaUpdate, CreateConversationRequest,
         ForkConversationRequest, TranscriptOffset,
@@ -18,6 +19,7 @@ use serde_json::{Map, Value, json};
 use socketioxide::{
     SocketIo,
     extract::{AckSender, Data, SocketRef, State},
+    socket::DisconnectReason,
 };
 use std::{
     path::PathBuf,
@@ -37,6 +39,7 @@ const METHOD_UPDATE: &str = "conversation.update";
 const METHOD_DELETE: &str = "conversation.delete";
 const METHOD_FORK: &str = "conversation.fork";
 const METHOD_DRAFT_SET: &str = "conversation.draft.set";
+const METHOD_DRAFT_SELECTION_SET: &str = "conversation.draft.selection.set";
 const METHOD_SEND: &str = "conversation.send";
 const METHOD_REPLAY_GET_CHUNK: &str = "conversation.replay.getChunk";
 const METHOD_INTERRUPT: &str = "conversation.interrupt";
@@ -55,6 +58,13 @@ pub fn register_conversations_rpc_namespace(io: &SocketIo) {
         "/rpc/conversations",
         async |socket: SocketRef, State(_state): State<AppState>| {
             socket.on(RPC_EVENT, handle_rpc_request);
+            socket.on_disconnect(
+                async |socket: SocketRef,
+                       State(state): State<AppState>,
+                       _reason: DisconnectReason| {
+                    let _ = state.composer_sync.remove_socket(&socket.id.to_string());
+                },
+            );
         },
     );
 }
@@ -103,7 +113,10 @@ async fn dispatch_rpc(
         METHOD_UPDATE => conversation_update(socket, io, state, request.params).await,
         METHOD_DELETE => conversation_delete(&io, &state, &request.params).await,
         METHOD_FORK => conversation_fork(&io, &state, &request.params).await,
-        METHOD_DRAFT_SET => conversation_draft_set(&io, &state, &request.params).await,
+        METHOD_DRAFT_SET => conversation_draft_set(socket, &io, &state, &request.params).await,
+        METHOD_DRAFT_SELECTION_SET => {
+            conversation_draft_selection_set(socket, &io, &state, &request.params).await
+        }
         METHOD_REPLAY_GET_CHUNK => conversation_replay_get_chunk(&state, &request.params),
         METHOD_SEND => conversation_send(socket, io, state, request.params).await,
         METHOD_PINS_SET => conversation_pins_set(&io, &state, &request.params).await,
@@ -198,6 +211,13 @@ fn conversation_get(state: &AppState, params: &JsonMap) -> Result<Value, RpcErro
         }
     };
     let mut value = meta_result(meta)?;
+    if let Some(snapshot) = state
+        .composer_sync
+        .snapshot(&conversation_id)
+        .map_err(internal_error)?
+    {
+        merge_composer_snapshot(&mut value, &snapshot);
+    }
     value["active_view"] = Value::String(selection.active_view);
     Ok(value)
 }
@@ -562,6 +582,7 @@ async fn conversation_fork(
 }
 
 async fn conversation_draft_set(
+    socket: SocketRef,
     io: &SocketIo,
     state: &AppState,
     params: &JsonMap,
@@ -569,18 +590,66 @@ async fn conversation_draft_set(
     let conversation_id = optional_str(params, "conversation_id")
         .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
     let draft = optional_str(params, "draft").unwrap_or("").to_owned();
-    state
+    let selection = composer_selection_from_params(params, "selection");
+    let client_id = composer_client_id(params, &socket);
+    let client_sequence = optional_u64_direct(params, "client_sequence").unwrap_or_default();
+    let meta = state
         .conversations
-        .update_meta(
+        .set_draft(conversation_id, draft, selection)
+        .map_err(internal_error)?;
+    let snapshot = state
+        .composer_sync
+        .note_draft(
             conversation_id,
-            ConversationMetaUpdate {
-                draft: Some(draft.clone()),
-                ..ConversationMetaUpdate::default()
-            },
+            &socket.id.to_string(),
+            &client_id,
+            client_sequence,
+            selection,
+            meta.draft_revision,
         )
         .map_err(internal_error)?;
-    emit_draft_updated(io, conversation_id, &draft).await;
-    Ok(json!({"ok": true, "conversation_id": conversation_id, "transport": "rpc"}))
+    emit_draft_updated(io, &meta, &snapshot).await;
+    let mut result = draft_updated_event(&meta, &snapshot);
+    result["ok"] = Value::Bool(true);
+    result["transport"] = Value::String("rpc".to_owned());
+    Ok(result)
+}
+
+async fn conversation_draft_selection_set(
+    socket: SocketRef,
+    io: &SocketIo,
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
+    let conversation_id = optional_str(params, "conversation_id")
+        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
+    let selection = composer_selection_from_params(params, "selection")
+        .ok_or_else(|| rpc_error(-32602, "selection is required"))?;
+    let client_id = composer_client_id(params, &socket);
+    let client_sequence = optional_u64_direct(params, "client_sequence").unwrap_or_default();
+    let Some(snapshot) = state
+        .composer_sync
+        .note_selection(
+            conversation_id,
+            &socket.id.to_string(),
+            &client_id,
+            client_sequence,
+            selection,
+        )
+        .map_err(internal_error)?
+    else {
+        return Ok(json!({
+            "ok": true,
+            "stale": true,
+            "conversation_id": conversation_id,
+            "transport": "rpc",
+        }));
+    };
+    emit_draft_selection_updated(io, conversation_id, &snapshot).await;
+    let mut result = draft_selection_updated_event(conversation_id, &snapshot);
+    result["ok"] = Value::Bool(true);
+    result["transport"] = Value::String("rpc".to_owned());
+    Ok(result)
 }
 
 fn conversation_replay_get_chunk(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
@@ -886,6 +955,14 @@ async fn forward_adapter_live_event(
         }
     }
     if event_type.trim().eq_ignore_ascii_case("approval") {
+        if event
+            .get("request_method")
+            .and_then(Value::as_str)
+            .map(|method| method.eq_ignore_ascii_case(AGENT_PTY_ASK_USER_REQUEST_METHOD))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
         persist_pending_approval_event(state, &conversation_id, &event)?;
         emit_rpc_notification_to_namespace(io, method, event).await;
         emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
@@ -949,7 +1026,32 @@ async fn conversation_approval_respond(
     }
 
     if is_agent_pty_ask_user_descriptor(&descriptor) {
-        submit_ask_user_response(&io, &state, &conversation_id, &request_id, &resolution).await?;
+        let requestor_id = string_from_map(&descriptor, "requestor_id")
+            .or_else(|| string_from_map(&descriptor, "requestorId"))
+            .unwrap_or_else(|| conversation_id.clone());
+        if !ipc::ask_user_request_is_active(&state, &request_id, &requestor_id) {
+            invalidate_ask_user_interaction(
+                &io,
+                &state,
+                &request_id,
+                "request_runtime_unavailable",
+            )
+            .await
+            .map_err(internal_error)?;
+            return Err(rpc_error(
+                -32009,
+                "Approval is stale or no longer actionable",
+            ));
+        }
+        submit_ask_user_response(
+            &io,
+            &state,
+            &conversation_id,
+            &request_id,
+            &requestor_id,
+            &resolution,
+        )
+        .await?;
         emit_meta_and_list_updated_to_namespace(&io, &state, &conversation_id, "meta_changed")
             .await;
         return Ok(json!({
@@ -1028,11 +1130,12 @@ async fn submit_ask_user_response(
     state: &AppState,
     conversation_id: &str,
     request_id: &str,
+    requestor_id: &str,
     resolution: &JsonMap,
 ) -> Result<(), RpcError> {
     let submitted = normalize_approval_resolution(resolution);
     record_pending_approval_submission(state, conversation_id, request_id, &submitted)?;
-    ipc::emit_ask_user_response(io, request_id, &submitted).await;
+    ipc::emit_ask_user_response(io, request_id, requestor_id, &submitted).await;
     Ok(())
 }
 
@@ -1285,11 +1388,28 @@ async fn emit_rpc_notification_to_namespace(io: &SocketIo, method: &str, params:
     }
 }
 
-pub async fn emit_draft_updated(io: &SocketIo, conversation_id: &str, draft: &str) {
+pub async fn emit_draft_updated(
+    io: &SocketIo,
+    meta: &ConversationMeta,
+    snapshot: &ComposerSyncSnapshot,
+) {
     emit_rpc_notification_to_namespace(
         io,
         "conversation.draft.updated",
-        draft_updated_event(conversation_id, draft),
+        draft_updated_event(meta, snapshot),
+    )
+    .await;
+}
+
+async fn emit_draft_selection_updated(
+    io: &SocketIo,
+    conversation_id: &str,
+    snapshot: &ComposerSyncSnapshot,
+) {
+    emit_rpc_notification_to_namespace(
+        io,
+        "conversation.draft.selection.updated",
+        draft_selection_updated_event(conversation_id, snapshot),
     )
     .await;
 }
@@ -1324,11 +1444,45 @@ async fn emit_conversation_list_updated(
     emit_rpc_notification_to_namespace(io, METHOD_LIST_UPDATED, value).await;
 }
 
-fn draft_updated_event(conversation_id: &str, draft: &str) -> Value {
-    json!({
+fn draft_updated_event(meta: &ConversationMeta, snapshot: &ComposerSyncSnapshot) -> Value {
+    let mut event = json!({
+        "conversation_id": meta.conversation_id,
+        "draft": meta.draft.clone().unwrap_or_default(),
+        "draft_revision": meta.draft_revision,
+        "selection_revision": snapshot.selection_revision,
+        "client_sequence": snapshot.client_sequence,
+    });
+    merge_composer_snapshot(&mut event, snapshot);
+    event
+}
+
+fn draft_selection_updated_event(conversation_id: &str, snapshot: &ComposerSyncSnapshot) -> Value {
+    let mut event = json!({
         "conversation_id": conversation_id,
-        "draft": draft,
-    })
+        "selection_revision": snapshot.selection_revision,
+        "client_sequence": snapshot.client_sequence,
+    });
+    merge_composer_snapshot(&mut event, snapshot);
+    event
+}
+
+fn merge_composer_snapshot(value: &mut Value, snapshot: &ComposerSyncSnapshot) {
+    let current_draft_revision = value
+        .get("draft_revision")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    value["draft_revision"] =
+        Value::Number(current_draft_revision.max(snapshot.draft_revision).into());
+    value["selection_revision"] = Value::Number(snapshot.selection_revision.into());
+    value["client_sequence"] = Value::Number(snapshot.client_sequence.into());
+    if let Some(selection) = snapshot.selection
+        && let Ok(selection) = serde_json::to_value(selection)
+    {
+        value["draft_selection"] = selection;
+    }
+    if let Some(client_id) = snapshot.origin_client_id.as_ref() {
+        value["origin_client_id"] = Value::String(client_id.clone());
+    }
 }
 
 fn adapter_conversation_object(value: Value) -> Option<(String, Value)> {
@@ -1383,6 +1537,7 @@ fn notification_method_for_event_type(event_type: &str) -> Option<&'static str> 
         "diff" => Some("conversation.diff"),
         "diff_declined" => Some("conversation.diff.declined"),
         "draft_update" => Some("conversation.draft.updated"),
+        "draft_selection_update" => Some("conversation.draft.selection.updated"),
         "error" => Some("conversation.error"),
         "list_updated" => Some(METHOD_LIST_UPDATED),
         "mention_insert" => Some("conversation.mention.inserted"),
@@ -1412,6 +1567,222 @@ fn notification_method_for_event_type(event_type: &str) -> Option<&'static str> 
         "warning" => Some("conversation.warning"),
         _ => None,
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct AskUserRegistration {
+    pub conversation_id: String,
+    pub request_id: String,
+    pub requestor_id: String,
+    pub event: JsonMap,
+    pub invalidated: Vec<JsonMap>,
+}
+
+pub(crate) fn prepare_ask_user_interaction(
+    state: &AppState,
+    payload: &Value,
+) -> anyhow::Result<AskUserRegistration> {
+    let payload = payload
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("ask_user_begin payload must be an object"))?;
+    let request_id = first_nonempty_event_string(payload, &["request_id", "requestId", "id"])
+        .ok_or_else(|| anyhow::anyhow!("request_id is required"))?;
+    let requestor_id = first_nonempty_event_string(payload, &["requestor_id", "requestorId"])
+        .ok_or_else(|| anyhow::anyhow!("requestor_id is required"))?;
+    let question = first_nonempty_event_string(payload, &["question"])
+        .ok_or_else(|| anyhow::anyhow!("question is required"))?;
+    let meta = state.conversations.load_meta(&requestor_id)?;
+    let conversation_id = meta.conversation_id.clone();
+    if conversation_id != requestor_id {
+        return Err(anyhow::anyhow!(
+            "requestor_id does not match conversation identity"
+        ));
+    }
+    let choices = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| Value::String(value.to_owned()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let allow_freeform = payload
+        .get("allow_freeform")
+        .or_else(|| payload.get("allowFreeform"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let created_at = utc_ts_for_rpc();
+    let request_params = json!({
+        "requestId": request_id,
+        "requestorId": requestor_id,
+        "question": question,
+        "choices": choices,
+        "allowFreeform": allow_freeform,
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default();
+    let mut card_payload = request_params.clone();
+    card_payload.insert("message".to_owned(), Value::String(question));
+    let mut event = json!({
+        "type": "approval",
+        "conversation_id": conversation_id,
+        "id": request_id,
+        "request_id": request_id,
+        "requestor_id": requestor_id,
+        "card_id": request_id,
+        "kind": "user_input",
+        "request_method": AGENT_PTY_ASK_USER_REQUEST_METHOD,
+        "request_params": request_params,
+        "payload": card_payload,
+        "created_at": created_at,
+        "order_id": -1,
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default();
+    let agent = meta
+        .extension_id
+        .clone()
+        .or(meta.agent_type.clone())
+        .or_else(|| string_from_map(&meta.settings, "agent"))
+        .unwrap_or_else(|| "unknown".to_owned());
+    event.insert("agent".to_owned(), Value::String(agent.clone()));
+    let mut descriptor = json!({
+        "request_id": request_id,
+        "requestor_id": requestor_id,
+        "agent": agent,
+        "kind": "user_input",
+        "request_method": AGENT_PTY_ASK_USER_REQUEST_METHOD,
+        "request_params": request_params,
+        "payload": card_payload,
+        "conversation_id": conversation_id,
+        "thread_id": meta.thread_id.or(meta.provider_session_id),
+        "transcript_anchor": {},
+        "source": "ipc",
+        "created_at": created_at,
+        "status": "pending",
+        "render_event": event,
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default();
+    descriptor.insert("render_event".to_owned(), Value::Object(event.clone()));
+    let (_, invalidated) = state.conversations.replace_pending_approval_for_requestor(
+        &conversation_id,
+        &request_id,
+        &requestor_id,
+        AGENT_PTY_ASK_USER_REQUEST_METHOD,
+        descriptor,
+    )?;
+    Ok(AskUserRegistration {
+        conversation_id,
+        request_id,
+        requestor_id,
+        event,
+        invalidated,
+    })
+}
+
+pub(crate) async fn publish_ask_user_interaction(
+    io: &SocketIo,
+    state: &AppState,
+    registration: &AskUserRegistration,
+) {
+    for descriptor in &registration.invalidated {
+        let event = build_ask_user_invalidation_event(
+            &registration.conversation_id,
+            descriptor,
+            "superseded",
+        );
+        emit_rpc_notification_to_namespace(
+            io,
+            "conversation.approval.invalidated",
+            Value::Object(event),
+        )
+        .await;
+    }
+    emit_rpc_notification_to_namespace(
+        io,
+        "conversation.approval.request",
+        Value::Object(registration.event.clone()),
+    )
+    .await;
+    emit_meta_and_list_updated_to_namespace(
+        io,
+        state,
+        &registration.conversation_id,
+        "meta_changed",
+    )
+    .await;
+}
+
+pub(crate) async fn invalidate_ask_user_interaction(
+    io: &SocketIo,
+    state: &AppState,
+    request_id: &str,
+    reason: &str,
+) -> anyhow::Result<bool> {
+    let Some((conversation_id, descriptor)) =
+        state.conversations.find_pending_approval(request_id)?
+    else {
+        return Ok(false);
+    };
+    if !is_agent_pty_ask_user_descriptor(&descriptor) {
+        return Ok(false);
+    }
+    let Some(removed) = state
+        .conversations
+        .remove_pending_approval(&conversation_id, request_id)?
+    else {
+        return Ok(false);
+    };
+    let event = build_ask_user_invalidation_event(&conversation_id, &removed, reason);
+    emit_rpc_notification_to_namespace(
+        io,
+        "conversation.approval.invalidated",
+        Value::Object(event),
+    )
+    .await;
+    emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
+    Ok(true)
+}
+
+fn build_ask_user_invalidation_event(
+    conversation_id: &str,
+    descriptor: &JsonMap,
+    reason: &str,
+) -> JsonMap {
+    let request_id = string_from_map(descriptor, "request_id")
+        .or_else(|| string_from_map(descriptor, "id"))
+        .unwrap_or_default();
+    let requestor_id = string_from_map(descriptor, "requestor_id")
+        .or_else(|| string_from_map(descriptor, "requestorId"))
+        .unwrap_or_else(|| conversation_id.to_owned());
+    let card_id = descriptor
+        .get("render_event")
+        .and_then(Value::as_object)
+        .and_then(|event| first_nonempty_event_string(event, &["card_id", "cardId"]))
+        .or_else(|| string_from_map(descriptor, "card_id"))
+        .unwrap_or_else(|| request_id.clone());
+    json!({
+        "type": "approval_invalidated",
+        "conversation_id": conversation_id,
+        "request_id": request_id,
+        "requestor_id": requestor_id,
+        "card_id": card_id,
+        "request_method": AGENT_PTY_ASK_USER_REQUEST_METHOD,
+        "status": "invalidated",
+        "reason": reason,
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default()
 }
 
 fn persist_pending_approval_event(
@@ -1566,6 +1937,11 @@ fn build_approval_handoff_event(
         Value::String(string_from_map(&event, "id").unwrap_or_else(|| request_id.clone())),
     );
     event.insert("request_id".to_owned(), Value::String(request_id));
+    if let Some(requestor_id) = string_from_map(descriptor, "requestor_id")
+        .or_else(|| string_from_map(descriptor, "requestorId"))
+    {
+        event.insert("requestor_id".to_owned(), Value::String(requestor_id));
+    }
     event.insert(
         "kind".to_owned(),
         Value::String(
@@ -1682,6 +2058,9 @@ fn append_approval_handoff_transcript_entry(
             .unwrap_or(Value::Null),
     );
     entry.insert("request_id".to_owned(), request_id);
+    if let Some(value) = handoff_event.get("requestor_id") {
+        entry.insert("requestor_id".to_owned(), value.clone());
+    }
     entry.insert("item_id".to_owned(), item_id);
     if let Some(card_id) = card_id {
         entry.insert("card_id".to_owned(), Value::String(card_id));
@@ -1840,6 +2219,22 @@ fn optional_str<'a>(params: &'a JsonMap, key: &str) -> Option<&'a str> {
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
+}
+
+fn composer_client_id(params: &JsonMap, socket: &SocketRef) -> String {
+    optional_str(params, "client_id")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| socket.id.to_string())
+}
+
+fn composer_selection_from_params(params: &JsonMap, key: &str) -> Option<ComposerSelection> {
+    let value = params.get(key)?.as_object()?;
+    Some(ComposerSelection {
+        anchor: usize::try_from(value.get("anchor")?.as_u64()?).ok()?,
+        focus: usize::try_from(value.get("focus")?.as_u64()?).ok()?,
+    })
 }
 
 fn binding_id_from_params(params: &JsonMap) -> Option<String> {
@@ -2093,11 +2488,37 @@ mod tests {
 
     #[test]
     fn draft_updated_event_matches_frontend_contract() {
+        let meta: ConversationMeta = serde_json::from_value(json!({
+            "conversation_id": "conv-draft",
+            "status": "draft",
+            "created_at": "now",
+            "updated_at": "now",
+            "draft": "hello",
+            "draft_revision": 3,
+            "draft_selection": {"anchor": 5, "focus": 5},
+        }))
+        .unwrap();
+        let snapshot = ComposerSyncSnapshot {
+            origin_client_id: Some("client-a".to_owned()),
+            selection: Some(ComposerSelection {
+                anchor: 5,
+                focus: 5,
+            }),
+            selection_revision: 7,
+            draft_revision: 3,
+            client_sequence: 11,
+            ..ComposerSyncSnapshot::default()
+        };
         assert_eq!(
-            draft_updated_event("conv-draft", "hello"),
+            draft_updated_event(&meta, &snapshot),
             json!({
                 "conversation_id": "conv-draft",
                 "draft": "hello",
+                "draft_revision": 3,
+                "selection_revision": 7,
+                "client_sequence": 11,
+                "draft_selection": {"anchor": 5, "focus": 5},
+                "origin_client_id": "client-a",
             })
         );
     }
@@ -2684,6 +3105,112 @@ mod tests {
                 .pending_approvals
                 .is_empty()
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ask_user_registration_replaces_only_the_same_requestor_slot() {
+        let root = std::env::temp_dir().join(format!(
+            "als-rs-rpc-ask-user-registration-test-{}",
+            unix_millis()
+        ));
+        let state = AppState::new(ServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 12459,
+            extensions_dir: root.join("extensions"),
+            roots: RuntimeRoots {
+                data_dir: root.join("data"),
+                cache_dir: root.join("cache"),
+                config_dir: root.join("config"),
+                static_dir: root.join("static"),
+            },
+            adapters: AdapterConfig {
+                python_bin: "python".to_owned(),
+            },
+            framework_shells: FrameworkShellConfig::default(),
+            socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+        });
+        let mut settings = JsonMap::new();
+        settings.insert("agent".to_owned(), json!("codex-ext"));
+        state
+            .conversations
+            .create(CreateConversationRequest {
+                conversation_id: Some("conv-registration".to_owned()),
+                settings,
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+        persist_pending_approval_event(
+            &state,
+            "conv-registration",
+            &json!({
+                "type": "approval",
+                "conversation_id": "conv-registration",
+                "id": "provider-request",
+                "request_id": "provider-request",
+                "kind": "command",
+                "request_method": "provider/approval",
+                "request_params": {},
+                "payload": {},
+            }),
+        )
+        .unwrap();
+        persist_pending_approval_event(
+            &state,
+            "conv-registration",
+            &json!({
+                "type": "approval",
+                "conversation_id": "conv-registration",
+                "id": "conv-registration",
+                "request_id": "conv-registration",
+                "kind": "user_input",
+                "request_method": AGENT_PTY_ASK_USER_REQUEST_METHOD,
+                "request_params": {"question": "Old question"},
+                "payload": {"question": "Old question"},
+            }),
+        )
+        .unwrap();
+
+        let first = prepare_ask_user_interaction(
+            &state,
+            &json!({
+                "request_id": "ask_user_first",
+                "requestor_id": "conv-registration",
+                "question": "First question",
+                "choices": ["Yes", "No"],
+                "allow_freeform": false,
+            }),
+        )
+        .unwrap();
+        assert_eq!(first.invalidated.len(), 1);
+        assert_eq!(first.invalidated[0]["request_id"], "conv-registration");
+        assert_eq!(first.event["request_id"], "ask_user_first");
+        assert_eq!(first.event["requestor_id"], "conv-registration");
+        assert_eq!(first.event["request_params"]["requestId"], "ask_user_first");
+        assert_eq!(
+            first.event["request_params"]["requestorId"],
+            "conv-registration"
+        );
+
+        let second = prepare_ask_user_interaction(
+            &state,
+            &json!({
+                "request_id": "ask_user_second",
+                "requestor_id": "conv-registration",
+                "question": "Second question",
+                "choices": ["Continue"],
+                "allow_freeform": true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(second.invalidated.len(), 1);
+        assert_eq!(second.invalidated[0]["request_id"], "ask_user_first");
+        let meta = state.conversations.load_meta("conv-registration").unwrap();
+        assert!(meta.pending_approvals.contains_key("provider-request"));
+        assert!(meta.pending_approvals.contains_key("ask_user_second"));
+        assert!(!meta.pending_approvals.contains_key("ask_user_first"));
+        assert_eq!(meta.pending_approvals.len(), 2);
 
         let _ = fs::remove_dir_all(root);
     }

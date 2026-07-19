@@ -18,3 +18,4 @@ static/dist/
 .tmp/
 rust/target/
 scratch/
+build/

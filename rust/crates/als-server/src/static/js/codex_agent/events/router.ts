@@ -37,8 +37,6 @@ interface RouterState {
   conversationListRevision?: number;
   conversationPreviewCache?: Record<string, ConversationPreview | null> | null;
   appConfig?: JsonObject;
-  lastDraftHash?: string | null;
-  draftDirty?: boolean;
   contextWindow?: number | null;
 }
 
@@ -48,6 +46,7 @@ interface MentionInsertOptions {
   col?: number | string;
   endCol?: number | string;
   content?: string;
+  operationId?: string;
 }
 
 interface RouterEvent extends JsonObject {
@@ -84,6 +83,7 @@ interface RouterEvent extends JsonObject {
   col?: number | string;
   endCol?: number | string;
   content?: string;
+  operation_id?: string;
   draft?: string;
     status?: string;
     label?: string;
@@ -112,7 +112,6 @@ interface EventRouterContext {
   getState: () => RouterState;
   setState: (patch: Partial<RouterState>) => void;
   getPending: () => Map<string | number, PendingRpcEntry>;
-  promptEl?: Element | null;
   debugEnabled?: boolean;
   setLastEventType: (value: string) => void;
   setActivity: (label: string, active: boolean) => void;
@@ -162,9 +161,11 @@ interface EventRouterContext {
   renderConversationList: (conversations: unknown[], activeConversationId: string | null) => void;
   renderMiniConversationList: (conversations: unknown[], activeConversationId: string | null) => void;
   insertMention: (path: string, options: MentionInsertOptions) => void;
-  renderPromptFromText: (text: string) => void;
+  applyDraftUpdate: (event: JsonObject) => void;
+  applySelectionUpdate: (event: JsonObject) => void;
   applyRuntimeMode: (kind: string) => void;
   handoffApproval?: (event: RouterEvent) => void;
+  invalidateApproval?: (event: RouterEvent) => void;
 }
 
 function asRouterEvent(value: unknown): RouterEvent | null {
@@ -179,7 +180,6 @@ export function bindEventRouter(ctx: EventRouterContext) {
     getState,
     setState,
     getPending,
-    promptEl,
     debugEnabled,
     setLastEventType,
     setActivity,
@@ -229,9 +229,11 @@ export function bindEventRouter(ctx: EventRouterContext) {
     renderConversationList,
     renderMiniConversationList,
     insertMention,
-    renderPromptFromText,
+    applyDraftUpdate,
+    applySelectionUpdate,
     applyRuntimeMode,
     handoffApproval,
+    invalidateApproval,
   } = ctx;
 
   function normalizePreviewText(text: unknown, maxLen = 160): string {
@@ -584,6 +586,10 @@ export function bindEventRouter(ctx: EventRouterContext) {
         setLastEventType('approval');
         handoffApproval?.(event);
         return;
+      case 'approval_invalidated':
+        setLastEventType('approval');
+        invalidateApproval?.(event);
+        return;
       case 'command_result':
         renderCommandResult(event);
         return;
@@ -708,26 +714,16 @@ export function bindEventRouter(ctx: EventRouterContext) {
           col: event.col,
           endCol: event.endCol,
           content: event.content,
+          operationId: event.operation_id,
         });
         return;
       }
       case 'draft_update': {
-        const s = getState();
-        if (!promptEl) return;
-        const activeConversationId = s.clientConversationId || s.conversationMeta?.conversation_id || null;
-        if (!activeConversationId) return;
-        if (event.conversation_id && event.conversation_id !== activeConversationId) return;
-        const draft = event.draft;
-        if (typeof draft !== 'string') return;
-        const incomingHash = draft.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(16);
-        if (incomingHash === s.lastDraftHash) return;
-        if (s.draftDirty) {
-          console.warn('Draft update ignored (local dirty)');
-          return;
-        }
-        renderPromptFromText(draft);
-        if (s.conversationMeta) s.conversationMeta.draft = draft;
-        setState({ lastDraftHash: incomingHash, draftDirty: false });
+        applyDraftUpdate(event);
+        return;
+      }
+      case 'draft_selection_update': {
+        applySelectionUpdate(event);
         return;
       }
       case 'rpc_response': {

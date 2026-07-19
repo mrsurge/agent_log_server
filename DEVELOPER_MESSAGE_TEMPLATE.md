@@ -59,6 +59,7 @@ If the non-plan MCP `ask_user` tool is available:
 ```
 - continue only after checking `ok`, `status`/`accepted`, and selected-answer fields such as `selected_choice`, `answer`, or `answers`
 - handle cancel, error, terminal, or non-accepted responses as a denial or stop condition instead of assuming approval
+- if the `ask_user` call yields an outer execution cell, best-effort call `functions.wait` with `yield_time_ms: 3600000` so its wait window matches the one-hour MCP timeout; if the host caps that wait, keep waiting on the same cell until it returns a terminal result, because a yielded cell is not the `ask_user` response
 
 ## ALS-RS Migration Harness Note
 
@@ -331,6 +332,30 @@ TE2 console is multi-client:
 - separate windows, tabs, iframes, or embedded + popped-out instances may each register their own worker
 - treat `workerId` as the exact evaluation/inspection target
 - treat `workerLabel` as a human grouping label, not as proof that only one worker exists
+
+### TE2 Console CLI
+
+```bash
+te2 console <command> [options]
+```
+
+- `list-workers`: `te2 console list-workers` connects to the running framework and lists live console worker IDs.
+- `eval`: `te2 console eval --worker <id> [--code <javascript>] [--timeout <seconds>] [--url <framework-url>]` evaluates JavaScript in one exact worker. The timeout defaults to 20 seconds. Without `--code`, it reads all of stdin with no line limit, so heredocs, pipes, and file redirects work. The bridge wraps results in `Promise.resolve()`, including returned promises and top-level `await`.
+- `tail`: `te2 console tail [--limit N] [--worker <id>] [--level <level>]` reads recent entries from `~/.cache/app_server/te2_console_log.jsonl`.
+- `search`: `te2 console search "query" [--limit N] [--worker <id>] [--level <level>]` performs a case-insensitive substring search across worker ID, level, and arguments in that log.
+
+`list-workers` and `eval` require a running `te2` framework. `tail` and `search` work offline. Log output is `HH:MM:SS.mmm [level] workerId: message`. The framework URL resolves from `TE_FRAMEWORK_URL`, otherwise `TE2_RUST_SPIKE_HOST` plus `TE_PORT`, with `http://127.0.0.1:8089` as the default.
+
+```bash
+te2 console eval --worker main_page:cccad31b --code "const el = document.querySelector('.foo'); el ? el.textContent : 'not found'"
+echo 'document.title' | te2 console eval --worker main_page:cccad31b
+te2 console eval --worker main_page:cccad31b < debug-script.js
+te2 console eval --worker main_page:cccad31b << 'EOF'
+const items = [1, 2, 3];
+await new Promise(resolve => setTimeout(resolve, 100));
+JSON.stringify(items.map(value => value * 2));
+EOF
+```
 
 If the target includes a browser or frontend surface, install the TE2 console bridge as part of the normal integration flow.
 

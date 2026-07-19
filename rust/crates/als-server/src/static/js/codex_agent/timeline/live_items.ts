@@ -549,6 +549,10 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     return approvalUi.handoffApproval(evt);
   }
 
+  function invalidateApproval(evt: ApprovalEvent) {
+    return approvalUi.invalidateApproval(evt);
+  }
+
   function restorePendingApprovals() {
     approvalUi.restorePendingApprovals();
   }
@@ -576,6 +580,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     renderApproval,
     respondApproval,
     handoffApproval,
+    invalidateApproval,
     restorePendingApprovals,
   };
 }

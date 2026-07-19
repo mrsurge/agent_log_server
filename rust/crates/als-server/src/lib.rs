@@ -2,6 +2,7 @@ mod adapter_process;
 mod agent_edits;
 mod agent_log;
 mod card_truncation;
+mod composer_sync;
 mod config;
 mod conversation_routes;
 mod conversation_rpc;

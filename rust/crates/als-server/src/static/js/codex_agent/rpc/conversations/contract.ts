@@ -16,6 +16,7 @@ export const CONVERSATIONS_RPC_METHODS = {
   fork: 'conversation.fork',
   pinsSet: 'conversation.pins.set',
   draftSet: 'conversation.draft.set',
+  draftSelectionSet: 'conversation.draft.selection.set',
   send: 'conversation.send',
   interrupt: 'conversation.interrupt',
   compact: 'conversation.compact',
@@ -38,6 +39,11 @@ export interface ConversationMetaRecord extends JsonObject {
   conversation_id?: string | null;
   active_view?: string | null;
   settings?: JsonObject;
+}
+
+export interface ComposerSelectionState extends JsonObject {
+  anchor: number;
+  focus: number;
 }
 
 export interface ConversationListResult extends JsonObject {
@@ -106,6 +112,11 @@ export interface ConversationDraftResult extends JsonObject {
   transport: ConversationsRpcTransport;
   ok?: boolean;
   error?: string;
+  draft_revision?: number;
+  selection_revision?: number;
+  client_sequence?: number;
+  draft_selection?: ComposerSelectionState;
+  origin_client_id?: string;
 }
 
 export interface ConversationControlResult extends JsonObject {
@@ -127,6 +138,7 @@ export const CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE = {
   activity: 'conversation.activity',
   approval: 'conversation.approval.request',
   approval_handoff: 'conversation.approval.handoff',
+  approval_invalidated: 'conversation.approval.invalidated',
   assistant_delta: 'conversation.message.delta',
   assistant_end: 'conversation.message.final',
   assistant_finalize: 'conversation.message.final',
@@ -135,6 +147,7 @@ export const CONVERSATIONS_RPC_NOTIFICATION_METHOD_BY_EVENT_TYPE = {
   diff: 'conversation.diff',
   diff_declined: 'conversation.diff.declined',
   draft_update: 'conversation.draft.updated',
+  draft_selection_update: 'conversation.draft.selection.updated',
   error: 'conversation.error',
   import_started: 'conversation.import.started',
   import_progress: 'conversation.import.progress',
@@ -178,6 +191,7 @@ export type ConversationsRpcNotificationMethod =
 export const CONVERSATIONS_RPC_CANONICAL_EVENT_TYPE_BY_METHOD = {
   'conversation.activity': 'activity',
   'conversation.approval.handoff': 'approval_handoff',
+  'conversation.approval.invalidated': 'approval_invalidated',
   'conversation.approval.request': 'approval',
   'conversation.command.begin': 'shell_begin',
   'conversation.command.delta': 'shell_delta',
@@ -187,6 +201,7 @@ export const CONVERSATIONS_RPC_CANONICAL_EVENT_TYPE_BY_METHOD = {
   'conversation.diff': 'diff',
   'conversation.diff.declined': 'diff_declined',
   'conversation.draft.updated': 'draft_update',
+  'conversation.draft.selection.updated': 'draft_selection_update',
   'conversation.error': 'error',
   'conversation.import.started': 'import_started',
   'conversation.import.progress': 'import_progress',

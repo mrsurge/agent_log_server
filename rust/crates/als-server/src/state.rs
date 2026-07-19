@@ -1,6 +1,7 @@
 use crate::adapter_process::{AdapterEventSink, AdapterSupervisor};
 use crate::agent_edits::AgentEditLedger;
 use crate::agent_log::AgentLogStore;
+use crate::composer_sync::ComposerSyncStore;
 use crate::config::ServerConfig;
 use crate::conversation_store::ConversationStore;
 use crate::extension_registry::ExtensionRegistry;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub agent_edits: AgentEditLedger,
     pub agent_log: AgentLogStore,
     pub config: ServerConfig,
+    pub composer_sync: ComposerSyncStore,
     pub conversations: ConversationStore,
     pub extensions: ExtensionRegistry,
     pub focused_window: FocusedWindowStore,
@@ -44,6 +46,7 @@ impl AppState {
         let adapter = AdapterSupervisor::new(config.clone(), events);
         let agent_edits = AgentEditLedger::default();
         let agent_log = AgentLogStore::with_cache_dir(config.roots.cache_dir.clone());
+        let composer_sync = ComposerSyncStore::default();
         let conversations = ConversationStore::new(config.roots.data_dir.clone());
         let extensions = ExtensionRegistry::load_with_config(
             config.extension_roots(),
@@ -72,6 +75,7 @@ impl AppState {
             agent_edits,
             agent_log,
             config,
+            composer_sync,
             conversations,
             extensions,
             focused_window,

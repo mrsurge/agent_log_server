@@ -3,6 +3,7 @@ from __future__ import annotations
 # pyright: reportPrivateUsage=false
 
 import asyncio
+import os
 import tempfile
 import unittest
 from collections.abc import Coroutine
@@ -30,6 +31,14 @@ class CodexSearchCardContractTests(unittest.TestCase):
 
 
 class AskUserToolContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        kb_server._ask_user_pending_requests.clear()
+        kb_server._ask_user_active_by_requestor.clear()
+
+    def tearDown(self) -> None:
+        kb_server._ask_user_pending_requests.clear()
+        kb_server._ask_user_active_by_requestor.clear()
+
     def test_ask_user_explicitly_advertises_non_read_only(self) -> None:
         async def scenario() -> object:
             tools = await kb_server.mcp.list_tools()
@@ -42,6 +51,206 @@ class AskUserToolContractTests(unittest.TestCase):
 
         self.assertIsNotNone(annotations)
         self.assertIs(getattr(annotations, "readOnlyHint", None), False)
+
+    def test_ask_user_registers_unique_request_id_for_stable_requestor(self) -> None:
+        class FakeIpcClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+                self.active_during_ack = False
+
+            async def call(
+                self,
+                event: str,
+                data: object = None,
+                *,
+                namespace: str | None = None,
+                timeout: float | int | None = None,
+            ) -> object:
+                del namespace, timeout
+                self.calls.append((event, data))
+                payload = cast(dict[str, object], data)
+                if event == "ask_user_begin":
+                    request_id = cast(str, payload["request_id"])
+                    waiter = kb_server._ask_user_pending_requests[request_id]
+                    response_event: kb_server.ObjectMap = {
+                        "request_id": request_id,
+                        "requestor_id": "conv-test",
+                        "response": {"action": "accept", "answer": "Approve"},
+                    }
+                    asyncio.get_running_loop().call_soon(
+                        waiter.set_result,
+                        response_event,
+                    )
+                    return {"ok": True, "request_id": request_id}
+                if event == "ask_user_ack":
+                    request_id = cast(str, payload["request_id"])
+                    self.active_during_ack = (
+                        request_id in kb_server._ask_user_pending_requests
+                        and kb_server._ask_user_active_by_requestor.get("conv-test") == request_id
+                    )
+                return {"ok": True}
+
+        async def scenario() -> tuple[dict[str, object], FakeIpcClient]:
+            client = FakeIpcClient()
+            with (
+                patch.dict(os.environ, {"CONVERSATION_ID": "conv-test"}),
+                patch.object(kb_server, "_get_appserver_ipc_sio", return_value=client),
+            ):
+                result = cast(
+                    dict[str, object],
+                    await kb_server.ask_user(
+                        "Proceed?",
+                        ["Approve", "Reject"],
+                        False,
+                        cast(object, object()),  # type: ignore[arg-type]
+                    ),
+                )
+            return result, client
+
+        result, client = asyncio.run(scenario())
+        begin_payload = cast(dict[str, object], client.calls[0][1])
+        request_id = cast(str, begin_payload["request_id"])
+        self.assertEqual(client.calls[0][0], "ask_user_begin")
+        self.assertEqual(begin_payload["requestor_id"], "conv-test")
+        self.assertTrue(request_id.startswith("ask_user_"))
+        self.assertNotEqual(request_id, "conv-test")
+        self.assertEqual(client.calls[1][0], "ask_user_ack")
+        self.assertEqual(cast(dict[str, object], client.calls[1][1])["request_id"], request_id)
+        self.assertTrue(client.active_during_ack)
+        self.assertEqual(result["answer"], "Approve")
+        self.assertFalse(kb_server._ask_user_pending_requests)
+        self.assertFalse(kb_server._ask_user_active_by_requestor)
+
+    def test_ask_user_rejects_a_second_live_request_for_same_requestor(self) -> None:
+        async def scenario() -> dict[str, object]:
+            loop = asyncio.get_running_loop()
+            pending: asyncio.Future[kb_server.ObjectMap] = loop.create_future()
+            kb_server._ask_user_pending_requests["ask_user_existing"] = pending
+            kb_server._ask_user_active_by_requestor["conv-test"] = "ask_user_existing"
+            with patch.dict(os.environ, {"CONVERSATION_ID": "conv-test"}):
+                return await kb_server.ask_user(
+                    "Another question?",
+                    ["Yes"],
+                    False,
+                    cast(object, object()),  # type: ignore[arg-type]
+                )
+
+        result = asyncio.run(scenario())
+        self.assertIs(result["ok"], False)
+        self.assertIn("already pending", cast(str, result["error"]))
+
+    def test_parallel_ask_user_calls_reserve_the_requestor_slot_before_ipc(self) -> None:
+        class BlockingIpcClient:
+            def __init__(self) -> None:
+                self.begin_entered = asyncio.Event()
+                self.release_begin = asyncio.Event()
+
+            async def call(
+                self,
+                event: str,
+                data: object = None,
+                *,
+                namespace: str | None = None,
+                timeout: float | int | None = None,
+            ) -> object:
+                del namespace, timeout
+                payload = cast(dict[str, object], data)
+                if event == "ask_user_begin":
+                    self.begin_entered.set()
+                    await self.release_begin.wait()
+                    request_id = cast(str, payload["request_id"])
+                    waiter = kb_server._ask_user_pending_requests[request_id]
+                    waiter.set_result({
+                        "request_id": request_id,
+                        "requestor_id": "conv-test",
+                        "status": "cancelled",
+                    })
+                return {"ok": True}
+
+        async def scenario() -> tuple[dict[str, object], dict[str, object]]:
+            client = BlockingIpcClient()
+            with (
+                patch.dict(os.environ, {"CONVERSATION_ID": "conv-test"}),
+                patch.object(kb_server, "_get_appserver_ipc_sio", return_value=client),
+            ):
+                first_task = asyncio.create_task(kb_server.ask_user(
+                    "First question?",
+                    ["Yes"],
+                    False,
+                    cast(object, object()),  # type: ignore[arg-type]
+                ))
+                await client.begin_entered.wait()
+                second = cast(
+                    dict[str, object],
+                    await kb_server.ask_user(
+                        "Second question?",
+                        ["Yes"],
+                        False,
+                        cast(object, object()),  # type: ignore[arg-type]
+                    ),
+                )
+                client.release_begin.set()
+                first = cast(dict[str, object], await first_task)
+                return first, second
+
+        first, second = asyncio.run(scenario())
+        self.assertEqual(first["status"], "cancel")
+        self.assertIs(second["ok"], False)
+        self.assertIn("already pending", cast(str, second["error"]))
+        self.assertFalse(kb_server._ask_user_pending_requests)
+        self.assertFalse(kb_server._ask_user_active_by_requestor)
+
+    def test_ask_user_cancellation_during_ack_releases_local_ownership(self) -> None:
+        class AckBlockingIpcClient:
+            def __init__(self) -> None:
+                self.ack_entered = asyncio.Event()
+
+            async def call(
+                self,
+                event: str,
+                data: object = None,
+                *,
+                namespace: str | None = None,
+                timeout: float | int | None = None,
+            ) -> object:
+                del namespace, timeout
+                payload = cast(dict[str, object], data)
+                request_id = cast(str, payload["request_id"])
+                if event == "ask_user_begin":
+                    waiter = kb_server._ask_user_pending_requests[request_id]
+                    waiter.set_result({
+                        "request_id": request_id,
+                        "requestor_id": "conv-test",
+                        "response": {"action": "accept", "answer": "Yes"},
+                    })
+                    return {"ok": True}
+                if event == "ask_user_ack":
+                    self.ack_entered.set()
+                    await asyncio.Event().wait()
+                return {"ok": True}
+
+        async def scenario() -> None:
+            client = AckBlockingIpcClient()
+            with (
+                patch.dict(os.environ, {"CONVERSATION_ID": "conv-test"}),
+                patch.object(kb_server, "_get_appserver_ipc_sio", return_value=client),
+            ):
+                task = asyncio.create_task(kb_server.ask_user(
+                    "Wait for ack?",
+                    ["Yes"],
+                    False,
+                    cast(object, object()),  # type: ignore[arg-type]
+                ))
+                await client.ack_entered.wait()
+                self.assertTrue(kb_server._ask_user_pending_requests)
+                self.assertTrue(kb_server._ask_user_active_by_requestor)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(scenario())
+        self.assertFalse(kb_server._ask_user_pending_requests)
+        self.assertFalse(kb_server._ask_user_active_by_requestor)
 
 
 class KbSelectorContractTests(unittest.TestCase):

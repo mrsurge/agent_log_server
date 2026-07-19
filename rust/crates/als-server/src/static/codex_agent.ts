@@ -641,6 +641,11 @@ document.addEventListener('DOMContentLoaded', () => {
       conversationMeta: {
         conversation_id: clientConversationId || conversationMeta.conversation_id || null,
         draft: typeof conversationMeta.draft === 'string' ? conversationMeta.draft : undefined,
+        draft_revision: typeof conversationMeta.draft_revision === 'number' ? conversationMeta.draft_revision : undefined,
+        draft_selection: conversationMeta.draft_selection as { anchor: number; focus: number } | undefined,
+        selection_revision: typeof conversationMeta.selection_revision === 'number' ? conversationMeta.selection_revision : undefined,
+        origin_client_id: typeof conversationMeta.origin_client_id === 'string' ? conversationMeta.origin_client_id : undefined,
+        client_sequence: typeof conversationMeta.client_sequence === 'number' ? conversationMeta.client_sequence : undefined,
         cwd: typeof conversationMeta.cwd === 'string' ? conversationMeta.cwd : undefined,
       },
       conversationSettings: {
@@ -656,6 +661,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.lastDraftHash !== undefined) lastDraftHash = patch.lastDraftHash;
       if (patch.draftDirty !== undefined) draftDirty = patch.draftDirty === true;
       if (patch.applyingDraft !== undefined) applyingDraft = patch.applyingDraft === true;
+      if (patch.conversationMeta !== undefined) {
+        conversationMeta = { ...conversationMeta, ...patch.conversationMeta };
+      }
     },
     promptEl,
     mentionPillEl,
@@ -675,6 +683,8 @@ document.addEventListener('DOMContentLoaded', () => {
     restoreDraft,
     clearDraft,
     syncDraftFromServer,
+    applyDraftUpdate,
+    applySelectionUpdate,
     initTribute,
     insertMention,
   } = composerRuntime;
@@ -1437,6 +1447,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderApproval,
     respondApproval: respondApprovalImpl,
     handoffApproval,
+    invalidateApproval,
     restorePendingApprovals: restorePendingApprovalsImpl,
   } = timelineLiveItems;
 
@@ -1922,8 +1933,6 @@ document.addEventListener('DOMContentLoaded', () => {
       conversationListRevision,
       conversationPreviewCache: conversationPreviewCache as EventRouterContext['getState'] extends () => infer S ? S extends { conversationPreviewCache?: infer T } ? T : never : never,
       appConfig: appConfig as EventRouterContext['getState'] extends () => infer S ? S extends { appConfig?: infer T } ? T : never : never,
-      lastDraftHash,
-      draftDirty,
     }),
     setState: (patch: EventRouterPatch) => {
       if (patch.hostUi !== undefined) hostUi = patch.hostUi as RootHostUi;
@@ -1938,11 +1947,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.conversationSettings !== undefined) conversationSettings = patch.conversationSettings as RootConversationSettings;
       if (patch.appConfig !== undefined) appConfig = patch.appConfig as RootAppConfig;
       if (patch.contextWindow !== undefined) contextWindow = patch.contextWindow;
-      if (patch.lastDraftHash !== undefined) lastDraftHash = patch.lastDraftHash;
-      if (patch.draftDirty !== undefined) draftDirty = patch.draftDirty;
     },
     getPending: () => pending,
-    promptEl,
     debugEnabled: _dbg,
     setLastEventType: (v: string) => { lastEventType = v; },
     setActivity,
@@ -1973,6 +1979,9 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     handoffApproval: (event) => {
       handoffApproval(event as Parameters<typeof handoffApproval>[0]);
+    },
+    invalidateApproval: (event) => {
+      invalidateApproval(event as Parameters<typeof invalidateApproval>[0]);
     },
     renderCommandResult,
     renderViewCard,
@@ -2013,7 +2022,8 @@ document.addEventListener('DOMContentLoaded', () => {
       );
     },
     insertMention,
-    renderPromptFromText,
+    applyDraftUpdate,
+    applySelectionUpdate,
     applyRuntimeMode,
   });
 

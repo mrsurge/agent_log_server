@@ -20,6 +20,10 @@ Implemented now:
 - conversation re-entry rehydrates approvals from `meta.json`, not from transcript guessing
 - backend validation removes stale approvals before replay
 - approval accept or decline removes the pending item from `meta.json`
+- MCP ask-user descriptors use a unique per-invocation `request_id` plus the
+  stable conversation `requestor_id`
+- a new MCP ask-user registration atomically replaces the older ask-user entry
+  for the same requestor while leaving unrelated provider approvals intact
 
 Still roadmap or follow-up work:
 
@@ -78,6 +82,7 @@ Add a top-level field:
   "pending_approvals": {
     "<request_id>": {
       "request_id": "<request_id>",
+      "requestor_id": "<conversation id for requestor-scoped interactions>",
       "agent": "codex|copilot-sdk|...",
       "kind": "command|diff|tool|unknown",
       "status": "pending",
@@ -110,6 +115,8 @@ Add a top-level field:
 Notes:
 
 - `request_id` is the canonical key for resolving and invalidating approvals
+- `requestor_id` is the stable owner slot for requestor-scoped interactions;
+  it does not replace the unique `request_id`
 - `payload` is the frontend-facing serialized approval content
 - `render_event` is the exact card-render payload used for replay
 - `runtime_signature` is the minimum required staleness check
@@ -128,6 +135,13 @@ When a backend requests approval:
 - keep any in-memory resolver object in the backend runtime
 
 The write to `meta.json` must happen before or alongside the live broadcast, not as a later best-effort step.
+
+For `agent-pty/ask-user`, the private IPC `ask_user_begin` registration is the
+arrival boundary. ALS-RS persists and broadcasts the card; provider extensions
+only suppress the duplicate generic MCP tool row. The MCP wait has no
+user-response timeout. A later registration for the same `requestor_id`
+invalidates and replaces the older ask-user descriptor without appending a
+transcript decision row.
 
 ## Approval Acceptance Or Decline
 

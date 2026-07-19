@@ -44,6 +44,7 @@ interface ApprovalData {
   type?: string;
   id?: unknown;
   request_id?: unknown;
+  requestor_id?: unknown;
   card_id?: unknown;
   cardId?: unknown;
   item_id?: unknown;
@@ -276,6 +277,12 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     return String(requestId);
   }
 
+  function approvalRequestorId(evt: ApprovalData = {}) {
+    const requestorId = evt?.requestor_id;
+    if (requestorId === null || requestorId === undefined || requestorId === '') return '';
+    return String(requestorId);
+  }
+
   function approvalRequestMethod(evt: ApprovalData = {}) {
     const requestMethod = evt?.request_method ?? evt?.requestMethod;
     if (requestMethod === null || requestMethod === undefined || requestMethod === '') return '';
@@ -338,13 +345,15 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     if (!timelineEl || !isAskUserApproval(evt)) return;
     const requestId = approvalRequestId(evt);
     if (!requestId) return;
+    const requestorId = approvalRequestorId(evt) || requestId;
     const cardId = approvalCardId(evt);
     const rows = Array.from((timelineEl as Element).querySelectorAll('.timeline-row[data-approval-id]')) as HTMLElement[];
     rows.forEach((row) => {
       if (row === preserveRow) return;
-      if (row.dataset.approvalId !== requestId) return;
       if (String(row.dataset.requestMethod || '').trim() !== AGENT_PTY_ASK_USER_REQUEST_METHOD) return;
       if (row.dataset.approvalSource === 'resolved' || row.dataset.approvalSource === 'replay') return;
+      const rowRequestorId = row.dataset.approvalRequestorId || row.dataset.approvalId;
+      if (rowRequestorId !== requestorId) return;
       if (cardId && row.dataset.approvalCardId === cardId) return;
       row.remove();
     });
@@ -393,6 +402,12 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
       row.classList.add('resolved');
     }
     row.dataset.approvalId = String(requestId);
+    const requestorId = approvalRequestorId(evt);
+    if (requestorId) {
+      row.dataset.approvalRequestorId = requestorId;
+    } else {
+      delete row.dataset.approvalRequestorId;
+    }
     if (cardId) {
       row.dataset.approvalCardId = cardId;
     } else {
@@ -823,10 +838,27 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     return resolvedRow;
   }
 
+  function invalidateApproval(evt: ApprovalData) {
+    const requestId = approvalRequestId(evt);
+    if (!requestId) return false;
+    if (timelineEl) {
+      const rows = Array.from(timelineEl.querySelectorAll('.timeline-row[data-approval-id]')) as HTMLElement[];
+      rows.forEach((row) => {
+        if (row.dataset.approvalId === requestId && row.dataset.approvalSource !== 'resolved') {
+          row.remove();
+        }
+      });
+    }
+    prunePendingApproval(requestId);
+    onAfterRender?.();
+    return true;
+  }
+
   return {
     approvalStatusFromResult,
     renderApproval,
     handoffApproval,
+    invalidateApproval,
     restorePendingApprovals,
     respondApproval,
   };

@@ -2197,67 +2197,15 @@ class CodexEventRouter:
         thread_id: Optional[str],
         turn_id: Optional[str],
     ) -> ObjectDict:
-        normalized_arguments = arguments if _is_object_dict(arguments) else {}
-        question = str(normalized_arguments.get("question") or "").strip()
-        raw_choices = normalized_arguments.get("choices")
-        if _is_object_list(raw_choices):
-            choices = raw_choices
-        elif isinstance(raw_choices, str):
-            try:
-                parsed = cast(object, json.loads(raw_choices))
-                choices = parsed if _is_object_list(parsed) else []
-            except Exception:
-                choices = []
-        else:
-            choices = []
-        allow_freeform = normalized_arguments.get(
-            "allow_freeform",
-            normalized_arguments.get("allowFreeform", True),
-        )
-        card_id = str(tool_id or request_id or "").strip() or request_id
+        del arguments
         item_state["approval_request_id"] = request_id
         item_state["ask_user_descriptor_emitted"] = True
         self._approval_request_map[str(tool_id)] = request_id
-        request_params: ObjectDict = {
-            "requestId": request_id,
-            "question": question,
-            "choices": list(choices),
-            "allowFreeform": bool(allow_freeform),
-        }
-        payload_data: ObjectDict = {
-            "requestId": request_id,
-            "question": question,
-            "choices": list(choices),
-            "allowFreeform": bool(allow_freeform),
-            "message": question,
-            "tool_call_id": str(tool_id or ""),
-        }
-        routed = self._tool_request_result(
-            request_id=request_id,
-            kind="user_input",
-            payload={key: value for key, value in payload_data.items() if value not in (None, "", [], {})},
-            thread_id=thread_id,
-            turn_id=turn_id,
-            request_method=AGENT_PTY_ASK_USER_REQUEST_METHOD,
-            request_params=request_params,
-            activity_label="request",
-        )
-        events = routed.get("events")
-        if _is_object_list(events):
-            for event in events:
-                if _is_object_dict(event) and event.get("type") == "approval":
-                    event["card_id"] = card_id
-        descriptors = routed.get("approval_descriptors")
-        if _is_object_list(descriptors):
-            for descriptor in descriptors:
-                if not _is_object_dict(descriptor):
-                    continue
-                descriptor["card_id"] = card_id
-                render_event_value = descriptor.get("render_event")
-                render_event = render_event_value if _is_object_dict(render_event_value) else None
-                if _is_object_dict(render_event):
-                    render_event["card_id"] = card_id
-        return self._decorate_routed_result(routed, thread_id=thread_id, item_state=item_state)
+        return self._decorate_routed_result({
+            "handled": True,
+            "events": [],
+            "transcript_entries": [],
+        }, thread_id=thread_id, item_state=item_state)
 
     def route_event(
         self,

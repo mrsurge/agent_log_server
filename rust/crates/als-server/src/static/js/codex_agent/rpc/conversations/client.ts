@@ -11,6 +11,7 @@ import {
   type ConversationListResult,
   type ConversationMetaRecord,
   type ConversationMetaResult,
+  type ComposerSelectionState,
   CONVERSATIONS_RPC_ANCHOR_MODULES,
   CONVERSATIONS_RPC_CANONICAL_EVENT_TYPE_BY_METHOD,
   CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
@@ -487,6 +488,9 @@ export function createConversationsRpcClient(
   async function setDraft(options: {
     conversationId?: string | null;
     draft: string;
+    clientId?: string | null;
+    clientSequence?: number;
+    selection?: ComposerSelectionState | null;
     timeoutMs?: number;
   }): Promise<ConversationDraftResult> {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
@@ -496,10 +500,45 @@ export function createConversationsRpcClient(
     if (typeof options.conversationId === 'string' && options.conversationId.trim()) {
       payload.conversation_id = options.conversationId.trim();
     }
+    if (typeof options.clientId === 'string' && options.clientId.trim()) {
+      payload.client_id = options.clientId.trim();
+    }
+    if (Number.isSafeInteger(options.clientSequence) && Number(options.clientSequence) >= 0) {
+      payload.client_sequence = Number(options.clientSequence);
+    }
+    if (options.selection) payload.selection = options.selection;
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.draftSet,
       params: payload,
+      timeoutMs,
+      windowRef: getWindowRef(),
+    });
+    const normalized = asObject(result) ?? {};
+    return {
+      ...normalized,
+      conversation_id: typeof normalized.conversation_id === 'string' ? normalized.conversation_id : null,
+      transport: 'rpc',
+    };
+  }
+
+  async function setDraftSelection(options: {
+    conversationId: string;
+    clientId: string;
+    clientSequence: number;
+    selection: ComposerSelectionState;
+    timeoutMs?: number;
+  }): Promise<ConversationDraftResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.draftSelectionSet,
+      params: {
+        conversation_id: options.conversationId,
+        client_id: options.clientId,
+        client_sequence: options.clientSequence,
+        selection: options.selection,
+      },
       timeoutMs,
       windowRef: getWindowRef(),
     });
@@ -689,6 +728,7 @@ export function createConversationsRpcClient(
     forkConversation,
     setConversationPins,
     setDraft,
+    setDraftSelection,
     fetchReplayChunk,
     sendMessage,
     interruptConversation,

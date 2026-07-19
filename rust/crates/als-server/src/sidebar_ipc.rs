@@ -1,6 +1,6 @@
 use crate::{
+    composer_sync::ComposerSelection,
     conversation_rpc,
-    conversation_store::ConversationMetaUpdate,
     state::{AppState, FocusedWindowSnapshot, HostUiSnapshot},
 };
 use als_adapter_protocol::JsonMap;
@@ -10,6 +10,7 @@ use rust_socketio::{
     Payload, TransportType,
     asynchronous::{Client, ClientBuilder},
 };
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use socketioxide::SocketIo;
 use std::{
@@ -997,12 +998,14 @@ async fn process_mention(io: &SocketIo, state: &AppState, payload: JsonMap) -> R
     let col = int_field(&payload, "col");
     let end_col = int_field(&payload, "endCol");
     let content = truncated_content(payload.get("content"));
+    let mention_id = state.composer_sync.next_operation_id();
     let mut event = JsonMap::new();
     event.insert(
         "type".to_owned(),
         Value::String("mention_insert".to_owned()),
     );
     event.insert("path".to_owned(), Value::String(path.clone()));
+    event.insert("operation_id".to_owned(), Value::String(mention_id.clone()));
     event.insert(
         "conversation_id".to_owned(),
         Value::String(conversation_id.clone()),
@@ -1015,23 +1018,27 @@ async fn process_mention(io: &SocketIo, state: &AppState, payload: JsonMap) -> R
         event.insert("content".to_owned(), Value::String(content.clone()));
     }
 
-    let active_conversation = selection.active_conversation_id.as_deref() == Some(&conversation_id);
-    let focused_conversation = focused_conversation_id.as_deref() == Some(&conversation_id);
-    if focused_conversation || (selection.active_view == "conversation" && active_conversation) {
-        emit_rpc_notification(
+    if let Some(owner_socket_id) = state.composer_sync.owner_socket_id(&conversation_id)? {
+        if emit_rpc_notification_to_socket(
             io,
             CONVERSATIONS_RPC_NAMESPACE,
+            &owner_socket_id,
             "conversation.mention.inserted",
             Value::Object(event),
-        )
-        .await;
-        return Ok(
-            json!({"ok": true, "queued": false, "conversation_id": conversation_id, "path": path}),
-        );
+        ) {
+            return Ok(json!({
+                "ok": true,
+                "queued": false,
+                "conversation_id": conversation_id,
+                "path": path,
+                "operation_id": mention_id,
+            }));
+        }
+        state.composer_sync.remove_socket(&owner_socket_id)?;
     }
 
     let mut draft = meta.draft.unwrap_or_default();
-    let token = encode_draft_mention_token(
+    let token = encode_draft_mention_envelope(
         &path,
         line_no,
         end_line_no,
@@ -1043,20 +1050,29 @@ async fn process_mention(io: &SocketIo, state: &AppState, payload: JsonMap) -> R
         draft.push(' ');
     }
     draft.push_str(&token);
-    state.conversations.update_meta(
+    draft.push(' ');
+    let selection_offset = draft.encode_utf16().count();
+    let draft_selection = ComposerSelection {
+        anchor: selection_offset,
+        focus: selection_offset,
+    };
+    let updated_meta =
+        state
+            .conversations
+            .set_draft(&conversation_id, draft, Some(draft_selection))?;
+    let snapshot = state.composer_sync.note_server_draft(
         &conversation_id,
-        ConversationMetaUpdate {
-            draft: Some(draft),
-            ..Default::default()
-        },
+        draft_selection,
+        updated_meta.draft_revision,
     )?;
-    let updated_draft = state
-        .conversations
-        .load_meta(&conversation_id)?
-        .draft
-        .unwrap_or_default();
-    conversation_rpc::emit_draft_updated(io, &conversation_id, &updated_draft).await;
-    Ok(json!({"ok": true, "queued": true, "conversation_id": conversation_id, "path": path}))
+    conversation_rpc::emit_draft_updated(io, &updated_meta, &snapshot).await;
+    Ok(json!({
+        "ok": true,
+        "queued": true,
+        "conversation_id": conversation_id,
+        "path": path,
+        "operation_id": mention_id,
+    }))
 }
 
 async fn emit_rpc_notification(io: &SocketIo, namespace: &str, method: &str, params: Value) {
@@ -1068,6 +1084,31 @@ async fn emit_rpc_notification(io: &SocketIo, namespace: &str, method: &str, par
     if let Some(namespace) = io.of(namespace) {
         let _ = namespace.emit(RPC_NOTIFY_EVENT, &notification).await;
     }
+}
+
+fn emit_rpc_notification_to_socket(
+    io: &SocketIo,
+    namespace: &str,
+    socket_id: &str,
+    method: &str,
+    params: Value,
+) -> bool {
+    let Some(namespace) = io.of(namespace) else {
+        return false;
+    };
+    let Some(socket) = namespace
+        .sockets()
+        .into_iter()
+        .find(|socket| socket.id.to_string() == socket_id)
+    else {
+        return false;
+    };
+    let notification = json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+    });
+    socket.emit(RPC_NOTIFY_EVENT, &notification).is_ok()
 }
 
 fn payload_to_object(payload: Payload) -> Option<JsonMap> {
@@ -1196,7 +1237,22 @@ fn truncated_content(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn encode_draft_mention_token(
+#[derive(Serialize)]
+struct DraftMentionEnvelope<'a> {
+    path: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<String>,
+    #[serde(rename = "endLine", skip_serializing_if = "Option::is_none")]
+    end_line: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    col: Option<String>,
+    #[serde(rename = "endCol", skip_serializing_if = "Option::is_none")]
+    end_col: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a str>,
+}
+
+fn encode_draft_mention_envelope(
     path: &str,
     line_no: Option<i64>,
     end_line_no: Option<i64>,
@@ -1204,26 +1260,18 @@ fn encode_draft_mention_token(
     end_col: Option<i64>,
     content: Option<&str>,
 ) -> String {
-    let mut token = format!("`{path}");
-    if let Some(line_no) = positive(line_no) {
-        token.push_str(&format!(":{line_no}"));
-        if let Some(col) = positive(col) {
-            token.push_str(&format!(":{col}"));
-        }
-        if let Some(end_line_no) = positive(end_line_no) {
-            token.push_str(&format!("-{end_line_no}"));
-            if let Some(end_col) = positive(end_col) {
-                token.push_str(&format!(":{end_col}"));
-            }
-        }
-    }
-    token.push('`');
-    if let Some(content) = content.filter(|value| !value.trim().is_empty()) {
-        token.push_str("\n```\n");
-        token.push_str(content);
-        token.push_str("\n```");
-    }
-    token
+    let payload = DraftMentionEnvelope {
+        path,
+        line: positive(line_no).map(|value| value.to_string()),
+        end_line: positive(end_line_no).map(|value| value.to_string()),
+        col: positive(col).map(|value| value.to_string()),
+        end_col: positive(end_col).map(|value| value.to_string()),
+        content: content.filter(|value| !value.is_empty()),
+    };
+    let payload = serde_json::to_string(&payload).unwrap_or_else(|_| {
+        serde_json::to_string(&json!({ "path": path })).unwrap_or_else(|_| "{}".to_owned())
+    });
+    format!("\x1eCODEX_MENTION {payload}\x1f")
 }
 
 fn positive(value: Option<i64>) -> Option<i64> {
@@ -1233,7 +1281,7 @@ fn positive(value: Option<i64>) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        conversation_id_from_url, cwd_from_value, encode_draft_mention_token,
+        conversation_id_from_url, cwd_from_value, encode_draft_mention_envelope,
         focused_conversation_id_from_params, focused_window_snapshot_from_params,
         rpc_result_explicitly_not_ok, same_logical_path, sidebar_project_result_path,
         sidebar_rpc_result, truncated_content,
@@ -1404,17 +1452,24 @@ mod tests {
     }
 
     #[test]
-    fn encodes_draft_mention_tokens_like_legacy_python() {
+    fn encodes_draft_mentions_for_the_contenteditable_renderer() {
         assert_eq!(
-            encode_draft_mention_token("/repo/file.rs", None, None, None, None, None),
-            "`/repo/file.rs`"
+            encode_draft_mention_envelope("/repo/file.rs", None, None, None, None, None),
+            "\x1eCODEX_MENTION {\"path\":\"/repo/file.rs\"}\x1f"
         );
         assert_eq!(
-            encode_draft_mention_token("/repo/file.rs", Some(12), Some(15), Some(4), Some(8), None),
-            "`/repo/file.rs:12:4-15:8`"
+            encode_draft_mention_envelope(
+                "/repo/file.rs",
+                Some(12),
+                Some(15),
+                Some(4),
+                Some(8),
+                None
+            ),
+            "\x1eCODEX_MENTION {\"path\":\"/repo/file.rs\",\"line\":\"12\",\"endLine\":\"15\",\"col\":\"4\",\"endCol\":\"8\"}\x1f"
         );
         assert_eq!(
-            encode_draft_mention_token(
+            encode_draft_mention_envelope(
                 "/repo/file.rs",
                 Some(12),
                 None,
@@ -1422,7 +1477,7 @@ mod tests {
                 None,
                 Some("let x = 1;")
             ),
-            "`/repo/file.rs:12`\n```\nlet x = 1;\n```"
+            "\x1eCODEX_MENTION {\"path\":\"/repo/file.rs\",\"line\":\"12\",\"content\":\"let x = 1;\"}\x1f"
         );
     }
 
