@@ -74,6 +74,7 @@ interface ApprovalData {
   patch?: string;
   changes?: ApprovalPayload['changes'];
   pending_approvals?: Record<string, ApprovalData>;
+  pending_approvals_revision?: number;
   handoff_event?: ApprovalData;
   ok?: boolean;
   error?: string;
@@ -295,6 +296,53 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     return String(cardId);
   }
 
+  function pendingApprovalsRevision(value: ApprovalData | null | undefined): number {
+    const revision = Number(value?.pending_approvals_revision);
+    return Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
+  }
+
+  function upsertLivePendingApproval(evt: ApprovalData, options: ApprovalRowOptions): boolean {
+    if (approvalRowSource(options, evt) !== 'live') return true;
+    const requestId = approvalRequestId(evt);
+    const conversationMeta = getConversationMeta?.();
+    if (!requestId || !conversationMeta || typeof conversationMeta !== 'object') return true;
+    const eventConversationId = typeof evt.conversation_id === 'string' ? evt.conversation_id.trim() : '';
+    const currentConversationId = typeof conversationMeta.conversation_id === 'string'
+      ? conversationMeta.conversation_id.trim()
+      : '';
+    if (eventConversationId && currentConversationId && eventConversationId !== currentConversationId) return false;
+
+    const currentRevision = pendingApprovalsRevision(conversationMeta);
+    const eventRevision = pendingApprovalsRevision(evt);
+    if (currentRevision > eventRevision) return false;
+    const currentPending = conversationMeta.pending_approvals && typeof conversationMeta.pending_approvals === 'object'
+      ? conversationMeta.pending_approvals
+      : {};
+    const existing = currentPending[requestId] && typeof currentPending[requestId] === 'object'
+      ? currentPending[requestId]
+      : {};
+    setConversationMeta?.({
+      ...conversationMeta,
+      pending_approvals: {
+        ...currentPending,
+        [requestId]: {
+          ...existing,
+          request_id: requestId,
+          requestor_id: evt.requestor_id,
+          request_method: evt.request_method ?? evt.requestMethod,
+          request_params: evt.request_params,
+          payload: evt.payload,
+          conversation_id: evt.conversation_id || currentConversationId,
+          created_at: evt.created_at,
+          status: 'pending',
+          render_event: { ...evt },
+        },
+      },
+      pending_approvals_revision: Math.max(currentRevision, eventRevision),
+    });
+    return true;
+  }
+
   function isAskUserApproval(evt: ApprovalData = {}) {
     return approvalRequestMethod(evt) === AGENT_PTY_ASK_USER_REQUEST_METHOD;
   }
@@ -419,11 +467,22 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     } else {
         delete row.dataset.approvalKey;
     }
-    row.dataset.approvalSource = approvalRowSource(options, evt);
+    const nextSource = approvalRowSource(options, evt);
+    if (!(existingRow && row.dataset.approvalSource === 'live' && nextSource === 'pending')) {
+      row.dataset.approvalSource = nextSource;
+    }
     if (typeof evt?.request_method === 'string' && evt.request_method.trim()) {
       row.dataset.requestMethod = evt.request_method.trim();
     } else {
       delete row.dataset.requestMethod;
+    }
+    const rowRevision = Number(row.dataset.approvalRevision);
+    const eventRevision = pendingApprovalsRevision(evt);
+    if (eventRevision > 0 || !Number.isSafeInteger(rowRevision)) {
+      row.dataset.approvalRevision = String(Math.max(
+        Number.isSafeInteger(rowRevision) ? rowRevision : 0,
+        eventRevision,
+      ));
     }
     if (typeof evt?.turn_id === 'string' && evt.turn_id.trim()) {
       row.dataset.turnId = evt.turn_id.trim();
@@ -445,18 +504,24 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     return { row, body };
   }
 
-  function prunePendingApproval(requestId: unknown) {
+  function prunePendingApproval(requestId: unknown, revision = 0) {
     if (requestId === null || requestId === undefined || requestId === '') return;
     const currentMeta = getConversationMeta?.();
     if (!currentMeta || typeof currentMeta !== 'object') return;
     const pending = currentMeta.pending_approvals;
     const key = String(requestId);
-    if (!pending || typeof pending !== 'object' || !Object.prototype.hasOwnProperty.call(pending, key)) return;
-    const nextPending = { ...pending };
-    delete nextPending[key];
+    const currentRevision = pendingApprovalsRevision(currentMeta);
+    const nextRevision = Number.isSafeInteger(revision) && revision >= 0
+      ? Math.max(currentRevision, revision)
+      : currentRevision;
+    const nextPending = pending && typeof pending === 'object' ? { ...pending } : {};
+    const removed = Object.prototype.hasOwnProperty.call(nextPending, key);
+    if (removed) delete nextPending[key];
+    if (!removed && nextRevision === currentRevision) return;
     setConversationMeta?.({
       ...currentMeta,
       pending_approvals: nextPending,
+      pending_approvals_revision: nextRevision,
     });
   }
 
@@ -692,6 +757,7 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
   function renderApproval(evt: ApprovalData, options: ApprovalRowOptions = {}) {
     const requestId = approvalRequestId(evt);
     if (!requestId) return null;
+    if (!upsertLivePendingApproval(evt, options)) return null;
     const { row, body } = ensureApprovalRow(evt, options);
     applyTranscriptCardMetadata(row, evt);
 
@@ -785,9 +851,27 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
 
   function restorePendingApprovals() {
     if (!timelineEl) return;
-    timelineEl.querySelectorAll('.timeline-row[data-approval-source="pending"]').forEach((row: Element) => row.remove());
     const conversationMeta = getConversationMeta?.();
     const pending = conversationMeta?.pending_approvals;
+    const metaRevision = pendingApprovalsRevision(conversationMeta);
+    const pendingIds = new Set(
+      pending && typeof pending === 'object' ? Object.keys(pending) : [],
+    );
+    timelineEl.querySelectorAll('.timeline-row[data-approval-id]').forEach((row: Element) => {
+      if (!(row instanceof HTMLElement)) return;
+      const source = row.dataset.approvalSource;
+      if (source === 'pending') {
+        row.remove();
+        return;
+      }
+      if (source !== 'live') return;
+      const requestId = row.dataset.approvalId || '';
+      const rowRevision = Number(row.dataset.approvalRevision);
+      const normalizedRowRevision = Number.isSafeInteger(rowRevision) && rowRevision >= 0 ? rowRevision : 0;
+      if (!pendingIds.has(requestId) && metaRevision >= normalizedRowRevision) {
+        row.remove();
+      }
+    });
     if (!pending || typeof pending !== 'object') {
       onAfterRender?.();
       return;
@@ -810,7 +894,7 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
     const parentEl = options.parentEl || activeRow?.parentElement || null;
     const nextSibling = activeRow?.nextSibling || null;
     if (activeRow) activeRow.remove();
-    prunePendingApproval(requestId);
+    prunePendingApproval(requestId, pendingApprovalsRevision(evt));
     const askUserMsgId = evt?.ask_user_msg_id ?? evt?.askUserMsgId;
     const resolvedCardId = approvalCardId(evt);
     const handoffEvent = {
@@ -849,7 +933,7 @@ export function bindApprovalUi(ctx: ApprovalUiContext) {
         }
       });
     }
-    prunePendingApproval(requestId);
+    prunePendingApproval(requestId, pendingApprovalsRevision(evt));
     onAfterRender?.();
     return true;
   }

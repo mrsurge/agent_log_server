@@ -16,6 +16,7 @@ export const CONVERSATIONS_RPC_METHODS = {
   fork: 'conversation.fork',
   pinsSet: 'conversation.pins.set',
   draftSet: 'conversation.draft.set',
+  draftAuthorClaim: 'conversation.draft.author.claim',
   draftSelectionSet: 'conversation.draft.selection.set',
   send: 'conversation.send',
   interrupt: 'conversation.interrupt',
@@ -115,6 +116,8 @@ export interface ConversationDraftResult extends JsonObject {
   draft_revision?: number;
   selection_revision?: number;
   client_sequence?: number;
+  author_epoch?: number;
+  author_client_id?: string;
   draft_selection?: ComposerSelectionState;
   origin_client_id?: string;
 }

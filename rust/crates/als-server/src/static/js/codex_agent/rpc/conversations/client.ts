@@ -490,6 +490,7 @@ export function createConversationsRpcClient(
     draft: string;
     clientId?: string | null;
     clientSequence?: number;
+    authorEpoch?: number;
     selection?: ComposerSelectionState | null;
     timeoutMs?: number;
   }): Promise<ConversationDraftResult> {
@@ -505,6 +506,9 @@ export function createConversationsRpcClient(
     }
     if (Number.isSafeInteger(options.clientSequence) && Number(options.clientSequence) >= 0) {
       payload.client_sequence = Number(options.clientSequence);
+    }
+    if (Number.isSafeInteger(options.authorEpoch) && Number(options.authorEpoch) >= 0) {
+      payload.author_epoch = Number(options.authorEpoch);
     }
     if (options.selection) payload.selection = options.selection;
     const result = await callRpcNamespace({
@@ -522,10 +526,39 @@ export function createConversationsRpcClient(
     };
   }
 
+  async function claimDraftAuthor(options: {
+    conversationId: string;
+    clientId: string;
+    clientSequence: number;
+    selection: ComposerSelectionState;
+    timeoutMs?: number;
+  }): Promise<ConversationDraftResult> {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const result = await callRpcNamespace({
+      namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.draftAuthorClaim,
+      params: {
+        conversation_id: options.conversationId,
+        client_id: options.clientId,
+        client_sequence: options.clientSequence,
+        selection: options.selection,
+      },
+      timeoutMs,
+      windowRef: getWindowRef(),
+    });
+    const normalized = asObject(result) ?? {};
+    return {
+      ...normalized,
+      conversation_id: typeof normalized.conversation_id === 'string' ? normalized.conversation_id : null,
+      transport: 'rpc',
+    };
+  }
+
   async function setDraftSelection(options: {
     conversationId: string;
     clientId: string;
     clientSequence: number;
+    authorEpoch: number;
     selection: ComposerSelectionState;
     timeoutMs?: number;
   }): Promise<ConversationDraftResult> {
@@ -537,6 +570,7 @@ export function createConversationsRpcClient(
         conversation_id: options.conversationId,
         client_id: options.clientId,
         client_sequence: options.clientSequence,
+        author_epoch: options.authorEpoch,
         selection: options.selection,
       },
       timeoutMs,
@@ -728,6 +762,7 @@ export function createConversationsRpcClient(
     forkConversation,
     setConversationPins,
     setDraft,
+    claimDraftAuthor,
     setDraftSelection,
     fetchReplayChunk,
     sendMessage,

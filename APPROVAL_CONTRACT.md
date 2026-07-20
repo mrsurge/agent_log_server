@@ -44,6 +44,10 @@ The MCP ask-user request method uses the same browser-facing approval DTO, but
 its live resolver is the private `/ipc` bridge rather than an extension
 `approval.respond` handler.
 
+After persisting a request, ALS-RS adds the backend-owned
+`pending_approvals_revision` to the live event. Extensions do not allocate or
+advance this revision themselves.
+
 ### MCP ask-user identity and lifetime
 
 `agent-pty-blocks.ask_user` is an approval pause button. The MCP call may wait
@@ -141,13 +145,25 @@ live render trigger. The descriptor mirrors the Python legacy shape:
   "created_at": "2026-...",
   "updated_at": "2026-...",
   "status": "pending",
+  "pending_approvals_revision": 12,
   "render_event": {}
 }
 ```
 
 `render_event` must contain the original approval event fields used by the
-frontend. On reload, the frontend restores pending approval cards from this
+frontend, including the same `pending_approvals_revision` assigned to the
+descriptor. On reload, the frontend restores pending approval cards from this
 descriptor instead of asking the extension to replay history.
+
+`meta.pending_approvals_revision` is a monotonic conversation-local revision.
+ALS-RS advances it whenever a pending descriptor is inserted, replaced,
+updated, or removed. Request and invalidation events carry the resulting
+revision. Frontend clients merge live requests into their in-memory pending map
+immediately and reject later hydration or metadata snapshots with an older
+revision. Pending restore may reuse an existing live row, but must not downgrade
+that row to hydration-owned state or delete it because an older fetch finishes
+late. A newer authoritative snapshot removes an unresolved live row when its
+request ID is no longer present in `pending_approvals`.
 
 `requestor_id` is required for `agent-pty/ask-user` descriptors and omitted for
 provider approvals that do not use the requestor-slot contract.
@@ -217,6 +233,8 @@ present) is merged into the live handoff before broadcasting.
   `agent-pty/ask-user`.
 - ALS-RS persists `pending_approvals` from the live event or IPC registration;
   extensions do not write Rust `meta.json` directly.
+- ALS-RS owns `pending_approvals_revision`; frontend request/removal
+  reconciliation is revision-ordered rather than arrival-ordered.
 - `conversation.approval.respond` is the only frontend response method.
 - Adapter method `approval.respond` is the provider-extension fulfillment
   method; `agent-pty/ask-user` fulfillment uses `/ipc` response and ack events.

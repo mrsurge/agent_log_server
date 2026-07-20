@@ -1018,53 +1018,57 @@ async fn process_mention(io: &SocketIo, state: &AppState, payload: JsonMap) -> R
         event.insert("content".to_owned(), Value::String(content.clone()));
     }
 
-    if let Some(owner_socket_id) = state.composer_sync.owner_socket_id(&conversation_id)? {
-        if emit_rpc_notification_to_socket(
-            io,
-            CONVERSATIONS_RPC_NAMESPACE,
-            &owner_socket_id,
-            "conversation.mention.inserted",
-            Value::Object(event),
-        ) {
-            return Ok(json!({
-                "ok": true,
-                "queued": false,
-                "conversation_id": conversation_id,
-                "path": path,
-                "operation_id": mention_id,
-            }));
+    let (updated_meta, snapshot) = {
+        let _mutation_guard = state.composer_sync.mutation_guard()?;
+        if let Some(owner_socket_id) = state.composer_sync.owner_socket_id(&conversation_id)? {
+            if emit_rpc_notification_to_socket(
+                io,
+                CONVERSATIONS_RPC_NAMESPACE,
+                &owner_socket_id,
+                "conversation.mention.inserted",
+                Value::Object(event),
+            ) {
+                return Ok(json!({
+                    "ok": true,
+                    "queued": false,
+                    "conversation_id": conversation_id,
+                    "path": path,
+                    "operation_id": mention_id,
+                }));
+            }
+            state.composer_sync.remove_socket(&owner_socket_id)?;
         }
-        state.composer_sync.remove_socket(&owner_socket_id)?;
-    }
 
-    let mut draft = meta.draft.unwrap_or_default();
-    let token = encode_draft_mention_envelope(
-        &path,
-        line_no,
-        end_line_no,
-        col,
-        end_col,
-        content.as_deref(),
-    );
-    if !draft.is_empty() && !draft.ends_with([' ', '\n', '\t']) {
+        let mut draft = meta.draft.unwrap_or_default();
+        let token = encode_draft_mention_envelope(
+            &path,
+            line_no,
+            end_line_no,
+            col,
+            end_col,
+            content.as_deref(),
+        );
+        if !draft.is_empty() && !draft.ends_with([' ', '\n', '\t']) {
+            draft.push(' ');
+        }
+        draft.push_str(&token);
         draft.push(' ');
-    }
-    draft.push_str(&token);
-    draft.push(' ');
-    let selection_offset = draft.encode_utf16().count();
-    let draft_selection = ComposerSelection {
-        anchor: selection_offset,
-        focus: selection_offset,
+        let selection_offset = draft.encode_utf16().count();
+        let draft_selection = ComposerSelection {
+            anchor: selection_offset,
+            focus: selection_offset,
+        };
+        let updated_meta =
+            state
+                .conversations
+                .set_draft(&conversation_id, draft, Some(draft_selection))?;
+        let snapshot = state.composer_sync.note_server_draft(
+            &conversation_id,
+            draft_selection,
+            updated_meta.draft_revision,
+        )?;
+        (updated_meta, snapshot)
     };
-    let updated_meta =
-        state
-            .conversations
-            .set_draft(&conversation_id, draft, Some(draft_selection))?;
-    let snapshot = state.composer_sync.note_server_draft(
-        &conversation_id,
-        draft_selection,
-        updated_meta.draft_revision,
-    )?;
     conversation_rpc::emit_draft_updated(io, &updated_meta, &snapshot).await;
     Ok(json!({
         "ok": true,

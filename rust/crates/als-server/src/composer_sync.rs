@@ -18,6 +18,8 @@ pub struct ComposerSelection {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ComposerSyncSnapshot {
     pub owner_socket_id: Option<String>,
+    pub owner_client_id: Option<String>,
+    pub author_epoch: u64,
     pub origin_client_id: Option<String>,
     pub selection: Option<ComposerSelection>,
     pub selection_revision: u64,
@@ -28,6 +30,7 @@ pub struct ComposerSyncSnapshot {
 #[derive(Clone, Default)]
 pub struct ComposerSyncStore {
     inner: Arc<Mutex<ComposerSyncState>>,
+    mutation_gate: Arc<Mutex<()>>,
     operation_counter: Arc<AtomicU64>,
 }
 
@@ -40,7 +43,32 @@ struct ComposerSyncState {
 }
 
 impl ComposerSyncStore {
-    pub fn note_selection(
+    pub fn mutation_guard(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.mutation_gate
+            .lock()
+            .map_err(|_| anyhow!("composer mutation gate poisoned"))
+    }
+
+    pub fn author_write_is_current(
+        &self,
+        conversation_id: &str,
+        socket_id: &str,
+        client_id: &str,
+        client_sequence: u64,
+        author_epoch: u64,
+    ) -> Result<bool> {
+        let state = self.lock()?;
+        Ok(snapshot_author_write_is_current(
+            &state,
+            conversation_id,
+            socket_id,
+            client_id,
+            client_sequence,
+            author_epoch,
+        ))
+    }
+
+    pub fn claim_author(
         &self,
         conversation_id: &str,
         socket_id: &str,
@@ -60,7 +88,45 @@ impl ComposerSyncStore {
             .conversations
             .entry(conversation_id.to_owned())
             .or_default();
+        if snapshot.owner_socket_id.as_deref() != Some(socket_id)
+            || snapshot.owner_client_id.as_deref() != Some(client_id)
+        {
+            snapshot.author_epoch = snapshot.author_epoch.saturating_add(1);
+        }
         snapshot.owner_socket_id = Some(socket_id.to_owned());
+        snapshot.owner_client_id = Some(client_id.to_owned());
+        snapshot.origin_client_id = Some(client_id.to_owned());
+        snapshot.selection = Some(selection);
+        snapshot.selection_revision = snapshot.selection_revision.saturating_add(1);
+        snapshot.client_sequence = client_sequence;
+        Ok(Some(snapshot.clone()))
+    }
+
+    pub fn note_selection(
+        &self,
+        conversation_id: &str,
+        socket_id: &str,
+        client_id: &str,
+        client_sequence: u64,
+        author_epoch: u64,
+        selection: ComposerSelection,
+    ) -> Result<Option<ComposerSyncSnapshot>> {
+        let mut state = self.lock()?;
+        if !snapshot_author_write_is_current(
+            &state,
+            conversation_id,
+            socket_id,
+            client_id,
+            client_sequence,
+            author_epoch,
+        ) || !accept_client_sequence(&mut state, client_id, client_sequence)
+        {
+            return Ok(None);
+        }
+        let snapshot = state
+            .conversations
+            .entry(conversation_id.to_owned())
+            .or_default();
         snapshot.origin_client_id = Some(client_id.to_owned());
         snapshot.selection = Some(selection);
         snapshot.selection_revision = snapshot.selection_revision.saturating_add(1);
@@ -74,32 +140,36 @@ impl ComposerSyncStore {
         socket_id: &str,
         client_id: &str,
         client_sequence: u64,
+        author_epoch: u64,
         selection: Option<ComposerSelection>,
         draft_revision: u64,
-    ) -> Result<ComposerSyncSnapshot> {
+    ) -> Result<Option<ComposerSyncSnapshot>> {
         let mut state = self.lock()?;
-        let sequence_is_current = accept_client_sequence(&mut state, client_id, client_sequence);
-        move_socket_owner(&mut state, socket_id, conversation_id);
-        state
-            .socket_clients
-            .insert(socket_id.to_owned(), client_id.to_owned());
+        if !snapshot_author_write_is_current(
+            &state,
+            conversation_id,
+            socket_id,
+            client_id,
+            client_sequence,
+            author_epoch,
+        ) || !accept_client_sequence(&mut state, client_id, client_sequence)
+        {
+            return Ok(None);
+        }
         let snapshot = state
             .conversations
             .entry(conversation_id.to_owned())
             .or_default();
         if draft_revision >= snapshot.draft_revision {
             snapshot.draft_revision = draft_revision;
-            snapshot.owner_socket_id = Some(socket_id.to_owned());
             snapshot.origin_client_id = Some(client_id.to_owned());
-            if sequence_is_current {
-                if let Some(selection) = selection {
-                    snapshot.selection = Some(selection);
-                    snapshot.selection_revision = snapshot.selection_revision.saturating_add(1);
-                }
-                snapshot.client_sequence = client_sequence;
+            if let Some(selection) = selection {
+                snapshot.selection = Some(selection);
+                snapshot.selection_revision = snapshot.selection_revision.saturating_add(1);
             }
+            snapshot.client_sequence = client_sequence;
         }
-        Ok(snapshot.clone())
+        Ok(Some(snapshot.clone()))
     }
 
     pub fn note_server_draft(
@@ -115,6 +185,8 @@ impl ComposerSyncStore {
             .or_default();
         snapshot.draft_revision = snapshot.draft_revision.max(draft_revision);
         snapshot.owner_socket_id = None;
+        snapshot.owner_client_id = None;
+        snapshot.author_epoch = snapshot.author_epoch.saturating_add(1);
         snapshot.origin_client_id = None;
         snapshot.selection = Some(selection);
         snapshot.selection_revision = snapshot.selection_revision.saturating_add(1);
@@ -142,6 +214,8 @@ impl ComposerSyncStore {
             && snapshot.owner_socket_id.as_deref() == Some(socket_id)
         {
             snapshot.owner_socket_id = None;
+            snapshot.owner_client_id = None;
+            snapshot.author_epoch = snapshot.author_epoch.saturating_add(1);
         }
         Ok(())
     }
@@ -181,6 +255,29 @@ fn accept_client_sequence(
     true
 }
 
+fn snapshot_author_write_is_current(
+    state: &ComposerSyncState,
+    conversation_id: &str,
+    socket_id: &str,
+    client_id: &str,
+    client_sequence: u64,
+    author_epoch: u64,
+) -> bool {
+    let previous_sequence = state
+        .client_sequences
+        .get(client_id)
+        .copied()
+        .unwrap_or_default();
+    let Some(snapshot) = state.conversations.get(conversation_id) else {
+        return false;
+    };
+    snapshot.owner_socket_id.as_deref() == Some(socket_id)
+        && snapshot.owner_client_id.as_deref() == Some(client_id)
+        && snapshot.author_epoch > 0
+        && snapshot.author_epoch == author_epoch
+        && client_sequence > previous_sequence
+}
+
 fn move_socket_owner(state: &mut ComposerSyncState, socket_id: &str, conversation_id: &str) {
     if let Some(previous_conversation_id) = state
         .socket_conversations
@@ -190,6 +287,8 @@ fn move_socket_owner(state: &mut ComposerSyncState, socket_id: &str, conversatio
         && previous.owner_socket_id.as_deref() == Some(socket_id)
     {
         previous.owner_socket_id = None;
+        previous.owner_client_id = None;
+        previous.author_epoch = previous.author_epoch.saturating_add(1);
     }
 }
 
@@ -198,10 +297,10 @@ mod tests {
     use super::{ComposerSelection, ComposerSyncStore};
 
     #[test]
-    fn newest_local_activity_owns_the_conversation() {
+    fn explicit_claim_moves_conversation_authorship() {
         let store = ComposerSyncStore::default();
-        store
-            .note_selection(
+        let first = store
+            .claim_author(
                 "conv-a",
                 "socket-a",
                 "client-a",
@@ -211,9 +310,10 @@ mod tests {
                     focus: 4,
                 },
             )
+            .unwrap()
             .unwrap();
-        store
-            .note_selection(
+        let second = store
+            .claim_author(
                 "conv-a",
                 "socket-b",
                 "client-b",
@@ -223,10 +323,14 @@ mod tests {
                     focus: 8,
                 },
             )
+            .unwrap()
             .unwrap();
 
         let snapshot = store.snapshot("conv-a").unwrap().unwrap();
+        assert_eq!(first.author_epoch, 1);
+        assert_eq!(second.author_epoch, 2);
         assert_eq!(snapshot.owner_socket_id.as_deref(), Some("socket-b"));
+        assert_eq!(snapshot.owner_client_id.as_deref(), Some("client-b"));
         assert_eq!(snapshot.origin_client_id.as_deref(), Some("client-b"));
         assert_eq!(snapshot.selection.unwrap().focus, 8);
     }
@@ -235,7 +339,7 @@ mod tests {
     fn moving_and_disconnecting_a_socket_clears_stale_ownership() {
         let store = ComposerSyncStore::default();
         store
-            .note_selection(
+            .claim_author(
                 "conv-a",
                 "socket-a",
                 "client-a",
@@ -244,7 +348,7 @@ mod tests {
             )
             .unwrap();
         store
-            .note_selection(
+            .claim_author(
                 "conv-b",
                 "socket-a",
                 "client-a",
@@ -259,31 +363,36 @@ mod tests {
         );
 
         store.remove_socket("socket-a").unwrap();
-        assert_eq!(store.owner_socket_id("conv-b").unwrap(), None);
+        let snapshot = store.snapshot("conv-b").unwrap().unwrap();
+        assert_eq!(snapshot.owner_socket_id, None);
+        assert_eq!(snapshot.owner_client_id, None);
+        assert_eq!(snapshot.author_epoch, 2);
     }
 
     #[test]
-    fn stale_client_sequences_do_not_rewind_selection() {
+    fn passive_client_cannot_publish_or_take_authorship() {
         let store = ComposerSyncStore::default();
-        store
-            .note_selection(
+        let claimed = store
+            .claim_author(
                 "conv-a",
                 "socket-a",
                 "client-a",
-                2,
+                1,
                 ComposerSelection {
                     anchor: 9,
                     focus: 9,
                 },
             )
+            .unwrap()
             .unwrap();
         assert!(
             store
                 .note_selection(
                     "conv-a",
-                    "socket-a",
-                    "client-a",
+                    "socket-b",
+                    "client-b",
                     1,
+                    claimed.author_epoch,
                     ComposerSelection {
                         anchor: 2,
                         focus: 2,
@@ -292,23 +401,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(
-            store
-                .snapshot("conv-a")
-                .unwrap()
-                .unwrap()
-                .selection
-                .unwrap()
-                .focus,
-            9
-        );
+        let snapshot = store.snapshot("conv-a").unwrap().unwrap();
+        assert_eq!(snapshot.owner_client_id.as_deref(), Some("client-a"));
+        assert_eq!(snapshot.selection.unwrap().focus, 9);
     }
 
     #[test]
-    fn server_draft_fallback_clears_target_owner() {
+    fn superseded_author_epoch_rejects_delayed_draft_and_selection() {
         let store = ComposerSyncStore::default();
-        store
-            .note_selection(
+        let first = store
+            .claim_author(
                 "conv-a",
                 "socket-a",
                 "client-a",
@@ -318,6 +420,76 @@ mod tests {
                     focus: 3,
                 },
             )
+            .unwrap()
+            .unwrap();
+        let second = store
+            .claim_author(
+                "conv-a",
+                "socket-b",
+                "client-b",
+                1,
+                ComposerSelection {
+                    anchor: 8,
+                    focus: 8,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            store
+                .note_selection(
+                    "conv-a",
+                    "socket-a",
+                    "client-a",
+                    2,
+                    first.author_epoch,
+                    ComposerSelection {
+                        anchor: 4,
+                        focus: 4,
+                    },
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .note_draft(
+                    "conv-a",
+                    "socket-a",
+                    "client-a",
+                    3,
+                    first.author_epoch,
+                    Some(ComposerSelection {
+                        anchor: 5,
+                        focus: 5,
+                    }),
+                    2,
+                )
+                .unwrap()
+                .is_none()
+        );
+        let snapshot = store.snapshot("conv-a").unwrap().unwrap();
+        assert_eq!(snapshot.author_epoch, second.author_epoch);
+        assert_eq!(snapshot.owner_client_id.as_deref(), Some("client-b"));
+        assert_eq!(snapshot.selection.unwrap().focus, 8);
+    }
+
+    #[test]
+    fn server_draft_fallback_clears_target_owner() {
+        let store = ComposerSyncStore::default();
+        let claimed = store
+            .claim_author(
+                "conv-a",
+                "socket-a",
+                "client-a",
+                1,
+                ComposerSelection {
+                    anchor: 3,
+                    focus: 3,
+                },
+            )
+            .unwrap()
             .unwrap();
 
         let snapshot = store
@@ -331,7 +503,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(snapshot.owner_socket_id, None);
+        assert_eq!(snapshot.owner_client_id, None);
         assert_eq!(snapshot.origin_client_id, None);
+        assert_eq!(snapshot.author_epoch, claimed.author_epoch + 1);
         assert_eq!(snapshot.draft_revision, 4);
         assert_eq!(snapshot.selection.unwrap().focus, 12);
     }

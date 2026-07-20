@@ -1983,6 +1983,7 @@ document.addEventListener('DOMContentLoaded', () => {
     invalidateApproval: (event) => {
       invalidateApproval(event as Parameters<typeof invalidateApproval>[0]);
     },
+    restorePendingApprovals,
     renderCommandResult,
     renderViewCard,
     renderSearchCard,

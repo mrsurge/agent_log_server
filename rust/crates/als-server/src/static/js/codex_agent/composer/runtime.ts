@@ -18,6 +18,8 @@ interface ComposerConversationMeta {
   draft_revision?: number;
   draft_selection?: ComposerSelectionState;
   selection_revision?: number;
+  author_epoch?: number;
+  author_client_id?: string;
   origin_client_id?: string;
   client_sequence?: number;
   cwd?: string;
@@ -122,7 +124,11 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
   let draftRevision = 0;
   let selectionRevision = 0;
   let clientSequence = 0;
+  let authorEpoch = 0;
+  let authorClientId: string | null = null;
+  let authorClaimPromise: Promise<number | null> | null = null;
   let applyingRemoteSelection = false;
+  let suppressSelectionPublishingUntil = 0;
   const appliedMentionOperations = new Set<string>();
   const composerClientId = createComposerClientId();
 
@@ -130,6 +136,77 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     const randomUuid = windowRef.crypto?.randomUUID?.bind(windowRef.crypto);
     if (randomUuid) return `composer_${randomUuid()}`;
     return `composer_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  }
+
+  function hasFocusedComposer(): boolean {
+    return Boolean(promptEl && documentRef.hasFocus() && documentRef.activeElement === promptEl);
+  }
+
+  function selectionPublishingSuppressed(): boolean {
+    return Date.now() < suppressSelectionPublishingUntil;
+  }
+
+  function cancelSelectionSync(): void {
+    if (selectionSyncTimer) clearTimeout(selectionSyncTimer);
+    selectionSyncTimer = null;
+  }
+
+  async function claimComposerAuthorship(
+    selectionOverride: ComposerSelectionState | null = null,
+    allowUnfocused = false,
+  ): Promise<number | null> {
+    if (!promptEl) return null;
+    const conversationId = getState().conversationMeta?.conversation_id;
+    if (!conversationId) return null;
+    if (authorClientId === composerClientId && authorEpoch > 0) return authorEpoch;
+    if (!allowUnfocused && !hasFocusedComposer()) return null;
+    if (authorClaimPromise) return authorClaimPromise;
+    const selection = selectionOverride || getComposerSelectionState();
+    if (!selection) return null;
+    const sequence = ++clientSequence;
+    authorClaimPromise = conversationsRpcClient.claimDraftAuthor({
+      conversationId,
+      clientId: composerClientId,
+      clientSequence: sequence,
+      selection,
+    }).then((result) => {
+      if (getState().conversationMeta?.conversation_id !== conversationId) return null;
+      applyComposerRevisions(result);
+      if (result.stale === true || authorClientId !== composerClientId || authorEpoch <= 0) {
+        return null;
+      }
+      return authorEpoch;
+    }).catch((error) => {
+      console.warn('Composer authorship claim failed:', error);
+      return null;
+    }).finally(() => {
+      authorClaimPromise = null;
+    });
+    return authorClaimPromise;
+  }
+
+  async function writeDraftAsAuthor(
+    conversationId: string,
+    draft: string,
+    selection: ComposerSelectionState | null,
+    allowUnfocusedClaim = false,
+  ): Promise<JsonObject | null> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const claimedEpoch = await claimComposerAuthorship(selection, allowUnfocusedClaim);
+      if (!claimedEpoch) return null;
+      const sequence = ++clientSequence;
+      const result = await conversationsRpcClient.setDraft({
+        conversationId,
+        draft,
+        clientId: composerClientId,
+        clientSequence: sequence,
+        authorEpoch: claimedEpoch,
+        selection,
+      });
+      applyComposerRevisions(result);
+      if (result.stale !== true) return result;
+    }
+    return null;
   }
 
   function appendTextWithBreaks(parent: HTMLElement, text: unknown) {
@@ -253,15 +330,19 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
 
   function queueSelectionSync() {
     if (getState().applyingDraft || applyingRemoteSelection) return;
+    if (selectionPublishingSuppressed()) return;
+    if (!hasFocusedComposer()) return;
     const conversationId = getState().conversationMeta?.conversation_id;
     const selection = getComposerSelectionState();
     if (!conversationId || !selection) return;
     const signature = `${conversationId}:${selection.anchor}:${selection.focus}`;
     if (signature === lastSelectionSignature) return;
     lastSelectionSignature = signature;
-    if (selectionSyncTimer) clearTimeout(selectionSyncTimer);
-    selectionSyncTimer = setTimeout(() => {
+    cancelSelectionSync();
+    selectionSyncTimer = setTimeout(async () => {
       selectionSyncTimer = null;
+      const claimedEpoch = await claimComposerAuthorship();
+      if (!claimedEpoch || !hasFocusedComposer()) return;
       const currentConversationId = getState().conversationMeta?.conversation_id;
       const currentSelection = getComposerSelectionState();
       if (!currentConversationId || currentConversationId !== conversationId || !currentSelection) return;
@@ -270,9 +351,14 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
         conversationId,
         clientId: composerClientId,
         clientSequence: sequence,
+        authorEpoch: claimedEpoch,
         selection: currentSelection,
       }).then((result) => {
         applyComposerRevisions(result);
+        if (result.stale === true) {
+          lastSelectionSignature = null;
+          if (hasFocusedComposer()) queueSelectionSync();
+        }
       }).catch((error) => {
         lastSelectionSignature = null;
         console.warn('Composer selection sync failed:', error);
@@ -562,6 +648,8 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
 
   function applyComposerSelection(selectionState: ComposerSelectionState | null) {
     if (!promptEl || !selectionState) return;
+    cancelSelectionSync();
+    suppressSelectionPublishingUntil = Date.now() + 200;
     const draftLength = getPromptDraftText().length;
     const anchorPoint = locateDraftPoint(promptEl, Math.min(selectionState.anchor, draftLength));
     const focusPoint = locateDraftPoint(promptEl, Math.min(selectionState.focus, draftLength));
@@ -597,11 +685,21 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     const record = value as JsonObject;
     const nextDraftRevision = Number(record.draft_revision);
     const nextSelectionRevision = Number(record.selection_revision);
+    const nextAuthorEpoch = Number(record.author_epoch);
     if (Number.isSafeInteger(nextDraftRevision) && nextDraftRevision >= 0) {
       draftRevision = Math.max(draftRevision, nextDraftRevision);
     }
     if (Number.isSafeInteger(nextSelectionRevision) && nextSelectionRevision >= 0) {
       selectionRevision = Math.max(selectionRevision, nextSelectionRevision);
+    }
+    if (Number.isSafeInteger(nextAuthorEpoch) && nextAuthorEpoch >= authorEpoch) {
+      authorEpoch = nextAuthorEpoch;
+      authorClientId = typeof record.author_client_id === 'string' && record.author_client_id.trim()
+        ? record.author_client_id.trim()
+        : null;
+      if (authorClientId !== composerClientId) {
+        cancelSelectionSync();
+      }
     }
   }
 
@@ -672,10 +770,10 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     rememberComposerSelection();
   }
 
-  function persistDraftNow() {
+  async function persistDraftNow() {
     const state = getState();
     const convoId = state.conversationMeta?.conversation_id;
-    if (!convoId || !promptEl) return Promise.resolve();
+    if (!convoId || !promptEl) return;
     if (state.draftSaveTimer) {
       clearTimeout(state.draftSaveTimer);
       setState({ draftSaveTimer: null });
@@ -684,28 +782,24 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     const hash = getDraftHash(text);
     if (hash === state.lastDraftHash) {
       setState({ draftDirty: false });
-      return Promise.resolve();
+      return;
     }
-    setState({ lastDraftHash: hash });
     const selection = getComposerSelectionState();
-    const sequence = ++clientSequence;
-    return conversationsRpcClient.setDraft({
-      conversationId: convoId,
-      draft: text,
-      clientId: composerClientId,
-      clientSequence: sequence,
-      selection,
-    }).then((result) => {
-      applyComposerRevisions(result);
+    try {
+      const result = await writeDraftAsAuthor(convoId, text, selection);
+      if (!result) {
+        setState({ draftDirty: true });
+        return;
+      }
       const latestState = getState();
       if (latestState.conversationMeta && latestState.conversationMeta.conversation_id === convoId) {
         setState({ conversationMeta: { ...latestState.conversationMeta, draft: text } });
       }
-      setState({ draftDirty: false });
-    }).catch((err) => {
+      setState({ lastDraftHash: hash, draftDirty: false });
+    } catch (err) {
       setState({ draftDirty: true });
       console.warn('Immediate draft save failed:', err);
-    });
+    }
   }
 
   function queueExplicitMentionDraftSave() {
@@ -729,24 +823,20 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       const text = getPromptDraftText();
       const hash = getDraftHash(text);
       if (hash === currentState.lastDraftHash) return;
-      setState({ lastDraftHash: hash });
       try {
         const selection = getComposerSelectionState();
-        const sequence = ++clientSequence;
-        const result = await conversationsRpcClient.setDraft({
-          conversationId: convoId,
-          draft: text,
-          clientId: composerClientId,
-          clientSequence: sequence,
-          selection,
-        });
-        applyComposerRevisions(result);
+        const result = await writeDraftAsAuthor(convoId, text, selection);
+        if (!result) {
+          setState({ draftDirty: true });
+          return;
+        }
         const latestState = getState();
         if (latestState.conversationMeta && latestState.conversationMeta.conversation_id === convoId) {
           setState({ conversationMeta: { ...latestState.conversationMeta, draft: text } });
         }
-        setState({ draftDirty: false });
+        setState({ lastDraftHash: hash, draftDirty: false });
       } catch (err) {
+        setState({ draftDirty: true });
         console.warn('Draft save failed:', err);
       }
     }, 500);
@@ -756,9 +846,12 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
 
   function bindComposerSelectionTracking() {
     if (!promptEl) return;
-    const remember = () => {
-      rememberComposerSelection();
+    const remember = (event: Event) => {
+      rememberComposerSelection(
+        event.isTrusted && hasFocusedComposer() && !selectionPublishingSuppressed(),
+      );
     };
+    const stopPublishing = () => cancelSelectionSync();
     documentRef.addEventListener('selectionchange', remember);
     promptEl.addEventListener('input', remember);
     promptEl.addEventListener('keyup', remember);
@@ -766,6 +859,11 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     promptEl.addEventListener('focus', remember);
     mentionPillEl?.addEventListener('pointerdown', remember);
     windowRef.addEventListener('focus', remember);
+    promptEl.addEventListener('blur', stopPublishing);
+    windowRef.addEventListener('blur', stopPublishing);
+    documentRef.addEventListener('visibilitychange', () => {
+      if (documentRef.visibilityState !== 'visible') stopPublishing();
+    });
   }
 
   function restoreDraft() {
@@ -774,6 +872,10 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     const draft = meta?.draft;
     draftRevision = Number.isSafeInteger(meta?.draft_revision) ? Number(meta?.draft_revision) : 0;
     selectionRevision = Number.isSafeInteger(meta?.selection_revision) ? Number(meta?.selection_revision) : 0;
+    authorEpoch = 0;
+    authorClientId = null;
+    authorClaimPromise = null;
+    cancelSelectionSync();
     if (typeof draft === 'string' && draft.trim()) {
       renderPromptFromText(draft);
       setState({
@@ -797,14 +899,9 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     });
     const convoId = getState().conversationMeta?.conversation_id;
     if (convoId) {
-      const sequence = ++clientSequence;
-      conversationsRpcClient.setDraft({
-        conversationId: convoId,
-        draft: '',
-        clientId: composerClientId,
-        clientSequence: sequence,
-        selection: { anchor: 0, focus: 0 },
-      }).catch(() => {});
+      void (async () => {
+        await writeDraftAsAuthor(convoId, '', { anchor: 0, focus: 0 }, true);
+      })().catch(() => {});
     }
   }
 

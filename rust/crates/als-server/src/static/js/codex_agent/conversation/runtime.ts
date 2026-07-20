@@ -18,6 +18,8 @@ interface ConversationMetaState {
   conversation_id?: string | null;
   active_view?: string | null;
   settings?: ConversationSettingsState;
+  pending_approvals?: UnknownRecord;
+  pending_approvals_revision?: number;
 }
 
 interface RuntimeOptionsState {
@@ -126,6 +128,26 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
   }
 
+  function pendingApprovalsRevision(value: ConversationMetaState | null | undefined): number {
+    const revision = Number(value?.pending_approvals_revision);
+    return Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
+  }
+
+  function preserveNewerPendingApprovals(
+    incoming: ConversationMetaState,
+    current: ConversationMetaState | null | undefined,
+  ): ConversationMetaState {
+    if (!current || current.conversation_id !== incoming.conversation_id) return incoming;
+    const incomingRevision = pendingApprovalsRevision(incoming);
+    const currentRevision = pendingApprovalsRevision(current);
+    if (currentRevision <= incomingRevision) return incoming;
+    return {
+      ...incoming,
+      pending_approvals: current.pending_approvals,
+      pending_approvals_revision: currentRevision,
+    };
+  }
+
   function currentExtensionId() {
     const { conversationSettings = {}, conversationMeta = {}, runtimeOptions = {} } = getState();
     const candidate = conversationSettings?.agent || conversationMeta?.settings?.agent || runtimeOptions?.agent || '';
@@ -214,7 +236,7 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
       });
       if (!isRecord(result) || result.ok === false) return;
 
-      const nextConversationMeta: ConversationMetaState = result;
+      let nextConversationMeta: ConversationMetaState = result;
       const responseConversationId = normalizeConversationId(nextConversationMeta.conversation_id);
       const latestState = getState();
       const currentClientConversationId = normalizeConversationId(latestState.clientConversationId);
@@ -228,6 +250,10 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
       ) {
         return;
       }
+      nextConversationMeta = preserveNewerPendingApprovals(
+        nextConversationMeta,
+        latestState.conversationMeta,
+      );
       const nextConversationSettings = isRecord(nextConversationMeta.settings)
         ? nextConversationMeta.settings as ConversationSettingsState
         : {};

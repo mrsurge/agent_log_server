@@ -20,6 +20,9 @@ interface ConversationPreview {
 interface ConversationMetaState extends JsonObject {
   conversation_id?: string | null;
   draft?: string;
+  settings?: JsonObject;
+  pending_approvals?: JsonObject;
+  pending_approvals_revision?: number;
 }
 
 interface HostUiState {
@@ -166,6 +169,7 @@ interface EventRouterContext {
   applyRuntimeMode: (kind: string) => void;
   handoffApproval?: (event: RouterEvent) => void;
   invalidateApproval?: (event: RouterEvent) => void;
+  restorePendingApprovals?: () => void;
 }
 
 function asRouterEvent(value: unknown): RouterEvent | null {
@@ -234,6 +238,7 @@ export function bindEventRouter(ctx: EventRouterContext) {
     applyRuntimeMode,
     handoffApproval,
     invalidateApproval,
+    restorePendingApprovals,
   } = ctx;
 
   function normalizePreviewText(text: unknown, maxLen = 160): string {
@@ -381,7 +386,19 @@ export function bindEventRouter(ctx: EventRouterContext) {
     const fullMetaPatch = patch.conversation_id === conversationId
       || (patch.settings && typeof patch.settings === 'object' && !Array.isArray(patch.settings));
     if (currentMetaId === conversationId || (clientConversationId === conversationId && fullMetaPatch)) {
-      const nextMeta = { ...(currentMeta || {}), ...patch };
+      const currentApprovalRevision = Number(currentMeta?.pending_approvals_revision);
+      const patchApprovalRevision = Number(patch.pending_approvals_revision);
+      const preserveCurrentApprovals = Number.isSafeInteger(currentApprovalRevision)
+        && currentApprovalRevision >= 0
+        && (!Number.isSafeInteger(patchApprovalRevision) || patchApprovalRevision < currentApprovalRevision);
+      const nextMeta = {
+        ...(currentMeta || {}),
+        ...patch,
+        ...(preserveCurrentApprovals ? {
+          pending_approvals: currentMeta?.pending_approvals,
+          pending_approvals_revision: currentApprovalRevision,
+        } : {}),
+      };
       nextState.conversationMeta = nextMeta;
       if (nextMeta.settings && typeof nextMeta.settings === 'object' && !Array.isArray(nextMeta.settings)) {
         nextState.conversationSettings = { ...(nextMeta.settings as JsonObject) };
@@ -440,15 +457,18 @@ export function bindEventRouter(ctx: EventRouterContext) {
     const event = asRouterEvent(evt);
     if (!event) return;
     if (isInternalEvent(event)) return;
-    const state = getState();
     if (updateConversationListFromEvent(event)) return;
     updateConversationPreview(event);
     updateConversationMetaFromEvent(event);
+    const state = getState();
 
     // Filter events by conversation_id - only render events for active conversation
     const activeConvoId = state.clientConversationId || state.conversationMeta?.conversation_id || null;
     if (event.conversation_id && activeConvoId && event.conversation_id !== activeConvoId) {
       return;
+    }
+    if (event.type === 'meta_updated') {
+      restorePendingApprovals?.();
     }
     clearWaitingForEvents?.();
 

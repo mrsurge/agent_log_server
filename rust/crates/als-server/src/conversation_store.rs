@@ -129,6 +129,7 @@ impl ConversationStore {
         meta.pinned = false;
         meta.pinned_order = None;
         meta.pending_approvals = JsonMap::new();
+        meta.pending_approvals_revision = 0;
         meta.status = "active".to_owned();
         meta.created_at = now.clone();
         meta.updated_at = now;
@@ -301,6 +302,8 @@ impl ConversationStore {
             .entry("created_at".to_owned())
             .or_insert_with(|| Value::String(utc_ts()));
         descriptor.insert("updated_at".to_owned(), Value::String(utc_ts()));
+        meta.pending_approvals_revision = meta.pending_approvals_revision.saturating_add(1);
+        stamp_pending_approval_revision(&mut descriptor, meta.pending_approvals_revision);
         meta.pending_approvals
             .insert(request_id.to_owned(), Value::Object(descriptor));
         meta.updated_at = utc_ts();
@@ -385,6 +388,8 @@ impl ConversationStore {
             .entry("created_at".to_owned())
             .or_insert_with(|| Value::String(utc_ts()));
         descriptor.insert("updated_at".to_owned(), Value::String(utc_ts()));
+        meta.pending_approvals_revision = meta.pending_approvals_revision.saturating_add(1);
+        stamp_pending_approval_revision(&mut descriptor, meta.pending_approvals_revision);
         meta.pending_approvals
             .insert(request_id.to_owned(), Value::Object(descriptor));
         meta.updated_at = utc_ts();
@@ -407,6 +412,7 @@ impl ConversationStore {
             .remove(request_id.trim())
             .and_then(|value| value.as_object().cloned());
         if removed.is_some() {
+            meta.pending_approvals_revision = meta.pending_approvals_revision.saturating_add(1);
             meta.updated_at = utc_ts();
             self.write_meta_unlocked(&meta)?;
         }
@@ -732,6 +738,7 @@ impl ConversationStore {
             pinned: false,
             pinned_order: None,
             pending_approvals: JsonMap::new(),
+            pending_approvals_revision: 0,
             last_preview: None,
             status: "draft".to_owned(),
             created_at: now.clone(),
@@ -808,6 +815,8 @@ pub struct ConversationMeta {
     pub pinned_order: Option<u64>,
     #[serde(default)]
     pub pending_approvals: JsonMap,
+    #[serde(default)]
+    pub pending_approvals_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_preview: Option<Value>,
     pub status: String,
@@ -882,6 +891,8 @@ pub struct ConversationSummary {
     pub pinned_order: Option<u64>,
     #[serde(default)]
     pub pending_approvals: JsonMap,
+    #[serde(default)]
+    pub pending_approvals_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_preview: Option<Value>,
     pub status: String,
@@ -935,6 +946,7 @@ impl From<ConversationMeta> for ConversationSummary {
             pinned: meta.pinned,
             pinned_order: meta.pinned_order,
             pending_approvals: meta.pending_approvals,
+            pending_approvals_revision: meta.pending_approvals_revision,
             last_preview: meta.last_preview,
             status: meta.status,
             created_at: meta.created_at,
@@ -1284,6 +1296,22 @@ fn new_conversation_id() -> String {
     format!("conv_{}_{}", unix_millis(), std::process::id())
 }
 
+fn stamp_pending_approval_revision(descriptor: &mut JsonMap, revision: u64) {
+    descriptor.insert(
+        "pending_approvals_revision".to_owned(),
+        Value::Number(revision.into()),
+    );
+    if let Some(render_event) = descriptor
+        .get_mut("render_event")
+        .and_then(Value::as_object_mut)
+    {
+        render_event.insert(
+            "pending_approvals_revision".to_owned(),
+            Value::Number(revision.into()),
+        );
+    }
+}
+
 fn utc_ts() -> String {
     format!("unix_ms:{}", unix_millis())
 }
@@ -1372,6 +1400,84 @@ mod tests {
         assert_eq!(second.draft_revision, 2);
         assert_eq!(second.draft.as_deref(), Some("hello world"));
         assert_eq!(second.draft_selection.unwrap().focus, 11);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pending_approval_mutations_advance_and_stamp_revision() {
+        let root = std::env::temp_dir().join(format!(
+            "als-rs-store-approval-revision-test-{}",
+            unix_millis()
+        ));
+        let store = ConversationStore::new(root.clone());
+        store
+            .create(CreateConversationRequest {
+                conversation_id: Some("approval-revision-test".to_owned()),
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+
+        let first = store
+            .upsert_pending_approval(
+                "approval-revision-test",
+                "request-a",
+                json!({
+                    "requestor_id": "approval-revision-test",
+                    "request_method": "agent-pty/ask-user",
+                    "render_event": {"request_id": "request-a"},
+                })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(first.pending_approvals_revision, 1);
+        assert_eq!(
+            first.pending_approvals["request-a"]["pending_approvals_revision"],
+            1
+        );
+        assert_eq!(
+            first.pending_approvals["request-a"]["render_event"]["pending_approvals_revision"],
+            1
+        );
+
+        let (second, replaced) = store
+            .replace_pending_approval_for_requestor(
+                "approval-revision-test",
+                "request-b",
+                "approval-revision-test",
+                "agent-pty/ask-user",
+                json!({
+                    "requestor_id": "approval-revision-test",
+                    "request_method": "agent-pty/ask-user",
+                    "render_event": {"request_id": "request-b"},
+                })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(second.pending_approvals_revision, 2);
+        assert_eq!(
+            second.pending_approvals["request-b"]["pending_approvals_revision"],
+            2
+        );
+
+        assert!(
+            store
+                .remove_pending_approval("approval-revision-test", "request-b")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .load_meta("approval-revision-test")
+                .unwrap()
+                .pending_approvals_revision,
+            3
+        );
 
         let _ = fs::remove_dir_all(root);
     }

@@ -39,6 +39,7 @@ const METHOD_UPDATE: &str = "conversation.update";
 const METHOD_DELETE: &str = "conversation.delete";
 const METHOD_FORK: &str = "conversation.fork";
 const METHOD_DRAFT_SET: &str = "conversation.draft.set";
+const METHOD_DRAFT_AUTHOR_CLAIM: &str = "conversation.draft.author.claim";
 const METHOD_DRAFT_SELECTION_SET: &str = "conversation.draft.selection.set";
 const METHOD_SEND: &str = "conversation.send";
 const METHOD_REPLAY_GET_CHUNK: &str = "conversation.replay.getChunk";
@@ -62,6 +63,9 @@ pub fn register_conversations_rpc_namespace(io: &SocketIo) {
                 async |socket: SocketRef,
                        State(state): State<AppState>,
                        _reason: DisconnectReason| {
+                    let Ok(_mutation_guard) = state.composer_sync.mutation_guard() else {
+                        return;
+                    };
                     let _ = state.composer_sync.remove_socket(&socket.id.to_string());
                 },
             );
@@ -114,6 +118,9 @@ async fn dispatch_rpc(
         METHOD_DELETE => conversation_delete(&io, &state, &request.params).await,
         METHOD_FORK => conversation_fork(&io, &state, &request.params).await,
         METHOD_DRAFT_SET => conversation_draft_set(socket, &io, &state, &request.params).await,
+        METHOD_DRAFT_AUTHOR_CLAIM => {
+            conversation_draft_author_claim(socket, &io, &state, &request.params).await
+        }
         METHOD_DRAFT_SELECTION_SET => {
             conversation_draft_selection_set(socket, &io, &state, &request.params).await
         }
@@ -593,23 +600,87 @@ async fn conversation_draft_set(
     let selection = composer_selection_from_params(params, "selection");
     let client_id = composer_client_id(params, &socket);
     let client_sequence = optional_u64_direct(params, "client_sequence").unwrap_or_default();
-    let meta = state
-        .conversations
-        .set_draft(conversation_id, draft, selection)
-        .map_err(internal_error)?;
-    let snapshot = state
-        .composer_sync
-        .note_draft(
-            conversation_id,
-            &socket.id.to_string(),
-            &client_id,
-            client_sequence,
-            selection,
-            meta.draft_revision,
-        )
-        .map_err(internal_error)?;
+    let author_epoch = optional_u64_direct(params, "author_epoch").unwrap_or_default();
+    let (meta, snapshot) = {
+        let _mutation_guard = state
+            .composer_sync
+            .mutation_guard()
+            .map_err(internal_error)?;
+        if !state
+            .composer_sync
+            .author_write_is_current(
+                conversation_id,
+                &socket.id.to_string(),
+                &client_id,
+                client_sequence,
+                author_epoch,
+            )
+            .map_err(internal_error)?
+        {
+            return Ok(stale_composer_write_result(state, conversation_id)?);
+        }
+        let meta = state
+            .conversations
+            .set_draft(conversation_id, draft, selection)
+            .map_err(internal_error)?;
+        let Some(snapshot) = state
+            .composer_sync
+            .note_draft(
+                conversation_id,
+                &socket.id.to_string(),
+                &client_id,
+                client_sequence,
+                author_epoch,
+                selection,
+                meta.draft_revision,
+            )
+            .map_err(internal_error)?
+        else {
+            return Ok(stale_composer_write_result(state, conversation_id)?);
+        };
+        (meta, snapshot)
+    };
     emit_draft_updated(io, &meta, &snapshot).await;
     let mut result = draft_updated_event(&meta, &snapshot);
+    result["ok"] = Value::Bool(true);
+    result["transport"] = Value::String("rpc".to_owned());
+    Ok(result)
+}
+
+async fn conversation_draft_author_claim(
+    socket: SocketRef,
+    io: &SocketIo,
+    state: &AppState,
+    params: &JsonMap,
+) -> Result<Value, RpcError> {
+    let conversation_id = optional_str(params, "conversation_id")
+        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
+    let selection = composer_selection_from_params(params, "selection")
+        .ok_or_else(|| rpc_error(-32602, "selection is required"))?;
+    let client_id = composer_client_id(params, &socket);
+    let client_sequence = optional_u64_direct(params, "client_sequence").unwrap_or_default();
+    let snapshot = {
+        let _mutation_guard = state
+            .composer_sync
+            .mutation_guard()
+            .map_err(internal_error)?;
+        let Some(snapshot) = state
+            .composer_sync
+            .claim_author(
+                conversation_id,
+                &socket.id.to_string(),
+                &client_id,
+                client_sequence,
+                selection,
+            )
+            .map_err(internal_error)?
+        else {
+            return Ok(stale_composer_write_result(state, conversation_id)?);
+        };
+        snapshot
+    };
+    emit_draft_selection_updated(io, conversation_id, &snapshot).await;
+    let mut result = draft_selection_updated_event(conversation_id, &snapshot);
     result["ok"] = Value::Bool(true);
     result["transport"] = Value::String("rpc".to_owned());
     Ok(result)
@@ -627,27 +698,44 @@ async fn conversation_draft_selection_set(
         .ok_or_else(|| rpc_error(-32602, "selection is required"))?;
     let client_id = composer_client_id(params, &socket);
     let client_sequence = optional_u64_direct(params, "client_sequence").unwrap_or_default();
-    let Some(snapshot) = state
-        .composer_sync
-        .note_selection(
-            conversation_id,
-            &socket.id.to_string(),
-            &client_id,
-            client_sequence,
-            selection,
-        )
-        .map_err(internal_error)?
-    else {
-        return Ok(json!({
-            "ok": true,
-            "stale": true,
-            "conversation_id": conversation_id,
-            "transport": "rpc",
-        }));
+    let author_epoch = optional_u64_direct(params, "author_epoch").unwrap_or_default();
+    let snapshot = {
+        let _mutation_guard = state
+            .composer_sync
+            .mutation_guard()
+            .map_err(internal_error)?;
+        let Some(snapshot) = state
+            .composer_sync
+            .note_selection(
+                conversation_id,
+                &socket.id.to_string(),
+                &client_id,
+                client_sequence,
+                author_epoch,
+                selection,
+            )
+            .map_err(internal_error)?
+        else {
+            return Ok(stale_composer_write_result(state, conversation_id)?);
+        };
+        snapshot
     };
     emit_draft_selection_updated(io, conversation_id, &snapshot).await;
     let mut result = draft_selection_updated_event(conversation_id, &snapshot);
     result["ok"] = Value::Bool(true);
+    result["transport"] = Value::String("rpc".to_owned());
+    Ok(result)
+}
+
+fn stale_composer_write_result(state: &AppState, conversation_id: &str) -> Result<Value, RpcError> {
+    let snapshot = state
+        .composer_sync
+        .snapshot(conversation_id)
+        .map_err(internal_error)?
+        .unwrap_or_default();
+    let mut result = draft_selection_updated_event(conversation_id, &snapshot);
+    result["ok"] = Value::Bool(true);
+    result["stale"] = Value::Bool(true);
     result["transport"] = Value::String("rpc".to_owned());
     Ok(result)
 }
@@ -963,7 +1051,8 @@ async fn forward_adapter_live_event(
         {
             return Ok(());
         }
-        persist_pending_approval_event(state, &conversation_id, &event)?;
+        let meta = persist_pending_approval_event(state, &conversation_id, &event)?;
+        event["pending_approvals_revision"] = Value::Number(meta.pending_approvals_revision.into());
         emit_rpc_notification_to_namespace(io, method, event).await;
         emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
         return Ok(());
@@ -1475,6 +1564,7 @@ fn merge_composer_snapshot(value: &mut Value, snapshot: &ComposerSyncSnapshot) {
         Value::Number(current_draft_revision.max(snapshot.draft_revision).into());
     value["selection_revision"] = Value::Number(snapshot.selection_revision.into());
     value["client_sequence"] = Value::Number(snapshot.client_sequence.into());
+    value["author_epoch"] = Value::Number(snapshot.author_epoch.into());
     if let Some(selection) = snapshot.selection
         && let Ok(selection) = serde_json::to_value(selection)
     {
@@ -1482,6 +1572,9 @@ fn merge_composer_snapshot(value: &mut Value, snapshot: &ComposerSyncSnapshot) {
     }
     if let Some(client_id) = snapshot.origin_client_id.as_ref() {
         value["origin_client_id"] = Value::String(client_id.clone());
+    }
+    if let Some(client_id) = snapshot.owner_client_id.as_ref() {
+        value["author_client_id"] = Value::String(client_id.clone());
     }
 }
 
@@ -1673,13 +1766,18 @@ pub(crate) fn prepare_ask_user_interaction(
     .cloned()
     .unwrap_or_default();
     descriptor.insert("render_event".to_owned(), Value::Object(event.clone()));
-    let (_, invalidated) = state.conversations.replace_pending_approval_for_requestor(
-        &conversation_id,
-        &request_id,
-        &requestor_id,
-        AGENT_PTY_ASK_USER_REQUEST_METHOD,
-        descriptor,
-    )?;
+    let (persisted_meta, invalidated) =
+        state.conversations.replace_pending_approval_for_requestor(
+            &conversation_id,
+            &request_id,
+            &requestor_id,
+            AGENT_PTY_ASK_USER_REQUEST_METHOD,
+            descriptor,
+        )?;
+    event.insert(
+        "pending_approvals_revision".to_owned(),
+        Value::Number(persisted_meta.pending_approvals_revision.into()),
+    );
     Ok(AskUserRegistration {
         conversation_id,
         request_id,
@@ -1695,11 +1793,14 @@ pub(crate) async fn publish_ask_user_interaction(
     registration: &AskUserRegistration,
 ) {
     for descriptor in &registration.invalidated {
-        let event = build_ask_user_invalidation_event(
+        let mut event = build_ask_user_invalidation_event(
             &registration.conversation_id,
             descriptor,
             "superseded",
         );
+        if let Some(revision) = registration.event.get("pending_approvals_revision") {
+            event.insert("pending_approvals_revision".to_owned(), revision.clone());
+        }
         emit_rpc_notification_to_namespace(
             io,
             "conversation.approval.invalidated",
@@ -1742,7 +1843,12 @@ pub(crate) async fn invalidate_ask_user_interaction(
     else {
         return Ok(false);
     };
-    let event = build_ask_user_invalidation_event(&conversation_id, &removed, reason);
+    let meta = state.conversations.load_meta(&conversation_id)?;
+    let mut event = build_ask_user_invalidation_event(&conversation_id, &removed, reason);
+    event.insert(
+        "pending_approvals_revision".to_owned(),
+        Value::Number(meta.pending_approvals_revision.into()),
+    );
     emit_rpc_notification_to_namespace(
         io,
         "conversation.approval.invalidated",
@@ -1789,7 +1895,7 @@ fn persist_pending_approval_event(
     state: &AppState,
     conversation_id: &str,
     event: &Value,
-) -> Result<(), RpcError> {
+) -> Result<ConversationMeta, RpcError> {
     let event_object = event
         .as_object()
         .ok_or_else(|| rpc_error(-32603, "approval event must be an object"))?;
@@ -1876,11 +1982,11 @@ fn persist_pending_approval_event(
     descriptor.insert("created_at".to_owned(), Value::String(created_at));
     descriptor.insert("status".to_owned(), Value::String("pending".to_owned()));
     descriptor.insert("render_event".to_owned(), Value::Object(render_event));
-    state
+    let meta = state
         .conversations
         .upsert_pending_approval(conversation_id, &request_id, descriptor)
         .map_err(internal_error)?;
-    Ok(())
+    Ok(meta)
 }
 
 fn build_approval_handoff_event(
@@ -2499,6 +2605,8 @@ mod tests {
         }))
         .unwrap();
         let snapshot = ComposerSyncSnapshot {
+            owner_client_id: Some("client-a".to_owned()),
+            author_epoch: 4,
             origin_client_id: Some("client-a".to_owned()),
             selection: Some(ComposerSelection {
                 anchor: 5,
@@ -2517,6 +2625,8 @@ mod tests {
                 "draft_revision": 3,
                 "selection_revision": 7,
                 "client_sequence": 11,
+                "author_epoch": 4,
+                "author_client_id": "client-a",
                 "draft_selection": {"anchor": 5, "focus": 5},
                 "origin_client_id": "client-a",
             })
@@ -3187,6 +3297,7 @@ mod tests {
         assert_eq!(first.invalidated[0]["request_id"], "conv-registration");
         assert_eq!(first.event["request_id"], "ask_user_first");
         assert_eq!(first.event["requestor_id"], "conv-registration");
+        assert_eq!(first.event["pending_approvals_revision"], 3);
         assert_eq!(first.event["request_params"]["requestId"], "ask_user_first");
         assert_eq!(
             first.event["request_params"]["requestorId"],
@@ -3206,7 +3317,9 @@ mod tests {
         .unwrap();
         assert_eq!(second.invalidated.len(), 1);
         assert_eq!(second.invalidated[0]["request_id"], "ask_user_first");
+        assert_eq!(second.event["pending_approvals_revision"], 4);
         let meta = state.conversations.load_meta("conv-registration").unwrap();
+        assert_eq!(meta.pending_approvals_revision, 4);
         assert!(meta.pending_approvals.contains_key("provider-request"));
         assert!(meta.pending_approvals.contains_key("ask_user_second"));
         assert!(!meta.pending_approvals.contains_key("ask_user_first"));
