@@ -40,6 +40,8 @@ export interface ConversationMetaRecord extends JsonObject {
   conversation_id?: string | null;
   active_view?: string | null;
   settings?: JsonObject;
+  integrity?: string;
+  integrity_error?: string;
 }
 
 export interface ComposerSelectionState extends JsonObject {

@@ -12,6 +12,8 @@ interface ConversationMeta extends Record<string, unknown> {
   settings?: ConversationSettings;
   cwd?: string;
   status?: string;
+  integrity?: string;
+  integrity_error?: string;
   pinned?: boolean;
   pending_approvals?: Record<string, unknown>;
   last_preview?: unknown;
@@ -115,12 +117,22 @@ function conversationMatchesProject(
   hostUi: HostUiState | null | undefined,
   splashTab: string,
 ): boolean {
+  if (conversationIntegrity(meta)) return true;
   if (splashTab !== 'project') return true;
   const projectRoot = hostUi?.projectRoot;
   if (!projectRoot || typeof projectRoot !== 'string') return false;
   const cwd = conversationCwd(meta);
   if (!cwd) return false;
   return cwd === projectRoot || cwd.startsWith(`${projectRoot}/`);
+}
+
+function conversationIntegrity(
+  meta: ConversationMeta | null | undefined,
+): { kind: string; error: string } | null {
+  const kind = typeof meta?.integrity === 'string' ? meta.integrity.trim() : '';
+  if (!kind) return null;
+  const error = typeof meta?.integrity_error === 'string' ? meta.integrity_error.trim() : '';
+  return { kind, error };
 }
 
 function normalizePreviewText(value: unknown): string {
@@ -138,6 +150,19 @@ function buildConversationDisplay(
   getConversationPreview: (conversationId: string) => unknown,
 ): ConversationDisplay {
   const conversationId = meta?.conversation_id || '';
+  const integrity = conversationIntegrity(meta);
+  if (integrity) {
+    const listFailed = integrity.kind === 'list_error';
+    return {
+      conversationId,
+      titleText: listFailed ? 'Conversation list unavailable' : (conversationId || 'Unreadable conversation'),
+      labelText: listFailed ? 'Conversation list unavailable' : 'Unreadable conversation metadata',
+      statusText: listFailed ? 'error' : 'corrupt',
+      pendingCount: 0,
+      previewText: integrity.error || 'The server could not read this conversation metadata.',
+      cwdText: '',
+    };
+  }
   const settings = getConversationSettings(meta);
   const labelRaw = typeof settings.label === 'string' ? settings.label.trim() : '';
   const aliasRaw = typeof settings.alias === 'string' ? settings.alias.trim() : '';
@@ -613,6 +638,16 @@ export function createConversationDrawerList(
     return info;
   }
 
+  function buildConversationIntegrityMarker(doc: Document, meta: ConversationMeta): HTMLDivElement {
+    const integrity = conversationIntegrity(meta);
+    const marker = doc.createElement('div');
+    marker.className = 'conversation-integrity-marker';
+    marker.textContent = '!';
+    marker.title = integrity?.error || 'Conversation data is unreadable';
+    marker.setAttribute('aria-hidden', 'true');
+    return marker;
+  }
+
   function buildConversationCardControls(
     doc: Document,
     meta: ConversationMeta | null | undefined,
@@ -802,9 +837,18 @@ export function createConversationDrawerList(
 
     items.forEach((meta) => {
       const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
+      const integrity = conversationIntegrity(meta);
       const row = doc.createElement('div');
       row.className = 'conversation-row';
-      row.dataset.conversationId = conversationId;
+      if (conversationId) row.dataset.conversationId = conversationId;
+      if (integrity) {
+        row.classList.add('integrity-error');
+        row.setAttribute('role', 'status');
+        row.appendChild(buildConversationIntegrityMarker(doc, meta));
+        row.appendChild(buildConversationInfo(doc, meta));
+        conversationListEl.appendChild(row);
+        return;
+      }
       if (conversationId && conversationId === activeConversationId) row.classList.add('active');
       if (meta?.pinned === true) row.classList.add('pinned');
       bindConversationRowActivation(row, conversationId);
@@ -850,9 +894,18 @@ export function createConversationDrawerList(
 
     items.forEach((meta) => {
       const conversationId = typeof meta?.conversation_id === 'string' ? meta.conversation_id : '';
+      const integrity = conversationIntegrity(meta);
       const row = doc.createElement('div');
       row.className = 'conversation-mini-row';
-      row.dataset.conversationId = conversationId;
+      if (conversationId) row.dataset.conversationId = conversationId;
+      if (integrity) {
+        row.classList.add('integrity-error');
+        row.setAttribute('role', 'status');
+        row.appendChild(buildConversationIntegrityMarker(doc, meta));
+        row.appendChild(buildConversationInfo(doc, meta, { compact: true }));
+        conversationMiniListEl.appendChild(row);
+        return;
+      }
       if (conversationId && conversationId === activeConversationId) row.classList.add('active');
       if (meta?.pinned === true) row.classList.add('pinned');
 

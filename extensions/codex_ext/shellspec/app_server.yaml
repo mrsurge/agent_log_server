@@ -12,5 +12,8 @@ shells:
     command:
       - codex
       - app-server
+    env:
+      PYTHON_GIL: '1'
+      PYTHON_JIT: '0'
     labels:
       app: "codex-app-server-observed"

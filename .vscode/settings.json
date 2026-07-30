@@ -6,5 +6,8 @@
   ],
   "basedpyright.analysis.diagnosticMode": "workspace",
   "typescript.enablePromptUseWorkspaceTsdk": true,
-  "basedpyright.analysis.typeCheckingMode": "strict"
+  "basedpyright.analysis.typeCheckingMode": "strict",
+  "rust-analyzer.linkedProjects": [
+    "rust/Cargo.toml"
+  ]
 }

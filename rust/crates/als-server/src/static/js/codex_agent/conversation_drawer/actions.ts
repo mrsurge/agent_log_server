@@ -12,6 +12,9 @@ interface ConversationSettings extends Record<string, unknown> {
 interface ConversationMeta extends Record<string, unknown> {
   conversation_id?: string | null;
   settings?: ConversationSettings;
+  status?: string;
+  integrity?: string;
+  integrity_error?: string;
 }
 
 export interface DrawerState {
@@ -74,6 +77,7 @@ interface ConversationDrawerActionsContext {
 
 interface ConversationDrawerActionsBinding {
   fetchConversations(): Promise<void>;
+  resyncConversationList(): Promise<void>;
   setActiveView(view: string): Promise<void>;
   selectConversation(conversationId: string): Promise<void>;
   selectConversationWithView(conversationId: string, view: string): Promise<void>;
@@ -156,6 +160,7 @@ export function createConversationDrawerActions(
     sioCall,
     windowRef,
   });
+  let conversationListFetchSerial = 0;
 
   function getActiveConversationId(): string | null {
     const state = getState();
@@ -189,9 +194,13 @@ export function createConversationDrawerActions(
     setMiniDrawerOpen(!state.miniConversationDrawerOpen);
   }
 
-  async function fetchConversations() {
+  async function loadConversationList({ resetRevision = false }: { resetRevision?: boolean } = {}): Promise<void> {
+    const fetchSerial = ++conversationListFetchSerial;
+    if (resetRevision) {
+      setState({ conversationListRevision: 0 });
+    }
+    let extensionCatalog = getState().extensionCatalog;
     try {
-      let extensionCatalog = getState().extensionCatalog;
       try {
         const extData = await settingsRpcClient.listExtensions();
         extensionCatalog = Array.isArray(extData.extensions) ? extData.extensions : [];
@@ -199,7 +208,17 @@ export function createConversationDrawerActions(
         // ignore
       }
       const data = normalizeConversationListResponse(await conversationsRpcClient.listConversations());
+      if (fetchSerial !== conversationListFetchSerial) return;
       const state = getState();
+      const currentRevision = typeof state.conversationListRevision === 'number'
+        && Number.isFinite(state.conversationListRevision)
+        ? state.conversationListRevision
+        : 0;
+      if (currentRevision > data.revision) {
+        setState({ extensionCatalog });
+        syncMiniDrawerUi();
+        return;
+      }
       const conversationList = data.items;
       const ssotActiveId = data.activeConversationId;
       const highlightId = state.clientConversationId || state.conversationMeta?.conversation_id || ssotActiveId;
@@ -219,9 +238,37 @@ export function createConversationDrawerActions(
       renderSplashTabs();
       updateActiveConversationLabel();
       syncMiniDrawerUi();
-    } catch {
-      // ignore
+    } catch (error) {
+      if (fetchSerial !== conversationListFetchSerial) return;
+      if (resetRevision) {
+        const currentRevision = getState().conversationListRevision;
+        if (typeof currentRevision === 'number' && Number.isFinite(currentRevision) && currentRevision > 0) {
+          return;
+        }
+      }
+      const message = error instanceof Error
+        ? error.message
+        : String(error || 'Unknown conversation list error');
+      const diagnostic: ConversationMeta = {
+        status: 'error',
+        integrity: 'list_error',
+        integrity_error: message,
+      };
+      setState({ conversationList: [diagnostic], extensionCatalog });
+      renderConversationList([diagnostic], null);
+      renderSplashTabs();
+      updateActiveConversationLabel();
+      syncMiniDrawerUi();
+      console.error('Conversation list failed:', error);
     }
+  }
+
+  async function fetchConversations(): Promise<void> {
+    await loadConversationList();
+  }
+
+  async function resyncConversationList(): Promise<void> {
+    await loadConversationList({ resetRevision: true });
   }
 
   async function setActiveView(view: string): Promise<void> {
@@ -463,6 +510,7 @@ export function createConversationDrawerActions(
 
   return {
     fetchConversations,
+    resyncConversationList,
     setActiveView,
     selectConversation,
     selectConversationWithView,

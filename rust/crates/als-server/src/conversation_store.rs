@@ -166,8 +166,17 @@ impl ConversationStore {
             if !meta_path.exists() {
                 continue;
             }
-            let meta = read_meta(&meta_path)?;
-            summaries.push(ConversationSummary::from(meta));
+            match read_meta(&meta_path) {
+                Ok(meta) => summaries.push(ConversationSummary::from(meta)),
+                Err(error) => {
+                    let conversation_id = entry.file_name().to_string_lossy().into_owned();
+                    summaries.push(ConversationSummary::corrupt(
+                        conversation_id,
+                        format!("{error:#}"),
+                        file_modified_ts(&meta_path),
+                    ));
+                }
+            }
         }
         summaries.sort_by(compare_summaries_for_display);
         Ok(summaries)
@@ -916,6 +925,10 @@ pub struct ConversationSummary {
     pub forked_from_conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -960,6 +973,43 @@ impl From<ConversationMeta> for ConversationSummary {
             transcript_line_count: meta.transcript_line_count,
             forked_from_conversation_id: meta.forked_from_conversation_id,
             forked_from_provider_session_id: meta.forked_from_provider_session_id,
+            integrity: None,
+            integrity_error: None,
+        }
+    }
+}
+
+impl ConversationSummary {
+    fn corrupt(conversation_id: String, error: String, updated_at: String) -> Self {
+        Self {
+            conversation_id,
+            title: None,
+            agent_type: None,
+            extension_id: None,
+            thread_id: None,
+            provider_session_id: None,
+            cwd: None,
+            label: None,
+            alias: None,
+            pinned: false,
+            pinned_order: None,
+            pending_approvals: JsonMap::new(),
+            pending_approvals_revision: 0,
+            last_preview: None,
+            status: "corrupt".to_owned(),
+            created_at: updated_at.clone(),
+            updated_at,
+            settings: JsonMap::new(),
+            draft: None,
+            draft_revision: 0,
+            draft_selection: None,
+            ask_user_msg_counter: 0,
+            next_transcript_order_id: 0,
+            transcript_line_count: None,
+            forked_from_conversation_id: None,
+            forked_from_provider_session_id: None,
+            integrity: Some("corrupt".to_owned()),
+            integrity_error: Some(error),
         }
     }
 }
@@ -1316,6 +1366,15 @@ fn utc_ts() -> String {
     format!("unix_ms:{}", unix_millis())
 }
 
+fn file_modified_ts(path: &PathBuf) -> String {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| format!("unix_ms:{}", duration.as_millis()))
+        .unwrap_or_else(utc_ts)
+}
+
 fn unix_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1400,6 +1459,49 @@ mod tests {
         assert_eq!(second.draft_revision, 2);
         assert_eq!(second.draft.as_deref(), Some("hello world"));
         assert_eq!(second.draft_selection.unwrap().focus, 11);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_preserves_healthy_conversations_and_reports_corrupt_metadata() {
+        let root =
+            std::env::temp_dir().join(format!("als-rs-store-corrupt-list-test-{}", unix_millis()));
+        let store = ConversationStore::new(root.clone());
+        store
+            .create(CreateConversationRequest {
+                conversation_id: Some("healthy-conversation".to_owned()),
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+        let corrupt_path = root
+            .join("conversations")
+            .join("corrupt-conversation")
+            .join("meta.json");
+        fs::create_dir_all(corrupt_path.parent().unwrap()).unwrap();
+        fs::write(&corrupt_path, b"\0\0\0\0").unwrap();
+
+        let summaries = store.list().unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert!(
+            summaries
+                .iter()
+                .any(|summary| summary.conversation_id == "healthy-conversation"
+                    && summary.integrity.is_none())
+        );
+        let corrupt = summaries
+            .iter()
+            .find(|summary| summary.conversation_id == "corrupt-conversation")
+            .unwrap();
+        assert_eq!(corrupt.status, "corrupt");
+        assert_eq!(corrupt.integrity.as_deref(), Some("corrupt"));
+        assert!(
+            corrupt
+                .integrity_error
+                .as_deref()
+                .is_some_and(|error| error.contains("invalid conversation meta"))
+        );
+        assert_eq!(fs::read(&corrupt_path).unwrap(), b"\0\0\0\0");
 
         let _ = fs::remove_dir_all(root);
     }

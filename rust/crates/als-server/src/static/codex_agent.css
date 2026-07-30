@@ -298,6 +298,32 @@ body.conversation-reorder-dragging * {
   background: #101a14;
 }
 
+.conversation-row.integrity-error,
+.conversation-mini-row.integrity-error {
+  border-left: 4px solid var(--danger);
+  background: rgba(248, 81, 73, 0.08);
+  cursor: default;
+}
+
+.conversation-integrity-marker {
+  flex: 0 0 24px;
+  align-self: flex-start;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(248, 81, 73, 0.55);
+  color: var(--danger);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.integrity-error .conversation-label-line,
+.integrity-error .conversation-status {
+  color: var(--danger);
+}
+
 .conversation-row.drag-over,
 .conversation-mini-row.drag-over {
   outline: 1px dashed rgba(46, 160, 67, 0.8);
@@ -746,6 +772,10 @@ body.widescreen-resizing * {
 
 .conversation-mini-row:hover {
   background: #141926;
+}
+
+.conversation-mini-row.integrity-error:hover {
+  background: rgba(248, 81, 73, 0.08);
 }
 
 .conversation-mini-row.active {

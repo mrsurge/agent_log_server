@@ -833,6 +833,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderConversationList,
     renderMiniConversationList,
     fetchConversations,
+    resyncConversationList,
     setActiveView,
     selectConversation,
     selectConversationWithView,
@@ -1754,6 +1755,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let reconnectRefreshSerial = 0;
   async function refreshConversationAfterReconnect(): Promise<void> {
+    await resyncConversationList();
     const conversationId = clientConversationId || conversationMeta?.conversation_id || null;
     if (!conversationId) return;
     const refreshSerial = ++reconnectRefreshSerial;
