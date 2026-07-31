@@ -24,6 +24,7 @@ import {
   type ConversationsRpcNotificationMethod,
   type JsonObject,
   type ReplayChunkResult,
+  type TranscriptProjectionAction,
 } from './contract.ts';
 
 export interface ConversationsRpcClientDescriptor {
@@ -205,9 +206,24 @@ function normalizeReplayChunkResult(result: unknown): ReplayChunkResult {
 
   const jsonl = typeof frame.jsonl === 'string' ? frame.jsonl : '';
   const nextCursor = asObject(frame.next_cursor);
+  const projection = asObject(payload?.projection);
   return {
     conversation_id: typeof payload?.conversation_id === 'string' ? payload.conversation_id : null,
     replay_id: typeof payload?.replay_id === 'string' ? payload.replay_id : 'replay',
+    projection: projection
+      ? {
+          start: Number.isFinite(projection.start) ? Number(projection.start) : 0,
+          window_entries: Number.isFinite(projection.window_entries)
+            ? Number(projection.window_entries)
+            : 0,
+          shift_entries: Number.isFinite(projection.shift_entries)
+            ? Number(projection.shift_entries)
+            : 0,
+          at_start: projection.at_start === true,
+          at_tail: projection.at_tail === true,
+          revision: Number.isFinite(projection.revision) ? Number(projection.revision) : 0,
+        }
+      : null,
     frame: {
       format: 'jsonl',
       offset: Number.isFinite(frame.offset) ? Number(frame.offset) : 0,
@@ -232,19 +248,32 @@ async function requestReplayChunkRpc(
     maxEntries: number;
     maxBytes: number;
     timeoutMs: number;
+    projection?: {
+      action: TranscriptProjectionAction;
+      windowEntries: number;
+      shiftEntries: number;
+    };
     windowRef?: RpcWindowRef;
   },
 ): Promise<ReplayChunkResult> {
+  const rpcParams: JsonObject = {
+    conversation_id: params.conversationId,
+    cursor: { offset: params.offset },
+    max_entries: params.maxEntries,
+    max_bytes: params.maxBytes,
+    format: 'jsonl',
+  };
+  if (params.projection) {
+    rpcParams.projection = {
+      action: params.projection.action,
+      window_entries: params.projection.windowEntries,
+      shift_entries: params.projection.shiftEntries,
+    };
+  }
   const result = await callRpcNamespace({
     namespace: CONVERSATIONS_RPC_NAMESPACE,
     method: CONVERSATIONS_RPC_METHODS.replayGetChunk,
-    params: {
-      conversation_id: params.conversationId,
-      cursor: { offset: params.offset },
-      max_entries: params.maxEntries,
-      max_bytes: params.maxBytes,
-      format: 'jsonl',
-    },
+    params: rpcParams,
     timeoutMs: params.timeoutMs,
     windowRef: params.windowRef ?? (typeof window !== 'undefined' ? window : null),
   });
@@ -258,6 +287,11 @@ async function fetchReplayChunkRpcAccumulated(
     maxEntries: number;
     maxBytes: number;
     timeoutMs: number;
+    projection?: {
+      action: TranscriptProjectionAction;
+      windowEntries: number;
+      shiftEntries: number;
+    };
     windowRef?: RpcWindowRef;
   },
 ): Promise<ReplayChunkResult> {
@@ -290,6 +324,7 @@ async function fetchReplayChunkRpcAccumulated(
       ...params,
       offset: nextOffset,
       maxEntries: Math.max(1, desiredCount - items.length),
+      projection: undefined,
     });
 
     if (!nextChunk.items.length) {
@@ -310,6 +345,7 @@ async function fetchReplayChunkRpcAccumulated(
   return {
     conversation_id: firstChunk.conversation_id,
     replay_id: firstChunk.replay_id,
+    projection: firstChunk.projection,
     frame: {
       format: 'jsonl',
       offset: firstOffset,
@@ -608,6 +644,37 @@ export function createConversationsRpcClient(
     });
   }
 
+  async function fetchReplayProjection(options: {
+    conversationId?: string | null;
+    action: TranscriptProjectionAction;
+    windowEntries: number;
+    shiftEntries: number;
+    maxBytes?: number;
+    timeoutMs?: number;
+  }): Promise<ReplayChunkResult> {
+    const {
+      conversationId = null,
+      action,
+      windowEntries,
+      shiftEntries,
+      maxBytes = 524288,
+      timeoutMs = 10000,
+    } = options;
+    return fetchReplayChunkRpcAccumulated({
+      conversationId,
+      offset: 0,
+      maxEntries: windowEntries,
+      maxBytes,
+      timeoutMs,
+      projection: {
+        action,
+        windowEntries,
+        shiftEntries,
+      },
+      windowRef: getWindowRef(),
+    });
+  }
+
   async function sendMessage(options: {
     conversationId?: string | null;
     text: string;
@@ -765,6 +832,7 @@ export function createConversationsRpcClient(
     claimDraftAuthor,
     setDraftSelection,
     fetchReplayChunk,
+    fetchReplayProjection,
     sendMessage,
     interruptConversation,
     compactConversation,

@@ -28,6 +28,7 @@ interface SubagentsCollapsibleContext {
   maybeAutoScroll(force?: boolean): void;
   documentRef: Document;
   storage?: Storage | null;
+  onRowToggle?(row: HTMLElement, expanded: boolean): void;
 }
 
 export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
@@ -37,6 +38,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
     maybeAutoScroll,
     documentRef,
     storage,
+    onRowToggle,
   } = ctx;
 
   const subagentContainers = new Map<string, SubagentContainerRecord>();
@@ -145,6 +147,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       syncExpandedState(expanded);
       syncExpandedPathLabels(expanded);
       if (typeof onToggle === 'function') onToggle(expanded);
+      onRowToggle?.(rowEl, expanded);
       maybeAutoScroll();
       return expanded;
     }

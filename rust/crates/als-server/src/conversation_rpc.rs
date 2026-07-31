@@ -4,7 +4,7 @@ use crate::{
     composer_sync::{ComposerSelection, ComposerSyncSnapshot},
     conversation_store::{
         ConversationMeta, ConversationMetaUpdate, CreateConversationRequest,
-        ForkConversationRequest, TranscriptOffset,
+        ForkConversationRequest, TranscriptOffset, TranscriptProjectionAction,
     },
     ipc, sidebar_ipc,
     state::AppState,
@@ -63,10 +63,13 @@ pub fn register_conversations_rpc_namespace(io: &SocketIo) {
                 async |socket: SocketRef,
                        State(state): State<AppState>,
                        _reason: DisconnectReason| {
-                    let Ok(_mutation_guard) = state.composer_sync.mutation_guard() else {
-                        return;
-                    };
-                    let _ = state.composer_sync.remove_socket(&socket.id.to_string());
+                    let socket_id = socket.id.to_string();
+                    if let Ok(_mutation_guard) = state.composer_sync.mutation_guard() {
+                        let _ = state.composer_sync.remove_socket(&socket_id);
+                    }
+                    let _ = state
+                        .conversations
+                        .clear_transcript_projections_for_client(&socket_id);
                 },
             );
         },
@@ -124,7 +127,10 @@ async fn dispatch_rpc(
         METHOD_DRAFT_SELECTION_SET => {
             conversation_draft_selection_set(socket, &io, &state, &request.params).await
         }
-        METHOD_REPLAY_GET_CHUNK => conversation_replay_get_chunk(&state, &request.params),
+        METHOD_REPLAY_GET_CHUNK => {
+            let client_id = socket.id.to_string();
+            conversation_replay_get_chunk(&state, &request.params, &client_id).await
+        }
         METHOD_SEND => conversation_send(socket, io, state, request.params).await,
         METHOD_PINS_SET => conversation_pins_set(&io, &state, &request.params).await,
         METHOD_APPROVAL_RESPOND => {
@@ -740,9 +746,14 @@ fn stale_composer_write_result(state: &AppState, conversation_id: &str) -> Resul
     Ok(result)
 }
 
-fn conversation_replay_get_chunk(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+async fn conversation_replay_get_chunk(
+    state: &AppState,
+    params: &JsonMap,
+    client_id: &str,
+) -> Result<Value, RpcError> {
     let conversation_id = optional_str(params, "conversation_id")
-        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?;
+        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?
+        .to_owned();
     let offset = match optional_i64(params, "cursor", "offset").unwrap_or(0) {
         value if value < 0 => TranscriptOffset::Latest,
         value => TranscriptOffset::Absolute(value as usize),
@@ -750,16 +761,85 @@ fn conversation_replay_get_chunk(state: &AppState, params: &JsonMap) -> Result<V
     let max_entries = optional_u64_direct(params, "max_entries")
         .unwrap_or(200)
         .max(1) as usize;
-    let replay = state
-        .conversations
-        .read_transcript_chunk(conversation_id, offset, max_entries)
-        .map_err(internal_error)?;
+    let max_bytes = optional_u64_direct(params, "max_bytes")
+        .unwrap_or(512 * 1024)
+        .clamp(1, 8 * 1024 * 1024) as usize;
+    let projection = optional_map(params, "projection");
+    let projection_action = projection
+        .as_ref()
+        .and_then(|value| value.get("action"))
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "tail" => Ok(TranscriptProjectionAction::Tail),
+            "older" => Ok(TranscriptProjectionAction::Older),
+            "newer" => Ok(TranscriptProjectionAction::Newer),
+            "current" => Ok(TranscriptProjectionAction::Current),
+            _ => Err(rpc_error(-32602, "invalid transcript projection action")),
+        })
+        .transpose()?;
+    let window_entries = projection
+        .as_ref()
+        .and_then(|value| value.get("window_entries"))
+        .and_then(Value::as_u64)
+        .unwrap_or(max_entries as u64)
+        .max(1) as usize;
+    let shift_entries = projection
+        .as_ref()
+        .and_then(|value| value.get("shift_entries"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| (window_entries / 4).max(1) as u64)
+        .max(1) as usize;
+    let conversations = state.conversations.clone();
+    let read_conversation_id = conversation_id.clone();
+    let read_client_id = client_id.to_owned();
+    let (replay, projection_meta) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        if let Some(action) = projection_action {
+            let projection = conversations.project_transcript(
+                &read_client_id,
+                &read_conversation_id,
+                action,
+                window_entries,
+                shift_entries,
+                max_bytes,
+            )?;
+            let meta = (
+                projection.start,
+                projection.window_entries,
+                projection.shift_entries,
+                projection.at_start,
+                projection.at_tail,
+                projection.revision,
+            );
+            Ok((projection.chunk, Some(meta)))
+        } else {
+            let chunk = conversations.read_transcript_range(
+                &read_conversation_id,
+                offset,
+                max_entries,
+                max_bytes,
+            )?;
+            Ok((chunk, None))
+        }
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
     let next_offset = replay.offset + replay.rows.len();
     let complete = next_offset >= replay.total_count;
     let jsonl = replay.rows.join("\n");
     Ok(json!({
         "conversation_id": conversation_id,
         "replay_id": format!("als-rs-{conversation_id}"),
+        "projection": projection_meta.map(
+            |(start, window_entries, shift_entries, at_start, at_tail, revision)| json!({
+                "start": start,
+                "window_entries": window_entries,
+                "shift_entries": shift_entries,
+                "at_start": at_start,
+                "at_tail": at_tail,
+                "revision": revision,
+            })
+        ),
         "frame": {
             "format": "jsonl",
             "offset": replay.offset,

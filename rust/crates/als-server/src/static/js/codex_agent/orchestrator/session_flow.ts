@@ -104,7 +104,7 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
       setActivity('save settings first', true);
       return;
     }
-    if (state.transcriptHistoryMode === true && typeof snapTranscriptToLive === 'function') {
+    if (typeof snapTranscriptToLive === 'function') {
       await snapTranscriptToLive();
     }
     setState({ autoScroll: true });

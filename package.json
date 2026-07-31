@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit && npm run lint:types --silent"
   },
   "dependencies": {
+    "@chenglou/pretext": "^0.0.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
     "highlight.js": "^11.11.1",
     "highlightjs-diff": "^1.0.0",

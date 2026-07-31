@@ -29,6 +29,8 @@ interface AssistantStreamContext {
   incrementMessages(): void;
   stripCitations(text: string): string;
   maybeAutoScroll(): void;
+  onMessageStreaming?(row: HTMLElement): void;
+  onMessageFinalized?(row: HTMLElement, text: string): void;
 }
 
 interface AssistantStreamBinding {
@@ -66,6 +68,8 @@ export function bindAssistantStream(ctx: AssistantStreamContext): AssistantStrea
     incrementMessages,
     stripCitations,
     maybeAutoScroll,
+    onMessageStreaming,
+    onMessageFinalized,
   } = ctx;
 
   function getAssistantRow(
@@ -98,6 +102,7 @@ export function bindAssistantStream(ctx: AssistantStreamContext): AssistantStrea
         entry = { row, container, pre, useMarkdown: false, counted: false, rawText: '' };
       }
       assistantRows.set(key, entry);
+      onMessageStreaming?.(row);
     } else {
       applyTranscriptCardMetadata(entry.row, metadata);
     }
@@ -153,6 +158,7 @@ export function bindAssistantStream(ctx: AssistantStreamContext): AssistantStrea
       incrementMessages();
       entry.counted = true;
     }
+    onMessageFinalized?.(entry.row, finalText);
   }
 
   return { getAssistantRow, appendAssistantDelta, finalizeAssistant };

@@ -4,8 +4,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
+    collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Seek, SeekFrom, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -15,6 +16,23 @@ use std::{
 pub struct ConversationStore {
     root: PathBuf,
     lock: Arc<Mutex<()>>,
+    transcript_indexes: Arc<Mutex<HashMap<String, TranscriptLineIndex>>>,
+    transcript_projections: Arc<Mutex<HashMap<(String, String), TranscriptProjectionCursor>>>,
+}
+
+#[derive(Clone, Debug)]
+struct TranscriptLineIndex {
+    file_len: u64,
+    line_offsets: Vec<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct TranscriptProjectionCursor {
+    start: usize,
+    window_entries: usize,
+    shift_entries: usize,
+    at_tail: bool,
+    revision: u64,
 }
 
 impl ConversationStore {
@@ -22,6 +40,8 @@ impl ConversationStore {
         Self {
             root: data_dir.join("conversations"),
             lock: Arc::new(Mutex::new(())),
+            transcript_indexes: Arc::new(Mutex::new(HashMap::new())),
+            transcript_projections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -532,6 +552,14 @@ impl ConversationStore {
         }
         fs::remove_dir_all(&dir)
             .with_context(|| format!("failed to delete conversation {}", dir.display()))?;
+        self.transcript_indexes
+            .lock()
+            .map_err(|_| anyhow!("transcript index lock poisoned"))?
+            .remove(&safe_id);
+        self.transcript_projections
+            .lock()
+            .map_err(|_| anyhow!("transcript projection lock poisoned"))?
+            .retain(|(_, conversation_id), _| conversation_id != &safe_id);
         Ok(true)
     }
 
@@ -572,13 +600,26 @@ impl ConversationStore {
         let dir = self.conversation_dir_unlocked(&meta.conversation_id);
         fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create conversation dir {}", dir.display()))?;
+        let transcript_path = dir.join("transcript.jsonl");
+        let previous_file_len = fs::metadata(&transcript_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let serialized = serde_json::to_string(&entry)?;
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("transcript.jsonl"))
+            .open(&transcript_path)
             .context("failed to open transcript for append")?;
-        writeln!(file, "{}", serde_json::to_string(&entry)?)
-            .context("failed to append transcript row")?;
+        writeln!(file, "{serialized}").context("failed to append transcript row")?;
+        self.record_appended_transcript_rows_unlocked(
+            &meta.conversation_id,
+            previous_file_len,
+            &[serialized.len()],
+        )?;
+        self.advance_tail_projections_unlocked(
+            &meta.conversation_id,
+            meta.transcript_line_count.unwrap_or_default(),
+        )?;
         self.write_meta_unlocked(&meta)?;
         Ok(entry)
     }
@@ -633,15 +674,29 @@ impl ConversationStore {
         let dir = self.conversation_dir_unlocked(&meta.conversation_id);
         fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create conversation dir {}", dir.display()))?;
+        let transcript_path = dir.join("transcript.jsonl");
+        let previous_file_len = fs::metadata(&transcript_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let serialized_rows = rows
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()?;
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("transcript.jsonl"))
+            .open(&transcript_path)
             .context("failed to open transcript for append")?;
-        for row in &rows {
-            writeln!(file, "{}", serde_json::to_string(row)?)
-                .context("failed to append transcript row")?;
+        for row in &serialized_rows {
+            writeln!(file, "{row}").context("failed to append transcript row")?;
         }
+        let row_lengths = serialized_rows.iter().map(String::len).collect::<Vec<_>>();
+        self.record_appended_transcript_rows_unlocked(
+            &meta.conversation_id,
+            previous_file_len,
+            &row_lengths,
+        )?;
+        self.advance_tail_projections_unlocked(&meta.conversation_id, line_count)?;
         self.write_meta_unlocked(&meta)?;
         Ok(rows)
     }
@@ -667,16 +722,111 @@ impl ConversationStore {
             .collect()
     }
 
-    pub fn read_transcript_chunk(
+    pub fn read_transcript_range(
         &self,
         conversation_id: &str,
         offset: TranscriptOffset,
         limit: usize,
+        max_bytes: usize,
     ) -> Result<TranscriptChunk> {
         let _guard = self
             .lock
             .lock()
             .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        self.read_transcript_range_unlocked(conversation_id, offset, limit, max_bytes)
+    }
+
+    pub fn project_transcript(
+        &self,
+        client_id: &str,
+        conversation_id: &str,
+        action: TranscriptProjectionAction,
+        window_entries: usize,
+        shift_entries: usize,
+        max_bytes: usize,
+    ) -> Result<TranscriptProjection> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow!("conversation store lock poisoned"))?;
+        let safe_id = sanitize_conversation_id(conversation_id);
+        let path = self
+            .conversation_dir_unlocked(&safe_id)
+            .join("transcript.jsonl");
+        let window_entries = window_entries.max(1);
+        let shift_entries = shift_entries.max(1).min(window_entries);
+        let total_count = if path.exists() {
+            self.transcript_total_count_unlocked(&safe_id, &path)?
+        } else {
+            0
+        };
+        let max_start = total_count.saturating_sub(window_entries);
+        let key = (client_id.to_owned(), safe_id.clone());
+        let (start, revision) = {
+            let mut projections = self
+                .transcript_projections
+                .lock()
+                .map_err(|_| anyhow!("transcript projection lock poisoned"))?;
+            let cursor = projections
+                .entry(key)
+                .or_insert_with(|| TranscriptProjectionCursor {
+                    start: max_start,
+                    window_entries,
+                    shift_entries,
+                    at_tail: true,
+                    revision: 0,
+                });
+            cursor.window_entries = window_entries;
+            cursor.shift_entries = shift_entries;
+            let current_start = if cursor.at_tail {
+                max_start
+            } else {
+                cursor.start.min(max_start)
+            };
+            cursor.start = match action {
+                TranscriptProjectionAction::Tail => max_start,
+                TranscriptProjectionAction::Older => current_start.saturating_sub(shift_entries),
+                TranscriptProjectionAction::Newer => {
+                    current_start.saturating_add(shift_entries).min(max_start)
+                }
+                TranscriptProjectionAction::Current => current_start,
+            };
+            cursor.at_tail = cursor.start >= max_start;
+            cursor.revision = cursor.revision.saturating_add(1);
+            (cursor.start, cursor.revision)
+        };
+        let chunk = self.read_transcript_range_unlocked(
+            &safe_id,
+            TranscriptOffset::Absolute(start),
+            window_entries,
+            max_bytes,
+        )?;
+        Ok(TranscriptProjection {
+            chunk,
+            start,
+            window_entries,
+            shift_entries,
+            at_start: start == 0,
+            at_tail: start >= max_start,
+            revision,
+        })
+    }
+
+    pub fn clear_transcript_projections_for_client(&self, client_id: &str) -> Result<()> {
+        self.transcript_projections
+            .lock()
+            .map_err(|_| anyhow!("transcript projection lock poisoned"))?
+            .retain(|(projection_client_id, _), _| projection_client_id != client_id);
+        Ok(())
+    }
+
+    fn read_transcript_range_unlocked(
+        &self,
+        conversation_id: &str,
+        offset: TranscriptOffset,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<TranscriptChunk> {
         let safe_id = sanitize_conversation_id(conversation_id);
         let path = self
             .conversation_dir_unlocked(&safe_id)
@@ -689,20 +839,83 @@ impl ConversationStore {
             });
         }
         let limit = limit.max(1);
-        let meta_path = self.conversation_dir_unlocked(&safe_id).join("meta.json");
-        let known_total_count = if meta_path.exists() {
-            read_meta(&meta_path)?.transcript_line_count
-        } else {
-            None
+        let max_bytes = max_bytes.max(1);
+        self.transcript_total_count_unlocked(&safe_id, &path)?;
+        let indexes = self
+            .transcript_indexes
+            .lock()
+            .map_err(|_| anyhow!("transcript index lock poisoned"))?;
+        let index = indexes
+            .get(&safe_id)
+            .ok_or_else(|| anyhow!("transcript index missing after rebuild"))?;
+        read_indexed_transcript_projection(&path, offset, limit, max_bytes, index)
+    }
+
+    fn transcript_total_count_unlocked(&self, safe_id: &str, path: &PathBuf) -> Result<usize> {
+        let file_len = fs::metadata(path)
+            .with_context(|| format!("failed to stat transcript {}", path.display()))?
+            .len();
+        let mut indexes = self
+            .transcript_indexes
+            .lock()
+            .map_err(|_| anyhow!("transcript index lock poisoned"))?;
+        let rebuild_index = indexes
+            .get(safe_id)
+            .map(|index| index.file_len != file_len)
+            .unwrap_or(true);
+        if rebuild_index {
+            indexes.insert(safe_id.to_owned(), build_transcript_line_index(path)?);
+        }
+        indexes
+            .get(safe_id)
+            .map(|index| index.line_offsets.len())
+            .ok_or_else(|| anyhow!("transcript index missing after rebuild"))
+    }
+
+    fn record_appended_transcript_rows_unlocked(
+        &self,
+        conversation_id: &str,
+        previous_file_len: u64,
+        row_lengths: &[usize],
+    ) -> Result<()> {
+        let safe_id = sanitize_conversation_id(conversation_id);
+        let mut indexes = self
+            .transcript_indexes
+            .lock()
+            .map_err(|_| anyhow!("transcript index lock poisoned"))?;
+        let Some(index) = indexes.get_mut(&safe_id) else {
+            return Ok(());
         };
-        match offset {
-            TranscriptOffset::Absolute(offset) => {
-                read_transcript_chunk_at(&path, offset, limit, known_total_count)
-            }
-            TranscriptOffset::Latest => {
-                read_latest_transcript_chunk(&path, limit, known_total_count)
+        if index.file_len != previous_file_len {
+            indexes.remove(&safe_id);
+            return Ok(());
+        }
+        let mut next_offset = previous_file_len;
+        for row_len in row_lengths {
+            index.line_offsets.push(next_offset);
+            next_offset = next_offset.saturating_add(*row_len as u64 + 1);
+        }
+        index.file_len = next_offset;
+        Ok(())
+    }
+
+    fn advance_tail_projections_unlocked(
+        &self,
+        conversation_id: &str,
+        total_count: usize,
+    ) -> Result<()> {
+        let safe_id = sanitize_conversation_id(conversation_id);
+        let mut projections = self
+            .transcript_projections
+            .lock()
+            .map_err(|_| anyhow!("transcript projection lock poisoned"))?;
+        for ((_, projection_conversation_id), cursor) in projections.iter_mut() {
+            if projection_conversation_id == &safe_id && cursor.at_tail {
+                cursor.start = total_count.saturating_sub(cursor.window_entries);
+                cursor.revision = cursor.revision.saturating_add(1);
             }
         }
+        Ok(())
     }
 
     fn load_or_default_meta_unlocked(&self, conversation_id: &str) -> Result<ConversationMeta> {
@@ -937,11 +1150,30 @@ pub enum TranscriptOffset {
     Latest,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptProjectionAction {
+    Tail,
+    Older,
+    Newer,
+    Current,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TranscriptChunk {
     pub offset: usize,
     pub total_count: usize,
     pub rows: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TranscriptProjection {
+    pub chunk: TranscriptChunk,
+    pub start: usize,
+    pub window_entries: usize,
+    pub shift_entries: usize,
+    pub at_start: bool,
+    pub at_tail: bool,
+    pub revision: u64,
 }
 
 impl From<ConversationMeta> for ConversationSummary {
@@ -1210,50 +1442,83 @@ fn read_meta(path: &PathBuf) -> Result<ConversationMeta> {
         .with_context(|| format!("invalid conversation meta {}", path.display()))
 }
 
-fn read_transcript_chunk_at(
-    path: &PathBuf,
-    offset: usize,
-    limit: usize,
-    known_total_count: Option<usize>,
-) -> Result<TranscriptChunk> {
+fn build_transcript_line_index(path: &PathBuf) -> Result<TranscriptLineIndex> {
     let file = fs::File::open(path)
         .with_context(|| format!("failed to open transcript {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut rows = Vec::new();
-    let mut total_count = 0usize;
-    for line in reader.lines() {
-        let line = line.with_context(|| format!("failed to read transcript {}", path.display()))?;
+    let file_len = file.metadata()?.len();
+    let mut reader = BufReader::new(file);
+    let mut line_offsets = Vec::new();
+    let mut line = String::new();
+    loop {
+        let line_offset = reader.stream_position()?;
+        line.clear();
+        if reader
+            .read_line(&mut line)
+            .with_context(|| format!("failed to read transcript {}", path.display()))?
+            == 0
+        {
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }
-        if total_count >= offset && rows.len() < limit {
-            rows.push(line);
-        }
-        total_count += 1;
-        if known_total_count.is_some() && rows.len() >= limit {
-            break;
-        }
+        line_offsets.push(line_offset);
     }
-    let total_count = known_total_count.unwrap_or(total_count);
-    Ok(TranscriptChunk {
-        offset: offset.min(total_count),
-        total_count,
-        rows,
+    Ok(TranscriptLineIndex {
+        file_len,
+        line_offsets,
     })
 }
 
-fn read_latest_transcript_chunk(
+fn read_indexed_transcript_projection(
     path: &PathBuf,
+    offset: TranscriptOffset,
     limit: usize,
-    known_total_count: Option<usize>,
+    max_bytes: usize,
+    index: &TranscriptLineIndex,
 ) -> Result<TranscriptChunk> {
-    let total_count = match known_total_count {
-        Some(count) => count,
-        None => count_transcript_lines(path)?,
+    let total_count = index.line_offsets.len();
+    let start = match offset {
+        TranscriptOffset::Absolute(offset) => offset.min(total_count),
+        TranscriptOffset::Latest => total_count.saturating_sub(limit),
     };
-    let rows = read_tail_lines(path, limit)?;
+    if start >= total_count {
+        return Ok(TranscriptChunk {
+            offset: start,
+            total_count,
+            rows: Vec::new(),
+        });
+    }
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open transcript {}", path.display()))?;
+    file.seek(SeekFrom::Start(index.line_offsets[start]))
+        .with_context(|| format!("failed to seek transcript {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut rows = Vec::with_capacity(limit.min(total_count - start));
+    let mut used_bytes = 0usize;
+    let mut line = String::new();
+    while rows.len() < limit && start + rows.len() < total_count {
+        line.clear();
+        if reader
+            .read_line(&mut line)
+            .with_context(|| format!("failed to read transcript {}", path.display()))?
+            == 0
+        {
+            break;
+        }
+        let row = line.trim_end_matches(['\r', '\n']);
+        if row.trim().is_empty() {
+            continue;
+        }
+        let row_bytes = row.len().saturating_add(1);
+        if !rows.is_empty() && used_bytes.saturating_add(row_bytes) > max_bytes {
+            break;
+        }
+        used_bytes = used_bytes.saturating_add(row_bytes);
+        rows.push(row.to_owned());
+    }
     Ok(TranscriptChunk {
-        offset: total_count.saturating_sub(rows.len()),
+        offset: start,
         total_count,
         rows,
     })
@@ -1269,49 +1534,11 @@ fn count_transcript_lines(path: &PathBuf) -> Result<usize> {
     let mut total_count = 0usize;
     for line in reader.lines() {
         let line = line.with_context(|| format!("failed to read transcript {}", path.display()))?;
-        if line.trim().is_empty() {
-            continue;
+        if !line.trim().is_empty() {
+            total_count += 1;
         }
-        total_count += 1;
     }
     Ok(total_count)
-}
-
-fn read_tail_lines(path: &PathBuf, limit: usize) -> Result<Vec<String>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("failed to open transcript {}", path.display()))?;
-    let file_len = file.metadata()?.len();
-    if file_len == 0 {
-        return Ok(Vec::new());
-    }
-
-    let mut window_size = 64 * 1024u64;
-    loop {
-        let read_size = window_size.min(file_len);
-        file.seek(SeekFrom::Start(file_len - read_size))
-            .with_context(|| format!("failed to seek transcript {}", path.display()))?;
-        let mut buf = vec![0u8; read_size as usize];
-        file.read_exact(&mut buf)
-            .with_context(|| format!("failed to read transcript tail {}", path.display()))?;
-        let at_start = read_size == file_len;
-        let mut parts = buf.split(|byte| *byte == b'\n').collect::<Vec<_>>();
-        if !at_start && !parts.is_empty() {
-            parts.remove(0);
-        }
-        let mut lines = parts
-            .into_iter()
-            .filter(|line| !line.iter().all(|byte| byte.is_ascii_whitespace()))
-            .map(|line| String::from_utf8_lossy(line).to_string())
-            .collect::<Vec<_>>();
-        if lines.len() >= limit || at_start {
-            let keep_from = lines.len().saturating_sub(limit);
-            return Ok(lines.split_off(keep_from));
-        }
-        window_size = (window_size * 2).min(file_len);
-    }
 }
 
 fn sanitize_conversation_id(value: &str) -> String {
@@ -1604,7 +1831,7 @@ mod tests {
         }
 
         let latest = store
-            .read_transcript_chunk("latest-test", TranscriptOffset::Latest, 2)
+            .read_transcript_range("latest-test", TranscriptOffset::Latest, 2, usize::MAX)
             .unwrap();
         assert_eq!(latest.total_count, 5);
         assert_eq!(latest.offset, 3);
@@ -1620,13 +1847,121 @@ mod tests {
         );
 
         let middle = store
-            .read_transcript_chunk("latest-test", TranscriptOffset::Absolute(1), 2)
+            .read_transcript_range("latest-test", TranscriptOffset::Absolute(1), 2, usize::MAX)
             .unwrap();
         assert_eq!(middle.total_count, 5);
         assert_eq!(middle.offset, 1);
         assert_eq!(middle.rows.len(), 2);
         assert!(middle.rows[0].contains("\"text\":\"row 1\""));
         assert!(middle.rows[1].contains("\"text\":\"row 2\""));
+
+        let byte_bounded = store
+            .read_transcript_range("latest-test", TranscriptOffset::Absolute(1), 4, 1)
+            .unwrap();
+        assert_eq!(byte_bounded.offset, 1);
+        assert_eq!(byte_bounded.total_count, 5);
+        assert_eq!(byte_bounded.rows.len(), 1);
+        assert!(byte_bounded.rows[0].contains("\"text\":\"row 1\""));
+
+        store
+            .append_transcript("latest-test", json!({"role": "user", "text": "row 5"}))
+            .unwrap();
+        let latest_after_append = store
+            .read_transcript_range("latest-test", TranscriptOffset::Latest, 2, usize::MAX)
+            .unwrap();
+        assert_eq!(latest_after_append.total_count, 6);
+        assert!(latest_after_append.rows[0].contains("\"text\":\"row 4\""));
+        assert!(latest_after_append.rows[1].contains("\"text\":\"row 5\""));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transcript_projection_position_is_server_owned_per_client() {
+        let root =
+            std::env::temp_dir().join(format!("als-rs-store-projection-test-{}", unix_millis()));
+        let store = ConversationStore::new(root.clone());
+        store
+            .create(CreateConversationRequest {
+                conversation_id: Some("projection-test".to_owned()),
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+        for idx in 0..10 {
+            store
+                .append_transcript(
+                    "projection-test",
+                    json!({"role": "user", "text": format!("row {idx}")}),
+                )
+                .unwrap();
+        }
+
+        let tail = store
+            .project_transcript(
+                "client-a",
+                "projection-test",
+                TranscriptProjectionAction::Tail,
+                4,
+                1,
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(tail.start, 6);
+        assert!(tail.at_tail);
+        assert!(tail.chunk.rows[0].contains("\"text\":\"row 6\""));
+
+        let older = store
+            .project_transcript(
+                "client-a",
+                "projection-test",
+                TranscriptProjectionAction::Older,
+                4,
+                1,
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(older.start, 5);
+        assert!(!older.at_tail);
+
+        let independent_tail = store
+            .project_transcript(
+                "client-b",
+                "projection-test",
+                TranscriptProjectionAction::Current,
+                4,
+                1,
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(independent_tail.start, 6);
+        assert!(independent_tail.at_tail);
+
+        store
+            .append_transcript("projection-test", json!({"role": "user", "text": "row 10"}))
+            .unwrap();
+        let detached_current = store
+            .project_transcript(
+                "client-a",
+                "projection-test",
+                TranscriptProjectionAction::Current,
+                4,
+                1,
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(detached_current.start, 5);
+        let advanced_tail = store
+            .project_transcript(
+                "client-b",
+                "projection-test",
+                TranscriptProjectionAction::Current,
+                4,
+                1,
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(advanced_tail.start, 7);
+        assert!(advanced_tail.at_tail);
 
         let _ = fs::remove_dir_all(root);
     }

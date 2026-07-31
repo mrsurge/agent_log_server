@@ -1,4 +1,7 @@
-import { TRANSCRIPT_PRELOAD_ROWS } from '../transcript_config.ts';
+import {
+  TRANSCRIPT_PRELOAD_ROWS,
+  TRANSCRIPT_PROJECTION_GUARD_VIEWPORTS,
+} from '../transcript_config.ts';
 import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
 
 const INTERRUPT_ARM_TIMEOUT_MS = 10_000;
@@ -98,6 +101,7 @@ interface InputFlowContext {
   maybeAutoScroll: (force?: boolean) => void;
   isNearBottom: () => boolean;
   loadOlderTranscript: () => void;
+  loadNewerTranscript: () => void;
   snapTranscriptToLive?: () => Promise<unknown>;
   fetchConversation: (conversationId: string) => Promise<unknown>;
   restorePendingApprovals: () => void;
@@ -133,6 +137,7 @@ export function bindInputFlow(ctx: InputFlowContext) {
     maybeAutoScroll,
     isNearBottom,
     loadOlderTranscript,
+    loadNewerTranscript,
     snapTranscriptToLive,
     fetchConversation,
     restorePendingApprovals,
@@ -146,6 +151,8 @@ export function bindInputFlow(ctx: InputFlowContext) {
     documentRef,
     windowRef,
   } = ctx;
+  let lastProjectionScrollTop = elements.scrollContainer?.scrollTop || 0;
+  let projectionScrollDirection = 0;
   const conversationsRpcClient = createConversationsRpcClient({
     windowRef,
   });
@@ -248,11 +255,44 @@ export function bindInputFlow(ctx: InputFlowContext) {
   function handleScroll() {
     const state = getState();
     if (!scrollContainer) return;
-    if (!state.transcriptLoading && (state.transcriptStart ?? 0) > 0) {
-      const topSpacerHeight = state.topSpacerEl ? state.topSpacerEl.getBoundingClientRect().height : 0;
-      const preloadPx = Math.max(120, (Number(state.estimatedRowHeight) || 0) * TRANSCRIPT_PRELOAD_ROWS);
-      if (scrollContainer.scrollTop <= topSpacerHeight + preloadPx) {
+    const nextScrollTop = scrollContainer.scrollTop;
+    const scrollDelta = nextScrollTop - lastProjectionScrollTop;
+    lastProjectionScrollTop = nextScrollTop;
+    if (!state.scrollProgrammatic && Math.abs(scrollDelta) >= 0.5) {
+      projectionScrollDirection = Math.sign(scrollDelta);
+    }
+    const scrollableHeight = Math.max(
+      0,
+      scrollContainer.scrollHeight - scrollContainer.clientHeight,
+    );
+    const projectionGuardPx = Math.min(
+      scrollableHeight / 3,
+      Math.max(
+        scrollContainer.clientHeight * TRANSCRIPT_PROJECTION_GUARD_VIEWPORTS,
+        (Number(state.estimatedRowHeight) || 0) * TRANSCRIPT_PRELOAD_ROWS,
+      ),
+    );
+    const topSpacerHeight = state.topSpacerEl ? state.topSpacerEl.getBoundingClientRect().height : 0;
+    const distanceFromProjectedTop = Math.max(0, scrollContainer.scrollTop - topSpacerHeight);
+    const distanceFromBottom = Math.max(
+      0,
+      scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight,
+    );
+    const hasOlderProjection = (state.transcriptStart ?? 0) > 0;
+    const hasNewerProjection = (state.transcriptEnd ?? 0) < (state.transcriptTotal ?? 0);
+    if (!state.transcriptLoading && !state.scrollProgrammatic) {
+      if (
+        hasOlderProjection
+        && projectionScrollDirection < 0
+        && distanceFromProjectedTop <= projectionGuardPx
+      ) {
         loadOlderTranscript();
+      } else if (
+        hasNewerProjection
+        && projectionScrollDirection > 0
+        && distanceFromBottom <= projectionGuardPx
+      ) {
+        loadNewerTranscript();
       }
     }
     if (!state.scrollProgrammatic && state.autoScroll && !isNearBottom()) {
@@ -262,16 +302,22 @@ export function bindInputFlow(ctx: InputFlowContext) {
       });
       updateScrollButton();
     }
-    if (!state.transcriptLoading && !state.scrollProgrammatic && !state.autoScroll && isNearBottom()) {
-      repinTranscript(state);
+    if (
+      !state.transcriptLoading
+      && !state.scrollProgrammatic
+      && !state.autoScroll
+      && !hasNewerProjection
+      && isNearBottom()
+    ) {
+      repinTranscript();
     }
   }
 
-  function repinTranscript(state: InputFlowState = getState()) {
+  function repinTranscript() {
     setState({ autoScroll: true });
     updateScrollButton();
     maybeAutoScroll(true);
-    if (state.transcriptHistoryMode === true && typeof snapTranscriptToLive === 'function') {
+    if (typeof snapTranscriptToLive === 'function') {
       void snapTranscriptToLive()
         .then(() => {
           maybeAutoScroll(true);
@@ -300,7 +346,7 @@ export function bindInputFlow(ctx: InputFlowContext) {
       updateScrollButton();
       return;
     }
-    repinTranscript(state);
+    repinTranscript();
   }
 
   function handleResize() {

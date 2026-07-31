@@ -80,9 +80,21 @@ export interface ReplayChunkFrame {
   jsonl: string;
 }
 
+export type TranscriptProjectionAction = 'tail' | 'older' | 'newer' | 'current';
+
+export interface TranscriptProjectionState {
+  start: number;
+  window_entries: number;
+  shift_entries: number;
+  at_start: boolean;
+  at_tail: boolean;
+  revision: number;
+}
+
 export interface ReplayChunkResult {
   conversation_id: string | null;
   replay_id: string;
+  projection: TranscriptProjectionState | null;
   frame: ReplayChunkFrame;
   items: JsonObject[];
   transport: ConversationsRpcTransport;

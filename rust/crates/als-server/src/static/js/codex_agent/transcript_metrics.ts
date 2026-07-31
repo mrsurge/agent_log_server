@@ -52,7 +52,12 @@ export function bindTranscriptMetrics(ctx: TranscriptMetricsContext): Transcript
   function measureRowHeight() {
     if (!timelineEl) return;
     const rows = Array.from(timelineEl.querySelectorAll<HTMLElement>('.timeline-row'))
-      .filter((row) => !row.classList.contains('activity') && !row.classList.contains('muted'));
+      .filter((row) => (
+        !row.classList.contains('activity')
+        && !row.classList.contains('muted')
+        && !row.closest('.timeline-virtual-placeholder')
+        && row.getBoundingClientRect().height > 0
+      ));
     if (!rows.length) return;
     const total = rows.reduce((sum, row) => sum + row.getBoundingClientRect().height, 0);
     if (total > 0) {

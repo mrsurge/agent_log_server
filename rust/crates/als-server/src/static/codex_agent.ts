@@ -48,6 +48,7 @@ import { bindSubagentsCollapsible } from './js/codex_agent/subagents/collapsible
 import { bindTimelineRows } from './js/codex_agent/timeline/rows.ts';
 import { bindTimelineLiveItems } from './js/codex_agent/timeline/live_items.ts';
 import { bindTimelineReplay } from './js/codex_agent/timeline/replay.ts';
+import { bindTimelineVirtualizer } from './js/codex_agent/timeline/virtualizer.ts';
 import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations/client.ts';
 import { createSettingsRpcClient } from './js/codex_agent/rpc/settings/client.ts';
 import { createUiRpcClient } from './js/codex_agent/rpc/ui/client.ts';
@@ -434,6 +435,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let transcriptLimit = DEFAULT_TRANSCRIPT_LIMIT;
   let transcriptLoading = false;
   let transcriptHistoryMode = false;
+  let hasBufferedLiveTranscript = false;
+  let collapseTranscriptToPinnedImpl: () => Promise<boolean> = async () => false;
   let estimatedRowHeight = 28;
   let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastDraftHash: string | null = null;
@@ -696,6 +699,20 @@ document.addEventListener('DOMContentLoaded', () => {
   let renderTranscriptEntries = (_items: AnyRecord[], _opts: AnyRecord = {}) => {};
   let restorePendingApprovals = () => {};
 
+  const timelineVirtualizer = bindTimelineVirtualizer({
+    timelineEl,
+    scrollContainer,
+    documentRef: document,
+    windowRef: window,
+    isAutoScroll: () => autoScroll,
+    setScrollProgrammatic: (value) => { _scrollProgrammatic = value; },
+    onLayout: () => {
+      timelineStickyHeaders?.update?.();
+      const averageHeight = timelineVirtualizer.averageMeasuredRowHeight();
+      if (averageHeight !== null) estimatedRowHeight = averageHeight;
+    },
+  });
+
   const timelineRows = bindTimelineRows({
     getState: () => ({
       bottomSpacerEl,
@@ -724,6 +741,8 @@ document.addEventListener('DOMContentLoaded', () => {
     renderMarkdownItBlock,
     stripCitations: (text: string) => stripCitations(text) || '',
     maybeAutoScroll,
+    onRowInserted: timelineVirtualizer.registerRow,
+    onMessageFinalized: timelineVirtualizer.registerFinalizedMessage,
   });
 
   const {
@@ -756,6 +775,7 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     documentRef: document,
     storage: window.localStorage,
+    onRowToggle: (row) => timelineVirtualizer.invalidateRow(row),
   });
 
   getSubagentContainer = subagentsCollapsible.getSubagentContainer;
@@ -1218,7 +1238,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateScrollButton() {
     if (!scrollBtn) return;
-    scrollBtn.textContent = autoScroll ? 'Pinned' : 'Free';
+    scrollBtn.textContent = autoScroll
+      ? 'Pinned'
+      : (hasBufferedLiveTranscript ? 'Free (new)' : 'Free');
     scrollBtn.classList.toggle('active', autoScroll);
   }
 
@@ -1420,9 +1442,12 @@ document.addEventListener('DOMContentLoaded', () => {
     getSubagentContainer: (id, name, intent) => ({ ...getSubagentContainer(id, name, intent) }),
     requestCardRuntime,
     onAfterRender: () => {
+      timelineVirtualizer.scheduleLayout();
       timelineStickyHeaders?.update?.();
       maybeAutoScroll();
     },
+    onMessageStreaming: (row) => timelineVirtualizer.markMessageStreaming(row, true),
+    onMessageFinalized: timelineVirtualizer.registerFinalizedMessage,
   });
 
   const {
@@ -1603,6 +1628,8 @@ document.addEventListener('DOMContentLoaded', () => {
     applyRuntimeMode,
     measureRowHeight,
     updateSpacerHeights,
+    resetVirtualizer: timelineVirtualizer.reset,
+    syncVirtualizer: timelineVirtualizer.syncRows,
   });
 
   resetTimeline = timelineReplay.resetTimeline;
@@ -1887,9 +1914,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   const {
-    fetchTranscriptRange,
     loadOlderTranscript,
+    loadNewerTranscript,
     replayTranscript,
+    collapseTranscriptToPinned,
   } = bindTranscriptLoader({
     getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
     sioCall,
@@ -1913,6 +1941,7 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     renderTranscriptEntries,
     prepareTranscriptWindow: timelineReplay.prepareTranscriptWindow,
+    prepareTranscriptProjection: timelineReplay.prepareTranscriptProjection,
     timelineEl,
     scrollContainer,
     setScrollProgrammatic: (v: unknown) => { _scrollProgrammatic = Boolean(v); },
@@ -1921,8 +1950,21 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     setLastEventType: (v: string) => { lastEventType = v; },
     refreshPlanSurface,
+    refreshRuntimeSurface: async () => {
+      await Promise.all([
+        fetchStatus(),
+        Promise.resolve(refreshPlanSurface()),
+      ]);
+    },
     restorePendingApprovals,
+    onLiveProjectionRestored: () => {
+      hasBufferedLiveTranscript = false;
+      updateScrollButton();
+    },
+    captureVirtualAnchor: timelineVirtualizer.captureTranscriptAnchor,
+    restoreVirtualAnchor: timelineVirtualizer.restoreTranscriptAnchor,
   });
+  collapseTranscriptToPinnedImpl = collapseTranscriptToPinned;
 
   const { handleEvent } = bindEventRouter({
     getState: () => ({
@@ -2057,14 +2099,25 @@ document.addEventListener('DOMContentLoaded', () => {
     return Boolean(eventConversationId && activeConversationId && eventConversationId === activeConversationId);
   }
 
-  function recordLiveTranscriptOrder(evt: AnyRecord): void {
+  function recordLiveTranscriptOrder(evt: AnyRecord): boolean {
+    const projectedAtTail = transcriptEnd >= transcriptTotal;
     const orderId = parseTranscriptOrderId(evt.order_id ?? evt.orderId);
     if (orderId === null || orderId < 0) {
-      return;
+      return projectedAtTail;
     }
     const nextOrder = orderId + 1;
     transcriptTotal = Math.max(Number(transcriptTotal) || 0, nextOrder);
-    transcriptEnd = Math.max(Number(transcriptEnd) || 0, nextOrder);
+    if (projectedAtTail) {
+      transcriptEnd = Math.max(Number(transcriptEnd) || 0, nextOrder);
+    }
+    return projectedAtTail;
+  }
+
+  function isDetachedApprovalLifecycleEvent(evt: AnyRecord | null): boolean {
+    const evtType = transcriptEventType(evt);
+    return evtType === 'approval'
+      || evtType === 'approval_handoff'
+      || evtType === 'approval_invalidated';
   }
 
   function trimTranscriptHead(): void {
@@ -2074,25 +2127,44 @@ document.addEventListener('DOMContentLoaded', () => {
     if (rows.length <= limit) return;
     const excess = rows.length - limit;
     for (let i = 0; i < excess; i++) {
-      rows[i].remove();
+      timelineVirtualizer.removeRow(rows[i]);
     }
     transcriptStart += excess;
     updateSpacerHeights();
   }
 
   async function snapTranscriptToLive(): Promise<void> {
-    trimTranscriptHead();
+    const restored = await collapseTranscriptToPinnedImpl();
+    if (!restored) {
+      return;
+    }
+    hasBufferedLiveTranscript = false;
     transcriptHistoryMode = false;
+    updateScrollButton();
   }
 
   function handleSocketEvent(event: unknown): void {
     const evt = event && typeof event === 'object' ? event as AnyRecord : null;
     let isTranscriptMutation = false;
+    const isVisibleTranscriptMutation = isCurrentConversationEvent(evt)
+      && isVisibleTranscriptCardRecord(evt);
+    const projectionDetachedBeforeEvent = transcriptHistoryMode
+      && transcriptEnd < transcriptTotal;
     if (isCurrentConversationEvent(evt) && isTranscriptMutationLiveEvent(evt)) {
       isTranscriptMutation = true;
       recordLiveTranscriptOrder(evt as AnyRecord);
     }
+    if (
+      projectionDetachedBeforeEvent
+      && isVisibleTranscriptMutation
+      && !isDetachedApprovalLifecycleEvent(evt)
+    ) {
+      hasBufferedLiveTranscript = true;
+      updateScrollButton();
+      return;
+    }
     handleEvent(event);
+    timelineVirtualizer.scheduleLayout();
     if (isTranscriptMutation && autoScroll) {
       trimTranscriptHead();
     }
@@ -2418,6 +2490,7 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     isNearBottom,
     loadOlderTranscript,
+    loadNewerTranscript,
     snapTranscriptToLive,
     fetchConversation,
     restorePendingApprovals,

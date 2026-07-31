@@ -2134,6 +2134,19 @@ textarea {
   flex-shrink: 0;
 }
 
+.timeline-virtual-placeholder {
+  width: 100%;
+  min-height: 1px;
+  flex: 0 0 auto;
+  contain: strict;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.timeline-virtual-placeholder > .timeline-row[hidden] {
+  display: none !important;
+}
+
 .timeline-row {
   border-top: 1px solid #202634;
   border-bottom: 1px solid #12151d;

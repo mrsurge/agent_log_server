@@ -26,6 +26,8 @@ interface TimelineRowsContext {
   renderMarkdownItBlock(text: string): Node;
   stripCitations(text: string): string;
   maybeAutoScroll(force?: boolean): void;
+  onRowInserted?(row: HTMLElement): void;
+  onMessageFinalized?(row: HTMLElement, text: string): void;
 }
 
 const WAITING_FOR_EVENTS_LABEL = 'Waiting for events...';
@@ -49,6 +51,8 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     renderMarkdownItBlock,
     stripCitations,
     maybeAutoScroll,
+    onRowInserted,
+    onMessageFinalized,
   } = ctx;
 
   function clearPlaceholder() {
@@ -74,6 +78,7 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     } else {
       timelineEl.appendChild(row);
     }
+    onRowInserted?.(row);
     maybeAutoScroll();
   }
 
@@ -142,6 +147,7 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     if (parentEl) {
       clearPlaceholder();
       if (row.parentElement !== parentEl) parentEl.appendChild(row);
+      onRowInserted?.(row);
       maybeAutoScroll();
     } else {
       insertRow(row, beforeEl);
@@ -255,6 +261,7 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
       pre.textContent = cleanText;
       body.append(pre);
     }
+    if (useMessageCard) onMessageFinalized?.(row, cleanText);
     incrementMessages();
     maybeAutoScroll();
   }

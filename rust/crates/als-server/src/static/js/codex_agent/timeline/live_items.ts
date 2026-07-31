@@ -103,6 +103,8 @@ interface LiveItemsContext {
   getSubagentContainer(id: string, name: string, intent: string): SubagentContainerRecord;
   requestCardRuntime: RequestCardRuntime;
   onAfterRender(): void;
+  onMessageStreaming?(row: HTMLElement): void;
+  onMessageFinalized?(row: HTMLElement, text: string): void;
 }
 
 export function bindTimelineLiveItems(ctx: LiveItemsContext) {
@@ -150,6 +152,8 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     getSubagentContainer,
     requestCardRuntime,
     onAfterRender,
+    onMessageStreaming,
+    onMessageFinalized,
   } = ctx;
 
   function setLastEventType(value: string) {
@@ -169,6 +173,8 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
     highlightCode,
     incrementMessages,
     stripCitations,
+    onMessageStreaming,
+    onMessageFinalized,
     maybeAutoScroll: () => {
       setLastEventType('message');
       maybeAutoScroll();
@@ -513,10 +519,12 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
       collapsed = !collapsed;
       toggleBtn.textContent = collapsed ? '[+]' : '[-]';
       list.style.display = collapsed ? 'none' : 'flex';
+      onAfterRender();
     });
 
     setLastEventType('plan');
     maybeAutoScroll();
+    onAfterRender();
   }
 
   const approvalUi = bindApprovalUi({

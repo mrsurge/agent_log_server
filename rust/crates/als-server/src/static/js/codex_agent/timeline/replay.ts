@@ -106,6 +106,8 @@ interface TimelineReplayContext {
   applyRuntimeMode(kind: string): void;
   measureRowHeight(): void;
   updateSpacerHeights(): void;
+  resetVirtualizer(): void;
+  syncVirtualizer(): void;
 }
 
 export function bindTimelineReplay(ctx: TimelineReplayContext) {
@@ -160,21 +162,28 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     applyRuntimeMode,
     measureRowHeight,
     updateSpacerHeights,
+    resetVirtualizer,
+    syncVirtualizer,
   } = ctx;
 
   function resetTimeline() {
     initializeReplayWindow({ bumpGeneration: true, showPlaceholder: true });
   }
 
-  function initializeReplayWindow(options: { bumpGeneration: boolean; showPlaceholder: boolean }) {
-    if (!timelineEl) return;
-    timelineEl.innerHTML = '';
+  function clearReplayRowState(): void {
     assistantRows.clear();
     reasoningRows.clear();
     diffRows.clear();
     toolRows.clear();
     shellRows.clear();
     agentBlockRows.clear();
+  }
+
+  function initializeReplayWindow(options: { bumpGeneration: boolean; showPlaceholder: boolean }) {
+    if (!timelineEl) return;
+    resetVirtualizer();
+    timelineEl.innerHTML = '';
+    clearReplayRowState();
     resetPlanState();
     const topSpacerEl = documentRef.createElement('div');
     topSpacerEl.className = 'timeline-spacer';
@@ -217,6 +226,26 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
 
   function prepareTranscriptWindow() {
     initializeReplayWindow({ bumpGeneration: false, showPlaceholder: false });
+  }
+
+  function prepareTranscriptProjection() {
+    if (!timelineEl) return;
+    const state = getState();
+    resetVirtualizer();
+    clearReplayRowState();
+    for (const child of Array.from(timelineEl.children)) {
+      if (!(child instanceof HTMLElement)) continue;
+      if (child === state.topSpacerEl || child === state.planOverlayEl) continue;
+      if (child.classList.contains('activity')) continue;
+      child.remove();
+    }
+    setState({
+      messageCount: 0,
+      lastEventType: null,
+    });
+    setCounter(counterMessagesEl, 0);
+    setPlaceholderCleared(true);
+    clearWaitingForEvents();
   }
 
   function isInternalTranscriptItem(entry: TranscriptEntry) {
@@ -681,10 +710,12 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     }
     measureRowHeight();
     updateSpacerHeights();
+    syncVirtualizer();
   }
 
   return {
     prepareTranscriptWindow,
+    prepareTranscriptProjection,
     resetTimeline,
     renderTranscriptEntries,
   };
