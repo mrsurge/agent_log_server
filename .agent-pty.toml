@@ -2,4 +2,4 @@
 # Auto-managed by kb tools.
 
 [knowledge]
-files = ["AGENTS.md", "fastHTML_README.md", "META_JSON_APPROVALS_PLAN.md", "THIRD_PARTY_EXTENSION_WORKFLOW.md", ".repo_memory.md", "worktrees/notes/ALS_RS_MIGRATION_PLAN.md", "worktrees/notes/old-notes/PATCHED_APP_SERVER.md", "AGENT_EXTENSION_INTEGRATION.md", "TRANSCRIPT_CARD_CONTRACTS.md"]
+files = ["THIRD_PARTY_EXTENSION_WORKFLOW.md", ".repo_memory.md", "ALS_RS_TECHNICAL_REFERENCE.md"]
