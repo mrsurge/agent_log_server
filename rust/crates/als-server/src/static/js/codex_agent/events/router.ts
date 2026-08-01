@@ -121,7 +121,7 @@ interface EventRouterContext {
   finalizePlanToTranscript: (...args: unknown[]) => void;
   renderErrorCard: (event: RouterEvent) => void;
   setStatusDot: (status: string) => void;
-  renderWarningCard: (message: string, action: unknown) => void;
+  renderWarningCard: (message: string, action: unknown, metadata?: RouterEvent | null) => void;
   clearWaitingForEvents?: () => void;
   clearReasoningRibbon: () => void;
   setReasoningRibbon: (text: string) => void;
@@ -484,7 +484,7 @@ export function bindEventRouter(ctx: EventRouterContext) {
         return;
       case 'warning':
         setLastEventType('warning');
-        renderWarningCard(event.message || '', event.action || null);
+        renderWarningCard(event.message || '', event.action || null, event);
         setStatusDot('warning');
         return;
       case 'import_started':

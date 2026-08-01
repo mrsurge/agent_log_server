@@ -22,6 +22,8 @@ mod socketio;
 mod state;
 mod static_assets;
 mod te2_readiness;
+mod transcript_card_projection;
+mod turn_projection;
 mod ui_rpc;
 
 use crate::config::ServerConfig;

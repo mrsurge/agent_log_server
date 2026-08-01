@@ -759,7 +759,7 @@ Implemented methods:
 | `conversation.delete` | Deletes a Rust conversation directory. |
 | `conversation.pins.set` | Persists ordered pin state directly onto conversation metadata and returns the normalized valid pin list. |
 | `conversation.draft.set` | Stores draft text on conversation metadata. |
-| `conversation.replay.getChunk` | Reads transcript JSONL rows and returns the frontend replay chunk frame shape. |
+| `conversation.replay.getChunk` | Returns raw JSONL chunks for explicit raw reads, or backend-owned 75-card projection recipes plus runtime state for transcript UI navigation. |
 | `conversation.send` | Appends/broadcasts the user message, resolves the selected extension from persisted metadata/settings, initializes that extension through the generic adapter, and sends the turn through the adapter. Adapter provider session ids are persisted back to metadata. |
 
 Backend-driven list sync:
@@ -978,20 +978,72 @@ Canonical card details live in `TRANSCRIPT_CARD_CONTRACTS.md`; approvals live in
 
 ### Rust-owned transcript projection
 
-ALS-RS owns transcript window position as a process-local projection cursor
-keyed by Socket.IO client and conversation. The browser requests `tail`, `older`,
-or `newer`; Rust applies a bounded 200-entry window with 50-entry overlapping
-shifts and returns only the active projection. Transcript line-offset indexes
-seek directly to selected rows, enforce the existing byte frame budget, and run
-blocking file reads outside the async executor.
+ALS-RS owns durable transcript position as a process-local card cursor keyed
+by Socket.IO client and conversation. The browser requests `tail`, `older`,
+`newer`, or `current`; Rust serves a bounded 75-card window with 20-card
+shifts. These units are deliberately distinct:
 
-The browser replaces its active projection rather than accumulating history.
-While detached from tail, ordinary live transcript rows buffer, but status,
-token, mode, and blocking approval lifecycle surfaces remain current. Sending,
-selecting the pinned affordance, initial replay, and reconnect replay repin to
-the Rust tail before normal live rendering resumes.
+- a raw transcript record is one append-only JSONL object
+- a transcript card is one user-visible semantic item and may reduce several
+  records; state-only and hidden records produce no card
+- a layout row is a mounted card root or virtual placeholder and is only browser
+  geometry
 
-Within the bounded projection, the Pretext hybrid virtualizer:
+A cached line-offset plus card index classifies records as create, update,
+runtime state, or hidden. It preserves and updates explicit card IDs, generates
+stable IDs when needed, reduces repeated family/source snapshots to their
+latest record, groups agent-PTY and subagent lifecycles, and includes required
+parent cards for nested recipes. Raw line counts remain diagnostics only.
+Projection responses use `frame.format: "card_recipes"` and
+`projection.unit: "transcript_card"`; they carry card-unit bounds, total and
+window counts, authoritative `at_start`/`at_tail` flags, ordered
+`cards[]` recipes, and separate `runtime_state[]`. Every recipe event carries
+authoritative card ID/index/operation/scope metadata. Durable recipes use scope
+`durable`; process-local turn recipes use scope `active`. A byte-budget overflow
+is an explicit error, never a partial card window.
+
+Durable `transcript.jsonl` remains append-only and final-event-only. Rust also
+owns a separate process-local active-turn projection for in-flight assistant,
+reasoning, command, tool, subagent, diff, view, search, plan, notice, and
+compaction events:
+
+- `conversation.send` starts a new projection generation.
+- Deltas reduce into stable item recipes with family-qualified render keys.
+  Family-neutral turn/subagent/provider-item lineage lets a specialized family
+  replace a provisional generic tool alias without moving its sequence. Shell
+  deltas synthesize a replayable `shell_begin + shell_delta` recipe when needed.
+- Active snapshots and outgoing live events carry the same authoritative card
+  identity envelope as durable recipes. Nested active items identify their
+  parent card.
+- The store is bounded to 96 active items, 512 KiB per accumulated delta stream,
+  and 256 recent durable lineages used to suppress transcript-first/live-final
+  reordering.
+- Adapter transcript append and card projection take the same per-conversation
+  lock. Replay therefore pairs one durable card window with the matching
+  `live_projection` snapshot.
+- A matching durable row retires every active family alias sharing its lineage.
+  Late generic aliases remain tombstoned, while unfinished items remain
+  available for hydration. A durable terminal status clears orphaned items.
+- `conversation.projection.updated` carries only generation, revision, item
+  count, and truncation state. Full active recipes travel only in replay.
+
+The frontend consumes recipes rather than reparsing raw projection JSONL. It
+requires exactly one rendered card root for each durable recipe. A renderer
+mismatch becomes one visible projection-error root at that card index instead
+of aborting a window replacement. Search/view replay preserves projection
+metadata. History navigation uses the backend `at_start`/`at_tail` state;
+browser code never advances the server cursor from DOM counts, raw order IDs,
+or pruning.
+
+While pinned, the browser remains a normal live view. Events append in arrival
+order and completed card roots prune toward the 75-card display budget without
+mutating the backend cursor; unresolved approvals and active rows are retained.
+While detached, ordinary live cards buffer, but status, token, mode, and
+blocking approval lifecycle surfaces remain current. Initial/reconnect
+hydration, detached history, newer-to-tail, and true re-pin combine the durable
+card window with active recipes.
+
+Within that bounded card projection, the Pretext hybrid virtualizer:
 
 - prepares finalized user/assistant Markdown geometry once fonts are ready
 - recomputes predicted heights when conversation width changes
@@ -999,17 +1051,51 @@ Within the bounded projection, the Pretext hybrid virtualizer:
 - parks stable offscreen rows in fixed-height identity-preserving placeholders
 - keeps streaming messages, unresolved approvals, plans, and expanded subagents
   mounted
-- parks diffs, terminals, tools, and other stable cards only after a measured
-  height exists
-- preserves the numerical scroll anchor during relayout or projection shifts
+- parks diffs, terminals, tools, and other stable cards only after measurement
+- preserves a card-ID scroll anchor numerically during relayout or window shifts
+- does not restore collapse state from localStorage; reconstructed normal and
+  synthetic subagents start collapsed
+- treats collapse/expand as an anchored measurement transaction and retains
+  width-and-state-specific heights only across projection replacement, clearing
+  them on a full conversation reset
 
 Source anchors:
 
+- `rust/crates/als-server/src/transcript_card_projection.rs`
+- `rust/crates/als-server/src/turn_projection.rs`
 - `rust/crates/als-server/src/conversation_store.rs`
 - `rust/crates/als-server/src/conversation_rpc.rs`
 - `rust/crates/als-server/src/static/js/codex_agent/transcript_loader.ts`
+- `rust/crates/als-server/src/static/js/codex_agent/rpc/conversations/contract.ts`
 - `rust/crates/als-server/src/static/js/codex_agent/timeline/virtualizer.ts`
 - `rust/crates/als-server/src/static/js/codex_agent/timeline/replay.ts`
+- `rust/crates/als-server/src/static/js/codex_agent/subagents/collapsible.ts`
+
+#### Frontend window motion
+
+The frontend shifts durable history only when both the visible durable
+card-index range and measured prefix-summed geometry reach an edge runway.
+Active-turn and unscoped live-only rows remain in layout but do not participate
+in durable cursor math; hidden descendants of collapsed cards are not treated
+as visible. The six-card trigger zone is separated from its 12-card re-arm
+boundary. Edge and live-tail runways are two viewports with a 640px floor; a
+four-viewport/1280px physical distance can also re-arm a direction. This keeps
+small upward motion inside the live-tail buffer from requesting history while
+still preserving the 20-card server shift and 75-card window.
+
+A projection transition remains both loading and programmatic through recipe
+rendering, card-ID anchor restoration, and settled virtualizer frames. Scroll
+deltas produced by that transition are discarded before another edge can
+trigger. The structural top spacer remains zero-height; the bounded Rust card
+window is the history buffer.
+
+Projection replacement preserves the IDs of cards currently expanded in
+memory and reopens only matching cards that remain in the next window. This
+state does not survive conversation reset or reload and is never stored in
+localStorage. The virtualizer debug snapshot is exposed as
+`CodexAgent.helpers.getTranscriptProjectionDebugSnapshot()` for console
+inspection of server bounds, logical records, mounted/parked counts, visible
+card indices, and scroll geometry.
 
 ### Conversation list resynchronization
 

@@ -80,23 +80,80 @@ export interface ReplayChunkFrame {
   jsonl: string;
 }
 
+export interface TranscriptCardProjectionFrame {
+  format: 'card_recipes';
+  card_count: number;
+  raw_event_count: number;
+  raw_total_count: number;
+  complete: boolean;
+}
+
 export type TranscriptProjectionAction = 'tail' | 'older' | 'newer' | 'current';
 
 export interface TranscriptProjectionState {
-  start: number;
-  window_entries: number;
-  shift_entries: number;
+  unit: 'transcript_card';
+  start_card: number;
+  end_card: number;
+  total_cards: number;
+  window_cards: number;
+  shift_cards: number;
+  card_count: number;
   at_start: boolean;
   at_tail: boolean;
   revision: number;
 }
 
+export interface TranscriptCardRecipe {
+  card_id: string;
+  card_index: number;
+  family: string;
+  scope: 'durable';
+  parent_card_id?: string;
+  events: JsonObject[];
+}
+
+export interface TurnProjectionItemSnapshot {
+  key: string;
+  card_id: string;
+  family: string;
+  scope: 'active';
+  source_id: string;
+  turn_id?: string;
+  subagent_id?: string;
+  parent_card_id?: string;
+  sequence: number;
+  events: JsonObject[];
+}
+
+export interface TurnProjectionSnapshot {
+  generation: number;
+  revision: number;
+  turn_id?: string;
+  items: TurnProjectionItemSnapshot[];
+  truncated: boolean;
+}
+
+export interface TurnProjectionChange extends JsonObject {
+  conversation_id: string;
+  generation: number;
+  revision: number;
+  turn_id?: string;
+  item_count: number;
+  reason: string;
+  truncated: boolean;
+}
+
+export const CONVERSATIONS_RPC_PROJECTION_NOTIFICATION_METHOD = 'conversation.projection.updated' as const;
+
 export interface ReplayChunkResult {
   conversation_id: string | null;
   replay_id: string;
   projection: TranscriptProjectionState | null;
-  frame: ReplayChunkFrame;
+  live_projection: TurnProjectionSnapshot;
+  frame: ReplayChunkFrame | TranscriptCardProjectionFrame;
   items: JsonObject[];
+  cards: TranscriptCardRecipe[];
+  runtime_state: JsonObject[];
   transport: ConversationsRpcTransport;
 }
 

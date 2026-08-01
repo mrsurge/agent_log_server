@@ -27,8 +27,7 @@ interface SubagentsCollapsibleContext {
   insertRow(row: HTMLElement, beforeEl?: ChildNode | null): void;
   maybeAutoScroll(force?: boolean): void;
   documentRef: Document;
-  storage?: Storage | null;
-  onRowToggle?(row: HTMLElement, expanded: boolean): void;
+  mutateRow?(row: HTMLElement, mutation: () => void): void;
 }
 
 export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
@@ -37,33 +36,10 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
     insertRow,
     maybeAutoScroll,
     documentRef,
-    storage,
-    onRowToggle,
+    mutateRow,
   } = ctx;
 
   const subagentContainers = new Map<string, SubagentContainerRecord>();
-
-  function loadExpandedCards() {
-    if (!storage) return new Set<string>();
-    try {
-      const raw = storage.getItem('expandedCards');
-      const parsed = raw ? JSON.parse(raw) : [];
-      return new Set(Array.isArray(parsed) ? parsed.map((item) => String(item)) : []);
-    } catch {
-      return new Set<string>();
-    }
-  }
-
-  const expandedCards = loadExpandedCards();
-
-  function saveExpandedCards() {
-    if (!storage) return;
-    try {
-      storage.setItem('expandedCards', JSON.stringify([...expandedCards]));
-    } catch {
-      // ignore storage failures
-    }
-  }
 
   function isInteractiveHeaderTarget(target: EventTarget | null): boolean {
     if (!(target instanceof Element)) return false;
@@ -95,7 +71,6 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
     const rowEl = row as ToggleableRow;
     const {
       headerEl = rowEl.querySelector('.command-ribbon') || rowEl.querySelector('.diff-path-label'),
-      persist = true,
       fullHeaderToggle = false,
       toggleZone = !fullHeaderToggle,
       onToggle = null,
@@ -104,7 +79,8 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
     const headerNode = headerEl;
 
     rowEl.classList.add('collapsible');
-    const isExpanded = Boolean(startExpanded || (persist && cardId && expandedCards.has(cardId)));
+    if (cardId) rowEl.dataset.virtualRowKey = cardId;
+    const isExpanded = Boolean(startExpanded);
     rowEl.classList.toggle('expanded', isExpanded);
 
     let twistyEl = headerNode.querySelector(':scope > .twisty') as HTMLElement | null;
@@ -122,13 +98,6 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       headerNode.dataset.expanded = expanded ? 'true' : 'false';
     }
 
-    function persistExpandedState(expanded: boolean) {
-      if (!persist || !cardId) return;
-      if (expanded) expandedCards.add(cardId);
-      else expandedCards.delete(cardId);
-      saveExpandedCards();
-    }
-
     function syncExpandedPathLabels(expanded: boolean) {
       if (!expanded) return;
       scrollPathLabelsToEnd(rowEl);
@@ -142,12 +111,14 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       const expanded = typeof forceExpanded === 'boolean'
         ? forceExpanded
         : !rowEl.classList.contains('expanded');
-      rowEl.classList.toggle('expanded', expanded);
-      persistExpandedState(expanded);
-      syncExpandedState(expanded);
-      syncExpandedPathLabels(expanded);
-      if (typeof onToggle === 'function') onToggle(expanded);
-      onRowToggle?.(rowEl, expanded);
+      const applyMutation = () => {
+        rowEl.classList.toggle('expanded', expanded);
+        syncExpandedState(expanded);
+        syncExpandedPathLabels(expanded);
+        if (typeof onToggle === 'function') onToggle(expanded);
+      };
+      if (mutateRow) mutateRow(rowEl, applyMutation);
+      else applyMutation();
       maybeAutoScroll();
       return expanded;
     }

@@ -8,6 +8,7 @@ use crate::{
     },
     ipc, sidebar_ipc,
     state::AppState,
+    turn_projection::TurnProjectionChange,
 };
 use als_adapter_protocol::{
     ConversationControlParams, ConversationForkParams, ConversationResumeParams,
@@ -49,6 +50,7 @@ const METHOD_APPROVAL_RESPOND: &str = "conversation.approval.respond";
 const METHOD_SHELL_EXEC: &str = "conversation.shell.exec";
 const METHOD_PINS_SET: &str = "conversation.pins.set";
 const METHOD_LIST_UPDATED: &str = "conversation.list.updated";
+const METHOD_PROJECTION_UPDATED: &str = "conversation.projection.updated";
 const AGENT_PTY_ASK_USER_REQUEST_METHOD: &str = "agent-pty/ask-user";
 const AGENT_PTY_BLOCKS_MCP_SERVER_NAME: &str = "agent-pty-blocks";
 const TE2_MCP_SERVER_NAME: &str = "te2-mcp";
@@ -466,6 +468,10 @@ async fn conversation_delete(
         .delete(conversation_id)
         .map_err(internal_error)?;
     if deleted {
+        state
+            .turn_projections
+            .remove(conversation_id)
+            .map_err(internal_error)?;
         let selection = state.ui_selection.snapshot().map_err(internal_error)?;
         if selection.active_conversation_id.as_deref() == Some(conversation_id) {
             state
@@ -761,9 +767,6 @@ async fn conversation_replay_get_chunk(
     let max_entries = optional_u64_direct(params, "max_entries")
         .unwrap_or(200)
         .max(1) as usize;
-    let max_bytes = optional_u64_direct(params, "max_bytes")
-        .unwrap_or(512 * 1024)
-        .clamp(1, 8 * 1024 * 1024) as usize;
     let projection = optional_map(params, "projection");
     let projection_action = projection
         .as_ref()
@@ -777,49 +780,93 @@ async fn conversation_replay_get_chunk(
             _ => Err(rpc_error(-32602, "invalid transcript projection action")),
         })
         .transpose()?;
-    let window_entries = projection
+    let max_bytes = optional_u64_direct(params, "max_bytes")
+        .unwrap_or(if projection_action.is_some() {
+            2 * 1024 * 1024
+        } else {
+            512 * 1024
+        })
+        .clamp(1, 8 * 1024 * 1024) as usize;
+    let window_cards = projection
         .as_ref()
-        .and_then(|value| value.get("window_entries"))
+        .and_then(|value| value.get("window_cards"))
         .and_then(Value::as_u64)
-        .unwrap_or(max_entries as u64)
+        .unwrap_or(75)
         .max(1) as usize;
-    let shift_entries = projection
+    let shift_cards = projection
         .as_ref()
-        .and_then(|value| value.get("shift_entries"))
+        .and_then(|value| value.get("shift_cards"))
         .and_then(Value::as_u64)
-        .unwrap_or_else(|| (window_entries / 4).max(1) as u64)
+        .unwrap_or(20)
         .max(1) as usize;
+
+    if let Some(action) = projection_action {
+        let conversations = state.conversations.clone();
+        let read_conversation_id = conversation_id.clone();
+        let read_client_id = client_id.to_owned();
+        let turn_projections = state.turn_projections.clone();
+        let (projection, live_projection) =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                turn_projections.project_transcript_with_live(
+                    &conversations,
+                    &read_client_id,
+                    &read_conversation_id,
+                    action,
+                    window_cards,
+                    shift_cards,
+                    max_bytes,
+                )
+            })
+            .await
+            .map_err(internal_error)?
+            .map_err(internal_error)?;
+        let card_count = projection.cards.len();
+        let raw_event_count = projection
+            .cards
+            .iter()
+            .map(|card| card.events.len())
+            .sum::<usize>();
+        return Ok(json!({
+            "conversation_id": conversation_id,
+            "replay_id": format!("als-rs-{conversation_id}"),
+            "projection": {
+                "unit": "transcript_card",
+                "start_card": projection.start_card,
+                "end_card": projection.end_card,
+                "total_cards": projection.total_cards,
+                "window_cards": projection.window_cards,
+                "shift_cards": projection.shift_cards,
+                "card_count": card_count,
+                "at_start": projection.at_start,
+                "at_tail": projection.at_tail,
+                "revision": projection.revision,
+            },
+            "cards": projection.cards,
+            "runtime_state": projection.runtime_state,
+            "live_projection": live_projection,
+            "frame": {
+                "format": "card_recipes",
+                "card_count": card_count,
+                "raw_event_count": raw_event_count,
+                "raw_total_count": projection.raw_total_count,
+                "complete": true,
+            },
+            "transport": "rpc"
+        }));
+    }
+
     let conversations = state.conversations.clone();
     let read_conversation_id = conversation_id.clone();
-    let read_client_id = client_id.to_owned();
-    let (replay, projection_meta) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        if let Some(action) = projection_action {
-            let projection = conversations.project_transcript(
-                &read_client_id,
-                &read_conversation_id,
-                action,
-                window_entries,
-                shift_entries,
-                max_bytes,
-            )?;
-            let meta = (
-                projection.start,
-                projection.window_entries,
-                projection.shift_entries,
-                projection.at_start,
-                projection.at_tail,
-                projection.revision,
-            );
-            Ok((projection.chunk, Some(meta)))
-        } else {
-            let chunk = conversations.read_transcript_range(
-                &read_conversation_id,
-                offset,
-                max_entries,
-                max_bytes,
-            )?;
-            Ok((chunk, None))
-        }
+    let turn_projections = state.turn_projections.clone();
+    let (replay, live_projection) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let chunk = conversations.read_transcript_range(
+            &read_conversation_id,
+            offset,
+            max_entries,
+            max_bytes,
+        )?;
+        let live_projection = turn_projections.snapshot(&read_conversation_id)?;
+        Ok((chunk, live_projection))
     })
     .await
     .map_err(internal_error)?
@@ -830,16 +877,8 @@ async fn conversation_replay_get_chunk(
     Ok(json!({
         "conversation_id": conversation_id,
         "replay_id": format!("als-rs-{conversation_id}"),
-        "projection": projection_meta.map(
-            |(start, window_entries, shift_entries, at_start, at_tail, revision)| json!({
-                "start": start,
-                "window_entries": window_entries,
-                "shift_entries": shift_entries,
-                "at_start": at_start,
-                "at_tail": at_tail,
-                "revision": revision,
-            })
-        ),
+        "projection": Value::Null,
+        "live_projection": live_projection,
         "frame": {
             "format": "jsonl",
             "offset": replay.offset,
@@ -894,6 +933,12 @@ async fn conversation_send(
     let extension_id = resolve_extension_id(&state, &params, &meta)
         .ok_or_else(|| rpc_error(-32603, "No active extension available"))?;
     let cwd = resolve_cwd(&params, &meta);
+
+    let projection_change = state
+        .turn_projections
+        .begin_send(&conversation_id)
+        .map_err(internal_error)?;
+    emit_projection_change(&io, projection_change).await;
 
     let user_event = json!({
         "type": "message",
@@ -1083,6 +1128,27 @@ async fn forward_adapter_live_event(
     let Some(method) = notification_method_for_event_type(&event_type) else {
         return Ok(());
     };
+    if let Some(change) = state
+        .turn_projections
+        .reduce_live(&conversation_id, &event)
+        .map_err(internal_error)?
+    {
+        if let Some(object) = event.as_object_mut() {
+            object.insert(
+                "projection_revision".to_owned(),
+                Value::Number(change.revision.into()),
+            );
+            object.insert(
+                "projection_generation".to_owned(),
+                Value::Number(change.generation.into()),
+            );
+        }
+        emit_projection_change(io, change).await;
+    }
+    state
+        .turn_projections
+        .decorate_live_event(&conversation_id, &mut event)
+        .map_err(internal_error)?;
     if event_type.trim().eq_ignore_ascii_case("diff") {
         if let Some(entry) = state
             .agent_edits
@@ -1411,7 +1477,12 @@ async fn persist_adapter_transcript(
     state: &AppState,
     value: Value,
 ) -> Result<(), RpcError> {
-    if let Some(conversation_id) = persist_adapter_transcript_entry(state, value)? {
+    if let Some((conversation_id, projection_change)) =
+        persist_adapter_transcript_entry(state, value)?
+    {
+        if let Some(change) = projection_change {
+            emit_projection_change(io, change).await;
+        }
         emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
     }
     Ok(())
@@ -1420,7 +1491,7 @@ async fn persist_adapter_transcript(
 fn persist_adapter_transcript_entry(
     state: &AppState,
     value: Value,
-) -> Result<Option<String>, RpcError> {
+) -> Result<Option<(String, Option<TurnProjectionChange>)>, RpcError> {
     let Some((conversation_id, mut entry)) = adapter_conversation_object(value) else {
         return Ok(None);
     };
@@ -1429,12 +1500,11 @@ fn persist_adapter_transcript_entry(
     }
     strip_internal_adapter_transcript_fields(&mut entry);
     sanitize_transcript_card_entry(&mut entry);
-    state
-        .conversations
-        .append_transcript(&conversation_id, entry)
-        .map(|_| ())
+    let (_, projection_change) = state
+        .turn_projections
+        .append_transcript_and_acknowledge(&state.conversations, &conversation_id, entry)
         .map_err(internal_error)?;
-    Ok(Some(conversation_id))
+    Ok(Some((conversation_id, projection_change)))
 }
 
 fn persist_import_transcript_batch(state: &AppState, value: Value) -> Result<(), RpcError> {
@@ -1554,6 +1624,17 @@ async fn emit_rpc_notification_to_namespace(io: &SocketIo, method: &str, params:
     };
     if let Err(error) = namespace.emit(RPC_NOTIFY_EVENT, &notification).await {
         warn!(error = %error, "failed to emit adapter event over conversations RPC");
+    }
+}
+
+async fn emit_projection_change(io: &SocketIo, change: TurnProjectionChange) {
+    match serde_json::to_value(change) {
+        Ok(value) => {
+            emit_rpc_notification_to_namespace(io, METHOD_PROJECTION_UPDATED, value).await;
+        }
+        Err(error) => {
+            warn!(%error, "failed to serialize turn projection change");
+        }
     }
 }
 

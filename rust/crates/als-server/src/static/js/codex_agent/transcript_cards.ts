@@ -698,10 +698,15 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     }
   }
 
-  function renderWarningCard(message: string | null | undefined, action: unknown = null): void {
+  function renderWarningCard(
+    message: string | null | undefined,
+    action: unknown = null,
+    metadata: TranscriptCardMetadata | null = null,
+  ): void {
     if (!message) return;
     clearPlaceholder();
-    const { body } = createRow('warning', 'warning');
+    const { row, body } = createRow('warning', 'warning');
+    applyTranscriptCardMetadata(row, metadata);
     const pre = document.createElement('pre');
     pre.className = 'warning-text';
     pre.textContent = message;

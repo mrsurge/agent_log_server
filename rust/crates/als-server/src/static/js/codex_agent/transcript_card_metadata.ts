@@ -43,10 +43,17 @@ export type TranscriptCardMetadata = {
   orderId?: unknown;
   card_id?: unknown;
   cardId?: unknown;
+  projection_card_id?: unknown;
+  projection_card_index?: unknown;
+  projection_card_op?: unknown;
+  projection_card_scope?: unknown;
+  projection_parent_card_id?: unknown;
 };
 
+export type TranscriptCardScope = 'durable' | 'active';
+
 export type TranscriptAnchor = {
-  orderId: number;
+  cardId: string;
   edge: 'start' | 'end';
   offsetPx: number;
 };
@@ -123,12 +130,40 @@ export function applyTranscriptCardMetadata(
   if (orderId !== null) {
     row.dataset.transcriptOrderId = String(orderId);
   }
-  const cardId = typeof metadata.card_id === 'string' && metadata.card_id
-    ? metadata.card_id
-    : (typeof metadata.cardId === 'string' ? metadata.cardId : '');
+  const cardId = typeof metadata.projection_card_id === 'string' && metadata.projection_card_id
+    ? metadata.projection_card_id
+    : (typeof metadata.card_id === 'string' && metadata.card_id
+      ? metadata.card_id
+      : (typeof metadata.cardId === 'string' ? metadata.cardId : ''));
   if (cardId) {
     row.dataset.transcriptCardId = cardId;
   }
+  const cardIndex = parseTranscriptOrderId(metadata.projection_card_index);
+  if (cardIndex !== null) {
+    row.dataset.transcriptCardIndex = String(cardIndex);
+  }
+  if (typeof metadata.projection_card_op === 'string' && metadata.projection_card_op) {
+    row.dataset.transcriptCardOperation = metadata.projection_card_op;
+  }
+  if (
+    metadata.projection_card_scope === 'durable'
+    || metadata.projection_card_scope === 'active'
+  ) {
+    row.dataset.transcriptCardScope = metadata.projection_card_scope;
+  }
+  if (typeof metadata.projection_parent_card_id === 'string' && metadata.projection_parent_card_id) {
+    row.dataset.transcriptParentCardId = metadata.projection_parent_card_id;
+  }
+}
+
+export function readTranscriptCardScope(
+  row: Element | null | undefined,
+): TranscriptCardScope | null {
+  if (!(row instanceof HTMLElement)) {
+    return null;
+  }
+  const scope = row.dataset.transcriptCardScope;
+  return scope === 'durable' || scope === 'active' ? scope : null;
 }
 
 export function readTranscriptOrderId(
@@ -159,9 +194,11 @@ export function findTranscriptCardRow(
     return null;
   }
   const expectedOrderId = parseTranscriptOrderId(metadata.order_id ?? metadata.orderId);
-  const expectedCardId = typeof metadata.card_id === 'string' && metadata.card_id
-    ? metadata.card_id
-    : (typeof metadata.cardId === 'string' ? metadata.cardId : '');
+  const expectedCardId = typeof metadata.projection_card_id === 'string' && metadata.projection_card_id
+    ? metadata.projection_card_id
+    : (typeof metadata.card_id === 'string' && metadata.card_id
+      ? metadata.card_id
+      : (typeof metadata.cardId === 'string' ? metadata.cardId : ''));
   const expectedConversationId = typeof metadata.conversation_id === 'string' && metadata.conversation_id
     ? metadata.conversation_id
     : (typeof metadata.conversationId === 'string' ? metadata.conversationId : '');

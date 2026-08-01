@@ -61,6 +61,77 @@ These fields are common across live/transcript payloads when applicable:
 
 Not every contract uses every field.
 
+## Durable projection units
+
+The transcript pipeline uses three different units. They must not be treated as
+interchangeable:
+
+- a **raw transcript record** is one append-only JSONL object in
+  `transcript.jsonl`; state records and lifecycle updates are records
+- a **transcript card** is one user-visible semantic timeline item; one card may
+  consume several raw records, while runtime state may consume no card
+- a **layout row** is a mounted card root or a virtual placeholder measured by
+  the browser; it is geometry, not persistence or cursor state
+
+Rust is the authority for durable transcript-card identity and position. The
+card index classifies records as card creation, card update, runtime state, or
+hidden/internal data. It groups lifecycle records such as one agent PTY block
+and one subagent into one card recipe, reduces repeated snapshots with the same
+family/source identity to the latest record, preserves and updates explicit
+`card_id` values, and generates stable IDs for records that do not supply one.
+
+`conversation.replay.getChunk` projection requests use:
+
+- `projection.action`: `tail`, `older`, `newer`, or `current`
+- `projection.window_cards`
+- `projection.shift_cards`
+
+The projection response is `frame.format: "card_recipes"` and carries:
+
+- `projection.unit: "transcript_card"`
+- `start_card`, `end_card`, `total_cards`, `window_cards`, `shift_cards`
+- `at_start`, `at_tail`, and the server cursor `revision`
+- `cards[]`, where every recipe has `card_id`, `card_index`, `family`, optional
+  `parent_card_id`, and ordered `events[]`
+- `runtime_state[]` for latest state-only records such as `mode`, `status`, and
+  `token_usage`
+
+Every recipe event carries `projection_card_id`, `projection_card_index`,
+`projection_card_op`, and `projection_card_scope`; nested recipes also carry
+`projection_parent_card_id`. The frontend must produce exactly one card root
+for each durable recipe. Durable recipes use scope `durable`; process-local
+turn recipes use scope `active`. Active and unscoped live-only rows participate
+in layout but never in durable cursor arithmetic. A renderer mismatch produces
+one visible projection-error root at the authoritative durable card index
+instead of aborting and leaving a partially replaced window. The frontend must
+not derive or mutate the backend cursor from DOM node counts, JSONL offsets, or
+provider order IDs.
+
+The default durable window is 75 cards with 20-card shifts. While pinned, live
+events append normally and the frontend may prune completed card roots to that
+display budget without changing the server cursor. Unresolved approvals and
+other active rows remain mounted. Active-turn replay recipes use the same card
+metadata envelope but remain process-local until matching finalized transcript
+records retire them.
+
+Detached history shifts combine the first and last visible authoritative
+durable card indices with prefix-summed measured geometry. The frontend uses a
+six-card trigger and a 12-card re-arm boundary, plus measured edge and live-tail
+runways of two viewports with a 640px floor. A four-viewport/1280px physical
+distance may also re-arm a direction. Hidden descendants of collapsed cards,
+active rows, and unscoped live-only rows do not count as visible durable cards.
+Mounted-node count, JSONL offsets, provider order IDs, and synthetic omitted-row
+estimates never drive the backend cursor. A shift remains loading/programmatic
+until rendering, card-ID anchor restoration, and virtualizer layout settle;
+scroll deltas produced by that transition cannot trigger an immediate reverse
+shift.
+
+The structural top spacer is zero-height. A parked placeholder still represents
+one logical layout record, so the mounted DOM subset may be smaller than the
+75-card recipe window without changing card count. Expanded state may survive
+one overlapping in-memory window replacement, but is never persisted across a
+conversation reset or reload.
+
 ## Canonical tool payload fields
 
 For generic tool cards, the canonical backend payload fields are:

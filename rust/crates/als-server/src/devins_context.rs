@@ -196,7 +196,10 @@ fn template_path() -> Result<PathBuf> {
 
 fn template_candidates() -> Vec<PathBuf> {
     let root = compile_time_repo_root();
-    vec![root.join(TEMPLATE_FILENAME), root.join("agent_log_server_rs").join(TEMPLATE_FILENAME)]
+    vec![
+        root.join(TEMPLATE_FILENAME),
+        root.join("agent_log_server_rs").join(TEMPLATE_FILENAME),
+    ]
 }
 
 fn compile_time_repo_root() -> PathBuf {

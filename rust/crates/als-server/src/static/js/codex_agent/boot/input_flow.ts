@@ -1,8 +1,15 @@
 import {
-  TRANSCRIPT_PRELOAD_ROWS,
-  TRANSCRIPT_PROJECTION_GUARD_VIEWPORTS,
+  TRANSCRIPT_PROJECTION_EDGE_RUNWAY_MIN_PX,
+  TRANSCRIPT_PROJECTION_EDGE_RUNWAY_VIEWPORTS,
+  TRANSCRIPT_PROJECTION_REARM_CARDS,
+  TRANSCRIPT_PROJECTION_REARM_MIN_PX,
+  TRANSCRIPT_PROJECTION_REARM_VIEWPORTS,
+  TRANSCRIPT_PROJECTION_TAIL_RUNWAY_MIN_PX,
+  TRANSCRIPT_PROJECTION_TAIL_RUNWAY_VIEWPORTS,
+  TRANSCRIPT_PROJECTION_TRIGGER_CARDS,
 } from '../transcript_config.ts';
 import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
+import type { TranscriptProjectionViewportMetrics } from '../timeline/virtualizer.ts';
 
 const INTERRUPT_ARM_TIMEOUT_MS = 10_000;
 
@@ -38,11 +45,9 @@ type InputFlowState = {
   transcriptLoading?: boolean;
   transcriptStart?: number;
   transcriptEnd?: number;
-  transcriptTotal?: number;
+  transcriptAtStart?: boolean;
+  transcriptAtTail?: boolean;
   transcriptHistoryMode?: boolean;
-  topSpacerEl?: HTMLElement | null;
-  bottomSpacerEl?: HTMLElement | null;
-  estimatedRowHeight?: number;
   scrollProgrammatic?: boolean;
   autoScroll?: boolean;
   conversationSettings?: ConversationSettingsState | null;
@@ -100,8 +105,9 @@ interface InputFlowContext {
   updateScrollButton: () => void;
   maybeAutoScroll: (force?: boolean) => void;
   isNearBottom: () => boolean;
-  loadOlderTranscript: () => void;
-  loadNewerTranscript: () => void;
+  loadOlderTranscript: () => Promise<boolean>;
+  loadNewerTranscript: () => Promise<boolean>;
+  getTranscriptProjectionMetrics: () => TranscriptProjectionViewportMetrics;
   snapTranscriptToLive?: () => Promise<unknown>;
   fetchConversation: (conversationId: string) => Promise<unknown>;
   restorePendingApprovals: () => void;
@@ -138,6 +144,7 @@ export function bindInputFlow(ctx: InputFlowContext) {
     isNearBottom,
     loadOlderTranscript,
     loadNewerTranscript,
+    getTranscriptProjectionMetrics,
     snapTranscriptToLive,
     fetchConversation,
     restorePendingApprovals,
@@ -153,6 +160,9 @@ export function bindInputFlow(ctx: InputFlowContext) {
   } = ctx;
   let lastProjectionScrollTop = elements.scrollContainer?.scrollTop || 0;
   let projectionScrollDirection = 0;
+  let projectionShiftInFlight = false;
+  let olderProjectionArmed = true;
+  let newerProjectionArmed = true;
   const conversationsRpcClient = createConversationsRpcClient({
     windowRef,
   });
@@ -252,47 +262,97 @@ export function bindInputFlow(ctx: InputFlowContext) {
     }
   }
 
+  function runProjectionShift(direction: 'older' | 'newer'): void {
+    if (projectionShiftInFlight) return;
+    projectionShiftInFlight = true;
+    olderProjectionArmed = false;
+    newerProjectionArmed = false;
+    projectionScrollDirection = 0;
+    const shift = direction === 'older' ? loadOlderTranscript : loadNewerTranscript;
+    void shift().finally(() => {
+      projectionShiftInFlight = false;
+      projectionScrollDirection = 0;
+      lastProjectionScrollTop = scrollContainer?.scrollTop || 0;
+    });
+  }
+
   function handleScroll() {
     const state = getState();
     if (!scrollContainer) return;
     const nextScrollTop = scrollContainer.scrollTop;
     const scrollDelta = nextScrollTop - lastProjectionScrollTop;
     lastProjectionScrollTop = nextScrollTop;
-    if (!state.scrollProgrammatic && Math.abs(scrollDelta) >= 0.5) {
+    if (!state.scrollProgrammatic && !projectionShiftInFlight && Math.abs(scrollDelta) >= 0.5) {
       projectionScrollDirection = Math.sign(scrollDelta);
     }
-    const scrollableHeight = Math.max(
-      0,
-      scrollContainer.scrollHeight - scrollContainer.clientHeight,
+    const projectionMetrics = getTranscriptProjectionMetrics();
+    const visibleRange = projectionMetrics.visible;
+    const transcriptStart = Math.max(0, Number(state.transcriptStart) || 0);
+    const transcriptEnd = Math.max(transcriptStart, Number(state.transcriptEnd) || 0);
+    const olderDistance = visibleRange
+      ? Math.max(0, visibleRange.first - transcriptStart)
+      : Number.POSITIVE_INFINITY;
+    const newerDistance = visibleRange
+      ? Math.max(0, Math.max(transcriptStart, transcriptEnd - 1) - visibleRange.last)
+      : Number.POSITIVE_INFINITY;
+    const viewportHeight = Math.max(1, scrollContainer.clientHeight);
+    const edgeRunwayPx = Math.max(
+      TRANSCRIPT_PROJECTION_EDGE_RUNWAY_MIN_PX,
+      viewportHeight * TRANSCRIPT_PROJECTION_EDGE_RUNWAY_VIEWPORTS,
     );
-    const projectionGuardPx = Math.min(
-      scrollableHeight / 3,
-      Math.max(
-        scrollContainer.clientHeight * TRANSCRIPT_PROJECTION_GUARD_VIEWPORTS,
-        (Number(state.estimatedRowHeight) || 0) * TRANSCRIPT_PRELOAD_ROWS,
-      ),
+    const rearmRunwayPx = Math.max(
+      TRANSCRIPT_PROJECTION_REARM_MIN_PX,
+      viewportHeight * TRANSCRIPT_PROJECTION_REARM_VIEWPORTS,
     );
-    const topSpacerHeight = state.topSpacerEl ? state.topSpacerEl.getBoundingClientRect().height : 0;
-    const distanceFromProjectedTop = Math.max(0, scrollContainer.scrollTop - topSpacerHeight);
+    const tailRunwayPx = Math.max(
+      TRANSCRIPT_PROJECTION_TAIL_RUNWAY_MIN_PX,
+      viewportHeight * TRANSCRIPT_PROJECTION_TAIL_RUNWAY_VIEWPORTS,
+    );
     const distanceFromBottom = Math.max(
       0,
       scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight,
     );
-    const hasOlderProjection = (state.transcriptStart ?? 0) > 0;
-    const hasNewerProjection = (state.transcriptEnd ?? 0) < (state.transcriptTotal ?? 0);
-    if (!state.transcriptLoading && !state.scrollProgrammatic) {
+    const distanceToStartPx = projectionMetrics.distanceToStartPx ?? Number.POSITIVE_INFINITY;
+    const distanceToEndPx = projectionMetrics.distanceToEndPx ?? Number.POSITIVE_INFINITY;
+    if (
+      olderDistance >= TRANSCRIPT_PROJECTION_REARM_CARDS
+      || distanceToStartPx >= rearmRunwayPx
+    ) {
+      olderProjectionArmed = true;
+    }
+    if (
+      newerDistance >= TRANSCRIPT_PROJECTION_REARM_CARDS
+      || distanceToEndPx >= rearmRunwayPx
+    ) {
+      newerProjectionArmed = true;
+    }
+    const hasOlderProjection = state.transcriptAtStart === false;
+    const hasNewerProjection = state.transcriptAtTail === false;
+    const outsideLiveTailRunway = state.transcriptAtTail === false
+      || distanceFromBottom >= tailRunwayPx;
+    if (
+      !state.transcriptLoading
+      && !state.scrollProgrammatic
+      && !state.autoScroll
+      && !projectionShiftInFlight
+    ) {
       if (
         hasOlderProjection
+        && olderProjectionArmed
         && projectionScrollDirection < 0
-        && distanceFromProjectedTop <= projectionGuardPx
+        && olderDistance <= TRANSCRIPT_PROJECTION_TRIGGER_CARDS
+        && distanceToStartPx <= edgeRunwayPx
+        && outsideLiveTailRunway
       ) {
-        loadOlderTranscript();
+        runProjectionShift('older');
       } else if (
         hasNewerProjection
+        && newerProjectionArmed
         && projectionScrollDirection > 0
-        && distanceFromBottom <= projectionGuardPx
+        && newerDistance <= TRANSCRIPT_PROJECTION_TRIGGER_CARDS
+        && distanceToEndPx <= edgeRunwayPx
       ) {
-        loadNewerTranscript();
+        runProjectionShift('newer');
       }
     }
     if (!state.scrollProgrammatic && state.autoScroll && !isNearBottom()) {

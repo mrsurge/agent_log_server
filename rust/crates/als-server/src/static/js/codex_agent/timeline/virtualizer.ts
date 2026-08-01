@@ -4,7 +4,7 @@ import {
   type PreparedText,
 } from '@chenglou/pretext';
 import {
-  parseTranscriptOrderId,
+  readTranscriptCardScope,
   type TranscriptAnchor,
 } from '../transcript_card_metadata.ts';
 
@@ -66,6 +66,33 @@ interface BottomLayoutAnchor {
 
 type LayoutAnchor = NumericLayoutAnchor | BottomLayoutAnchor | null;
 
+export interface VisibleTranscriptCardRange {
+  first: number;
+  last: number;
+}
+
+export interface TimelineVirtualizerDebugSnapshot {
+  records: number;
+  mounted: number;
+  parked: number;
+  durableRoots: number;
+  activeRoots: number;
+  unscopedRoots: number;
+  first: number | null;
+  last: number | null;
+  visible: VisibleTranscriptCardRange | null;
+  distanceToStartPx: number | null;
+  distanceToEndPx: number | null;
+}
+
+export interface TranscriptProjectionViewportMetrics {
+  first: number | null;
+  last: number | null;
+  visible: VisibleTranscriptCardRange | null;
+  distanceToStartPx: number | null;
+  distanceToEndPx: number | null;
+}
+
 interface TimelineVirtualizerContext {
   timelineEl: HTMLElement | null;
   scrollContainer: HTMLElement | null;
@@ -79,15 +106,18 @@ interface TimelineVirtualizerContext {
 export interface TimelineVirtualizerBinding {
   scheduleLayout(): void;
   syncRows(): void;
-  reset(): void;
+  reset(preserveMeasurements?: boolean): void;
   removeRow(row: Element | null | undefined): void;
   registerRow(row: HTMLElement): void;
   markMessageStreaming(row: HTMLElement, streaming: boolean): void;
   registerFinalizedMessage(row: HTMLElement, text: string): void;
   invalidateRow(row: HTMLElement, keepMountedMs?: number): void;
+  mutateRow(row: HTMLElement, mutation: () => void): void;
   captureTranscriptAnchor(edge: 'start' | 'end'): TranscriptAnchor | null;
   restoreTranscriptAnchor(anchor: TranscriptAnchor | null): void;
-  averageMeasuredRowHeight(): number | null;
+  visibleTranscriptCardRange(): VisibleTranscriptCardRange | null;
+  transcriptProjectionMetrics(): TranscriptProjectionViewportMetrics;
+  debugSnapshot(): TimelineVirtualizerDebugSnapshot;
 }
 
 function finiteCssPx(value: string | null | undefined): number {
@@ -173,9 +203,34 @@ export function bindTimelineVirtualizer(
       markMessageStreaming() {},
       registerFinalizedMessage() {},
       invalidateRow() {},
+      mutateRow(_row, mutation) { mutation(); },
       captureTranscriptAnchor() { return null; },
       restoreTranscriptAnchor() {},
-      averageMeasuredRowHeight() { return null; },
+      visibleTranscriptCardRange() { return null; },
+      transcriptProjectionMetrics() {
+        return {
+          first: null,
+          last: null,
+          visible: null,
+          distanceToStartPx: null,
+          distanceToEndPx: null,
+        };
+      },
+      debugSnapshot() {
+        return {
+          records: 0,
+          mounted: 0,
+          parked: 0,
+          durableRoots: 0,
+          activeRoots: 0,
+          unscopedRoots: 0,
+          first: null,
+          last: null,
+          visible: null,
+          distanceToStartPx: null,
+          distanceToEndPx: null,
+        };
+      },
     };
   }
 
@@ -183,6 +238,7 @@ export function bindTimelineVirtualizer(
   const scrollEl = scrollContainer;
   const recordsByRow = new Map<HTMLElement, VirtualRowRecord>();
   const recordsByPlaceholder = new Map<HTMLDivElement, VirtualRowRecord>();
+  const measuredHeightCache = new Map<string, number>();
   let records: VirtualRowRecord[] = [];
   let rafId: number | null = null;
   let dynamicTimer: number | null = null;
@@ -235,6 +291,11 @@ export function bindTimelineVirtualizer(
     };
     recordsByRow.set(row, record);
     recordsByPlaceholder.set(placeholder, record);
+    const cachedHeight = readCachedHeight(record);
+    if (cachedHeight !== null) {
+      record.height = cachedHeight;
+      record.measured = true;
+    }
     const messageText = (row as MessageCardElement)._messageText;
     if (
       row.classList.contains('message-card')
@@ -245,6 +306,28 @@ export function bindTimelineVirtualizer(
       scheduleMessagePreparation(record, messageText);
     }
     return record;
+  }
+
+  function measurementCacheKey(record: VirtualRowRecord): string | null {
+    const rowKey = record.row.dataset.virtualRowKey;
+    if (!rowKey) return null;
+    const width = Math.max(1, Math.round(timeline.clientWidth));
+    const state = record.row.classList.contains('expanded') ? 'expanded' : 'collapsed';
+    return `${width}:${state}:${rowKey}`;
+  }
+
+  function readCachedHeight(record: VirtualRowRecord): number | null {
+    const key = measurementCacheKey(record);
+    if (!key) return null;
+    const height = measuredHeightCache.get(key);
+    return typeof height === 'number' && height > 0 ? height : null;
+  }
+
+  function cacheMeasuredHeight(record: VirtualRowRecord): void {
+    const key = measurementCacheKey(record);
+    if (key && record.height > 0) {
+      measuredHeightCache.set(key, record.height);
+    }
   }
 
   function recordForTopLevelRow(row: HTMLElement): VirtualRowRecord | null {
@@ -433,6 +516,7 @@ export function bindTimelineVirtualizer(
       if (!(nextHeight > 0)) continue;
       record.height = nextHeight;
       record.measured = true;
+      cacheMeasuredHeight(record);
       resizeObserver.observe(record.row);
     }
   }
@@ -583,8 +667,13 @@ export function bindTimelineVirtualizer(
     const widthChanged = Math.abs(timelineWidth - lastTimelineWidth) >= 0.5;
     if (widthChanged) {
       for (const record of records) {
-        if (!record.mounted && record.predictor) {
-          record.height = predictedMessageHeight(record, timelineWidth);
+        if (!record.mounted) {
+          const cachedHeight = readCachedHeight(record);
+          if (cachedHeight !== null) {
+            record.height = cachedHeight;
+          } else if (record.predictor) {
+            record.height = predictedMessageHeight(record, timelineWidth);
+          }
         }
       }
       lastTimelineWidth = timelineWidth;
@@ -729,6 +818,30 @@ export function bindTimelineVirtualizer(
     if (record) invalidateRecord(record, keepMountedMs);
   }
 
+  function mutateRow(row: HTMLElement, mutation: () => void): void {
+    syncRecordOrder();
+    measureMountedRecords();
+    recomputePositions();
+    const anchor = captureLayoutAnchor();
+    const record = recordForTopLevelRow(row);
+    mutation();
+    if (record) {
+      const nextHeight = measuredFlowHeight(record.row, windowRef);
+      if (nextHeight > 0) {
+        record.height = nextHeight;
+        record.measured = true;
+        cacheMeasuredHeight(record);
+      }
+      record.dynamicUntil = Math.max(
+        record.dynamicUntil,
+        performance.now() + DYNAMIC_ROW_GRACE_MS,
+      );
+    }
+    recomputePositions();
+    restoreLayoutAnchor(anchor);
+    scheduleLayout();
+  }
+
   function removeRow(row: Element | null | undefined): void {
     if (!(row instanceof HTMLElement)) return;
     const ownRecord = recordsByRow.get(row);
@@ -749,11 +862,117 @@ export function bindTimelineVirtualizer(
     else scheduleLayout();
   }
 
-  function recordTranscriptOrderId(record: VirtualRowRecord): number | null {
-    const direct = parseTranscriptOrderId(record.row.dataset.transcriptOrderId);
-    if (direct !== null) return direct;
-    const nested = record.row.querySelector<HTMLElement>('[data-transcript-order-id]');
-    return parseTranscriptOrderId(nested?.dataset.transcriptOrderId);
+  function recordTranscriptCardId(record: VirtualRowRecord): string | null {
+    const direct = record.row.dataset.transcriptCardId || '';
+    if (direct) return direct;
+    const nested = record.row.querySelector<HTMLElement>('[data-transcript-card-id]');
+    return nested?.dataset.transcriptCardId || null;
+  }
+
+  function parseTranscriptCardIndex(value: string | null | undefined): number | null {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+  }
+
+  function recordTranscriptCardRoots(record: VirtualRowRecord): HTMLElement[] {
+    const roots = [
+      record.row,
+      ...Array.from(
+        record.row.querySelectorAll<HTMLElement>('[data-transcript-card-id]'),
+      ),
+    ];
+    return roots.filter((row) => Boolean(row.dataset.transcriptCardId));
+  }
+
+  function recordTranscriptCardIndexRange(
+    record: VirtualRowRecord,
+    scope: 'durable' | 'active' | null = 'durable',
+  ): VisibleTranscriptCardRange | null {
+    const indices = recordTranscriptCardRoots(record)
+      .filter((row) => scope === null || readTranscriptCardScope(row) === scope)
+      .map((row) => parseTranscriptCardIndex(row.dataset.transcriptCardIndex))
+      .filter((index): index is number => index !== null);
+    if (!indices.length) return null;
+    return {
+      first: Math.min(...indices),
+      last: Math.max(...indices),
+    };
+  }
+
+  function visibleTranscriptCardRange(): VisibleTranscriptCardRange | null {
+    if (!records.length) return null;
+    const viewTop = viewportTopInTimeline();
+    const viewBottom = viewTop + scrollEl.clientHeight;
+    const start = binarySearchFirstBottomAfter(records, viewTop);
+    const end = binarySearchFirstTopAtOrAfter(records, viewBottom);
+    let first = Number.POSITIVE_INFINITY;
+    let last = Number.NEGATIVE_INFINITY;
+    const viewportRect = scrollEl.getBoundingClientRect();
+    for (const record of records.slice(start, end)) {
+      for (const row of recordTranscriptCardRoots(record)) {
+        if (readTranscriptCardScope(row) !== 'durable') continue;
+        const index = parseTranscriptCardIndex(row.dataset.transcriptCardIndex);
+        if (index === null) continue;
+        if (row !== record.row) {
+          const rect = row.getBoundingClientRect();
+          if (
+            row.getClientRects().length === 0
+            || rect.bottom <= viewportRect.top
+            || rect.top >= viewportRect.bottom
+          ) {
+            continue;
+          }
+        }
+        first = Math.min(first, index);
+        last = Math.max(last, index);
+      }
+    }
+    if (!Number.isFinite(first) || !Number.isFinite(last)) return null;
+    return { first, last };
+  }
+
+  function transcriptProjectionMetrics(): TranscriptProjectionViewportMetrics {
+    const durableRecords = records
+      .map((record) => ({ record, range: recordTranscriptCardIndexRange(record) }))
+      .filter((entry): entry is { record: VirtualRowRecord; range: VisibleTranscriptCardRange } => entry.range !== null);
+    if (!durableRecords.length) {
+      return {
+        first: null,
+        last: null,
+        visible: null,
+        distanceToStartPx: null,
+        distanceToEndPx: null,
+      };
+    }
+    const viewTop = viewportTopInTimeline();
+    const viewBottom = viewTop + scrollEl.clientHeight;
+    const firstRecord = durableRecords[0]!.record;
+    const lastRecord = durableRecords[durableRecords.length - 1]!.record;
+    return {
+      first: Math.min(...durableRecords.map(({ range }) => range.first)),
+      last: Math.max(...durableRecords.map(({ range }) => range.last)),
+      visible: visibleTranscriptCardRange(),
+      distanceToStartPx: Math.max(0, viewTop - firstRecord.bottom),
+      distanceToEndPx: Math.max(0, lastRecord.top - viewBottom),
+    };
+  }
+
+  function debugSnapshot(): TimelineVirtualizerDebugSnapshot {
+    const metrics = transcriptProjectionMetrics();
+    const roots = records.flatMap(recordTranscriptCardRoots);
+    return {
+      records: records.length,
+      mounted: records.filter((record) => record.mounted).length,
+      parked: records.filter((record) => !record.mounted).length,
+      durableRoots: roots.filter((row) => readTranscriptCardScope(row) === 'durable').length,
+      activeRoots: roots.filter((row) => readTranscriptCardScope(row) === 'active').length,
+      unscopedRoots: roots.filter((row) => readTranscriptCardScope(row) === null).length,
+      first: metrics.first,
+      last: metrics.last,
+      visible: metrics.visible,
+      distanceToStartPx: metrics.distanceToStartPx,
+      distanceToEndPx: metrics.distanceToEndPx,
+    };
   }
 
   function captureTranscriptAnchor(edge: 'start' | 'end'): TranscriptAnchor | null {
@@ -771,10 +990,10 @@ export function bindTimelineVirtualizer(
       for (const index of indices) {
         const record = records[index];
         if (!record) continue;
-        const orderId = recordTranscriptOrderId(record);
-        if (orderId === null) continue;
+        const cardId = recordTranscriptCardId(record);
+        if (!cardId) continue;
         return {
-          orderId,
+          cardId,
           edge,
           offsetPx: edge === 'start'
             ? record.top - viewTop
@@ -789,10 +1008,10 @@ export function bindTimelineVirtualizer(
     if (!anchor) return;
     syncRows();
     const record = records.find((candidate) => {
-      if (recordTranscriptOrderId(candidate) === anchor.orderId) return true;
-      return Boolean(candidate.row.querySelector(
-        `[data-transcript-order-id="${anchor.orderId}"]`,
-      ));
+      if (recordTranscriptCardId(candidate) === anchor.cardId) return true;
+      return Array.from(
+        candidate.row.querySelectorAll<HTMLElement>('[data-transcript-card-id]'),
+      ).some((row) => row.dataset.transcriptCardId === anchor.cardId);
     });
     if (!record) return;
     const contentOffset = timelineContentOffset();
@@ -809,13 +1028,7 @@ export function bindTimelineVirtualizer(
     });
   }
 
-  function averageMeasuredRowHeight(): number | null {
-    const measured = records.filter((record) => record.measured && record.height > 0);
-    if (!measured.length) return null;
-    return measured.reduce((sum, record) => sum + record.height, 0) / measured.length;
-  }
-
-  function reset(): void {
+  function reset(preserveMeasurements = false): void {
     disposedGeneration += 1;
     if (rafId !== null) {
       windowRef.cancelAnimationFrame(rafId);
@@ -830,6 +1043,9 @@ export function bindTimelineVirtualizer(
     recordsByPlaceholder.clear();
     records = [];
     currentWindowRecords.clear();
+    if (!preserveMeasurements) {
+      measuredHeightCache.clear();
+    }
     lastTimelineWidth = 0;
     lastObservedScrollTop = scrollEl.scrollTop;
     lastObservedScrollAt = performance.now();
@@ -850,6 +1066,7 @@ export function bindTimelineVirtualizer(
       if (!(nextHeight > 0) || Math.abs(nextHeight - record.height) < 0.5) continue;
       record.height = nextHeight;
       record.measured = true;
+      cacheMeasuredHeight(record);
       changed = true;
     }
     if (changed) scheduleLayout();
@@ -896,8 +1113,11 @@ export function bindTimelineVirtualizer(
     markMessageStreaming,
     registerFinalizedMessage,
     invalidateRow,
+    mutateRow,
     captureTranscriptAnchor,
     restoreTranscriptAnchor,
-    averageMeasuredRowHeight,
+    visibleTranscriptCardRange,
+    transcriptProjectionMetrics,
+    debugSnapshot,
   };
 }

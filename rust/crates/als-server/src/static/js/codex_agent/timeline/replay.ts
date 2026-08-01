@@ -4,7 +4,8 @@ import {
 } from '../transcript_card_metadata.ts';
 import { buildShellCommandPreview } from '../shell_render.ts';
 import { ansiToHtml, hasAnsiSgr } from '../terminal_ansi.ts';
-import type { UnknownRecord } from '../shared_types.ts';
+import type { ToggleableRow, UnknownRecord } from '../shared_types.ts';
+import type { TranscriptCardRecipe } from '../rpc/conversations/contract.ts';
 
 interface AgentPtyReplayRecord {
   row: HTMLElement;
@@ -50,6 +51,8 @@ interface TimelineReplayState {
   transcriptTotal?: number;
   transcriptStart?: number;
   transcriptEnd?: number;
+  transcriptAtStart?: boolean;
+  transcriptAtTail?: boolean;
   transcriptLoading?: boolean;
   transcriptGeneration?: number;
   debugEnabled?: boolean;
@@ -104,9 +107,8 @@ interface TimelineReplayContext {
   updateTokens(total: number): void;
   updateContextRemaining(total: number, windowSize: number): void;
   applyRuntimeMode(kind: string): void;
-  measureRowHeight(): void;
   updateSpacerHeights(): void;
-  resetVirtualizer(): void;
+  resetVirtualizer(preserveMeasurements?: boolean): void;
   syncVirtualizer(): void;
 }
 
@@ -160,11 +162,11 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     updateTokens,
     updateContextRemaining,
     applyRuntimeMode,
-    measureRowHeight,
     updateSpacerHeights,
     resetVirtualizer,
     syncVirtualizer,
   } = ctx;
+  let projectionExpandedCardIds: Set<string> | null = null;
 
   function resetTimeline() {
     initializeReplayWindow({ bumpGeneration: true, showPlaceholder: true });
@@ -181,6 +183,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
 
   function initializeReplayWindow(options: { bumpGeneration: boolean; showPlaceholder: boolean }) {
     if (!timelineEl) return;
+    projectionExpandedCardIds = null;
     resetVirtualizer();
     timelineEl.innerHTML = '';
     clearReplayRowState();
@@ -201,6 +204,8 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       nextState.transcriptTotal = 0;
       nextState.transcriptStart = 0;
       nextState.transcriptEnd = 0;
+      nextState.transcriptAtStart = true;
+      nextState.transcriptAtTail = true;
       nextState.transcriptLoading = false;
       nextState.transcriptGeneration = currentGeneration + 1;
     }
@@ -231,7 +236,14 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
   function prepareTranscriptProjection() {
     if (!timelineEl) return;
     const state = getState();
-    resetVirtualizer();
+    projectionExpandedCardIds = new Set(
+      Array.from(
+        timelineEl.querySelectorAll<HTMLElement>(
+          '.collapsible.expanded[data-transcript-card-id]',
+        ),
+      ).map((row) => row.dataset.transcriptCardId || '').filter(Boolean),
+    );
+    resetVirtualizer(true);
     clearReplayRowState();
     for (const child of Array.from(timelineEl.children)) {
       if (!(child instanceof HTMLElement)) continue;
@@ -254,6 +266,28 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       return true;
     }
     return typeof entry.visibility === 'string' && entry.visibility.trim().toLowerCase() === 'internal';
+  }
+
+  function applyTranscriptRuntimeState(items: TranscriptEntry[]): void {
+    for (const entry of items) {
+      if (entry.role === 'token_usage') {
+        const total = asNumber(entry.total, Number.NaN);
+        if (Number.isFinite(total)) {
+          setState({ tokenCount: total });
+          updateTokens(total);
+        }
+        const contextWindow = asNumber(entry.context_window, Number.NaN);
+        if (Number.isFinite(contextWindow)) {
+          setState({ contextWindow });
+          updateContextRemaining(total, contextWindow);
+        }
+      } else if (entry.role === 'mode' && typeof entry.kind === 'string') {
+        applyRuntimeMode(entry.kind);
+      } else if (entry.role === 'status') {
+        const status = asString(entry.status);
+        if (status) setStatusDot(status);
+      }
+    }
   }
 
   function renderTranscriptEntries(items: TranscriptEntry[], opts: UnknownRecord = {}) {
@@ -332,7 +366,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         return;
       }
 
-      if (findTranscriptCardRow(timelineEl, entry)) {
+      if (entry.projection_card_op !== 'update' && findTranscriptCardRow(timelineEl, entry)) {
         return;
       }
 
@@ -358,7 +392,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
             const body = documentRef.createElement('div');
             body.className = 'subagent-body';
             row.appendChild(body);
-            makeCollapsible(row, `subagent:${subagentId}`, true, {
+            makeCollapsible(row, `subagent:${subagentId}`, false, {
               headerEl: header,
               fullHeaderToggle: true,
             });
@@ -390,6 +424,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
 
       if (entry.role === 'view') {
         renderViewCard({
+          ...entry,
           id: entry.id || entry.item_id || '',
           title: entry.title || '',
           path: entry.path || '',
@@ -402,6 +437,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
 
       if (entry.role === 'search') {
         renderSearchCard({
+          ...entry,
           id: entry.id || entry.item_id || '',
           title: entry.title || '',
           mode: entry.mode || entry.tool || 'search',
@@ -428,29 +464,17 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
       }
 
       if (entry.role === 'token_usage') {
-        const total = asNumber(entry.total, Number.NaN);
-        if (Number.isFinite(total)) {
-          setState({ tokenCount: total });
-          updateTokens(total);
-        }
-        const contextWindow = asNumber(entry.context_window, Number.NaN);
-        if (Number.isFinite(contextWindow)) {
-          setState({ contextWindow });
-          updateContextRemaining(total, contextWindow);
-        }
+        applyTranscriptRuntimeState([entry]);
         return;
       }
 
       if (entry.role === 'mode') {
-        if (typeof entry.kind === 'string') {
-          applyRuntimeMode(entry.kind);
-        }
+        applyTranscriptRuntimeState([entry]);
         return;
       }
 
       if (entry.role === 'status') {
-        const status = asString(entry.status);
-        if (status) setStatusDot(status);
+        applyTranscriptRuntimeState([entry]);
         return;
       }
 
@@ -708,9 +732,81 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         });
       });
     }
-    measureRowHeight();
     updateSpacerHeights();
     syncVirtualizer();
+  }
+
+  function renderTranscriptCards(cards: TranscriptCardRecipe[], opts: UnknownRecord = {}): void {
+    const events = cards.flatMap((card) => card.events);
+    renderTranscriptEntries(events, opts);
+    if (!timelineEl) return;
+    let renderedRows = Array.from(
+      timelineEl.querySelectorAll<HTMLElement>('[data-transcript-card-id]'),
+    );
+    try {
+      for (const card of cards) {
+        const matches = renderedRows.filter((row) => row.dataset.transcriptCardId === card.card_id);
+        if (matches.length !== 1) {
+          const error = new Error(
+            `Transcript card projection mismatch for ${card.card_id}: rendered ${matches.length} roots`,
+          );
+          console.error(error, {
+            card_id: card.card_id,
+            card_index: card.card_index,
+            family: card.family,
+            event_count: card.events.length,
+          });
+          for (const row of matches) {
+            row.remove();
+          }
+          const { row, body } = buildRow('error', 'projection error');
+          row.dataset.projectionContractError = 'true';
+          applyTranscriptCardMetadata(row, {
+            projection_card_id: card.card_id,
+            projection_card_index: card.card_index,
+            projection_card_op: 'create',
+            projection_card_scope: 'durable',
+            projection_parent_card_id: card.parent_card_id,
+          });
+          const message = documentRef.createElement('div');
+          message.className = 'system-message';
+          message.textContent = `Unable to render ${card.family} transcript card ${card.card_index}.`;
+          body.appendChild(message);
+          const parentRow = card.parent_card_id
+            ? renderedRows.find((candidate) => candidate.dataset.transcriptCardId === card.parent_card_id)
+            : null;
+          const parentBody = parentRow?.querySelector<HTMLElement>('.subagent-body') || null;
+          if (parentBody) {
+            parentBody.appendChild(row);
+          } else {
+            const nextRow = renderedRows.find((candidate) => {
+              const candidateIndex = Number(candidate.dataset.transcriptCardIndex);
+              return candidate.parentElement === timelineEl
+                && Number.isSafeInteger(candidateIndex)
+                && candidateIndex > card.card_index;
+            });
+            const state = getState();
+            const before = nextRow
+              || (state.bottomSpacerEl?.parentElement === timelineEl ? state.bottomSpacerEl : null);
+            timelineEl.insertBefore(row, before);
+          }
+          renderedRows = renderedRows
+            .filter((candidate) => !matches.includes(candidate))
+            .concat(row);
+        }
+      }
+      for (const cardId of projectionExpandedCardIds || []) {
+        const row = renderedRows.find(
+          (candidate) => candidate.dataset.transcriptCardId === cardId,
+        ) as ToggleableRow | undefined;
+        if (row && !row.classList.contains('expanded')) {
+          row._toggleCollapse?.(true);
+        }
+      }
+      syncVirtualizer();
+    } finally {
+      projectionExpandedCardIds = null;
+    }
   }
 
   return {
@@ -718,5 +814,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     prepareTranscriptProjection,
     resetTimeline,
     renderTranscriptEntries,
+    renderTranscriptCards,
+    applyTranscriptRuntimeState,
   };
 }

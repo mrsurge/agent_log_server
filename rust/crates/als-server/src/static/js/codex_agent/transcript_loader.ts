@@ -3,9 +3,14 @@ import {
   createConversationsRpcClientPlaceholder,
 } from './rpc/conversations/client.ts';
 import {
-  parseTranscriptOrderId,
   type TranscriptAnchor,
 } from './transcript_card_metadata.ts';
+import type {
+  JsonObject,
+  TranscriptCardRecipe,
+  TurnProjectionSnapshot,
+} from './rpc/conversations/contract.ts';
+import { TRANSCRIPT_CARD_SHIFT } from './transcript_config.ts';
 
 const _conversationsReplayRpcPlaceholder = createConversationsRpcClientPlaceholder;
 void _conversationsReplayRpcPlaceholder;
@@ -16,6 +21,8 @@ interface TranscriptLoaderState {
   transcriptLimit: number;
   transcriptTotal: number;
   transcriptEnd: number;
+  transcriptAtStart?: boolean;
+  transcriptAtTail?: boolean;
   transcriptGeneration?: number;
   transcriptHistoryMode?: boolean;
 }
@@ -23,8 +30,13 @@ interface TranscriptLoaderState {
 interface TranscriptRangeResponse {
   conversation_id: string | null;
   total: number;
-  offset: number;
-  items: unknown[];
+  start: number;
+  end: number;
+  cards: TranscriptCardRecipe[];
+  runtimeState: JsonObject[];
+  atStart: boolean;
+  atTail: boolean;
+  liveProjection: TurnProjectionSnapshot;
 }
 
 interface TranscriptLoaderContext {
@@ -32,7 +44,9 @@ interface TranscriptLoaderContext {
   sioCall(event: string, payload?: Record<string, unknown>): Promise<unknown>;
   getTranscriptState(): TranscriptLoaderState;
   setTranscriptState(patch: Partial<TranscriptLoaderState>): void;
-  renderTranscriptEntries(items: unknown[], options: { prepend: boolean }): void;
+  renderTranscriptCards(cards: TranscriptCardRecipe[], options: { prepend: boolean }): void;
+  applyTranscriptRuntimeState(items: JsonObject[]): void;
+  renderLiveProjection?(projection: TurnProjectionSnapshot): void;
   prepareTranscriptWindow?(): void;
   prepareTranscriptProjection?(): void;
   timelineEl?: HTMLElement | null;
@@ -56,7 +70,9 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     sioCall,
     getTranscriptState,
     setTranscriptState,
-    renderTranscriptEntries,
+    renderTranscriptCards,
+    applyTranscriptRuntimeState,
+    renderLiveProjection,
     prepareTranscriptWindow,
     prepareTranscriptProjection,
     timelineEl,
@@ -74,6 +90,12 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     restoreVirtualAnchor,
   } = ctx;
   const conversationsRpcClient = createConversationsRpcClient({ sioCall });
+
+  function nextAnimationFrame(): Promise<void> {
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+  }
 
   function isStaleTranscriptResponse(
     expectedConversationId: string | null,
@@ -103,15 +125,14 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     }
     const containerRect = scrollContainer.getBoundingClientRect();
     const rows = Array.from(
-      timelineEl.querySelectorAll<HTMLElement>('[data-transcript-order-id]'),
+      timelineEl.querySelectorAll<HTMLElement>('[data-transcript-card-id]'),
     );
     let bestRow: HTMLElement | null = null;
     let bestOffset = 0;
     if (edge === 'start') {
       let bestDistance = Number.POSITIVE_INFINITY;
       for (const row of rows) {
-        const orderId = parseTranscriptOrderId(row.dataset.transcriptOrderId);
-        if (orderId === null) continue;
+        if (!row.dataset.transcriptCardId) continue;
         const rect = row.getBoundingClientRect();
         if (rect.bottom <= containerRect.top || rect.top >= containerRect.bottom) continue;
         const offsetPx = rect.top - containerRect.top;
@@ -125,8 +146,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     } else {
       let bestDistance = Number.POSITIVE_INFINITY;
       for (const row of rows) {
-        const orderId = parseTranscriptOrderId(row.dataset.transcriptOrderId);
-        if (orderId === null) continue;
+        if (!row.dataset.transcriptCardId) continue;
         const rect = row.getBoundingClientRect();
         if (rect.bottom <= containerRect.top || rect.top >= containerRect.bottom) continue;
         const offsetPx = containerRect.bottom - rect.bottom;
@@ -138,12 +158,12 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
         }
       }
     }
-    const orderId = parseTranscriptOrderId(bestRow?.dataset.transcriptOrderId);
-    if (orderId === null) {
+    const cardId = bestRow?.dataset.transcriptCardId || '';
+    if (!cardId) {
       return null;
     }
     return {
-      orderId,
+      cardId,
       edge,
       offsetPx: bestOffset,
     };
@@ -157,9 +177,9 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     if (!anchor || !scrollContainer || !timelineEl) {
       return;
     }
-    const anchorRow = timelineEl.querySelector<HTMLElement>(
-      `[data-transcript-order-id="${anchor.orderId}"]`,
-    );
+    const anchorRow = Array.from(
+      timelineEl.querySelectorAll<HTMLElement>('[data-transcript-card-id]'),
+    ).find((row) => row.dataset.transcriptCardId === anchor.cardId);
     if (!(anchorRow instanceof HTMLElement)) {
       return;
     }
@@ -175,42 +195,54 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     });
   }
 
-  function shiftChunkSize(limit: number): number {
-    return Math.max(1, Math.floor(Math.max(1, limit) / 4));
-  }
-
-  function replaceTranscriptWindow(
-    items: unknown[],
+  async function replaceTranscriptWindow(
+    cards: TranscriptCardRecipe[],
+    runtimeState: JsonObject[],
     nextState: {
       total: number;
       start: number;
       end: number;
+      atStart: boolean;
+      atTail: boolean;
     },
     anchor: TranscriptAnchor | null,
     options: {
       historyMode?: boolean;
       preserveRuntimeSurface?: boolean;
+      liveProjection?: TurnProjectionSnapshot;
     } = {},
-  ): void {
-    if (options.preserveRuntimeSurface) {
-      prepareTranscriptProjection?.();
-    } else {
-      prepareTranscriptWindow?.();
-    }
-    setTranscriptState({
-      transcriptTotal: nextState.total,
-      transcriptStart: nextState.start,
-      transcriptEnd: nextState.end,
-      transcriptHistoryMode: options.historyMode === true,
-    });
-    renderTranscriptEntries(items, { prepend: false });
-    restorePendingApprovals?.();
-    if (options.historyMode !== true) {
-      onLiveProjectionRestored?.();
-    }
-    requestAnimationFrame(() => {
+  ): Promise<void> {
+    setScrollProgrammatic(true);
+    try {
+      if (options.preserveRuntimeSurface) {
+        prepareTranscriptProjection?.();
+      } else {
+        prepareTranscriptWindow?.();
+      }
+      setTranscriptState({
+        transcriptTotal: nextState.total,
+        transcriptStart: nextState.start,
+        transcriptEnd: nextState.end,
+        transcriptAtStart: nextState.atStart,
+        transcriptAtTail: nextState.atTail,
+        transcriptHistoryMode: options.historyMode === true,
+      });
+      renderTranscriptCards(cards, { prepend: false });
+      applyTranscriptRuntimeState(runtimeState);
+      restorePendingApprovals?.();
+      if (options.historyMode !== true) {
+        if (options.liveProjection) {
+          renderLiveProjection?.(options.liveProjection);
+        }
+        onLiveProjectionRestored?.();
+      }
+      await nextAnimationFrame();
       restoreTranscriptAnchor(anchor);
-    });
+      await nextAnimationFrame();
+      await nextAnimationFrame();
+    } finally {
+      setScrollProgrammatic(false);
+    }
   }
 
   async function loadLatestTranscriptWindow(
@@ -224,19 +256,23 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     if (isStaleTranscriptResponse(requestConversationId, requestGeneration, data.conversation_id)) {
       return false;
     }
-    if (!data || !Array.isArray(data.items)) {
+    if (!data || !Array.isArray(data.cards)) {
       return false;
     }
-    const transcriptStart = data.offset || 0;
-    const transcriptEnd = transcriptStart + (data.items?.length || 0);
-    replaceTranscriptWindow(
-      data.items,
+    await replaceTranscriptWindow(
+      data.cards,
+      data.runtimeState,
       {
         total: data.total || 0,
-        start: transcriptStart,
-        end: transcriptEnd,
+        start: data.start,
+        end: data.end,
+        atStart: data.atStart,
+        atTail: data.atTail,
       },
       null,
+      {
+        liveProjection: data.liveProjection,
+      },
     );
     if (refreshPlanSurface) {
       await refreshPlanSurface();
@@ -258,14 +294,22 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     const replay = await conversationsRpcClient.fetchReplayProjection({
       conversationId: convoId,
       action,
-      windowEntries: windowSize,
-      shiftEntries: shiftChunkSize(windowSize),
+      windowCards: windowSize,
+      shiftCards: TRANSCRIPT_CARD_SHIFT,
     });
+    if (!replay.projection || replay.frame.format !== 'card_recipes') {
+      throw new Error('Transcript projection response is not card-based');
+    }
     return {
       conversation_id: replay.conversation_id,
-      total: replay.frame.total_count,
-      offset: replay.frame.offset,
-      items: replay.items,
+      total: replay.projection.total_cards,
+      start: replay.projection.start_card,
+      end: replay.projection.end_card,
+      cards: replay.cards,
+      runtimeState: replay.runtime_state,
+      atStart: replay.projection.at_start,
+      atTail: replay.projection.at_tail,
+      liveProjection: replay.live_projection,
     };
   }
 
@@ -284,24 +328,27 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
       if (isStaleTranscriptResponse(requestConversationId, requestGeneration, data.conversation_id)) {
         return false;
       }
-      if (data && Array.isArray(data.items) && data.items.length) {
-        const transcriptStart = data.offset ?? currentStart;
+      if (data && Array.isArray(data.cards)) {
+        const transcriptStart = data.start;
         if (transcriptStart === currentStart && (data.total || total) === total) {
           return false;
         }
-        const transcriptEnd = transcriptStart + data.items.length;
         const anchor = captureTranscriptAnchor(direction === 'older' ? 'start' : 'end');
-        replaceTranscriptWindow(
-          data.items,
+        await replaceTranscriptWindow(
+          data.cards,
+          data.runtimeState,
           {
             total: Math.max(data.total || 0, total),
             start: transcriptStart,
-            end: transcriptEnd,
+            end: data.end,
+            atStart: data.atStart,
+            atTail: data.atTail,
           },
           anchor,
           {
-            historyMode: true,
+            historyMode: !data.atTail,
             preserveRuntimeSurface: true,
+            liveProjection: data.atTail ? data.liveProjection : undefined,
           },
         );
         if (refreshRuntimeSurface) {

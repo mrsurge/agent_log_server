@@ -1,4 +1,5 @@
 import type { createConversationsRpcClient } from '../rpc/conversations/client.ts';
+import type { TurnProjectionChange } from '../rpc/conversations/contract.ts';
 
 interface AppserverSocket {
   connected?: boolean;
@@ -23,6 +24,7 @@ interface BindSocketEventsContext {
   conversationsRpcClient?: ReturnType<typeof createConversationsRpcClient> | null;
   isRpcTransportEnabled?: () => boolean;
   onReconnect?: (() => void | Promise<void>) | null;
+  onProjectionChange?: ((change: TurnProjectionChange) => void) | null;
 }
 
 export function bindSocketEvents(ctx: BindSocketEventsContext) {
@@ -38,6 +40,7 @@ export function bindSocketEvents(ctx: BindSocketEventsContext) {
     conversationsRpcClient,
     isRpcTransportEnabled,
     onReconnect,
+    onProjectionChange,
   } = ctx;
   let unsubscribeRpcNotifications: (() => void) | null = null;
   let hasConnectedOnce = false;
@@ -116,6 +119,9 @@ export function bindSocketEvents(ctx: BindSocketEventsContext) {
         },
         onEvent: (event) => {
           if (typeof onEvent === 'function') onEvent(event);
+        },
+        onProjectionChange: (change) => {
+          onProjectionChange?.(change);
         },
       });
     } catch (error) {

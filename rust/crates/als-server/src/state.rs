@@ -8,6 +8,7 @@ use crate::extension_registry::ExtensionRegistry;
 use crate::inline_agent_edits::InlineAgentEditLedger;
 use crate::ipc::IpcClientStore;
 use crate::sidebar_ipc::SidebarIpcStore;
+use crate::turn_projection::TurnProjectionStore;
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -37,6 +38,7 @@ pub struct AppState {
     pub ipc_clients: IpcClientStore,
     pub list_revision: Arc<AtomicU64>,
     pub sidebar_ipc: SidebarIpcStore,
+    pub turn_projections: TurnProjectionStore,
     pub ui_selection: UiSelectionStore,
 }
 
@@ -69,6 +71,7 @@ impl AppState {
         let ipc_clients = IpcClientStore::default();
         let list_revision = Arc::new(AtomicU64::new(0));
         let sidebar_ipc = SidebarIpcStore::default();
+        let turn_projections = TurnProjectionStore::default();
         let ui_selection = UiSelectionStore::with_cache_dir(config.roots.cache_dir.clone());
         Self {
             adapter,
@@ -84,6 +87,7 @@ impl AppState {
             ipc_clients,
             list_revision,
             sidebar_ipc,
+            turn_projections,
             ui_selection,
         }
     }
