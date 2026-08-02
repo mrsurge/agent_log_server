@@ -1,6 +1,6 @@
 [package]
 name = "als-server"
-version = "0.2.115"
+version = "0.2.116"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,11 +12,13 @@ als-dto.workspace = true
 als-jsonrpc.workspace = true
 anyhow.workspace = true
 axum.workspace = true
+flate2.workspace = true
 ferrous_framework.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 git2.workspace = true
 regex.workspace = true
+rmp-serde.workspace = true
 rust_socketio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

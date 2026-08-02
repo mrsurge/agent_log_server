@@ -13,6 +13,7 @@ use tower_http::services::ServeDir;
 use crate::state::AppState;
 
 const SOCKETIO_SERIALIZER_PLACEHOLDER: &str = "__ALS_RS_SOCKETIO_SERIALIZER__";
+const TRANSCRIPT_TRANSPORT_PLACEHOLDER: &str = "__ALS_RS_TRANSCRIPT_TRANSPORT__";
 
 pub fn routes(static_dir: &Path) -> Router<AppState> {
     Router::new()
@@ -32,6 +33,7 @@ async fn index(State(state): State<AppState>) -> Html<String> {
     Html(render_page(
         include_str!("index.html"),
         state.config.socketio_serializer,
+        state.config.transcript_transport,
     ))
 }
 
@@ -39,14 +41,26 @@ async fn agent_log(State(state): State<AppState>) -> Html<String> {
     Html(render_page(
         include_str!("agent_log.html"),
         state.config.socketio_serializer,
+        state.config.transcript_transport,
     ))
 }
 
-fn render_page(template: &str, serializer: crate::config::SocketIoSerializer) -> String {
-    template.replace(
-        SOCKETIO_SERIALIZER_PLACEHOLDER,
-        &serde_json::to_string(serializer.as_str()).expect("serializer mode should encode as JSON"),
-    )
+fn render_page(
+    template: &str,
+    serializer: crate::config::SocketIoSerializer,
+    transcript_transport: crate::config::TranscriptTransport,
+) -> String {
+    template
+        .replace(
+            SOCKETIO_SERIALIZER_PLACEHOLDER,
+            &serde_json::to_string(serializer.as_str())
+                .expect("serializer mode should encode as JSON"),
+        )
+        .replace(
+            TRANSCRIPT_TRANSPORT_PLACEHOLDER,
+            &serde_json::to_string(transcript_transport.as_str())
+                .expect("transcript transport should encode as JSON"),
+        )
 }
 
 async fn manifest() -> Json<serde_json::Value> {
@@ -147,18 +161,47 @@ fn content_type_for_path(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{render_page, safe_asset_components};
-    use crate::config::SocketIoSerializer;
+    use crate::config::{SocketIoSerializer, TranscriptTransport};
 
     #[test]
     fn renders_socketio_serializer_before_browser_boot() {
         let template = "window.AGENT_LOG_SOCKETIO_SERIALIZER = __ALS_RS_SOCKETIO_SERIALIZER__;";
         assert_eq!(
-            render_page(template, SocketIoSerializer::Msgpack),
+            render_page(
+                template,
+                SocketIoSerializer::Msgpack,
+                TranscriptTransport::Stream,
+            ),
             "window.AGENT_LOG_SOCKETIO_SERIALIZER = \"msgpack\";"
         );
         assert_eq!(
-            render_page(template, SocketIoSerializer::Json),
+            render_page(
+                template,
+                SocketIoSerializer::Json,
+                TranscriptTransport::Stream,
+            ),
             "window.AGENT_LOG_SOCKETIO_SERIALIZER = \"json\";"
+        );
+    }
+
+    #[test]
+    fn renders_transcript_transport_before_browser_boot() {
+        let template = "window.ALS_RS_TRANSCRIPT_TRANSPORT = __ALS_RS_TRANSCRIPT_TRANSPORT__;";
+        assert_eq!(
+            render_page(
+                template,
+                SocketIoSerializer::Msgpack,
+                TranscriptTransport::Stream,
+            ),
+            "window.ALS_RS_TRANSCRIPT_TRANSPORT = \"stream\";"
+        );
+        assert_eq!(
+            render_page(
+                template,
+                SocketIoSerializer::Msgpack,
+                TranscriptTransport::Rpc,
+            ),
+            "window.ALS_RS_TRANSCRIPT_TRANSPORT = \"rpc\";"
         );
     }
 

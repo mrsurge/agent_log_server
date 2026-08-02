@@ -9,6 +9,7 @@ import type {
   TributeLookupItem,
   UnknownRecord,
 } from '../shared_types.ts';
+import { getPageClientId } from '../client_identity.ts';
 
 declare const Tribute: TributeConstructor | undefined;
 
@@ -130,13 +131,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
   let applyingRemoteSelection = false;
   let suppressSelectionPublishingUntil = 0;
   const appliedMentionOperations = new Set<string>();
-  const composerClientId = createComposerClientId();
-
-  function createComposerClientId(): string {
-    const randomUuid = windowRef.crypto?.randomUUID?.bind(windowRef.crypto);
-    if (randomUuid) return `composer_${randomUuid()}`;
-    return `composer_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  }
+  const composerClientId = getPageClientId(windowRef);
 
   function hasFocusedComposer(): boolean {
     return Boolean(promptEl && documentRef.hasFocus() && documentRef.activeElement === promptEl);

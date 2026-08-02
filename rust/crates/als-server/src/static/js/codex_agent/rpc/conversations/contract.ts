@@ -1,7 +1,7 @@
 import { RPC_NAMESPACES } from '../namespaces.ts';
 
 export type JsonObject = Record<string, unknown>;
-export type ConversationsRpcTransport = 'rpc' | 'legacy';
+export type ConversationsRpcTransport = 'rpc' | 'stream' | 'legacy';
 
 export const CONVERSATIONS_RPC_NAMESPACE = RPC_NAMESPACES.conversations;
 export const CONVERSATIONS_RPC_IMPLEMENTATION_STATUS = 'implemented' as const;
@@ -106,6 +106,7 @@ export interface TranscriptProjectionState {
 export interface TranscriptCardRecipe {
   card_id: string;
   card_index: number;
+  version: number;
   family: string;
   scope: 'durable';
   parent_card_id?: string;

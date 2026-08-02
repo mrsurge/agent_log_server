@@ -1,3 +1,4 @@
+use crate::config::TranscriptTransport;
 use crate::{
     adapter_process::AdapterCapturedEvent,
     card_truncation::{sanitize_live_card_event, sanitize_transcript_card_entry},
@@ -938,7 +939,7 @@ async fn conversation_send(
         .turn_projections
         .begin_send(&conversation_id)
         .map_err(internal_error)?;
-    emit_projection_change(&io, projection_change).await;
+    emit_projection_change(&io, &state, projection_change).await;
 
     let user_event = json!({
         "type": "message",
@@ -950,7 +951,13 @@ async fn conversation_send(
         .conversations
         .append_transcript(&conversation_id, user_event.clone())
         .map_err(internal_error)?;
-    emit_rpc_notification(&socket, "conversation.user.message", transcript.clone());
+    if state.config.transcript_transport == TranscriptTransport::Stream {
+        state
+            .transcript_streams
+            .publish("conversation.user.message", transcript.clone());
+    } else {
+        emit_rpc_notification(&socket, "conversation.user.message", transcript.clone());
+    }
     emit_meta_and_list_updated_to_namespace(&io, &state, &conversation_id, "meta_changed").await;
 
     let thread_id = meta.thread_id.clone();
@@ -1066,10 +1073,10 @@ async fn handle_adapter_other_event(
 ) -> Result<(), RpcError> {
     match other.method.as_str() {
         events::IMPORT_STARTED => {
-            forward_import_event(io, "conversation.import.started", other.params).await
+            forward_import_event(io, state, "conversation.import.started", other.params).await
         }
         events::IMPORT_PROGRESS => {
-            forward_import_event(io, "conversation.import.progress", other.params).await
+            forward_import_event(io, state, "conversation.import.progress", other.params).await
         }
         events::IMPORT_TRANSCRIPT_BATCH => {
             persist_import_transcript_batch(state, other.params)?;
@@ -1085,7 +1092,7 @@ async fn handle_adapter_other_event(
                 )
                 .await;
             }
-            forward_import_event(io, "conversation.import.completed", other.params).await
+            forward_import_event(io, state, "conversation.import.completed", other.params).await
         }
         events::IMPORT_FAILED => {
             if let Some(conversation_id) = conversation_id_from_value(&other.params) {
@@ -1097,14 +1104,19 @@ async fn handle_adapter_other_event(
                 )
                 .await;
             }
-            forward_import_event(io, "conversation.import.failed", other.params).await
+            forward_import_event(io, state, "conversation.import.failed", other.params).await
         }
         _ => Ok(()),
     }
 }
 
-async fn forward_import_event(io: &SocketIo, method: &str, params: Value) -> Result<(), RpcError> {
-    emit_rpc_notification_to_namespace(io, method, params).await;
+async fn forward_import_event(
+    io: &SocketIo,
+    state: &AppState,
+    method: &str,
+    params: Value,
+) -> Result<(), RpcError> {
+    emit_transcript_notification(io, state, method, params).await;
     Ok(())
 }
 
@@ -1143,7 +1155,7 @@ async fn forward_adapter_live_event(
                 Value::Number(change.generation.into()),
             );
         }
-        emit_projection_change(io, change).await;
+        emit_projection_change(io, state, change).await;
     }
     state
         .turn_projections
@@ -1199,11 +1211,11 @@ async fn forward_adapter_live_event(
         }
         let meta = persist_pending_approval_event(state, &conversation_id, &event)?;
         event["pending_approvals_revision"] = Value::Number(meta.pending_approvals_revision.into());
-        emit_rpc_notification_to_namespace(io, method, event).await;
+        emit_transcript_notification(io, state, method, event).await;
         emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
         return Ok(());
     }
-    emit_rpc_notification_to_namespace(io, method, event).await;
+    emit_transcript_notification(io, state, method, event).await;
     Ok(())
 }
 
@@ -1342,12 +1354,22 @@ async fn conversation_approval_respond(
         .conversations
         .remove_pending_approval(&conversation_id, &request_id);
     emit_meta_and_list_updated_to_namespace(&io, &state, &conversation_id, "meta_changed").await;
-    emit_rpc_notification(
-        &socket,
-        "conversation.approval.handoff",
-        Value::Object(handoff_event.clone()),
-    );
-    maybe_emit_diff_declined(&socket, &conversation_id, &handoff_event);
+    if state.config.transcript_transport == TranscriptTransport::Stream {
+        emit_transcript_notification(
+            &io,
+            &state,
+            "conversation.approval.handoff",
+            Value::Object(handoff_event.clone()),
+        )
+        .await;
+    } else {
+        emit_rpc_notification(
+            &socket,
+            "conversation.approval.handoff",
+            Value::Object(handoff_event.clone()),
+        );
+    }
+    maybe_emit_diff_declined(&socket, &io, &state, &conversation_id, &handoff_event).await;
 
     Ok(json!({
         "ok": true,
@@ -1387,8 +1409,9 @@ pub async fn acknowledge_ask_user_interaction(
     };
     merge_recorded_approval_fields(&mut handoff_event, &recorded_entry);
     emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
-    emit_rpc_notification_to_namespace(
+    emit_transcript_notification(
         io,
+        state,
         "conversation.approval.handoff",
         Value::Object(handoff_event),
     )
@@ -1481,7 +1504,7 @@ async fn persist_adapter_transcript(
         persist_adapter_transcript_entry(state, value)?
     {
         if let Some(change) = projection_change {
-            emit_projection_change(io, change).await;
+            emit_projection_change(io, state, change).await;
         }
         emit_meta_and_list_updated_to_namespace(io, state, &conversation_id, "meta_changed").await;
     }
@@ -1627,10 +1650,37 @@ async fn emit_rpc_notification_to_namespace(io: &SocketIo, method: &str, params:
     }
 }
 
-async fn emit_projection_change(io: &SocketIo, change: TurnProjectionChange) {
+async fn emit_transcript_notification(
+    io: &SocketIo,
+    state: &AppState,
+    method: &str,
+    params: Value,
+) {
+    if state.config.transcript_transport == TranscriptTransport::Stream
+        && is_transcript_stream_notification(method)
+    {
+        state.transcript_streams.publish(method, params);
+    } else {
+        emit_rpc_notification_to_namespace(io, method, params).await;
+    }
+}
+
+fn is_transcript_stream_notification(method: &str) -> bool {
+    !matches!(
+        method,
+        "conversation.draft.updated"
+            | "conversation.draft.selection.updated"
+            | "conversation.list.updated"
+            | "conversation.mention.inserted"
+            | "conversation.meta.updated"
+            | "conversation.preview.updated"
+    )
+}
+
+async fn emit_projection_change(io: &SocketIo, state: &AppState, change: TurnProjectionChange) {
     match serde_json::to_value(change) {
         Ok(value) => {
-            emit_rpc_notification_to_namespace(io, METHOD_PROJECTION_UPDATED, value).await;
+            emit_transcript_notification(io, state, METHOD_PROJECTION_UPDATED, value).await;
         }
         Err(error) => {
             warn!(%error, "failed to serialize turn projection change");
@@ -1962,15 +2012,17 @@ pub(crate) async fn publish_ask_user_interaction(
         if let Some(revision) = registration.event.get("pending_approvals_revision") {
             event.insert("pending_approvals_revision".to_owned(), revision.clone());
         }
-        emit_rpc_notification_to_namespace(
+        emit_transcript_notification(
             io,
+            state,
             "conversation.approval.invalidated",
             Value::Object(event),
         )
         .await;
     }
-    emit_rpc_notification_to_namespace(
+    emit_transcript_notification(
         io,
+        state,
         "conversation.approval.request",
         Value::Object(registration.event.clone()),
     )
@@ -2010,8 +2062,9 @@ pub(crate) async fn invalidate_ask_user_interaction(
         "pending_approvals_revision".to_owned(),
         Value::Number(meta.pending_approvals_revision.into()),
     );
-    emit_rpc_notification_to_namespace(
+    emit_transcript_notification(
         io,
+        state,
         "conversation.approval.invalidated",
         Value::Object(event),
     )
@@ -2359,7 +2412,13 @@ fn merge_recorded_approval_fields(handoff_event: &mut JsonMap, recorded_entry: &
     }
 }
 
-fn maybe_emit_diff_declined(socket: &SocketRef, conversation_id: &str, handoff_event: &JsonMap) {
+async fn maybe_emit_diff_declined(
+    socket: &SocketRef,
+    io: &SocketIo,
+    state: &AppState,
+    conversation_id: &str,
+    handoff_event: &JsonMap,
+) {
     if handoff_event.get("status").and_then(Value::as_str) != Some("declined") {
         return;
     }
@@ -2380,17 +2439,18 @@ fn maybe_emit_diff_declined(socket: &SocketRef, conversation_id: &str, handoff_e
         .cloned()
         .or_else(|| payload.get("path").cloned())
         .unwrap_or(Value::Null);
-    emit_rpc_notification(
-        socket,
-        "conversation.diff.declined",
-        json!({
-            "type": "diff_declined",
-            "id": handoff_event.get("request_id").cloned().unwrap_or(Value::Null),
-            "text": diff,
-            "path": path,
-            "conversation_id": conversation_id,
-        }),
-    );
+    let event = json!({
+        "type": "diff_declined",
+        "id": handoff_event.get("request_id").cloned().unwrap_or(Value::Null),
+        "text": diff,
+        "path": path,
+        "conversation_id": conversation_id,
+    });
+    if state.config.transcript_transport == TranscriptTransport::Stream {
+        emit_transcript_notification(io, state, "conversation.diff.declined", event).await;
+    } else {
+        emit_rpc_notification(socket, "conversation.diff.declined", event);
+    }
 }
 
 fn approval_status_from_resolution(resolution: &JsonMap) -> &'static str {
@@ -2859,6 +2919,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         };
 
         let mut settings = JsonMap::new();
@@ -2937,6 +2998,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         });
 
         persist_adapter_transcript_entry(
@@ -2993,6 +3055,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         });
 
         persist_adapter_transcript_entry(
@@ -3049,6 +3112,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         });
         let mut settings = JsonMap::new();
         settings.insert("agent".to_owned(), json!("other-ext"));
@@ -3100,6 +3164,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         });
         state
             .conversations
@@ -3155,6 +3220,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         });
 
         assert_eq!(conversation_list(&state).unwrap()["revision"], json!(0));
@@ -3185,6 +3251,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         };
         let state = AppState::new(config.clone());
         state
@@ -3228,6 +3295,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         });
         let mut settings = JsonMap::new();
         settings.insert("agent".to_owned(), json!("other-ext"));
@@ -3319,6 +3387,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         });
         let mut settings = JsonMap::new();
         settings.insert("agent".to_owned(), json!("other-ext"));
@@ -3401,6 +3470,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         });
         let mut settings = JsonMap::new();
         settings.insert("agent".to_owned(), json!("codex-ext"));
@@ -3508,6 +3578,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         };
         let context = build_mcp_context(&config, "conv-origin", None, Some("/repo"))
             .expect("mcp context should be built");

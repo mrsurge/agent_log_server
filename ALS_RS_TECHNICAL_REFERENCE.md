@@ -895,7 +895,8 @@ Validation currently covers:
 
 ## Browser transport and RPC contracts
 
-ALS-RS uses Socket.IO namespaces with JSON-RPC-shaped DTO envelopes:
+ALS-RS uses Socket.IO namespaces as its browser control plane with
+JSON-RPC-shaped DTO envelopes:
 
 - request event: `rpc`
 - response: Socket.IO ack containing JSON-RPC success/error
@@ -909,6 +910,25 @@ override and must switch the entire lane together. MessagePack changes the
 Socket.IO payload codec; the request, result, error, and notification objects
 remain JSON-RPC shaped.
 
+Transcript transfer is a separate binary data plane. By default, the browser
+opens `/ws/transcript` with one page-lifetime client ID shared with composer
+authorship. The WebSocket accepts only versioned tagged MessagePack frames and
+serves transcript windows plus selected-conversation live/projection events.
+Large server frames use negotiated gzip. One logical client owns one current
+stream connection and one selected conversation; a newer connection supersedes
+the old one, and bounded outbound queues force reconnect/resync if a client
+falls behind. The browser uses `reconnecting-websocket` with no stale send
+queue.
+
+`ALS_RS_TRANSCRIPT_TRANSPORT=rpc` is the explicit transcript debugging mode. It
+routes projection requests and transcript notifications through the existing
+Socket.IO JSON-RPC lane. There is no runtime fallback or duplicate delivery
+between the two modes. Conversation lists, drafts/selections, mentions, metadata,
+settings, UI controls, and private MCP IPC remain on their existing Socket.IO
+namespaces in stream mode. Setting both transcript transport to `rpc` and
+`AGENT_LOG_SOCKETIO_SERIALIZER=json` provides a fully JSON-readable browser
+debug lane.
+
 Frontend params are normalized to the JSON value domain before MessagePack
 encoding: undefined object fields are omitted and undefined array values become
 null. Request builders should omit absent optional fields. Parser selection is
@@ -920,6 +940,9 @@ Source anchors:
 - `rust/crates/als-server/src/config.rs`
 - `rust/crates/als-server/src/http.rs`
 - `rust/crates/als-server/src/socketio.rs`
+- `rust/crates/als-server/src/transcript_stream.rs`
+- `rust/crates/als-server/src/static/js/codex_agent/transcript_stream.ts`
+- `rust/crates/als-server/src/static/js/codex_agent/client_identity.ts`
 - `rust/crates/als-server/src/static/js/codex_agent/rpc/transport.ts`
 - `rust/crates/als-server/src/static/js/socketio_runtime.js`
 
@@ -979,7 +1002,7 @@ Canonical card details live in `TRANSCRIPT_CARD_CONTRACTS.md`; approvals live in
 ### Rust-owned transcript projection
 
 ALS-RS owns durable transcript position as a process-local card cursor keyed
-by Socket.IO client and conversation. The browser requests `tail`, `older`,
+by logical page client and conversation. The browser requests `tail`, `older`,
 `newer`, or `current`; Rust serves a bounded 75-card window with 20-card
 shifts. These units are deliberately distinct:
 
@@ -994,13 +1017,24 @@ runtime state, or hidden. It preserves and updates explicit card IDs, generates
 stable IDs when needed, reduces repeated family/source snapshots to their
 latest record, groups agent-PTY and subagent lifecycles, and includes required
 parent cards for nested recipes. Raw line counts remain diagnostics only.
-Projection responses use `frame.format: "card_recipes"` and
-`projection.unit: "transcript_card"`; they carry card-unit bounds, total and
-window counts, authoritative `at_start`/`at_tail` flags, ordered
-`cards[]` recipes, and separate `runtime_state[]`. Every recipe event carries
-authoritative card ID/index/operation/scope metadata. Durable recipes use scope
-`durable`; process-local turn recipes use scope `active`. A byte-budget overflow
-is an explicit error, never a partial card window.
+Projection responses use `projection.unit: "transcript_card"`; they carry
+card-unit bounds, total and window counts, authoritative `at_start`/`at_tail`
+flags, ordered recipes, and separate `runtime_state[]`. Every durable recipe has
+a monotonic per-card `version`, and every durable recipe event carries
+authoritative card ID/index/version/operation/scope metadata. Process-local turn
+recipes retain the card ID/index/operation/scope envelope and use scope `active`.
+A byte-budget overflow is an explicit error, never a partial card window.
+
+The Socket.IO RPC debug mode returns complete `frame.format: "card_recipes"`
+windows. The default binary stream returns one complete snapshot for initial
+hydration or forced resync, then sends deltas containing authoritative ordered
+card IDs/indexes/versions, removed card IDs, and only new or version-changed
+recipes. A normal 20-card shift therefore does not resend the 55 overlapping
+recipes in a 75-card window. Reconnect sends the last known bounds and card
+versions; `current` preserves a detached cursor, and a server restart or sequence
+gap requests an authoritative snapshot at that position. Transcript reads batch
+the selected indexed JSONL lines in file order and avoid serializing every event
+back to JSON merely to estimate the response budget.
 
 Durable `transcript.jsonl` remains append-only and final-event-only. Rust also
 owns a separate process-local active-turn projection for in-flight assistant,
@@ -1065,6 +1099,8 @@ Source anchors:
 - `rust/crates/als-server/src/turn_projection.rs`
 - `rust/crates/als-server/src/conversation_store.rs`
 - `rust/crates/als-server/src/conversation_rpc.rs`
+- `rust/crates/als-server/src/transcript_stream.rs`
+- `rust/crates/als-server/src/static/js/codex_agent/transcript_stream.ts`
 - `rust/crates/als-server/src/static/js/codex_agent/transcript_loader.ts`
 - `rust/crates/als-server/src/static/js/codex_agent/rpc/conversations/contract.ts`
 - `rust/crates/als-server/src/static/js/codex_agent/timeline/virtualizer.ts`
@@ -1095,7 +1131,8 @@ state does not survive conversation reset or reload and is never stored in
 localStorage. The virtualizer debug snapshot is exposed as
 `CodexAgent.helpers.getTranscriptProjectionDebugSnapshot()` for console
 inspection of server bounds, logical records, mounted/parked counts, visible
-card indices, and scroll geometry.
+card indices, scroll geometry, selected transport, stream connection/cache
+state, and the last received stream sequence.
 
 ### Conversation list resynchronization
 

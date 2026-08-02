@@ -15,6 +15,10 @@ import { bindShellRender } from './js/codex_agent/shell_render.ts';
 import { bindToolRender } from './js/codex_agent/tool_render.ts';
 import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.ts';
 import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.ts';
+import {
+  createTranscriptStreamClient,
+  readTranscriptTransportMode,
+} from './js/codex_agent/transcript_stream.ts';
 import { bindTranscriptMetrics } from './js/codex_agent/transcript_metrics.ts';
 import {
   isVisibleTranscriptCardRecord,
@@ -437,6 +441,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let hasBufferedLiveTranscript = false;
   let liveProjectionEventHandler: ((event: unknown) => void) | null = null;
   let collapseTranscriptToPinnedImpl: () => Promise<boolean> = async () => false;
+  let refreshCurrentTranscriptProjectionImpl: () => Promise<boolean> = async () => false;
   let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastDraftHash: string | null = null;
   let draftDirty = false;
@@ -1708,6 +1713,18 @@ document.addEventListener('DOMContentLoaded', () => {
     sioCall,
     windowRef: window,
   });
+  const transcriptTransportMode = readTranscriptTransportMode(window);
+  const transcriptStreamClient = transcriptTransportMode === 'stream'
+    ? createTranscriptStreamClient({
+        windowRef: window,
+        getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
+        onEvent: (event) => handleSocketEvent(event),
+        onProjectionChange: (change) => handleProjectionChange(change),
+        onReconnect: () => refreshCurrentTranscriptProjectionImpl().then(() => undefined),
+        onResyncRequired: () => refreshCurrentTranscriptProjectionImpl().then(() => undefined),
+      })
+    : null;
+  const transcriptProjectionClient = transcriptStreamClient ?? conversationsRpcClient;
   const settingsRpcClient = createSettingsRpcClient({
     sioCall,
     windowRef: window,
@@ -1784,13 +1801,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (currentConversationId !== conversationId) return;
     const shouldRefreshTranscript = activeView === 'conversation' || isWidescreenLayout();
     if (!shouldRefreshTranscript) return;
-    resetTimeline();
-    await replayTranscript();
-    if (refreshSerial !== reconnectRefreshSerial) return;
+    if (transcriptTransportMode === 'rpc') {
+      resetTimeline();
+      await replayTranscript();
+      if (refreshSerial !== reconnectRefreshSerial) return;
+    }
     await refreshPlanSurface();
     restorePendingApprovals();
     await publishSidebarWindowState();
-    maybeAutoScroll(true);
+    if (transcriptTransportMode === 'rpc') {
+      maybeAutoScroll(true);
+    }
   }
 
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
@@ -1911,9 +1932,11 @@ document.addEventListener('DOMContentLoaded', () => {
     loadNewerTranscript,
     replayTranscript,
     collapseTranscriptToPinned,
+    refreshCurrentTranscriptProjection,
   } = bindTranscriptLoader({
     getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
     sioCall,
+    projectionClient: transcriptProjectionClient,
     getTranscriptState: () => ({
       transcriptTotal,
       transcriptStart,
@@ -1971,6 +1994,7 @@ document.addEventListener('DOMContentLoaded', () => {
     restoreVirtualAnchor: timelineVirtualizer.restoreTranscriptAnchor,
   });
   collapseTranscriptToPinnedImpl = collapseTranscriptToPinned;
+  refreshCurrentTranscriptProjectionImpl = refreshCurrentTranscriptProjection;
 
   const { handleEvent } = bindEventRouter({
     getState: () => ({
@@ -2407,6 +2431,8 @@ document.addEventListener('DOMContentLoaded', () => {
         meta: { ...conversationMeta },
       }),
       getTranscriptProjectionDebugSnapshot: () => ({
+        transport: transcriptTransportMode,
+        stream: transcriptStreamClient?.debugSnapshot() ?? null,
         projection: {
           total: transcriptTotal,
           start: transcriptStart,

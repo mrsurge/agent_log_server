@@ -183,7 +183,7 @@ function normalizeRpcObjectResult(result: unknown): JsonObject {
   return asObject(result) ?? {};
 }
 
-function normalizeTurnProjectionSnapshot(value: unknown): TurnProjectionSnapshot {
+export function normalizeTurnProjectionSnapshot(value: unknown): TurnProjectionSnapshot {
   const payload = asObject(value) ?? {};
   const items = Array.isArray(payload.items)
     ? payload.items.flatMap((candidate) => {
@@ -289,9 +289,12 @@ function normalizeReplayChunkResult(result: unknown): ReplayChunkResult {
             throw new Error(`Transcript-card recipe ${card.card_id} has no events`);
           }
           const cardIndex = Number.isFinite(card.card_index) ? Number(card.card_index) : -1;
+          const cardVersion = Number.isFinite(card.version) ? Number(card.version) : -1;
           if (
             !Number.isSafeInteger(cardIndex)
             || cardIndex < 0
+            || !Number.isSafeInteger(cardVersion)
+            || cardVersion < 1
             || typeof card.family !== 'string'
             || !card.family
             || card.scope !== 'durable'
@@ -302,6 +305,7 @@ function normalizeReplayChunkResult(result: unknown): ReplayChunkResult {
             if (
               event.projection_card_id !== card.card_id
               || Number(event.projection_card_index) !== cardIndex
+              || Number(event.projection_card_version) !== cardVersion
               || !['create', 'update'].includes(String(event.projection_card_op))
               || event.projection_card_scope !== 'durable'
             ) {
@@ -311,6 +315,7 @@ function normalizeReplayChunkResult(result: unknown): ReplayChunkResult {
           return {
             card_id: card.card_id,
             card_index: cardIndex,
+            version: cardVersion,
             family: card.family,
             scope: 'durable',
             ...(typeof card.parent_card_id === 'string'

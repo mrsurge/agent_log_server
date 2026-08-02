@@ -7,7 +7,9 @@ import {
 } from './transcript_card_metadata.ts';
 import type {
   JsonObject,
+  ReplayChunkResult,
   TranscriptCardRecipe,
+  TranscriptProjectionAction,
   TurnProjectionSnapshot,
 } from './rpc/conversations/contract.ts';
 import { TRANSCRIPT_CARD_SHIFT } from './transcript_config.ts';
@@ -42,6 +44,7 @@ interface TranscriptRangeResponse {
 interface TranscriptLoaderContext {
   getConversationId?(): string | null | undefined;
   sioCall(event: string, payload?: Record<string, unknown>): Promise<unknown>;
+  projectionClient?: TranscriptProjectionClient;
   getTranscriptState(): TranscriptLoaderState;
   setTranscriptState(patch: Partial<TranscriptLoaderState>): void;
   renderTranscriptCards(cards: TranscriptCardRecipe[], options: { prepend: boolean }): void;
@@ -64,10 +67,23 @@ interface TranscriptLoaderContext {
   restoreVirtualAnchor?(anchor: TranscriptAnchor | null): void;
 }
 
+interface TranscriptProjectionClient {
+  fetchReplayProjection(options: {
+    conversationId?: string | null;
+    action: TranscriptProjectionAction;
+    windowCards: number;
+    shiftCards: number;
+    maxBytes?: number;
+    timeoutMs?: number;
+  }): Promise<ReplayChunkResult>;
+  clearProjectionCache?(): void;
+}
+
 export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
   const {
     getConversationId,
     sioCall,
+    projectionClient,
     getTranscriptState,
     setTranscriptState,
     renderTranscriptCards,
@@ -89,7 +105,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     captureVirtualAnchor,
     restoreVirtualAnchor,
   } = ctx;
-  const conversationsRpcClient = createConversationsRpcClient({ sioCall });
+  const conversationsRpcClient = projectionClient ?? createConversationsRpcClient({ sioCall });
 
   function nextAnimationFrame(): Promise<void> {
     return new Promise((resolve) => {
@@ -407,6 +423,60 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     }
   }
 
+  async function refreshCurrentTranscriptProjection(): Promise<boolean> {
+    let state = getTranscriptState();
+    const waitDeadline = Date.now() + 12000;
+    while (state.transcriptLoading && Date.now() < waitDeadline) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 25);
+      });
+      state = getTranscriptState();
+    }
+    if (state.transcriptLoading) return false;
+    const requestConversationId = getConversationId?.() || null;
+    if (!requestConversationId) return false;
+    const requestGeneration = Number(state.transcriptGeneration) || 0;
+    const wasAtTail = state.transcriptAtTail === true;
+    const anchor = wasAtTail ? null : captureTranscriptAnchor('start');
+    setTranscriptState({ transcriptLoading: true });
+    try {
+      const data = await fetchTranscriptProjection(
+        'current',
+        Math.max(1, Number(state.transcriptLimit) || 0),
+      );
+      if (isStaleTranscriptResponse(requestConversationId, requestGeneration, data.conversation_id)) {
+        return false;
+      }
+      await replaceTranscriptWindow(
+        data.cards,
+        data.runtimeState,
+        {
+          total: data.total,
+          start: data.start,
+          end: data.end,
+          atStart: data.atStart,
+          atTail: data.atTail,
+        },
+        anchor,
+        {
+          historyMode: !data.atTail,
+          preserveRuntimeSurface: true,
+          liveProjection: data.atTail ? data.liveProjection : undefined,
+        },
+      );
+      if (wasAtTail && data.atTail) {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => maybeAutoScroll(true));
+        });
+      }
+      return true;
+    } finally {
+      if ((Number(getTranscriptState().transcriptGeneration) || 0) === requestGeneration) {
+        setTranscriptState({ transcriptLoading: false });
+      }
+    }
+  }
+
   async function replayTranscript() {
     try {
       const requestConversationId = getConversationId?.() || null;
@@ -436,5 +506,6 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     loadNewerTranscript,
     replayTranscript,
     collapseTranscriptToPinned,
+    refreshCurrentTranscriptProjection,
   };
 }

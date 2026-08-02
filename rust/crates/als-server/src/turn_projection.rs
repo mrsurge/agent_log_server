@@ -1,5 +1,6 @@
 use crate::conversation_store::{
     ConversationStore, TranscriptProjection, TranscriptProjectionAction,
+    TranscriptProjectionTransfer,
 };
 use anyhow::{Result, anyhow};
 use serde::Serialize;
@@ -273,6 +274,36 @@ impl TurnProjectionStore {
             window_cards,
             shift_cards,
             max_bytes,
+        )?;
+        Ok((transcript, snapshot_from(&state)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_transcript_transfer_with_live(
+        &self,
+        conversations: &ConversationStore,
+        client_id: &str,
+        conversation_id: &str,
+        action: TranscriptProjectionAction,
+        window_cards: usize,
+        shift_cards: usize,
+        max_bytes: usize,
+        requested_start: Option<usize>,
+        known_cards: &HashMap<String, u64>,
+    ) -> Result<(TranscriptProjectionTransfer, TurnProjectionSnapshot)> {
+        let cell = self.cell(conversation_id)?;
+        let state = cell
+            .lock()
+            .map_err(|_| anyhow!("turn projection lock poisoned"))?;
+        let transcript = conversations.project_transcript_transfer(
+            client_id,
+            conversation_id,
+            action,
+            window_cards,
+            shift_cards,
+            max_bytes,
+            requested_start,
+            known_cards,
         )?;
         Ok((transcript, snapshot_from(&state)))
     }

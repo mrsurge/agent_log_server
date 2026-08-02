@@ -87,7 +87,10 @@
         max-width: 100%;
       }
     </style>
-    <script>window.AGENT_LOG_SOCKETIO_SERIALIZER = __ALS_RS_SOCKETIO_SERIALIZER__;</script>
+    <script>
+      window.AGENT_LOG_SOCKETIO_SERIALIZER = __ALS_RS_SOCKETIO_SERIALIZER__;
+      window.ALS_RS_TRANSCRIPT_TRANSPORT = __ALS_RS_TRANSCRIPT_TRANSPORT__;
+    </script>
     <script src="/static/vendor/socket.io/socket.io.min.js"></script>
     <script type="module">
       import { initConsoleBridge } from '/static/js/console_bridge.js';

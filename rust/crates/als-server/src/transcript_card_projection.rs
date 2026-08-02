@@ -20,6 +20,7 @@ struct IndexedLineProjection {
 pub struct TranscriptCardEventMetadata {
     pub card_id: String,
     pub card_index: usize,
+    pub version: u64,
     pub operation: &'static str,
     pub parent_card_id: Option<String>,
 }
@@ -29,6 +30,7 @@ struct IndexedTranscriptCard {
     card_id: String,
     family: String,
     parent_card_id: Option<String>,
+    version: u64,
     events: Vec<IndexedCardEvent>,
 }
 
@@ -48,6 +50,7 @@ enum IndexedCardEventSource {
 pub struct TranscriptCardRecipe {
     pub card_id: String,
     pub card_index: usize,
+    pub version: u64,
     pub family: String,
     pub scope: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +80,7 @@ pub enum IndexedProjectionEvent {
 pub struct IndexedCardRecipe {
     pub card_id: String,
     pub card_index: usize,
+    pub version: u64,
     pub family: String,
     pub parent_card_id: Option<String>,
     pub events: Vec<IndexedProjectionEvent>,
@@ -122,6 +126,7 @@ impl TranscriptCardIndex {
             };
             let card_id = subagent_card_id(&subagent_id);
             if let Some(index) = self.cards_by_id.get(&card_id).copied() {
+                self.cards[index].version = self.cards[index].version.saturating_add(1);
                 self.cards[index].events.push(IndexedCardEvent {
                     source: IndexedCardEventSource::Line(line_index),
                     operation: "update",
@@ -181,6 +186,7 @@ impl TranscriptCardIndex {
             let card = &mut self.cards[index];
             card.family = family;
             card.parent_card_id = parent_card_id.or_else(|| card.parent_card_id.clone());
+            card.version = card.version.saturating_add(1);
             card.events.clear();
             card.events.push(IndexedCardEvent {
                 source: IndexedCardEventSource::Line(line_index),
@@ -259,6 +265,7 @@ impl TranscriptCardIndex {
         Some(IndexedCardRecipe {
             card_id: card.card_id.clone(),
             card_index,
+            version: card.version,
             family: card.family.clone(),
             parent_card_id: card.parent_card_id.clone(),
             events: card
@@ -284,6 +291,7 @@ impl TranscriptCardIndex {
         Some(TranscriptCardEventMetadata {
             card_id: card.card_id.clone(),
             card_index: projection.card_index,
+            version: card.version,
             operation: projection.operation,
             parent_card_id: card.parent_card_id.clone(),
         })
@@ -298,6 +306,7 @@ impl TranscriptCardIndex {
             .unwrap_or_else(|| format!("line-{line_index}"));
         let card_id = format!("agent_pty:{block_id}");
         if let Some(index) = self.cards_by_id.get(&card_id).copied() {
+            self.cards[index].version = self.cards[index].version.saturating_add(1);
             self.cards[index].events.push(IndexedCardEvent {
                 source: IndexedCardEventSource::Line(line_index),
                 operation: "update",
@@ -328,6 +337,7 @@ impl TranscriptCardIndex {
         let Some(index) = self.cards_by_id.get(card_id).copied() else {
             return;
         };
+        self.cards[index].version = self.cards[index].version.saturating_add(1);
         self.cards[index].events.push(IndexedCardEvent {
             source: IndexedCardEventSource::Line(line_index),
             operation: "update",
@@ -384,6 +394,7 @@ impl TranscriptCardIndex {
             card_id,
             family,
             parent_card_id,
+            version: 1,
             events: vec![IndexedCardEvent {
                 source,
                 operation: "create",
@@ -396,6 +407,7 @@ pub fn apply_projection_metadata(
     mut event: Value,
     card_id: &str,
     card_index: usize,
+    card_version: u64,
     operation: &str,
     parent_card_id: Option<&str>,
 ) -> Value {
@@ -407,6 +419,10 @@ pub fn apply_projection_metadata(
         object.insert(
             "projection_card_index".to_owned(),
             Value::Number((card_index as u64).into()),
+        );
+        object.insert(
+            "projection_card_version".to_owned(),
+            Value::Number(card_version.into()),
         );
         object.insert(
             "projection_card_op".to_owned(),
@@ -496,6 +512,7 @@ mod tests {
         assert_eq!(index.total_cards(), 1);
         let recipe = index.indexed_recipe(0).unwrap();
         assert_eq!(recipe.events.len(), 3);
+        assert_eq!(recipe.version, 3);
     }
 
     #[test]
@@ -540,6 +557,7 @@ mod tests {
         assert_eq!(index.total_cards(), 1);
         let recipe = index.indexed_recipe(0).unwrap();
         assert_eq!(recipe.card_id, "diff:patch-1");
+        assert_eq!(recipe.version, 2);
         assert_eq!(recipe.events.len(), 1);
         assert!(matches!(
             recipe.events[0],
@@ -550,6 +568,7 @@ mod tests {
         ));
         let live_metadata = index.event_metadata(1).unwrap();
         assert_eq!(live_metadata.operation, "update");
+        assert_eq!(live_metadata.version, 2);
     }
 
     #[test]
@@ -565,6 +584,7 @@ mod tests {
         );
         assert_eq!(index.total_cards(), 1);
         let recipe = index.indexed_recipe(0).unwrap();
+        assert_eq!(recipe.version, 2);
         assert!(matches!(
             recipe.events[0],
             IndexedProjectionEvent::Line {

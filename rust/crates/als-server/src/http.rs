@@ -3,6 +3,7 @@ use crate::sidebar_ipc;
 use crate::socketio::register_socket_namespaces;
 use crate::state::AppState;
 use crate::static_assets;
+use crate::transcript_stream;
 use crate::{conversation_routes, conversation_rpc, extension_routes};
 use als_dto::{APP_ID, HealthResponse, HealthStatus};
 use axum::{Json, Router, routing::get};
@@ -30,6 +31,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(agent_log::routes())
         .merge(conversation_routes::routes())
         .merge(extension_routes::routes())
+        .merge(transcript_stream::routes())
         .route("/api/health", get(health))
         .with_state(state)
         .layer(socket_layer)

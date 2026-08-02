@@ -35,6 +35,11 @@ function copyFile(src, dest) {
   cpSync(src, dest);
 }
 
+function stripGeneratedTrailingWhitespace(path) {
+  const source = readFileSync(path, 'utf8');
+  writeFileSync(path, source.replace(/[ \t]+$/gm, ''));
+}
+
 function resetManagedVendorAssets() {
   const managedPaths = [
     join(vendorDir, 'fonts', 'jetbrains-mono'),
@@ -134,4 +139,5 @@ if (isWatch) {
   console.log('[build] watching…');
 } else {
   await esbuild.build(codexAgent);
+  stripGeneratedTrailingWhitespace(codexAgent.outfile);
 }

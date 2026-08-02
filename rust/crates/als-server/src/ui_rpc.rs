@@ -1354,6 +1354,7 @@ mod tests {
             },
             framework_shells: FrameworkShellConfig::default(),
             socketio_serializer: crate::config::SocketIoSerializer::Msgpack,
+            transcript_transport: crate::config::TranscriptTransport::Stream,
         })
     }
 

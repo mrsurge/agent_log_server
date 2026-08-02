@@ -14,14 +14,17 @@
     "build": "node build.mjs",
     "build:watch": "node build.mjs --watch",
     "lint:types": "eslint --max-warnings=0 \"rust/crates/als-server/src/static/**/*.ts\"",
+    "test:transcript-url": "node --test tests/transcript_stream_url.test.mjs",
     "typecheck": "tsc --noEmit && npm run lint:types --silent"
   },
   "dependencies": {
     "@chenglou/pretext": "^0.0.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
+    "@msgpack/msgpack": "^3.1.3",
     "highlight.js": "^11.11.1",
     "highlightjs-diff": "^1.0.0",
     "markdown-it": "^14.1.1",
+    "reconnecting-websocket": "^4.4.0",
     "socket.io-client": "^4.7.5",
     "socket.io-msgpack-parser": "^3.0.2",
     "streaming-markdown": "^0.2.15",

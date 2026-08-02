@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 pub const SOCKETIO_SERIALIZER_ENV: &str = "AGENT_LOG_SOCKETIO_SERIALIZER";
+pub const TRANSCRIPT_TRANSPORT_ENV: &str = "ALS_RS_TRANSCRIPT_TRANSPORT";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SocketIoSerializer {
@@ -38,6 +39,31 @@ impl SocketIoSerializer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranscriptTransport {
+    Stream,
+    Rpc,
+}
+
+impl TranscriptTransport {
+    fn from_raw(raw: Option<&str>) -> Result<Self> {
+        match raw.unwrap_or("stream").trim().to_ascii_lowercase().as_str() {
+            "stream" | "websocket" | "ws" => Ok(Self::Stream),
+            "rpc" | "socketio" => Ok(Self::Rpc),
+            value => {
+                bail!("invalid {TRANSCRIPT_TRANSPORT_ENV} value: {value}; expected stream or rpc")
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stream => "stream",
+            Self::Rpc => "rpc",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub host: String,
@@ -47,6 +73,7 @@ pub struct ServerConfig {
     pub adapters: AdapterConfig,
     pub framework_shells: FrameworkShellConfig,
     pub socketio_serializer: SocketIoSerializer,
+    pub transcript_transport: TranscriptTransport,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +110,8 @@ impl ServerConfig {
         framework_shells.apply_args(args)?;
         let socketio_serializer =
             SocketIoSerializer::from_raw(env::var(SOCKETIO_SERIALIZER_ENV).ok().as_deref())?;
+        let transcript_transport =
+            TranscriptTransport::from_raw(env::var(TRANSCRIPT_TRANSPORT_ENV).ok().as_deref())?;
 
         let config = Self {
             host,
@@ -99,6 +128,7 @@ impl ServerConfig {
             },
             framework_shells,
             socketio_serializer,
+            transcript_transport,
         };
         config.ensure_roots()?;
         Ok(config)
@@ -301,6 +331,23 @@ mod tests {
             SocketIoSerializer::Json
         );
         assert!(SocketIoSerializer::from_raw(Some("other")).is_err());
+    }
+
+    #[test]
+    fn transcript_transport_defaults_to_stream_and_accepts_rpc_debug_mode() {
+        assert_eq!(
+            TranscriptTransport::from_raw(None).unwrap(),
+            TranscriptTransport::Stream
+        );
+        assert_eq!(
+            TranscriptTransport::from_raw(Some("ws")).unwrap(),
+            TranscriptTransport::Stream
+        );
+        assert_eq!(
+            TranscriptTransport::from_raw(Some("rpc")).unwrap(),
+            TranscriptTransport::Rpc
+        );
+        assert!(TranscriptTransport::from_raw(Some("other")).is_err());
     }
 
     #[test]

@@ -23,6 +23,7 @@ mod state;
 mod static_assets;
 mod te2_readiness;
 mod transcript_card_projection;
+mod transcript_stream;
 mod turn_projection;
 mod ui_rpc;
 

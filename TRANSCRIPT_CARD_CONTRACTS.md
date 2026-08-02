@@ -80,32 +80,47 @@ and one subagent into one card recipe, reduces repeated snapshots with the same
 family/source identity to the latest record, preserves and updates explicit
 `card_id` values, and generates stable IDs for records that do not supply one.
 
-`conversation.replay.getChunk` projection requests use:
+Projection requests use the same action contract through either the default
+binary transcript stream or the explicit Socket.IO RPC debug transport:
 
 - `projection.action`: `tail`, `older`, `newer`, or `current`
 - `projection.window_cards`
 - `projection.shift_cards`
 
-The projection response is `frame.format: "card_recipes"` and carries:
+Every projection response carries:
 
 - `projection.unit: "transcript_card"`
 - `start_card`, `end_card`, `total_cards`, `window_cards`, `shift_cards`
 - `at_start`, `at_tail`, and the server cursor `revision`
-- `cards[]`, where every recipe has `card_id`, `card_index`, `family`, optional
+- ordered cards where every entry has `card_id`, `card_index`, and `version`
+- complete snapshots carry every selected recipe; stream deltas carry removed
+  card IDs and only new or version-changed recipes
+- every recipe has `card_id`, `card_index`, `version`, `family`, optional
   `parent_card_id`, and ordered `events[]`
 - `runtime_state[]` for latest state-only records such as `mode`, `status`, and
   `token_usage`
 
-Every recipe event carries `projection_card_id`, `projection_card_index`,
-`projection_card_op`, and `projection_card_scope`; nested recipes also carry
-`projection_parent_card_id`. The frontend must produce exactly one card root
-for each durable recipe. Durable recipes use scope `durable`; process-local
-turn recipes use scope `active`. Active and unscoped live-only rows participate
-in layout but never in durable cursor arithmetic. A renderer mismatch produces
-one visible projection-error root at the authoritative durable card index
-instead of aborting and leaving a partially replaced window. The frontend must
-not derive or mutate the backend cursor from DOM node counts, JSONL offsets, or
-provider order IDs.
+Every durable recipe event carries `projection_card_id`,
+`projection_card_index`, `projection_card_version`, `projection_card_op`, and
+`projection_card_scope`; nested recipes also carry
+`projection_parent_card_id`. Process-local active recipe events use the same
+identity/operation/scope envelope without a durable card version. The frontend
+must produce exactly one card root for each durable recipe. Durable recipes use
+scope `durable`; process-local turn recipes use scope `active`. Active and
+unscoped live-only rows participate in layout but never in durable cursor
+arithmetic. A renderer mismatch produces one visible projection-error root at
+the authoritative durable card index instead of aborting and leaving a partially
+replaced window. The frontend must not derive or mutate the backend cursor from
+DOM node counts, JSONL offsets, or provider order IDs.
+
+The default `/ws/transcript` transport is binary-only, versioned tagged
+MessagePack. It sends a full snapshot for initial hydration or forced resync and
+uses ordered/remove/upsert deltas afterward. Large server frames may be gzip
+compressed only after client negotiation. Reconnect requests carry the logical
+client ID, current bounds, known card IDs/versions, and stream sequence. The
+server routes selected-conversation transcript events only to clients subscribed
+to that conversation. `ALS_RS_TRANSCRIPT_TRANSPORT=rpc` is an explicit debugging
+mode; implementations must not silently fall back or deliver both modes.
 
 The default durable window is 75 cards with 20-card shifts. While pinned, live
 events append normally and the frontend may prune completed card roots to that
