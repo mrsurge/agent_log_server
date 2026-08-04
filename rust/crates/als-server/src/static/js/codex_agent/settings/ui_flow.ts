@@ -82,6 +82,13 @@ type PickerItem = {
   [key: string]: unknown;
 };
 
+const MENTION_DOUBLE_ACTIVATION_MS = 400;
+
+export function mentionPickerItemPath(item: PickerItem | null | undefined): string {
+  const value = item?.path || item?.name || '';
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 type RolloutItem = {
   id?: string;
   short_id?: string;
@@ -176,7 +183,6 @@ type RolloutPickerProvider = {
 };
 
 type SettingsUiElements = {
-  settingsModalEl?: HTMLElement | null;
   settingsCwdEl?: TextValueInput | null;
   settingsApprovalEl?: TextValueInput | null;
   settingsSandboxEl?: TextValueInput | null;
@@ -269,7 +275,6 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
   } = ctx;
 
   const {
-    settingsModalEl,
     settingsCwdEl,
     settingsApprovalEl,
     settingsSandboxEl,
@@ -316,6 +321,9 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
   const pickerUpBtn = elements.pickerUpBtn || windowRef?.document?.getElementById('picker-up');
   const pickerSelectBtn = elements.pickerSelectBtn || windowRef?.document?.getElementById('picker-select');
   let pickerTargetInput: TextValueInput | null = null;
+  let selectedMentionItem: PickerItem | null = null;
+  let lastMentionClickPath = '';
+  let lastMentionClickAt = 0;
 
   function getSchemaFieldInput(fieldId: string): TextValueInput | null {
     const getter = windowRef?.CodexAgent?.helpers?.getSchemaFieldInput;
@@ -345,8 +353,56 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       pickerTitleEl.textContent = mode === 'mention' ? 'Mentioning' : 'Pick CWD';
     }
     const isMention = mode === 'mention';
-    if (pickerSelectBtn instanceof HTMLElement) pickerSelectBtn.style.display = isMention ? 'none' : '';
+    if (pickerListEl instanceof HTMLElement) {
+      if (isMention) {
+        pickerListEl.setAttribute('role', 'listbox');
+        pickerListEl.setAttribute('aria-label', 'Mention target');
+      } else {
+        pickerListEl.removeAttribute('role');
+        pickerListEl.removeAttribute('aria-label');
+      }
+    }
+    if (pickerSelectBtn instanceof HTMLButtonElement) {
+      pickerSelectBtn.style.display = '';
+      pickerSelectBtn.textContent = isMention ? 'Mention' : 'Select Current';
+      pickerSelectBtn.disabled = isMention && !mentionPickerItemPath(selectedMentionItem);
+      pickerSelectBtn.setAttribute('aria-disabled', String(pickerSelectBtn.disabled));
+    }
     if (pickerUpBtn instanceof HTMLElement) pickerUpBtn.style.display = '';
+  }
+
+  function clearMentionPickerSelection(): void {
+    selectedMentionItem = null;
+    lastMentionClickPath = '';
+    lastMentionClickAt = 0;
+    pickerListEl?.querySelectorAll<HTMLElement>('.picker-item.selected').forEach((row) => {
+      row.classList.remove('selected');
+      row.setAttribute('aria-selected', 'false');
+    });
+    if (getState().pickerMode === 'mention') setPickerChrome('mention');
+  }
+
+  function selectMentionPickerItem(item: PickerItem, row: HTMLElement): void {
+    pickerListEl?.querySelectorAll<HTMLElement>('.picker-item.selected').forEach((candidate) => {
+      candidate.classList.remove('selected');
+      candidate.setAttribute('aria-selected', 'false');
+    });
+    selectedMentionItem = item;
+    row.classList.add('selected');
+    row.setAttribute('aria-selected', 'true');
+    setPickerChrome('mention');
+  }
+
+  function activateMentionPickerItem(item: PickerItem): void {
+    const path = mentionPickerItemPath(item);
+    if (!path) return;
+    if (item.type === 'directory') {
+      clearMentionPickerSelection();
+      void fetchPicker(path);
+      return;
+    }
+    insertMention(path);
+    closePicker();
   }
 
   function applyPickedCwd(path: unknown): void {
@@ -485,7 +541,6 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
   }
 
   async function openSettingsModal(): Promise<void> {
-    if (!settingsModalEl) return;
     const state = getState();
     if (state.pendingNewConversation) {
       if (settingsCwdEl) {
@@ -537,7 +592,6 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       const hasSavedSettings = !state.pendingNewConversation && !!state.conversationMeta?.settings && Object.values(state.conversationMeta.settings).some((value) => Boolean(value));
       settingsRolloutRowEl.style.display = hasSavedSettings ? 'none' : 'block';
     }
-    settingsModalEl.classList.remove('hidden');
     const currentAgent = resolveAgentId(settingsAgentEl?.value, state);
     if (settingsAgentEl) settingsAgentEl.value = currentAgent;
     if (currentAgent) {
@@ -545,21 +599,20 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
     }
   }
 
-  function closeSettingsModal(): void {
-    if (!settingsModalEl) return;
+  function closeSettingsModal(): boolean {
     const state = getState();
     const agentType = resolveAgentId(settingsAgentEl?.value, state);
     if (!agentType) {
       setActivity('Agent required', true);
-      return;
+      return false;
     }
     const cwdOk = Boolean(getActiveCwdValue({ fallbackToSaved: true }));
     if (!cwdOk) {
       setActivity('CWD required', true);
-      return;
+      return false;
     }
     setState({ pendingNewConversation: false });
-    settingsModalEl.classList.add('hidden');
+    return true;
   }
 
   function openPicker(startPath: unknown, mode: PickerMode = 'cwd', options: { input?: unknown } = {}): void {
@@ -572,6 +625,9 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       || (nextMode === 'cwd' ? getActiveCwdValue({ fallbackToSaved: true }) : '')
       || getState().pickerPath
       || '~';
+    selectedMentionItem = null;
+    lastMentionClickPath = '';
+    lastMentionClickAt = 0;
     setState({ pickerMode: nextMode, pickerPath: nextPath });
     setPickerChrome(nextMode);
     pickerOverlayEl.classList.remove('hidden');
@@ -586,6 +642,9 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
     if (!pickerOverlayEl) return;
     pickerOverlayEl.classList.add('hidden');
     pickerTargetInput = null;
+    selectedMentionItem = null;
+    lastMentionClickPath = '';
+    lastMentionClickAt = 0;
     setPickerChrome('cwd');
     setState({ pickerMode: 'cwd' });
   }
@@ -594,6 +653,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
     if (!pickerFilterEl) return;
     pickerFilterEl.addEventListener('input', () => {
       const state = getState();
+      if (state.pickerMode === 'mention') clearMentionPickerSelection();
       if (state.filterTimer) clearTimeout(state.filterTimer);
       const timer = setTimeout(() => {
         applyPickerFilter();
@@ -922,6 +982,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
   }
 
   async function fetchPicker(path: unknown): Promise<void> {
+    if (getState().pickerMode === 'mention') clearMentionPickerSelection();
     try {
       const targetPath = typeof path === 'string' && path.trim() ? path : '~';
       const data = await uiRpcClient.listFilesystem(targetPath);
@@ -987,6 +1048,7 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
 
   function renderPickerList(items: PickerItem[]): void {
     if (!pickerListEl) return;
+    if (getState().pickerMode === 'mention') clearMentionPickerSelection();
     pickerListEl.innerHTML = '';
     const state = getState();
     items.forEach((item) => {
@@ -997,6 +1059,9 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
       const name = document.createElement('span');
       name.textContent = item.name || item.path || '';
       if (state.pickerMode === 'mention') {
+        row.tabIndex = 0;
+        row.setAttribute('role', 'option');
+        row.setAttribute('aria-selected', 'false');
         const textWrap = document.createElement('span');
         textWrap.className = 'picker-item-text';
         name.className = 'picker-item-name';
@@ -1012,13 +1077,25 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
         row.append(icon, name);
       }
       row.addEventListener('click', () => {
+        if (getState().pickerMode === 'mention') {
+          const path = mentionPickerItemPath(item);
+          if (!path) return;
+          const now = windowRef.performance?.now?.() ?? Date.now();
+          const isDoubleActivation = path === lastMentionClickPath
+            && now - lastMentionClickAt <= MENTION_DOUBLE_ACTIVATION_MS;
+          selectMentionPickerItem(item, row);
+          lastMentionClickPath = path;
+          lastMentionClickAt = now;
+          if (isDoubleActivation) {
+            lastMentionClickPath = '';
+            lastMentionClickAt = 0;
+            activateMentionPickerItem(item);
+          }
+          return;
+        }
         if (item.type === 'directory') {
           void fetchPicker(item.path || item.name || '');
           return;
-        }
-        if (getState().pickerMode === 'mention') {
-          insertMention(item.path || item.name || '');
-          closePicker();
         }
       });
       pickerListEl.appendChild(row);
@@ -1031,7 +1108,13 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
     void fetchPicker(parentPickerPath(currentPath));
   });
   pickerSelectBtn?.addEventListener('click', () => {
-    if (getState().pickerMode === 'mention') return;
+    if (getState().pickerMode === 'mention') {
+      const selectedPath = mentionPickerItemPath(selectedMentionItem);
+      if (!selectedPath) return;
+      insertMention(selectedPath);
+      closePicker();
+      return;
+    }
     const currentPath = getState().pickerPath || pickerPathEl?.textContent || '';
     applyPickedCwd(currentPath);
     closePicker();

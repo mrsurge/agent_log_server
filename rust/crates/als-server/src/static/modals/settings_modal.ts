@@ -22,19 +22,14 @@ function callHelper(ctx: CodexAgentModuleApi | undefined, helperName: string, ..
 
 window.CodexAgentModules = window.CodexAgentModules || [];
 window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
-  const settingsModalEl = document.getElementById('settings-modal');
-  const settingsCloseBtn = document.getElementById('settings-close');
   const settingsCancelBtn = document.getElementById('settings-cancel');
   const settingsSaveBtn = document.getElementById('settings-save');
   const settingsCwdEl = document.getElementById('settings-cwd') as TextValueElement | null;
   const settingsCwdBrowseBtn = document.getElementById('settings-cwd-browse');
   const settingsRolloutBrowseBtn = document.getElementById('settings-rollout-browse');
 
-  settingsCloseBtn?.addEventListener('click', () => callHelper(ctx, 'closeSettingsModal'));
   settingsCancelBtn?.addEventListener('click', () => {
-    if (settingsModalEl) settingsModalEl.classList.add('hidden');
-    callHelper(ctx, 'setPendingNewConversation', false);
-    callHelper(ctx, 'setPendingRollout', null);
+    callHelper(ctx, 'cancelSettingsModal');
   });
   settingsSaveBtn?.addEventListener('click', async () => {
     await callHelper(ctx, 'saveSettings');

@@ -1268,9 +1268,18 @@ provider binding and Rust calls generic resume/hydration. Rust stores normalized
 transcript rows and IDs but never parses provider-native rollout/session
 semantics.
 
+Conversation Settings and Project share one static tabbed modal shell. The
+shell controller owns visibility, tab accessibility, and close routing while the
+settings schema renderer and Project renderer retain ownership of their panel
+content and actions. Existing `openSettingsModal()` and `openProjectModal()`
+entry points select the corresponding tab. Settings form values remain mounted
+across tab switches, and Project is disabled while new-conversation setup is
+pending so the required agent/CWD flow cannot be bypassed.
+
 Source anchors:
 
 - `rust/crates/als-server/src/settings_rpc.rs`
+- `rust/crates/als-server/src/static/js/codex_agent/conversation_modal.ts`
 - `rust/crates/als-server/src/static/modals/settings_schema.ts`
 - `rust/crates/als-server/src/static/js/codex_agent/runtime_footer.ts`
 - `agent_log_server_rs/adapters/extension_adapter.py`
@@ -1321,7 +1330,8 @@ separate contracts.
 `/rpc/ui` `project.summary.get` computes git summary/status/diff data with
 `git2` in `spawn_blocking`. The Project modal exposes generic stage, unstage,
 restore, and commit RPCs and tracks category/diff expansion state in browser
-storage.
+storage. Live project notifications schedule summary refresh only while the
+shared modal's Project tab is active.
 
 Conversation-scoped agent edits are Rust-owned and process-local. Canonical live
 `type: "diff"` events feed:

@@ -209,10 +209,19 @@
           </div>
         </section>
       </main>
-      <div class="settings-overlay hidden" id="settings-modal">
-        <div class="settings-dialog">
-          <div class="settings-header"><h3>Conversation Settings</h3><button id="settings-close" class="btn ghost">×</button></div>
-          <div class="settings-body">
+      <div class="settings-overlay hidden" id="conversation-modal">
+        <div class="settings-dialog conversation-modal-dialog">
+          <div class="settings-header conversation-modal-header">
+            <div class="conversation-modal-tabs" role="tablist" aria-label="Conversation details">
+              <button id="conversation-modal-settings-tab" class="conversation-modal-tab active" type="button" role="tab" aria-selected="true" aria-controls="conversation-modal-settings-panel">Settings</button>
+              <button id="conversation-modal-project-tab" class="conversation-modal-tab" type="button" role="tab" aria-selected="false" aria-controls="conversation-modal-project-panel" tabindex="-1">Project</button>
+            </div>
+            <div class="conversation-modal-header-actions">
+              <div id="conversation-modal-project-header-actions" class="project-header-actions hidden"><button id="project-te2-control" class="btn ghost tiny" type="button" disabled>TE2 unavailable</button></div>
+              <button id="conversation-modal-close" class="btn ghost conversation-modal-close" type="button" aria-label="Close conversation details">×</button>
+            </div>
+          </div>
+          <div id="conversation-modal-settings-panel" class="settings-body conversation-modal-panel" role="tabpanel" aria-labelledby="conversation-modal-settings-tab">
             <label id="settings-agent-row"><span>Agent</span><div class="dropdown-field"><input type="text" id="settings-agent" placeholder="(select agent)" readonly><button id="settings-agent-toggle" class="btn ghost dropdown-toggle">▾</button><div id="settings-agent-options" class="dropdown-list"></div></div></label>
             <label><span>Conversation Label</span><input type="text" id="settings-label" placeholder="label"></label>
             <label><span>Assistant Alias</span><input type="text" id="settings-alias" placeholder="assistant"></label>
@@ -233,7 +242,9 @@
             <label class="settings-checkbox-row"><span>Semantic shell ribbon (Tree-sitter)</span><input type="checkbox" id="settings-semantic-shell-ribbon" checked></label>
             <label class="settings-checkbox-row"><span>TE2 MCP Integration</span><input type="checkbox" id="settings-te2-mcp-integration"></label>
           </div>
-          <div class="settings-footer"><button id="settings-cancel" class="btn ghost">Cancel</button><button id="settings-save" class="btn primary">Save</button></div>
+          <div id="conversation-modal-project-panel" class="settings-body project-modal-body conversation-modal-panel hidden" role="tabpanel" aria-labelledby="conversation-modal-project-tab"><div id="project-body"></div></div>
+          <div id="conversation-modal-settings-footer" class="settings-footer"><button id="settings-cancel" class="btn ghost">Cancel</button><button id="settings-save" class="btn primary">Save</button></div>
+          <div id="conversation-modal-project-footer" class="settings-footer hidden"><button id="project-refresh" class="btn ghost" type="button">Refresh</button><button id="project-dismiss" class="btn primary" type="button">Close</button></div>
         </div>
       </div>
       <div class="settings-overlay hidden" id="splash-settings-modal">
@@ -258,7 +269,6 @@
       <div class="picker-overlay hidden" id="session-picker"><div class="picker-dialog"><div class="picker-header"><h3>Resume Session</h3><button id="session-picker-close" class="btn ghost">×</button></div><div class="picker-body"><div id="session-picker-sort" class="picker-sort-actions" hidden></div><div id="session-picker-list" class="picker-list"></div></div></div></div>
       <div class="settings-overlay hidden" id="warning-modal"><div class="settings-dialog"><div class="settings-header"><h3>Confirm</h3><button id="warning-close" class="btn ghost">×</button></div><div class="settings-body"><p id="warning-body">Are you sure?</p></div><div class="settings-footer"><button id="warning-cancel" class="btn ghost">Cancel</button><button id="warning-confirm" class="btn danger">Continue</button></div></div></div>
       <div class="settings-overlay hidden" id="plan-modal"><div class="settings-dialog"><div class="settings-header"><h3>Plan</h3><button id="plan-close" class="btn ghost">×</button></div><div class="settings-body"><div id="plan-body" class="markdown-body plan-modal-body"></div></div><div class="settings-footer"><button id="plan-dismiss" class="btn primary">Close</button></div></div></div>
-      <div class="settings-overlay hidden" id="project-modal"><div class="settings-dialog project-dialog"><div class="settings-header"><h3>Project</h3><div class="project-header-actions"><button id="project-te2-control" class="btn ghost tiny" type="button" disabled>TE2 unavailable</button><button id="project-close" class="btn ghost">×</button></div></div><div class="settings-body project-modal-body" id="project-body"></div><div class="settings-footer"><button id="project-refresh" class="btn ghost" type="button">Refresh</button><button id="project-dismiss" class="btn primary" type="button">Close</button></div></div></div>
     </div>
   </body>
 </html>

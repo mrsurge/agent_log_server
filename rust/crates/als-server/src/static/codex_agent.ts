@@ -41,6 +41,7 @@ import { bindTranscriptCards } from './js/codex_agent/transcript_cards.ts';
 import { bindBootInitFlow } from './js/codex_agent/boot/init_flow.ts';
 import { bindInputFlow } from './js/codex_agent/boot/input_flow.ts';
 import { bindComposerRuntime } from './js/codex_agent/composer/runtime.ts';
+import { bindConversationModal, type ConversationModalTab } from './js/codex_agent/conversation_modal.ts';
 import { bindConversationRuntime } from './js/codex_agent/conversation/runtime.ts';
 import { bindHostRuntime } from './js/codex_agent/host/runtime.ts';
 import { bindWidescreenLayout } from './js/codex_agent/layout/widescreen.ts';
@@ -58,7 +59,6 @@ import { createUiRpcClient } from './js/codex_agent/rpc/ui/client.ts';
 import type { SocketLike, ToggleableRow, UnknownRecord } from './js/codex_agent/shared_types.ts';
 import './modals/settings_modal.ts';
 import './modals/settings_schema.ts';
-import './modals/cwd_picker.ts';
 import './modals/rollout_picker.ts';
 import './modals/warning_modal.ts';
 import './ui/splash_settings.ts';
@@ -253,10 +253,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const splashSettingsUserNameEl = byId<HTMLInputElement>('splash-settings-user-name');
   const splashSettingsShowConsoleWorkerIdEl = byId<HTMLInputElement>('splash-settings-show-console-worker-id');
   const splashConsoleWorkerIdEl = byId('splash-console-worker-id');
-  const settingsModalEl = byId('settings-modal');
-  const settingsCloseBtn = byId('settings-close');
-  const settingsCancelBtn = byId('settings-cancel');
-  const settingsSaveBtn = byId('settings-save');
   const settingsCwdEl = byId<TextValueElement>('settings-cwd');
   const settingsApprovalEl = byId<TextValueElement>('settings-approval');
   const settingsSandboxEl = byId<TextValueElement>('settings-sandbox');
@@ -852,6 +848,25 @@ document.addEventListener('DOMContentLoaded', () => {
   getUserDisplayName = getUserDisplayNameImpl;
   getAssistantDisplayName = getAssistantDisplayNameImpl;
   let projectModal: ReturnType<typeof bindProjectModal> | null = null;
+  let settingsModalPrepared = false;
+  const conversationModal = bindConversationModal({
+    getProjectDisabled: () => pendingNewConversation,
+    onTabRequest: (tab: ConversationModalTab) => {
+      if (tab === 'settings') {
+        void openSettingsModal({ preserveCurrentValues: true });
+        return;
+      }
+      void projectModal?.activateProjectTab();
+    },
+    onCloseRequest: (tab: ConversationModalTab) => {
+      if (tab === 'settings') {
+        closeSettingsModal();
+        return;
+      }
+      projectModal?.closeProjectModal();
+    },
+    documentRef: document,
+  });
 
   const {
     renderSplashTabs,
@@ -1019,13 +1034,30 @@ document.addEventListener('DOMContentLoaded', () => {
     },
   });
 
-  async function openSettingsModal(...args: Parameters<SettingsUiBinding['openSettingsModal']>) {
+  async function openSettingsModal(options: { preserveCurrentValues?: boolean } = {}) {
     if (!settingsUi) return;
-    return settingsUi.openSettingsModal(...args);
+    const opened = conversationModal.show('settings');
+    if (opened) settingsModalPrepared = false;
+    if (options.preserveCurrentValues && settingsModalPrepared) return;
+    await settingsUi.openSettingsModal();
+    settingsModalPrepared = true;
   }
 
-  function closeSettingsModal(...args: Parameters<SettingsUiBinding['closeSettingsModal']>) {
-    settingsUi?.closeSettingsModal(...args);
+  function hideConversationModal(): void {
+    conversationModal.hide();
+    settingsModalPrepared = false;
+  }
+
+  function closeSettingsModal(): boolean {
+    if (!settingsUi?.closeSettingsModal()) return false;
+    hideConversationModal();
+    return true;
+  }
+
+  function cancelSettingsModal(): void {
+    pendingNewConversation = false;
+    pendingRollout = null;
+    hideConversationModal();
   }
 
   const runtimeFooter = bindRuntimeFooter({
@@ -1178,7 +1210,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (patch.runtimeOptions !== undefined) runtimeOptions = patch.runtimeOptions || {};
     },
     elements: {
-      settingsModalEl,
       settingsCwdEl,
       settingsApprovalEl,
       settingsSandboxEl,
@@ -1786,6 +1817,12 @@ document.addEventListener('DOMContentLoaded', () => {
     renderDiffBlock,
     makeCollapsible,
     confirmProjectAction,
+    showProjectModal: () => {
+      const opened = conversationModal.show('project');
+      if (opened) settingsModalPrepared = false;
+    },
+    closeConversationModal: hideConversationModal,
+    isProjectTabActive: () => conversationModal.isTabActive('project'),
     documentRef: document,
   });
 
@@ -2395,6 +2432,7 @@ document.addEventListener('DOMContentLoaded', () => {
       helperFns: {
         openSettingsModal,
         closeSettingsModal,
+        cancelSettingsModal,
         saveSettings,
       onAgentChange: async (agentId: string) => { await loadExtensionUiFeatures(agentId); },
       openSplashSettingsModal,

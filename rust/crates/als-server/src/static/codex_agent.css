@@ -1014,8 +1014,73 @@ body.widescreen-resizing * {
   box-shadow: var(--shadow);
 }
 
-.project-dialog {
+.conversation-modal-dialog {
   width: min(860px, 94vw);
+}
+
+.conversation-modal-header {
+  gap: 12px;
+}
+
+.conversation-modal-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+}
+
+.conversation-modal-tab {
+  appearance: none;
+  width: auto;
+  min-width: 88px;
+  padding: 9px 12px 8px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.conversation-modal-tab:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.conversation-modal-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.conversation-modal-tab:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.conversation-modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.conversation-modal-close {
+  width: auto;
+  min-width: 36px;
+}
+
+.conversation-modal-panel {
+  min-height: 0;
+}
+
+.conversation-modal-panel.hidden,
+.conversation-modal-header-actions > .hidden,
+.settings-footer.hidden {
+  display: none;
 }
 
 .settings-header,
@@ -1062,6 +1127,12 @@ body.widescreen-resizing * {
 
 .project-modal-body {
   max-height: min(70vh, 720px);
+}
+
+#project-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .project-summary-grid {
@@ -1899,6 +1970,7 @@ label.is-disabled {
   cursor: pointer;
   border-bottom: 1px solid rgba(255,255,255,0.04);
   font-size: 13px;
+  touch-action: manipulation;
 }
 
 .picker-item:last-child {
@@ -1912,6 +1984,16 @@ label.is-disabled {
 .picker-item.selected {
   background: rgba(80, 120, 255, 0.18);
   border-left: 3px solid var(--accent);
+}
+
+.picker-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+#picker-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .schema-option-picker-item {
@@ -3103,6 +3185,12 @@ textarea {
 @media (max-width: 480px) {
   .composer { flex-direction: column; }
   .btn { width: 100%; text-align: center; }
+  .conversation-modal-header { align-items: stretch; }
+  .conversation-modal-tabs { flex: 1; }
+  .conversation-modal-tab { flex: 1; min-width: 0; }
+  .conversation-modal-header-actions,
+  .conversation-modal-close,
+  .project-header-actions .btn { width: auto; }
   .project-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .project-category-header { align-items: flex-start; }
   .project-category-actions .btn,

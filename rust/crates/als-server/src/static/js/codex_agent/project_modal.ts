@@ -29,11 +29,15 @@ interface ProjectModalContext {
   renderDiffBlock(block: HTMLElement, text: string, filePath: string): void;
   makeCollapsible(row: HTMLElement | null, cardId: string, startExpanded: boolean, options?: Record<string, unknown>): void;
   confirmProjectAction(options: { title: string; body: string; confirmText: string }): Promise<boolean>;
+  showProjectModal(): void;
+  closeConversationModal(): void;
+  isProjectTabActive(): boolean;
   documentRef?: Document;
 }
 
 interface ProjectModalBinding {
   openProjectModal(path?: string | null): Promise<void>;
+  activateProjectTab(): Promise<void>;
   closeProjectModal(): void;
 }
 
@@ -283,8 +287,6 @@ function categoryLabel(category: string): string {
 
 export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding {
   const doc = ctx.documentRef || document;
-  const projectModalEl = doc.getElementById('project-modal');
-  const projectCloseBtn = doc.getElementById('project-close');
   const projectDismissBtn = doc.getElementById('project-dismiss');
   const projectRefreshBtn = doc.getElementById('project-refresh');
   const projectTe2Control = doc.getElementById('project-te2-control') as HTMLButtonElement | null;
@@ -1315,7 +1317,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   }
 
   function scheduleProjectSummaryRefresh(): void {
-    if (!projectModalEl || projectModalEl.classList.contains('hidden')) return;
+    if (!ctx.isProjectTabActive()) return;
     if (refreshTimer !== null) return;
     refreshTimer = window.setTimeout(() => {
       refreshTimer = null;
@@ -1340,13 +1342,18 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   async function openProjectModal(path?: string | null): Promise<void> {
     closeMenus();
     selectedProjectPath = typeof path === 'string' && path.trim() ? path.trim() : null;
-    if (!projectModalEl) return;
-    projectModalEl.classList.remove('hidden');
+    ctx.showProjectModal();
+    await refreshProjectSummary();
+  }
+
+  async function activateProjectTab(): Promise<void> {
+    closeMenus();
+    ctx.showProjectModal();
     await refreshProjectSummary();
   }
 
   function closeProjectModal(): void {
-    projectModalEl?.classList.add('hidden');
+    ctx.closeConversationModal();
   }
 
   conversationMenuToggle?.addEventListener('click', (evt) => {
@@ -1357,7 +1364,6 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     void openProjectModal();
   });
   conversationSettingsBtn?.addEventListener('click', closeMenus);
-  projectCloseBtn?.addEventListener('click', closeProjectModal);
   projectDismissBtn?.addEventListener('click', closeProjectModal);
   projectRefreshBtn?.addEventListener('click', () => {
     void refreshProjectSummary();
@@ -1372,9 +1378,6 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     },
   });
   bindProjectDiffClickHandler();
-  projectModalEl?.addEventListener('click', (evt) => {
-    if (evt.target === projectModalEl) closeProjectModal();
-  });
   doc.addEventListener('click', (evt) => {
     const target = evt.target;
     if (!(target instanceof Element)) return;
@@ -1384,12 +1387,12 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   doc.addEventListener('keydown', (evt) => {
     if (evt.key === 'Escape') {
       closeMenus();
-      closeProjectModal();
     }
   });
 
   return {
     openProjectModal,
+    activateProjectTab,
     closeProjectModal,
   };
 }
