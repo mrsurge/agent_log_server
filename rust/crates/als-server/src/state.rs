@@ -183,15 +183,6 @@ impl HostUiStore {
         }
         Ok(state.clone())
     }
-
-    pub fn te2_base_url(&self) -> String {
-        self.snapshot()
-            .ok()
-            .and_then(|snapshot| snapshot.parent_origin)
-            .filter(|origin| origin.starts_with("http://") || origin.starts_with("https://"))
-            .map(|origin| origin.trim_end_matches('/').to_owned())
-            .unwrap_or_else(|| "http://127.0.0.1:8089".to_owned())
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

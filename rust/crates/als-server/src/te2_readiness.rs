@@ -1,3 +1,4 @@
+use crate::config::framework_url_from_env;
 use als_dto::APP_ID;
 use std::{
     env,
@@ -130,21 +131,6 @@ impl ReadinessTarget {
             },
         })
     }
-}
-
-fn framework_url_from_env() -> String {
-    env::var("TE_FRAMEWORK_URL")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            let port = env::var("TE_PORT")
-                .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "8089".to_owned());
-            format!("http://127.0.0.1:{port}")
-        })
 }
 
 fn parse_authority(authority: &str) -> Option<(&str, u16)> {

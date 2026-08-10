@@ -1,5 +1,6 @@
 use crate::{
     composer_sync::ComposerSelection,
+    config::framework_url_from_env,
     conversation_rpc,
     state::{AppState, FocusedWindowSnapshot, HostUiSnapshot},
 };
@@ -7,7 +8,7 @@ use als_adapter_protocol::JsonMap;
 use anyhow::{Result, anyhow, bail};
 use futures_util::FutureExt;
 use rust_socketio::{
-    Payload, TransportType,
+    Event, Payload, TransportType,
     asynchronous::{Client, ClientBuilder},
 };
 use serde::Serialize;
@@ -410,16 +411,32 @@ async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>
         return Ok(Some(client));
     }
 
-    let address = sidebar_address(state);
-    let disconnect_state = state.clone();
+    let address = sidebar_address();
     let notify_io = io.clone();
     let notify_state = state.clone();
+    let (initial_registration_tx, initial_registration_rx) = oneshot::channel::<bool>();
+    let initial_registration_tx = Arc::new(Mutex::new(Some(initial_registration_tx)));
+    let connect_registration_tx = initial_registration_tx.clone();
 
     let client = ClientBuilder::new(address)
         .namespace(SIDEBAR_NAMESPACE)
         .transport_type(TransportType::Websocket)
-        .reconnect(false)
-        .reconnect_on_disconnect(false)
+        .reconnect(true)
+        .reconnect_on_disconnect(true)
+        .on(Event::Connect, move |_payload, client| {
+            let registration_tx = connect_registration_tx.clone();
+            async move {
+                tokio::spawn(async move {
+                    let registered = register_sidebar_client(&client).await;
+                    if let Ok(mut guard) = registration_tx.lock() {
+                        if let Some(sender) = guard.take() {
+                            let _ = sender.send(registered);
+                        }
+                    }
+                });
+            }
+            .boxed()
+        })
         .on(RPC_NOTIFY_EVENT, move |payload, _client| {
             let io = notify_io.clone();
             let state = notify_state.clone();
@@ -430,10 +447,13 @@ async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>
             }
             .boxed()
         })
-        .on("disconnect", move |_payload, _client| {
-            let state = disconnect_state.clone();
+        .on(Event::Close, move |_payload, _client| {
             async move {
-                state.sidebar_ipc.clear().await;
+                info!(
+                    namespace = SIDEBAR_NAMESPACE,
+                    socket_path = SIDEBAR_SOCKET_PATH,
+                    "ALS-RS sidebar IPC disconnected; awaiting automatic reconnect"
+                );
             }
             .boxed()
         })
@@ -456,14 +476,19 @@ async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>
     };
 
     state.sidebar_ipc.set(client.clone()).await;
-    register_sidebar_client(&client).await;
+    match timeout(Duration::from_secs(6), initial_registration_rx).await {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => warn!("initial ALS-RS sidebar IPC registration failed"),
+        Ok(Err(_)) => warn!("initial ALS-RS sidebar IPC registration result was dropped"),
+        Err(_) => warn!("initial ALS-RS sidebar IPC registration timed out"),
+    }
     Ok(Some(client))
 }
 
-fn sidebar_address(state: &AppState) -> String {
+fn sidebar_address() -> String {
     format!(
         "{}{}?app_id=file_editor_cm6&source=appserver",
-        state.host_ui.te2_base_url(),
+        framework_url_from_env(),
         SIDEBAR_SOCKET_PATH
     )
 }
@@ -481,7 +506,7 @@ async fn query_initial_cwd(
     Ok(None)
 }
 
-async fn register_sidebar_client(client: &Client) {
+async fn register_sidebar_client(client: &Client) -> bool {
     let payload = json!({
         "role": "iframe",
         "app": "als-rs",
@@ -502,6 +527,7 @@ async fn register_sidebar_client(client: &Client) {
                 ?value,
                 "registered ALS-RS sidebar IPC client"
             );
+            true
         }
         Ok(value) => {
             warn!(
@@ -512,6 +538,7 @@ async fn register_sidebar_client(client: &Client) {
                 ?value,
                 "sidebar.register RPC returned an unsuccessful result"
             );
+            false
         }
         Err(error) => {
             warn!(
@@ -522,6 +549,7 @@ async fn register_sidebar_client(client: &Client) {
                 %error,
                 "sidebar.register RPC failed"
             );
+            false
         }
     }
 }

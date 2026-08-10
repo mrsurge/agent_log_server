@@ -9,6 +9,27 @@ use std::path::PathBuf;
 pub const SOCKETIO_SERIALIZER_ENV: &str = "AGENT_LOG_SOCKETIO_SERIALIZER";
 pub const TRANSCRIPT_TRANSPORT_ENV: &str = "ALS_RS_TRANSCRIPT_TRANSPORT";
 
+pub fn framework_url_from_env() -> String {
+    framework_url_from_values(
+        env::var("TE_FRAMEWORK_URL").ok().as_deref(),
+        env::var("TE_PORT").ok().as_deref(),
+    )
+}
+
+fn framework_url_from_values(framework_url: Option<&str>, framework_port: Option<&str>) -> String {
+    framework_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_owned())
+        .unwrap_or_else(|| {
+            let port = framework_port
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("8089");
+            format!("http://127.0.0.1:{port}")
+        })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SocketIoSerializer {
     Json,
@@ -348,6 +369,18 @@ mod tests {
             TranscriptTransport::Rpc
         );
         assert!(TranscriptTransport::from_raw(Some("other")).is_err());
+    }
+
+    #[test]
+    fn framework_url_uses_the_injected_nondefault_port() {
+        assert_eq!(
+            framework_url_from_values(None, Some("8081")),
+            "http://127.0.0.1:8081"
+        );
+        assert_eq!(
+            framework_url_from_values(Some("http://127.0.0.1:8081/"), Some("8089")),
+            "http://127.0.0.1:8081"
+        );
     }
 
     #[test]
