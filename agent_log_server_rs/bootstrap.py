@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib
 import os
+import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable, Generator, MutableMapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -17,6 +21,11 @@ from typing import Sequence, cast
 APP_ID = "als-rs"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = "12459"
+SERVER_PACKAGE = "als-server"
+
+_INCLUDE_LITERAL_PATTERN = re.compile(
+    rb'include_(?:str|bytes)!\(\s*"([^"\\]+)"\s*\)',
+)
 
 SignalHandler = int | signal.Handlers | Callable[[int, FrameType | None], object]
 
@@ -31,6 +40,7 @@ class BootstrapArgs:
     static_dir: str | None
     server_bin: str | None
     cargo_manifest: str | None
+    debug: bool
     framework_shells_base_dir: str | None
     framework_shells_secret: str | None
     framework_shells_repo_fingerprint: str | None
@@ -66,6 +76,7 @@ def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
         epilog=(
             "Examples:\n"
             "  als-rs\n"
+            "  als-rs --debug\n"
             "  als-rs --port 12459\n"
             "  als-rs extension list\n"
             "  als-rs extension install --path /path/to/extension --install-dependencies\n"
@@ -82,12 +93,20 @@ def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
     parser.add_argument(
         "--server-bin",
         default=os.environ.get("ALS_RS_SERVER_BIN"),
-        help="Path to an installed als-server binary. Defaults to cargo run in source checkouts.",
+        help=(
+            "Path to an installed als-server binary. Defaults to the fingerprinted Cargo "
+            "release cache; use --debug for the debug profile."
+        ),
     )
     parser.add_argument(
         "--cargo-manifest",
         default=os.environ.get("ALS_RS_CARGO_MANIFEST"),
         help="Path to rust/Cargo.toml for development launches.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Build and run the Rust server with Cargo's debug profile (release is the default).",
     )
     parser.add_argument(
         "--framework-shells-base-dir",
@@ -123,6 +142,7 @@ def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
         static_dir=cast(str | None, raw.static_dir),
         server_bin=cast(str | None, raw.server_bin),
         cargo_manifest=cast(str | None, raw.cargo_manifest),
+        debug=cast(bool, raw.debug),
         framework_shells_base_dir=cast(str | None, raw.framework_shells_base_dir),
         framework_shells_secret=cast(str | None, raw.framework_shells_secret),
         framework_shells_repo_fingerprint=cast(str | None, raw.framework_shells_repo_fingerprint),
@@ -172,22 +192,173 @@ def _server_command(args: BootstrapArgs, env: MutableMapping[str, str] | None = 
 
     manifest = Path(args.cargo_manifest) if args.cargo_manifest else _default_rust_manifest()
     target_dir = _bootstrap_cargo_target_dir(manifest, runtime_env)
+    cargo_profile = "debug" if args.debug else "release"
+    fingerprint = _rust_source_fingerprint(manifest, profile=cargo_profile)
+    cache_dir = Path(runtime_env.get("ALS_RS_CACHE_DIR") or args.cache_dir or _default_cache_dir())
+    binary_name = _server_binary_name()
+    bin_root = cache_dir / "bin"
+    cached_binary = bin_root / fingerprint / cargo_profile / binary_name
 
-    debug_binary = target_dir / "debug" / "als-server"
-    use_ferrous_framework = _ferrous_framework_enabled(args)
-    if debug_binary.exists() and not use_ferrous_framework:
-        return [str(debug_binary), *framework_shell_args]
+    with _exclusive_build_cache_lock(cache_dir):
+        if _cached_binary_is_usable(cached_binary):
+            _prune_final_binary_cache(bin_root, cached_binary)
+            return [str(cached_binary), *framework_shell_args]
 
-    command = [
-        "cargo",
-        "run",
-        "--manifest-path",
-        str(manifest),
-        "-p",
-        "als-server",
-    ]
-    command.extend(["--", *framework_shell_args])
-    return command
+        command = [
+            "cargo",
+            "build",
+            "--manifest-path",
+            str(manifest),
+            "-p",
+            SERVER_PACKAGE,
+        ]
+        if not args.debug:
+            command.append("--release")
+        build_env = dict(runtime_env)
+        build_env["CARGO_TARGET_DIR"] = str(target_dir)
+        result = subprocess.run(command, env=build_env, check=False)
+        if result.returncode != 0:
+            raise SystemExit(result.returncode)
+
+        built_binary = target_dir / cargo_profile / binary_name
+        if not _cached_binary_is_usable(built_binary):
+            raise SystemExit(
+                f"Rust server build finished but binary is missing or unusable: {built_binary}"
+            )
+        _publish_cached_binary(built_binary, cached_binary)
+        _prune_final_binary_cache(bin_root, cached_binary)
+
+    return [str(cached_binary), *framework_shell_args]
+
+
+@contextmanager
+def _exclusive_build_cache_lock(cache_dir: Path) -> Generator[None, None, None]:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_dir / ".build.lock"
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _cached_binary_is_usable(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0 and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def _publish_cached_binary(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+    try:
+        shutil.copy2(source, temporary)
+        temporary.chmod(temporary.stat().st_mode | 0o755)
+        with temporary.open("rb") as file_handle:
+            os.fsync(file_handle.fileno())
+        if not _cached_binary_is_usable(temporary):
+            raise RuntimeError(f"published Rust server binary is unusable: {temporary}")
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _prune_final_binary_cache(bin_root: Path, selected_binary: Path) -> None:
+    if not _cached_binary_is_usable(selected_binary):
+        raise RuntimeError(
+            f"refusing to prune before the selected binary validates: {selected_binary}"
+        )
+
+    selected_profile_dir = selected_binary.parent
+    selected_fingerprint_dir = selected_profile_dir.parent
+    if selected_fingerprint_dir.parent != bin_root:
+        raise RuntimeError(
+            f"selected binary is outside the final binary cache: {selected_binary}"
+        )
+
+    for fingerprint_entry in tuple(bin_root.iterdir()):
+        if fingerprint_entry != selected_fingerprint_dir:
+            _remove_cache_entry(fingerprint_entry)
+    for profile_entry in tuple(selected_fingerprint_dir.iterdir()):
+        if profile_entry != selected_profile_dir:
+            _remove_cache_entry(profile_entry)
+    for binary_entry in tuple(selected_profile_dir.iterdir()):
+        if binary_entry != selected_binary:
+            _remove_cache_entry(binary_entry)
+    _fsync_directory(bin_root)
+
+
+def _remove_cache_entry(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _server_binary_name() -> str:
+    suffix = ".exe" if sys.platform == "win32" else ""
+    return f"{SERVER_PACKAGE}{suffix}"
+
+
+def _rust_source_fingerprint(manifest: Path, *, profile: str) -> str:
+    workspace = manifest.parent
+    hasher = hashlib.sha256()
+    hasher.update(b"als-rs-server-build-cache-v1\0")
+    hasher.update(str(workspace).encode("utf-8", "surrogateescape"))
+    hasher.update(b"\0")
+    hasher.update(profile.encode("utf-8"))
+    hasher.update(b"\0")
+    hasher.update(sys.platform.encode("utf-8"))
+    hasher.update(b"\0")
+    uname_result = os.uname() if hasattr(os, "uname") else None
+    hasher.update(uname_result.machine.encode("utf-8") if uname_result is not None else b"")
+    for path in _rust_fingerprint_paths(workspace):
+        relative = path.relative_to(workspace).as_posix()
+        hasher.update(b"\0path:")
+        hasher.update(relative.encode("utf-8", "surrogateescape"))
+        hasher.update(b"\0")
+        hasher.update(path.read_bytes())
+    return hasher.hexdigest()[:24]
+
+
+def _rust_fingerprint_paths(workspace: Path) -> list[Path]:
+    candidates: set[Path] = set()
+    for relative in ("Cargo.toml", "Cargo.lock"):
+        path = workspace / relative
+        if path.is_file():
+            candidates.add(path)
+
+    crates_root = workspace / "crates"
+    if not crates_root.is_dir():
+        return sorted(candidates)
+
+    rust_sources: list[Path] = []
+    for path in crates_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name in {"Cargo.toml", "build.rs"} or path.suffix == ".rs":
+            candidates.add(path)
+        if path.suffix == ".rs":
+            rust_sources.append(path)
+
+    for source in rust_sources:
+        source_bytes = source.read_bytes()
+        for match in _INCLUDE_LITERAL_PATTERN.finditer(source_bytes):
+            included = source.parent / os.fsdecode(match.group(1))
+            if included.is_file():
+                candidates.add(included)
+    return sorted(candidates)
 
 
 def _bootstrap_cargo_target_dir(manifest: Path, runtime_env: MutableMapping[str, str]) -> Path:
@@ -223,22 +394,6 @@ def _framework_shell_args(args: BootstrapArgs) -> list[str]:
         if value:
             rendered.extend((flag, value))
     return rendered
-
-
-def _ferrous_framework_enabled(args: BootstrapArgs) -> bool:
-    disabled = os.environ.get("ALS_RS_DISABLE_FERROUS_FRAMEWORK", "").lower()
-    if disabled in {"1", "true", "yes", "on"}:
-        return False
-    return any(
-        (
-            args.framework_shells_base_dir,
-            args.framework_shells_secret,
-            args.framework_shells_repo_fingerprint,
-            args.framework_shells_secret_fingerprint,
-            args.framework_shells_fws_socketio_server_pid,
-            args.framework_shells_run_id,
-        )
-    )
 
 
 def _set_if_present(env: dict[str, str], key: str, value: str | None) -> None:

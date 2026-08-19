@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "profileId": "page-preview",
+      "runner": "pagePreview",
+      "entry": "index.html",
+      "include": [
+        "index.html",
+        "*.html",
+        "*.htm",
+        "*.css",
+        "*.scss",
+        "*.sass",
+        "*.less",
+        "*.js",
+        "*.mjs",
+        "*.ts",
+        "*.jsx",
+        "*.tsx",
+        "*.json",
+        "src/**",
+        "public/**",
+        "assets/**"
+      ],
+      "sidebarUrl": "http://127.0.0.1:3000/",
+      "runningBehavior": "just save",
+      "saveDrafts": "included",
+      "showSaveWarning": true,
+      "devTools": false
+    }
+  ]
+}

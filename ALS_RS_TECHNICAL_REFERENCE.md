@@ -219,17 +219,25 @@ Bootstrap responsibilities:
    - source-checkout `rust/Cargo.toml` during development
    - packaged `agent_log_server_rs/rust/Cargo.toml` copied into built wheels
      (this generated package path is not present in a source checkout)
-   - development binary under the active Cargo target dir when present
-   - otherwise `cargo run -p als-server`
-   Packaged wheel launches set `CARGO_TARGET_DIR` under the ALS-RS cache root so
-   cargo does not write build output into site-packages.
-   Future release/optimized binary support should be an explicit opt-in
-   bootstrap mode such as `--release` or `ALS_RS_CARGO_PROFILE=release`, not
-   the default development path. The first release build will create a
-   separate `target/release` tree and can take materially longer on Termux, so
-   keep the initial implementation profile-only and avoid enabling LTO or
-   heavier size-optimization settings until the compile-time and disk impact
-   is measured in this checkout.
+   - a validated final binary under
+     `${ALS_RS_CACHE_DIR}/bin/<source-fingerprint>/<profile>/als-server`
+   The fingerprint covers the workspace path without resolving symlinks, Cargo
+   manifests/lockfile, Rust/build-script sources, literal `include_str!` /
+   `include_bytes!` inputs, profile, platform, and architecture. A cache miss
+   acquires the process-shared build lock and runs `cargo build -p als-server`
+   in the isolated Cargo target dir, with `--release` by default or the debug
+   profile when `--debug` is present. The resulting executable is validated,
+   atomically published, and fsynced before any prior final binary is removed.
+   Successful cache hits/builds retain only the selected fingerprint/profile
+   binary. Cargo dependencies and incremental state remain under
+   `${ALS_RS_CACHE_DIR}/cargo-target/<manifest-key>` for reuse and are not part
+   of final-binary pruning. Packaged wheel launches therefore never write
+   Cargo output into site-packages.
+   Explicit `ALS_RS_SERVER_BIN` / `--server-bin` remains authoritative and
+   bypasses fingerprinting, profile selection, building, and pruning.
+   Framework-shell launches use the same fingerprinted final cache; source or
+   embedded-asset changes force a new build instead of relying on target-file
+   existence as a freshness signal.
    Bootstrap also exports `ALS_RS_EXTENSIONS_DIR` to the packaged/source
    builtin `extensions/` root so Rust discovery does not rely on Cargo's
    rust-workspace-relative default.
@@ -384,10 +392,11 @@ The adapter shellspec is:
 agent_log_server_rs/shellspec/extension_adapter.yaml
 ```
 
-For source-checkout launches, the Python bootstrap still forces `cargo run` when
-framework-shell context is present so a stale `target/debug/als-server` binary
-does not hide adapter transport changes. There is no ALS-side PyO3 feature gate
-or PyO3 interpreter selection for this path anymore.
+For source-checkout and packaged launches, framework-shell context is forwarded
+to the fingerprint-selected `als-server` exactly as it is for direct launches.
+Fingerprint misses build release by default and debug under `--debug`; cache
+hits launch the validated final binary directly. There is no ALS-side PyO3
+feature gate or PyO3 interpreter selection for this path anymore.
 
 Reasons to prefer JSON-RPC shape:
 
@@ -1766,10 +1775,10 @@ Current status:
     context is present, emits `adapter.transport.started` /
     `adapter.transport.fallback` diagnostics for that path, and otherwise keeps
     the direct child transport as the default.
-  - The source-checkout bootstrap skips stale `target/debug/als-server` binaries
-    when framework-shell context is present and launches plain `cargo run`; no
-    `ferrous-framework-pyo3`, `PYO3_CONFIG_FILE`, or `PYO3_PYTHON` handling is
-    needed.
+  - The bootstrap now selects a source-fingerprinted, validated final
+    `als-server` binary for both direct and framework-shell launches. It builds
+    on a fingerprint miss and does not require `ferrous-framework-pyo3`,
+    `PYO3_CONFIG_FILE`, or `PYO3_PYTHON` handling.
   - The deleted Python helper `agent_log_server_rs/ferrous_framework.py` is no
     longer part of ALS-RS runtime. Ferrous owns native process/pipe lifecycle;
     ALS owns JSON-RPC line framing, request matching, and DTO routing.

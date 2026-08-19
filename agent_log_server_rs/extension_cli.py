@@ -224,6 +224,7 @@ def _bootstrap_env(args: argparse.Namespace) -> dict[str, str]:
         static_dir=_optional_str(getattr(args, "static_dir", None)),
         server_bin=None,
         cargo_manifest=None,
+        debug=False,
         framework_shells_base_dir=os.environ.get("FRAMEWORK_SHELLS_BASE_DIR"),
         framework_shells_secret=os.environ.get("FRAMEWORK_SHELLS_SECRET"),
         framework_shells_repo_fingerprint=os.environ.get("FRAMEWORK_SHELLS_REPO_FINGERPRINT"),
