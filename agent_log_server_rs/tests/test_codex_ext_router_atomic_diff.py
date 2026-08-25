@@ -80,6 +80,7 @@ class CodexAtomicDiffRouterTests(unittest.TestCase):
         diff_entries = [entry for entry in entries if entry.get("role") == "diff"]
 
         self.assertEqual([entry.get("role") for entry in entries], ["tool", "diff"])
+        self.assertNotIn("diff", entries[0])
         self.assertEqual(len(diff_entries), 1)
         self.assertEqual(diff_entries[0]["path"], "src/example.ts")
         self.assertEqual(diff_entries[0]["event"], "item/completed")
@@ -128,7 +129,7 @@ class CodexAtomicDiffRouterTests(unittest.TestCase):
         self.assertIn("+- markdown bullet", diff_text)
         self.assertNotIn("\n# Example", diff_text)
 
-    def test_started_add_filechange_raw_content_becomes_new_file_diff(self) -> None:
+    def test_started_add_filechange_keeps_patch_body_out_of_tool_summary(self) -> None:
         result = self.router.route_event(
             self.protocol,
             label="item/started",
@@ -139,12 +140,64 @@ class CodexAtomicDiffRouterTests(unittest.TestCase):
 
         events = cast(list[ObjectDict], result["events"])
         tool_begin = events[0]
-        diff_text = cast(str, tool_begin["diff"])
 
         self.assertEqual(tool_begin["type"], "tool_begin")
         self.assertTrue(tool_begin["new_file"])
+        self.assertNotIn("diff", tool_begin)
+
+    def test_add_filechange_hunk_uses_dev_null_header(self) -> None:
+        result = self._completed_filechange(
+            "call-add-hunk",
+            "@@ -0,0 +1 @@\n+new\n",
+            {"type": "add"},
+        )
+
+        entries = cast(list[ObjectDict], result["transcript_entries"])
+        diff_entry = [entry for entry in entries if entry.get("role") == "diff"][0]
+        diff_text = cast(str, diff_entry["text"])
+
         self.assertIn("--- /dev/null", diff_text)
-        self.assertIn("+# Example", diff_text)
+        self.assertIn("+++ b/src/example.ts", diff_text)
+
+    def test_update_raw_content_does_not_become_fake_diff(self) -> None:
+        result = self._completed_filechange(
+            "call-raw-update",
+            "src/bundle.js.map:4:" + "x" * 32_000,
+        )
+
+        entries = cast(list[ObjectDict], result["transcript_entries"])
+
+        self.assertEqual([entry.get("role") for entry in entries], ["tool"])
+        self.assertNotIn("diff", entries[0])
+
+    def test_header_wrapped_raw_content_does_not_become_fake_diff(self) -> None:
+        result = self._completed_filechange(
+            "call-wrapped-raw",
+            "\n".join((
+                "diff --git a/audit.txt b/audit.txt",
+                "--- a/audit.txt",
+                "+++ b/audit.txt",
+                "src/bundle.js.map:4:" + "x" * 32_000,
+            )),
+        )
+
+        entries = cast(list[ObjectDict], result["transcript_entries"])
+
+        self.assertEqual([entry.get("role") for entry in entries], ["tool"])
+        self.assertNotIn("diff", entries[0])
+
+    def test_metadata_only_filechange_remains_renderable(self) -> None:
+        result = self._completed_filechange(
+            "call-mode-change",
+            "old mode 100644\nnew mode 100755\n",
+        )
+
+        entries = cast(list[ObjectDict], result["transcript_entries"])
+        diff_entry = [entry for entry in entries if entry.get("role") == "diff"][0]
+        diff_text = cast(str, diff_entry["text"])
+
+        self.assertIn("diff --git a/src/example.ts b/src/example.ts", diff_text)
+        self.assertIn("new mode 100755", diff_text)
 
     def test_turn_diff_updated_is_not_a_conversation_diff_row(self) -> None:
         result = self.router.route_event(

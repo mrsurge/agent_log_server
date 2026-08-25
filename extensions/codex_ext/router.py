@@ -1180,7 +1180,9 @@ def _diff_sections_from_changes(changes: object) -> List[Tuple[Optional[str], st
                 continue
             path = change.get("path") or change.get("file_path") or _extract_path_from_diff(text)
             section_path = path if isinstance(path, str) else None
-            sections.append((section_path, _normalized_change_diff(section_path, change, text)))
+            normalized = _normalized_change_diff(section_path, change, text)
+            if normalized:
+                sections.append((section_path, normalized))
     elif _is_object_dict(changes):
         for change_path, change in changes.items():
             if not _is_object_dict(change):
@@ -1190,7 +1192,9 @@ def _diff_sections_from_changes(changes: object) -> List[Tuple[Optional[str], st
                 continue
             path = change.get("path") or change.get("file_path") or change_path or _extract_path_from_diff(text)
             section_path = path if isinstance(path, str) else None
-            sections.append((section_path, _normalized_change_diff(section_path, change, text)))
+            normalized = _normalized_change_diff(section_path, change, text)
+            if normalized:
+                sections.append((section_path, normalized))
     return sections
 
 
@@ -1214,21 +1218,48 @@ def _diff_text_has_file_headers(text: str) -> bool:
 
 
 def _diff_text_has_hunk_header(text: str) -> bool:
-    return any(line.startswith("@@ ") for line in text.splitlines())
+    return any(
+        re.match(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", line) is not None
+        for line in text.splitlines()
+    )
 
 
 def _diff_text_has_git_header(text: str) -> bool:
     return any(line.startswith("diff --git ") for line in text.splitlines())
 
 
+def _diff_text_has_metadata_change(text: str) -> bool:
+    prefixes = (
+        "Binary files ",
+        "GIT binary patch",
+        "old mode ",
+        "new mode ",
+        "new file mode ",
+        "deleted file mode ",
+        "similarity index ",
+        "dissimilarity index ",
+        "rename from ",
+        "rename to ",
+        "copy from ",
+        "copy to ",
+    )
+    return any(line.startswith(prefixes) for line in text.splitlines())
+
+
+def _diff_text_is_renderable(text: str) -> bool:
+    return _diff_text_has_hunk_header(text) or _diff_text_has_metadata_change(text)
+
+
 def _normalized_change_diff(path: Optional[str], change: ObjectDict, text: str) -> str:
     if _change_kind_type(change) != "add":
-        return text
+        return text if _diff_text_is_renderable(text) else ""
     if _diff_text_has_git_header(text) or _diff_text_has_file_headers(text):
-        return text
+        return text if _diff_text_is_renderable(text) else ""
     header_path = _diff_header_path(path or _extract_path_from_diff(text))
     if _diff_text_has_hunk_header(text):
         return f"--- /dev/null\n+++ {_prefix_diff_path('b', header_path)}\n{text}"
+    if _diff_text_has_metadata_change(text):
+        return text
     return _build_new_file_diff(header_path, text)
 
 
@@ -1249,14 +1280,16 @@ def _prefix_diff_path(prefix: str, path: str) -> str:
 
 def _diff_with_file_header(path: Optional[str], diff_text: str) -> str:
     text = diff_text.strip()
-    if not text:
+    if not text or not _diff_text_is_renderable(text):
         return ""
     if any(line.startswith("diff --git ") for line in text.splitlines()):
         return text
     header_path = _diff_header_path(path or _extract_path_from_diff(text))
     old_path = _prefix_diff_path("a", header_path)
     new_path = _prefix_diff_path("b", header_path)
-    if any(line.startswith("--- ") or line.startswith("+++ ") for line in text.splitlines()):
+    if _diff_text_has_file_headers(text):
+        return f"diff --git {old_path} {new_path}\n{text}"
+    if not _diff_text_has_hunk_header(text):
         return f"diff --git {old_path} {new_path}\n{text}"
     return f"diff --git {old_path} {new_path}\n--- {old_path}\n+++ {new_path}\n{text}"
 
@@ -2440,7 +2473,6 @@ class CodexEventRouter:
                                 "tool": "apply_patch",
                                 "arguments": arguments,
                                 "path": path,
-                                "diff": new_file_spec.get("diff"),
                                 "new_file": True,
                             },
                             {"type": "activity", "label": "creating file", "active": True},
@@ -2489,7 +2521,9 @@ class CodexEventRouter:
             if item_type == "filechange":
                 changes = item.get("changes")
                 diff_text, path = _extract_diff_with_path(item)
-                display_diff_text = _diff_text_from_changes_with_headers(changes) or diff_text
+                display_diff_text = _diff_text_from_changes_with_headers(changes)
+                if not display_diff_text and diff_text:
+                    display_diff_text = _diff_with_file_header(path, diff_text) or None
                 paths = _paths_from_changes(changes)
                 new_file = _diff_is_new_file(display_diff_text)
                 item_state.update({
@@ -2515,7 +2549,6 @@ class CodexEventRouter:
                             "tool": "apply_patch",
                             "arguments": arguments,
                             "path": path,
-                            "diff": display_diff_text,
                             "new_file": new_file,
                         },
                         {"type": "activity", "label": "preparing diff", "active": True},
@@ -2744,13 +2777,17 @@ class CodexEventRouter:
                 "changes": changes,
                 "path": payload.get("path") or state.get("path"),
             })
-            display_diff_text = _diff_text_from_changes_with_headers(changes) or diff_text
+            display_diff_text = _diff_text_from_changes_with_headers(changes)
+            if not display_diff_text and diff_text:
+                display_diff_text = _diff_with_file_header(path, diff_text) or None
             paths = _paths_from_changes(changes)
             state["changes"] = changes
             state["patch_updated_seen"] = True
             if display_diff_text:
                 state["diff"] = display_diff_text
                 state["new_file"] = bool(state.get("new_file")) or _diff_is_new_file(display_diff_text)
+            else:
+                state.pop("diff", None)
             if path:
                 state["path"] = path
             if paths:
@@ -3005,7 +3042,6 @@ class CodexEventRouter:
                                 "result": result_payload,
                                 "output": output,
                                 "path": path,
-                                "diff": diff_text,
                                 "duration_ms": duration_ms,
                                 "is_error": is_error,
                                 "new_file": True,
@@ -3020,7 +3056,6 @@ class CodexEventRouter:
                             "result": result_payload,
                             "output": output,
                             "path": path,
-                            "diff": diff_text,
                             "duration_ms": duration_ms,
                             "status": status or ("error" if is_error else "completed"),
                             "is_error": is_error,
@@ -3091,11 +3126,24 @@ class CodexEventRouter:
                 primary_path = paths[0] if paths else item_state.get("path")
                 diff_value = item_state.get("diff")
                 diff_text = diff_value if isinstance(diff_value, str) else None
+                if diff_text:
+                    diff_text = _diff_with_file_header(
+                        primary_path if isinstance(primary_path, str) else None,
+                        diff_text,
+                    ) or None
                 if not diff_text:
                     diff_text = _diff_text_from_changes_with_headers(changes)
                     extracted_path = None
                     if not diff_text:
-                        diff_text, extracted_path = _extract_diff_with_path({"changes": changes, "path": primary_path})
+                        raw_diff_text, extracted_path = _extract_diff_with_path({
+                            "changes": changes,
+                            "path": primary_path,
+                        })
+                        if raw_diff_text:
+                            diff_text = _diff_with_file_header(
+                                primary_path if isinstance(primary_path, str) else extracted_path,
+                                raw_diff_text,
+                            ) or None
                     if extracted_path and not primary_path:
                         primary_path = extracted_path
                 new_file = bool(item_state.get("new_file")) or _diff_is_new_file(diff_text)
@@ -3119,7 +3167,6 @@ class CodexEventRouter:
                             "result": result_payload,
                             "output": output,
                             "path": primary_path,
-                            "diff": diff_text,
                             "duration_ms": duration_ms,
                             "is_error": is_error,
                             "new_file": new_file,
@@ -3134,7 +3181,6 @@ class CodexEventRouter:
                         "result": result_payload,
                         "output": output,
                         "path": primary_path,
-                        "diff": diff_text,
                         "duration_ms": duration_ms,
                         "status": status or ("error" if is_error else "completed"),
                         "is_error": is_error,

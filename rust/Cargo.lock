@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "als-server"
-version = "0.2.116"
+version = "0.2.118"
 dependencies = [
  "als-adapter-protocol",
  "als-dto",

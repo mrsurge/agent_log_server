@@ -5,7 +5,7 @@ use crate::transcript_card_projection::{
 use als_adapter_protocol::JsonMap;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -16,6 +16,7 @@ use std::{
 };
 
 const TRANSCRIPT_PROJECTION_CLIENT_TTL: Duration = Duration::from_secs(60 * 60);
+const MAX_PROJECTED_TRANSCRIPT_CARD_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct ConversationStore {
@@ -1757,6 +1758,7 @@ fn read_indexed_card_recipes(
 
     for indexed in indexed_cards {
         let mut events = Vec::with_capacity(indexed.events.len());
+        let mut card_bytes = 0usize;
         for event in indexed.events {
             let (value, source_bytes, operation) = match event {
                 IndexedProjectionEvent::Line {
@@ -1784,19 +1786,47 @@ fn read_indexed_card_recipes(
             let metadata_bytes = 256usize
                 .saturating_add(indexed.card_id.len())
                 .saturating_add(indexed.parent_card_id.as_deref().map(str::len).unwrap_or(0));
-            used_bytes = used_bytes.saturating_add(source_bytes.saturating_add(metadata_bytes));
-            if used_bytes > max_bytes {
-                bail!(
-                    "card projection exceeds max_bytes ({used_bytes} > {max_bytes}); increase the projection byte budget"
-                );
-            }
+            card_bytes = card_bytes.saturating_add(source_bytes.saturating_add(metadata_bytes));
             events.push(value);
+        }
+        let (family, events, projected_bytes) = if card_bytes > MAX_PROJECTED_TRANSCRIPT_CARD_BYTES
+        {
+            let message = format!(
+                "Transcript card {} was omitted because its stored payload is {} bytes, above the {} byte per-card safety limit.",
+                indexed.card_index, card_bytes, MAX_PROJECTED_TRANSCRIPT_CARD_BYTES
+            );
+            let diagnostic = apply_projection_metadata(
+                json!({
+                    "role": "error",
+                    "message": message,
+                    "error_type": "transcript_projection",
+                    "code": "projection_card_too_large",
+                    "source": "transcript_projection",
+                    "original_bytes": card_bytes,
+                    "max_bytes": MAX_PROJECTED_TRANSCRIPT_CARD_BYTES,
+                }),
+                &indexed.card_id,
+                indexed.card_index,
+                indexed.version,
+                "create",
+                indexed.parent_card_id.as_deref(),
+            );
+            let projected_bytes = serde_json::to_vec(&diagnostic)?.len();
+            ("error".to_owned(), vec![diagnostic], projected_bytes)
+        } else {
+            (indexed.family, events, card_bytes)
+        };
+        used_bytes = used_bytes.saturating_add(projected_bytes);
+        if used_bytes > max_bytes {
+            bail!(
+                "card projection exceeds max_bytes ({used_bytes} > {max_bytes}); increase the projection byte budget"
+            );
         }
         cards.push(TranscriptCardRecipe {
             card_id: indexed.card_id,
             card_index: indexed.card_index,
             version: indexed.version,
-            family: indexed.family,
+            family,
             scope: "durable",
             parent_card_id: indexed.parent_card_id,
             events,
@@ -2408,6 +2438,99 @@ mod tests {
         assert_eq!(older.end_card, 100);
         assert_eq!(older.cards.len(), 75);
         assert!(!older.at_tail);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transcript_projection_replaces_only_an_oversized_card() {
+        let root = std::env::temp_dir().join(format!(
+            "als-rs-store-oversized-card-test-{}",
+            unix_millis()
+        ));
+        let store = ConversationStore::new(root.clone());
+        store
+            .create(CreateConversationRequest {
+                conversation_id: Some("oversized-card-test".to_owned()),
+                ..CreateConversationRequest::default()
+            })
+            .unwrap();
+        store
+            .append_transcript_batch(
+                "oversized-card-test",
+                vec![
+                    json!({"role":"user","text":"before"}),
+                    json!({
+                        "role":"diff",
+                        "card_id":"oversized-diff",
+                        "path":"bundle.js.map",
+                        "text":"x".repeat(MAX_PROJECTED_TRANSCRIPT_CARD_BYTES + 1024),
+                    }),
+                    json!({"role":"assistant","text":"after"}),
+                ],
+            )
+            .unwrap();
+
+        let projection = store
+            .project_transcript(
+                "client",
+                "oversized-card-test",
+                TranscriptProjectionAction::Tail,
+                3,
+                1,
+                2 * 1024 * 1024,
+            )
+            .unwrap();
+
+        assert_eq!(projection.cards.len(), 3);
+        assert_eq!(projection.cards[0].events[0]["text"], "before");
+        assert_eq!(projection.cards[1].card_id, "oversized-diff");
+        assert_eq!(projection.cards[1].card_index, 1);
+        assert_eq!(projection.cards[1].family, "error");
+        assert_eq!(projection.cards[1].events.len(), 1);
+        assert_eq!(projection.cards[1].events[0]["role"], "error");
+        assert_eq!(
+            projection.cards[1].events[0]["code"],
+            "projection_card_too_large"
+        );
+        assert_eq!(
+            projection.cards[1].events[0]["projection_card_id"],
+            "oversized-diff"
+        );
+        assert_eq!(projection.cards[1].events[0]["projection_card_index"], 1);
+        assert_eq!(projection.cards[2].events[0]["text"], "after");
+
+        let snapshot = store
+            .project_transcript_transfer(
+                "stream-client",
+                "oversized-card-test",
+                TranscriptProjectionAction::Tail,
+                3,
+                1,
+                2 * 1024 * 1024,
+                None,
+                &HashMap::new(),
+            )
+            .unwrap();
+        let known_cards = snapshot
+            .ordered_cards
+            .iter()
+            .map(|card| (card.card_id.clone(), card.version))
+            .collect::<HashMap<_, _>>();
+        let unchanged = store
+            .project_transcript_transfer(
+                "stream-client",
+                "oversized-card-test",
+                TranscriptProjectionAction::Current,
+                3,
+                1,
+                2 * 1024 * 1024,
+                Some(snapshot.start_card),
+                &known_cards,
+            )
+            .unwrap();
+        assert_eq!(unchanged.ordered_cards.len(), 3);
+        assert!(unchanged.cards.is_empty());
 
         let _ = fs::remove_dir_all(root);
     }

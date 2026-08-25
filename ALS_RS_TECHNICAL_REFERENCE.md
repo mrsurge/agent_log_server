@@ -1032,7 +1032,12 @@ flags, ordered recipes, and separate `runtime_state[]`. Every durable recipe has
 a monotonic per-card `version`, and every durable recipe event carries
 authoritative card ID/index/version/operation/scope metadata. Process-local turn
 recipes retain the card ID/index/operation/scope envelope and use scope `active`.
-A byte-budget overflow is an explicit error, never a partial card window.
+Before applying the request-wide byte budget, Rust enforces a fixed 1 MiB limit
+per durable recipe. An oversized recipe is replaced by one bounded
+`role: "error"` recipe preserving the original card ID, index, version, and
+parent identity, allowing the rest of the ordered window to load. Aggregate
+overflow among otherwise individually valid cards remains an explicit error,
+never a partial card window.
 
 The Socket.IO RPC debug mode returns complete `frame.format: "card_recipes"`
 windows. The default binary stream returns one complete snapshot for initial

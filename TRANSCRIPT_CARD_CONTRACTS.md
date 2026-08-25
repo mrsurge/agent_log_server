@@ -113,6 +113,13 @@ the authoritative durable card index instead of aborting and leaving a partially
 replaced window. The frontend must not derive or mutate the backend cursor from
 DOM node counts, JSONL offsets, or provider order IDs.
 
+Rust applies a fixed 1 MiB safety limit to each durable card recipe before the
+request-wide projection byte budget. A card above that limit becomes exactly one
+bounded `role: "error"` recipe with the original card ID, index, version, and
+parent identity, so neighboring cards and cursor arithmetic remain intact.
+Request-wide overflow among otherwise valid cards remains an explicit error; it
+must not return a partial ordered window.
+
 The default `/ws/transcript` transport is binary-only, versioned tagged
 MessagePack. It sends a full snapshot for initial hydration or forced resync and
 uses ordered/remove/upsert deltas afterward. Large server frames may be gzip
@@ -464,6 +471,7 @@ Router expectations:
 - when upstream per-file changes provide hunks without file headers, add `diff --git`, `---`, and `+++` headers so path extraction and highlighting work during live render and replay
 - when upstream add/new-file changes provide raw file content in a field named `diff`, synthesize a real new-file unified diff (`--- /dev/null`, `+++ <path>`, hunk header, and `+`-prefixed body lines) before emitting `diff` or embedding diff metadata on the related tool card
 - do not create fake diff cards by prepending `diff --git`, `---`, and `+++` to arbitrary raw file content; raw Markdown bullets and ordinary text must never be interpreted as deletion/context lines because of a header-only wrapper
+- non-add file-change payloads must contain a valid unified hunk or recognized binary/mode/rename/copy metadata before they can produce a standalone diff card; omit malformed payloads while retaining the related tool summary
 - split multi-file unified diffs into per-file diff cards when the upstream shape provides independent file changes or when doing so preserves path-specific rendering
 - avoid duplicate standalone diff cards when a provider emits the same patch through both file-change items and later aggregate turn-diff notifications
 
@@ -635,7 +643,7 @@ Render expectations:
   - success/failure outcome treatment from generic tool fields such as `status`, `is_error`, and `response`
   - summary/outcome/path rendering only; standalone `diff` cards own patch body rendering for apply-patch/file-change output
 - routers may normalize semantically equivalent upstream edit tools onto this shared contract; for example an old-string/new-string replacement may be emitted as `tool: "apply_patch"` for success/failure/path semantics even when its actual diff arrives separately as a standalone `diff` card
-- routers may still include `diff` metadata on the tool event/transcript entry for semantic parity, but they should not rely on the apply-patch tool card to render that patch body
+- when a standalone diff card owns the patch body, routers must not duplicate the full body into the related apply-patch tool event or transcript entry
 - emit a standalone `diff` card whenever the patch body should be visible in the transcript
 
 ### `mcp_tool`
