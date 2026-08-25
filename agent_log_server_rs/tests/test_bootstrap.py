@@ -54,7 +54,7 @@ class BootstrapCommandTests(unittest.TestCase):
             _write(binary, "packaged", executable=True)
             manifest = {
                 "schema": bootstrap.PACKAGED_SERVER_MANIFEST_SCHEMA,
-                "package_version": "0.2.118",
+                "package_version": "0.2.119",
                 "binary": "als-server",
                 "target": "x86_64-unknown-linux-gnu",
                 "platform_tag": "manylinux_2_28_x86_64",
@@ -73,7 +73,7 @@ class BootstrapCommandTests(unittest.TestCase):
                 mock.patch.object(
                     bootstrap,
                     "_installed_package_version",
-                    return_value="0.2.118",
+                    return_value="0.2.119",
                 ),
                 mock.patch.object(bootstrap.platform, "machine", return_value="x86_64"),
                 mock.patch.object(bootstrap.sys, "platform", "linux"),
@@ -91,7 +91,7 @@ class BootstrapCommandTests(unittest.TestCase):
             _write(binary, "tampered", executable=True)
             manifest = {
                 "schema": bootstrap.PACKAGED_SERVER_MANIFEST_SCHEMA,
-                "package_version": "0.2.118",
+                "package_version": "0.2.119",
                 "binary": "als-server",
                 "target": "x86_64-unknown-linux-gnu",
                 "platform_tag": "manylinux_2_28_x86_64",
@@ -110,7 +110,7 @@ class BootstrapCommandTests(unittest.TestCase):
                 mock.patch.object(
                     bootstrap,
                     "_installed_package_version",
-                    return_value="0.2.118",
+                    return_value="0.2.119",
                 ),
                 mock.patch.object(bootstrap.platform, "machine", return_value="x86_64"),
                 mock.patch.object(bootstrap.sys, "platform", "linux"),

@@ -18,6 +18,15 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_NAME = "als-server"
+REQUIRED_WHEEL_MEMBERS = (
+    "agent_log_server_rs/bin/als-server",
+    "agent_log_server_rs/bin/als-server.manifest.json",
+    "agent_log_server_rs/rust/crates/als-server/src/static/dist/codex_agent.js",
+    (
+        "agent_log_server_rs/rust/crates/als-server/src/static/vendor/"
+        "socket.io-msgpack-parser/socket.io-msgpack-parser.js"
+    ),
+)
 
 
 def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -51,12 +60,19 @@ def _source_is_dirty() -> bool:
 
 def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
     ignored: set[str] = set()
+    directory = Path(_directory)
     for name in names:
+        if name == "dist":
+            # The repository-level dist directory is release output. Nested
+            # dist directories can be runtime input, including ALS-RS's
+            # checked-in compiled frontend bundle.
+            if directory == ROOT:
+                ignored.add(name)
+            continue
         if name in {
             ".git",
             ".venv",
             "build",
-            "dist",
             "node_modules",
             "target",
             "__pycache__",
@@ -67,6 +83,17 @@ def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
         elif name.endswith(".egg-info"):
             ignored.add(name)
     return ignored
+
+
+def _validate_release_wheel(wheel_path: Path) -> None:
+    with ZipFile(wheel_path) as archive:
+        members = set(archive.namelist())
+    missing = [name for name in REQUIRED_WHEEL_MEMBERS if name not in members]
+    if missing:
+        raise RuntimeError(
+            "ALS-RS release wheel is missing required runtime payloads: "
+            + ", ".join(missing)
+        )
 
 
 def _scratch_root() -> Path:
@@ -244,16 +271,20 @@ def build_binary_wheel(
         if len(raw_wheels) != 1:
             raise RuntimeError(f"Expected one raw ALS-RS wheel, found {raw_wheels}")
         raw_wheel = raw_wheels[0]
+        _validate_release_wheel(raw_wheel)
         is_android = target.endswith("-android")
         if skip_auditwheel:
             if not is_android:
                 raise RuntimeError("--skip-auditwheel is only valid for Android/Bionic wheels")
             destination = out_dir / raw_wheel.name
             shutil.copy2(raw_wheel, destination)
+            _validate_release_wheel(destination)
             return destination
         if is_android:
             raise RuntimeError("Android/Bionic wheels require --skip-auditwheel")
-        return _repair_linux_wheel(raw_wheel, out_dir=out_dir, platform_tag=platform_tag)
+        repaired = _repair_linux_wheel(raw_wheel, out_dir=out_dir, platform_tag=platform_tag)
+        _validate_release_wheel(repaired)
+        return repaired
 
 
 def main() -> None:

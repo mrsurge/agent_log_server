@@ -208,6 +208,14 @@ The installed console script must not collide with the current `codex-agent`
 command. ALS-RS exposes only the generic `als-rs-extension-adapter` entrypoint;
 provider-specific adapter console scripts are not part of the current runtime.
 
+Binary-release wheels replace that buildable workspace with the verified
+`als-server` executable and the package-owned Rust static tree used by
+`ALS_RS_STATIC_DIR`. That tree includes the checked-in compiled
+`static/dist/codex_agent.js` bundle and the Socket.IO MessagePack parser. The
+release staging filter excludes only the repository-level release-output
+`dist/`; the wheel builder validates the server, manifest, compiled bundle, and
+parser before and after auditwheel processing and aborts if any are absent.
+
 Bootstrap responsibilities:
 
 1. Parse CLI options/env for host, port, root overrides, foreground mode, and
@@ -2021,12 +2029,6 @@ Acceptance:
 2. Remaining conversation controls.
    - `conversation.compact` and `conversation.shell.exec` still need generic
      adapter/Rust/frontend contracts before they can be enabled in ALS-RS.
-3. Static packaging policy.
-   - Current source-checkout builds serve the Rust-owned static tree and bundled
-     frontend from `rust/crates/als-server/src/static`.
-   - Future packaged builds should keep the source-checkout vs packaged static
-     layout explicit so install-time assets do not drift from build-time assets.
-
 ### Migration risks
 
 - **Contract drift:** Rust DTOs may accidentally diverge from the frontend's
