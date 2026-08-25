@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+import hashlib
+import json
 import subprocess
 import tempfile
 import unittest
@@ -44,6 +47,114 @@ def _write(path: Path, content: str, *, executable: bool = False) -> None:
 
 
 class BootstrapCommandTests(unittest.TestCase):
+    def test_packaged_server_is_verified_and_selected_without_cargo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            package_root = Path(temp_root) / "agent_log_server_rs"
+            binary = package_root / "bin" / "als-server"
+            _write(binary, "packaged", executable=True)
+            manifest = {
+                "schema": bootstrap.PACKAGED_SERVER_MANIFEST_SCHEMA,
+                "package_version": "0.2.118",
+                "binary": "als-server",
+                "target": "x86_64-unknown-linux-gnu",
+                "platform_tag": "manylinux_2_28_x86_64",
+                "source_commit": "a" * 40,
+                "source_dirty": False,
+                "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            }
+            _write(
+                binary.parent / bootstrap.PACKAGED_SERVER_MANIFEST_NAME,
+                json.dumps(manifest),
+            )
+            args = replace(_args(Path("unused/Cargo.toml")), cargo_manifest=None)
+
+            with (
+                mock.patch.object(bootstrap, "_package_root", return_value=package_root),
+                mock.patch.object(
+                    bootstrap,
+                    "_installed_package_version",
+                    return_value="0.2.118",
+                ),
+                mock.patch.object(bootstrap.platform, "machine", return_value="x86_64"),
+                mock.patch.object(bootstrap.sys, "platform", "linux"),
+                mock.patch.object(bootstrap.subprocess, "run") as run,
+            ):
+                command = bootstrap._server_command(args, {})  # pyright: ignore[reportPrivateUsage]
+
+            self.assertEqual(command, [str(binary)])
+            run.assert_not_called()
+
+    def test_packaged_server_digest_failure_does_not_fall_back_to_cargo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            package_root = Path(temp_root) / "agent_log_server_rs"
+            binary = package_root / "bin" / "als-server"
+            _write(binary, "tampered", executable=True)
+            manifest = {
+                "schema": bootstrap.PACKAGED_SERVER_MANIFEST_SCHEMA,
+                "package_version": "0.2.118",
+                "binary": "als-server",
+                "target": "x86_64-unknown-linux-gnu",
+                "platform_tag": "manylinux_2_28_x86_64",
+                "source_commit": "b" * 40,
+                "source_dirty": False,
+                "sha256": "0" * 64,
+            }
+            _write(
+                binary.parent / bootstrap.PACKAGED_SERVER_MANIFEST_NAME,
+                json.dumps(manifest),
+            )
+            args = replace(_args(Path("unused/Cargo.toml")), cargo_manifest=None)
+
+            with (
+                mock.patch.object(bootstrap, "_package_root", return_value=package_root),
+                mock.patch.object(
+                    bootstrap,
+                    "_installed_package_version",
+                    return_value="0.2.118",
+                ),
+                mock.patch.object(bootstrap.platform, "machine", return_value="x86_64"),
+                mock.patch.object(bootstrap.sys, "platform", "linux"),
+                mock.patch.object(bootstrap.subprocess, "run") as run,
+                self.assertRaisesRegex(RuntimeError, "digest mismatch"),
+            ):
+                bootstrap._server_command(args, {})  # pyright: ignore[reportPrivateUsage]
+
+            run.assert_not_called()
+
+    def test_explicit_cargo_manifest_bypasses_packaged_server_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            manifest = root / "rust" / "Cargo.toml"
+            _write(manifest, "[workspace]\n")
+            cache_dir = root / "cache"
+            env: dict[str, str] = {"ALS_RS_CACHE_DIR": str(cache_dir)}
+
+            def fake_build(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                build_env = cast(dict[str, str], kwargs["env"])
+                target_dir = Path(build_env["CARGO_TARGET_DIR"])
+                _write(target_dir / "release" / "als-server", "release", executable=True)
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                mock.patch.object(
+                    bootstrap,
+                    "_packaged_server_binary",
+                    side_effect=AssertionError("packaged server must not be probed"),
+                ),
+                mock.patch.object(
+                    bootstrap,
+                    "_rust_source_fingerprint",
+                    return_value="selected",
+                ),
+                mock.patch.object(bootstrap.subprocess, "run", side_effect=fake_build),
+            ):
+                command = bootstrap._server_command(_args(manifest), env)  # pyright: ignore[reportPrivateUsage]
+
+            self.assertEqual(
+                command,
+                [str(cache_dir / "bin" / "selected" / "release" / "als-server")],
+            )
+
     def test_release_build_publishes_and_prunes_stale_final_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:
             root = Path(temp_root)

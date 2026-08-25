@@ -34,6 +34,7 @@ als_deprecated = [
 ]
 agent_log_server_rs = [
   "DEVELOPER_MESSAGE_TEMPLATE.md",
+  "bin/*",
   "shellspec/*",
   "shellspec/**/*",
   "rust/*",

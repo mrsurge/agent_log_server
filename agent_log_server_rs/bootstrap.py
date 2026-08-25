@@ -4,13 +4,17 @@ import argparse
 import fcntl
 import hashlib
 import importlib
+import importlib.metadata
+import json
 import os
+import platform
 import re
 import secrets
 import shutil
 import signal
 import subprocess
 import sys
+import sysconfig
 from collections.abc import Callable, Generator, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,6 +26,8 @@ APP_ID = "als-rs"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = "12459"
 SERVER_PACKAGE = "als-server"
+PACKAGED_SERVER_MANIFEST_SCHEMA = 1
+PACKAGED_SERVER_MANIFEST_NAME = "als-server.manifest.json"
 
 _INCLUDE_LITERAL_PATTERN = re.compile(
     rb'include_(?:str|bytes)!\(\s*"([^"\\]+)"\s*\)',
@@ -190,6 +196,16 @@ def _server_command(args: BootstrapArgs, env: MutableMapping[str, str] | None = 
     if args.server_bin:
         return [str(Path(args.server_bin)), *framework_shell_args]
 
+    if not args.cargo_manifest:
+        packaged_binary = _packaged_server_binary()
+        if packaged_binary is not None:
+            if args.debug:
+                raise RuntimeError(
+                    "--debug requires an ALS-RS source checkout; the installed binary-release "
+                    "wheel contains only the verified release server"
+                )
+            return [str(packaged_binary), *framework_shell_args]
+
     manifest = Path(args.cargo_manifest) if args.cargo_manifest else _default_rust_manifest()
     target_dir = _bootstrap_cargo_target_dir(manifest, runtime_env)
     cargo_profile = "debug" if args.debug else "release"
@@ -229,6 +245,111 @@ def _server_command(args: BootstrapArgs, env: MutableMapping[str, str] | None = 
         _prune_final_binary_cache(bin_root, cached_binary)
 
     return [str(cached_binary), *framework_shell_args]
+
+
+def _packaged_server_binary() -> Path | None:
+    binary_dir = _package_root() / "bin"
+    manifest_path = binary_dir / PACKAGED_SERVER_MANIFEST_NAME
+    binary_path = binary_dir / _server_binary_name()
+    if not manifest_path.is_file():
+        if binary_path.exists():
+            raise RuntimeError(
+                f"ALS-RS binary-release payload is incomplete: missing {manifest_path}"
+            )
+        return None
+
+    try:
+        loaded = cast(object, json.loads(manifest_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"ALS-RS binary-release manifest is unreadable: {manifest_path}: {exc}"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise RuntimeError(f"ALS-RS binary-release manifest must be an object: {manifest_path}")
+    raw = cast(dict[str, object], loaded)
+
+    schema = raw.get("schema")
+    package_version = raw.get("package_version")
+    binary_name = raw.get("binary")
+    target = raw.get("target")
+    platform_tag = raw.get("platform_tag")
+    source_commit = raw.get("source_commit")
+    source_dirty = raw.get("source_dirty")
+    expected_digest = raw.get("sha256")
+    if schema != PACKAGED_SERVER_MANIFEST_SCHEMA:
+        raise RuntimeError(f"Unsupported ALS-RS binary-release manifest schema: {schema!r}")
+    if not isinstance(package_version, str) or not package_version:
+        raise RuntimeError("ALS-RS binary-release manifest has no package_version")
+    if binary_name != _server_binary_name():
+        raise RuntimeError(f"ALS-RS binary-release manifest has invalid binary: {binary_name!r}")
+    if not isinstance(target, str) or not target:
+        raise RuntimeError("ALS-RS binary-release manifest has no target")
+    if not isinstance(platform_tag, str) or not platform_tag:
+        raise RuntimeError("ALS-RS binary-release manifest has no platform_tag")
+    if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{7,64}", source_commit):
+        raise RuntimeError("ALS-RS binary-release manifest has invalid source_commit")
+    if not isinstance(source_dirty, bool):
+        raise RuntimeError("ALS-RS binary-release manifest has invalid source_dirty")
+    if not isinstance(expected_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        raise RuntimeError("ALS-RS binary-release manifest has invalid sha256")
+
+    installed_version = _installed_package_version()
+    if installed_version is not None and package_version != installed_version:
+        raise RuntimeError(
+            "ALS-RS binary-release package version mismatch: "
+            f"manifest={package_version}, installed={installed_version}"
+        )
+    _validate_packaged_target(target, platform_tag)
+    if not _cached_binary_is_usable(binary_path):
+        raise RuntimeError(f"ALS-RS packaged server is missing or unusable: {binary_path}")
+    actual_digest = _sha256_file(binary_path)
+    if actual_digest != expected_digest:
+        raise RuntimeError(
+            "ALS-RS packaged server digest mismatch: "
+            f"expected={expected_digest}, actual={actual_digest}"
+        )
+    return binary_path
+
+
+def _installed_package_version() -> str | None:
+    try:
+        return importlib.metadata.version("agent-log-server")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _validate_packaged_target(target: str, platform_tag: str) -> None:
+    machine = platform.machine().strip().lower().replace("amd64", "x86_64")
+    machine = machine.replace("arm64", "aarch64")
+    sys_platform = sys.platform.lower()
+    sysconfig_platform = sysconfig.get_platform().lower()
+    multiarch = str(sysconfig.get_config_var("MULTIARCH") or "").lower()
+    is_android = (
+        "android" in sysconfig_platform
+        or "android" in multiarch
+        or bool(os.environ.get("ANDROID_ROOT"))
+    )
+
+    if target == "x86_64-unknown-linux-gnu":
+        compatible = sys_platform.startswith("linux") and machine == "x86_64" and not is_android
+    elif target == "aarch64-linux-android":
+        compatible = sys_platform.startswith("linux") and machine == "aarch64" and is_android
+    else:
+        raise RuntimeError(f"Unsupported ALS-RS packaged server target: {target}")
+    if not compatible:
+        raise RuntimeError(
+            "ALS-RS packaged server is incompatible with this runtime: "
+            f"target={target}, platform_tag={platform_tag}, "
+            f"runtime={sys_platform}/{machine}, android={is_android}"
+        )
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 @contextmanager
