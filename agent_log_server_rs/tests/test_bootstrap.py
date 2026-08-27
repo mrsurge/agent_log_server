@@ -51,12 +51,17 @@ class BootstrapCommandTests(unittest.TestCase):
         with (
             mock.patch.object(bootstrap.platform, "machine", return_value="aarch64"),
             mock.patch.object(bootstrap.sys, "platform", "android"),
-            mock.patch.object(bootstrap.sysconfig, "get_platform", return_value="android-24-arm64-v8a"),
+            mock.patch.object(
+                bootstrap.sysconfig,
+                "get_platform",
+                side_effect=AssertionError("Android must not require sysconfig probing"),
+            ),
             mock.patch.object(
                 bootstrap.sysconfig,
                 "get_config_var",
-                return_value="aarch64-linux-android",
+                side_effect=AssertionError("Android must not require sysconfig probing"),
             ),
+            mock.patch.dict(bootstrap.os.environ, {"ANDROID_ROOT": "/system"}, clear=True),
         ):
             bootstrap._validate_packaged_target(  # pyright: ignore[reportPrivateUsage]
                 "aarch64-linux-android",
@@ -93,6 +98,17 @@ class BootstrapCommandTests(unittest.TestCase):
                 ),
                 mock.patch.object(bootstrap.platform, "machine", return_value="x86_64"),
                 mock.patch.object(bootstrap.sys, "platform", "linux"),
+                mock.patch.object(
+                    bootstrap.sysconfig,
+                    "get_platform",
+                    return_value="linux-x86_64",
+                ),
+                mock.patch.object(
+                    bootstrap.sysconfig,
+                    "get_config_var",
+                    return_value="x86_64-linux-gnu",
+                ),
+                mock.patch.dict(bootstrap.os.environ, {}, clear=True),
                 mock.patch.object(bootstrap.subprocess, "run") as run,
             ):
                 command = bootstrap._server_command(args, {})  # pyright: ignore[reportPrivateUsage]
@@ -130,6 +146,17 @@ class BootstrapCommandTests(unittest.TestCase):
                 ),
                 mock.patch.object(bootstrap.platform, "machine", return_value="x86_64"),
                 mock.patch.object(bootstrap.sys, "platform", "linux"),
+                mock.patch.object(
+                    bootstrap.sysconfig,
+                    "get_platform",
+                    return_value="linux-x86_64",
+                ),
+                mock.patch.object(
+                    bootstrap.sysconfig,
+                    "get_config_var",
+                    return_value="x86_64-linux-gnu",
+                ),
+                mock.patch.dict(bootstrap.os.environ, {}, clear=True),
                 mock.patch.object(bootstrap.subprocess, "run") as run,
                 self.assertRaisesRegex(RuntimeError, "digest mismatch"),
             ):

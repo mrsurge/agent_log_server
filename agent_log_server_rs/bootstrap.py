@@ -322,13 +322,11 @@ def _validate_packaged_target(target: str, platform_tag: str) -> None:
     machine = platform.machine().strip().lower().replace("amd64", "x86_64")
     machine = machine.replace("arm64", "aarch64")
     sys_platform = sys.platform.lower()
-    sysconfig_platform = sysconfig.get_platform().lower()
-    multiarch = str(sysconfig.get_config_var("MULTIARCH") or "").lower()
-    is_android = (
-        "android" in sysconfig_platform
-        or "android" in multiarch
-        or bool(os.environ.get("ANDROID_ROOT"))
-    )
+    is_android = sys_platform == "android" or bool(os.environ.get("ANDROID_ROOT"))
+    if not is_android:
+        sysconfig_platform = sysconfig.get_platform().lower()
+        multiarch = str(sysconfig.get_config_var("MULTIARCH") or "").lower()
+        is_android = "android" in sysconfig_platform or "android" in multiarch
     is_linux_kernel = sys_platform.startswith("linux") or sys_platform == "android"
 
     if target == "x86_64-unknown-linux-gnu":
