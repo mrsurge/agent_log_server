@@ -47,6 +47,22 @@ def _write(path: Path, content: str, *, executable: bool = False) -> None:
 
 
 class BootstrapCommandTests(unittest.TestCase):
+    def test_android_sys_platform_accepts_android_packaged_target(self) -> None:
+        with (
+            mock.patch.object(bootstrap.platform, "machine", return_value="aarch64"),
+            mock.patch.object(bootstrap.sys, "platform", "android"),
+            mock.patch.object(bootstrap.sysconfig, "get_platform", return_value="android-24-arm64-v8a"),
+            mock.patch.object(
+                bootstrap.sysconfig,
+                "get_config_var",
+                return_value="aarch64-linux-android",
+            ),
+        ):
+            bootstrap._validate_packaged_target(  # pyright: ignore[reportPrivateUsage]
+                "aarch64-linux-android",
+                "android_24_arm64_v8a",
+            )
+
     def test_packaged_server_is_verified_and_selected_without_cargo(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:
             package_root = Path(temp_root) / "agent_log_server_rs"

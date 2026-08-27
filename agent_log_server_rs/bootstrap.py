@@ -329,11 +329,12 @@ def _validate_packaged_target(target: str, platform_tag: str) -> None:
         or "android" in multiarch
         or bool(os.environ.get("ANDROID_ROOT"))
     )
+    is_linux_kernel = sys_platform.startswith("linux") or sys_platform == "android"
 
     if target == "x86_64-unknown-linux-gnu":
-        compatible = sys_platform.startswith("linux") and machine == "x86_64" and not is_android
+        compatible = is_linux_kernel and machine == "x86_64" and not is_android
     elif target == "aarch64-linux-android":
-        compatible = sys_platform.startswith("linux") and machine == "aarch64" and is_android
+        compatible = is_linux_kernel and machine == "aarch64" and is_android
     else:
         raise RuntimeError(f"Unsupported ALS-RS packaged server target: {target}")
     if not compatible:
