@@ -39,6 +39,18 @@ class McpSocketIoSerializerTests(unittest.TestCase):
         env = cast(dict[str, str], server["env"])
         self.assertEqual(env["AGENT_LOG_SOCKETIO_SERIALIZER"], "msgpack")
 
+    def test_codex_high_context_uses_450k_window_and_400k_compaction(self) -> None:
+        config = apply_codex_mcp_context(
+            {},
+            {},
+            enable_high_context_400k=True,
+        )
+
+        self.assertIsNotNone(config)
+        assert config is not None
+        self.assertEqual(config["model_context_window"], 450000)
+        self.assertEqual(config["model_auto_compact_token_limit"], 400000)
+
     def test_copilot_mcp_child_inherits_socketio_serializer(self) -> None:
         with tempfile.TemporaryDirectory() as cwd:
             settings = apply_copilot_mcp_context(self._settings(cwd))

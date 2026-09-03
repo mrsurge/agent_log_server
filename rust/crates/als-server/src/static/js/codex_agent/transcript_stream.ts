@@ -255,7 +255,7 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
       resolveReady?.();
       resolveReady = null;
       options.onConnectionChange?.(true);
-      if (reconnected) await options.onReconnect?.();
+      if (reconnected) scheduleProjectionRefresh(options.onReconnect, 'reconnect');
       return;
     }
     if (tag === TAG_WINDOW_SNAPSHOT || tag === TAG_WINDOW_DELTA) {
@@ -457,15 +457,27 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
     options.onEvent({ ...params, type: eventType } as ConversationsLiveEvent);
   }
 
-  function scheduleResync(): void {
+  function scheduleProjectionRefresh(
+    callback: (() => void | Promise<void>) | undefined,
+    reason: 'reconnect' | 'resync',
+  ): void {
     if (resyncScheduled) return;
     resyncScheduled = true;
     clearProjectionCache(true);
     queueMicrotask(() => {
-      void Promise.resolve(options.onResyncRequired?.()).finally(() => {
-        resyncScheduled = false;
-      });
+      void Promise.resolve()
+        .then(() => callback?.())
+        .catch((error: unknown) => {
+          console.warn(`transcript stream ${reason} refresh failed`, error);
+        })
+        .finally(() => {
+          resyncScheduled = false;
+        });
     });
+  }
+
+  function scheduleResync(): void {
+    scheduleProjectionRefresh(options.onResyncRequired, 'resync');
   }
 
   async function requestProjection(optionsValue: ProjectionOptions, retry = true): Promise<ReplayChunkResult> {

@@ -123,11 +123,14 @@ must not return a partial ordered window.
 The default `/ws/transcript` transport is binary-only, versioned tagged
 MessagePack. It sends a full snapshot for initial hydration or forced resync and
 uses ordered/remove/upsert deltas afterward. Large server frames may be gzip
-compressed only after client negotiation. Reconnect requests carry the logical
-client ID, current bounds, known card IDs/versions, and stream sequence. The
-server routes selected-conversation transcript events only to clients subscribed
-to that conversation. `ALS_RS_TRANSCRIPT_TRANSPORT=rpc` is an explicit debugging
-mode; implementations must not silently fall back or deliver both modes.
+compressed only after client negotiation. Reconnect preserves the logical client
+ID and current card bounds but clears known recipe versions so the next `current`
+request receives a complete authoritative snapshot. That refresh must be
+scheduled outside the serialized frame-decoder chain; awaiting it from the
+server-hello handler deadlocks response decoding. The server routes
+selected-conversation transcript events only to clients subscribed to that
+conversation. `ALS_RS_TRANSCRIPT_TRANSPORT=rpc` is an explicit debugging mode;
+implementations must not silently fall back or deliver both modes.
 
 The default durable window is 75 cards with 20-card shifts. While pinned, live
 events append normally and the frontend may prune completed card roots to that

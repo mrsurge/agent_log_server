@@ -935,7 +935,11 @@ Large server frames use negotiated gzip. One logical client owns one current
 stream connection and one selected conversation; a newer connection supersedes
 the old one, and bounded outbound queues force reconnect/resync if a client
 falls behind. The browser uses `reconnecting-websocket` with no stale send
-queue.
+queue. A post-initial server hello clears cached recipe versions while retaining
+the current card bounds, then schedules a `current` projection refresh outside
+the serialized frame decoder. The empty known-card set forces a full snapshot,
+avoiding both stale transcript state and the decoder deadlock that occurs when a
+hello handler awaits the response it must itself unblock.
 
 `ALS_RS_TRANSCRIPT_TRANSPORT=rpc` is the explicit transcript debugging mode. It
 routes projection requests and transcript notifications through the existing
@@ -1052,11 +1056,12 @@ windows. The default binary stream returns one complete snapshot for initial
 hydration or forced resync, then sends deltas containing authoritative ordered
 card IDs/indexes/versions, removed card IDs, and only new or version-changed
 recipes. A normal 20-card shift therefore does not resend the 55 overlapping
-recipes in a 75-card window. Reconnect sends the last known bounds and card
-versions; `current` preserves a detached cursor, and a server restart or sequence
-gap requests an authoritative snapshot at that position. Transcript reads batch
-the selected indexed JSONL lines in file order and avoid serializing every event
-back to JSON merely to estimate the response budget.
+recipes in a 75-card window. Reconnect keeps the last known bounds but clears
+known recipe versions; `current` therefore preserves a detached cursor while
+forcing an authoritative snapshot at that position. Sequence gaps use the same
+single-flight snapshot path. Transcript reads batch the selected indexed JSONL
+lines in file order and avoid serializing every event back to JSON merely to
+estimate the response budget.
 
 Durable `transcript.jsonl` remains append-only and final-event-only. Rust also
 owns a separate process-local active-turn projection for in-flight assistant,
@@ -1411,6 +1416,9 @@ waits for readiness where requested.
 
 ### Codex
 
+- The schema-owned `high_context_400k` toggle injects
+  `model_context_window = 450000` and
+  `model_auto_compact_token_limit = 400000`.
 - Runtime protocol response registries use lowercase method keys and rebuild
   missing schema entries from the loaded generated bundle where possible.
 - Runtime schema cache is under `${ALS_RS_CACHE_DIR}/codex_app_server_schema`;
