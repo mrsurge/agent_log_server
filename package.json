@@ -15,6 +15,7 @@
     "build:watch": "node build.mjs --watch",
     "lint:types": "eslint --max-warnings=0 \"rust/crates/als-server/src/static/**/*.ts\"",
     "test:conversation-modal": "node --test tests/conversation_modal.test.mjs",
+    "test:composer-focus": "node --test tests/composer_focus.test.mjs",
     "test:mention-picker": "node --test tests/mention_picker.test.mjs",
     "test:transcript-reconnect": "node --test tests/transcript_stream_reconnect.test.mjs",
     "test:transcript-url": "node --test tests/transcript_stream_url.test.mjs",

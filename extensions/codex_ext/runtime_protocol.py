@@ -1030,6 +1030,13 @@ def _decode_schema_value(
     if value is None:
         if type_decl == "null":
             return None
+        if (
+            type_decl is None
+            and not _is_schema_dict(resolved.get("properties"))
+            and not _is_schema_dict(resolved.get("items"))
+            and resolved.get("additionalProperties", True) is True
+        ):
+            return None
         raise _SchemaDecodeError(f"{path}: expected {type_decl or 'value'}, got null")
 
     props_dict = _dict_value(resolved.get("properties"))

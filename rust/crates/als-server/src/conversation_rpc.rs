@@ -7,7 +7,7 @@ use crate::{
         ConversationMeta, ConversationMetaUpdate, CreateConversationRequest,
         ForkConversationRequest, TranscriptOffset, TranscriptProjectionAction,
     },
-    ipc, sidebar_ipc,
+    ipc, settings_rpc, sidebar_ipc,
     state::AppState,
     turn_projection::TurnProjectionChange,
 };
@@ -1105,6 +1105,10 @@ async fn handle_adapter_other_event(
                 .await;
             }
             forward_import_event(io, state, "conversation.import.failed", other.params).await
+        }
+        events::PROVIDER_INFO_UPDATED => {
+            settings_rpc::emit_provider_info_updated(io, other.params).await;
+            Ok(())
         }
         _ => Ok(()),
     }

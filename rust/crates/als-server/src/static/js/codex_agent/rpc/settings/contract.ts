@@ -35,6 +35,7 @@ export type SettingsRpcMethod =
 export const SETTINGS_RPC_NOTIFICATION_METHODS = [
   'extensions.updated',
   'config.updated',
+  'extension.providerInfo.updated',
 ] as const;
 
 export type SettingsRpcNotificationMethod =

@@ -213,6 +213,16 @@ async def _handle_auth_transport_event(
 ) -> List[Dict[str, object]]:
     del thread_id, turn_id, request_id
     label_lower = str(label or "").strip().lower()
+    if label_lower == "account/ratelimits/updated":
+        return [
+            {
+                "type": "provider_info_updated",
+                "extension_id": extension_id,
+                "provider": "codex",
+                "reason": "rate_limits_updated",
+            }
+            for extension_id in _auth_extension_ids()
+        ]
     if label_lower not in {"account/login/completed", "account/updated"}:
         return []
 
@@ -414,7 +424,47 @@ def _build_rate_limit_lines(snapshot: Dict[str, object]) -> tuple[List[str], Lis
                 lines.append(f"Credits balance: {balance.strip()}")
             else:
                 lines.append("Credits available")
+
+    individual_limit = snapshot.get("individualLimit")
+    if _is_object_dict(individual_limit):
+        remaining = individual_limit.get("remainingPercent")
+        if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
+            remaining_percent = max(0.0, min(100.0, float(remaining)))
+            spend_parts = [f"Spend control: {remaining_percent:.0f}% remaining"]
+            used = individual_limit.get("used")
+            limit = individual_limit.get("limit")
+            if isinstance(used, str) and used.strip() and isinstance(limit, str) and limit.strip():
+                spend_parts.append(f"{used.strip()} of {limit.strip()} used")
+            reset_text = _format_settings_timestamp(individual_limit.get("resetsAt"))
+            if reset_text:
+                spend_parts.append(f"resets {reset_text}")
+            lines.append("  •  ".join(spend_parts))
+            remaining_values.append(remaining_percent)
+    if snapshot.get("spendControlReached") is True:
+        lines.append("Spend control reached")
+        remaining_values.append(0.0)
     return lines, remaining_values
+
+
+def _build_rate_limit_reset_lines(payload: Dict[str, object]) -> List[str]:
+    summary = payload.get("rateLimitResetCredits")
+    if not _is_object_dict(summary):
+        return []
+    available_count = summary.get("availableCount")
+    if isinstance(available_count, bool) or not isinstance(available_count, int):
+        return []
+    lines = [f"Rate-limit resets available: {max(0, available_count)}"]
+    credits = summary.get("credits")
+    if not _is_object_list(credits):
+        return lines
+    for credit in credits:
+        if not _is_object_dict(credit) or credit.get("status") != "available":
+            continue
+        title = credit.get("title")
+        title_text = title.strip() if isinstance(title, str) and title.strip() else "Reset credit"
+        expires_text = _format_settings_timestamp(credit.get("expiresAt"))
+        lines.append(f"{title_text}: expires {expires_text}" if expires_text else title_text)
+    return lines
 
 
 async def get_usage_info(
@@ -499,6 +549,7 @@ async def get_usage_info(
         snapshot_lines, snapshot_remaining = _build_rate_limit_lines(snapshot)
         lines.extend(snapshot_lines)
         remaining_values.extend(snapshot_remaining)
+    lines.extend(_build_rate_limit_reset_lines(payload))
     if not lines:
         return _usage_info_unavailable(
             "Usage info unavailable.",

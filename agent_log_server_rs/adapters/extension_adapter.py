@@ -1669,6 +1669,9 @@ class ExtensionJsonRpcAdapter:
             terminated_shell_ids.add(shell_id)
 
     async def _broadcast(self, payload: JsonMap) -> None:
+        if optional_string(payload.get("type")) == "provider_info_updated":
+            await self._send_notification(AdapterEventMethod.PROVIDER_INFO_UPDATED, payload)
+            return
         await self._send_notification(AdapterEventMethod.LIVE_EVENT, payload)
 
     async def _transcript(self, conversation_id: str, entry: JsonMap) -> None:

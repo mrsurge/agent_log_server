@@ -4,6 +4,7 @@ import { createUiRpcClient } from '../rpc/ui/client.ts';
 type CodexAgentHelpers = {
   getSchemaFieldInput?: (fieldId: string) => unknown;
   onAgentChange?: (agentId: string) => unknown;
+  refreshProviderInfo?: (extensionId?: string) => unknown;
 };
 
 type CodexAgentWindow = Window & typeof globalThis & {
@@ -859,9 +860,19 @@ export function bindSettingsUiFlow(ctx: SettingsUiContext) {
 
   const eventsWindow = (getWindow ? getWindow() : window) as CodexAgentWindow;
   settingsRpcClient.subscribeLiveNotifications({
-    onNotification: (method) => {
+    onNotification: (method, params) => {
       if (method === 'extensions.updated') {
         void loadAgentOptions();
+        return;
+      }
+      if (method === 'extension.providerInfo.updated') {
+        const extensionId = typeof params.extension_id === 'string' ? params.extension_id.trim() : '';
+        const refreshProviderInfo = eventsWindow.CodexAgent?.helpers?.refreshProviderInfo;
+        if (typeof refreshProviderInfo === 'function') {
+          void Promise.resolve(refreshProviderInfo(extensionId)).catch((error: unknown) => {
+            console.warn('Provider info refresh failed:', error);
+          });
+        }
       }
     },
   });

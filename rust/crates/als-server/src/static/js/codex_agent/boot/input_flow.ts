@@ -194,15 +194,24 @@ export function bindInputFlow(ctx: InputFlowContext) {
     }
   }
 
+  function restorePromptFocus(): void {
+    promptEl?.focus({ preventScroll: true });
+  }
+
+  async function submitPrompt(): Promise<void> {
+    const text = getPromptText().trim();
+    if (!text) return;
+    clearPrompt();
+    clearDraft();
+    restorePromptFocus();
+    await dispatchInput(text);
+  }
+
   async function handlePromptKeydown(evt: KeyboardEvent) {
     if (evt.key === 'Enter' && !evt.shiftKey) {
       if (getState().isMobile) return;
       evt.preventDefault();
-      const text = getPromptText().trim();
-      if (!text) return;
-      clearPrompt();
-      clearDraft();
-      await dispatchInput(text);
+      await submitPrompt();
       return;
     }
     if (evt.key === 'Enter' && evt.shiftKey) {
@@ -532,12 +541,11 @@ export function bindInputFlow(ctx: InputFlowContext) {
   }
 
   function bindInputHandlers() {
+    sendBtn?.addEventListener('pointerdown', (evt) => {
+      evt.preventDefault();
+    });
     sendBtn?.addEventListener('click', async () => {
-      const text = getPromptText().trim();
-      if (!text) return;
-      clearPrompt();
-      clearDraft();
-      await dispatchInput(text);
+      await submitPrompt();
     });
 
     promptEl?.addEventListener('keydown', handlePromptKeydown);

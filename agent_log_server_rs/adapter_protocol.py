@@ -47,6 +47,7 @@ class AdapterMethod(StrEnum):
 class AdapterEventMethod(StrEnum):
     LIVE_EVENT = "event.live"
     TRANSCRIPT_RECORD = "event.transcript_record"
+    PROVIDER_INFO_UPDATED = "event.provider_info_updated"
     IMPORT_STARTED = "event.import_started"
     IMPORT_PROGRESS = "event.import_progress"
     IMPORT_TRANSCRIPT_BATCH = "event.import_transcript_batch"

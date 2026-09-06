@@ -13,8 +13,10 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
 };
+use tracing::warn;
 
 const RPC_EVENT: &str = "rpc";
+const RPC_NOTIFY_EVENT: &str = "rpc.notify";
 const JSONRPC_VERSION: &str = "2.0";
 
 pub fn register_settings_rpc_namespace(io: &SocketIo) {
@@ -24,6 +26,21 @@ pub fn register_settings_rpc_namespace(io: &SocketIo) {
             socket.on(RPC_EVENT, handle_rpc_request);
         },
     );
+}
+
+pub async fn emit_provider_info_updated(io: &SocketIo, params: Value) {
+    let notification = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "method": "extension.providerInfo.updated",
+        "params": params,
+    });
+    let Some(namespace) = io.of("/rpc/settings") else {
+        warn!("settings RPC namespace is unavailable for provider-info fanout");
+        return;
+    };
+    if let Err(error) = namespace.emit(RPC_NOTIFY_EVENT, &notification).await {
+        warn!(error = %error, "failed to emit provider-info update over settings RPC");
+    }
 }
 
 async fn handle_rpc_request(

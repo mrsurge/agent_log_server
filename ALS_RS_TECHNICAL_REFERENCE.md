@@ -207,6 +207,9 @@ als-rs-extension-adapter = "agent_log_server_rs.adapters.extension_adapter:main"
 The installed console script must not collide with the current `codex-agent`
 command. ALS-RS exposes only the generic `als-rs-extension-adapter` entrypoint;
 provider-specific adapter console scripts are not part of the current runtime.
+The package dependency list pins `fastmcp==3.4.7`; FastMCP 4 changes the MCP
+interface used by ALS-RS and must not enter this runtime without a deliberate
+compatibility migration.
 
 Binary-release wheels replace that buildable workspace with the verified
 `als-server` executable and the package-owned Rust static tree used by
@@ -1186,6 +1189,12 @@ Selections are serialized against canonical text and restored after rendering.
 Clients suppress stale same-origin updates and remote-apply selection echoes.
 Disconnect or server-side fallback invalidates ownership.
 
+Composer submission keeps the focused editing surface active. Pointer-down on
+the Send control does not transfer focus away, and both button and Enter
+submission clear the draft and restore the empty composer focus before waiting
+for the send RPC. Mobile soft keyboards therefore remain ready for the next
+message without weakening the existing authorship gate.
+
 Sidebar mentions target one live author socket with a unique operation id. With
 no live author, Rust appends one canonical mention to persisted draft state,
 moves the stored selection to its end, and broadcasts the authoritative update.
@@ -1288,7 +1297,11 @@ Runtime quick controls, provider status, and provider usage are schema-declared
 semantics. Rust resolves active conversation metadata and calls generic adapter
 methods such as `extension.get_runtime_options` and
 `extension.get_provider_info`; extension code owns provider-native calls and
-returns normalized DTOs.
+returns normalized DTOs. Extension-owned account notifications can emit
+`event.provider_info_updated`; Rust forwards this as
+`extension.providerInfo.updated` on `/rpc/settings`, and the mounted schema
+renderer refreshes only provider-info rows so unsaved form controls are not
+recreated or clobbered.
 
 Provider session import is extension-owned. The schema picker persists the
 provider binding and Rust calls generic resume/hydration. Rust stores normalized
@@ -1421,6 +1434,9 @@ waits for readiness where requested.
   `model_auto_compact_token_limit = 400000`.
 - Runtime protocol response registries use lowercase method keys and rebuild
   missing schema entries from the loaded generated bundle where possible.
+- Runtime JSON Schema decoding treats a property schema with no validation
+  keywords as unconstrained, including accepting `null`. This matches JSON
+  Schema semantics for fields such as the optional `rateLimitUpsell` value.
 - Runtime schema cache is under `${ALS_RS_CACHE_DIR}/codex_app_server_schema`;
   generation uses `codex app-server generate-json-schema --experimental`.
 - `initialize.capabilities.experimentalApi` is negotiated when required by
@@ -1429,6 +1445,10 @@ waits for readiness where requested.
   waiters immediately and places non-response events on a Codex-owned async
   router queue so settings/provider-info calls do not wait behind transcript
   processing.
+- Provider usage includes rate-limit windows, credit balance, individual spend
+  control, and available reset credits. `account/rateLimits/updated` invalidates
+  the mounted provider-info card through the generic settings notification lane;
+  account identifiers and unconstrained upsell payloads are not displayed.
 - `agent-pty-blocks` is injected as stdio with the full generated enabled-tool
   list, per-turn config, nonparallel scheduling, and the one-hour timeout. The
   retained `mcp_agent_pty_http_shim.py` is not the active Codex injection path.

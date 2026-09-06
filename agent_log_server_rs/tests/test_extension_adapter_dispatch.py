@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from typing import cast
 from unittest.mock import patch
 
-from agent_log_server_rs.adapter_protocol import AdapterMethod
+from agent_log_server_rs.adapter_protocol import AdapterEventMethod, AdapterMethod
 from agent_log_server_rs.adapters.extension_adapter import (
     ExtensionJsonRpcAdapter,
     write_all_fd,
@@ -41,6 +41,18 @@ class _ConcurrentAdapter(ExtensionJsonRpcAdapter):
         return await super()._dispatch(message)
 
 
+class _RecordingAdapter(ExtensionJsonRpcAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.notifications: list[tuple[str, object]] = []
+
+    async def _send_notification(self, method: str, params: object) -> None:
+        self.notifications.append((str(method), params))
+
+    async def broadcast_for_test(self, payload: dict[str, object]) -> None:
+        await self._broadcast(payload)
+
+
 def _rpc_line(request_id: int, method: str) -> str:
     return json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method}) + "\n"
 
@@ -54,6 +66,29 @@ def _decode_responses(output: str) -> list[dict[str, object]]:
 
 
 class ExtensionAdapterDispatchTests(unittest.TestCase):
+    def test_provider_info_update_uses_global_adapter_event(self) -> None:
+        async def scenario() -> list[tuple[str, object]]:
+            adapter = _RecordingAdapter()
+            payload: dict[str, object] = {
+                "type": "provider_info_updated",
+                "extension_id": "codex-ext",
+            }
+            await adapter.broadcast_for_test(payload)
+            return adapter.notifications
+
+        self.assertEqual(
+            asyncio.run(scenario()),
+            [
+                (
+                    AdapterEventMethod.PROVIDER_INFO_UPDATED,
+                    {
+                        "type": "provider_info_updated",
+                        "extension_id": "codex-ext",
+                    },
+                )
+            ],
+        )
+
     def test_stdio_dispatches_independent_requests_concurrently(self) -> None:
         async def scenario() -> list[dict[str, object]]:
             adapter = _ConcurrentAdapter()

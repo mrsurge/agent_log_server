@@ -166,6 +166,14 @@ type SelectControl = {
   largePickerMode?: boolean;
 };
 
+type ProviderInfoBinding = {
+  extensionId: string;
+  runtimeKey: string;
+  root: HTMLDivElement;
+  text: HTMLDivElement;
+  detail: HTMLDivElement;
+};
+
 type DynamicSourceOptions = {
   cwd?: string | null;
   conversationId?: string | null;
@@ -397,6 +405,8 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   let currentSchemaValues: Record<string, SchemaValueEntry> = {};
   let currentSchemaWriteBackValues: JsonRecord = {};
   let currentSchemaFields: Record<string, SchemaField> = {};
+  let currentProviderInfoBindings: ProviderInfoBinding[] = [];
+  let providerInfoRefreshPromise: Promise<void> | null = null;
    
   // Session picker overlay elements (reuse HTML already in template)
   const sessionPickerOverlay = document.getElementById('session-picker');
@@ -1007,7 +1017,43 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     ));
   }
 
-  function renderProviderInfo(field: SchemaField, providerInfoPromise: Promise<JsonRecord> | null): HTMLDivElement {
+  function applyProviderInfo(binding: ProviderInfoBinding, payload: JsonRecord): void {
+    const part = asRecord(payload[binding.runtimeKey]);
+    binding.root.dataset.tone = trimString(part.tone) || 'neutral';
+    binding.text.textContent = trimString(part.text) || 'Provider info unavailable.';
+    binding.detail.textContent = trimString(part.detail);
+    binding.detail.hidden = !binding.detail.textContent;
+    if (!binding.detail.isConnected) binding.root.appendChild(binding.detail);
+  }
+
+  function refreshProviderInfo(schemaExtensionId = ''): Promise<void> {
+    if (providerInfoRefreshPromise) return providerInfoRefreshPromise;
+    const target = providerInfoTarget(schemaExtensionId);
+    if (!target) return Promise.resolve();
+    const bindings = currentProviderInfoBindings.filter((binding) => (
+      binding.root.isConnected && binding.extensionId === target.extensionId
+    ));
+    if (!bindings.length) return Promise.resolve();
+    bindings.forEach((binding) => {
+      binding.root.dataset.tone = 'neutral';
+      binding.text.textContent = 'Checking...';
+    });
+    const refresh = loadProviderInfo(target.extensionId).then((payload) => {
+      bindings.forEach((binding) => {
+        if (binding.root.isConnected) applyProviderInfo(binding, payload);
+      });
+    });
+    providerInfoRefreshPromise = refresh.finally(() => {
+      providerInfoRefreshPromise = null;
+    });
+    return providerInfoRefreshPromise;
+  }
+
+  function renderProviderInfo(
+    field: SchemaField,
+    providerInfoPromise: Promise<JsonRecord> | null,
+    schemaExtensionId: string,
+  ): HTMLDivElement {
     const info = document.createElement('div');
     info.className = 'settings-schema-info';
     info.dataset.tone = 'neutral';
@@ -1035,15 +1081,17 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     }
     if (!providerInfoPromise) return info;
 
+    const binding: ProviderInfoBinding = {
+      extensionId: schemaExtensionId,
+      runtimeKey,
+      root: info,
+      text: infoText,
+      detail: infoDetail,
+    };
+    currentProviderInfoBindings.push(binding);
+
     providerInfoPromise.then((payload) => {
-      const part = asRecord(payload[runtimeKey]);
-      const tone = trimString(part.tone) || 'neutral';
-      info.dataset.tone = tone;
-      infoText.textContent = trimString(part.text) || 'Provider info unavailable.';
-      infoDetail.textContent = trimString(part.detail);
-      if (!infoDetail.textContent) {
-        infoDetail.remove();
-      }
+      applyProviderInfo(binding, payload);
     }).catch((error: unknown) => {
       info.dataset.tone = 'error';
       infoText.textContent = 'Provider info unavailable.';
@@ -1259,6 +1307,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
     currentSchemaValues = {};
     currentSchemaWriteBackValues = {};
     currentSchemaFields = {};
+    currentProviderInfoBindings = [];
     
     if (!schema || !Array.isArray(schema.fields)) return;
     const getConversationInfoFields = (): SchemaField[] => {
@@ -3191,7 +3240,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
 
       if (field.type === 'info') {
         if (isProviderInfoField(field)) {
-          const info = renderProviderInfo(field, getProviderInfoPromise());
+          const info = renderProviderInfo(field, getProviderInfoPromise(), schemaExtensionId);
           info.dataset.schemaFieldId = field.id;
           conditionalRows.push({ field, element: info, input: null });
           container.appendChild(info);
@@ -3661,6 +3710,7 @@ window.CodexAgentModules.push((ctx: CodexAgentModuleApi | undefined) => {
   ctx.helpers.getSchemaValues = getSchemaValues;
   ctx.helpers.getSchemaFieldInput = getSchemaFieldInput;
   ctx.helpers.onAgentChange = onAgentChange;
+  ctx.helpers.refreshProviderInfo = refreshProviderInfo;
 });
 
 export {};

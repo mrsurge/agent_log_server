@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 from typing import Callable, cast
 
-from extensions.codex_ext.runtime_protocol import RuntimeProtocol, build_request_params
+from extensions.codex_ext.runtime_protocol import (
+    RuntimeProtocol,
+    build_request_params,
+    decode_response_result,
+)
 from extensions.codex_ext import runtime_protocol
 
 
@@ -26,6 +30,43 @@ def _write_schema_bundle(cache_dir: Path, properties: dict[str, object]) -> None
 
 
 class CodexRuntimeProtocolTests(unittest.TestCase):
+    def test_unconstrained_response_property_accepts_null(self) -> None:
+        protocol = RuntimeProtocol(
+            version="codex-cli 0.153.3",
+            version_key="0.153.3",
+            cache_dir=Path("."),
+            schema_path=Path("codex_app_server_protocol.v2.schemas.json"),
+            definitions={},
+            request_params={},
+            responses={
+                "account/ratelimits/read": {
+                    "type": "object",
+                    "required": ["rateLimits"],
+                    "properties": {
+                        "rateLimits": {"type": "object"},
+                        "rateLimitUpsell": {
+                            "description": "Optional backend-owned banner."
+                        },
+                    },
+                }
+            },
+            server_requests={},
+            server_request_responses={},
+            notifications={},
+            events={},
+            server_request_semantics={},
+            notification_semantics={},
+            event_semantics={},
+        )
+
+        decoded = decode_response_result(
+            protocol,
+            "account/rateLimits/read",
+            {"rateLimits": {}, "rateLimitUpsell": None},
+        )
+
+        self.assertEqual(decoded, {"rateLimits": {}, "rateLimitUpsell": None})
+
     def test_schema_cache_rejects_stable_resume_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp)

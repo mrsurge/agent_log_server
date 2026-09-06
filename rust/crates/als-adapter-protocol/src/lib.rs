@@ -38,6 +38,7 @@ pub mod methods {
 pub mod events {
     pub const LIVE_EVENT: &str = "event.live";
     pub const TRANSCRIPT_RECORD: &str = "event.transcript_record";
+    pub const PROVIDER_INFO_UPDATED: &str = "event.provider_info_updated";
     pub const IMPORT_STARTED: &str = "event.import_started";
     pub const IMPORT_PROGRESS: &str = "event.import_progress";
     pub const IMPORT_TRANSCRIPT_BATCH: &str = "event.import_transcript_batch";
