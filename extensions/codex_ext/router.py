@@ -501,6 +501,34 @@ def _command_text(value: object) -> str:
     return str(value)
 
 
+def _split_command_string(command: str) -> List[str]:
+    text = str(command or "")
+    try:
+        parts = shlex.split(text, posix=True)
+        round_trip = shlex.join(parts)
+        if round_trip == text or (
+            ":\\" not in text and shlex.split(round_trip, posix=True) == parts
+        ):
+            return parts
+    except ValueError:
+        pass
+    return [text]
+
+
+def _display_command_text(value: object) -> str:
+    raw = _command_text(value)
+    parts = (
+        [str(part) for part in value]
+        if _is_object_list(value)
+        else _split_command_string(raw)
+    )
+    if len(parts) == 3:
+        shell = os.path.basename(parts[0])
+        if shell in {"bash", "sh", "zsh"} and parts[1] in {"-c", "-lc"}:
+            return parts[2]
+    return raw
+
+
 def _resolve_view_path(path: str, cwd: str) -> str:
     if not path:
         return ""
@@ -602,17 +630,8 @@ def _build_codex_view_lines(content: str, view_spec: Optional[ObjectDict] = None
     ]
 
 
-def _unwrap_single_shell_command(command: str) -> str:
-    text = str(command or "").strip()
-    if not text:
-        return ""
-    try:
-        tokens = shlex.split(text, posix=True)
-    except ValueError:
-        return text
-    if len(tokens) >= 3 and tokens[0] in {"sh", "/bin/sh", "bash", "/bin/bash"} and tokens[1] in {"-c", "-lc"}:
-        return str(tokens[2] or "").strip()
-    return text
+def _unwrap_single_shell_command(command: object) -> str:
+    return _display_command_text(command).strip()
 
 
 def _last_non_flag_token(tokens: List[str], start: int = 1) -> Optional[str]:
@@ -758,7 +777,7 @@ def _separator_tokens_to_text(tokens: List[str]) -> Optional[str]:
 
 
 def _shell_command_to_view_sequence(command: object, cwd: str = "") -> Optional[ObjectDict]:
-    inner = _unwrap_single_shell_command(_command_text(command))
+    inner = _unwrap_single_shell_command(command)
     if not inner or "\n" in inner:
         return None
     try:
@@ -816,7 +835,7 @@ def _split_view_output_by_divider(output: str, divider: str, expected_parts: int
 
 
 def _shell_command_to_view_spec(command: object, cwd: str = "") -> Optional[ObjectDict]:
-    inner = _unwrap_single_shell_command(_command_text(command))
+    inner = _unwrap_single_shell_command(command)
     if not inner or any(marker in inner for marker in ("\n", "&&", "||", ";")):
         return None
     try:
@@ -918,7 +937,7 @@ def _new_file_arguments(spec: ObjectDict) -> ObjectDict:
 
 
 def _shell_command_to_new_file_spec(command: object, cwd: str = "") -> Optional[ObjectDict]:
-    inner = _unwrap_single_shell_command(_command_text(command))
+    inner = _unwrap_single_shell_command(command)
     if not inner or "\n" not in inner:
         return None
     normalized = inner.replace("\r\n", "\n").replace("\r", "\n")
@@ -936,8 +955,7 @@ def _shell_command_to_new_file_spec(command: object, cwd: str = "") -> Optional[
             break
     if end_idx is None or end_idx <= 0:
         return None
-    if any(line.strip() for line in lines[end_idx + 1 :]):
-        return None
+    trailing_command = "\n".join(lines[end_idx + 1 :]).strip()
     resolved_path = _resolve_view_path(path_token, cwd)
     content = "\n".join(lines[cat_line_idx + 1 : end_idx])
     spec: ObjectDict = {
@@ -946,6 +964,8 @@ def _shell_command_to_new_file_spec(command: object, cwd: str = "") -> Optional[
         "diff": _build_new_file_diff(resolved_path, content),
         "new_file": True,
     }
+    if trailing_command:
+        spec["trailing_command"] = trailing_command
     if len(created_dirs) == 1:
         spec["directory"] = created_dirs[0]
     elif created_dirs:
@@ -954,7 +974,7 @@ def _shell_command_to_new_file_spec(command: object, cwd: str = "") -> Optional[
 
 
 def _shell_command_to_search_spec(command: object, cwd: str = "") -> Optional[ObjectDict]:
-    inner = _unwrap_single_shell_command(_command_text(command))
+    inner = _unwrap_single_shell_command(command)
     if not inner or "\n" in inner:
         return None
     try:
@@ -2445,6 +2465,8 @@ class CodexEventRouter:
 
             if item_type == "commandexecution":
                 command = item.get("command") or item.get("parsedCmd") or item.get("cmd") or item.get("argv") or ""
+                raw_command = _command_text(command)
+                display_command = _display_command_text(command)
                 cwd_value = item.get("cwd")
                 cwd = cwd_value if isinstance(cwd_value, str) else ""
                 new_file_spec = _shell_command_to_new_file_spec(command, cwd)
@@ -2454,6 +2476,8 @@ class CodexEventRouter:
                 item_state.update({
                     "item_type": item_type,
                     "command": command,
+                    "raw_command": raw_command,
+                    "display_command": display_command,
                     "cwd": cwd,
                     "output_buffer": "",
                     "new_file_spec": new_file_spec,
@@ -2464,6 +2488,20 @@ class CodexEventRouter:
                 if new_file_spec:
                     path = new_file_spec.get("path") if isinstance(new_file_spec.get("path"), str) else ""
                     arguments = _new_file_arguments(new_file_spec)
+                    trailing_command = _string_value(new_file_spec.get("trailing_command"))
+                    trailing_events: List[ObjectDict] = []
+                    if trailing_command:
+                        trailing_id = f"{item_id or _assistant_id(item, thread_id, turn_id)}:shell"
+                        item_state["trailing_shell_id"] = trailing_id
+                        trailing_events.append({
+                            "type": "shell_begin",
+                            "id": trailing_id,
+                            "command": trailing_command,
+                            "raw_command": raw_command,
+                            "cwd": cwd,
+                            "result_scope": "invocation",
+                            "activity": "running command",
+                        })
                     return self._decorate_routed_result({
                         "handled": True,
                         "events": [
@@ -2475,6 +2513,7 @@ class CodexEventRouter:
                                 "path": path,
                                 "new_file": True,
                             },
+                            *trailing_events,
                             {"type": "activity", "label": "creating file", "active": True},
                         ],
                         "transcript_entries": [],
@@ -2509,7 +2548,8 @@ class CodexEventRouter:
                         {
                             "type": "shell_begin",
                             "id": item_id or _assistant_id(item, thread_id, turn_id),
-                            "command": _command_text(command),
+                            "command": display_command,
+                            "raw_command": raw_command,
                             "cwd": cwd,
                             "activity": "running command",
                         },
@@ -2722,12 +2762,12 @@ class CodexEventRouter:
                 state["output_buffer"] = f"{state.get('output_buffer', '')}{delta}"
                 if state.get("view_spec") or state.get("view_sequence") or state.get("search_spec"):
                     return {"handled": True, "events": [], "transcript_entries": []}
-                if not state.get("new_file_spec"):
+                if not state.get("new_file_spec") or state.get("trailing_shell_id"):
                     return self._decorate_routed_result({
                         "handled": True,
                         "events": [{
                             "type": "shell_delta",
-                            "id": item_id or _assistant_id(payload, thread_id, turn_id),
+                            "id": state.get("trailing_shell_id") or item_id or _assistant_id(payload, thread_id, turn_id),
                             "delta": delta,
                         }],
                         "transcript_entries": [],
@@ -2895,7 +2935,8 @@ class CodexEventRouter:
 
             if item_type == "commandexecution":
                 command = item.get("command") or item.get("parsedCmd") or item_state.get("command") or ""
-                display_command = _command_text(command)
+                raw_command = _command_text(command)
+                display_command = _display_command_text(command)
                 cwd = item.get("cwd") or item_state.get("cwd") or ""
                 output = _normalize_output(
                     item.get("aggregatedOutput") or item.get("output") or item.get("stdout") or item_state.get("output_buffer")
@@ -3027,10 +3068,14 @@ class CodexEventRouter:
                     diff_value = new_file_spec.get("diff")
                     diff_text = diff_value if isinstance(diff_value, str) else ""
                     arguments = _new_file_arguments(new_file_spec)
+                    trailing_command = _string_value(new_file_spec.get("trailing_command"))
+                    file_output = "" if trailing_command else output
                     result_payload = {
                         "status": status or "completed",
                         "changed_files": 1,
                     }
+                    if trailing_command:
+                        result_payload["result_scope"] = "invocation"
                     routed = {
                         "handled": True,
                         "events": [
@@ -3040,7 +3085,7 @@ class CodexEventRouter:
                                 "tool": "apply_patch",
                                 "arguments": arguments,
                                 "result": result_payload,
-                                "output": output,
+                                "output": file_output,
                                 "path": path,
                                 "duration_ms": duration_ms,
                                 "is_error": is_error,
@@ -3054,7 +3099,7 @@ class CodexEventRouter:
                             "tool": "apply_patch",
                             "arguments": arguments,
                             "result": result_payload,
-                            "output": output,
+                            "output": file_output,
                             "path": path,
                             "duration_ms": duration_ms,
                             "status": status or ("error" if is_error else "completed"),
@@ -3076,6 +3121,43 @@ class CodexEventRouter:
                         item_id=item_id,
                         event_name=label_lower,
                     )
+                    if trailing_command:
+                        trailing_id = _string_value(item_state.get("trailing_shell_id"))
+                        trailing_events = _dict_list(routed.get("events"))
+                        trailing_entries = _dict_list(routed.get("transcript_entries"))
+                        trailing_events.append({
+                            "type": "shell_end",
+                            "id": trailing_id,
+                            "command": trailing_command,
+                            "raw_command": raw_command,
+                            "cwd": cwd,
+                            "stdout": output,
+                            "stderr": "",
+                            "exitCode": exit_code if exit_code is not None else (1 if is_error else 0),
+                            "duration_ms": duration_ms,
+                            "status": status or ("error" if is_error else "completed"),
+                            "is_error": is_error,
+                            "result_scope": "invocation",
+                        })
+                        trailing_entries.append({
+                            "role": "command",
+                            "id": trailing_id,
+                            "item_id": trailing_id,
+                            "source_item_id": item_id,
+                            "command": trailing_command,
+                            "raw_command": raw_command,
+                            "cwd": cwd,
+                            "output": output,
+                            "exit_code": exit_code,
+                            "duration_ms": duration_ms,
+                            "status": status or ("error" if is_error else "completed"),
+                            "is_error": is_error,
+                            "result_scope": "invocation",
+                            "turn_id": turn_id,
+                            "event": label_lower,
+                        })
+                        routed["events"] = trailing_events
+                        routed["transcript_entries"] = trailing_entries
                     approval_request_id = item_state.get("approval_request_id")
                     if approval_request_id:
                         routed["clear_live_approval_ids"] = [approval_request_id]
@@ -3088,6 +3170,7 @@ class CodexEventRouter:
                             "type": "shell_end",
                             "id": item_id or _assistant_id(item, thread_id, turn_id),
                             "command": display_command,
+                            "raw_command": raw_command,
                             "cwd": cwd,
                             "stdout": output,
                             "stderr": "",
@@ -3101,6 +3184,7 @@ class CodexEventRouter:
                     "transcript_entries": [{
                         "role": "command",
                         "command": display_command,
+                        "raw_command": raw_command,
                         "cwd": cwd,
                         "output": output,
                         "exit_code": exit_code,

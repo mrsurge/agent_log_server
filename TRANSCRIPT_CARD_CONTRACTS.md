@@ -393,6 +393,8 @@ Expected fields:
 
 - `role: "command"`
 - `command`
+- `raw_command` optional executable/transport form when `command` is normalized
+  for display
 - `output`
 - `path` when the command has a concrete file target
 - `source` when needed for prompt/terminal rendering
@@ -400,6 +402,14 @@ Expected fields:
 Notes:
 
 - This is for actual command execution, not arbitrary tools flattened into commands.
+- Provider-owned display normalization must preserve live/replay parity. A
+  streaming command card's bounded output viewport follows newly appended text
+  independently of the conversation viewport's pinned state.
+- When a provider invocation is presented as a leading file-write card and a
+  trailing shell card, their identities must remain distinct in live and replay.
+  Combined output belongs to the shell card only; `result_scope: "invocation"`
+  marks results that cannot be attributed to an individual command. The related
+  file tool's result uses the same scope instead of claiming a separate outcome.
 
 ### `view`
 

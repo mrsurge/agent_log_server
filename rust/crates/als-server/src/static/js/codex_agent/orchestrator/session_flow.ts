@@ -1,4 +1,5 @@
 import { createConversationsRpcClient } from '../rpc/conversations/client.ts';
+import { createSettingsRpcClient } from '../rpc/settings/client.ts';
 import type { JsonObject } from '../rpc/conversations/contract.ts';
 
 interface SessionConversationMeta {
@@ -38,6 +39,7 @@ interface SessionFlowContext {
   sioCall: (event: string, payload?: JsonObject, options?: JsonObject) => Promise<unknown>;
   waitForWs: () => Promise<boolean>;
   conversationsRpcClient?: ReturnType<typeof createConversationsRpcClient> | null;
+  settingsRpcClient?: Pick<ReturnType<typeof createSettingsRpcClient>, 'getExtensionSessionState'>;
   setActivity: (label: string, active: boolean) => void;
   updateScrollButton: () => void;
   maybeAutoScroll: (force?: boolean) => void;
@@ -75,6 +77,7 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
     sioCall,
     waitForWs,
     conversationsRpcClient,
+    settingsRpcClient,
     setActivity,
     updateScrollButton,
     maybeAutoScroll,
@@ -84,6 +87,7 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
     snapTranscriptToLive,
   } = ctx;
   const activeConversationsRpcClient = conversationsRpcClient ?? createConversationsRpcClient({});
+  const sessionStateClient = settingsRpcClient ?? createSettingsRpcClient({ sioCall });
 
   async function ensureInitialized() {
     const state = getState();
@@ -111,21 +115,41 @@ export function bindSessionFlow(ctx: SessionFlowContext) {
     updateScrollButton();
     maybeAutoScroll(true);
     setActivity('sending', true);
+    let loadingSession = false;
     try {
       await ensureInitialized();
+      try {
+        const session = await sessionStateClient.getExtensionSessionState({
+          conversationId: convoId,
+          timeoutMs: 3000,
+        });
+        loadingSession = session.ok !== false && session.supported === true
+          && session.loaded !== true && (session.state === 'cold' || session.state === 'unbound');
+      } catch {
+        // Session inspection is optional; an unavailable probe must not block send.
+      }
+      if (loadingSession && scopedConversationId(getState()) === convoId) {
+        setActivity('Loading session', true);
+      }
       const result = await activeConversationsRpcClient.sendMessage({
         conversationId: convoId,
         text,
+        timeoutMs: loadingSession ? 120000 : 10000,
       });
       if (result?.accepted === false || result?.ok === false) {
         console.error('sendUserMessage failed:', result?.error);
-        setActivity(result?.error || 'send failed', true);
+        if (scopedConversationId(getState()) === convoId) setActivity(result?.error || 'send failed', true);
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error || 'send failed');
+      let message = error instanceof Error ? error.message : String(error || 'send failed');
+      if (loadingSession && message === 'Timed out waiting for conversation.send') {
+        message = 'Session loading timed out after 2 minutes';
+      }
       console.error('sendUserMessage failed:', error);
-      setStatusDot('error');
-      setActivity(message, true);
+      if (scopedConversationId(getState()) === convoId) {
+        setStatusDot('error');
+        setActivity(message, true);
+      }
     }
   }
 

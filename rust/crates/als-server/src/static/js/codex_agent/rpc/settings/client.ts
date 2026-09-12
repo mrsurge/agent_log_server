@@ -543,9 +543,10 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
   }
 
   async function getExtensionSessionState(options: {
-    extensionId: string;
+    extensionId?: string;
     conversationId: string;
     providerSessionId?: string | null;
+    timeoutMs?: number;
   }): Promise<JsonObject & { transport: TransportTag }> {
     if (!rpcEnabled()) {
       return normalizeTransport({
@@ -557,9 +558,9 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
       }, 'legacy');
     }
     const params: JsonObject = {
-      extension_id: options.extensionId,
       conversation_id: options.conversationId,
     };
+    if (options.extensionId) params.extension_id = options.extensionId;
     if (typeof options.providerSessionId === 'string' && options.providerSessionId.trim()) {
       params.provider_session_id = options.providerSessionId.trim();
       params.thread_id = options.providerSessionId.trim();
@@ -568,6 +569,7 @@ export function createSettingsRpcClient(deps: SettingsRpcClientDeps) {
       namespace: SETTINGS_RPC_NAMESPACE,
       method: SETTINGS_RPC_METHODS.extensionSessionStateGet,
       params,
+      timeoutMs: options.timeoutMs,
       windowRef: getWindowRef(deps.windowRef),
     });
     return normalizeTransport(asObject(result) ?? {}, 'rpc');

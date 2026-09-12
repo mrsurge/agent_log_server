@@ -39,7 +39,7 @@
     "icon": "codex.svg",
     "color": "#10a37f",
     "semanticShellRibbon": {
-      "quoteParsing": true
+      "quoteParsing": false
     },
     "toolRenderPolicy": {
       "default": {

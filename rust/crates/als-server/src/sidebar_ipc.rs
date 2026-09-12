@@ -75,6 +75,15 @@ pub async fn recheck_status(io: &SocketIo, state: &AppState) -> Value {
 }
 
 pub async fn emit_agent_open(io: &SocketIo, state: &AppState, payload: JsonMap) -> bool {
+    let mut payload = payload;
+    if let Ok(Some(focused)) = state.focused_window.snapshot()
+        && let (Some(client_id), Some(host_id)) = (focused.client_id, focused.host_id)
+    {
+        payload.insert(
+            "target".to_owned(),
+            json!({"clientId": client_id, "hostId": host_id}),
+        );
+    }
     let Ok(Some(client)) = ensure_client(io, state).await else {
         warn!(
             namespace = SIDEBAR_NAMESPACE,
@@ -732,6 +741,7 @@ fn process_focused_window(state: &AppState, params: JsonMap) -> Result<()> {
 fn focused_window_snapshot_from_params(params: &JsonMap) -> Option<FocusedWindowSnapshot> {
     let conversation_id = focused_conversation_id_from_params(params)?;
     Some(FocusedWindowSnapshot {
+        client_id: string_field(params, "client_id").or_else(|| string_field(params, "clientId")),
         host_id: string_field(params, "host_id").or_else(|| string_field(params, "hostId")),
         conversation_id,
         state_kind: string_field(params, "state_kind")
@@ -1368,6 +1378,7 @@ mod tests {
     fn focused_window_snapshot_prefers_query_state() {
         let params = json!({
             "app_id": "als-rs",
+            "client_id": "client_123456789abc",
             "host_id": "slot:als-rs:als_rs:a1b2",
             "state_kind": "conversation",
             "query_state": {"conversation_id": "conv-query"},
@@ -1385,6 +1396,7 @@ mod tests {
         let snapshot = focused_window_snapshot_from_params(&params)
             .expect("focused window snapshot should parse");
         assert_eq!(snapshot.conversation_id, "conv-query");
+        assert_eq!(snapshot.client_id.as_deref(), Some("client_123456789abc"));
         assert_eq!(snapshot.host_id.as_deref(), Some("slot:als-rs:als_rs:a1b2"));
         assert_eq!(snapshot.state_kind.as_deref(), Some("conversation"));
         assert_eq!(snapshot.token_id.as_deref(), Some("als_rs"));

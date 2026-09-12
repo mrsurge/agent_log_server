@@ -55,6 +55,10 @@ interface ShellRenderContext {
 
 const DEFAULT_SHELL_PREVIEW_LENGTH = 120;
 
+export function scrollShellOutputToTail(el: Pick<HTMLElement, 'scrollTop' | 'scrollHeight'>): void {
+  el.scrollTop = el.scrollHeight;
+}
+
 export function buildShellCommandPreview(
   command: unknown,
   maxLength = DEFAULT_SHELL_PREVIEW_LENGTH,
@@ -240,6 +244,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
     if (delta) {
       entry.text += delta;
       setTerminalText(entry.termEl, entry.text);
+      scrollShellOutputToTail(entry.termEl);
     }
     if (setLastEventType) setLastEventType('shell');
     maybeAutoScroll();
@@ -289,6 +294,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
     } else {
       entry.termEl.textContent = '(no output)';
     }
+    scrollShellOutputToTail(entry.termEl);
 
     // Add footer with exit code (same as renderCommandResult)
     if (exitCode !== 0) {

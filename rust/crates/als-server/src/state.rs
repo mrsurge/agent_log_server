@@ -107,6 +107,7 @@ impl AppState {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FocusedWindowSnapshot {
+    pub client_id: Option<String>,
     pub host_id: Option<String>,
     pub conversation_id: String,
     pub state_kind: Option<String>,

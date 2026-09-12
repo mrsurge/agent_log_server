@@ -856,7 +856,10 @@ Current behavior:
   `rpc.notify`: `hostUi.recheck` calls `sidebar.cwd.get`, file navigation calls
   `sidebar.file.open`, and incoming notifications include `sidebar.cwd.set`,
   `sidebar.mention`, `sidebar.window.focused`, and inline agent-edit document
-  state. Narrow legacy `sidebar:*` handlers remain only as a cutover fallback.
+  state. Focus notifications retain the owning TE2 client/host pair; outbound
+  file navigation returns that pair as the target so Code TE2 can validate the
+  active registered presentation and update only its client-scoped foreground.
+  Narrow legacy `sidebar:*` handlers remain only as a cutover fallback.
 - The ALS-RS splash header can optionally show the TE2 console bridge worker ID
   beside the settings gear. The toggle is stored as `show_console_worker_id` in
   `app_state.json`, and the browser reads the worker ID published by
@@ -1018,6 +1021,16 @@ generic `diff` rows own visible patch bodies. Raw new-file content received in a
 provider field named `diff` must be synthesized into a real `/dev/null` unified
 diff before emit or persistence; arbitrary text must never be header-wrapped into
 a fake patch.
+
+Streaming shell cards keep their bounded output viewport at the newest appended
+text. The conversation viewport's pinned-tail behavior remains a separate layer.
+
+Composer sends inspect `extension.session.state.get` with a three-second bound;
+the server derives the extension and provider binding from conversation metadata.
+Supported cold/unbound sessions show `Loading session` and use a 120-second send
+ack timeout. Loaded, unsupported, unknown, and failed state checks use the normal
+10-second send timeout. This cold-safe inspection does not resume the provider;
+the send still owns lazy resume. A timeout does not trigger another frontend send.
 
 Canonical card details live in `TRANSCRIPT_CARD_CONTRACTS.md`; approvals live in
 `APPROVAL_CONTRACT.md`; planning DTOs live in
@@ -1445,6 +1458,22 @@ waits for readiness where requested.
   waiters immediately and places non-response events on a Codex-owned async
   router queue so settings/provider-info calls do not wait behind transcript
   processing.
+- Command-execution cards use the same presentation boundary as the Codex TUI:
+  round-trip-safe POSIX splitting recognizes `bash`, `sh`, and `zsh` `-c`/`-lc`
+  wrappers and displays the inner script. Live and replay entries retain the raw
+  executable form separately as `raw_command`.
+  Codex's manifest disables `semanticShellRibbon.quoteParsing`: the frontend
+  must not reinterpret ordinary quoted arguments as independent shell scripts
+  after launcher unwrapping. Embedded Python/JavaScript highlighting remains.
+  New-file heredoc, view, view-sequence, and search detection pass the original
+  command string or argv to the same unwrapping helper used by headers. Joining
+  wrapper argv before unwrapping loses argument boundaries and breaks detection.
+  A recognized leading new-file heredoc ends at its exact delimiter. Following
+  commands remain together in a separate shell card with an `:shell` identity;
+  output deltas and final output go there instead of the file tool card. Both
+  cards retain the invocation-level outcome (`result_scope: "invocation"`),
+  since Codex supplies no per-command exit status or output boundaries. The
+  remaining script is not recursively interpreted as additional file writes.
 - Provider usage includes rate-limit windows, credit balance, individual spend
   control, and available reset credits. `account/rateLimits/updated` invalidates
   the mounted provider-info card through the generic settings notification lane;

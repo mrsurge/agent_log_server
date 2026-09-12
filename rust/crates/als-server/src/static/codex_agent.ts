@@ -1955,6 +1955,7 @@ document.addEventListener('DOMContentLoaded', () => {
     sioCall,
     waitForWs,
     conversationsRpcClient,
+    settingsRpcClient,
     setActivity,
     updateScrollButton,
     maybeAutoScroll,
