@@ -1,3 +1,5 @@
+@import url('./vendor/codicons/codicon.css');
+
 :root {
   --bg: #0d0f13;
   --panel: #151821;
@@ -1438,7 +1440,6 @@ body.widescreen-resizing * {
 
 .project-status-pill,
 .project-file-state,
-.project-file-stats,
 .project-file-bytes,
 .project-file-truncated {
   padding: 2px 6px;
@@ -1446,6 +1447,39 @@ body.widescreen-resizing * {
   border-radius: 999px;
   background: #161b22;
 }
+
+.project-file-stats { padding: 2px 0; font-variant-numeric: tabular-nums; }
+.project-file-stats.added { color: #88ad96; }
+.project-file-stats.deleted { color: #bd9090; }
+.timeline-row.diff > .meta.diff-shortstat {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 10px;
+}
+.diff-shortstat .diff-count {
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.diff-shortstat .added { color: #99d4ad; background: #203c2b; }
+.diff-shortstat .deleted { color: #e0a0a0; background: #432a2e; }
+.diff-shortstat .diff-file-type { color: var(--muted); font-size: 11px; }
+.diff-language-icon {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  background-color: currentColor;
+  mask: var(--language-icon) center / contain no-repeat;
+  -webkit-mask: var(--language-icon) center / contain no-repeat;
+}
+.diff-language-icon.language-rust { --language-icon: url('./vendor/language-icons/rust.svg'); }
+.diff-language-icon.language-typescript { --language-icon: url('./vendor/language-icons/typescript.svg'); }
+.diff-language-icon.language-python { --language-icon: url('./vendor/language-icons/python.svg'); }
+.diff-language-icon.language-javascript { --language-icon: url('./vendor/language-icons/javascript.svg'); }
 
 .project-file-truncated {
   color: #f2cc60;

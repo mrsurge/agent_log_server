@@ -4,18 +4,14 @@ import {
   scrollPathLabelsToEnd,
 } from '../path_label.ts';
 import type { TranscriptCardMetadata } from '../transcript_card_metadata.ts';
+import { countPatchChanges, diffFileIcon } from './summary.ts';
 
 type HighlightResult = {
   value: string;
 };
 
-type HighlightAutoResult = HighlightResult & {
-  relevance: number;
-};
-
 declare const hljs: {
   highlight(code: string, options: { language: string; ignoreIllegals: boolean }): HighlightResult;
-  highlightAuto(code: string): HighlightAutoResult;
 };
 
 type DiffBlockState = {
@@ -81,6 +77,7 @@ type DiffAlignmentPair = {
 
 type DiffRowEntry = {
   block: HTMLElement;
+  row?: HTMLElement;
 };
 
 type CreatedRow = {
@@ -250,6 +247,18 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
     metadata: TranscriptCardMetadata | null = null,
   ): void {
     const entry = getDiffRow(id, path, parentEl, metadata);
+    const meta = entry.row?.querySelector(':scope > .meta');
+    if (meta) {
+      const { additions, deletions } = countPatchChanges(text || '');
+      const language = detectLangFromPath?.(path);
+      meta.classList.add('diff-shortstat');
+      const fileType = language ? `<span class="diff-file-type">${escapeHtml(language)}</span>` : '';
+      const icon = diffFileIcon(language);
+      const iconClass = icon.startsWith('language-') ? `diff-language-icon ${icon}` : `codicon codicon-${icon}`;
+      meta.innerHTML = `<span class="${iconClass}" aria-hidden="true"></span>${fileType}<span>diff</span><span class="diff-count added">+${additions}</span><span class="diff-count deleted">-${deletions}</span>`;
+      meta.setAttribute('aria-label', `diff: ${additions} added, ${deletions} deleted`);
+      entry.row?.appendChild(meta);
+    }
     renderDiffBlock(entry.block, text || '', path);
     setLastEventType('diff');
     maybeAutoScroll();
@@ -563,11 +572,43 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
     return { leftParts, rightParts };
   }
 
-  function renderDiffPartsHtml(parts: IntralinePart[], emphasisClass: string): string {
-    return parts.map((part) => {
-      const safeText = escapeHtml(part.text);
-      return part.changed ? `<span class="${emphasisClass}">${safeText}</span>` : safeText;
-    }).join('');
+  function renderDiffPartsHtml(parts: IntralinePart[], emphasisClass: string, path: string): string {
+    const container = document.createElement('div');
+    container.innerHTML = renderDiffCodeHtml(parts.map(part => part.text).join(''), path);
+    // Walk decoded text so diff offsets survive syntax spans, entities, and Unicode.
+    const walker = document.createTreeWalker(container, 4);
+    const nodes: Node[] = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    let partIndex = 0;
+    let partOffset = 0;
+    for (const node of nodes) {
+      const text = node.textContent || '';
+      const replacement = document.createDocumentFragment();
+      let offset = 0;
+      while (offset < text.length && partIndex < parts.length) {
+        const part = parts[partIndex];
+        const length = Math.min(text.length - offset, part.text.length - partOffset);
+        if (length > 0) {
+          const fragment = document.createTextNode(text.slice(offset, offset + length));
+          if (part.changed) {
+            const span = document.createElement('span');
+            span.className = emphasisClass;
+            span.append(fragment);
+            replacement.append(span);
+          } else {
+            replacement.append(fragment);
+          }
+          offset += length;
+          partOffset += length;
+        }
+        if (partOffset === part.text.length) {
+          partIndex += 1;
+          partOffset = 0;
+        }
+      }
+      node.parentNode?.replaceChild(replacement, node);
+    }
+    return container.innerHTML;
   }
 
   function hasMeaningfulChangedContent(parts: IntralinePart[]): boolean {
@@ -587,11 +628,6 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
         const lang = resolveHljsLanguage?.(langHint) || null;
         if (lang) {
           codeHtml = hljs.highlight(display, { language: lang, ignoreIllegals: true }).value;
-        } else if (display.length > 10) {
-          const auto = hljs.highlightAuto(display);
-          if (auto.relevance > 3) {
-            codeHtml = auto.value;
-          }
         }
       } catch {}
     }
@@ -646,8 +682,8 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
           markWholeLineEmphasis(addition);
           return;
         }
-        deletion.codeHtml = renderDiffPartsHtml(pair.leftParts, 'diff-intraline-change diff-intraline-del');
-        addition.codeHtml = renderDiffPartsHtml(pair.rightParts, 'diff-intraline-change diff-intraline-add');
+        deletion.codeHtml = renderDiffPartsHtml(pair.leftParts, 'diff-intraline-change diff-intraline-del', deletion.activePath);
+        addition.codeHtml = renderDiffPartsHtml(pair.rightParts, 'diff-intraline-change diff-intraline-add', addition.activePath);
       });
 
       deletions.forEach((deletion, deletionIndex) => {

@@ -16,6 +16,7 @@ interface ConversationMetaState {
 interface ConversationSettingsState {
   cwd?: string;
   alias?: string;
+  model?: string;
   label?: string;
 }
 
@@ -235,7 +236,8 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
   function getAssistantDisplayName() {
     const conversationSettings = getState().conversationSettings;
     const alias = typeof conversationSettings?.alias === 'string' ? conversationSettings.alias.trim() : '';
-    return alias || 'assistant';
+    const model = typeof conversationSettings?.model === 'string' ? conversationSettings.model.trim() : '';
+    return alias || model || 'assistant';
   }
 
   function getConversationHeaderTitle() {

@@ -1025,6 +1025,30 @@ a fake patch.
 Streaming shell cards keep their bounded output viewport at the newest appended
 text. The conversation viewport's pinned-tail behavior remains a separate layer.
 
+Transcript diff metadata rows show per-patch additions/deletions counted within
+unified-diff hunks (excluding file headers), with green/red badges and a Codicon
+chosen from the existing detected language. The footer sits after the diff body
+and includes a language label. Rust, TypeScript, Python, and JavaScript use
+bundled monochrome Simple Icons logos; other file types use Codicons. Diff syntax uses the
+file-extension mapping exclusively; unsupported or unknown languages remain plain
+text rather than guessing a different language from isolated changed lines.
+Intraline changes highlight the complete line first, then overlay diff spans on
+decoded DOM text nodes while retaining syntax spans. This preserves keyword and
+string highlighting as well as literal entity/Unicode text in paired changes.
+Codicons CSS/font/license are copied
+into static vendor assets by the frontend build. Project renders quieter colored
+counts and actual file bytes, preserving null for unknown sizes. Libgit2 generates
+untracked-file patch content for counts; those previews remain suppressed, and
+the existing preview byte budget still applies. File size and patch size are
+separate quantities and must never substitute an absent patch size with zero.
+
+Assistant message headers resolve the session's trimmed `settings.alias`, then
+the shared `settings.model` ID, then `assistant`. Extensions using that common
+model setting need no provider-specific frontend mapping. An unspecified model
+does not imply a known provider default. Live and replay headers use the current
+session settings because per-message model IDs are not consistently persisted;
+changing session settings may therefore relabel historical message headers.
+
 Composer sends inspect `extension.session.state.get` with a three-second bound;
 the server derives the extension and provider binding from conversation metadata.
 Supported cold/unbound sessions show `Loading session` and use a 120-second send

@@ -82,6 +82,7 @@ pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Valu
     let mut diff_options = DiffOptions::new();
     diff_options
         .include_untracked(true)
+        .show_untracked_content(true)
         .recurse_untracked_dirs(true)
         .include_typechange(true);
     let diff = repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut diff_options))?;
@@ -124,7 +125,11 @@ pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Valu
             .as_ref()
             .map(|summary| summary.diff_truncated)
             .unwrap_or(false);
-        let diff_text = patch_summary.and_then(|summary| summary.diff_text);
+        let diff_text = if raw_status.map(is_untracked).unwrap_or(false) {
+            None
+        } else {
+            patch_summary.and_then(|summary| summary.diff_text)
+        };
         files.push(ProjectFileSummary {
             path,
             old_path,
@@ -338,6 +343,40 @@ fn path_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untracked_suppressed_files_keep_counts_and_file_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "als-project-summary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let repo = Repository::init(&root).unwrap();
+        fs::write(root.join("new.py"), b"one\ntwo\nthree").unwrap();
+        fs::write(root.join("empty.py"), b"").unwrap();
+        for limit in [1, 15000] {
+            let summary = project_summary(&root, Some(limit)).unwrap();
+            let files = summary["files"].as_array().unwrap();
+            let file = files.iter().find(|file| file["path"] == "new.py").unwrap();
+            assert_eq!(file["additions"], 3);
+            assert_eq!(file["deletions"], 0);
+            assert_eq!(file["bytes"], 13);
+            assert!(file["diff_text"].is_null());
+            assert_eq!(file["diff_truncated"], limit == 1);
+            let empty = files
+                .iter()
+                .find(|file| file["path"] == "empty.py")
+                .unwrap();
+            assert_eq!(empty["bytes"], 0);
+            assert_eq!(empty["additions"], 0);
+        }
+        drop(repo);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn project_file(path: &str, status: &str) -> ProjectFileSummary {
         ProjectFileSummary {

@@ -799,6 +799,7 @@ document.addEventListener('DOMContentLoaded', () => {
       conversationSettings: {
         cwd: typeof conversationSettings.cwd === 'string' ? conversationSettings.cwd : undefined,
         alias: typeof conversationSettings.alias === 'string' ? conversationSettings.alias : undefined,
+        model: typeof conversationSettings.model === 'string' ? conversationSettings.model : undefined,
         label: typeof conversationSettings.label === 'string' ? conversationSettings.label : undefined,
       },
       activeView,

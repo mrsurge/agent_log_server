@@ -1,6 +1,7 @@
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import esbuild from 'esbuild';
+import { siRust, siTypescript, siPython, siJavascript } from 'simple-icons';
 
 const isWatch = process.argv.includes('--watch');
 const staticDir = 'rust/crates/als-server/src/static';
@@ -121,6 +122,16 @@ globalThis.SocketIoMsgpackParser = parser;
 async function prepareVendorAssets() {
   resetManagedVendorAssets();
   buildJetBrainsMonoCss();
+  for (const file of ['codicon.css', 'codicon.ttf']) {
+    copyFile(`node_modules/@vscode/codicons/dist/${file}`, join(vendorDir, 'codicons', file));
+  }
+  copyFile('node_modules/@vscode/codicons/LICENSE', join(vendorDir, 'codicons', 'LICENSE'));
+  const languageIconDir = join(vendorDir, 'language-icons');
+  ensureDir(languageIconDir);
+  for (const icon of [siRust, siTypescript, siPython, siJavascript]) {
+    writeFileSync(join(languageIconDir, `${icon.slug}.svg`), icon.svg);
+  }
+  copyFile('node_modules/simple-icons/LICENSE.md', join(languageIconDir, 'LICENSE.md'));
   await buildSocketIoMsgpackParserAsset();
 }
 

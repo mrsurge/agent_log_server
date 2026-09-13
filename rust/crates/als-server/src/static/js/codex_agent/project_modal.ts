@@ -176,8 +176,8 @@ function normalizeProjectFile(value: unknown): ProjectFile | null {
     untracked: value.untracked === true,
     additions: numberValue(value.additions),
     deletions: numberValue(value.deletions),
-    bytes: Number.isFinite(Number(value.bytes)) ? Number(value.bytes) : null,
-    diffBytes: Number.isFinite(Number(value.diff_bytes)) ? Number(value.diff_bytes) : null,
+    bytes: value.bytes != null && Number.isFinite(Number(value.bytes)) ? Number(value.bytes) : null,
+    diffBytes: value.diff_bytes != null && Number.isFinite(Number(value.diff_bytes)) ? Number(value.diff_bytes) : null,
     diffTruncated: value.diff_truncated === true,
     diffText: stringValue(value.diff_text),
   };
@@ -621,7 +621,8 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     const meta = doc.createElement('span');
     meta.className = 'project-file-meta';
     appendProjectFilePill(meta, 'project-status-pill', 'tracked');
-    appendProjectFilePill(meta, 'project-file-stats', `+${diff.additions} -${diff.deletions}`);
+    appendProjectFilePill(meta, 'project-file-stats added', `+${diff.additions}`);
+    appendProjectFilePill(meta, 'project-file-stats deleted', `-${diff.deletions}`);
     if (diff.diffBytes > 0) {
       appendProjectFilePill(meta, 'project-file-bytes', formatBytes(diff.diffBytes));
     }
@@ -704,11 +705,13 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     appendProjectFilePill(meta, 'project-status-pill', file.status);
     if (file.staged) appendProjectFilePill(meta, 'project-file-state staged', 'staged');
     if (file.unstaged) appendProjectFilePill(meta, 'project-file-state unstaged', file.untracked ? 'untracked' : 'unstaged');
-    appendProjectFilePill(meta, 'project-file-stats', `+${file.additions} -${file.deletions}`);
+    appendProjectFilePill(meta, 'project-file-stats added', `+${file.additions}`);
+    appendProjectFilePill(meta, 'project-file-stats deleted', `-${file.deletions}`);
+    if (file.bytes !== null) {
+      appendProjectFilePill(meta, 'project-file-bytes', formatBytes(file.bytes));
+    }
     if (file.diffTruncated) {
       appendProjectFilePill(meta, 'project-file-truncated', `>${formatBytes(summary.maxDiffBytes)}`);
-    } else if (file.diffBytes !== null) {
-      appendProjectFilePill(meta, 'project-file-bytes', formatBytes(file.diffBytes));
     }
 
     const actions = doc.createElement('span');

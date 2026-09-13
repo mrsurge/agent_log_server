@@ -19,7 +19,7 @@ interface RenderUtilsContext {
 }
 
 const FILE_EXT_LANG_MAP: Record<string, string> = {
-  js: 'javascript', mjs: 'javascript', ts: 'typescript', tsx: 'typescript', jsx: 'javascript',
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'typescript', jsx: 'javascript',
   py: 'python', rb: 'ruby', rs: 'rust', go: 'go',
   java: 'java', kt: 'kotlin', scala: 'scala',
   c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', hpp: 'cpp',
@@ -57,12 +57,12 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
 
   function detectLangFromPath(file: string | null | undefined) {
     if (!file) return null;
-    const ext = file.split('.').pop()?.toLowerCase();
+    const basename = file.split(/[\\/]/).pop()?.toLowerCase() || '';
+    const ext = basename.split('.').pop();
     if (ext && FILE_EXT_LANG_MAP[ext]) return FILE_EXT_LANG_MAP[ext];
-    const basename = file.split('/').pop()?.toLowerCase();
     if (basename === 'dockerfile') return 'dockerfile';
     if (basename === 'makefile' || basename === 'gnumakefile') return 'makefile';
-    if (basename?.endsWith('rc') || basename?.startsWith('.')) return 'bash';
+    if (['.bashrc', '.bash_profile', '.bash_login', '.profile', '.zshrc', '.zprofile', '.zshenv'].includes(basename)) return 'bash';
     return null;
   }
 
@@ -71,18 +71,18 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
     const requested = String(lang).trim().toLowerCase();
     if (!requested) return null;
     const fallbackMap: Record<string, string[]> = {
-      javascript: ['javascript', 'typescript'],
-      jsx: ['javascript', 'typescript'],
-      typescript: ['typescript', 'javascript'],
-      tsx: ['typescript', 'javascript'],
+      javascript: ['javascript'],
+      jsx: ['javascript'],
+      typescript: ['typescript'],
+      tsx: ['typescript'],
       html: ['html', 'xml'],
       htm: ['html', 'xml'],
       xml: ['xml', 'html'],
       markdown: ['markdown'],
       md: ['markdown'],
       json: ['json'],
-      css: ['css', 'scss'],
-      scss: ['scss', 'css'],
+      css: ['css'],
+      scss: ['scss'],
       yaml: ['yaml'],
       yml: ['yaml'],
       toml: ['ini'],
