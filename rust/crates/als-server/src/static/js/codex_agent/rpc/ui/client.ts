@@ -1,4 +1,5 @@
 import { getRpcRegistry } from '../registry.ts';
+import { showToast } from '../../toast.ts';
 import {
   callRpcNamespace,
   readRpcTransportEnabledPreference,
@@ -510,7 +511,21 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
       params: payload,
       windowRef: getWindowRef(deps.windowRef),
     });
-    return normalizeTransport(asObject(result) ?? {}, 'rpc');
+    const response = normalizeTransport(asObject(result) ?? {}, 'rpc');
+    if (response.ok === true && response.sent === true && typeof payload.path === 'string') {
+      showToast(`Opened ${payload.path}${typeof payload.line === 'number' ? `:${payload.line}` : ''}`);
+    }
+    return response;
+  }
+
+  async function remoteProject(options: { path: string; action: 'fetch' | 'pull' | 'push' }): Promise<JsonObject> {
+    return callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectGitRemote,
+      params: options,
+      timeoutMs: 130000,
+      windowRef: getWindowRef(deps.windowRef),
+    });
   }
 
   async function openUrl(payload: { url: string; source?: string | null; conversation_id?: string | null }): Promise<JsonObject & { transport: TransportTag }> {
@@ -574,6 +589,7 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     rejectAgentDiff,
     rejectAllAgentDiffs,
     stageProjectPaths,
+    remoteProject,
     unstageProjectPaths,
     restoreProjectPaths,
     commitProject,

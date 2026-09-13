@@ -86,6 +86,13 @@ async fn dispatch_rpc(
         "project.git.unstage" => project_git_unstage(state, request.params).await,
         "project.git.restore" => project_git_restore(state, request.params).await,
         "project.git.commit" => project_git_commit(state, request.params).await,
+        "project.git.remote" => {
+            let start = project_start_from_params(state, &request.params)?;
+            let action = required_string(&request.params, "action")?;
+            crate::project_git::remote_action(&start, &action)
+                .await
+                .map_err(internal_rpc_error)
+        }
         "project.te2.status.get" => {
             Ok(sidebar_ipc::te2_project_status(io, state, request.params).await)
         }

@@ -20,6 +20,7 @@ export const UI_RPC_METHODS = {
   projectGitUnstage: 'project.git.unstage',
   projectGitRestore: 'project.git.restore',
   projectGitCommit: 'project.git.commit',
+  projectGitRemote: 'project.git.remote',
   projectTe2StatusGet: 'project.te2.status.get',
   projectTe2Open: 'project.te2.open',
   projectTe2Create: 'project.te2.create',

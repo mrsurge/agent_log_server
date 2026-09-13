@@ -1500,6 +1500,54 @@ body.widescreen-resizing * {
   font-size: 12px;
 }
 
+.project-git-remote {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 6px;
+  flex: 0 0 32px;
+}
+.project-git-remote.push {
+  color: #b3dfbf;
+  background: #254632;
+  border-color: #436b4f;
+}
+.project-git-remote[aria-busy="true"] { opacity: 0.55; }
+#als-toasts {
+  position: fixed;
+  top: max(20px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: min(90%, 420px);
+  z-index: 2000;
+  pointer-events: none;
+}
+.als-toast {
+  background: #282b30;
+  color: #f0f0f0;
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid #555a62;
+  box-shadow: 0 8px 24px #0006;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.3;
+  max-width: 100%;
+  max-height: 30vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+  pointer-events: auto;
+  cursor: copy;
+}
+.als-toast-feedback:not(:empty) { display: block; margin-top: 6px; color: #b3dfbf; }
 .project-file-open-placeholder {
   cursor: pointer;
 }
@@ -3219,8 +3267,8 @@ textarea {
 @media (max-width: 480px) {
   .composer { flex-direction: column; }
   .btn { width: 100%; text-align: center; }
-  .conversation-modal-header { align-items: stretch; }
-  .conversation-modal-tabs { flex: 1; }
+  .conversation-modal-header { align-items: stretch; flex-wrap: wrap; }
+  .conversation-modal-tabs { flex: 1 0 150px; }
   .conversation-modal-tab { flex: 1; min-width: 0; }
   .conversation-modal-header-actions,
   .conversation-modal-close,

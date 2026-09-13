@@ -1,7 +1,11 @@
 import type { JsonObject } from './rpc/ui/contract.ts';
 import { applyPathScrollLabel } from './path_label.ts';
+import { diffFileIcon } from './diff/summary.ts';
+import { projectGitButton, type RemoteGitAction } from './project_git_icons.ts';
+import { showToast } from './toast.ts';
 
 interface UiRpcProjectClient {
+  remoteProject(options: { path: string; action: RemoteGitAction }): Promise<JsonObject>;
   getProjectSummary(options?: { conversationId?: string | null; path?: string | null; maxDiffBytes?: number }): Promise<JsonObject & { transport: string }>;
   acceptAgentDiff(options: { conversationId: string; diffId: string }): Promise<JsonObject & { transport: string }>;
   rejectAgentDiff(options: { conversationId: string; diffId: string; force?: boolean }): Promise<JsonObject & { transport: string }>;
@@ -26,6 +30,7 @@ interface ProjectModalContext {
   getConversationCwd(): string | null | undefined;
   getProjectRoot(): string | null | undefined;
   toRelativePath(path: string | null | undefined): string;
+  detectLangFromPath(path: string): string | null;
   renderDiffBlock(block: HTMLElement, text: string, filePath: string): void;
   makeCollapsible(row: HTMLElement | null, cardId: string, startExpanded: boolean, options?: Record<string, unknown>): void;
   confirmProjectAction(options: { title: string; body: string; confirmText: string }): Promise<boolean>;
@@ -297,6 +302,56 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
   const conversationSettingsBtn = doc.getElementById('conversation-settings');
   let selectedProjectPath: string | null = null;
   let currentSummary: ProjectSummary | null = null;
+  let remoteBusy = false;
+  const remoteHeaderButtons = (['fetch', 'pull'] as const).map((action) => {
+    const button = createRemoteButton(action);
+    projectTe2Control?.before(button);
+    return button;
+  });
+
+  function createRemoteButton(action: RemoteGitAction): HTMLButtonElement {
+    const button = projectGitButton(doc, action);
+    button.disabled = remoteBusy || !currentSummary?.ok;
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (remoteBusy || !currentSummary?.root) return;
+      const root = currentSummary.root;
+      remoteBusy = true;
+      syncRemoteButtons();
+      clearProjectActionError();
+      try {
+        const result = await ctx.uiRpc.remoteProject({ path: root, action });
+        if (result.ok !== true) throw new Error(String(result.error || 'Git operation failed'));
+        const output = [result.stdout, result.stderr].filter((text) => typeof text === 'string' && text.trim()).join('\n');
+        showToast(output || `Git ${action} completed`, doc);
+        await refreshProjectSummary({ showLoading: false });
+      } catch (error) {
+        showProjectActionError(errorMessage(error));
+      } finally {
+        remoteBusy = false;
+        syncRemoteButtons();
+      }
+    });
+    return button;
+  }
+
+  function syncRemoteButtons(): void {
+    const buttons = [...remoteHeaderButtons, ...Array.from(projectBodyEl?.querySelectorAll<HTMLButtonElement>('[data-remote-action]') || [])];
+    for (const button of buttons) {
+      button.disabled = remoteBusy || !currentSummary?.ok;
+      button.setAttribute('aria-busy', String(remoteBusy));
+    }
+  }
+
+  function appendFileIcon(meta: HTMLElement, path: string): void {
+    const language = ctx.detectLangFromPath(path);
+    const icon = diffFileIcon(language);
+    const element = doc.createElement('span');
+    element.className = icon.startsWith('language-') ? `diff-language-icon ${icon}` : `codicon codicon-${icon}`;
+    element.title = language || 'File';
+    element.setAttribute('aria-label', element.title);
+    meta.append(element);
+  }
   let currentTe2State: Te2ProjectState | null = null;
   let refreshTimer: number | null = null;
   let projectAgentRejectOverlayEl: HTMLElement | null = null;
@@ -621,6 +676,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     const meta = doc.createElement('span');
     meta.className = 'project-file-meta';
     appendProjectFilePill(meta, 'project-status-pill', 'tracked');
+    appendFileIcon(meta, absolutePath);
     appendProjectFilePill(meta, 'project-file-stats added', `+${diff.additions}`);
     appendProjectFilePill(meta, 'project-file-stats deleted', `-${diff.deletions}`);
     if (diff.diffBytes > 0) {
@@ -703,6 +759,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     const meta = doc.createElement('span');
     meta.className = 'project-file-meta';
     appendProjectFilePill(meta, 'project-status-pill', file.status);
+    appendFileIcon(meta, absolutePath);
     if (file.staged) appendProjectFilePill(meta, 'project-file-state staged', 'staged');
     if (file.unstaged) appendProjectFilePill(meta, 'project-file-state unstaged', file.untracked ? 'untracked' : 'unstaged');
     appendProjectFilePill(meta, 'project-file-stats added', `+${file.additions}`);
@@ -748,14 +805,11 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
         onToggle: (expanded: boolean) => setProjectFileCollapsed(absolutePath, !expanded),
       });
     } else {
-      const note = doc.createElement('div');
-      note.className = 'muted project-file-disabled-note project-file-open-placeholder';
-      note.setAttribute('role', 'button');
-      note.tabIndex = 0;
-      note.dataset.path = absolutePath;
-      note.title = absolutePath;
-      note.textContent = 'No text diff available.';
-      body.appendChild(note);
+      header.classList.add('project-file-open-placeholder');
+      header.setAttribute('role', 'link');
+      header.tabIndex = 0;
+      header.dataset.path = absolutePath;
+      header.title = `Open ${absolutePath}`;
     }
 
     card.appendChild(body);
@@ -816,6 +870,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
     const commitBtn = createProjectActionButton(summary.stagedFiles > 0 ? 'Commit' : 'Stage & Commit', 'commit-project', 'primary');
     commitBtn.disabled = summary.changedFiles === 0;
     actions.appendChild(commitBtn);
+    actions.appendChild(createRemoteButton('push'));
     appendProjectRoot(body, summary.root || '-');
 
     const header = doc.createElement('div');
@@ -1246,7 +1301,7 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
 
     projectBodyEl?.addEventListener('click', (evt) => {
       const target = evt.target;
-      if (!(target instanceof HTMLElement)) return;
+      if (!(target instanceof Element)) return;
       const projectActionEl = target.closest('[data-project-action]');
       if (projectActionEl instanceof HTMLElement) {
         void handleProjectAction(projectActionEl, evt);
@@ -1316,6 +1371,8 @@ export function bindProjectModal(ctx: ProjectModalContext): ProjectModalBinding 
       currentSummary = null;
       setTe2ControlState(null);
       renderMessage(error instanceof Error ? error.message : 'Project summary unavailable.');
+    } finally {
+      syncRemoteButtons();
     }
   }
 

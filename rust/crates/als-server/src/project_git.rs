@@ -19,6 +19,32 @@ struct GitOutput {
     stderr: String,
 }
 
+pub async fn remote_action(start: &Path, action: &str) -> Result<Value> {
+    let args: &[&str] = match action {
+        "fetch" => &["fetch"],
+        "pull" => &["pull", "--ff-only"],
+        "push" => &["push"],
+        _ => bail!("Unsupported remote Git action"),
+    };
+    let repo = discover_project_repo(start)?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo.root)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("Remote Git operation timed out after 120 seconds")?;
+    let output = output_to_result(output, args)?;
+    Ok(json!({"ok": true, "root": path_to_string(&repo.root),
+        "action": action, "stdout": output.stdout, "stderr": output.stderr, "transport": "rpc"}))
+}
+
 pub fn stage_paths(start: &Path, raw_paths: &[String]) -> Result<Value> {
     let repo = discover_project_repo(start)?;
     let paths = validate_targets(raw_paths)?;
@@ -290,6 +316,30 @@ fn path_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_actions_reject_unknown_commands_and_report_git_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "als-remote-git-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let result = async {
+            Repository::init(&root)?;
+            let error = remote_action(&root, "push --force").await.unwrap_err();
+            assert!(error.to_string().contains("Unsupported remote Git action"));
+            let error = remote_action(&root, "push").await.unwrap_err();
+            assert!(error.to_string().contains("git push failed"));
+            Result::<()>::Ok(())
+        }
+        .await;
+        fs::remove_dir_all(&root).unwrap();
+        result.unwrap();
+    }
 
     #[test]
     fn validate_targets_rejects_absolute_and_parent_paths() {

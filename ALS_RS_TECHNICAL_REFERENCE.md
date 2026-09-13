@@ -1410,6 +1410,27 @@ restore, and commit RPCs and tracks category/diff expansion state in browser
 storage. Live project notifications schedule summary refresh only while the
 shared modal's Project tab is active.
 
+Remote actions use `/rpc/ui` `project.git.remote` with a repository `path` and
+an allowlisted `action` (`fetch`, `push`, or `pull`). Rust runs Git without shell
+interpolation or terminal prompts, uses `pull --ff-only`, and bounds the async
+child to 120 seconds (the browser allows 130 seconds for its acknowledgment).
+The Project overview places a green push control after Stage & Commit/Commit;
+fetch and pull precede the TE2 status control. Their SVG geometry is locally
+owned and matches Code TE2's explorer actions. Remote controls disable while
+the local request runs, show failures inline, and refresh the summary on success.
+Project file metadata uses the same filename-based icons as transcript diffs.
+Non-truncated files without a preview have a navigable header instead of an
+empty diff footer; action-button clicks remain independent of navigation.
+
+The shared UI client shows a local ALS toast after `file.open` returns both
+`ok: true` and `sent: true`. Toast styling follows TE2's shared `te_ui.js`, but
+does not depend on TE2 globals. The stack holds at most four messages; messages
+expire after six seconds unless hovered/focused. A tap copies the original
+literal text (including whitespace), using Clipboard API with a copy-command
+fallback for embedded/insecure contexts. Copy feedback is separate from the
+copied message. Failed or unsent file-open acknowledgments produce no success
+toast. Remote Git command output uses the same toast surface.
+
 Conversation-scoped agent edits are Rust-owned and process-local. Canonical live
 `type: "diff"` events feed:
 

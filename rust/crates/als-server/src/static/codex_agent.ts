@@ -1806,6 +1806,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   projectModal = bindProjectModal({
     uiRpc: uiRpcClient,
+    detectLangFromPath,
     getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
     getConversationCwd: () => activeConversationCwd(),
     getProjectRoot: () => {
