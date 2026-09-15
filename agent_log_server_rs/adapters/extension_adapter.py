@@ -466,6 +466,8 @@ class ExtensionLoaderModule(Protocol):
 
     async def interrupt_session(self, extension_id: str, conversation_id: str) -> JsonMap: ...
 
+    async def compact_session(self, extension_id: str, conversation_id: str) -> JsonMap: ...
+
 
 @dataclass
 class AdapterState:
@@ -700,6 +702,8 @@ class ExtensionJsonRpcAdapter:
             return await self._conversation_send(params)
         if method == AdapterMethod.CONVERSATION_INTERRUPT:
             return await self._conversation_interrupt(params)
+        if method == AdapterMethod.CONVERSATION_COMPACT:
+            return await self._conversation_compact(params)
         if method == AdapterMethod.APPROVAL_RESPOND:
             return await self._approval_respond(params)
 
@@ -752,6 +756,7 @@ class ExtensionJsonRpcAdapter:
                     models=models_supported,
                     sessions=sessions_supported,
                     interruption=interruption_supported,
+                    compaction=_has_callable_attr(handler, "compact_session"),
                     conversation_fork=fork_supported,
                     live_events=conversations_supported,
                     transcript_records=conversations_supported,
@@ -1495,6 +1500,39 @@ class ExtensionJsonRpcAdapter:
         if not isinstance(result, dict):
             raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid send result")
         return ack_from_result(conversation_id, cast(JsonMap, result)).to_json()
+
+    async def _conversation_compact(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        handler = self._supported_handler(extension_id)
+        if not _has_callable_attr(handler, "compact_session"):
+            raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support compaction")
+        conversation_id = required_string(params, "conversation_id")
+        provider_session_id = required_string(params, "provider_session_id")
+        self._seed_conversation_meta(
+            conversation_id,
+            extension_id=extension_id,
+            settings=optional_map(params.get("settings")) or {},
+            cwd=optional_string(params.get("cwd")) or str(self._state.cwd),
+            provider_session_id=provider_session_id,
+        )
+        try:
+            result = await asyncio.wait_for(
+                self._loader.compact_session(extension_id, conversation_id), timeout=120.0
+            )
+        except TimeoutError:
+            return ConversationControlResult(
+                extension_id=extension_id, conversation_id=conversation_id, ok=False,
+                error="Timed out waiting for compaction acknowledgment; completion is unknown",
+            ).to_json()
+        result_map = optional_map(result)
+        if result_map is None or not isinstance(result_map.get("ok"), bool):
+            raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid compact result")
+        return ConversationControlResult(
+            extension_id=extension_id, conversation_id=conversation_id,
+            ok=result_map.get("ok") is True, error=optional_string(result_map.get("error")),
+            metadata={key: value for key, value in result_map.items()
+                      if key not in {"ok", "error", "extension_id", "conversation_id"}},
+        ).to_json()
 
     async def _conversation_interrupt(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)

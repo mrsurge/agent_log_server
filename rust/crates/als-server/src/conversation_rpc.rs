@@ -12,8 +12,8 @@ use crate::{
     turn_projection::TurnProjectionChange,
 };
 use als_adapter_protocol::{
-    ConversationControlParams, ConversationForkParams, ConversationResumeParams,
-    ConversationSendParams, JsonMap, McpContext, events, methods,
+    ConversationCompactParams, ConversationControlParams, ConversationForkParams,
+    ConversationResumeParams, ConversationSendParams, JsonMap, McpContext, events, methods,
 };
 use als_jsonrpc::{ErrorResponse, RequestId, RpcError, SuccessResponse};
 use serde::{Deserialize, Serialize};
@@ -140,7 +140,8 @@ async fn dispatch_rpc(
             conversation_approval_respond(socket, io, state, request.params).await
         }
         METHOD_INTERRUPT => conversation_interrupt(&state, &request.params).await,
-        METHOD_COMPACT | METHOD_SHELL_EXEC => Ok(json!({
+        METHOD_COMPACT => conversation_compact(&state, &request.params).await,
+        METHOD_SHELL_EXEC => Ok(json!({
             "ok": false,
             "error": format!("{} is not implemented in ALS-RS yet", request.method),
             "transport": "rpc"
@@ -1013,6 +1014,52 @@ async fn conversation_send(
             .await;
     }
     let mut result = adapter_result.as_object().cloned().unwrap_or_default();
+    result.insert("conversation_id".to_owned(), Value::String(conversation_id));
+    result.insert("transport".to_owned(), Value::String("rpc".to_owned()));
+    Ok(Value::Object(result))
+}
+
+async fn conversation_compact(state: &AppState, params: &JsonMap) -> Result<Value, RpcError> {
+    let conversation_id = optional_str(params, "conversation_id")
+        .ok_or_else(|| rpc_error(-32602, "conversation_id is required"))?
+        .to_owned();
+    let meta = state
+        .conversations
+        .load_meta(&conversation_id)
+        .map_err(internal_error)?;
+    let extension_id = resolve_extension_id(state, params, &meta)
+        .ok_or_else(|| rpc_error(-32603, "No active extension available"))?;
+    let provider_session_id = meta
+        .provider_session_id
+        .clone()
+        .or_else(|| meta.thread_id.clone())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| rpc_error(-32602, "No provider session to compact"))?;
+    let adapter_params = ConversationCompactParams {
+        extension_id: extension_id.clone(),
+        conversation_id: conversation_id.clone(),
+        provider_session_id,
+        cwd: resolve_cwd(params, &meta),
+        settings: meta.settings.clone(),
+    };
+    state
+        .adapter
+        .initialize_extension(&extension_id)
+        .await
+        .map_err(internal_error)?;
+    let result = state
+        .adapter
+        .client()
+        .await
+        .map_err(internal_error)?
+        .request_value(methods::CONVERSATION_COMPACT, adapter_params)
+        .await
+        .map_err(internal_error)?;
+    let mut result = result
+        .as_object()
+        .cloned()
+        .ok_or_else(|| rpc_error(-32603, "Invalid compaction result from extension adapter"))?;
+    result.insert("extension_id".to_owned(), Value::String(extension_id));
     result.insert("conversation_id".to_owned(), Value::String(conversation_id));
     result.insert("transport".to_owned(), Value::String("rpc".to_owned()));
     Ok(Value::Object(result))

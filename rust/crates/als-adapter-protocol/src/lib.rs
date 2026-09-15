@@ -300,6 +300,17 @@ pub struct ConversationControlParams {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ConversationCompactParams {
+    pub extension_id: String,
+    pub conversation_id: String,
+    pub provider_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub settings: JsonMap,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ConversationControlResult {
     pub conversation_id: String,
     pub ok: bool,
@@ -547,6 +558,23 @@ mod tests {
                 "conversation_id": "conv-1"
             })
         );
+    }
+
+    #[test]
+    fn compact_params_carry_cold_provider_identity_and_settings() {
+        let params = ConversationCompactParams {
+            extension_id: "example".to_owned(),
+            conversation_id: "local-1".to_owned(),
+            provider_session_id: "provider-2".to_owned(),
+            cwd: None,
+            settings: serde_json::from_value(json!({"model": "test", "reasoning_effort": "xhigh"}))
+                .unwrap(),
+        };
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["conversation_id"], "local-1");
+        assert_eq!(value["provider_session_id"], "provider-2");
+        assert_eq!(value["settings"]["reasoning_effort"], "xhigh");
+        assert!(value.get("hydrate_transcript").is_none());
     }
 
     #[test]

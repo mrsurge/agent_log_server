@@ -810,8 +810,18 @@ Current implementation:
   ALS-RS `/ipc` MCP ask-user bridge.
 - `conversation.interrupt` is implemented through the generic adapter
   `conversation.interrupt` hook and extension-owned abort logic.
-- `conversation.compact` and `conversation.shell.exec` still return explicit
-  not-implemented control results for now.
+- `conversation.compact` uses the generic adapter's `compact_session` dispatch.
+  Rust sends `ConversationCompactParams` containing the saved provider session,
+  CWD, and settings so an adapter restarted since the last send can seed its
+  in-memory metadata before extension-owned lazy resume. Capability
+  `compaction` reflects a callable handler `compact_session`. Unsupported
+  extensions and invalid results fail explicitly. Adapter acknowledgment is
+  bounded to 120 seconds; the frontend allows 150 seconds, prevents duplicate
+  taps while pending, and shows acceptance/errors through copyable toasts.
+  An accepted request does not imply compaction has completed. Codex retains
+  its direct `thread/compact/start`, cold-miss resume with `excludeTurns: true`,
+  then single retry. No local transcript hydration or rewriting occurs here.
+- `conversation.shell.exec` remains explicitly not implemented.
 - Legacy Python intent was used as a parity guide, not a logic template: the
   Python server rendered splash cards from full `meta.json`, stored
   `pinned_conversations` as ordered app config, and resolved the selected
@@ -911,7 +921,7 @@ Validation currently covers:
 | Settings | Rust reads extension `settings_schema.json`; provider data and actions route through generic adapter methods. |
 | TE2 integration | Rust owns readiness, typed sidebar IPC, stateful window checkpoints, file navigation, mentions, drafts, and inline edit projections. |
 | Project/edit review | Rust owns git summaries/actions, tracked agent edits, reverse patching, sequential reject-all, and inline review state. |
-| Compaction | `conversation.compact` remains an explicit ALS-RS not-implemented control. Provider protocol support alone does not make the harness method available. |
+| Compaction | `conversation.compact` routes Rust -> generic adapter -> extension `compact_session`; capability and cold-session metadata are preserved. Unsupported extensions fail explicitly. |
 | Shell execution | `conversation.shell.exec` remains explicitly not implemented. Provider shell/tool cards still arrive through normalized router events. |
 | Provider isolation | One long-lived adapter currently initializes all active Python extension handlers. Per-extension adapter processes remain an optional future isolation design. |
 | Embedded Python adapter | `embedded_adapter.rs` is retained behind `cfg(feature = "embedded-python-adapter")`, but no Cargo feature/dependency enables it. The active path is the subprocess adapter; the dormant source is a cleanup or future-design artifact. |
@@ -2274,7 +2284,7 @@ Acceptance:
      `conversation.draft.updated` channel.
    - interrupt: implemented through the generic adapter `conversation.interrupt`
      path.
-   - compact: still needs the generic ALS-RS control contract.
+   - compact: subsequently implemented through the generic ALS-RS adapter control contract; see Conversations RPC namespace.
    - shell/tool card parity: continue validating via provider-owned router events
      and transcript mirror rules instead of Copilot-pilot-only assumptions.
 5. Keep this migration plan current after each ALS-RS phase lands.
