@@ -1,3 +1,4 @@
+use crate::adapter_codec::{Codec, Decoder, ENV as ADAPTER_CODEC_ENV};
 use crate::config::{
     FrameworkShellConfig, SOCKETIO_SERIALIZER_ENV, ServerConfig, SocketIoSerializer,
 };
@@ -8,8 +9,8 @@ use als_jsonrpc::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use ferrous_framework::{
-    FerrousNativeLifecycleEventKind, FerrousNativeManager, FerrousNativePipeConfig,
-    FerrousNativeShellRecord, FerrousNativeShellStatus, ferrous_native_enabled,
+    FerrousNativeManager, FerrousNativeShellRecord, FerrousNativeShellStatus,
+    ferrous_native_enabled,
     shellspec::{ShellspecRenderInput, render_shellspec_entry},
 };
 use serde::Serialize;
@@ -27,7 +28,7 @@ use std::{
     },
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::{Mutex, broadcast, mpsc, oneshot},
     time::{Duration, sleep, timeout},
@@ -177,6 +178,8 @@ impl AdapterSupervisor {
 }
 
 pub struct AdapterClient {
+    codec: Codec,
+    write_lock: Arc<Mutex<()>>,
     writer: AdapterWriter,
     pending: PendingMap,
     next_id: AtomicI64,
@@ -256,6 +259,7 @@ impl AdapterClient {
         events: AdapterEventSink,
     ) -> Result<Self> {
         let cwd = adapter_working_dir(python_path_root.as_deref(), roots);
+        let codec = Codec::from_env()?;
         let shellspec_path = python_path_root
             .as_ref()
             .map(|root| root.join("agent_log_server_rs/shellspec/extension_adapter.yaml"))
@@ -279,29 +283,15 @@ impl AdapterClient {
             "jsonrpc".to_owned(),
             "observed".to_owned(),
         ];
-        let record = if let Some(shellspec_path) = shellspec_path {
-            spawn_ferrous_shellspec_pipe(
-                &manager,
-                shellspec_path,
-                command,
-                Some(cwd.clone()),
-                env,
-                subgroups,
-            )
-            .await?
-        } else {
-            manager
-                .spawn_shell_pipe(FerrousNativePipeConfig {
-                    command,
-                    cwd: Some(cwd.clone()),
-                    env,
-                    label: "als-rs-extension-adapter".to_owned(),
-                    spec_id: "als-rs-extension-adapter".to_owned(),
-                    subgroups,
-                    log_dir: None,
-                })
-                .await?
-        };
+        let record = spawn_ferrous_shellspec_pipe(
+            &manager,
+            shellspec_path,
+            command,
+            Some(cwd.clone()),
+            env,
+            subgroups,
+        )
+        .await?;
         wait_for_ferrous_pipe_ready(&manager, &record.id, Duration::from_secs(5)).await?;
         let transport = FerrousAdapterTransport {
             manager,
@@ -312,6 +302,7 @@ impl AdapterClient {
             transport.clone(),
             pending.clone(),
             events.clone(),
+            codec,
         ));
         let shell_id = record.id;
         let label = record.label;
@@ -330,6 +321,8 @@ impl AdapterClient {
                 .await;
         });
         Ok(Self {
+            codec,
+            write_lock: Arc::new(Mutex::new(())),
             writer: AdapterWriter::Ferrous(transport),
             pending,
             next_id: AtomicI64::new(1),
@@ -345,6 +338,7 @@ impl AdapterClient {
         socketio_serializer: SocketIoSerializer,
         events: AdapterEventSink,
     ) -> Result<Self> {
+        let codec = Codec::from_env()?;
         let mut command = Command::new(&python);
         command
             .arg("-m")
@@ -376,10 +370,17 @@ impl AdapterClient {
             .take()
             .context("adapter stderr is unavailable")?;
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        tokio::spawn(read_adapter_stdout(stdout, pending.clone(), events.clone()));
+        tokio::spawn(read_adapter_stdout(
+            stdout,
+            pending.clone(),
+            events.clone(),
+            codec,
+        ));
         tokio::spawn(read_adapter_stderr(stderr, events));
 
         Ok(Self {
+            codec,
+            write_lock: Arc::new(Mutex::new(())),
             writer: AdapterWriter::Direct(Arc::new(Mutex::new(stdin))),
             pending,
             next_id: AtomicI64::new(1),
@@ -400,11 +401,11 @@ impl AdapterClient {
     async fn request_raw(&self, method: &str, params: Value) -> Result<Value> {
         let id = RequestId::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
         let request = Request::new(id.clone(), method, Some(params));
-        let line = serde_json::to_string(&request)?;
+        let bytes = self.codec.encode(&request)?;
         let (sender, receiver) = oneshot::channel();
 
         self.pending.lock().await.insert(id.clone(), sender);
-        if let Err(err) = self.write_line(&line).await {
+        if let Err(err) = self.write_frame(bytes).await {
             self.pending.lock().await.remove(&id);
             return Err(err);
         }
@@ -419,24 +420,34 @@ impl AdapterClient {
         }
     }
 
-    async fn write_line(&self, line: &str) -> Result<()> {
-        match &self.writer {
-            AdapterWriter::Direct(stdin) => {
-                let mut stdin = stdin.lock().await;
-                stdin.write_all(line.as_bytes()).await?;
-                stdin.write_all(b"\n").await?;
-                stdin.flush().await?;
-                Ok(())
-            }
-            AdapterWriter::Ferrous(transport) => {
-                transport
-                    .manager
-                    .write_to_shell(&transport.shell_id, line, true)
+    async fn write_frame(&self, bytes: Vec<u8>) -> Result<()> {
+        let writer = self.writer.clone();
+        let lock = self.write_lock.clone();
+        // Cancellation of an RPC waiter must not leave half a binary frame.
+        tokio::spawn(async move {
+            let _guard = lock.lock().await;
+            match &writer {
+                AdapterWriter::Direct(stdin) => {
+                    let mut stdin = stdin.lock().await;
+                    stdin.write_all(&bytes).await?;
+                    stdin.flush().await?;
+                    Ok(())
+                }
+                AdapterWriter::Ferrous(transport) => {
+                    let transport = transport.clone();
+                    tokio::task::spawn_blocking(move || {
+                        transport
+                            .manager
+                            .write_to_pipe_blocking(&transport.shell_id, &bytes)
+                    })
                     .await
-                    .context("ferrous_framework adapter write failed")?;
-                Ok(())
+                    .context("adapter pipe writer task failed")??;
+                    Ok(())
+                }
             }
-        }
+        })
+        .await
+        .context("adapter writer task failed")?
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -504,6 +515,10 @@ fn adapter_env_overrides(
     socketio_serializer: SocketIoSerializer,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
+    env.insert(
+        ADAPTER_CODEC_ENV.to_owned(),
+        std::env::var(ADAPTER_CODEC_ENV).unwrap_or_else(|_| "messagepack".to_owned()),
+    );
     if let Some(root) = python_path_root {
         if let Some(pythonpath) = pythonpath_with_root(root, env::var_os("PYTHONPATH")) {
             if let Ok(value) = pythonpath.into_string() {
@@ -555,27 +570,25 @@ fn adapter_working_dir(python_path_root: Option<&Path>, roots: &RuntimeRoots) ->
 
 async fn spawn_ferrous_shellspec_pipe(
     manager: &FerrousNativeManager,
-    shellspec_path: PathBuf,
+    shellspec_path: Option<PathBuf>,
     command: Vec<String>,
     cwd: Option<PathBuf>,
     env: HashMap<String, String>,
     fallback_subgroups: Vec<String>,
 ) -> Result<FerrousNativeShellRecord> {
-    let raw = fs::read_to_string(&shellspec_path)
-        .with_context(|| format!("failed to read shellspec {}", shellspec_path.display()))?;
-    let document: Value = match shellspec_path.extension().and_then(|value| value.to_str()) {
-        Some("json") => serde_json::from_str(&raw).with_context(|| {
-            format!(
-                "failed to parse shellspec JSON {}",
-                shellspec_path.display()
-            )
-        })?,
-        _ => serde_yaml::from_str(&raw).with_context(|| {
-            format!(
-                "failed to parse shellspec YAML {}",
-                shellspec_path.display()
-            )
-        })?,
+    let document: Value = match shellspec_path {
+        Some(path) => {
+            let raw = fs::read_to_string(&path)?;
+            if path.extension().and_then(|v| v.to_str()) == Some("json") {
+                serde_json::from_str(&raw)?
+            } else {
+                serde_yaml::from_str(&raw)?
+            }
+        }
+        None => json!({"version": "1", "shells": {"extension_adapter": {
+            "backend": "pipe", "pipe": {"mode": "native_pipe_testing"},
+            "command": command,
+        }}}),
     };
     let mut ctx = HashMap::new();
     ctx.insert(
@@ -590,6 +603,9 @@ async fn spawn_ferrous_shellspec_pipe(
         env: env.clone(),
     };
     let mut spec = render_shellspec_entry(&document, "extension_adapter", &input)?;
+    spec.log_codecs
+        .insert("stdout".to_owned(), json!(Codec::from_env()?.name()));
+    spec.log_codecs.insert("stderr".to_owned(), json!("text"));
     if spec.backend != "pipe" {
         bail!(
             "extension adapter shellspec rendered backend '{}', expected pipe",
@@ -638,132 +654,112 @@ async fn read_ferrous_adapter_stdout(
     transport: FerrousAdapterTransport,
     pending: PendingMap,
     events: AdapterEventSink,
+    codec: Codec,
 ) {
     let shell_id = transport.shell_id.clone();
-    let mut lifecycle = transport.manager.subscribe_lifecycle();
-    let mut buffer = Vec::<u8>::new();
+    let mut decoder = Decoder::new(codec);
 
     loop {
-        tokio::select! {
-            result = transport.manager.read_stdout_available(&shell_id, 64) => {
-                match result {
-                    Ok(chunks) if chunks.is_empty() => {
-                        drain_ferrous_buffer(&mut buffer, &pending, &events).await;
-                        events
-                            .push_other("adapter.ferrous_framework.closed".to_owned(), json!({}))
-                            .await;
-                        fail_all_pending(&pending, "ferrous_framework adapter pipe closed").await;
-                        break;
-                    }
-                    Ok(chunks) => {
-                        for chunk in chunks {
-                            buffer.extend_from_slice(&chunk);
-                            while let Some(line) = take_line_from_buffer(&mut buffer) {
-                                if let Err(err) = handle_adapter_line(&line, &pending, &events).await {
-                                    warn!(error = %err, "failed to handle ferrous_framework adapter JSON-RPC line");
-                                    events
-                                        .push_other(
-                                            "adapter.ferrous_framework.invalid_json".to_owned(),
-                                            json!({
-                                                "error": err.to_string(),
-                                                "line": truncate_log_line(&line),
-                                            }),
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        error!(error = %err, "ferrous_framework adapter pipe read failed");
-                        events
-                            .push_other(
-                                "adapter.ferrous_framework.read_failed".to_owned(),
-                                json!({"error": err.to_string()}),
-                            )
-                            .await;
-                        fail_all_pending(&pending, "ferrous_framework adapter pipe read failed").await;
-                        break;
+        // Keep the read alive through Ferrous log persistence. Cancelling it on
+        // a lifecycle event can discard bytes already removed from the pipe.
+        let result = transport.manager.read_stdout_available(&shell_id, 64).await;
+        match result {
+            Ok(chunks) if chunks.is_empty() => {
+                report_adapter_eof(&decoder, &events).await;
+                events
+                    .push_other("adapter.ferrous_framework.closed".to_owned(), json!({}))
+                    .await;
+                fail_all_pending(&pending, "ferrous_framework adapter pipe closed").await;
+                break;
+            }
+            Ok(chunks) => {
+                for chunk in chunks {
+                    if let Err(err) =
+                        handle_adapter_chunk(&mut decoder, &chunk, &pending, &events).await
+                    {
+                        report_adapter_decode_error(err, &pending, &events).await;
+                        return;
                     }
                 }
             }
-            Ok(event) = lifecycle.recv() => {
-                if event.kind == FerrousNativeLifecycleEventKind::Exited
-                    && event.shell_id == shell_id
-                {
-                    drain_ferrous_buffer(&mut buffer, &pending, &events).await;
-                    events
-                        .push_other("adapter.ferrous_framework.closed".to_owned(), json!({}))
-                        .await;
-                    fail_all_pending(&pending, "ferrous_framework adapter pipe closed").await;
-                    break;
-                }
+            Err(err) => {
+                error!(error = %err, "ferrous_framework adapter pipe read failed");
+                events
+                    .push_other(
+                        "adapter.ferrous_framework.read_failed".to_owned(),
+                        json!({"error": err.to_string()}),
+                    )
+                    .await;
+                fail_all_pending(&pending, "ferrous_framework adapter pipe read failed").await;
+                break;
             }
         }
     }
 }
 
-async fn drain_ferrous_buffer(
-    buffer: &mut Vec<u8>,
+async fn handle_adapter_chunk(
+    decoder: &mut Decoder,
+    chunk: &[u8],
+    pending: &PendingMap,
+    events: &AdapterEventSink,
+) -> Result<()> {
+    for value in decoder.feed(chunk)? {
+        handle_adapter_value(value, pending, events).await?;
+    }
+    Ok(())
+}
+
+async fn report_adapter_eof(decoder: &Decoder, events: &AdapterEventSink) {
+    if let Err(error) = decoder.finish() {
+        events
+            .push_other(
+                "adapter.stdout.invalid_frame".to_owned(),
+                json!({"error": error.to_string()}),
+            )
+            .await;
+    }
+}
+
+async fn report_adapter_decode_error(
+    error: anyhow::Error,
     pending: &PendingMap,
     events: &AdapterEventSink,
 ) {
-    while let Some(line) = take_line_from_buffer(buffer) {
-        if let Err(err) = handle_adapter_line(&line, pending, events).await {
-            warn!(error = %err, "failed to handle ferrous_framework adapter JSON-RPC line (drain)");
-            events
-                .push_other(
-                    "adapter.ferrous_framework.invalid_json".to_owned(),
-                    json!({
-                        "error": err.to_string(),
-                        "line": truncate_log_line(&line),
-                    }),
-                )
-                .await;
-        }
-    }
-}
-
-fn take_line_from_buffer(buffer: &mut Vec<u8>) -> Option<String> {
-    let newline = buffer.iter().position(|byte| *byte == b'\n')?;
-    let mut raw = buffer.drain(..=newline).collect::<Vec<_>>();
-    if raw.ends_with(b"\n") {
-        raw.pop();
-    }
-    if raw.ends_with(b"\r") {
-        raw.pop();
-    }
-    Some(String::from_utf8_lossy(&raw).into_owned())
+    warn!(%error, "adapter protocol stream failed");
+    events
+        .push_other(
+            "adapter.stdout.invalid_frame".to_owned(),
+            json!({"error": error.to_string()}),
+        )
+        .await;
+    fail_all_pending(pending, "adapter protocol stream failed").await;
 }
 
 async fn read_adapter_stdout(
-    stdout: tokio::process::ChildStdout,
+    mut stdout: tokio::process::ChildStdout,
     pending: PendingMap,
     events: AdapterEventSink,
+    codec: Codec,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut decoder = Decoder::new(codec);
+    let mut buffer = [0u8; 65536];
     loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                if let Err(err) = handle_adapter_line(&line, &pending, &events).await {
-                    warn!(error = %err, "failed to handle adapter JSON-RPC line");
-                    events
-                        .push_other(
-                            "adapter.stdout.invalid_json".to_owned(),
-                            json!({
-                                "error": err.to_string(),
-                                "line": truncate_log_line(&line),
-                            }),
-                        )
-                        .await;
-                }
-            }
-            Ok(None) => {
+        match stdout.read(&mut buffer).await {
+            Ok(0) => {
+                report_adapter_eof(&decoder, &events).await;
                 events
                     .push_other("adapter.stdout.closed".to_owned(), json!({}))
                     .await;
                 fail_all_pending(&pending, "adapter stdout closed").await;
                 break;
+            }
+            Ok(n) => {
+                if let Err(err) =
+                    handle_adapter_chunk(&mut decoder, &buffer[..n], &pending, &events).await
+                {
+                    report_adapter_decode_error(err, &pending, &events).await;
+                    break;
+                }
             }
             Err(err) => {
                 error!(error = %err, "adapter stdout read failed");
@@ -813,12 +809,21 @@ async fn read_adapter_stderr(stderr: tokio::process::ChildStderr, events: Adapte
     }
 }
 
+#[cfg(test)]
 async fn handle_adapter_line(
     line: &str,
     pending: &PendingMap,
     events: &AdapterEventSink,
 ) -> Result<()> {
     let value: Value = serde_json::from_str(line).context("invalid adapter JSON")?;
+    handle_adapter_value(value, pending, events).await
+}
+
+async fn handle_adapter_value(
+    value: Value,
+    pending: &PendingMap,
+    events: &AdapterEventSink,
+) -> Result<()> {
     if value.get("id").is_some() && (value.get("result").is_some() || value.get("error").is_some())
     {
         handle_response(value, pending).await

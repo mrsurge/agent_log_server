@@ -383,19 +383,36 @@ There is no built-in provider runtime fallback. Active provider behavior comes
 from the registered `codex-ext` and `copilot-sdk` packages behind the generic
 adapter boundary.
 
-Selected first protocol/transport: newline-delimited JSON-RPC 2.0 over adapter
-stdin/stdout. The protocol shape remains transport-disposable: stdio can be
-replaced later by Unix sockets, framework-shell pipes, PyO3/shared-memory, or
-another byte channel without changing DTO method/event names.
+Adapter stdin/stdout defaults to concatenated raw MessagePack maps. The
+JSON-RPC-shaped DTO envelope, method/event names, correlation IDs, and extension
+Python API remain unchanged; this is an encoding change, not a provider API
+change. Frames have no newline or length prefix. Both readers handle split and
+coalesced frames, limit individual frames to 32 MiB, and reject malformed or
+truncated streams. Python uses msgpack's streaming boundary scanner and msgspec
+for payload decoding/encoding; Rust uses rmp-serde named maps.
 
-Current observed transport direction: keep the JSON-RPC DTO shape, but move the
-adapter process under the native `ferrous_framework` stdio transport
-introspection/orchestration layer when framework-shell context is present. ALS-RS
-uses Ferrous' async native pipe facade for adapter writes and a single
-ALS-owned reader task over Ferrous stdout bytes/chunks for JSON-RPC line
-framing. The adapter JSON-RPC stream must never be forwarded through the Rust
-CLI stdout. Default ALS-RS builds retain the direct child stdin/stdout fallback
-when Ferrous cannot start.
+`ALS_RS_ADAPTER_CODEC=json` explicitly selects newline-delimited JSON on both
+ends for debugging, independently of the browser Socket.IO serializer. There
+is no codec sniffing or silent encoding fallback. stderr remains plain text.
+
+With framework-shell context, Ferrous owns the observed child pipes. ALS uses
+serialized binary writes off the async executor and one stdout consumer; an
+RPC cancellation does not interrupt an in-progress frame write. The direct
+child fallback uses the same codec. Protocol stdout never goes to Rust CLI
+stdout. Shellspec and launch metadata declare `log_codecs.stdout: messagepack`
+and `stderr: text`; the JSON debug override also changes stdout metadata to
+`json`. Missing on-disk shellspecs use an equivalent in-memory pipe spec.
+
+The pinned FWS/Ferrous observer currently has a 1 MiB MessagePack inspection
+budget, smaller than the adapter's transport limit. Oversized observation may
+fail; original logs and byte locations remain available for direct inspection.
+That observation budget does not truncate or alter transport payloads.
+
+Provider-owned pipes are unchanged: Codex app-server speaks JSON lines and
+Copilot CLI speaks Content-Length-framed JSON. Do not label those MessagePack.
+TE2's framework-worker pipe already uses MessagePack; ALS's separate TE2
+sidebar Socket.IO client is not migrated by this adapter change. Durable
+transcript JSONL and metadata JSON are also unchanged.
 
 The adapter shellspec is:
 
@@ -564,10 +581,10 @@ Supported runtime scope:
 | `approval.respond` | Delegates provider approval responses through the extension loader; MCP ask-user responses are bridged by ALS-RS IPC before handoff persistence. |
 | `extension.shutdown` | Stops supported extension handlers. |
 
-First physical transport:
+Current physical transport:
 
-- newline-delimited JSON-RPC 2.0 over adapter stdin/stdout
-- one JSON object per line
+- concatenated MessagePack maps over adapter stdin/stdout
+- unchanged JSON-RPC-shaped DTOs; JSON lines only under `ALS_RS_ADAPTER_CODEC=json`
 - Rust can later replace this transport without changing adapter DTO names
 - live events from extension routers are forwarded as `event.live`
   notifications
@@ -613,13 +630,14 @@ Runtime behavior:
   and Rust registry use the same multi-root extension view. Root 0 is builtin;
   root 1 is the ALS-RS user-installed extension root at
   `${ALS_RS_DATA_DIR}/extensions`.
-- Adapter transport is newline-delimited JSON-RPC 2.0 on stdin/stdout.
+- Adapter transport defaults to raw MessagePack maps on stdin/stdout.
 - If framework-shell config is present, `als-server` prefers the
   `ferrous_framework` transport: a native async manager/pipe facade that starts
-  the adapter as an observed native-pipe shell and uses direct async
-  `write_to_shell(..., append_newline=true)` for JSON-RPC requests.
+  the adapter as an observed native-pipe shell. A serialized writer calls
+  `write_to_pipe_blocking` with encoded bytes on a blocking task, never through
+  a text conversion or newline-appending API.
   The shell shape comes from `agent_log_server_rs/shellspec/extension_adapter.yaml`.
-- ALS-RS owns JSON-RPC line framing over the Ferrous byte/chunk read path;
+- ALS-RS owns incremental frame decoding over the Ferrous byte/chunk read path;
   Ferrous owns process launch, stdin writes, stdout/stderr logs, FWS-compatible
   records/capabilities, and shell termination.
 - The current Ferrous pin also exposes an FWS Socket.IO peer/control-plane lane
@@ -627,7 +645,7 @@ Runtime behavior:
   ALS-RS does not use that lane for extension-adapter JSON-RPC; it remains an
   introspection/control-plane capability of Ferrous, separate from ALS's adapter
   protocol.
-- The current Ferrous pin is `5f9e0de` / `0.2.7`; it also includes native
+- The branch Ferrous pin is `0151f5f` / `0.2.13`; it also includes native
   lifecycle event subscriptions and procfs-backed tree shutdown. Those are
   Ferrous/FWS control-plane semantics and do not change ALS-RS adapter
   request/response framing.
