@@ -3,7 +3,7 @@ uvicorn>=0.27
 python-socketio>=5.11
 jinja2>=3.1
 fastcore>=1.7
-framework-shells==0.0.63
+framework-shells @ git+https://github.com/mrsurge/framework-shells.git@af4238edb7c572c6d3535bef8ff174472da149d7
 pyte>=0.8.0
 fastmcp==3.4.7
 msgspec>=0.19

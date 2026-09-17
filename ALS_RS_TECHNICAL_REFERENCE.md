@@ -1257,6 +1257,29 @@ Source anchors:
 
 ### Generic approvals
 
+Codex native `item/tool/requestUserInput` already targets this persisted lane
+and the question renderer shared with MCP ask-user. It keeps the provider
+request ID and returns `answers[question_id].answers` through the extension,
+not private MCP IPC. Multi-question cards stage choices/freeform and submit
+only after every question has an answer; single-question options submit
+immediately. The extension defaults `features.default_mode_request_user_input`
+to true during thread configuration, independently of TE2, preserving explicit
+false. Verified against upstream `rust-v0.153.3`: the native handler awaits a
+response even in Default mode (`isBlocking: false`), but that is not a guarantee
+of whole-turn tool exclusivity. `request_user_input_async` is a separate tool.
+
+The extension defaults `include_collaboration_mode_instructions` to false to
+avoid upstream's optional-only/no-permission-question policy. Its
+`devins_contract.py` appends ALS-owned mode/user-input guidance to the effective
+developer instructions, preserving repository/user context. Default mode honors
+workflow approvals; Plan mode remains non-mutating until the configured mode
+changes. Required questions/approval gates use native input when available and
+never treat missing answers as consent. An explicit true restores upstream
+mode instructions and skips the replacement. Execution-permission settings
+remain unchanged. Thread configuration takes effect on start/resume; developer
+guidance is also supplied per turn. Reattach existing live provider sessions
+to activate changed thread configuration.
+
 Live generic `type: "approval"` events persist into
 `meta.pending_approvals`. `conversation.approval.respond` routes provider
 approvals through adapter `approval.respond`; successful resolution appends a
@@ -1558,6 +1581,13 @@ frontend consume only generic adapter/schema/card contracts.
 
 ## Repository operations and validation
 
+- The `agent-run-profile-workflow` dependency baseline pins Python FWS through
+  the Git requirement in `requirements.txt` to
+  `af4238edb7c572c6d3535bef8ff174472da149d7` and the Ferrous submodule to
+  `0151f5f2a12b2110aca02a72ad85059ab0eec0e9`. Both include sliding log viewport
+  and live-tail pinning. Package versions alone do not identify these changes.
+  Updating these repository pins does not install dependencies or restart the
+  live harness; those are separate operations.
 - Run `basedpyright` directly from `PATH`.
 - Use targeted source searches. Do not blindly content-search generated,
   bundled, vendor, transcript, or framework-shell log trees.

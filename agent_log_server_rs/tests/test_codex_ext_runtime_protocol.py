@@ -30,6 +30,37 @@ def _write_schema_bundle(cache_dir: Path, properties: dict[str, object]) -> None
 
 
 class CodexRuntimeProtocolTests(unittest.TestCase):
+    def test_thread_and_turn_requests_carry_als_collaboration_policy(self) -> None:
+        methods = ("thread/start", "thread/resume", "turn/start")
+        protocol = RuntimeProtocol(
+            version="codex-cli 0.153.3", version_key="0.153.3",
+            cache_dir=Path("."), schema_path=Path("unused.json"),
+            definitions={},
+            request_params={method: {
+                "type": "object", "properties": {
+                    "config": {"type": "object"},
+                    "developerInstructions": {"type": "string"},
+                    "threadId": {"type": "string"},
+                },
+            } for method in methods},
+            responses={}, server_requests={}, server_request_responses={},
+            notifications={}, events={}, server_request_semantics={},
+            notification_semantics={}, event_semantics={},
+        )
+        for method in methods:
+            for mode in ("default", "plan"):
+                with self.subTest(method=method, mode=mode):
+                    params = build_request_params(protocol, method, {
+                        "mcp_context": {}, "mode": mode,
+                        "developer_instructions": "Repo guidance",
+                    }, thread_id="thread_123")
+                    config = cast(dict[str, object], params["config"])
+                    self.assertIs(config["include_collaboration_mode_instructions"], False)
+                    self.assertEqual(config["features"], {"default_mode_request_user_input": True})
+                    instructions = str(params["developerInstructions"])
+                    self.assertTrue(instructions.startswith("Repo guidance\n"))
+                    self.assertIn(f"Current collaboration mode: {mode.title()}", instructions)
+
     def test_unconstrained_response_property_accepts_null(self) -> None:
         protocol = RuntimeProtocol(
             version="codex-cli 0.153.3",
