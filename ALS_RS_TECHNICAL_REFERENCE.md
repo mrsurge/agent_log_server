@@ -968,12 +968,25 @@ serves transcript windows plus selected-conversation live/projection events.
 Large server frames use negotiated gzip. One logical client owns one current
 stream connection and one selected conversation; a newer connection supersedes
 the old one, and bounded outbound queues force reconnect/resync if a client
-falls behind. The browser uses `reconnecting-websocket` with no stale send
-queue. A post-initial server hello clears cached recipe versions while retaining
-the current card bounds, then schedules a `current` projection refresh outside
-the serialized frame decoder. The empty known-card set forces a full snapshot,
-avoiding both stale transcript state and the decoder deadlock that occurs when a
-hello handler awaits the response it must itself unblock.
+falls behind. The browser uses `reconnecting-websocket` with no stale send queue.
+Raw-stream reconnect/resync, Socket.IO reconnect, and foreground recovery share
+a debounced single-flight coordinator. Visibility returns after at least one
+second hidden, page lifecycle resume, and persisted pageshow trigger recovery;
+a reconnect seen while hidden is also recovered on visibility return. There is
+no periodic refresh. Control/foreground recovery reopens the suspect raw socket
+rather than trusting an OPEN state retained through suspension. Old connection
+generations cannot apply queued decoded frames after reconnection.
+
+Recovery clears cached recipe versions and fetches only a bounded card window,
+outside the serialized frame decoder. Actual `autoScroll` pin state chooses
+`tail`; unpinned views choose `current`, even when their window contains the
+tail. The anchor is captured immediately before replacement and restored by
+card ID/pixel offset. Visible durable card indexes can reseed stale stream
+bounds after live pruning. Conversation/generation and pin-change guards reject
+obsolete responses. One retry handles concurrent pin/window changes; a later
+control/resume interruption schedules follow-up recovery. Existing replacement
+preserves overlapping expansion/measurement state. This is neither full-history
+hydration nor a full-page reload, and does not force unpinned readers to tail.
 
 `ALS_RS_TRANSCRIPT_TRANSPORT=rpc` is the explicit transcript debugging mode. It
 routes projection requests and transcript notifications through the existing
@@ -1621,6 +1634,8 @@ frontend consume only generic adapter/schema/card contracts.
 - After Python changes, run focused tests and `basedpyright`.
 - Keep `pyproject.toml` and Rust crate versions synchronized when a release or
   commit requires a version bump.
+- A user-requested checkpoint means no version bump unless separately requested;
+  this overrides the general commit-version rule.
 - Changes to the `ferrous_framework` submodule are committed/pushed in its own
   repository first; the parent then records the gitlink update.
 

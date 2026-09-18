@@ -48,7 +48,8 @@ class FakeReconnectingWebSocket {
     this.sent.push(new Uint8Array(value));
   }
 
-  reconnect() {}
+  reconnectCount = 0;
+  reconnect() { this.reconnectCount++; this.disconnect(); }
 
   close() {
     this.readyState = 3;
@@ -238,5 +239,16 @@ test('reconnect requests and decodes a complete transcript snapshot', async () =
   await waitFor(() => reconnectResult !== null, 'reconnect snapshot response was not decoded');
   assert.equal(reconnectResult.cards[0].version, 2);
   assert.equal(client.debugSnapshot().stream_sequence, 7);
+  reconnectResult = null;
+  client.reconnectForRecovery();
+  assert.equal(socket.reconnectCount, 1);
+  socket.open();
+  socket.message(TAG_SERVER_HELLO, { protocol: PROTOCOL_VERSION, server_epoch: 'epoch-1' });
+  await waitFor(() => windowRequestCount(socket) > requestsBeforeReconnect + 1, 'forced reconnect failed to request snapshot');
+  const forcedRequest = latestWindowRequest(socket);
+  assert.deepEqual(forcedRequest.known.cards, []);
+  socket.message(TAG_WINDOW_SNAPSHOT, projectionPayload(forcedRequest.request_id, 3, 10));
+  await waitFor(() => reconnectResult !== null, 'forced reconnect did not recover');
+  assert.equal(reconnectResult.cards[0].version, 3);
   client.dispose();
 });

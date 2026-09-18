@@ -46,6 +46,8 @@ interface TranscriptLoaderContext {
   sioCall(event: string, payload?: Record<string, unknown>): Promise<unknown>;
   projectionClient?: TranscriptProjectionClient;
   getTranscriptState(): TranscriptLoaderState;
+  isPinned(): boolean;
+  getVisibleCardIndex?(): number | null;
   setTranscriptState(patch: Partial<TranscriptLoaderState>): void;
   renderTranscriptCards(cards: TranscriptCardRecipe[], options: { prepend: boolean }): void;
   applyTranscriptRuntimeState(items: JsonObject[]): void;
@@ -75,8 +77,9 @@ interface TranscriptProjectionClient {
     shiftCards: number;
     maxBytes?: number;
     timeoutMs?: number;
+    startCard?: number;
   }): Promise<ReplayChunkResult>;
-  clearProjectionCache?(): void;
+  clearProjectionCache?(preservePosition?: boolean): void;
 }
 
 export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
@@ -85,6 +88,8 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     sioCall,
     projectionClient,
     getTranscriptState,
+    isPinned,
+    getVisibleCardIndex,
     setTranscriptState,
     renderTranscriptCards,
     applyTranscriptRuntimeState,
@@ -105,7 +110,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
     captureVirtualAnchor,
     restoreVirtualAnchor,
   } = ctx;
-  const conversationsRpcClient = projectionClient ?? createConversationsRpcClient({ sioCall });
+  const conversationsRpcClient: TranscriptProjectionClient = projectionClient ?? createConversationsRpcClient({ sioCall });
 
   function nextAnimationFrame(): Promise<void> {
     return new Promise((resolve) => {
@@ -226,6 +231,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
       historyMode?: boolean;
       preserveRuntimeSurface?: boolean;
       liveProjection?: TurnProjectionSnapshot;
+      followTail?: boolean;
     } = {},
   ): Promise<void> {
     setScrollProgrammatic(true);
@@ -254,6 +260,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
       }
       await nextAnimationFrame();
       restoreTranscriptAnchor(anchor);
+      if (options.followTail && isPinned()) maybeAutoScroll(true);
       await nextAnimationFrame();
       await nextAnimationFrame();
     } finally {
@@ -305,6 +312,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
   async function fetchTranscriptProjection(
     action: 'tail' | 'older' | 'newer' | 'current',
     windowSize: number,
+    startCard?: number,
   ): Promise<TranscriptRangeResponse> {
     const convoId = getConversationId?.() || null;
     const replay = await conversationsRpcClient.fetchReplayProjection({
@@ -312,6 +320,7 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
       action,
       windowCards: windowSize,
       shiftCards: TRANSCRIPT_CARD_SHIFT,
+      startCard,
     });
     if (!replay.projection || replay.frame.format !== 'card_recipes') {
       throw new Error('Transcript projection response is not card-based');
@@ -425,6 +434,8 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
 
   async function refreshCurrentTranscriptProjection(): Promise<boolean> {
     let state = getTranscriptState();
+    const initialConversationId = getConversationId?.() || null;
+    const initialGeneration = Number(state.transcriptGeneration) || 0;
     const waitDeadline = Date.now() + 12000;
     while (state.transcriptLoading && Date.now() < waitDeadline) {
       await new Promise<void>((resolve) => {
@@ -433,20 +444,34 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
       state = getTranscriptState();
     }
     if (state.transcriptLoading) return false;
+    if (isStaleTranscriptResponse(initialConversationId, initialGeneration, initialConversationId)) return false;
     const requestConversationId = getConversationId?.() || null;
     if (!requestConversationId) return false;
     const requestGeneration = Number(state.transcriptGeneration) || 0;
-    const wasAtTail = state.transcriptAtTail === true;
-    const anchor = wasAtTail ? null : captureTranscriptAnchor('start');
+    const wasPinned = isPinned();
+    const visibleIndex = getVisibleCardIndex?.();
+    const startCard = typeof visibleIndex === 'number'
+      && (visibleIndex < state.transcriptStart || visibleIndex >= state.transcriptEnd)
+      ? Math.max(0, visibleIndex - TRANSCRIPT_CARD_SHIFT)
+      : state.transcriptStart;
     setTranscriptState({ transcriptLoading: true });
     try {
+      conversationsRpcClient.clearProjectionCache?.(true);
       const data = await fetchTranscriptProjection(
-        'current',
+        wasPinned ? 'tail' : 'current',
         Math.max(1, Number(state.transcriptLimit) || 0),
+        wasPinned ? undefined : startCard,
       );
       if (isStaleTranscriptResponse(requestConversationId, requestGeneration, data.conversation_id)) {
         return false;
       }
+      if (isPinned() !== wasPinned) return false;
+      const currentVisibleIndex = getVisibleCardIndex?.();
+      if (!wasPinned && typeof currentVisibleIndex === 'number'
+        && currentVisibleIndex < data.total
+        && (currentVisibleIndex < data.start || currentVisibleIndex >= data.end)) return false;
+      // Capture after the request so scrolling during network latency is preserved.
+      const anchor = wasPinned ? null : captureTranscriptAnchor('start');
       await replaceTranscriptWindow(
         data.cards,
         data.runtimeState,
@@ -462,11 +487,16 @@ export function bindTranscriptLoader(ctx: TranscriptLoaderContext) {
           historyMode: !data.atTail,
           preserveRuntimeSurface: true,
           liveProjection: data.atTail ? data.liveProjection : undefined,
+          followTail: wasPinned,
         },
       );
-      if (wasAtTail && data.atTail) {
+      if (wasPinned && data.atTail) {
         requestAnimationFrame(() => {
-          requestAnimationFrame(() => maybeAutoScroll(true));
+          requestAnimationFrame(() => {
+            if (isPinned() && !isStaleTranscriptResponse(requestConversationId, requestGeneration, data.conversation_id)) {
+              maybeAutoScroll(true);
+            }
+          });
         });
       }
       return true;

@@ -53,6 +53,7 @@ import { bindTimelineRows } from './js/codex_agent/timeline/rows.ts';
 import { bindTimelineLiveItems } from './js/codex_agent/timeline/live_items.ts';
 import { bindTimelineReplay } from './js/codex_agent/timeline/replay.ts';
 import { bindTimelineVirtualizer } from './js/codex_agent/timeline/virtualizer.ts';
+import { bindTranscriptRecovery } from './js/codex_agent/transcript_recovery.ts';
 import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations/client.ts';
 import { createSettingsRpcClient } from './js/codex_agent/rpc/settings/client.ts';
 import { createUiRpcClient } from './js/codex_agent/rpc/ui/client.ts';
@@ -1752,11 +1753,24 @@ document.addEventListener('DOMContentLoaded', () => {
         getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
         onEvent: (event) => handleSocketEvent(event),
         onProjectionChange: (change) => handleProjectionChange(change),
-        onReconnect: () => refreshCurrentTranscriptProjectionImpl().then(() => undefined),
-        onResyncRequired: () => refreshCurrentTranscriptProjectionImpl().then(() => undefined),
+        onReconnect: () => transcriptRecovery.request('stream'),
+        onResyncRequired: () => transcriptRecovery.request('resync'),
       })
     : null;
   const transcriptProjectionClient = transcriptStreamClient ?? conversationsRpcClient;
+  const transcriptRecovery = bindTranscriptRecovery({
+    windowRef: window,
+    documentRef: document,
+    getKey: () => {
+      const id = clientConversationId || conversationMeta?.conversation_id;
+      return id && (activeView === 'conversation' || isWidescreenLayout())
+        ? `${id}:${transcriptGeneration}` : null;
+    },
+    refresh: async (reconnectStream) => {
+      if (reconnectStream) transcriptStreamClient?.reconnectForRecovery();
+      return refreshCurrentTranscriptProjectionImpl();
+    },
+  });
   const settingsRpcClient = createSettingsRpcClient({
     sioCall,
     windowRef: window,
@@ -1830,6 +1844,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let reconnectRefreshSerial = 0;
   async function refreshConversationAfterReconnect(): Promise<void> {
+    // Independent of metadata/list refresh and shared with stream/foreground recovery.
+    const transcriptRefresh = transcriptRecovery.request('control');
     await resyncConversationList();
     const conversationId = clientConversationId || conversationMeta?.conversation_id || null;
     if (!conversationId) return;
@@ -1840,17 +1856,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (currentConversationId !== conversationId) return;
     const shouldRefreshTranscript = activeView === 'conversation' || isWidescreenLayout();
     if (!shouldRefreshTranscript) return;
-    if (transcriptTransportMode === 'rpc') {
-      resetTimeline();
-      await replayTranscript();
-      if (refreshSerial !== reconnectRefreshSerial) return;
-    }
+    await transcriptRefresh;
+    if (refreshSerial !== reconnectRefreshSerial) return;
     await refreshPlanSurface();
     restorePendingApprovals();
     await publishSidebarWindowState();
-    if (transcriptTransportMode === 'rpc') {
-      maybeAutoScroll(true);
-    }
   }
 
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
@@ -1977,6 +1987,8 @@ document.addEventListener('DOMContentLoaded', () => {
     getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
     sioCall,
     projectionClient: transcriptProjectionClient,
+    isPinned: () => autoScroll,
+    getVisibleCardIndex: () => timelineVirtualizer.visibleTranscriptCardRange()?.first ?? null,
     getTranscriptState: () => ({
       transcriptTotal,
       transcriptStart,
