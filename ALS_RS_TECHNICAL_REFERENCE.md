@@ -645,7 +645,7 @@ Runtime behavior:
   ALS-RS does not use that lane for extension-adapter JSON-RPC; it remains an
   introspection/control-plane capability of Ferrous, separate from ALS's adapter
   protocol.
-- The branch Ferrous pin is `45b3830` / `0.2.14`; it also includes native
+- The released Ferrous pin is `4cdf5db` / `0.2.14`; it also includes native
   lifecycle event subscriptions and procfs-backed tree shutdown. Those are
   Ferrous/FWS control-plane semantics and do not change ALS-RS adapter
   request/response framing.
@@ -1642,11 +1642,9 @@ frontend consume only generic adapter/schema/card contracts.
 
 ## Repository operations and validation
 
-- The `agent-run-profile-workflow` dependency baseline pins Python FWS through
-  the Git requirement in `requirements.txt` to
-  `f9a0eeb45620540cea0617c3e68ec6bf1041d123` (FWS 0.0.64) and the Ferrous submodule to
-  `45b3830187ed789669a20bad68ac43e700a16f41` (0.2.14). Both are exact snapshots
-  from `feature/log-projection-codecs`, not a merge with main; they include sliding
+- The release dependency baseline pins Python FWS through
+  `framework-shells==0.0.64` in `requirements.txt` and the Ferrous submodule to
+  released tag `0.2.14` at `4cdf5db`. Both releases include the merged sliding
   log viewport/live-tail pinning and collapsible resizable log panes.
   Updating these repository pins does not install dependencies or restart the
   live harness; those are separate operations.
