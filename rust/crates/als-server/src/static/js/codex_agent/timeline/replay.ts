@@ -2,7 +2,7 @@ import {
   applyTranscriptCardMetadata,
   findTranscriptCardRow,
 } from '../transcript_card_metadata.ts';
-import { buildShellCommandPreview } from '../shell_render.ts';
+import { renderShellSummary } from '../shell_render.ts';
 import { ansiToHtml, hasAnsiSgr } from '../terminal_ansi.ts';
 import type { ToggleableRow, UnknownRecord } from '../shared_types.ts';
 import type { TranscriptCardRecipe } from '../rpc/conversations/contract.ts';
@@ -508,7 +508,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         const summaryTextEl = documentRef.createElement('span');
         summaryTextEl.className = 'shell-card-summary-text';
         const shellCmd = asString(entry.command);
-        summaryTextEl.textContent = buildShellCommandPreview(shellCmd);
+        renderShellSummary(summaryTextEl, shellCmd);
         summaryRibbon.appendChild(summaryTextEl);
         body.appendChild(summaryRibbon);
         const detailEl = documentRef.createElement('div');

@@ -75,6 +75,17 @@ export function buildShellCommandPreview(
   return `${preview.slice(0, Math.max(0, limit - 3)).trimEnd()}...`;
 }
 
+export function renderShellSummary(el: HTMLElement, command: string, prefix = '$ '): void {
+  const preview = buildShellCommandPreview(command, undefined, prefix);
+  const match = /^(\$\s*)?(\S+)([\s\S]*)$/.exec(preview);
+  el.textContent = '';
+  if (!match) { el.textContent = preview; return; }
+  const word = el.ownerDocument.createElement('span');
+  word.className = 'shell-command-name';
+  word.textContent = match[2];
+  el.append(match[1] || '', word, match[3]);
+}
+
 export function bindShellRender(ctx: ShellRenderContext) {
   const {
     shellRows,
@@ -219,7 +230,9 @@ export function bindShellRender(ctx: ShellRenderContext) {
       }
     }
     const entry = getShellRow(evt.id || '', parentEl, evt);
-    entry.summaryTextEl.textContent = buildShellCommandPreview(evt.command || '');
+    entry.row.classList.add('shell-running');
+    entry.row.setAttribute('aria-busy', 'true');
+    renderShellSummary(entry.summaryTextEl, evt.command || '');
     renderShellCmdRibbon(entry.cmdRibbon, evt.command || '', { promptPrefix: '' });
     syncShellCommandLink(entry.row, entry.cmdRibbon, evt.path, evt.line);
 
@@ -260,10 +273,12 @@ export function bindShellRender(ctx: ShellRenderContext) {
     applyTranscriptCardMetadata(entry.row, evt);
 
     const exitCode = evt.exitCode ?? 0;
+    entry.row.classList.remove('shell-running');
+    entry.row.removeAttribute('aria-busy');
 
     // Update command ribbon if shell_end carries a refined label
     const cmd = String(evt.command || '');
-    entry.summaryTextEl.textContent = buildShellCommandPreview(cmd);
+    renderShellSummary(entry.summaryTextEl, cmd);
     if (cmd && entry.cmdRibbon) {
       renderShellCmdRibbon(entry.cmdRibbon, cmd, { promptPrefix: '' });
     }
@@ -326,7 +341,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
       termEl,
     } = createShellCardElements(evt);
     const cmd = String(evt.command || '(shell)');
-    summaryTextEl.textContent = buildShellCommandPreview(cmd);
+    renderShellSummary(summaryTextEl, cmd);
     renderShellCmdRibbon(cmdRibbon, cmd, { promptPrefix: '' });
     syncShellCommandLink(row, cmdRibbon, evt.path, evt.line);
 

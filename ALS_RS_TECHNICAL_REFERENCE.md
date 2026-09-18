@@ -645,7 +645,7 @@ Runtime behavior:
   ALS-RS does not use that lane for extension-adapter JSON-RPC; it remains an
   introspection/control-plane capability of Ferrous, separate from ALS's adapter
   protocol.
-- The branch Ferrous pin is `0151f5f` / `0.2.13`; it also includes native
+- The branch Ferrous pin is `45b3830` / `0.2.14`; it also includes native
   lifecycle event subscriptions and procfs-backed tree shutdown. Those are
   Ferrous/FWS control-plane semantics and do not change ALS-RS adapter
   request/response framing.
@@ -1065,6 +1065,27 @@ a fake patch.
 
 Streaming shell cards keep their bounded output viewport at the newest appended
 text. The conversation viewport's pinned-tail behavior remains a separate layer.
+Shell summaries mark begin/end lifecycle with a running spinner, including active
+projection replay; final historical shell cards have no running indicator.
+The summary uses a single non-wrapping flex row with ellipsized command text and
+a fixed-size right-aligned spinner; expanded command/output content is unchanged.
+Collapsed shell summaries colour the first command token without invoking syntax
+detection. Search headers use muted yellow, view headers muted grey, tool headers
+separate a blue prefix from the normal command text, and patch summaries isolate
+the basename in readable grey. Expanded content retains its normal rendering.
+Transcript twisties are visually replaced by whole-card overlay borders enclosing
+header and content, with a stronger most-recent-user-expansion border. Sticky
+header replicas carry the same state. Standalone diff paths render their basename
+in a darker grey than the path. Toggle targets remain keyboard
+accessible; projection restoration does not change expansion recency.
+
+The idle status ribbon displays the conversation CWD basename and available Git
+branch/short SHA. `/rpc/ui` `project.identity.get` uses repository discovery and
+HEAD only, never status/diff traversal. Non-Git directories retain their basename;
+detached HEAD omits branch. Conversation/header changes, reconnect, and idle
+transitions refresh identity with stale-response protection and a short event
+throttle, not polling. Active activity and explicit non-idle status messages
+retain precedence over the placeholder; the existing active spinner is unchanged.
 
 Transcript diff metadata rows show per-patch additions/deletions counted within
 unified-diff hunks (excluding file headers), with green/red badges and a Codicon
@@ -1551,6 +1572,15 @@ waits for readiness where requested.
 
 ### Codex
 
+`contextCompaction` item start reports activity; completion emits and persists the
+generic `context_compacted` card with matching identity/source/turn fields.
+Deprecated `thread/compacted` notifications remain supported and are deduplicated
+against modern completions. Distinct modern compaction IDs within a turn remain
+distinct cards. Generic rendering and Rust projection remain provider-neutral.
+Command terminal interactions without stdin use `read_shell` (Reading shell);
+nonempty stdin uses `write_shell` (Writing to shell). New-file interactions retain
+their apply-patch ownership instead of relabeling that existing card.
+
 - The schema-owned `high_context_400k` toggle injects
   `model_context_window = 450000` and
   `model_auto_compact_token_limit = 400000`.
@@ -1614,9 +1644,10 @@ frontend consume only generic adapter/schema/card contracts.
 
 - The `agent-run-profile-workflow` dependency baseline pins Python FWS through
   the Git requirement in `requirements.txt` to
-  `af4238edb7c572c6d3535bef8ff174472da149d7` and the Ferrous submodule to
-  `0151f5f2a12b2110aca02a72ad85059ab0eec0e9`. Both include sliding log viewport
-  and live-tail pinning. Package versions alone do not identify these changes.
+  `f9a0eeb45620540cea0617c3e68ec6bf1041d123` (FWS 0.0.64) and the Ferrous submodule to
+  `45b3830187ed789669a20bad68ac43e700a16f41` (0.2.14). Both are exact snapshots
+  from `feature/log-projection-codecs`, not a merge with main; they include sliding
+  log viewport/live-tail pinning and collapsible resizable log panes.
   Updating these repository pins does not install dependencies or restart the
   live harness; those are separate operations.
 - Run `basedpyright` directly from `PATH`.

@@ -3347,6 +3347,47 @@ textarea {
   transform: translateY(-50%) rotate(90deg);
 }
 /* Hide output when collapsed */
+#agent-timeline .collapsible .twisty { display: none; }
+.timeline-sticky-header .twisty { display: none; }
+#agent-timeline .mcp-tool-card:not(.expanded) > .body > .command-ribbon { color: var(--text); }
+#agent-timeline .collapsible.expanded,
+.timeline-sticky-slot-host.expanded { position: relative; --expanded-border: #606469; }
+#agent-timeline .collapsible.expanded.expanded-mru,
+.timeline-sticky-slot-host.expanded.expanded-mru { --expanded-border: #80858d; }
+#agent-timeline .collapsible.expanded::after,
+.timeline-sticky-slot-host.expanded::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--expanded-border);
+  pointer-events: none;
+  z-index: 3;
+}
+.diff-filename { color: #a6a8ad; }
+#agent-timeline .collapsible:not(.expanded) .shell-command-name,
+#agent-timeline .collapsible:not(.expanded) .tool-command-prefix { color: #6894bc; }
+#agent-timeline .search-card:not(.expanded) > .body > .command-ribbon,
+#agent-timeline .search-card:not(.expanded) > .body > .command-ribbon * { color: #b39a58; }
+#agent-timeline .view-card:not(.expanded) > .body > .command-ribbon,
+#agent-timeline .view-card:not(.expanded) > .body > .command-ribbon * { color: #92959a; }
+.patch-collapsed-summary { display: none; }
+.collapsible:not(.expanded) .patch-command-ribbon > code,
+.collapsible:not(.expanded) .patch-command-ribbon > .shell-prompt { display: none; }
+.collapsible:not(.expanded) .patch-collapsed-summary { display: inline; }
+.collapsible:not(.expanded) .patch-filename { color: #92959a; }
+.shell-running .shell-card-summary::after {
+  content: '';
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  margin-left: auto;
+  pointer-events: none;
+  border: 1.5px solid var(--border);
+  border-top-color: #6894bc;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 .collapsible:not(.expanded) > .body > .shell-card-detail,
 .collapsible:not(.expanded) > .body > pre.command-output,
 .collapsible:not(.expanded) > .body > .command-output,
@@ -3444,7 +3485,12 @@ textarea {
 .command-ribbon .ts-quoted-inner { color: inherit; }
 
 .shell-card-summary {
-  padding-right: 42px;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-width: 0;
+  padding-right: 14px;
   white-space: nowrap;
   word-break: normal;
   overflow: hidden;
@@ -3453,6 +3499,7 @@ textarea {
 
 .shell-card-summary .shell-card-summary-text {
   display: block;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3895,7 +3942,7 @@ body .tribute-container .tribute-file {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  opacity: 0;
+  opacity: 1;
   transition: opacity 0.15s;
 }
 .status-ribbon.active .status-text {

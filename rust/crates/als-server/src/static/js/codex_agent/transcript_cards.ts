@@ -3,7 +3,7 @@ import {
   applyTranscriptCardMetadata,
   type TranscriptCardMetadata,
 } from './transcript_card_metadata.ts';
-import { buildShellCommandPreview } from './shell_render.ts';
+import { renderShellSummary } from './shell_render.ts';
 import { ansiToHtml, hasAnsiSgr } from './terminal_ansi.ts';
 import { applyPathScrollLabel } from './path_label.ts';
 
@@ -240,9 +240,9 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     summaryRibbon.className = 'command-ribbon shell-card-summary';
     const summaryTextEl = document.createElement('span');
     summaryTextEl.className = 'shell-card-summary-text';
-    summaryTextEl.textContent = buildShellCommandPreview(
+    renderShellSummary(
+      summaryTextEl,
       ribbonText,
-      undefined,
       isUserTerminal ? '' : '$ ',
     );
     summaryRibbon.appendChild(summaryTextEl);

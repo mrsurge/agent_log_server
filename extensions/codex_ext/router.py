@@ -1466,6 +1466,7 @@ class CodexEventRouter:
         self._approval_request_map: Dict[str, str] = {}
         self._subagent_states: Dict[str, ObjectDict] = {}
         self._thread_subagent_ids: Dict[str, str] = {}
+        self._compactions: Dict[str, List[str]] = {}
 
     def reset(self) -> None:
         self._turn_states.clear()
@@ -1473,6 +1474,31 @@ class CodexEventRouter:
         self._approval_request_map.clear()
         self._subagent_states.clear()
         self._thread_subagent_ids.clear()
+        self._compactions.clear()
+
+    def _compaction_result(self, thread_id: Optional[str], turn_id: Optional[str], item_id: Optional[str]) -> ObjectDict:
+        key = self._turn_key(thread_id, turn_id)
+        seen = self._compactions.setdefault(key, [])
+        identity = item_id or "legacy"
+        if identity in seen or (identity == "legacy" and seen):
+            return {"handled": True, "events": [], "transcript_entries": []}
+        if "legacy" in seen:
+            seen.remove("legacy")
+            seen.append(identity)
+            return {"handled": True, "events": [], "transcript_entries": []}
+        seen.append(identity)
+        while len(self._compactions) > 128:
+            self._compactions.pop(next(iter(self._compactions)))
+        fields: ObjectDict = {
+            "id": item_id or f"compaction:{key}",
+            "turn_id": turn_id,
+            "source": "contextCompaction" if item_id else "thread/compacted",
+        }
+        return self._decorate_routed_result({
+            "handled": True,
+            "events": [{"type": "context_compacted", **fields}],
+            "transcript_entries": [{"role": "context_compacted", **fields, "timestamp": utc_ts()}],
+        }, thread_id=thread_id)
 
     def _turn_key(self, thread_id: Optional[str], turn_id: Optional[str]) -> str:
         return f"{thread_id or 'unknown'}:{turn_id or 'unknown'}"
@@ -2410,6 +2436,19 @@ class CodexEventRouter:
         ) and _is_object_dict(payload):
             return self._error_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
 
+        if label_lower == "thread/compacted" and _is_object_dict(payload):
+            return self._compaction_result(_payload_thread_id(payload, thread_id), _payload_turn_id(payload, turn_id), None)
+
+        if label_lower in {"item/started", "item/completed"} and _is_object_dict(payload):
+            compact_item = _dict_payload(payload.get("item"))
+            if _item_type(compact_item) == "contextcompaction":
+                if label_lower == "item/started":
+                    return {"handled": True, "events": [{"type": "activity", "label": "Compacting context", "active": True}], "transcript_entries": []}
+                return self._compaction_result(
+                    _payload_thread_id(payload, thread_id), _payload_turn_id(payload, turn_id),
+                    _payload_string(compact_item, "id"),
+                )
+
         if label_lower == "codex/event/task_started" and _is_object_dict(payload):
             return self._collaboration_mode_result(label_lower=label_lower, payload=payload, turn_id=turn_id)
 
@@ -2848,7 +2887,7 @@ class CodexEventRouter:
                 "events": [{
                     "type": "tool_interaction",
                     "id": item_id or _assistant_id(payload, thread_id, turn_id),
-                    "tool": "apply_patch" if state.get("new_file_spec") else "command",
+                    "tool": "apply_patch" if state.get("new_file_spec") else ("write_shell" if payload.get("stdin") else "read_shell"),
                     "payload": {
                         "stdin": payload.get("stdin"),
                         "stdout": payload.get("stdout"),

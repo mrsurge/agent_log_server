@@ -265,6 +265,7 @@ export function bindTimelineLiveItems(ctx: LiveItemsContext) {
         pathLabel.appendChild(createPathScrollLabel(document, toRelativePath(path), {
           title: path,
           strong: true,
+          basenameClass: 'diff-filename',
         }));
         pathLabel.style.cursor = 'pointer';
         pathLabel.dataset.hasClickHandler = 'true';

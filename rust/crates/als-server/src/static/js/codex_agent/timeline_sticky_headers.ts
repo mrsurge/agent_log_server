@@ -78,6 +78,7 @@ function getStickyHostClasses(row: Element | null | undefined): string[] {
   if (row.classList.contains('user')) classes.push('user');
   if (row.classList.contains('subagent-card')) classes.push('subagent-card');
   if (row.classList.contains('expanded')) classes.push('expanded');
+  if (row.classList.contains('expanded-mru')) classes.push('expanded-mru');
   if (row.classList.contains('diff')) classes.push('diff');
   if (row.classList.contains('declined')) classes.push('declined');
   if (row.classList.contains('command-result')) classes.push('command-result');

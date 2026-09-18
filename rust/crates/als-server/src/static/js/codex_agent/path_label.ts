@@ -2,6 +2,7 @@ type PathLabelOptions = {
   className?: string;
   title?: string;
   strong?: boolean;
+  basenameClass?: string;
 };
 
 const PATH_SCROLL_RETRY_DELAYS_MS = [0, 50, 150];
@@ -47,6 +48,14 @@ export function applyPathScrollLabel(
     .join(' ');
   el.classList.add(...classes.split(/\s+/).filter(Boolean));
   el.textContent = label || 'file';
+  if (options.basenameClass) {
+    const text = label || 'file';
+    const slash = text.lastIndexOf('/') + 1;
+    const name = el.ownerDocument.createElement('span');
+    name.className = options.basenameClass;
+    name.textContent = text.slice(slash);
+    el.replaceChildren(text.slice(0, slash), name);
+  }
   if (options.title) {
     el.title = options.title;
   }
@@ -67,10 +76,15 @@ export function createPathScrollLabel(
 export function pathScrollLabelHtml(
   label: string,
   escapeHtml: (text: string) => string,
-  options: Pick<PathLabelOptions, 'className' | 'strong'> = {},
+  options: Pick<PathLabelOptions, 'className' | 'strong' | 'basenameClass'> = {},
 ): string {
   const classes = ['path-scroll-label', options.className || '', options.strong ? 'path-scroll-strong' : '']
     .filter(Boolean)
     .join(' ');
-  return `<span class="${escapeHtml(classes)}">${escapeHtml(label || 'file')}</span>`;
+  const text = label || 'file';
+  const slash = text.lastIndexOf('/') + 1;
+  const content = options.basenameClass
+    ? `${escapeHtml(text.slice(0, slash))}<span class="${escapeHtml(options.basenameClass)}">${escapeHtml(text.slice(slash))}</span>`
+    : escapeHtml(text);
+  return `<span class="${escapeHtml(classes)}">${content}</span>`;
 }

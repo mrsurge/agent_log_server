@@ -233,6 +233,15 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     );
   }
 
+  async function getProjectIdentity(conversationId: string): Promise<JsonObject> {
+    return callRpcNamespace<JsonObject>({
+      namespace: UI_RPC_NAMESPACE,
+      method: UI_RPC_METHODS.projectIdentityGet,
+      params: { conversation_id: conversationId },
+      windowRef: getWindowRef(deps.windowRef),
+    });
+  }
+
   async function getProjectSummary(options: {
     conversationId?: string | null;
     path?: string | null;
@@ -585,6 +594,7 @@ export function createUiRpcClient(deps: UiRpcClientDeps) {
     listFilesystem,
     searchFilesystem,
     getProjectSummary,
+    getProjectIdentity,
     acceptAgentDiff,
     rejectAgentDiff,
     rejectAllAgentDiffs,

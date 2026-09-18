@@ -775,6 +775,7 @@ export function bindDiffRendering(ctx: DiffRenderingContext) {
           codeHtml: pathScrollLabelHtml(relLabel, escapeHtml, {
             className: 'diff-file-path-label',
             strong: true,
+            basenameClass: 'diff-filename',
           }),
           activePath: currentFilePath || '',
         });

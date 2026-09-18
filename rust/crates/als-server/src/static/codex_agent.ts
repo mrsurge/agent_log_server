@@ -701,6 +701,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let getUserDisplayName = () => 'user';
   let getAssistantDisplayName = () => 'assistant';
   let refreshMessageCardHeaders = () => {};
+  let refreshIdleProject = (_force = false) => {};
   let resetTimeline = () => {};
   let restorePendingApprovals = () => {};
 
@@ -746,6 +747,7 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     onRowInserted: timelineVirtualizer.registerRow,
     onMessageFinalized: timelineVirtualizer.registerFinalizedMessage,
+    onIdle: () => refreshIdleProject(true),
   });
 
   const {
@@ -839,13 +841,18 @@ document.addEventListener('DOMContentLoaded', () => {
     updateActiveConversationLabel,
     getUserDisplayName: getUserDisplayNameImpl,
     getAssistantDisplayName: getAssistantDisplayNameImpl,
-    updateConversationHeaderLabel,
+    updateConversationHeaderLabel: updateConversationHeaderLabelImpl,
     applyAppConfig,
     fetchAppConfig,
     openSplashSettingsModal,
     closeSplashSettingsModal,
     saveSplashSettings,
   } = hostRuntime;
+
+  function updateConversationHeaderLabel() {
+    updateConversationHeaderLabelImpl();
+    refreshIdleProject();
+  }
 
   getUserDisplayName = getUserDisplayNameImpl;
   getAssistantDisplayName = getAssistantDisplayNameImpl;
@@ -1779,6 +1786,25 @@ document.addEventListener('DOMContentLoaded', () => {
     sioCall,
     windowRef: window,
   });
+  let idleProjectKey = '';
+  let idleProjectRequest = 0;
+  let idleProjectUpdated = 0;
+  refreshIdleProject = (force = false) => {
+    const id = clientConversationId || conversationMeta?.conversation_id || '';
+    const cwd = String(conversationSettings.cwd || conversationMeta?.settings?.cwd || '');
+    const key = `${id}:${cwd}`;
+    if (key === idleProjectKey && (!force || Date.now() - idleProjectUpdated < 2000)) return;
+    if (key !== idleProjectKey) timelineRows.setIdleLabel(cwd.split('/').filter(Boolean).pop() || '');
+    idleProjectKey = key;
+    idleProjectUpdated = Date.now();
+    const request = ++idleProjectRequest;
+    if (!id) return;
+    void uiRpcClient.getProjectIdentity(id).then((identity) => {
+      if (request !== idleProjectRequest || id !== (clientConversationId || conversationMeta?.conversation_id || '')) return;
+      timelineRows.setIdleLabel([identity.name, identity.branch, identity.head_short]
+        .filter((value): value is string => typeof value === 'string' && Boolean(value)).join(' / '));
+    }).catch(() => { /* Keep the CWD fallback when Git metadata is unavailable. */ });
+  };
 
   function currentConversationTitle(): string | null {
     const settingsTitle = conversationSettings.alias || conversationSettings.label;
@@ -1844,6 +1870,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let reconnectRefreshSerial = 0;
   async function refreshConversationAfterReconnect(): Promise<void> {
+    refreshIdleProject(true);
     // Independent of metadata/list refresh and shared with stream/foreground recovery.
     const transcriptRefresh = transcriptRecovery.request('control');
     await resyncConversationList();

@@ -28,6 +28,7 @@ interface TimelineRowsContext {
   maybeAutoScroll(force?: boolean): void;
   onRowInserted?(row: HTMLElement): void;
   onMessageFinalized?(row: HTMLElement, text: string): void;
+  onIdle?(): void;
 }
 
 const WAITING_FOR_EVENTS_LABEL = 'Waiting for events...';
@@ -155,9 +156,18 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     return { row, body };
   }
 
+  let idleLabel = '';
+  let showingIdle = true;
+  function setIdleLabel(label: string) {
+    idleLabel = label;
+    if (statusLabelEl && showingIdle) statusLabelEl.textContent = idleLabel;
+  }
+
   function setActivity(label: string, active: boolean) {
-    if (statusLabelEl) statusLabelEl.textContent = label || 'idle';
+    showingIdle = !active && (!label || label.toLowerCase() === 'idle');
+    if (statusLabelEl) statusLabelEl.textContent = showingIdle ? idleLabel : label;
     if (statusRibbonEl) statusRibbonEl.classList.toggle('active', Boolean(active));
+    if (showingIdle) ctx.onIdle?.();
   }
 
   function showWaitingForEvents() {
@@ -276,6 +286,7 @@ export function bindTimelineRows(ctx: TimelineRowsContext) {
     buildMessageCard,
     createRow,
     setActivity,
+    setIdleLabel,
     showWaitingForEvents,
     clearWaitingForEvents,
     setReasoningRibbon,

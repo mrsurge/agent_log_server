@@ -40,6 +40,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
   } = ctx;
 
   const subagentContainers = new Map<string, SubagentContainerRecord>();
+  let mostRecentlyExpanded = '';
 
   function isInteractiveHeaderTarget(target: EventTarget | null): boolean {
     if (!(target instanceof Element)) return false;
@@ -82,6 +83,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
     if (cardId) rowEl.dataset.virtualRowKey = cardId;
     const isExpanded = Boolean(startExpanded);
     rowEl.classList.toggle('expanded', isExpanded);
+    rowEl.classList.toggle('expanded-mru', isExpanded && cardId === mostRecentlyExpanded);
 
     let twistyEl = headerNode.querySelector(':scope > .twisty') as HTMLElement | null;
     if (!(twistyEl instanceof HTMLElement)) {
@@ -96,6 +98,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
 
     function syncExpandedState(expanded: boolean) {
       headerNode.dataset.expanded = expanded ? 'true' : 'false';
+      headerNode.querySelector('.ribbon-toggle-zone')?.setAttribute('aria-expanded', String(expanded));
     }
 
     function syncExpandedPathLabels(expanded: boolean) {
@@ -113,6 +116,13 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
         : !rowEl.classList.contains('expanded');
       const applyMutation = () => {
         rowEl.classList.toggle('expanded', expanded);
+        if (!rowEl.classList.contains('project-file-card')) {
+          if (expanded && forceExpanded === undefined) {
+            documentRef.querySelectorAll('#agent-timeline .expanded-mru').forEach((el) => el.classList.remove('expanded-mru'));
+            mostRecentlyExpanded = cardId;
+          }
+          rowEl.classList.toggle('expanded-mru', expanded && cardId === mostRecentlyExpanded);
+        }
         syncExpandedState(expanded);
         syncExpandedPathLabels(expanded);
         if (typeof onToggle === 'function') onToggle(expanded);
@@ -144,6 +154,17 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       toggleZoneEl.addEventListener('click', (event) => {
         event.stopPropagation();
         toggleCollapse();
+      });
+      toggleZoneEl.setAttribute('role', 'button');
+      toggleZoneEl.setAttribute('tabindex', '0');
+      toggleZoneEl.setAttribute('aria-label', 'Expand or collapse card');
+      toggleZoneEl.setAttribute('aria-expanded', String(isExpanded));
+      toggleZoneEl.addEventListener('keydown', (event) => {
+        if (event instanceof KeyboardEvent && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          event.stopPropagation();
+          toggleCollapse();
+        }
       });
     }
 

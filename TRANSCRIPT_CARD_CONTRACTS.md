@@ -237,6 +237,7 @@ Expected fields:
 - live: `type: "context_compacted"`
 - replay: `role: "context_compacted"`
 - `source` optional
+- `id` stable compaction identity when available; identical live/replay values
 - `messages_removed` optional
 - `tokens_removed` optional
 - `turn_id`
@@ -245,6 +246,27 @@ Expected fields:
 Contract rule:
 
 - when a compaction/truncation event also updates token totals, emit/record the matching `token_count` / `token_usage` state too
+- Codex maps `contextCompaction` item completion to this generic live/durable card;
+  item start is activity, not a completed card. The deprecated `thread/compacted`
+  alias must not duplicate an already reported modern completion.
+
+### Collapsed card presentation
+
+- Shell headers highlight only the first command token in muted blue. A running
+  indicator follows `shell_begin` through `shell_end`, not output arrival or a timer.
+  The summary is one non-wrapping ribbon: truncated command text on the left and
+  a fixed-size spinner on the far right, never a separate spinner line.
+- Generic `read_shell` / `write_shell` tool labels mean Reading shell / Writing to
+  shell; they do not invent missing output or process metadata.
+- Search headers use muted yellow; view headers and patch basenames use readable
+  grey; tool/server prefixes use command blue with normal-colour command text.
+- These colours apply only to collapsed summaries; expanded syntax stays intact.
+- Expanded transcript cards have a subtle border and the most recently expanded
+  card a slightly stronger border enclosing header and body, replacing visible
+  twisties. Sticky header replicas retain that border state. Standalone diff
+  header basenames are a darker grey than the path. Existing click
+  targets remain, with keyboard support. Recency is in-memory and user-driven;
+  restoring expanded cards after a projection shift must not reorder it.
 
 ## Message / reasoning contracts
 
