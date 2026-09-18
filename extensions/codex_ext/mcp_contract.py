@@ -55,6 +55,11 @@ def build_codex_thread_config(
     else:
         raise ValueError("Codex config must be a JSON object")
 
+    features = _optional_map(merged.get("features")).copy()
+    features.setdefault("default_mode_request_user_input", True)
+    merged["features"] = features
+    merged.setdefault("include_collaboration_mode_instructions", False)
+
     existing_mcp = merged.get("mcp_servers")
     if existing_mcp in (None, ""):
         mcp_servers: ObjectMap = {}

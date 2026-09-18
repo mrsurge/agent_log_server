@@ -55,6 +55,17 @@ struct PatchSummary {
     diff_text: Option<String>,
 }
 
+pub fn project_identity(start: &Path) -> Value {
+    let repo = Repository::discover(start).ok();
+    let head = repo.as_ref().and_then(|repo| repo.head().ok());
+    json!({
+        "cwd": start.to_string_lossy(),
+        "name": start.file_name().map(|name| name.to_string_lossy()),
+        "branch": head.as_ref().filter(|head| head.is_branch()).and_then(|head| head.shorthand()),
+        "head_short": head.as_ref().and_then(|head| head.target()).map(|oid| oid.to_string()[..8].to_owned()),
+    })
+}
+
 pub fn project_summary(start: &Path, max_diff_bytes: Option<u64>) -> Result<Value> {
     let repo = Repository::discover(start)
         .with_context(|| format!("No git repository found from {}", start.display()))?;
@@ -356,6 +367,9 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let repo = Repository::init(&root).unwrap();
+        let identity = project_identity(&root);
+        assert_eq!(identity["cwd"], root.to_string_lossy().as_ref());
+        assert!(identity["head_short"].is_null());
         fs::write(root.join("new.py"), b"one\ntwo\nthree").unwrap();
         fs::write(root.join("empty.py"), b"").unwrap();
         for limit in [1, 15000] {
@@ -374,6 +388,16 @@ mod tests {
             assert_eq!(empty["bytes"], 0);
             assert_eq!(empty["additions"], 0);
         }
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("test", "test@example.com").unwrap();
+        let oid = repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[]).unwrap();
+        let identity = project_identity(&root);
+        assert!(identity["branch"].as_str().is_some());
+        assert_eq!(identity["head_short"], oid.to_string()[..8]);
+        repo.set_head_detached(oid).unwrap();
+        assert!(project_identity(&root)["branch"].is_null());
+        drop(tree);
         drop(repo);
         fs::remove_dir_all(root).unwrap();
     }

@@ -1,4 +1,5 @@
 import { createSettingsRpcClient } from '../rpc/settings/client.ts';
+import { showToast } from '../toast.ts';
 import type { SocketLike, UnknownRecord } from '../shared_types.ts';
 
 interface ConversationSettingsState {
@@ -320,17 +321,26 @@ export function bindConversationRuntime(ctx: ConversationRuntimeContext) {
     }
   }
 
+  let compactPending = false;
   async function requestContextCompact() {
+    if (compactPending) return;
+    compactPending = true;
     try {
       const state = getState();
       const convoId = normalizeConversationId(state.clientConversationId)
         || normalizeConversationId(state.conversationMeta?.conversation_id);
-      const result = await conversationsRpcClient.compactConversation({ conversationId: convoId });
+      if (!convoId) throw new Error('No conversation selected');
+      showToast('Requesting context compaction...');
+      const result = await conversationsRpcClient.compactConversation({ conversationId: convoId, timeoutMs: 150000 });
       if (isRecord(result) && result.ok === false) {
         throw new Error(String(result.error || 'compact failed'));
       }
+      showToast('Context compaction request accepted');
     } catch (err) {
       console.warn('compact failed', err);
+      showToast(`Context compaction failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      compactPending = false;
     }
   }
 

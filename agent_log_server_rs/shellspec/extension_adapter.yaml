@@ -7,8 +7,11 @@ shells:
     cwd: ${ctx:CWD}
     subgroups: ["als-rs", "extension-adapter", "jsonrpc", "observed"]
     inspect_hints:
-      - json
+      - messagepack
       - jsonrpc
+    log_codecs:
+      stdout: messagepack
+      stderr: text
     command:
       - ${ctx:PYTHON}
       - -m

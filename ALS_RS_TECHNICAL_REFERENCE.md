@@ -383,19 +383,36 @@ There is no built-in provider runtime fallback. Active provider behavior comes
 from the registered `codex-ext` and `copilot-sdk` packages behind the generic
 adapter boundary.
 
-Selected first protocol/transport: newline-delimited JSON-RPC 2.0 over adapter
-stdin/stdout. The protocol shape remains transport-disposable: stdio can be
-replaced later by Unix sockets, framework-shell pipes, PyO3/shared-memory, or
-another byte channel without changing DTO method/event names.
+Adapter stdin/stdout defaults to concatenated raw MessagePack maps. The
+JSON-RPC-shaped DTO envelope, method/event names, correlation IDs, and extension
+Python API remain unchanged; this is an encoding change, not a provider API
+change. Frames have no newline or length prefix. Both readers handle split and
+coalesced frames, limit individual frames to 32 MiB, and reject malformed or
+truncated streams. Python uses msgpack's streaming boundary scanner and msgspec
+for payload decoding/encoding; Rust uses rmp-serde named maps.
 
-Current observed transport direction: keep the JSON-RPC DTO shape, but move the
-adapter process under the native `ferrous_framework` stdio transport
-introspection/orchestration layer when framework-shell context is present. ALS-RS
-uses Ferrous' async native pipe facade for adapter writes and a single
-ALS-owned reader task over Ferrous stdout bytes/chunks for JSON-RPC line
-framing. The adapter JSON-RPC stream must never be forwarded through the Rust
-CLI stdout. Default ALS-RS builds retain the direct child stdin/stdout fallback
-when Ferrous cannot start.
+`ALS_RS_ADAPTER_CODEC=json` explicitly selects newline-delimited JSON on both
+ends for debugging, independently of the browser Socket.IO serializer. There
+is no codec sniffing or silent encoding fallback. stderr remains plain text.
+
+With framework-shell context, Ferrous owns the observed child pipes. ALS uses
+serialized binary writes off the async executor and one stdout consumer; an
+RPC cancellation does not interrupt an in-progress frame write. The direct
+child fallback uses the same codec. Protocol stdout never goes to Rust CLI
+stdout. Shellspec and launch metadata declare `log_codecs.stdout: messagepack`
+and `stderr: text`; the JSON debug override also changes stdout metadata to
+`json`. Missing on-disk shellspecs use an equivalent in-memory pipe spec.
+
+The pinned FWS/Ferrous observer currently has a 1 MiB MessagePack inspection
+budget, smaller than the adapter's transport limit. Oversized observation may
+fail; original logs and byte locations remain available for direct inspection.
+That observation budget does not truncate or alter transport payloads.
+
+Provider-owned pipes are unchanged: Codex app-server speaks JSON lines and
+Copilot CLI speaks Content-Length-framed JSON. Do not label those MessagePack.
+TE2's framework-worker pipe already uses MessagePack; ALS's separate TE2
+sidebar Socket.IO client is not migrated by this adapter change. Durable
+transcript JSONL and metadata JSON are also unchanged.
 
 The adapter shellspec is:
 
@@ -564,10 +581,10 @@ Supported runtime scope:
 | `approval.respond` | Delegates provider approval responses through the extension loader; MCP ask-user responses are bridged by ALS-RS IPC before handoff persistence. |
 | `extension.shutdown` | Stops supported extension handlers. |
 
-First physical transport:
+Current physical transport:
 
-- newline-delimited JSON-RPC 2.0 over adapter stdin/stdout
-- one JSON object per line
+- concatenated MessagePack maps over adapter stdin/stdout
+- unchanged JSON-RPC-shaped DTOs; JSON lines only under `ALS_RS_ADAPTER_CODEC=json`
 - Rust can later replace this transport without changing adapter DTO names
 - live events from extension routers are forwarded as `event.live`
   notifications
@@ -613,13 +630,14 @@ Runtime behavior:
   and Rust registry use the same multi-root extension view. Root 0 is builtin;
   root 1 is the ALS-RS user-installed extension root at
   `${ALS_RS_DATA_DIR}/extensions`.
-- Adapter transport is newline-delimited JSON-RPC 2.0 on stdin/stdout.
+- Adapter transport defaults to raw MessagePack maps on stdin/stdout.
 - If framework-shell config is present, `als-server` prefers the
   `ferrous_framework` transport: a native async manager/pipe facade that starts
-  the adapter as an observed native-pipe shell and uses direct async
-  `write_to_shell(..., append_newline=true)` for JSON-RPC requests.
+  the adapter as an observed native-pipe shell. A serialized writer calls
+  `write_to_pipe_blocking` with encoded bytes on a blocking task, never through
+  a text conversion or newline-appending API.
   The shell shape comes from `agent_log_server_rs/shellspec/extension_adapter.yaml`.
-- ALS-RS owns JSON-RPC line framing over the Ferrous byte/chunk read path;
+- ALS-RS owns incremental frame decoding over the Ferrous byte/chunk read path;
   Ferrous owns process launch, stdin writes, stdout/stderr logs, FWS-compatible
   records/capabilities, and shell termination.
 - The current Ferrous pin also exposes an FWS Socket.IO peer/control-plane lane
@@ -627,7 +645,7 @@ Runtime behavior:
   ALS-RS does not use that lane for extension-adapter JSON-RPC; it remains an
   introspection/control-plane capability of Ferrous, separate from ALS's adapter
   protocol.
-- The current Ferrous pin is `5f9e0de` / `0.2.7`; it also includes native
+- The branch Ferrous pin is `45b3830` / `0.2.14`; it also includes native
   lifecycle event subscriptions and procfs-backed tree shutdown. Those are
   Ferrous/FWS control-plane semantics and do not change ALS-RS adapter
   request/response framing.
@@ -810,8 +828,18 @@ Current implementation:
   ALS-RS `/ipc` MCP ask-user bridge.
 - `conversation.interrupt` is implemented through the generic adapter
   `conversation.interrupt` hook and extension-owned abort logic.
-- `conversation.compact` and `conversation.shell.exec` still return explicit
-  not-implemented control results for now.
+- `conversation.compact` uses the generic adapter's `compact_session` dispatch.
+  Rust sends `ConversationCompactParams` containing the saved provider session,
+  CWD, and settings so an adapter restarted since the last send can seed its
+  in-memory metadata before extension-owned lazy resume. Capability
+  `compaction` reflects a callable handler `compact_session`. Unsupported
+  extensions and invalid results fail explicitly. Adapter acknowledgment is
+  bounded to 120 seconds; the frontend allows 150 seconds, prevents duplicate
+  taps while pending, and shows acceptance/errors through copyable toasts.
+  An accepted request does not imply compaction has completed. Codex retains
+  its direct `thread/compact/start`, cold-miss resume with `excludeTurns: true`,
+  then single retry. No local transcript hydration or rewriting occurs here.
+- `conversation.shell.exec` remains explicitly not implemented.
 - Legacy Python intent was used as a parity guide, not a logic template: the
   Python server rendered splash cards from full `meta.json`, stored
   `pinned_conversations` as ordered app config, and resolved the selected
@@ -911,7 +939,7 @@ Validation currently covers:
 | Settings | Rust reads extension `settings_schema.json`; provider data and actions route through generic adapter methods. |
 | TE2 integration | Rust owns readiness, typed sidebar IPC, stateful window checkpoints, file navigation, mentions, drafts, and inline edit projections. |
 | Project/edit review | Rust owns git summaries/actions, tracked agent edits, reverse patching, sequential reject-all, and inline review state. |
-| Compaction | `conversation.compact` remains an explicit ALS-RS not-implemented control. Provider protocol support alone does not make the harness method available. |
+| Compaction | `conversation.compact` routes Rust -> generic adapter -> extension `compact_session`; capability and cold-session metadata are preserved. Unsupported extensions fail explicitly. |
 | Shell execution | `conversation.shell.exec` remains explicitly not implemented. Provider shell/tool cards still arrive through normalized router events. |
 | Provider isolation | One long-lived adapter currently initializes all active Python extension handlers. Per-extension adapter processes remain an optional future isolation design. |
 | Embedded Python adapter | `embedded_adapter.rs` is retained behind `cfg(feature = "embedded-python-adapter")`, but no Cargo feature/dependency enables it. The active path is the subprocess adapter; the dormant source is a cleanup or future-design artifact. |
@@ -940,12 +968,25 @@ serves transcript windows plus selected-conversation live/projection events.
 Large server frames use negotiated gzip. One logical client owns one current
 stream connection and one selected conversation; a newer connection supersedes
 the old one, and bounded outbound queues force reconnect/resync if a client
-falls behind. The browser uses `reconnecting-websocket` with no stale send
-queue. A post-initial server hello clears cached recipe versions while retaining
-the current card bounds, then schedules a `current` projection refresh outside
-the serialized frame decoder. The empty known-card set forces a full snapshot,
-avoiding both stale transcript state and the decoder deadlock that occurs when a
-hello handler awaits the response it must itself unblock.
+falls behind. The browser uses `reconnecting-websocket` with no stale send queue.
+Raw-stream reconnect/resync, Socket.IO reconnect, and foreground recovery share
+a debounced single-flight coordinator. Visibility returns after at least one
+second hidden, page lifecycle resume, and persisted pageshow trigger recovery;
+a reconnect seen while hidden is also recovered on visibility return. There is
+no periodic refresh. Control/foreground recovery reopens the suspect raw socket
+rather than trusting an OPEN state retained through suspension. Old connection
+generations cannot apply queued decoded frames after reconnection.
+
+Recovery clears cached recipe versions and fetches only a bounded card window,
+outside the serialized frame decoder. Actual `autoScroll` pin state chooses
+`tail`; unpinned views choose `current`, even when their window contains the
+tail. The anchor is captured immediately before replacement and restored by
+card ID/pixel offset. Visible durable card indexes can reseed stale stream
+bounds after live pruning. Conversation/generation and pin-change guards reject
+obsolete responses. One retry handles concurrent pin/window changes; a later
+control/resume interruption schedules follow-up recovery. Existing replacement
+preserves overlapping expansion/measurement state. This is neither full-history
+hydration nor a full-page reload, and does not force unpinned readers to tail.
 
 `ALS_RS_TRANSCRIPT_TRANSPORT=rpc` is the explicit transcript debugging mode. It
 routes projection requests and transcript notifications through the existing
@@ -1024,6 +1065,27 @@ a fake patch.
 
 Streaming shell cards keep their bounded output viewport at the newest appended
 text. The conversation viewport's pinned-tail behavior remains a separate layer.
+Shell summaries mark begin/end lifecycle with a running spinner, including active
+projection replay; final historical shell cards have no running indicator.
+The summary uses a single non-wrapping flex row with ellipsized command text and
+a fixed-size right-aligned spinner; expanded command/output content is unchanged.
+Collapsed shell summaries colour the first command token without invoking syntax
+detection. Search headers use muted yellow, view headers muted grey, tool headers
+separate a blue prefix from the normal command text, and patch summaries isolate
+the basename in readable grey. Expanded content retains its normal rendering.
+Transcript twisties are visually replaced by whole-card overlay borders enclosing
+header and content, with a stronger most-recent-user-expansion border. Sticky
+header replicas carry the same state. Standalone diff paths render their basename
+in a darker grey than the path. Toggle targets remain keyboard
+accessible; projection restoration does not change expansion recency.
+
+The idle status ribbon displays the conversation CWD basename and available Git
+branch/short SHA. `/rpc/ui` `project.identity.get` uses repository discovery and
+HEAD only, never status/diff traversal. Non-Git directories retain their basename;
+detached HEAD omits branch. Conversation/header changes, reconnect, and idle
+transitions refresh identity with stale-response protection and a short event
+throttle, not polling. Active activity and explicit non-idle status messages
+retain precedence over the placeholder; the existing active spinner is unchanged.
 
 Transcript diff metadata rows show per-patch additions/deletions counted within
 unified-diff hunks (excluding file headers), with green/red badges and a Codicon
@@ -1246,6 +1308,29 @@ Source anchors:
 ## Approval and MCP interaction contracts
 
 ### Generic approvals
+
+Codex native `item/tool/requestUserInput` already targets this persisted lane
+and the question renderer shared with MCP ask-user. It keeps the provider
+request ID and returns `answers[question_id].answers` through the extension,
+not private MCP IPC. Multi-question cards stage choices/freeform and submit
+only after every question has an answer; single-question options submit
+immediately. The extension defaults `features.default_mode_request_user_input`
+to true during thread configuration, independently of TE2, preserving explicit
+false. Verified against upstream `rust-v0.153.3`: the native handler awaits a
+response even in Default mode (`isBlocking: false`), but that is not a guarantee
+of whole-turn tool exclusivity. `request_user_input_async` is a separate tool.
+
+The extension defaults `include_collaboration_mode_instructions` to false to
+avoid upstream's optional-only/no-permission-question policy. Its
+`devins_contract.py` appends ALS-owned mode/user-input guidance to the effective
+developer instructions, preserving repository/user context. Default mode honors
+workflow approvals; Plan mode remains non-mutating until the configured mode
+changes. Required questions/approval gates use native input when available and
+never treat missing answers as consent. An explicit true restores upstream
+mode instructions and skips the replacement. Execution-permission settings
+remain unchanged. Thread configuration takes effect on start/resume; developer
+guidance is also supplied per turn. Reattach existing live provider sessions
+to activate changed thread configuration.
 
 Live generic `type: "approval"` events persist into
 `meta.pending_approvals`. `conversation.approval.respond` routes provider
@@ -1487,6 +1572,15 @@ waits for readiness where requested.
 
 ### Codex
 
+`contextCompaction` item start reports activity; completion emits and persists the
+generic `context_compacted` card with matching identity/source/turn fields.
+Deprecated `thread/compacted` notifications remain supported and are deduplicated
+against modern completions. Distinct modern compaction IDs within a turn remain
+distinct cards. Generic rendering and Rust projection remain provider-neutral.
+Command terminal interactions without stdin use `read_shell` (Reading shell);
+nonempty stdin uses `write_shell` (Writing to shell). New-file interactions retain
+their apply-patch ownership instead of relabeling that existing card.
+
 - The schema-owned `high_context_400k` toggle injects
   `model_context_window = 450000` and
   `model_auto_compact_token_limit = 400000`.
@@ -1548,6 +1642,14 @@ frontend consume only generic adapter/schema/card contracts.
 
 ## Repository operations and validation
 
+- The `agent-run-profile-workflow` dependency baseline pins Python FWS through
+  the Git requirement in `requirements.txt` to
+  `f9a0eeb45620540cea0617c3e68ec6bf1041d123` (FWS 0.0.64) and the Ferrous submodule to
+  `45b3830187ed789669a20bad68ac43e700a16f41` (0.2.14). Both are exact snapshots
+  from `feature/log-projection-codecs`, not a merge with main; they include sliding
+  log viewport/live-tail pinning and collapsible resizable log panes.
+  Updating these repository pins does not install dependencies or restart the
+  live harness; those are separate operations.
 - Run `basedpyright` directly from `PATH`.
 - Use targeted source searches. Do not blindly content-search generated,
   bundled, vendor, transcript, or framework-shell log trees.
@@ -1563,6 +1665,8 @@ frontend consume only generic adapter/schema/card contracts.
 - After Python changes, run focused tests and `basedpyright`.
 - Keep `pyproject.toml` and Rust crate versions synchronized when a release or
   commit requires a version bump.
+- A user-requested checkpoint means no version bump unless separately requested;
+  this overrides the general commit-version rule.
 - Changes to the `ferrous_framework` submodule are committed/pushed in its own
   repository first; the parent then records the gitlink update.
 
@@ -2274,7 +2378,7 @@ Acceptance:
      `conversation.draft.updated` channel.
    - interrupt: implemented through the generic adapter `conversation.interrupt`
      path.
-   - compact: still needs the generic ALS-RS control contract.
+   - compact: subsequently implemented through the generic ALS-RS adapter control contract; see Conversations RPC namespace.
    - shell/tool card parity: continue validating via provider-owned router events
      and transcript mirror rules instead of Copilot-pilot-only assumptions.
 5. Keep this migration plan current after each ALS-RS phase lands.

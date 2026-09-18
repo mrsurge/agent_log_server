@@ -1,3 +1,4 @@
+mod adapter_codec;
 mod adapter_process;
 mod agent_edits;
 mod agent_log;

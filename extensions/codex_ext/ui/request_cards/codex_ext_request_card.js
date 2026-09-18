@@ -391,6 +391,8 @@ function renderUserInputCard(body, event, _schema, helpers) {
     body.append(summary);
   }
 
+  const multipleQuestions = questions.length > 1;
+  const selectedAnswers = {};
   const buildAnswers = (overrides = {}) => {
     const answers = {};
     const assignAnswers = (questionId, raw) => {
@@ -400,7 +402,7 @@ function renderUserInputCard(body, event, _schema, helpers) {
         answers[questionId] = { answers: values };
       }
     };
-    Object.entries(overrides).forEach(([questionId, raw]) => {
+    Object.entries({ ...selectedAnswers, ...overrides }).forEach(([questionId, raw]) => {
       assignAnswers(questionId, raw);
     });
     body.querySelectorAll('[data-question-id]').forEach((inputEl) => {
@@ -465,6 +467,16 @@ function renderUserInputCard(body, event, _schema, helpers) {
           button.disabled = true;
         } else {
           button.addEventListener('click', async () => {
+            if (multipleQuestions) {
+              selectedAnswers[questionId] = [optionLabel];
+              optionsWrap.querySelectorAll('button').forEach((candidate) => {
+                candidate.classList.toggle('approve', candidate === button);
+                candidate.setAttribute('aria-pressed', String(candidate === button));
+              });
+              const field = wrapper.querySelector('[data-question-id]');
+              if (field) field.value = '';
+              return;
+            }
             const answers = buildAnswers({ [questionId]: [optionLabel] });
             const ok = await trySubmit(helpers, { answers }, {}, feedback, 'Sending answers…');
             if (ok) {
@@ -507,6 +519,13 @@ function renderUserInputCard(body, event, _schema, helpers) {
         field.rows = 2;
         field.placeholder = question.isOther ? 'Enter one or more responses (one per line)' : 'Enter response';
       }
+      field.addEventListener('input', () => {
+        delete selectedAnswers[questionId];
+        wrapper.querySelectorAll('.approval-option-list button').forEach((button) => {
+          button.classList.remove('approve');
+          button.setAttribute('aria-pressed', 'false');
+        });
+      });
       wrapper.append(field);
     }
 
@@ -519,7 +538,7 @@ function renderUserInputCard(body, event, _schema, helpers) {
     setFeedback(feedback, readOnlyStatusLabel(event), false);
     return;
   }
-  const needsManualSubmit = questions.some((question) => {
+  const needsManualSubmit = multipleQuestions || questions.some((question) => {
     if (!question || typeof question !== 'object') return false;
     if (question.allowFreeform !== false) return true;
     return !Array.isArray(question.options) || !question.options.length;
@@ -534,6 +553,10 @@ function renderUserInputCard(body, event, _schema, helpers) {
   sendButton.textContent = 'Send';
   sendButton.addEventListener('click', async () => {
     const answers = buildAnswers();
+    if (multipleQuestions && questions.some((question) => !answers[String(question.id || '')])) {
+      setFeedback(feedback, 'Answer each question before sending.', true);
+      return;
+    }
     if (!Object.keys(answers).length) {
       setFeedback(feedback, 'Enter at least one answer first.', true);
       return;

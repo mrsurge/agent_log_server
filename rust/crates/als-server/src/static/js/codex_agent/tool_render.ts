@@ -437,6 +437,8 @@ export function bindToolRender(ctx: ToolRenderContext) {
   }
 
   function toolCardLabel(toolName: string, serverName = '', filePath = '', payload: ToolPayload = {}): string {
+    if (!serverName && toolName === 'read_shell') return 'Reading shell';
+    if (!serverName && toolName === 'write_shell') return 'Writing to shell';
     if (toolName === 'apply_patch') {
       const resolvedPath = typeof filePath === 'string' && filePath.trim() ? filePath.trim() : '';
       const relPath = resolvedPath ? (toRelativePath(resolvedPath) || resolvedPath.split('/').pop() || resolvedPath) : '';
@@ -461,11 +463,29 @@ export function bindToolRender(ctx: ToolRenderContext) {
       const outcomeEmoji = applyPatchOutcomeEmoji(resolveToolCardOutcome(toolName, payload));
       const ribbonCommand = outcomeEmoji ? `${label} ${outcomeEmoji}` : label;
       renderShellCmdRibbon(headerEl, ribbonCommand);
+      headerEl.classList.add('patch-command-ribbon');
+      const compact = document.createElement('span');
+      compact.className = 'patch-collapsed-summary';
+      const command = document.createElement('span');
+      command.className = 'tool-command-prefix';
+      command.textContent = isApplyPatchNewFile(payload) ? 'new file ' : 'apply_patch ';
+      const path = toRelativePath(filePath) || filePath;
+      const slash = path.lastIndexOf('/') + 1;
+      const name = document.createElement('span');
+      name.className = 'patch-filename';
+      name.textContent = path.slice(slash);
+      compact.append(command, path.slice(0, slash), name, outcomeEmoji ? ` ${outcomeEmoji}` : '');
+      headerEl.prepend(compact);
       return ribbonCommand;
     }
     const savedTwisty = headerEl.querySelector(':scope > .twisty') || headerEl.querySelector('.twisty');
     const savedToggle = headerEl.querySelector(':scope > .ribbon-toggle-zone') || headerEl.querySelector('.ribbon-toggle-zone');
-    headerEl.textContent = label;
+    headerEl.textContent = '';
+    const colon = label.indexOf(':');
+    const prefix = document.createElement('span');
+    prefix.className = 'tool-command-prefix';
+    prefix.textContent = colon >= 0 ? label.slice(0, colon) : label;
+    headerEl.append(prefix, colon >= 0 ? label.slice(colon) : '');
     if (savedTwisty) headerEl.appendChild(savedTwisty);
     if (savedToggle) headerEl.appendChild(savedToggle);
     return label;

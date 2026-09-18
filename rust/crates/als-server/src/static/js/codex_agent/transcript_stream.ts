@@ -29,6 +29,7 @@ const TAG_ERROR = 255;
 export type TranscriptTransportMode = 'stream' | 'rpc';
 
 interface ProjectionOptions {
+  startCard?: number;
   conversationId?: string | null;
   action: TranscriptProjectionAction;
   windowCards: number;
@@ -88,6 +89,7 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
   let readyPromise: Promise<void>;
   let resolveReady: (() => void) | null = null;
   let connectedOnce = false;
+  let connectionGeneration = 0;
   let serverEpoch: string | null = null;
   let lastStreamSequence = 0;
   let requestCounter = 0;
@@ -191,6 +193,7 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
     });
     socket.binaryType = 'arraybuffer';
     socket.addEventListener('open', () => {
+      connectionGeneration += 1;
       const conversationId = options.getConversationId() || null;
       send(TAG_CLIENT_HELLO, {
         protocol: PROTOCOL_VERSION,
@@ -201,14 +204,21 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
       });
     });
     socket.addEventListener('message', (event) => {
+      const generation = connectionGeneration;
       decodeQueue = decodeQueue
-        .then(async () => handleFrame(await decodeFrame(event.data)))
+        .then(async () => {
+          if (generation !== connectionGeneration) return;
+          const frame = await decodeFrame(event.data);
+          if (generation === connectionGeneration) await handleFrame(frame);
+        })
         .catch((error) => {
+          if (generation !== connectionGeneration) return;
           console.error('transcript stream frame failed', error);
           scheduleResync();
         });
     });
     socket.addEventListener('close', () => {
+      connectionGeneration += 1;
       rejectPending('Transcript stream disconnected');
       if (!resolveReady) resetReady();
       options.onConnectionChange?.(false);
@@ -503,7 +513,7 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
         shift_cards: optionsValue.shiftCards,
         max_bytes: optionsValue.maxBytes ?? 2097152,
         known: {
-          start_card: projection?.start_card,
+          start_card: optionsValue.startCard ?? projection?.start_card,
           end_card: projection?.end_card,
           revision: projection?.revision,
           cards: orderedCards.map((card) => [card.cardId, card.version]),
@@ -532,6 +542,15 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
     socket = null;
   }
 
+  function reconnectForRecovery(): void {
+    if (!socket) return;
+    connectionGeneration += 1;
+    rejectPending('Transcript stream recovery');
+    resetReady();
+    clearProjectionCache(true);
+    socket.reconnect(4002, 'foreground/control recovery');
+  }
+
   function debugSnapshot(): JsonObject {
     return {
       mode: 'stream',
@@ -551,6 +570,7 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
 
   return {
     clientId,
+    reconnectForRecovery,
     clearProjectionCache,
     debugSnapshot,
     dispose,

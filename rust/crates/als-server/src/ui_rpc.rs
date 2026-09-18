@@ -72,6 +72,11 @@ async fn dispatch_rpc(
         "filesystem.list" => filesystem_list(request.params).await,
         "filesystem.search" => filesystem_search(state, request.params).await,
         "project.summary.get" => project_summary_get(state, request.params).await,
+        "project.identity.get" => {
+            let start = project_start_from_params(state, &request.params)?;
+            tokio::task::spawn_blocking(move || crate::project_summary::project_identity(&start))
+                .await.map_err(internal_rpc_error)
+        }
         "project.agentDiff.accept" => project_agent_diff_accept(io, state, request.params).await,
         "project.agentDiff.reject" => project_agent_diff_reject(io, state, request.params).await,
         "project.agentDiff.rejectAll" => {

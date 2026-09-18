@@ -13,6 +13,7 @@ export const UI_RPC_METHODS = {
   filesystemList: 'filesystem.list',
   filesystemSearch: 'filesystem.search',
   projectSummaryGet: 'project.summary.get',
+  projectIdentityGet: 'project.identity.get',
   projectAgentDiffAccept: 'project.agentDiff.accept',
   projectAgentDiffReject: 'project.agentDiff.reject',
   projectAgentDiffRejectAll: 'project.agentDiff.rejectAll',

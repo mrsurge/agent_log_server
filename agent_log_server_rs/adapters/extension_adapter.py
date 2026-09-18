@@ -10,7 +10,7 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, TextIO, TypeAlias, cast
+from typing import BinaryIO, Protocol, TextIO, TypeAlias, cast
 
 from agent_log_server_rs.adapter_protocol import (
     AdapterCapabilities,
@@ -23,8 +23,10 @@ from agent_log_server_rs.adapter_protocol import (
 )
 from agent_log_server_rs.codec import (
     AdapterDecodeError,
-    decode_json_line,
-    encode_json_line,
+    adapter_codec,
+    decode_frame,
+    encode_frame,
+    FrameDecoder,
 )
 from agent_log_server_rs.adapters.rpc_common import (
     INTERNAL_ERROR,
@@ -466,6 +468,8 @@ class ExtensionLoaderModule(Protocol):
 
     async def interrupt_session(self, extension_id: str, conversation_id: str) -> JsonMap: ...
 
+    async def compact_session(self, extension_id: str, conversation_id: str) -> JsonMap: ...
+
 
 @dataclass
 class AdapterState:
@@ -488,23 +492,21 @@ class ExtensionJsonRpcAdapter:
         )
         self._state = AdapterState()
         self._loader_initialized = False
-        self._stdout: TextIO | None = None
+        self._codec = adapter_codec()
+        self._stdout: TextIO | BinaryIO | None = None
         self._write_lock = asyncio.Lock()
         self._initialize_lock = asyncio.Lock()
         self._shutdown_requested = False
 
     async def run_stdio(
         self,
-        stdin: TextIO = sys.stdin,
-        stdout: TextIO = sys.stdout,
+        stdin: TextIO | BinaryIO = sys.stdin,
+        stdout: TextIO | BinaryIO = sys.stdout,
     ) -> int:
         self._stdout = stdout
         pending_tasks: set[asyncio.Task[None]] = set()
-        async for line in self._iter_stdin_lines(stdin):
-            line = line.strip()
-            if not line:
-                continue
-            message = await self._decode_line(line)
+        async for frame in self._iter_stdin_frames(stdin):
+            message = await self._decode_frame(frame)
             if message is None:
                 continue
             method = message.get("method") if isinstance(message.get("method"), str) else ""
@@ -525,40 +527,41 @@ class ExtensionJsonRpcAdapter:
         await self._drain_tasks(pending_tasks)
         return 0
 
-    async def _iter_stdin_lines(self, stdin: TextIO) -> AsyncIterator[bytes]:
+    async def _iter_stdin_frames(self, stdin: TextIO | BinaryIO) -> AsyncIterator[bytes]:
         try:
-            async for line in self._iter_stdin_lines_fd(stdin):
-                yield line
+            async for frame in self._iter_stdin_frames_fd(stdin):
+                yield frame
             return
         except (AttributeError, OSError, RuntimeError, io.UnsupportedOperation, NotImplementedError):
             pass
 
+        decoder = FrameDecoder(self._codec)
+        stream = cast(BinaryIO | TextIO, getattr(stdin, "buffer", stdin))
+        read = cast(Callable[[int], bytes | str], getattr(stream, "read1", stream.read))
         while True:
-            line = await asyncio.to_thread(stdin.readline)
-            if line == "":
+            chunk = await asyncio.to_thread(read, 65536)
+            if not chunk:
+                decoder.finish()
                 return
-            if isinstance(line, bytes):
-                yield line
-            else:
-                yield line.encode("utf-8")
+            raw = chunk if isinstance(chunk, bytes) else chunk.encode("utf-8")
+            for frame in decoder.feed(raw):
+                yield frame
 
-    async def _iter_stdin_lines_fd(self, stdin: TextIO) -> AsyncIterator[bytes]:
+    async def _iter_stdin_frames_fd(self, stdin: TextIO | BinaryIO) -> AsyncIterator[bytes]:
         stdin_buffer = getattr(stdin, "buffer", stdin)
         fd = stdin_buffer.fileno()
         loop = asyncio.get_running_loop()
         was_blocking = os.get_blocking(fd)
         queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-        pending = bytearray()
+        decoder = FrameDecoder(self._codec)
         eof_queued = False
 
         def queue_eof() -> None:
             nonlocal eof_queued
             if eof_queued:
                 return
-            if pending:
-                queue.put_nowait(bytes(pending))
-                pending.clear()
             eof_queued = True
+            loop.remove_reader(fd)
             queue.put_nowait(None)
 
         def on_stdin_ready() -> None:
@@ -575,14 +578,9 @@ class ExtensionJsonRpcAdapter:
                 if not chunk:
                     queue_eof()
                     return
-                pending.extend(chunk)
-                while True:
-                    newline = pending.find(b"\n")
-                    if newline < 0:
-                        break
-                    line = bytes(pending[:newline])
-                    del pending[: newline + 1]
-                    queue.put_nowait(line)
+                queue.put_nowait(chunk)
+                loop.remove_reader(fd)
+                return
 
         os.set_blocking(fd, False)
         reader_added = False
@@ -592,8 +590,12 @@ class ExtensionJsonRpcAdapter:
             while True:
                 line = await queue.get()
                 if line is None:
+                    decoder.finish()
                     return
-                yield line
+                for frame in decoder.feed(line):
+                    yield frame
+                if not eof_queued:
+                    loop.add_reader(fd, on_stdin_ready)
         finally:
             if reader_added:
                 with contextlib.suppress(Exception):
@@ -608,9 +610,9 @@ class ExtensionJsonRpcAdapter:
         tasks.clear()
         await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _decode_line(self, line: bytes | str) -> JsonMap | None:
+    async def _decode_frame(self, line: bytes | str) -> JsonMap | None:
         try:
-            raw = decode_json_line(line)
+            raw = decode_frame(line, self._codec)
         except AdapterDecodeError as exc:
             await self._send_error(None, PARSE_ERROR, "Parse error", str(exc))
             return None
@@ -622,7 +624,7 @@ class ExtensionJsonRpcAdapter:
         return cast(JsonMap, raw)
 
     async def _handle_line(self, line: str) -> None:
-        message = await self._decode_line(line)
+        message = await self._decode_frame(line)
         if message is None:
             return
 
@@ -700,6 +702,8 @@ class ExtensionJsonRpcAdapter:
             return await self._conversation_send(params)
         if method == AdapterMethod.CONVERSATION_INTERRUPT:
             return await self._conversation_interrupt(params)
+        if method == AdapterMethod.CONVERSATION_COMPACT:
+            return await self._conversation_compact(params)
         if method == AdapterMethod.APPROVAL_RESPOND:
             return await self._approval_respond(params)
 
@@ -752,6 +756,7 @@ class ExtensionJsonRpcAdapter:
                     models=models_supported,
                     sessions=sessions_supported,
                     interruption=interruption_supported,
+                    compaction=_has_callable_attr(handler, "compact_session"),
                     conversation_fork=fork_supported,
                     live_events=conversations_supported,
                     transcript_records=conversations_supported,
@@ -1496,6 +1501,39 @@ class ExtensionJsonRpcAdapter:
             raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid send result")
         return ack_from_result(conversation_id, cast(JsonMap, result)).to_json()
 
+    async def _conversation_compact(self, params: JsonMap) -> JsonMap:
+        extension_id = self._extension_id_param(params)
+        handler = self._supported_handler(extension_id)
+        if not _has_callable_attr(handler, "compact_session"):
+            raise RpcAdapterError(METHOD_NOT_FOUND, f"{extension_id} does not support compaction")
+        conversation_id = required_string(params, "conversation_id")
+        provider_session_id = required_string(params, "provider_session_id")
+        self._seed_conversation_meta(
+            conversation_id,
+            extension_id=extension_id,
+            settings=optional_map(params.get("settings")) or {},
+            cwd=optional_string(params.get("cwd")) or str(self._state.cwd),
+            provider_session_id=provider_session_id,
+        )
+        try:
+            result = await asyncio.wait_for(
+                self._loader.compact_session(extension_id, conversation_id), timeout=120.0
+            )
+        except TimeoutError:
+            return ConversationControlResult(
+                extension_id=extension_id, conversation_id=conversation_id, ok=False,
+                error="Timed out waiting for compaction acknowledgment; completion is unknown",
+            ).to_json()
+        result_map = optional_map(result)
+        if result_map is None or not isinstance(result_map.get("ok"), bool):
+            raise RpcAdapterError(INTERNAL_ERROR, f"{extension_id} returned invalid compact result")
+        return ConversationControlResult(
+            extension_id=extension_id, conversation_id=conversation_id,
+            ok=result_map.get("ok") is True, error=optional_string(result_map.get("error")),
+            metadata={key: value for key, value in result_map.items()
+                      if key not in {"ok", "error", "extension_id", "conversation_id"}},
+        ).to_json()
+
     async def _conversation_interrupt(self, params: JsonMap) -> JsonMap:
         extension_id = self._extension_id_param(params)
         self._supported_handler(extension_id)
@@ -1721,7 +1759,7 @@ class ExtensionJsonRpcAdapter:
         self._save_meta(conversation_id, meta)
 
     async def _send_notification(self, method: str, params: object) -> None:
-        await self._write_json({"jsonrpc": JSONRPC_VERSION, "method": method, "params": params})
+        await self._write_message({"jsonrpc": JSONRPC_VERSION, "method": method, "params": params})
 
     async def _send_import_started(
         self,
@@ -1834,7 +1872,7 @@ class ExtensionJsonRpcAdapter:
         )
 
     async def _send_success(self, request_id: RpcId, result: object) -> None:
-        await self._write_json(
+        await self._write_message(
             {"jsonrpc": JSONRPC_VERSION, "id": request_id, "result": result}
         )
 
@@ -1848,16 +1886,22 @@ class ExtensionJsonRpcAdapter:
         error: JsonMap = {"code": code, "message": message}
         if data is not None:
             error["data"] = data
-        await self._write_json({"jsonrpc": JSONRPC_VERSION, "id": request_id, "error": error})
+        await self._write_message({"jsonrpc": JSONRPC_VERSION, "id": request_id, "error": error})
 
-    async def _write_json(self, payload: JsonMap) -> None:
+    async def _write_message(self, payload: JsonMap) -> None:
         if self._stdout is None:
             return
-        encoded = encode_json_line(payload)
+        encoded = encode_frame(payload, self._codec)
         async with self._write_lock:
-            if _write_bytes_to_text_stream(self._stdout, encoded):
+            if _write_bytes_to_text_stream(self._stdout, encoded, self._codec):
                 return
-            write_all_fd(self._stdout.fileno(), encoded)
+            writer = asyncio.create_task(asyncio.to_thread(write_all_fd, self._stdout.fileno(), encoded))
+            try:
+                await asyncio.shield(writer)
+            except asyncio.CancelledError:
+                # Finish this frame before another request can acquire the writer.
+                await writer
+                raise
 
 
 def write_all_fd(fd: int, data: bytes) -> None:
@@ -1873,17 +1917,20 @@ def write_all_fd(fd: int, data: bytes) -> None:
         offset += written
 
 
-def _write_bytes_to_text_stream(stdout: TextIO, data: bytes) -> bool:
+def _write_bytes_to_text_stream(stdout: TextIO | BinaryIO, data: bytes, codec: str = "json") -> bool:
     try:
         fd = stdout.fileno()
     except (AttributeError, OSError, io.UnsupportedOperation):
-        stdout.write(data.decode("utf-8"))
+        if isinstance(stdout, io.TextIOBase):
+            if codec != "json":
+                raise TypeError("MessagePack requires binary stdout")
+            _ = cast(TextIO, stdout).write(data.decode("utf-8"))
+        else:
+            _ = cast(BinaryIO, stdout).write(data)
         stdout.flush()
         return True
     if fd < 0:
-        stdout.write(data.decode("utf-8"))
-        stdout.flush()
-        return True
+        raise ValueError("invalid adapter stdout descriptor")
     return False
 
 

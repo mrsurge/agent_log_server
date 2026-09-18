@@ -53,6 +53,7 @@ import { bindTimelineRows } from './js/codex_agent/timeline/rows.ts';
 import { bindTimelineLiveItems } from './js/codex_agent/timeline/live_items.ts';
 import { bindTimelineReplay } from './js/codex_agent/timeline/replay.ts';
 import { bindTimelineVirtualizer } from './js/codex_agent/timeline/virtualizer.ts';
+import { bindTranscriptRecovery } from './js/codex_agent/transcript_recovery.ts';
 import { createConversationsRpcClient } from './js/codex_agent/rpc/conversations/client.ts';
 import { createSettingsRpcClient } from './js/codex_agent/rpc/settings/client.ts';
 import { createUiRpcClient } from './js/codex_agent/rpc/ui/client.ts';
@@ -700,6 +701,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let getUserDisplayName = () => 'user';
   let getAssistantDisplayName = () => 'assistant';
   let refreshMessageCardHeaders = () => {};
+  let refreshIdleProject = (_force = false) => {};
   let resetTimeline = () => {};
   let restorePendingApprovals = () => {};
 
@@ -745,6 +747,7 @@ document.addEventListener('DOMContentLoaded', () => {
     maybeAutoScroll,
     onRowInserted: timelineVirtualizer.registerRow,
     onMessageFinalized: timelineVirtualizer.registerFinalizedMessage,
+    onIdle: () => refreshIdleProject(true),
   });
 
   const {
@@ -838,13 +841,18 @@ document.addEventListener('DOMContentLoaded', () => {
     updateActiveConversationLabel,
     getUserDisplayName: getUserDisplayNameImpl,
     getAssistantDisplayName: getAssistantDisplayNameImpl,
-    updateConversationHeaderLabel,
+    updateConversationHeaderLabel: updateConversationHeaderLabelImpl,
     applyAppConfig,
     fetchAppConfig,
     openSplashSettingsModal,
     closeSplashSettingsModal,
     saveSplashSettings,
   } = hostRuntime;
+
+  function updateConversationHeaderLabel() {
+    updateConversationHeaderLabelImpl();
+    refreshIdleProject();
+  }
 
   getUserDisplayName = getUserDisplayNameImpl;
   getAssistantDisplayName = getAssistantDisplayNameImpl;
@@ -1752,11 +1760,24 @@ document.addEventListener('DOMContentLoaded', () => {
         getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
         onEvent: (event) => handleSocketEvent(event),
         onProjectionChange: (change) => handleProjectionChange(change),
-        onReconnect: () => refreshCurrentTranscriptProjectionImpl().then(() => undefined),
-        onResyncRequired: () => refreshCurrentTranscriptProjectionImpl().then(() => undefined),
+        onReconnect: () => transcriptRecovery.request('stream'),
+        onResyncRequired: () => transcriptRecovery.request('resync'),
       })
     : null;
   const transcriptProjectionClient = transcriptStreamClient ?? conversationsRpcClient;
+  const transcriptRecovery = bindTranscriptRecovery({
+    windowRef: window,
+    documentRef: document,
+    getKey: () => {
+      const id = clientConversationId || conversationMeta?.conversation_id;
+      return id && (activeView === 'conversation' || isWidescreenLayout())
+        ? `${id}:${transcriptGeneration}` : null;
+    },
+    refresh: async (reconnectStream) => {
+      if (reconnectStream) transcriptStreamClient?.reconnectForRecovery();
+      return refreshCurrentTranscriptProjectionImpl();
+    },
+  });
   const settingsRpcClient = createSettingsRpcClient({
     sioCall,
     windowRef: window,
@@ -1765,6 +1786,25 @@ document.addEventListener('DOMContentLoaded', () => {
     sioCall,
     windowRef: window,
   });
+  let idleProjectKey = '';
+  let idleProjectRequest = 0;
+  let idleProjectUpdated = 0;
+  refreshIdleProject = (force = false) => {
+    const id = clientConversationId || conversationMeta?.conversation_id || '';
+    const cwd = String(conversationSettings.cwd || conversationMeta?.settings?.cwd || '');
+    const key = `${id}:${cwd}`;
+    if (key === idleProjectKey && (!force || Date.now() - idleProjectUpdated < 2000)) return;
+    if (key !== idleProjectKey) timelineRows.setIdleLabel(cwd.split('/').filter(Boolean).pop() || '');
+    idleProjectKey = key;
+    idleProjectUpdated = Date.now();
+    const request = ++idleProjectRequest;
+    if (!id) return;
+    void uiRpcClient.getProjectIdentity(id).then((identity) => {
+      if (request !== idleProjectRequest || id !== (clientConversationId || conversationMeta?.conversation_id || '')) return;
+      timelineRows.setIdleLabel([identity.name, identity.branch, identity.head_short]
+        .filter((value): value is string => typeof value === 'string' && Boolean(value)).join(' / '));
+    }).catch(() => { /* Keep the CWD fallback when Git metadata is unavailable. */ });
+  };
 
   function currentConversationTitle(): string | null {
     const settingsTitle = conversationSettings.alias || conversationSettings.label;
@@ -1830,6 +1870,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let reconnectRefreshSerial = 0;
   async function refreshConversationAfterReconnect(): Promise<void> {
+    refreshIdleProject(true);
+    // Independent of metadata/list refresh and shared with stream/foreground recovery.
+    const transcriptRefresh = transcriptRecovery.request('control');
     await resyncConversationList();
     const conversationId = clientConversationId || conversationMeta?.conversation_id || null;
     if (!conversationId) return;
@@ -1840,17 +1883,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (currentConversationId !== conversationId) return;
     const shouldRefreshTranscript = activeView === 'conversation' || isWidescreenLayout();
     if (!shouldRefreshTranscript) return;
-    if (transcriptTransportMode === 'rpc') {
-      resetTimeline();
-      await replayTranscript();
-      if (refreshSerial !== reconnectRefreshSerial) return;
-    }
+    await transcriptRefresh;
+    if (refreshSerial !== reconnectRefreshSerial) return;
     await refreshPlanSurface();
     restorePendingApprovals();
     await publishSidebarWindowState();
-    if (transcriptTransportMode === 'rpc') {
-      maybeAutoScroll(true);
-    }
   }
 
   const { resetWsReady, markWsOpen, waitForWs, connectWS } = bindSocketEvents({
@@ -1977,6 +2014,8 @@ document.addEventListener('DOMContentLoaded', () => {
     getConversationId: () => clientConversationId || conversationMeta?.conversation_id || null,
     sioCall,
     projectionClient: transcriptProjectionClient,
+    isPinned: () => autoScroll,
+    getVisibleCardIndex: () => timelineVirtualizer.visibleTranscriptCardRange()?.first ?? null,
     getTranscriptState: () => ({
       transcriptTotal,
       transcriptStart,

@@ -896,7 +896,7 @@ export function createConversationsRpcClient(
     const conversationId = typeof options.conversationId === 'string' && options.conversationId
       ? options.conversationId
       : null;
-    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 10000;
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 150000;
     const result = await callRpcNamespace({
       namespace: CONVERSATIONS_RPC_NAMESPACE,
       method: CONVERSATIONS_RPC_METHODS.compact,

@@ -17,7 +17,7 @@ from agent_log_server_rs.adapters.extension_adapter import (
 from agent_log_server_rs.codec import decode_json_line
 
 
-class _ConcurrentAdapter(ExtensionJsonRpcAdapter):
+class ConcurrentAdapter(ExtensionJsonRpcAdapter):
     def __init__(self) -> None:
         super().__init__()
         self.slow_started = asyncio.Event()
@@ -66,6 +66,17 @@ def _decode_responses(output: str) -> list[dict[str, object]]:
 
 
 class ExtensionAdapterDispatchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._old_codec = os.environ.get("ALS_RS_ADAPTER_CODEC")
+        os.environ["ALS_RS_ADAPTER_CODEC"] = "json"
+        self.addCleanup(self._restore_codec)
+
+    def _restore_codec(self) -> None:
+        if self._old_codec is None:
+            _ = os.environ.pop("ALS_RS_ADAPTER_CODEC", None)
+        else:
+            os.environ["ALS_RS_ADAPTER_CODEC"] = self._old_codec
+
     def test_provider_info_update_uses_global_adapter_event(self) -> None:
         async def scenario() -> list[tuple[str, object]]:
             adapter = _RecordingAdapter()
@@ -91,7 +102,7 @@ class ExtensionAdapterDispatchTests(unittest.TestCase):
 
     def test_stdio_dispatches_independent_requests_concurrently(self) -> None:
         async def scenario() -> list[dict[str, object]]:
-            adapter = _ConcurrentAdapter()
+            adapter = ConcurrentAdapter()
             stdin = io.StringIO(
                 _rpc_line(1, "test.slow")
                 + _rpc_line(2, "test.fast")
@@ -111,7 +122,7 @@ class ExtensionAdapterDispatchTests(unittest.TestCase):
 
     def test_stdio_drains_before_ordered_control_methods(self) -> None:
         async def scenario() -> bool:
-            adapter = _ConcurrentAdapter()
+            adapter = ConcurrentAdapter()
             stdin = io.StringIO(
                 _rpc_line(1, "test.slow")
                 + _rpc_line(2, AdapterMethod.EXTENSION_SHUTDOWN)
@@ -146,9 +157,8 @@ class ExtensionAdapterDispatchTests(unittest.TestCase):
 
     def test_event_reader_handles_eof_after_partial_frame(self) -> None:
         line = _rpc_line(1, "test.fast").rstrip("\n").encode("utf-8")
-        responses = asyncio.run(self._run_pipe_scenario([line]))
-
-        self.assertEqual(responses[0]["result"], {"name": "fast"})
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            asyncio.run(self._run_pipe_scenario([line]))
 
     def test_event_reader_ignores_empty_lines(self) -> None:
         responses = asyncio.run(
@@ -173,7 +183,7 @@ class ExtensionAdapterDispatchTests(unittest.TestCase):
         self.assertEqual(b"".join(chunks), b"abcdefghi")
 
     async def _run_pipe_scenario(self, chunks: Iterable[bytes]) -> list[dict[str, object]]:
-        adapter = _ConcurrentAdapter()
+        adapter = ConcurrentAdapter()
         stdin_read_fd, stdin_write_fd = os.pipe()
         stdout_read_fd, stdout_write_fd = os.pipe()
         stdin = os.fdopen(stdin_read_fd, "r", encoding="utf-8")
@@ -196,7 +206,7 @@ class ExtensionAdapterDispatchTests(unittest.TestCase):
             if stdin_write_fd >= 0:
                 os.close(stdin_write_fd)
             if stdout_write_fd >= 0:
-                os.close(stdout_write_fd)
+                stdout.close()
             if stdout_read_fd >= 0:
                 os.close(stdout_read_fd)
 

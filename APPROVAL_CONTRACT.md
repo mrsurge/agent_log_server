@@ -44,6 +44,32 @@ The MCP ask-user request method uses the same browser-facing approval DTO, but
 its live resolver is the private `/ipc` bridge rather than an extension
 `approval.respond` handler.
 
+Codex native `request_user_input` uses the existing question renderer shared
+with ask-user, but retains its app-server request ID and native
+`{ "answers": { "question_id": { "answers": ["value"] } } }` response.
+Multiple questions stage option selections/freeform locally and require an
+answer to every question before Send; single-question cards retain immediate
+option submission. Pending requests use the generic persisted approval lane,
+not a synthetic MCP invocation.
+
+The Codex extension defaults `features.default_mode_request_user_input` to true
+in thread configuration, preserving an explicit false. In upstream 0.153.3 this
+enables the native tool in Default mode; Plan mode already allows it. The
+upstream handler awaits a response even when Default mode reports
+`isBlocking: false`; this is not a promise of exclusive whole-turn execution.
+The separate `request_user_input_async` tool is not this integration.
+
+The extension also defaults `include_collaboration_mode_instructions` to false.
+`devins_contract.py` appends ALS-owned Default/Plan and user-input guidance to
+the effective developer context, allowing native questions for required input
+and workflow approval gates. Plan remains non-mutating until the configured
+mode changes. Missing/cancelled answers never count as approval. Explicit
+`include_collaboration_mode_instructions: true` restores upstream instructions
+and suppresses the ALS replacement. This does not alter execution approvals or
+sandbox enforcement. The configuration travels on thread start/resume; mode
+guidance also travels on turn start. Already loaded sessions require a fresh
+provider reattach to pick up changed thread configuration.
+
 After persisting a request, ALS-RS adds the backend-owned
 `pending_approvals_revision` to the live event. Extensions do not allocate or
 advance this revision themselves.
