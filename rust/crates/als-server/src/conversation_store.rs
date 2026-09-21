@@ -142,6 +142,15 @@ impl ConversationStore {
             &target_dir,
             &target_id,
         )?;
+        let shell_outputs = source_dir.join("shell-output");
+        if shell_outputs.is_dir() {
+            let target_outputs = target_dir.join("shell-output");
+            fs::create_dir_all(&target_outputs)?;
+            for entry in fs::read_dir(shell_outputs)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() { fs::copy(entry.path(), target_outputs.join(entry.file_name()))?; }
+            }
+        }
 
         let mut meta = source;
         meta.conversation_id = target_id.clone();
@@ -1509,6 +1518,9 @@ fn copy_transcript_for_fork(
         let mut row: Value =
             serde_json::from_str(&line).context("invalid source transcript JSONL row")?;
         if let Some(object) = row.as_object_mut() {
+            if let Some(output) = object.get_mut("shell_output").and_then(Value::as_object_mut) {
+                output.insert("conversation_id".to_owned(), Value::String(target_conversation_id.to_owned()));
+            }
             object.insert(
                 "conversation_id".to_owned(),
                 Value::String(target_conversation_id.to_owned()),
@@ -1765,9 +1777,11 @@ fn read_indexed_card_recipes(
                     line_index,
                     operation,
                 } => {
-                    let (value, source_bytes) = line_values
+                    let (mut value, mut source_bytes) = line_values
                         .remove(&line_index)
                         .ok_or_else(|| anyhow!("transcript line value missing: {line_index}"))?;
+                    crate::shell_output::ShellOutputStore::project_legacy(path, line_index, &mut value)?;
+                    if value.get("shell_output").is_some() { source_bytes = serde_json::to_vec(&value)?.len(); }
                     (value, source_bytes, operation)
                 }
                 IndexedProjectionEvent::Synthetic { value, operation } => {
@@ -2653,6 +2667,11 @@ mod tests {
             )
             .unwrap();
 
+        let outputs = crate::shell_output::ShellOutputStore::new(root.clone());
+        let mut command = json!({"role":"command","id":"shell-1","output":"retained output"});
+        outputs.capture("source-fork", &mut command).unwrap();
+        store.append_transcript("source-fork", command).unwrap();
+
         let forked = store
             .fork_from(ForkConversationRequest {
                 source_conversation_id: "source-fork".to_owned(),
@@ -2673,11 +2692,15 @@ mod tests {
             Some("thread-source")
         );
         assert_eq!(forked.pending_approvals.len(), 0);
-        assert_eq!(forked.transcript_line_count, Some(1));
-        assert_eq!(forked.next_transcript_order_id, 1);
+        assert_eq!(forked.transcript_line_count, Some(2));
+        assert_eq!(forked.next_transcript_order_id, 2);
         let rows = store.read_transcript("target-fork").unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["conversation_id"], "target-fork");
+        assert_eq!(rows[1]["shell_output"]["conversation_id"], "target-fork");
+        fs::remove_dir_all(root.join("conversations/source-fork")).unwrap();
+        let window = outputs.window(&json!({"conversation_id":"target-fork","output_id":rows[1]["shell_output"]["id"]})).unwrap();
+        assert_eq!(window["text"], "retained output");
 
         let _ = fs::remove_dir_all(root);
     }

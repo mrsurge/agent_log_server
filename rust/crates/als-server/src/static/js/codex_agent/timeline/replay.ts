@@ -3,6 +3,7 @@ import {
   findTranscriptCardRow,
 } from '../transcript_card_metadata.ts';
 import { renderShellSummary } from '../shell_render.ts';
+import { mountShellOutputWindow } from '../shell_output_window.ts';
 import { ansiToHtml, hasAnsiSgr } from '../terminal_ansi.ts';
 import type { ToggleableRow, UnknownRecord } from '../shared_types.ts';
 import type { TranscriptCardRecipe } from '../rpc/conversations/contract.ts';
@@ -556,6 +557,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
           pre.textContent = '(no output)';
         }
         detailEl.appendChild(pre);
+        mountShellOutputWindow(pre, entry.shell_output, shellCmd);
         if (exitCode !== 0) {
           const footer = documentRef.createElement('div');
           footer.className = 'command-footer';

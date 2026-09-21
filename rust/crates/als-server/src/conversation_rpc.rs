@@ -82,7 +82,45 @@ pub fn register_conversations_rpc_namespace(io: &SocketIo) {
 pub fn start_adapter_event_fanout(io: SocketIo, state: AppState) {
     tokio::spawn(async move {
         let mut adapter_events = state.adapter.events().subscribe_lossless().await;
-        while let Some(event) = adapter_events.recv().await {
+        let mut shell_updates = Vec::<(String, String, Value)>::new();
+        let mut flush = tokio::time::interval(std::time::Duration::from_millis(100));
+        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let event = tokio::select! {
+                event = adapter_events.recv() => event,
+                _ = flush.tick() => {
+                    for (_, _, value) in shell_updates.drain(..) {
+                        if let Err(error) = forward_adapter_live_event(&io, &state, value).await {
+                            warn!(error = %error.message, "failed to publish shell output revision");
+                        }
+                    }
+                    continue;
+                }
+            };
+            let Some(event) = event else { break; };
+            if let AdapterCapturedEvent::Live(value) = &event {
+                if value.get("type").and_then(Value::as_str) == Some("shell_delta") {
+                    if let Some((conversation, mut value)) = adapter_conversation_object(value.clone()) {
+                        match state.shell_outputs.capture(&conversation, &mut value) {
+                            Ok(()) => {
+                                let id = value["shell_output"]["id"].as_str().unwrap_or("").to_owned();
+                                if let Some((_, _, previous)) = shell_updates.iter_mut().find(|(owner, output, _)| owner == &conversation && output == &id) {
+                                    *previous = value;
+                                } else { shell_updates.push((conversation, id, value)); }
+                            }
+                            Err(error) => warn!(%error, "failed to capture shell output"),
+                        }
+                    }
+                    continue;
+                }
+            }
+            // Drain before lifecycle/final transcript events so a delayed delta
+            // cannot resurrect a completed card.
+            for (_, _, value) in shell_updates.drain(..) {
+                if let Err(error) = forward_adapter_live_event(&io, &state, value).await {
+                    warn!(error = %error.message, "failed to publish shell output revision");
+                }
+            }
             if let Err(error) = handle_adapter_event(&io, &state, event).await {
                 warn!(error = %error.message, "failed to fan out adapter event");
             }
@@ -116,6 +154,7 @@ async fn dispatch_rpc(
     }
 
     match request.method.as_str() {
+        "conversation.shell.output.window" => state.shell_outputs.window(&Value::Object(request.params)).map_err(internal_error),
         METHOD_LIST => conversation_list(&state),
         METHOD_GET => conversation_get(&state, &request.params),
         METHOD_CREATE => conversation_create(socket, io, state, request.params).await,
@@ -1184,6 +1223,7 @@ async fn forward_adapter_live_event(
         .and_then(Value::as_str)
         .ok_or_else(|| rpc_error(-32603, "adapter live event is missing type"))?
         .to_owned();
+    state.shell_outputs.capture(&conversation_id, &mut event).map_err(internal_error)?;
     sanitize_live_card_event(&mut event);
     if should_skip_adapter_event_type(&event_type) {
         return Ok(());
@@ -1573,6 +1613,7 @@ fn persist_adapter_transcript_entry(
         return Ok(None);
     }
     strip_internal_adapter_transcript_fields(&mut entry);
+    state.shell_outputs.capture(&conversation_id, &mut entry).map_err(internal_error)?;
     sanitize_transcript_card_entry(&mut entry);
     let (_, projection_change) = state
         .turn_projections
@@ -1603,6 +1644,7 @@ fn persist_import_transcript_batch(state: &AppState, value: Value) -> Result<(),
             continue;
         }
         strip_internal_adapter_transcript_fields(&mut entry);
+        state.shell_outputs.capture(&conversation_id, &mut entry).map_err(internal_error)?;
         sanitize_transcript_card_entry(&mut entry);
         entries.push(entry);
     }

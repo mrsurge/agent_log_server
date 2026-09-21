@@ -38,6 +38,8 @@ const TAG_WINDOW_REQUEST: u64 = 3;
 const TAG_WINDOW_SNAPSHOT: u64 = 4;
 const TAG_WINDOW_DELTA: u64 = 5;
 const TAG_LIVE_EVENT: u64 = 6;
+const TAG_SHELL_WINDOW_REQUEST: u64 = 7;
+const TAG_SHELL_WINDOW: u64 = 8;
 const TAG_ERROR: u64 = 255;
 
 #[derive(Clone)]
@@ -363,6 +365,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 continue;
             }
         };
+        if frame.get(0).and_then(Value::as_u64) == Some(TAG_SHELL_WINDOW_REQUEST) {
+            let params = frame.get(1).cloned().unwrap_or(Value::Null);
+            let request_id = params.get("request_id").and_then(Value::as_str).unwrap_or("").to_owned();
+            let store = state.shell_outputs.clone();
+            let result = tokio::task::spawn_blocking(move || store.window(&params)).await;
+            let payload = match result {
+                Ok(Ok(value)) => json!({"request_id":request_id,"result":value}),
+                other => json!({"request_id":request_id,"error":format!("Shell output window failed: {other:?}")}),
+            };
+            if outbound_sender.send(OutboundFrame { value: tagged_frame(TAG_SHELL_WINDOW, payload), allow_compression:true, terminal:false }).await.is_err() { break; }
+            continue;
+        }
         let request = match parse_window_request(frame) {
             Ok(request) => request,
             Err(error) => {

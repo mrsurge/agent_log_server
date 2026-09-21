@@ -24,6 +24,8 @@ const TAG_WINDOW_REQUEST = 3;
 const TAG_WINDOW_SNAPSHOT = 4;
 const TAG_WINDOW_DELTA = 5;
 const TAG_LIVE_EVENT = 6;
+const TAG_SHELL_WINDOW_REQUEST = 7;
+const TAG_SHELL_WINDOW = 8;
 const TAG_ERROR = 255;
 
 export type TranscriptTransportMode = 'stream' | 'rpc';
@@ -96,6 +98,7 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
   let decodeQueue = Promise.resolve();
   let resyncScheduled = false;
   const pending = new Map<string, PendingProjection>();
+  const shellPending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
 
   function resetReady(): void {
     readyPromise = new Promise<void>((resolve) => {
@@ -174,6 +177,11 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
   }
 
   function rejectPending(message: string): void {
+    for (const request of shellPending.values()) {
+      clearTimeout(request.timer);
+      request.reject(new Error(message));
+    }
+    shellPending.clear();
     for (const item of pending.values()) {
       clearTimeout(item.timer);
       item.reject(new Error(message));
@@ -254,6 +262,17 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
 
   async function handleFrame(value: unknown): Promise<void> {
     const [tag, payload] = parseTaggedFrame(value);
+    if (tag === TAG_SHELL_WINDOW) {
+      const id = stringValue(payload.request_id);
+      const request = shellPending.get(id);
+      if (request) {
+        shellPending.delete(id);
+        clearTimeout(request.timer);
+        if (payload.error) request.reject(new Error(String(payload.error)));
+        else request.resolve(payload.result);
+      }
+      return;
+    }
     if (tag === TAG_SERVER_HELLO) {
       const nextEpoch = stringValue(payload.server_epoch);
       const reconnected = connectedOnce;
@@ -542,6 +561,20 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
     socket = null;
   }
 
+  async function fetchShellWindow(params: JsonObject): Promise<unknown> {
+    await waitUntilReady(10000);
+    const requestId = nextRequestId();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        shellPending.delete(requestId);
+        reject(new Error('Timed out loading shell output'));
+      }, 10000);
+      shellPending.set(requestId, { resolve, reject, timer });
+      try { send(TAG_SHELL_WINDOW_REQUEST, { ...params, request_id: requestId }); }
+      catch (error) { clearTimeout(timer); shellPending.delete(requestId); reject(error); }
+    });
+  }
+
   function reconnectForRecovery(): void {
     if (!socket) return;
     connectionGeneration += 1;
@@ -569,6 +602,7 @@ export function createTranscriptStreamClient(options: TranscriptStreamClientOpti
   }
 
   return {
+    fetchShellWindow,
     clientId,
     reconnectForRecovery,
     clearProjectionCache,

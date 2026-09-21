@@ -1236,6 +1236,52 @@ Source anchors:
 - `rust/crates/als-server/src/static/js/codex_agent/timeline/replay.ts`
 - `rust/crates/als-server/src/static/js/codex_agent/subagents/collapsible.ts`
 
+#### Shell output windows
+
+Shell output has its own disk-backed projection, separate from transcript-card
+positions. `shell_output.rs` captures generic shell begin/delta/end and command
+records before the 16 KiB card sanitizer, replacing bodies with `shell_output`
+references. The files live in each conversation's `shell-output/` directory:
+UTF-8 text, a fixed-record offset/ANSI checkpoint index, and bounded parser
+continuation state. Stable invocation-to-output mappings are persisted, with a
+bounded in-memory lookup cache. The full received output stays on disk; provider
+or adapter memory use and upstream truncation are separate concerns.
+
+Windows are at most 200 fragments / 64 KiB with shifts up to 50 fragments.
+Newlines define normal fragments; exceptionally long lines split near 16 KiB
+without breaking UTF-8 or a supported SGR sequence. `unit: "line_fragment"`,
+fragment bounds, byte offsets, and `at_start`/`at_tail` are authoritative.
+These values never enter the conversation's 75-card cursor arithmetic.
+The index stores the SGR state at fragment boundaries so tail windows do not
+need to scan all preceding output. It preserves existing supported SGR colors;
+this is a log viewer, not a terminal emulator.
+
+Binary transcript frame tags 7/8 request/return shell windows. The explicit RPC
+debug lane calls `conversation.shell.output.window` on `/rpc/conversations`.
+Requests carry conversation/output identity, action (`tail`, `older`, `newer`,
+`current`), start fragment, and bounded shift. Shell requests do not resubscribe
+the connection or mutate the transcript-card cursor. Output revisions are
+coalesced at 100 ms in adapter fanout, drained before lifecycle/final events.
+Active-turn recipes retain the latest output reference rather than deltas.
+
+`shell_output_window.ts` owns the independent pin/scroll state. Only visible
+output viewports fetch windows; requests are single-flight and coalesced.
+Detached views retain their text and measured fragment anchor while new output
+arrives. Follow output requests a fresh tail. A fixed-height viewport and
+overscroll containment isolate inner movement from the parent transcript;
+shell deltas and final body updates do not call parent autoscroll. Observer
+registration follows card removal/remount, including virtualizer parking.
+Known-language highlighting runs over the bounded window before DOM fragments
+are split, rather than guessing a language for each output line.
+
+Final snapshots replace rather than duplicate output. A shorter final payload
+does not erase a longer received stream. Durable records retain references;
+older inline command/shell records are indexed lazily when projected, without
+rewriting append-only transcript history. Forks copy sidecars and retarget
+references; deleting the conversation removes its output. Previously clipped
+historical output cannot be recovered. Disk retention is not a log rotation
+policy and the browser never claims it has bytes omitted by the provider.
+
 #### Frontend window motion
 
 The frontend shifts durable history only when both the visible durable

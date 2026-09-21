@@ -1,4 +1,4 @@
-type AnsiState = {
+export type AnsiState = {
   fg: number | null;
   bg: number | null;
   bold: boolean;
@@ -58,11 +58,15 @@ export function hasAnsiSgr(value: unknown): boolean {
   return /\x1b\[[0-9;]*m/.test(String(value ?? ''));
 }
 
-export function ansiToHtml(value: unknown): string {
+export function createAnsiState(): AnsiState {
+  return { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
+}
+
+export function ansiToHtml(value: unknown, initialState?: AnsiState): string {
   const input = String(value ?? '');
   let lastIndex = 0;
   let html = '';
-  let state: AnsiState = {
+  const state: AnsiState = initialState ?? {
     fg: null,
     bg: null,
     bold: false,
@@ -96,7 +100,7 @@ export function ansiToHtml(value: unknown): string {
       const n = Number(part || '0');
       if (!Number.isFinite(n)) continue;
       if (n === 0) {
-        state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, inverse: false };
+        Object.assign(state, createAnsiState());
       } else if (n === 1) state.bold = true;
       else if (n === 2) state.dim = true;
       else if (n === 3) state.italic = true;

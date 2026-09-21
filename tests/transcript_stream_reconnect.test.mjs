@@ -250,5 +250,15 @@ test('reconnect requests and decodes a complete transcript snapshot', async () =
   socket.message(TAG_WINDOW_SNAPSHOT, projectionPayload(forcedRequest.request_id, 3, 10));
   await waitFor(() => reconnectResult !== null, 'forced reconnect did not recover');
   assert.equal(reconnectResult.cards[0].version, 3);
+  const shellPromise = client.fetchShellWindow({ conversation_id: 'conv-reconnect', output_id: 'shell-1', action: 'tail' });
+  await waitFor(() => socket.sent.map(decodeClientFrame).some(([tag]) => tag === 7), 'shell request not sent');
+  const shellRequest = socket.sent.map(decodeClientFrame).filter(([tag]) => tag === 7).at(-1)[1];
+  socket.message(8, { request_id: shellRequest.request_id, result: { text: 'bounded output' } });
+  assert.deepEqual(await shellPromise, { text: 'bounded output' });
+  const interrupted = client.fetchShellWindow({ conversation_id: 'conv-reconnect', output_id: 'shell-1', action: 'tail' });
+  const rejection = assert.rejects(interrupted, /disconnected/);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  socket.disconnect();
+  await rejection;
   client.dispose();
 });

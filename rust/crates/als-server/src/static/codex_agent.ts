@@ -12,6 +12,7 @@ import {
   streamWrite,
 } from './js/codex_agent/markdown.ts';
 import { bindShellRender } from './js/codex_agent/shell_render.ts';
+import { configureShellOutputWindows } from './js/codex_agent/shell_output_window.ts';
 import { bindToolRender } from './js/codex_agent/tool_render.ts';
 import { bindConversationDrawer } from './js/codex_agent/conversation_drawer.ts';
 import { bindTranscriptLoader } from './js/codex_agent/transcript_loader.ts';
@@ -1765,6 +1766,10 @@ document.addEventListener('DOMContentLoaded', () => {
       })
     : null;
   const transcriptProjectionClient = transcriptStreamClient ?? conversationsRpcClient;
+  configureShellOutputWindows(params => transcriptProjectionClient.fetchShellWindow(params), (text, command) => {
+    const language = detectLangFromCommand(command);
+    return language ? highlightCodeAlways(text, language) : null;
+  });
   const transcriptRecovery = bindTranscriptRecovery({
     windowRef: window,
     documentRef: document,

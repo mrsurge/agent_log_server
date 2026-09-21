@@ -40,6 +40,7 @@ pub struct AppState {
     pub list_revision: Arc<AtomicU64>,
     pub sidebar_ipc: SidebarIpcStore,
     pub transcript_streams: TranscriptStreamHub,
+    pub shell_outputs: crate::shell_output::ShellOutputStore,
     pub turn_projections: TurnProjectionStore,
     pub ui_selection: UiSelectionStore,
 }
@@ -74,6 +75,7 @@ impl AppState {
         let list_revision = Arc::new(AtomicU64::new(0));
         let sidebar_ipc = SidebarIpcStore::default();
         let transcript_streams = TranscriptStreamHub::default();
+        let shell_outputs = crate::shell_output::ShellOutputStore::new(config.roots.data_dir.clone());
         let turn_projections = TurnProjectionStore::default();
         let ui_selection = UiSelectionStore::with_cache_dir(config.roots.cache_dir.clone());
         Self {
@@ -91,6 +93,7 @@ impl AppState {
             list_revision,
             sidebar_ipc,
             transcript_streams,
+            shell_outputs,
             turn_projections,
             ui_selection,
         }

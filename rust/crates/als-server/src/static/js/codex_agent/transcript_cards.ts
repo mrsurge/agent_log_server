@@ -4,6 +4,7 @@ import {
   type TranscriptCardMetadata,
 } from './transcript_card_metadata.ts';
 import { renderShellSummary } from './shell_render.ts';
+import { mountShellOutputWindow } from './shell_output_window.ts';
 import { ansiToHtml, hasAnsiSgr } from './terminal_ansi.ts';
 import { applyPathScrollLabel } from './path_label.ts';
 
@@ -274,7 +275,12 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     }
     detailEl.appendChild(cmdRibbon);
 
-    if (displayOutput) {
+    if (evt.shell_output) {
+      const pre = document.createElement('pre');
+      pre.className = 'command-output';
+      detailEl.appendChild(pre);
+      mountShellOutputWindow(pre, evt.shell_output, command);
+    } else if (displayOutput) {
       const outputPre = document.createElement('pre');
       outputPre.className = 'command-output';
       const hasAnsi = hasAnsiSgr(displayOutput);

@@ -24,6 +24,7 @@ export const CONVERSATIONS_RPC_METHODS = {
   replayGetChunk: 'conversation.replay.getChunk',
   approvalRespond: 'conversation.approval.respond',
   shellExec: 'conversation.shell.exec',
+  shellOutputWindow: 'conversation.shell.output.window',
 } as const;
 
 export type ConversationsRpcMethod =
@@ -400,6 +401,11 @@ export const CONVERSATIONS_RPC_METHOD_DESCRIPTORS: readonly RpcMethodDescriptor<
   },
   {
     name: CONVERSATIONS_RPC_METHODS.shellExec,
+    namespace: CONVERSATIONS_RPC_NAMESPACE,
+    status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
+  },
+  {
+    name: CONVERSATIONS_RPC_METHODS.shellOutputWindow,
     namespace: CONVERSATIONS_RPC_NAMESPACE,
     status: CONVERSATIONS_RPC_IMPLEMENTATION_STATUS,
   },

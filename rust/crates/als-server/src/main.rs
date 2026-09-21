@@ -21,6 +21,7 @@ mod settings_rpc;
 mod sidebar_ipc;
 mod socketio;
 mod state;
+mod shell_output;
 mod static_assets;
 mod te2_readiness;
 mod transcript_card_projection;

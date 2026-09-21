@@ -417,7 +417,8 @@ Expected fields:
 - `command`
 - `raw_command` optional executable/transport form when `command` is normalized
   for display
-- `output`
+- `output` at extension ingress, or Rust-owned `shell_output` reference after
+  capture (`id`, `conversation_id`, received `bytes`, and `running`)
 - `path` when the command has a concrete file target
 - `source` when needed for prompt/terminal rendering
 
@@ -427,6 +428,23 @@ Notes:
 - Provider-owned display normalization must preserve live/replay parity. A
   streaming command card's bounded output viewport follows newly appended text
   independently of the conversation viewport's pinned state.
+- Rust captures shell bodies before generic 16 KiB card truncation. Live and
+  durable command cards carry the same disk-backed output reference; final
+  snapshots are not appended a second time. A shorter final summary does not
+  erase a longer received stream. Retention covers received output only, not
+  bytes the provider omitted upstream.
+- Output windows contain at most 200 newline-delimited fragments and 64 KiB.
+  Long logical lines split around 16 KiB on UTF-8/SGR-safe boundaries; the wire
+  cursor unit is explicitly `line_fragment`, never a wrapped screen row or a
+  transcript-card index. Requests shift by up to 50 fragments with overlap.
+- Output append notifications coalesce over 100 ms between lifecycle events.
+  A visible shell viewport permits one request in flight, batches renders,
+  preserves its own detached anchor, and exposes a Follow output button.
+  Inner output updates never call the parent transcript autoscroll helper.
+- Completed and historical shell cards use the same output window renderer.
+  Legacy inline output is indexed lazily without rewriting the transcript.
+  Conversation forks copy output sidecars; deletion follows the conversation
+  directory lifecycle. Earlier truncated history cannot be reconstructed.
 - When a provider invocation is presented as a leading file-write card and a
   trailing shell card, their identities must remain distinct in live and replay.
   Combined output belongs to the shell card only; `result_scope: "invocation"`

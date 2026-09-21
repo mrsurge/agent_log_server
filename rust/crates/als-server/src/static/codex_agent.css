@@ -3553,6 +3553,7 @@ body .tribute-container .tribute-item-path {
 }
 
 .timeline-row.command-result pre.command-output {
+  overscroll-behavior: contain;
   background: #000;
   color: #c9d1d9;
   padding: 10px 14px;
@@ -3566,6 +3567,27 @@ body .tribute-container .tribute-item-path {
   border-radius: 0;
   border: none;
 }
+
+.shell-output-frame { position: relative; min-width: 0; }
+.timeline-row.command-result pre.command-output.shell-output-window {
+  height: 240px;
+  max-height: 240px;
+  overflow-anchor: none;
+  margin: 0;
+}
+.shell-output-follow {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border: 1px solid #666;
+  border-radius: 4px;
+  background: rgb(45 45 45 / 85%);
+  color: #ddd;
+  cursor: pointer;
+}
+.shell-output-follow[hidden] { display: none; }
 /* Syntax highlighted code in command output */
 .timeline-row.command-result pre.command-output code {
   background: transparent;

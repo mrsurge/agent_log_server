@@ -5,6 +5,7 @@ import {
   type TranscriptCardMetadata,
 } from './transcript_card_metadata.ts';
 import { ansiToHtml, hasAnsiSgr } from './terminal_ansi.ts';
+import { mountShellOutputWindow } from './shell_output_window.ts';
 
 export type ShellRowEntry = {
   row: HTMLDivElement;
@@ -21,6 +22,7 @@ type SubagentContainer = Record<string, unknown> & {
 };
 
 type ShellRenderEvent = {
+  shell_output?: unknown;
   id?: string;
   card_id?: string;
   order_id?: number;
@@ -241,6 +243,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
     entry.text = '';
     // Plain text mode.
     entry.termEl.textContent = '';
+    mountShellOutputWindow(entry.termEl, evt.shell_output, evt.command || '');
     entry.detailEl.querySelector('.command-footer')?.remove();
     if (setLastEventType) setLastEventType('shell');
     if (!evt.subagent_id) {
@@ -253,6 +256,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
     const entry = shellRows.get(evt.id || '');
     if (!entry) return;
     applyTranscriptCardMetadata(entry.row, evt);
+    if (mountShellOutputWindow(entry.termEl, evt.shell_output)) return;
     const delta = evt.delta || '';
     if (delta) {
       entry.text += delta;
@@ -260,7 +264,6 @@ export function bindShellRender(ctx: ShellRenderContext) {
       scrollShellOutputToTail(entry.termEl);
     }
     if (setLastEventType) setLastEventType('shell');
-    maybeAutoScroll();
   }
 
   function renderShellEnd(evt: ShellRenderEvent) {
@@ -289,7 +292,10 @@ export function bindShellRender(ctx: ShellRenderContext) {
     const stdout = String(evt.stdout || '');
     const stderr = String(evt.stderr || '');
     const lang = detectLangFromCommand(cmd);
-    if (stdout || stderr) {
+    const projected = mountShellOutputWindow(entry.termEl, evt.shell_output, cmd);
+    if (projected) {
+      // The output controller owns its viewport, including final snapshots.
+    } else if (stdout || stderr) {
       if (hasAnsiSgr(stdout)) {
         entry.termEl.innerHTML = ansiToHtml(stdout);
       } else if (lang) {
@@ -309,7 +315,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
     } else {
       entry.termEl.textContent = '(no output)';
     }
-    scrollShellOutputToTail(entry.termEl);
+    if (!projected) scrollShellOutputToTail(entry.termEl);
 
     // Add footer with exit code (same as renderCommandResult)
     if (exitCode !== 0) {
@@ -323,7 +329,6 @@ export function bindShellRender(ctx: ShellRenderContext) {
     setStatusDot(exitCode === 0 ? 'success' : 'error');
     // Don't clear activity label — let it persist until turn end or next tool overwrites it
     if (setLastEventType) setLastEventType('shell');
-    maybeAutoScroll();
 
     // Clean up tracking
     shellRows.delete(evt.id || '');
@@ -356,7 +361,9 @@ export function bindShellRender(ctx: ShellRenderContext) {
     const stdout = String(evt.stdout || '');
     const stderr = String(evt.stderr || '');
     const lang = detectLangFromCommand(cmd);
-    if (stdout || stderr) {
+    if (mountShellOutputWindow(termEl, evt.shell_output, cmd)) {
+      // Load a bounded window when the card becomes visible.
+    } else if (stdout || stderr) {
       if (hasAnsiSgr(stdout)) {
         termEl.innerHTML = ansiToHtml(stdout);
       } else if (lang) {

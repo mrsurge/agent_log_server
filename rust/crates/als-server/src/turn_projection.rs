@@ -474,6 +474,13 @@ fn reduce_item(item: &mut ProjectedTurnItem, event: &Value, kind: &str) -> bool 
         return true;
     }
     if is_delta_event(kind) {
+        if kind == "shell_delta" && event.get("shell_output").is_some() {
+            let replacement = with_projection_metadata(event.clone(), &projection_key, projection_sequence);
+            if let Some(previous) = item.events.iter_mut().find(|e| event_type(e).as_deref() == Some(kind)) {
+                *previous = replacement;
+            } else { item.events.push(replacement); }
+            return true;
+        }
         let delta = event
             .get("delta")
             .and_then(Value::as_str)
@@ -846,6 +853,20 @@ mod tests {
             snapshot.items[0].events[0]["projection_card_scope"],
             "active"
         );
+    }
+
+    #[test]
+    fn shell_projection_replaces_output_references_without_accumulating_text() {
+        let store = TurnProjectionStore::default();
+        store.begin_send("conv").unwrap();
+        for bytes in [10, 100, 10000] {
+            store.reduce_live("conv", &json!({"type":"shell_delta","id":"shell","shell_output":{"id":"output","bytes":bytes}})).unwrap();
+        }
+        let snapshot = store.snapshot("conv").unwrap();
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].events.len(), 2);
+        assert_eq!(snapshot.items[0].events[1]["shell_output"]["bytes"], 10000);
+        assert!(snapshot.items[0].events[1].get("delta").is_none());
     }
 
     #[test]

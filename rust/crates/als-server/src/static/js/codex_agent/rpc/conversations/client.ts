@@ -531,6 +531,10 @@ async function fetchReplayChunkRpcAccumulated(
 export function createConversationsRpcClient(
   deps: ConversationsRpcClientDeps,
 ) {
+  function fetchShellWindow(params: JsonObject): Promise<unknown> {
+    return callRpcNamespace({ namespace: CONVERSATIONS_RPC_NAMESPACE,
+      method: CONVERSATIONS_RPC_METHODS.shellOutputWindow, params, timeoutMs: 10000, windowRef: getWindowRef() });
+  }
   function getWindowRef(): RpcWindowRef {
     return deps.windowRef ?? (typeof window !== 'undefined' ? window : null);
   }
@@ -998,6 +1002,7 @@ export function createConversationsRpcClient(
 
   return {
     getConversation,
+    fetchShellWindow,
     listConversations,
     createConversation,
     selectConversation,
