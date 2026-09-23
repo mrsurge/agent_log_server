@@ -96,6 +96,7 @@ interface TimelineReplayContext {
   buildReplayToolRow(entry: TranscriptEntry): HTMLElement;
   renderShellCmdRibbon(el: HTMLElement, cmd: string, options?: { promptPrefix?: string }): void;
   highlightCodeAlways(text: string, lang: string): string;
+  highlightShellOutput(text: string, explicitLanguage: string | null): string | null;
   detectLangFromCommand(command: string): string;
   escapeHtml(text: string): string;
   toRelativePath(path: string): string;
@@ -151,6 +152,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     buildReplayToolRow,
     renderShellCmdRibbon,
     highlightCodeAlways,
+    highlightShellOutput,
     detectLangFromCommand,
     escapeHtml,
     toRelativePath,
@@ -533,12 +535,12 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
         pre.className = 'command-output';
         const stdout = asString(entry.stdout);
         const stderr = asString(entry.stderr);
-        const outLang = detectLangFromCommand(shellCmd);
+        const highlighted = highlightShellOutput(stdout, detectLangFromCommand(shellCmd));
         if (stdout) {
           if (hasAnsiSgr(stdout)) {
             pre.innerHTML = ansiToHtml(stdout);
-          } else if (outLang) {
-            pre.innerHTML = highlightCodeAlways(stdout, outLang);
+          } else if (highlighted !== null) {
+            pre.innerHTML = highlighted;
           } else {
             pre.appendChild(documentRef.createTextNode(stdout));
           }

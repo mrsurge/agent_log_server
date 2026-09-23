@@ -100,6 +100,7 @@ type TranscriptCardsContext = {
   renderShellCmdRibbon: (el: HTMLElement | null, cmd: string, options?: { promptPrefix?: string }) => unknown;
   detectLangFromCommand: (command: string) => string | null;
   highlightCodeAlways: (text: string, language: string) => string;
+  highlightShellOutput: (text: string, explicitLanguage: string | null) => string | null;
   detectLangFromPath: (path: string) => string | null;
   toRelativePath: (path: string) => string;
   postTe2OpenRequest: (target: { path: string; line: number; column: number }) => unknown;
@@ -139,6 +140,7 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
     renderShellCmdRibbon,
     detectLangFromCommand,
     highlightCodeAlways,
+    highlightShellOutput,
     detectLangFromPath,
     toRelativePath,
     postTe2OpenRequest,
@@ -290,14 +292,14 @@ export function bindTranscriptCards(ctx: TranscriptCardsContext) {
           appendTruncationNote(outputPre, `\n... (truncated, showing ${truncateLines} of ${totalLines} lines)`, true);
         }
       } else {
-        const lang = detectLangFromCommand(command);
-        if (lang) {
-          outputPre.innerHTML = highlightCodeAlways(displayOutput, lang);
+        const highlighted = highlightShellOutput(displayOutput, detectLangFromCommand(command));
+        if (highlighted !== null) {
+          outputPre.innerHTML = highlighted;
         } else {
           outputPre.textContent = displayOutput;
         }
         if (truncated) {
-          if (lang) {
+          if (highlighted !== null) {
             appendTruncationNote(outputPre, `\n... (truncated, showing ${truncateLines} of ${totalLines} lines)`, true);
           } else {
             outputPre.textContent += `\n... (truncated, showing ${truncateLines} of ${totalLines} lines)`;

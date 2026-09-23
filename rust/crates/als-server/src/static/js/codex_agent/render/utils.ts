@@ -37,6 +37,78 @@ const FILE_EXT_LANG_MAP: Record<string, string> = {
   hs: 'haskell', ml: 'ocaml', nim: 'nim', zig: 'zig',
 };
 
+function parsesJsonContainer(text: string): boolean {
+  try {
+    const value: unknown = JSON.parse(text);
+    return value !== null && typeof value === 'object';
+  } catch {
+    return false;
+  }
+}
+
+export interface ImplicitJsonRange {
+  start: number;
+  end: number;
+}
+
+function jsonDelimiterCandidates(text: string): ImplicitJsonRange[] {
+  const stack: Array<{ character: string; start: number }> = [];
+  const candidates: ImplicitJsonRange[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (character === '\n' || character === '\r') {
+        stack.length = 0;
+        inString = false;
+        escaped = false;
+        continue;
+      }
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (stack.length && character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === '{' || character === '[') {
+      stack.push({ character, start: index });
+      continue;
+    }
+    if (character !== '}' && character !== ']') continue;
+    const opening = stack.pop();
+    if (!opening) continue;
+    if ((opening.character === '{' && character !== '}') || (opening.character === '[' && character !== ']')) {
+      stack.length = 0;
+      inString = false;
+      escaped = false;
+      continue;
+    }
+    candidates.push({ start: opening.start, end: index + 1 });
+  }
+  return candidates;
+}
+
+export function findImplicitJsonRanges(text: string | null | undefined): ImplicitJsonRange[] {
+  const source = String(text || '');
+  const candidates = jsonDelimiterCandidates(source)
+    .filter(({ start, end }) => parsesJsonContainer(source.slice(start, end)))
+    .sort((left, right) => left.start - right.start || right.end - left.end);
+  const ranges: ImplicitJsonRange[] = [];
+  for (const candidate of candidates) {
+    const previous = ranges[ranges.length - 1];
+    if (!previous || candidate.start >= previous.end) ranges.push(candidate);
+  }
+  return ranges;
+}
+
+export function detectsImplicitJsonOutput(text: string | null | undefined): boolean {
+  return findImplicitJsonRanges(text).length > 0;
+}
+
 export function bindRenderUtils(ctx: RenderUtilsContext) {
   const { getState, documentRef } = ctx;
 
@@ -193,6 +265,22 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
       // fall through
     }
     return escapeHtml(text || '');
+  }
+
+  function highlightShellOutput(text: string, explicitLanguage: string | null | undefined): string | null {
+    if (!text?.trim()) return null;
+    if (explicitLanguage) return highlightCodeAlways(text, explicitLanguage);
+    const ranges = findImplicitJsonRanges(text);
+    if (!ranges.length) return null;
+    let html = '';
+    let cursor = 0;
+    for (const range of ranges) {
+      html += escapeHtml(text.slice(cursor, range.start));
+      html += highlightCodeAlways(text.slice(range.start, range.end), 'json');
+      cursor = range.end;
+    }
+    html += escapeHtml(text.slice(cursor));
+    return html;
   }
 
   function normalizeStructuredViewLines(lines: unknown): StructuredViewLine[] | null {
@@ -421,6 +509,7 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
     buildViewCardTitle,
     detectLangFromCommand,
     highlightCodeAlways,
+    highlightShellOutput,
     normalizeStructuredViewLines,
     synthesizeStructuredViewLines,
     renderStructuredViewLineTable,

@@ -23,7 +23,7 @@ test('shell headers colour only the command and running state ends with shell_en
     const renderer = bindShellRender({
       shellRows: shells, clearPlaceholder() {}, insertRow: row => timeline.append(row), makeCollapsible() {},
       renderShellCmdRibbon: (el, cmd) => { el.textContent = cmd; }, postTe2OpenRequest() {},
-      detectLangFromCommand: () => null, highlightCodeAlways: text => text, setStatusDot() {}, setActivity() {}, maybeAutoScroll() {},
+      detectLangFromCommand: () => null, highlightShellOutput: text => text, setStatusDot() {}, setActivity() {}, maybeAutoScroll() {},
     });
     renderer.renderShellBegin({ id: 'one', command: 'python script.py' });
     const row = timeline.firstElementChild;

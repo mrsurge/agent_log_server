@@ -1271,8 +1271,15 @@ arrives. Follow output requests a fresh tail. A fixed-height viewport and
 overscroll containment isolate inner movement from the parent transcript;
 shell deltas and final body updates do not call parent autoscroll. Observer
 registration follows card removal/remount, including virtualizer parking.
-Known-language highlighting runs over the bounded window before DOM fragments
-are split, rather than guessing a language for each output line.
+
+Explicit command/path language detection has precedence. With no explicit
+language, the shared structural scanner finds balanced object/array spans across
+one or multiple lines, respects JSON string escapes, validates each candidate
+with `JSON.parse`, and applies the JSON grammar only to valid spans.
+Intervening shell text is escaped and preserved exactly, so one status line does
+not suppress JSON highlighting and projected-window partitioning still matches
+the source text. Scalars and malformed or truncated fragments remain plain.
+ANSI output and stderr retain their existing render paths.
 
 Final snapshots replace rather than duplicate output. A shorter final payload
 does not erase a longer received stream. Durable records retain references;

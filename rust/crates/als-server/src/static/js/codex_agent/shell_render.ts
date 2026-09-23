@@ -47,7 +47,7 @@ interface ShellRenderContext {
   renderShellCmdRibbon: (el: HTMLElement | null, cmd: string, options?: { promptPrefix?: string }) => void;
   postTe2OpenRequest: (target: { path: string; line: number; column: number }) => void;
   detectLangFromCommand: (command: string) => string | null;
-  highlightCodeAlways: (text: string, language: string) => string;
+  highlightShellOutput: (text: string, explicitLanguage: string | null) => string | null;
   setStatusDot: (value: string) => void;
   setActivity: (message: string, active: boolean) => void;
   maybeAutoScroll: (force?: boolean) => void;
@@ -98,7 +98,7 @@ export function bindShellRender(ctx: ShellRenderContext) {
     renderShellCmdRibbon,
     postTe2OpenRequest,
     detectLangFromCommand,
-    highlightCodeAlways,
+    highlightShellOutput,
     setStatusDot,
     setActivity,
     maybeAutoScroll,
@@ -291,16 +291,16 @@ export function bindShellRender(ctx: ShellRenderContext) {
     // Prefer final stdout/stderr from the event so we can do syntax highlighting.
     const stdout = String(evt.stdout || '');
     const stderr = String(evt.stderr || '');
-    const lang = detectLangFromCommand(cmd);
+    const highlighted = highlightShellOutput(stdout, detectLangFromCommand(cmd));
     const projected = mountShellOutputWindow(entry.termEl, evt.shell_output, cmd);
     if (projected) {
       // The output controller owns its viewport, including final snapshots.
     } else if (stdout || stderr) {
       if (hasAnsiSgr(stdout)) {
         entry.termEl.innerHTML = ansiToHtml(stdout);
-      } else if (lang) {
+      } else if (highlighted !== null) {
         try {
-          entry.termEl.innerHTML = highlightCodeAlways(stdout, lang);
+          entry.termEl.innerHTML = highlighted;
         } catch {
           entry.termEl.textContent = stdout;
         }
@@ -360,15 +360,15 @@ export function bindShellRender(ctx: ShellRenderContext) {
     // Output
     const stdout = String(evt.stdout || '');
     const stderr = String(evt.stderr || '');
-    const lang = detectLangFromCommand(cmd);
+    const highlighted = highlightShellOutput(stdout, detectLangFromCommand(cmd));
     if (mountShellOutputWindow(termEl, evt.shell_output, cmd)) {
       // Load a bounded window when the card becomes visible.
     } else if (stdout || stderr) {
       if (hasAnsiSgr(stdout)) {
         termEl.innerHTML = ansiToHtml(stdout);
-      } else if (lang) {
+      } else if (highlighted !== null) {
         try {
-          termEl.innerHTML = highlightCodeAlways(stdout, lang);
+          termEl.innerHTML = highlighted;
         } catch {
           termEl.textContent = stdout;
         }

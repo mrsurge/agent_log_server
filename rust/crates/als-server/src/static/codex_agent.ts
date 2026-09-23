@@ -577,6 +577,7 @@ document.addEventListener('DOMContentLoaded', () => {
     buildViewCardTitle,
     detectLangFromCommand,
     highlightCodeAlways,
+    highlightShellOutput,
     normalizeStructuredViewLines,
     synthesizeStructuredViewLines,
     renderStructuredViewLineTable,
@@ -1422,6 +1423,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderShellCmdRibbon,
     detectLangFromCommand,
     highlightCodeAlways,
+    highlightShellOutput,
     detectLangFromPath,
     toRelativePath,
     postTe2OpenRequest,
@@ -1541,7 +1543,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderShellCmdRibbon,
     postTe2OpenRequest,
     detectLangFromCommand,
-    highlightCodeAlways,
+    highlightShellOutput,
     setStatusDot,
     setActivity,
     maybeAutoScroll,
@@ -1665,6 +1667,7 @@ document.addEventListener('DOMContentLoaded', () => {
     buildReplayToolRow,
     renderShellCmdRibbon,
     highlightCodeAlways,
+    highlightShellOutput,
     detectLangFromCommand: (command: string) => detectLangFromCommand(command) || '',
     escapeHtml,
     toRelativePath,
@@ -1778,8 +1781,7 @@ document.addEventListener('DOMContentLoaded', () => {
     : null;
   const transcriptProjectionClient = transcriptStreamClient ?? conversationsRpcClient;
   configureShellOutputWindows(params => transcriptProjectionClient.fetchShellWindow(params), (text, command) => {
-    const language = detectLangFromCommand(command);
-    return language ? highlightCodeAlways(text, language) : null;
+    return highlightShellOutput(text, detectLangFromCommand(command));
   });
   const transcriptRecovery = bindTranscriptRecovery({
     windowRef: window,
