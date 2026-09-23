@@ -72,56 +72,220 @@ interface ComposerRuntimeContext {
 
 const DRAFT_MENTION_ENVELOPE_START = '\x1eCODEX_MENTION ';
 const DRAFT_MENTION_ENVELOPE_END = '\x1f';
+export const COMPOSER_PAIR_GESTURE_TIMEOUT_MS = 800;
 const COMPOSER_AUTO_PAIRS: Readonly<Record<string, string>> = {
   '(': ')',
   '[': ']',
   '{': '}',
   '"': '"',
-  "'": "'",
   '`': '`',
 };
-const COMPOSER_CLOSERS = new Set(Object.values(COMPOSER_AUTO_PAIRS));
+const COMPOSER_SELECTION_PAIRS: Readonly<Record<string, string>> = {
+  ...COMPOSER_AUTO_PAIRS,
+  "'": "'",
+};
+const COMPOSER_CLOSERS = new Set(Object.values(COMPOSER_SELECTION_PAIRS));
+const COMPOSER_TRIPLE_CHARACTERS = new Set(['"', "'", '`']);
+
+export type ComposerAutoPairState =
+  | {
+    kind: 'fresh_pair';
+    opening: string;
+    closing: string;
+    start: number;
+    expiresAt: number;
+  }
+  | {
+    kind: 'single_quote_start';
+    start: number;
+    expiresAt: number;
+  }
+  | {
+    kind: 'single_entry';
+    character: string;
+    expiresAt: number;
+  };
 
 export interface ComposerAutoPairEdit {
   draft: string;
   selection: ComposerSelectionState;
-  action: 'insert' | 'skip';
+  action: 'insert' | 'delete' | 'skip';
 }
 
-export function planComposerAutoPairEdit(
-  input: string,
+export interface ComposerAutoPairPlan {
+  edit: ComposerAutoPairEdit | null;
+  state: ComposerAutoPairState | null;
+}
+
+export interface ComposerBeforeInput {
+  inputType: string;
+  data: string | null;
+}
+
+function activeAutoPairState(
+  state: ComposerAutoPairState | null,
+  now: number,
+): ComposerAutoPairState | null {
+  return state && state.expiresAt >= now ? state : null;
+}
+
+function selectionBounds(
   draft: string,
   selection: ComposerSelectionState,
-): ComposerAutoPairEdit | null {
-  if (input.length !== 1) return null;
+): { anchor: number; focus: number; start: number; end: number; collapsed: boolean } {
   const draftLength = draft.length;
   const anchor = Math.min(Math.max(0, selection.anchor), draftLength);
   const focus = Math.min(Math.max(0, selection.focus), draftLength);
   const start = Math.min(anchor, focus);
   const end = Math.max(anchor, focus);
-  const collapsed = start === end;
+  return { anchor, focus, start, end, collapsed: start === end };
+}
+
+export function planComposerAutoPairEdit(
+  beforeInput: ComposerBeforeInput,
+  draft: string,
+  selection: ComposerSelectionState,
+  previousState: ComposerAutoPairState | null,
+  now: number,
+): ComposerAutoPairPlan {
+  let state = activeAutoPairState(previousState, now);
+  const { anchor, focus, start, end, collapsed } = selectionBounds(draft, selection);
+
+  if (beforeInput.inputType === 'deleteContentBackward') {
+    if (state?.kind !== 'fresh_pair'
+      || !collapsed
+      || start !== state.start + 1
+      || draft.slice(state.start, state.start + 2) !== `${state.opening}${state.closing}`) {
+      return { edit: null, state: state?.kind === 'single_entry' ? state : null };
+    }
+    if (state.opening === '"' || state.opening === '`') {
+      return {
+        edit: {
+          draft: `${draft.slice(0, state.start)}${draft.slice(state.start + 1)}`,
+          selection: { anchor: state.start + 1, focus: state.start + 1 },
+          action: 'delete',
+        },
+        state: null,
+      };
+    }
+    if (state.opening === "'") return { edit: null, state: null };
+    return {
+      edit: {
+        draft: `${draft.slice(0, state.start)}${draft.slice(state.start + 2)}`,
+        selection: { anchor: state.start, focus: state.start },
+        action: 'delete',
+      },
+      state: {
+        kind: 'single_entry',
+        character: state.opening,
+        expiresAt: now + COMPOSER_PAIR_GESTURE_TIMEOUT_MS,
+      },
+    };
+  }
+
+  if (beforeInput.inputType !== 'insertText') return { edit: null, state: null };
+  const input = beforeInput.data || '';
+  if (input.length !== 1) return { edit: null, state: null };
+
+  if (!collapsed) {
+    const closing = COMPOSER_SELECTION_PAIRS[input];
+    if (!closing) return { edit: null, state: null };
+    return {
+      edit: {
+        draft: `${draft.slice(0, start)}${input}${draft.slice(start, end)}${closing}${draft.slice(end)}`,
+        selection: {
+          anchor: anchor + 1,
+          focus: focus + 1,
+        },
+        action: 'insert',
+      },
+      state: null,
+    };
+  }
+
+  if (state?.kind === 'single_entry') {
+    if (state.character === input) return { edit: null, state };
+    state = null;
+  }
+
+  if (state?.kind === 'fresh_pair') {
+    const pairIsIntact = start === state.start + 1
+      && draft.slice(state.start, state.start + 2) === `${state.opening}${state.closing}`;
+    if (pairIsIntact && input === state.opening && COMPOSER_TRIPLE_CHARACTERS.has(input)) {
+      return {
+        edit: {
+          draft: `${draft.slice(0, state.start + 2)}${input}${draft.slice(state.start + 2)}`,
+          selection: { anchor: state.start + 3, focus: state.start + 3 },
+          action: 'insert',
+        },
+        state: null,
+      };
+    }
+    state = null;
+  }
+
+  if (state?.kind === 'single_quote_start') {
+    const firstQuoteIsIntact = input === "'"
+      && start === state.start + 1
+      && draft[state.start] === "'";
+    if (firstQuoteIsIntact) {
+      return {
+        edit: {
+          draft: `${draft.slice(0, start)}'${draft.slice(start)}`,
+          selection: { anchor: start, focus: start },
+          action: 'insert',
+        },
+        state: {
+          kind: 'fresh_pair',
+          opening: "'",
+          closing: "'",
+          start: state.start,
+          expiresAt: now + COMPOSER_PAIR_GESTURE_TIMEOUT_MS,
+        },
+      };
+    }
+    state = null;
+  }
 
   if (collapsed && COMPOSER_CLOSERS.has(input) && draft[start] === input) {
     return {
-      draft,
-      selection: { anchor: start + 1, focus: start + 1 },
-      action: 'skip',
+      edit: {
+        draft,
+        selection: { anchor: start + 1, focus: start + 1 },
+        action: 'skip',
+      },
+      state: null,
     };
   }
 
   const closing = COMPOSER_AUTO_PAIRS[input];
-  if (!closing) return null;
-  if (input === "'" && collapsed && start > 0 && /[\p{L}\p{N}_]/u.test(draft[start - 1])) {
-    return null;
+  if (!closing) {
+    if (input === "'") {
+      return {
+        edit: null,
+        state: {
+          kind: 'single_quote_start',
+          start,
+          expiresAt: now + COMPOSER_PAIR_GESTURE_TIMEOUT_MS,
+        },
+      };
+    }
+    return { edit: null, state: null };
   }
 
   return {
-    draft: `${draft.slice(0, start)}${input}${draft.slice(start, end)}${closing}${draft.slice(end)}`,
-    selection: {
-      anchor: anchor + 1,
-      focus: focus + 1,
+    edit: {
+      draft: `${draft.slice(0, start)}${input}${closing}${draft.slice(start)}`,
+      selection: { anchor: start + 1, focus: start + 1 },
+      action: 'insert',
     },
-    action: 'insert',
+    state: {
+      kind: 'fresh_pair',
+      opening: input,
+      closing,
+      start,
+      expiresAt: now + COMPOSER_PAIR_GESTURE_TIMEOUT_MS,
+    },
   };
 }
 
@@ -182,8 +346,13 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
   let authorClaimPromise: Promise<number | null> | null = null;
   let applyingRemoteSelection = false;
   let suppressSelectionPublishingUntil = 0;
+  let autoPairState: ComposerAutoPairState | null = null;
   const appliedMentionOperations = new Set<string>();
   const composerClientId = getPageClientId(windowRef);
+
+  function resetComposerAutoPairState(): void {
+    autoPairState = null;
+  }
 
   function hasFocusedComposer(): boolean {
     return Boolean(promptEl && documentRef.hasFocus() && documentRef.activeElement === promptEl);
@@ -762,15 +931,29 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     return true;
   }
 
-  function handleComposerAutoPairInput(event: InputEvent): 'insert' | 'skip' | null {
-    if (!promptEl || !event.cancelable || event.isComposing || event.inputType !== 'insertText') return null;
-    const input = typeof event.data === 'string' ? event.data : '';
+  function handleComposerAutoPairInput(event: InputEvent): 'insert' | 'delete' | 'skip' | null {
+    if (!promptEl) return null;
+    if (!event.cancelable || event.isComposing) {
+      resetComposerAutoPairState();
+      return null;
+    }
     const selection = getComposerSelectionState();
     if (!selection) return null;
-    const edit = planComposerAutoPairEdit(input, getPromptDraftText(), selection);
+    const plan = planComposerAutoPairEdit(
+      {
+        inputType: event.inputType,
+        data: typeof event.data === 'string' ? event.data : null,
+      },
+      getPromptDraftText(),
+      selection,
+      autoPairState,
+      Date.now(),
+    );
+    autoPairState = plan.state;
+    const edit = plan.edit;
     if (!edit) return null;
     event.preventDefault();
-    if (edit.action === 'insert') renderPromptFromText(edit.draft);
+    if (edit.action !== 'skip') renderPromptFromText(edit.draft);
     applyLocalComposerSelection(edit.selection);
     return edit.action;
   }
@@ -815,7 +998,10 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       && incomingSequence < clientSequence)
       || (sameOrigin && getState().draftDirty === true && draft !== localText);
     const rendered = draft !== localText && !localSequenceIsNewer;
-    if (rendered) renderPromptFromText(draft);
+    if (rendered) {
+      resetComposerAutoPairState();
+      renderPromptFromText(draft);
+    }
 
     const state = getState();
     const nextMeta = state.conversationMeta ? { ...state.conversationMeta, draft } : undefined;
@@ -844,11 +1030,13 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     if (Number.isSafeInteger(incomingRevision) && incomingRevision < selectionRevision) return;
     applyComposerRevisions(event);
     if (event.origin_client_id === composerClientId) return;
+    resetComposerAutoPairState();
     applyComposerSelection(parseComposerSelection(event.draft_selection));
   }
 
   function clearPrompt() {
     if (!promptEl) return;
+    resetComposerAutoPairState();
     promptEl.innerHTML = '';
     clearStoredComposerSelection();
   }
@@ -963,6 +1151,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
 
   function restoreDraft() {
     if (!promptEl) return;
+    resetComposerAutoPairState();
     const meta = getState().conversationMeta;
     const draft = meta?.draft;
     draftRevision = Number.isSafeInteger(meta?.draft_revision) ? Number(meta?.draft_revision) : 0;
@@ -1028,6 +1217,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
       selectTemplate(item: TributeLookupItem | null) {
         if (!item) return '';
         const absPath = item.original.path || '';
+        resetComposerAutoPairState();
         queueExplicitMentionDraftSave();
         return createMentionToken(absPath).outerHTML;
       },
@@ -1093,6 +1283,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     tributeInstance.attach(promptEl);
 
     promptEl.addEventListener('paste', (evt: ClipboardEvent) => {
+      resetComposerAutoPairState();
       evt.preventDefault();
       const clipboardData = evt.clipboardData || (windowRef as ClipboardWindow).clipboardData;
       const text = clipboardData?.getData?.('text/plain');
@@ -1108,6 +1299,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
 
   function insertMention(path: string, opts: DraftMentionOptions = {}) {
     if (!promptEl || !path) return;
+    resetComposerAutoPairState();
     const operationId = typeof opts.operationId === 'string' ? opts.operationId.trim() : '';
     if (operationId) {
       if (appliedMentionOperations.has(operationId)) return;

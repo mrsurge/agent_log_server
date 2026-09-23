@@ -96,7 +96,7 @@ interface InputFlowContext {
   clearPrompt: () => void;
   clearDraft: () => void;
   saveDraftDebounced: () => void;
-  handleComposerAutoPairInput: (event: InputEvent) => 'insert' | 'skip' | null;
+  handleComposerAutoPairInput: (event: InputEvent) => 'insert' | 'delete' | 'skip' | null;
   openPicker: (startPath: string, mode: string) => void;
   sendHostCloseMessage: () => void;
   bindSplashTabHandlers: () => void;
@@ -231,7 +231,8 @@ export function bindInputFlow(ctx: InputFlowContext) {
   }
 
   function handlePromptBeforeInput(evt: InputEvent) {
-    if (handleComposerAutoPairInput(evt) === 'insert') handlePromptInput();
+    const action = handleComposerAutoPairInput(evt);
+    if (action === 'insert' || action === 'delete') handlePromptInput();
   }
 
   function handlePromptClick(evt: MouseEvent) {

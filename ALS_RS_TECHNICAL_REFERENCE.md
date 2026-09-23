@@ -1348,13 +1348,32 @@ submission clear the draft and restore the empty composer focus before waiting
 for the send RPC. Mobile soft keyboards therefore remain ready for the next
 message without weakening the existing authorship gate.
 
-Composer auto-pairing is handled at `beforeinput` so hardware and mobile virtual
-keyboards share one path. Parentheses, square/curly brackets, ASCII quotes, and
-backticks insert pairs; selections are wrapped; typing an existing closer moves
-past it; and a single quote after a word character remains ordinary apostrophe
-input. The edit planner operates on serialized draft offsets, then restores the
-DOM selection through the mention-aware mapper before the ordinary draft save
-and authorship pipeline runs.
+Composer matching is handled at `beforeinput` so hardware and mobile virtual
+keyboards share one path. Parentheses, square/curly brackets, double quotes, and
+backticks insert pairs at a collapsed caret. Any supported opener, including a
+single quote, wraps a selected range while preserving selection direction.
+Typing an existing closer outside a fresh triple-character gesture advances
+past it without duplication.
+
+An ordinary collapsed single quote is left to native insertion. If a second
+adjacent single quote arrives within 800 ms, the pair is recognized and the
+caret moves between it. A matching character typed between a fresh double
+quote, backtick, or recognized single-quote pair is appended after the pair as
+its third character.
+
+Immediate Backspace between a fresh bracket pair removes both characters and
+starts an 800 ms single-entry window for that opener. Repeating only that opener
+during the window inserts literal single characters; typing any other character
+cancels the window. Immediate Backspace between fresh double quotes or backticks
+removes the typed opener, retains the closer, and moves the caret after it.
+Typing other content cancels pending fresh-pair deletion behavior.
+
+Gesture state is page-local and never persisted or mirrored. Every delayed
+operation validates its exact canonical draft text and caret offsets before
+editing, and remote draft/selection application, restore, clear, expiry, or
+incompatible input discards it. Text edits still run through serialized draft
+offsets and the mention-aware DOM selection mapper before the ordinary draft
+save and authorship pipeline.
 
 Sidebar mentions target one live author socket with a unique operation id. With
 no live author, Rust appends one canonical mention to persisted draft state,
