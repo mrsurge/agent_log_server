@@ -1581,7 +1581,7 @@ def build_request_params(
             raise RuntimeError(f"{method} requires thread_id")
         params["threadId"] = thread_id
     if "turnId" in props:
-        if not turn_id:
+        if turn_id is None:
             raise RuntimeError(f"{method} requires turn_id")
         params["turnId"] = turn_id
     if "input" in props:

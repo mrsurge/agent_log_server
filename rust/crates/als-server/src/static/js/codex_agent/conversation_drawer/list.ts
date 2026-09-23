@@ -20,6 +20,7 @@ interface ConversationMeta extends Record<string, unknown> {
 }
 
 export interface HostUiState {
+  ideMode?: boolean;
   projectRoot?: string;
 }
 
@@ -124,6 +125,17 @@ function conversationMatchesProject(
   const cwd = conversationCwd(meta);
   if (!cwd) return false;
   return cwd === projectRoot || cwd.startsWith(`${projectRoot}/`);
+}
+
+export function filterMiniConversations(
+  list: ConversationMeta[] | null | undefined,
+  hostUi: HostUiState | null | undefined,
+  splashTab: string,
+): ConversationMeta[] {
+  const scope = hostUi?.ideMode === true && splashTab === 'project' ? 'project' : 'all';
+  return Array.isArray(list)
+    ? list.filter((meta) => conversationMatchesProject(meta, hostUi, scope))
+    : [];
 }
 
 function conversationIntegrity(
@@ -882,12 +894,15 @@ export function createConversationDrawerList(
   function renderMiniConversationList(list: ConversationMeta[], activeConversationId: string | null): void {
     if (!conversationMiniListEl) return;
     const doc = documentRef || document;
+    const hostUi = getHostUi();
+    const splashTab = getSplashTab();
+    const projectScoped = hostUi?.ideMode === true && splashTab === 'project';
     conversationMiniListEl.innerHTML = '';
-    const items = Array.isArray(list) ? list : [];
+    const items = filterMiniConversations(list, hostUi, splashTab);
     if (!items.length) {
       const empty = doc.createElement('div');
       empty.className = 'muted';
-      empty.textContent = 'No conversations yet.';
+      empty.textContent = projectScoped ? 'No project conversations yet.' : 'No conversations yet.';
       conversationMiniListEl.appendChild(empty);
       return;
     }
@@ -943,13 +958,22 @@ export function createConversationDrawerList(
   function renderSplashTabs(): void {
     const doc = documentRef || document;
     const state = getState();
+    const hostUi = getHostUi();
     const splashTabAllBtn = doc.getElementById('splash-tab-all');
     const splashTabProjectBtn = doc.getElementById('splash-tab-project');
+    const miniTabAllBtn = doc.getElementById('conversation-mini-tab-all');
+    const miniTabProjectBtn = doc.getElementById('conversation-mini-tab-project');
+    const miniScopeEl = doc.getElementById('conversation-mini-scope');
     const splashGoConversationBtn = doc.getElementById('splash-go-conversation');
     const activeTab = getSplashTab();
     const activeConversationId = getActiveConversationIdFromState(state);
     splashTabAllBtn?.classList.toggle('active', activeTab === 'all');
     splashTabProjectBtn?.classList.toggle('active', activeTab === 'project');
+    miniTabAllBtn?.classList.toggle('active', activeTab === 'all');
+    miniTabProjectBtn?.classList.toggle('active', activeTab === 'project');
+    miniTabAllBtn?.setAttribute('aria-pressed', activeTab === 'all' ? 'true' : 'false');
+    miniTabProjectBtn?.setAttribute('aria-pressed', activeTab === 'project' ? 'true' : 'false');
+    if (miniScopeEl instanceof HTMLElement) miniScopeEl.hidden = hostUi?.ideMode !== true;
     if (splashGoConversationBtn instanceof HTMLButtonElement) {
       splashGoConversationBtn.disabled = !activeConversationId;
       splashGoConversationBtn.title = activeConversationId

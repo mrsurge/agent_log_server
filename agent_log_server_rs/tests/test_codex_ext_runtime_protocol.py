@@ -56,6 +56,7 @@ class CodexRuntimeProtocolTests(unittest.TestCase):
                     }, thread_id="thread_123")
                     config = cast(dict[str, object], params["config"])
                     self.assertIs(config["include_collaboration_mode_instructions"], False)
+                    self.assertIs(config["suppress_unstable_features_warning"], True)
                     self.assertEqual(config["features"], {"default_mode_request_user_input": True})
                     instructions = str(params["developerInstructions"])
                     self.assertTrue(instructions.startswith("Repo guidance\n"))
@@ -163,6 +164,43 @@ class CodexRuntimeProtocolTests(unittest.TestCase):
 
         self.assertEqual(params["threadId"], "thread_123")
         self.assertIs(params["excludeTurns"], True)
+
+    def test_turn_interrupt_allows_schema_valid_empty_turn_id(self) -> None:
+        protocol = RuntimeProtocol(
+            version="codex-cli 0.155.1",
+            version_key="0.155.1",
+            cache_dir=Path("."),
+            schema_path=Path("codex_app_server_protocol.v2.schemas.json"),
+            definitions={},
+            request_params={
+                "turn/interrupt": {
+                    "type": "object",
+                    "required": ["threadId", "turnId"],
+                    "properties": {
+                        "threadId": {"type": "string"},
+                        "turnId": {"type": "string"},
+                    },
+                }
+            },
+            responses={},
+            server_requests={},
+            server_request_responses={},
+            notifications={},
+            events={},
+            server_request_semantics={},
+            notification_semantics={},
+            event_semantics={},
+        )
+
+        params = build_request_params(
+            protocol,
+            "turn/interrupt",
+            {},
+            thread_id="thread_123",
+            turn_id="",
+        )
+
+        self.assertEqual(params, {"threadId": "thread_123", "turnId": ""})
 
     def test_agent_pty_blocks_config_forces_parallel_tool_calls_off(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

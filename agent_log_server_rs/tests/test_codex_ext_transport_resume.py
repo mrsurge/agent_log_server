@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import unittest
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 from extensions.codex_ext.transport import CodexAppServerTransport, MetaFns, ShellManager
+
+
+def _discard_raw_log(_direction: str, _label: str, _payload: object) -> None:
+    return None
 
 
 class _ResumeTransport(CodexAppServerTransport):
@@ -107,7 +113,126 @@ class _BlockingRouteTransport(CodexAppServerTransport):
         await self._terminate_event_router()
 
 
+class _BindingTransport(CodexAppServerTransport):
+    bound_conversation_id: str | None = None
+
+    async def _write_payload(self, payload: dict[str, object], *, conversation_id: str | None = None) -> None:
+        params = payload.get("params")
+        params_dict = cast(dict[str, object], params) if isinstance(params, dict) else {}
+        self.bound_conversation_id = self._resolve_conversation_id(
+            None,
+            params_dict,
+        )
+        request_id = str(payload["id"])
+        self._rpc_waiters[request_id].set_result({"id": payload["id"], "result": {}})
+
+    async def _decode_rpc_response_result(
+        self,
+        method: str,
+        response: dict[str, object],
+        *,
+        conversation_id: str | None,
+    ) -> dict[str, object]:
+        del method, response, conversation_id
+        return {}
+
+    def remember_response_bindings(self, conversation_id: str, result: dict[str, object]) -> None:
+        self._remember_response_bindings(conversation_id=conversation_id, result=result)
+
+    def find_conversation_by_thread_id(self, thread_id: str) -> str | None:
+        return self._find_conversation_by_thread_id(thread_id)
+
+
 class CodexTransportResumeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_binding_precedes_app_server_write(self) -> None:
+        async def fws_getter() -> object:
+            raise AssertionError("binding test should not touch framework shells")
+
+        async def no_broadcast(_event: dict[str, object]) -> None:
+            return None
+
+        async def no_transcript(_conversation_id: str, _entry: dict[str, object]) -> None:
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            transport = _BindingTransport(
+                server_root=Path(tmp),
+                fws_getter=cast(Callable[[], Awaitable[ShellManager]], fws_getter),
+                broadcast_fn=no_broadcast,
+                transcript_fn=no_transcript,
+                meta_fns=None,
+                raw_log_fn=_discard_raw_log,
+            )
+            await transport.rpc_request_unchecked(
+                "turn/start",
+                params={"threadId": "thread_123"},
+                conversation_id="conv_123",
+            )
+
+        self.assertEqual(transport.bound_conversation_id, "conv_123")
+
+    async def test_response_turn_binding_persists_through_meta_adapter(self) -> None:
+        stored_meta: dict[str, object] = {"thread_id": "thread_123"}
+
+        def load_meta(_conversation_id: str) -> dict[str, object]:
+            return dict(stored_meta)
+
+        def save_meta(_conversation_id: str, value: dict[str, object]) -> None:
+            stored_meta.clear()
+            stored_meta.update(value)
+
+        async def fws_getter() -> object:
+            raise AssertionError("response binding test should not touch framework shells")
+
+        async def no_broadcast(_event: dict[str, object]) -> None:
+            return None
+
+        async def no_transcript(_conversation_id: str, _entry: dict[str, object]) -> None:
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            transport = _BindingTransport(
+                server_root=Path(tmp),
+                fws_getter=cast(Callable[[], Awaitable[ShellManager]], fws_getter),
+                broadcast_fn=no_broadcast,
+                transcript_fn=no_transcript,
+                meta_fns={"load": load_meta, "save": save_meta},
+                raw_log_fn=_discard_raw_log,
+            )
+            transport.remember_response_bindings("conv_123", {"turn": {"id": "turn_155"}})
+
+        self.assertEqual(stored_meta["turn_id"], "turn_155")
+
+    async def test_conversation_fallback_uses_als_data_root(self) -> None:
+        async def fws_getter() -> object:
+            raise AssertionError("data root test should not touch framework shells")
+
+        async def no_broadcast(_event: dict[str, object]) -> None:
+            return None
+
+        async def no_transcript(_conversation_id: str, _entry: dict[str, object]) -> None:
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conversation_dir = Path(tmp) / "conversations" / "conv_123"
+            conversation_dir.mkdir(parents=True)
+            (conversation_dir / "meta.json").write_text(
+                '{"thread_id":"thread_123"}',
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"ALS_RS_DATA_DIR": tmp}):
+                transport = _BindingTransport(
+                    server_root=Path(tmp),
+                    fws_getter=cast(Callable[[], Awaitable[ShellManager]], fws_getter),
+                    broadcast_fn=no_broadcast,
+                    transcript_fn=no_transcript,
+                    meta_fns=None,
+                    raw_log_fn=_discard_raw_log,
+                )
+                resolved = transport.find_conversation_by_thread_id("thread_123")
+
+        self.assertEqual(resolved, "conv_123")
+
     async def test_resume_waits_for_matching_thread_idle_after_rpc_response(self) -> None:
         logs: list[tuple[str, str, object]] = []
 

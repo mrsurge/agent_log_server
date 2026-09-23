@@ -179,7 +179,13 @@
             <div class="conversation-mini-drawer" id="conversation-mini-drawer" aria-hidden="true">
               <div class="conversation-mini-header">
                 <span class="conversation-mini-title">Switch conversation</span>
-                <button id="conversation-mini-close" class="btn ghost tiny">×</button>
+                <div class="conversation-mini-header-actions">
+                  <div id="conversation-mini-scope" class="conversation-mini-scope" role="group" aria-label="Conversation scope">
+                    <button id="conversation-mini-tab-project" class="btn tiny toggle" type="button">Project</button>
+                    <button id="conversation-mini-tab-all" class="btn tiny toggle active" type="button">All</button>
+                  </div>
+                  <button id="conversation-mini-close" class="btn ghost tiny" type="button" title="Close conversation switcher" aria-label="Close conversation switcher">×</button>
+                </div>
               </div>
               <div id="conversation-mini-list" class="conversation-mini-list"></div>
             </div>

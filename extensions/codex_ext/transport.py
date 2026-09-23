@@ -21,11 +21,23 @@ from .runtime_protocol import (
 )
 
 _TRANSPORT_LABEL = "app-server:codex-extension"
-_CONFIG_ROOT = Path(os.path.expanduser("~/.cache/app_server"))
-_CONVERSATION_DIR = _CONFIG_ROOT / "conversations"
+_LEGACY_ROOT = Path(os.path.expanduser("~/.cache/app_server"))
 _META_ENVELOPE_START = "\x1eCODEX_META "
 _META_ENVELOPE_END = "\x1f"
 _APP_SERVER_JSON_DECODER = msgspec.json.Decoder()
+
+
+def _environment_root(name: str, fallback: Path) -> Path:
+    value = os.environ.get(name)
+    return Path(value) if isinstance(value, str) and value else fallback
+
+
+def _conversation_dir() -> Path:
+    return _environment_root("ALS_RS_DATA_DIR", _LEGACY_ROOT) / "conversations"
+
+
+def _config_root() -> Path:
+    return _environment_root("ALS_RS_CONFIG_DIR", _LEGACY_ROOT)
 
 
 class _PipeWriter(Protocol):
@@ -446,6 +458,11 @@ class CodexAppServerTransport:
         payload: Dict[str, object] = {"id": int(req_id), "method": method}
         if params is not None:
             payload["params"] = params
+            self._remember_bindings(
+                conversation_id=conversation_id,
+                thread_id=self._get_thread_id(params, fallback=None),
+                turn_id=self._get_turn_id(params),
+            )
         await self._write_payload(payload, conversation_id=conversation_id)
         try:
             try:
@@ -1164,12 +1181,13 @@ class CodexAppServerTransport:
         return (self._conversation_meta_path(conversation_id)).exists()
 
     def _conversation_meta_path(self, conversation_id: str) -> Path:
-        return _CONVERSATION_DIR / conversation_id / "meta.json"
+        return _conversation_dir() / conversation_id / "meta.json"
 
     def _find_conversation_by_thread_id(self, thread_id: Optional[str]) -> Optional[str]:
-        if not thread_id or not _CONVERSATION_DIR.exists():
+        conversation_dir = _conversation_dir()
+        if not thread_id or not conversation_dir.exists():
             return None
-        for child in _CONVERSATION_DIR.iterdir():
+        for child in conversation_dir.iterdir():
             if not child.is_dir():
                 continue
             meta_path = child / "meta.json"
@@ -1184,9 +1202,10 @@ class CodexAppServerTransport:
         return None
 
     def _find_conversation_by_turn_id(self, turn_id: Optional[str]) -> Optional[str]:
-        if not turn_id or not _CONVERSATION_DIR.exists():
+        conversation_dir = _conversation_dir()
+        if not turn_id or not conversation_dir.exists():
             return None
-        for child in _CONVERSATION_DIR.iterdir():
+        for child in conversation_dir.iterdir():
             if not child.is_dir():
                 continue
             meta_path = child / "meta.json"
@@ -1201,7 +1220,7 @@ class CodexAppServerTransport:
         return None
 
     def _shell_cwd(self) -> str:
-        config_path = _CONFIG_ROOT / "config.json"
+        config_path = _config_root() / "config.json"
         try:
             if config_path.exists():
                 data = cast(object, json.loads(config_path.read_text(encoding="utf-8")))
@@ -1357,6 +1376,8 @@ class CodexAppServerTransport:
                 thread_id=thread_id,
                 turn_id=turn_id,
             )
+        if turn_id:
+            self._persist_turn_id(conversation_id, turn_id)
 
     def _get_thread_id(self, payload: object, fallback: Optional[str]) -> Optional[str]:
         payload_dict = _object_dict(payload)

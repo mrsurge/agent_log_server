@@ -743,11 +743,33 @@ body.widescreen-resizing * {
 }
 
 .conversation-mini-title {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: 11px;
   letter-spacing: 0.35px;
   text-transform: uppercase;
   color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-mini-header-actions,
+.conversation-mini-scope {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.conversation-mini-scope .btn {
+  min-width: 0;
+  padding-inline: 7px;
+}
+
+.conversation-mini-scope[hidden] {
+  display: none;
 }
 
 .conversation-mini-list {

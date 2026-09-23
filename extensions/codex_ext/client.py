@@ -154,6 +154,26 @@ def _extract_thread_id_from_result(payload: object) -> Optional[str]:
     return None
 
 
+def _save_turn_request_meta(
+    conversation_id: str,
+    *,
+    fallback_meta: Dict[str, object],
+    thread_id: str,
+    settings: Dict[str, object],
+    runtime_signature: Optional[str] = None,
+) -> Dict[str, object]:
+    if not _meta_fns or "load" not in _meta_fns:
+        return fallback_meta
+    latest_meta = _object_dict(_meta_fns["load"](conversation_id)) or dict(fallback_meta)
+    latest_meta["thread_id"] = thread_id
+    latest_meta["status"] = "active"
+    latest_meta["settings"] = settings
+    if runtime_signature:
+        latest_meta["thread_runtime_signature"] = runtime_signature
+    _save_meta(conversation_id, latest_meta)
+    return latest_meta
+
+
 def _mark_transport_ready() -> None:
     for ext_id in _registered_extension_ids:
         _ready_extensions.add(ext_id)
@@ -1509,6 +1529,12 @@ async def handle_message(
 
     try:
         if thread_id:
+            meta = _save_turn_request_meta(
+                conversation_id,
+                fallback_meta=meta,
+                thread_id=thread_id,
+                settings=merged_settings,
+            )
             turn_params = build_request_params(
                 protocol,
                 "turn/start",
@@ -1524,9 +1550,6 @@ async def handle_message(
                     timeout=15.0,
                 )
                 transport.mark_thread_ready(thread_id)
-                meta["status"] = "active"
-                meta["settings"] = merged_settings
-                _save_meta(conversation_id, meta)
             except Exception as exc:
                 if not _looks_like_thread_not_loaded_error(exc, thread_id):
                     raise
@@ -1800,11 +1823,10 @@ async def abort_session(conversation_id: str) -> bool:
     if not _is_object_dict(meta):
         return False
     thread_id = meta.get("thread_id")
-    turn_id = meta.get("turn_id")
     if not isinstance(thread_id, str) or not thread_id:
         return False
-    if not isinstance(turn_id, str) or not turn_id:
-        return False
+    turn_id_value = meta.get("turn_id")
+    turn_id = turn_id_value if isinstance(turn_id_value, str) else ""
 
     try:
         transport = await _ensure_transport_ready()

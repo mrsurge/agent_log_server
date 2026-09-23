@@ -487,19 +487,21 @@ export function createConversationDrawerActions(
     const doc = documentRef || document;
     const splashTabAllBtn = doc.getElementById('splash-tab-all');
     const splashTabProjectBtn = doc.getElementById('splash-tab-project');
+    const miniTabAllBtn = doc.getElementById('conversation-mini-tab-all');
+    const miniTabProjectBtn = doc.getElementById('conversation-mini-tab-project');
     const splashGoConversationBtn = doc.getElementById('splash-go-conversation');
-    splashTabAllBtn?.addEventListener('click', () => {
-      setState({ splashTab: 'all' });
+    const setConversationScope = (scope: 'all' | 'project') => {
+      setState({ splashTab: scope });
       const state = getState();
       renderSplashTabs();
-      renderConversationList(state.conversationList || [], state.conversationMeta?.conversation_id || null);
-    });
-    splashTabProjectBtn?.addEventListener('click', async () => {
-      setState({ splashTab: 'project' });
-      const state = getState();
-      renderSplashTabs();
-      renderConversationList(state.conversationList || [], state.conversationMeta?.conversation_id || null);
-    });
+      const activeConversationId = getActiveConversationId();
+      renderConversationList(state.conversationList || [], activeConversationId);
+      renderMiniConversationList(state.conversationList || [], activeConversationId);
+    };
+    splashTabAllBtn?.addEventListener('click', () => setConversationScope('all'));
+    splashTabProjectBtn?.addEventListener('click', () => setConversationScope('project'));
+    miniTabAllBtn?.addEventListener('click', () => setConversationScope('all'));
+    miniTabProjectBtn?.addEventListener('click', () => setConversationScope('project'));
     splashGoConversationBtn?.addEventListener('click', async () => {
       const activeConversationId = getActiveConversationId();
       if (!activeConversationId) return;

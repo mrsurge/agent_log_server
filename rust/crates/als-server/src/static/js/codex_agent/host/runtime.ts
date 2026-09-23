@@ -65,6 +65,7 @@ interface HostRuntimeContext {
   splashConsoleWorkerIdEl: HTMLElement | null;
   documentRef: Document;
   windowRef: Window;
+  onHostUiChanged?(): void;
 }
 
 export function bindHostRuntime(ctx: HostRuntimeContext) {
@@ -83,6 +84,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     splashConsoleWorkerIdEl,
     documentRef,
     windowRef,
+    onHostUiChanged,
   } = ctx;
   const settingsRpcClient = createSettingsRpcClient({
     sioCall,
@@ -126,6 +128,7 @@ export function bindHostRuntime(ctx: HostRuntimeContext) {
     if (tabsEl instanceof HTMLElement) {
       tabsEl.style.display = Boolean(hostUi?.ideMode) ? 'flex' : 'none';
     }
+    onHostUiChanged?.();
   }
 
   function sendHostCloseMessage() {

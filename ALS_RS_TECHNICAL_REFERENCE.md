@@ -1323,6 +1323,14 @@ Unreadable conversation `meta.json` files become non-actionable
 A whole-list RPC failure renders an explicit list error instead of pretending
 the list is empty or mutating damaged data.
 
+The full splash list and conversation minibar consume the same canonical list
+and persisted All/Project scope. Their controls mutate the same `splashTab`
+state, so switching either surface immediately rerenders both. In TE2
+IDE/sidebar Project mode, the minibar applies the Project splash tab's
+CWD-under-project-root predicate; standalone clients retain the complete list.
+Applying changed host UI state rerenders the minibar immediately so a sidebar
+project switch cannot leave stale cross-project rows visible.
+
 ### Multi-client composer ownership
 
 Rust owns canonical draft text, persisted draft revision, and selection state.
@@ -1339,6 +1347,14 @@ the Send control does not transfer focus away, and both button and Enter
 submission clear the draft and restore the empty composer focus before waiting
 for the send RPC. Mobile soft keyboards therefore remain ready for the next
 message without weakening the existing authorship gate.
+
+Composer auto-pairing is handled at `beforeinput` so hardware and mobile virtual
+keyboards share one path. Parentheses, square/curly brackets, ASCII quotes, and
+backticks insert pairs; selections are wrapped; typing an existing closer moves
+past it; and a single quote after a word character remains ordinary apostrophe
+input. The edit planner operates on serialized draft offsets, then restores the
+DOM selection through the mention-aware mapper before the ordinary draft save
+and authorship pipeline runs.
 
 Sidebar mentions target one live author socket with a unique operation id. With
 no live author, Rust appends one canonical mention to persisted draft state,
@@ -1377,6 +1393,11 @@ mode instructions and skips the replacement. Execution-permission settings
 remain unchanged. Thread configuration takes effect on start/resume; developer
 guidance is also supplied per turn. Reattach existing live provider sessions
 to activate changed thread configuration.
+
+The same extension-owned thread config merger defaults
+`suppress_unstable_features_warning` to true while preserving an explicit
+false. This is supplied on thread start/resume/fork through the normal Codex
+`config` request field; it does not mutate the user's global `config.toml`.
 
 Live generic `type: "approval"` events persist into
 `meta.pending_approvals`. `conversation.approval.respond` routes provider
@@ -1668,6 +1689,18 @@ their apply-patch ownership instead of relabeling that existing card.
   retained `mcp_agent_pty_http_shim.py` is not the active Codex injection path.
 - Resume is event-first and excludes turns; authentication is notification
   driven rather than account-read polling.
+
+- Codex turn identity is response/event-owned. Before writing a provider
+  request, the transport binds the local conversation to any request
+  `threadId`/`turnId`; a `TurnStartResponse.turn.id` is persisted immediately,
+  and `turn/started` remains an idempotent confirmation. The send path patches
+  settings/status before `turn/start` and never writes an older metadata
+  snapshot after the RPC, because that can erase the concurrently persisted
+  `turn_id` and make interrupt deterministically fail. Transport filesystem
+  fallback reads conversations from `${ALS_RS_DATA_DIR}/conversations` and
+  config from `${ALS_RS_CONFIG_DIR}`, retaining the legacy Python root only
+  when ALS-RS roots are absent. `turn/interrupt` permits the schema-valid empty
+  `turnId` that Codex uses to cancel startup before an active turn ID exists.
 
 ### Copilot
 

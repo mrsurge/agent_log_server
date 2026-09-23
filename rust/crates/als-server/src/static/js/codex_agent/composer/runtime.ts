@@ -72,6 +72,58 @@ interface ComposerRuntimeContext {
 
 const DRAFT_MENTION_ENVELOPE_START = '\x1eCODEX_MENTION ';
 const DRAFT_MENTION_ENVELOPE_END = '\x1f';
+const COMPOSER_AUTO_PAIRS: Readonly<Record<string, string>> = {
+  '(': ')',
+  '[': ']',
+  '{': '}',
+  '"': '"',
+  "'": "'",
+  '`': '`',
+};
+const COMPOSER_CLOSERS = new Set(Object.values(COMPOSER_AUTO_PAIRS));
+
+export interface ComposerAutoPairEdit {
+  draft: string;
+  selection: ComposerSelectionState;
+  action: 'insert' | 'skip';
+}
+
+export function planComposerAutoPairEdit(
+  input: string,
+  draft: string,
+  selection: ComposerSelectionState,
+): ComposerAutoPairEdit | null {
+  if (input.length !== 1) return null;
+  const draftLength = draft.length;
+  const anchor = Math.min(Math.max(0, selection.anchor), draftLength);
+  const focus = Math.min(Math.max(0, selection.focus), draftLength);
+  const start = Math.min(anchor, focus);
+  const end = Math.max(anchor, focus);
+  const collapsed = start === end;
+
+  if (collapsed && COMPOSER_CLOSERS.has(input) && draft[start] === input) {
+    return {
+      draft,
+      selection: { anchor: start + 1, focus: start + 1 },
+      action: 'skip',
+    };
+  }
+
+  const closing = COMPOSER_AUTO_PAIRS[input];
+  if (!closing) return null;
+  if (input === "'" && collapsed && start > 0 && /[\p{L}\p{N}_]/u.test(draft[start - 1])) {
+    return null;
+  }
+
+  return {
+    draft: `${draft.slice(0, start)}${input}${draft.slice(start, end)}${closing}${draft.slice(end)}`,
+    selection: {
+      anchor: anchor + 1,
+      focus: focus + 1,
+    },
+    action: 'insert',
+  };
+}
 
 function getDraftHash(text: string): string {
   return String(text || '').split('').reduce((acc, char) => ((acc << 5) - acc + char.charCodeAt(0)) | 0, 0).toString(16);
@@ -675,6 +727,54 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     rememberComposerSelection(false);
   }
 
+  function applyLocalComposerSelection(selectionState: ComposerSelectionState): boolean {
+    if (!promptEl) return false;
+    const draftLength = getPromptDraftText().length;
+    const anchorOffset = Math.min(selectionState.anchor, draftLength);
+    const focusOffset = Math.min(selectionState.focus, draftLength);
+    const anchorPoint = locateDraftPoint(promptEl, anchorOffset);
+    const focusPoint = locateDraftPoint(promptEl, focusOffset);
+    const selection = windowRef.getSelection?.();
+    if (!selection) return false;
+    try {
+      selection.setBaseAndExtent(
+        anchorPoint.node,
+        anchorPoint.offset,
+        focusPoint.node,
+        focusPoint.offset,
+      );
+    } catch {
+      try {
+        const range = documentRef.createRange();
+        const startOffset = Math.min(anchorOffset, focusOffset);
+        const endOffset = Math.max(anchorOffset, focusOffset);
+        const startPoint = locateDraftPoint(promptEl, startOffset);
+        const endPoint = locateDraftPoint(promptEl, endOffset);
+        range.setStart(startPoint.node, startPoint.offset);
+        range.setEnd(endPoint.node, endPoint.offset);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch {
+        return false;
+      }
+    }
+    rememberComposerSelection();
+    return true;
+  }
+
+  function handleComposerAutoPairInput(event: InputEvent): 'insert' | 'skip' | null {
+    if (!promptEl || !event.cancelable || event.isComposing || event.inputType !== 'insertText') return null;
+    const input = typeof event.data === 'string' ? event.data : '';
+    const selection = getComposerSelectionState();
+    if (!selection) return null;
+    const edit = planComposerAutoPairEdit(input, getPromptDraftText(), selection);
+    if (!edit) return null;
+    event.preventDefault();
+    if (edit.action === 'insert') renderPromptFromText(edit.draft);
+    applyLocalComposerSelection(edit.selection);
+    return edit.action;
+  }
+
   function applyComposerRevisions(value: unknown) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return;
     const record = value as JsonObject;
@@ -1059,6 +1159,7 @@ export function bindComposerRuntime(ctx: ComposerRuntimeContext) {
     syncDraftFromServer,
     applyDraftUpdate,
     applySelectionUpdate,
+    handleComposerAutoPairInput,
     initTribute,
     insertMention,
   };

@@ -96,6 +96,7 @@ interface InputFlowContext {
   clearPrompt: () => void;
   clearDraft: () => void;
   saveDraftDebounced: () => void;
+  handleComposerAutoPairInput: (event: InputEvent) => 'insert' | 'skip' | null;
   openPicker: (startPath: string, mode: string) => void;
   sendHostCloseMessage: () => void;
   bindSplashTabHandlers: () => void;
@@ -133,6 +134,7 @@ export function bindInputFlow(ctx: InputFlowContext) {
     clearPrompt,
     clearDraft,
     saveDraftDebounced,
+    handleComposerAutoPairInput,
     openPicker,
     sendHostCloseMessage,
     bindSplashTabHandlers,
@@ -226,6 +228,10 @@ export function bindInputFlow(ctx: InputFlowContext) {
       setState({ draftDirty: true });
       saveDraftDebounced();
     }
+  }
+
+  function handlePromptBeforeInput(evt: InputEvent) {
+    if (handleComposerAutoPairInput(evt) === 'insert') handlePromptInput();
   }
 
   function handlePromptClick(evt: MouseEvent) {
@@ -549,6 +555,7 @@ export function bindInputFlow(ctx: InputFlowContext) {
     });
 
     promptEl?.addEventListener('keydown', handlePromptKeydown);
+    promptEl?.addEventListener('beforeinput', handlePromptBeforeInput);
     promptEl?.addEventListener('input', handlePromptInput);
     promptEl?.addEventListener('click', handlePromptClick);
 

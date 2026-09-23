@@ -695,6 +695,7 @@ document.addEventListener('DOMContentLoaded', () => {
     syncDraftFromServer,
     applyDraftUpdate,
     applySelectionUpdate,
+    handleComposerAutoPairInput,
     initTribute,
     insertMention,
   } = composerRuntime;
@@ -788,6 +789,7 @@ document.addEventListener('DOMContentLoaded', () => {
   finalizeSubagent = subagentsCollapsible.finalizeSubagent;
   makeCollapsible = subagentsCollapsible.makeCollapsible;
 
+  let refreshMiniConversationScope = () => {};
   const hostRuntime = bindHostRuntime({
     getState: () => ({
       hostUi: {
@@ -829,6 +831,7 @@ document.addEventListener('DOMContentLoaded', () => {
     splashConsoleWorkerIdEl,
     documentRef: document,
     windowRef: window,
+    onHostUiChanged: () => refreshMiniConversationScope(),
   });
 
   const {
@@ -901,6 +904,7 @@ document.addEventListener('DOMContentLoaded', () => {
     conversationMiniDrawerEl,
     conversationMiniCloseBtn,
     getHostUi: () => ({
+      ideMode: hostUi.ideMode === true,
       projectRoot: typeof hostUi.projectRoot === 'string' ? hostUi.projectRoot : undefined,
     }),
     getSplashTab: () => splashTab,
@@ -975,6 +979,13 @@ document.addEventListener('DOMContentLoaded', () => {
     documentRef: document,
     windowRef: window,
   });
+
+  refreshMiniConversationScope = () => {
+    const activeConversationId = clientConversationId
+      || (typeof conversationMeta.conversation_id === 'string' ? conversationMeta.conversation_id : null);
+    renderSplashTabs();
+    renderMiniConversationList(conversationList, activeConversationId);
+  };
 
   function toProjectRelativePath(path: string | null | undefined): string | null {
 	    if (!path || typeof path !== 'string') return null;
@@ -2624,6 +2635,7 @@ document.addEventListener('DOMContentLoaded', () => {
     clearPrompt,
     clearDraft,
     saveDraftDebounced,
+    handleComposerAutoPairInput,
     openPicker: (startPath: string, mode: string) => {
       openPicker(startPath, mode as Parameters<SettingsUiBinding['openPicker']>[1]);
     },

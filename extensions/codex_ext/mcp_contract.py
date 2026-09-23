@@ -59,6 +59,7 @@ def build_codex_thread_config(
     features.setdefault("default_mode_request_user_input", True)
     merged["features"] = features
     merged.setdefault("include_collaboration_mode_instructions", False)
+    merged.setdefault("suppress_unstable_features_warning", True)
 
     existing_mcp = merged.get("mcp_servers")
     if existing_mcp in (None, ""):
