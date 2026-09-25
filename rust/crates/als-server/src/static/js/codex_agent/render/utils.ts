@@ -51,6 +51,113 @@ export interface ImplicitJsonRange {
   end: number;
 }
 
+export interface GitDiffRange {
+  start: number;
+  end: number;
+}
+
+interface SourceLine {
+  start: number;
+  end: number;
+  text: string;
+}
+
+function sourceLines(text: string): SourceLine[] {
+  const lines: SourceLine[] = [];
+  let start = 0;
+  while (start < text.length) {
+    const newline = text.indexOf('\n', start);
+    const end = newline < 0 ? text.length : newline + 1;
+    let contentEnd = newline < 0 ? end : newline;
+    if (contentEnd > start && text[contentEnd - 1] === '\r') contentEnd -= 1;
+    lines.push({ start, end, text: text.slice(start, contentEnd) });
+    start = end;
+  }
+  return lines;
+}
+
+function parseUnifiedHunkCounts(line: string): { old: number; next: number } | null {
+  const match = line.match(/^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/);
+  if (!match) return null;
+  return {
+    old: match[1] === undefined ? 1 : Number(match[1]),
+    next: match[2] === undefined ? 1 : Number(match[2]),
+  };
+}
+
+function isGitDiffMetadataLine(line: string): boolean {
+  return line === '' || /^(?:index |old mode |new mode |deleted file mode |new file mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |--- |\+\+\+ |Binary files |Submodule )/.test(line);
+}
+
+export function findGitDiffRanges(text: string | null | undefined): GitDiffRange[] {
+  const source = String(text || '');
+  const lines = sourceLines(source);
+  const ranges: GitDiffRange[] = [];
+  let lineIndex = 0;
+  while (lineIndex < lines.length) {
+    if (!lines[lineIndex].text.startsWith('diff --git ')) {
+      lineIndex += 1;
+      continue;
+    }
+
+    const start = lines[lineIndex].start;
+    let end = lines[lineIndex].end;
+    let oldRemaining = 0;
+    let nextRemaining = 0;
+    let inHunk = false;
+    lineIndex += 1;
+
+    while (lineIndex < lines.length) {
+      const line = lines[lineIndex];
+      const value = line.text;
+      if (value.startsWith('diff --git ')) {
+        break;
+      }
+
+      const hunkCounts = parseUnifiedHunkCounts(value);
+      if (hunkCounts) {
+        inHunk = true;
+        oldRemaining = hunkCounts.old;
+        nextRemaining = hunkCounts.next;
+        end = line.end;
+        lineIndex += 1;
+        continue;
+      }
+
+      if (inHunk) {
+        let accepted = false;
+        if (value === '\\ No newline at end of file') {
+          accepted = true;
+        } else if (value.startsWith(' ') && oldRemaining > 0 && nextRemaining > 0) {
+          oldRemaining -= 1;
+          nextRemaining -= 1;
+          accepted = true;
+        } else if (value.startsWith('-') && oldRemaining > 0) {
+          oldRemaining -= 1;
+          accepted = true;
+        } else if (value.startsWith('+') && nextRemaining > 0) {
+          nextRemaining -= 1;
+          accepted = true;
+        }
+        if (accepted) {
+          end = line.end;
+          lineIndex += 1;
+          continue;
+        }
+        if (oldRemaining > 0 || nextRemaining > 0) break;
+        inHunk = false;
+      }
+
+      if (!isGitDiffMetadataLine(value)) break;
+      end = line.end;
+      lineIndex += 1;
+    }
+
+    ranges.push({ start, end });
+  }
+  return ranges;
+}
+
 function jsonDelimiterCandidates(text: string): ImplicitJsonRange[] {
   const stack: Array<{ character: string; start: number }> = [];
   const candidates: ImplicitJsonRange[] = [];
@@ -269,7 +376,24 @@ export function bindRenderUtils(ctx: RenderUtilsContext) {
 
   function highlightShellOutput(text: string, explicitLanguage: string | null | undefined): string | null {
     if (!text?.trim()) return null;
-    if (explicitLanguage) return highlightCodeAlways(text, explicitLanguage);
+    if (explicitLanguage && explicitLanguage !== 'diff') return highlightCodeAlways(text, explicitLanguage);
+    if (explicitLanguage === 'diff') {
+      const ranges = findGitDiffRanges(text);
+      if (!ranges.length) return null;
+      let html = '';
+      let cursor = 0;
+      for (const range of ranges) {
+        html += escapeHtml(text.slice(cursor, range.start));
+        const source = text.slice(range.start, range.end);
+        const highlighted = highlightCodeAlways(source, 'diff');
+        const host = documentRef.createElement('div');
+        host.innerHTML = highlighted;
+        html += host.textContent === source ? highlighted : escapeHtml(source);
+        cursor = range.end;
+      }
+      html += escapeHtml(text.slice(cursor));
+      return html;
+    }
     const ranges = findImplicitJsonRanges(text);
     if (!ranges.length) return null;
     let html = '';

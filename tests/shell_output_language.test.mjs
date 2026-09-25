@@ -5,6 +5,8 @@ import { build } from 'esbuild';
 import hljs from 'highlight.js/lib/core';
 import json from 'highlight.js/lib/languages/json';
 import plaintext from 'highlight.js/lib/languages/plaintext';
+import python from 'highlight.js/lib/languages/python';
+import diffModule from 'highlightjs-diff';
 import { parseHTML } from 'linkedom';
 
 const result = await build({
@@ -19,13 +21,18 @@ const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('b
 const {
   bindRenderUtils,
   detectsImplicitJsonOutput,
+  findGitDiffRanges,
   findImplicitJsonRanges,
 } = await import(moduleUrl);
 
+const diffLanguage = typeof diffModule === 'function' ? diffModule : diffModule.default;
 hljs.registerLanguage('json', json);
 hljs.registerLanguage('plaintext', plaintext);
+hljs.registerLanguage('python', python);
+hljs.registerLanguage('diff', diffLanguage);
 globalThis.hljs = hljs;
-const utils = bindRenderUtils({ getState: () => ({}), documentRef: {} });
+const renderDocument = parseHTML('<html><body></body></html>').document;
+const utils = bindRenderUtils({ getState: () => ({}), documentRef: renderDocument });
 
 test('implicit JSON accepts complete objects and arrays regardless of HLJS relevance', () => {
   assert.equal(detectsImplicitJsonOutput('{"a":1}'), true);
@@ -86,4 +93,73 @@ test('explicit shell language wins before mixed JSON span rendering', () => {
   const html = utils.highlightShellOutput('{"a":1}', 'plaintext');
   assert.doesNotMatch(html, /class="hljs-attr"/);
   assert.equal(utils.highlightShellOutput('ordinary output', null), null);
+});
+
+test('git diff ranges exclude status, stat, and trailing command output', () => {
+  const patch = [
+    'diff --git a/demo.py b/demo.py',
+    'index 1111111..2222222 100644',
+    '--- a/demo.py',
+    '+++ b/demo.py',
+    '@@ -1,5 +1,6 @@',
+    ' def run():',
+    '-    return False',
+    '+    return True',
+    '+    print("done")',
+  ].join('\n') + '\n';
+  const output = [
+    ' M demo.py',
+    ' demo.py | 3 ++-',
+    ' 1 file changed, 2 insertions(+), 1 deletion(-)',
+    patch,
+    'xrsurge',
+    'origin\thttps://example.invalid/repo (fetch)',
+  ].join('\n');
+  const ranges = findGitDiffRanges(output);
+  assert.equal(ranges.length, 1);
+  assert.equal(output.slice(ranges[0].start, ranges[0].end), patch);
+
+  const html = utils.highlightShellOutput(output, 'diff');
+  const host = renderDocument.createElement('div');
+  host.innerHTML = html;
+  assert.equal(host.textContent, output);
+  assert.match(html, /class="hljs-addition"/);
+  assert.match(html, /class="hljs-deletion"/);
+  assert.match(html, /class="hljs-keyword"/);
+  assert.match(html, /^ M demo\.py/);
+  assert.match(html, /xrsurge\norigin/);
+});
+
+test('diff highlighting requires a structural patch span', () => {
+  assert.equal(utils.highlightShellOutput(' demo.py | 3 ++-\n1 file changed', 'diff'), null);
+});
+
+test('each git diff file is isolated when an earlier hunk is truncated', () => {
+  const first = [
+    'diff --git a/first.py b/first.py',
+    '--- a/first.py',
+    '+++ b/first.py',
+    '@@ -1,4 +1,4 @@',
+    '-return False',
+    '+return True',
+  ].join('\n') + '\n';
+  const second = [
+    'diff --git a/second.py b/second.py',
+    '--- a/second.py',
+    '+++ b/second.py',
+    '@@ -1 +1 @@',
+    '-value = False',
+    '+value = True',
+  ].join('\n') + '\n';
+  const output = `${first}${second}xrsurge\n`;
+  const ranges = findGitDiffRanges(output);
+  assert.deepEqual(ranges.map(range => output.slice(range.start, range.end)), [first, second]);
+
+  const html = utils.highlightShellOutput(output, 'diff');
+  const host = renderDocument.createElement('div');
+  host.innerHTML = html;
+  assert.equal(host.textContent, output);
+  assert.equal((html.match(/hljs-addition/g) || []).length, 2);
+  assert.equal((html.match(/hljs-deletion/g) || []).length, 2);
+  assert.match(html, /class="hljs-keyword"/);
 });

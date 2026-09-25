@@ -1272,14 +1272,22 @@ overscroll containment isolate inner movement from the parent transcript;
 shell deltas and final body updates do not call parent autoscroll. Observer
 registration follows card removal/remount, including virtualizer parking.
 
-Explicit command/path language detection has precedence. With no explicit
-language, the shared structural scanner finds balanced object/array spans across
-one or multiple lines, respects JSON string escapes, validates each candidate
-with `JSON.parse`, and applies the JSON grammar only to valid spans.
-Intervening shell text is escaped and preserved exactly, so one status line does
-not suppress JSON highlighting and projected-window partitioning still matches
-the source text. Scalars and malformed or truncated fragments remain plain.
-ANSI output and stderr retain their existing render paths.
+Explicit command/path language detection has precedence. Detected `git diff`
+output is not passed wholesale to the diff grammar: a linear scanner isolates
+each `diff --git` file section, tracks unified-hunk old/new counts, and stops at
+structurally impossible lines even when a bounded window or `head` truncates a
+hunk. A later file starts a fresh grammar invocation, so an incomplete hunk
+cannot corrupt its headers. Status, stat, and later chained-command output
+therefore remain literal.
+Each highlighted patch span must decode to the exact source text or that span
+falls back to literal rendering; this protects projected-window partitioning
+from grammar buffering or reordering. With no explicit language, the shared
+structural scanner finds balanced object/array spans across one or multiple
+lines, respects JSON string escapes, validates each candidate with `JSON.parse`,
+and applies the JSON grammar only to valid spans. Intervening shell text is
+escaped and preserved exactly, so one status line does not suppress JSON
+highlighting. Scalars and malformed or truncated fragments remain plain. ANSI
+output and stderr retain their existing render paths.
 
 Final snapshots replace rather than duplicate output. A shorter final payload
 does not erase a longer received stream. Durable records retain references;
