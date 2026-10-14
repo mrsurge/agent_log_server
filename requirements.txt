@@ -1,4 +1,4 @@
-fastapi>=0.110
+starlette
 uvicorn>=0.27
 python-socketio>=5.11
 jinja2>=3.1

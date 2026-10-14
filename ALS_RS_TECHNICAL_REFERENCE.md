@@ -204,12 +204,27 @@ als-rs = "agent_log_server_rs.bootstrap:main"
 als-rs-extension-adapter = "agent_log_server_rs.adapters.extension_adapter:main"
 ```
 
-The installed console script must not collide with the current `codex-agent`
-command. ALS-RS exposes only the generic `als-rs-extension-adapter` entrypoint;
+The obsolete `codex-agent` entrypoint into als_deprecated.server is retired;
+`als-rs` is the supported server launcher. ALS-RS exposes the generic
+`als-rs-extension-adapter` entrypoint;
 provider-specific adapter console scripts are not part of the current runtime.
 The package dependency list pins `fastmcp==3.4.7`; FastMCP 4 changes the MCP
 interface used by ALS-RS and must not enter this runtime without a deliberate
 compatibility migration.
+
+FastAPI is no longer an ALS runtime requirement; the unused HTTP MCP shim is
+removed. The conversation-scoped stdio MCP process still genuinely uses the
+Python SDK's mcp.server.fastmcp (38 tools and one KB resource), so its remaining
+Pydantic/cryptography closure is not yet eliminated. The selected migration is
+an independent rmcp Rust stdio executable embedding existing Python tools through
+PyO3, with one persistent ordinary asyncio loop; see DEPENDENCY_TRIM_PLAN.md.
+
+Active Python extension adapter/CLI loop creation uses agent_log_server_rs.asyncio_runtime:
+optional import uvloop, absent fallback, ALS_DISABLE_UVLOOP override and explicit
+failure for a broken installed module. The performance extra selects mutually
+exclusive upstream Linux x86-64 uvloop or Android aarch64 uvloop-te2. The dormant
+embedded PyO3 facade remains unchanged/unenabled and does not establish active
+loop ownership. Source integration is not a live harness restart or release.
 
 Binary-release wheels replace that buildable workspace with the verified
 `als-server` executable and the package-owned Rust static tree used by

@@ -1,6 +1,19 @@
 # Agent Log Server
 
-A FastAPI server with a `fastcore.xml`-generated UI for AI agent orchestration and conversation management. The primary feature is the **Codex Agent UI** — a web-based interface for interacting with OpenAI's `codex-app-server` CLI.
+A Rust-first server and browser UI for AI agent orchestration and conversation
+management. Launch with `als-rs`; Python owns the generic extension adapter and
+conversation-scoped stdio MCP tools, not the web server.
+
+Current architecture: [ALS_RS_TECHNICAL_REFERENCE.md](ALS_RS_TECHNICAL_REFERENCE.md).
+Dependency/stdio migration: [DEPENDENCY_TRIM_PLAN.md](DEPENDENCY_TRIM_PLAN.md).
+The older Python-server descriptions below are historical, not current runtime
+requirements. The unused HTTP MCP shim and legacy `codex-agent` console entrypoint
+are retired.
+
+Optional Python loop acceleration is available with
+`pip install 'agent-log-server[performance]'`: Linux x86-64 selects upstream
+uvloop; Android aarch64 selects uvloop-te2. Both expose `uvloop`. Without it,
+asyncio remains supported; `ALS_DISABLE_UVLOOP=1` explicitly disables selection.
 
 ## Device Litmus (Symlink-Resolved CWD)
 

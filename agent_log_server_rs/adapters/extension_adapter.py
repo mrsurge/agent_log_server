@@ -21,6 +21,7 @@ from agent_log_server_rs.adapter_protocol import (
     ExtensionInitializeResult,
     JsonMap,
 )
+from agent_log_server_rs.asyncio_runtime import run
 from agent_log_server_rs.codec import (
     AdapterDecodeError,
     adapter_codec,
@@ -1968,7 +1969,7 @@ async def amain() -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     if argv:
         raise SystemExit("extension adapter does not accept CLI arguments yet")
-    return asyncio.run(amain())
+    return run(amain())
 
 
 if __name__ == "__main__":

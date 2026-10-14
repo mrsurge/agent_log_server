@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-log-server"
-version = "0.2.132"
+version = "0.2.133"
 description = "ALS-RS agent harness, extension adapter, KB/MCP tools, and TE2 integration."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,11 +13,16 @@ dynamic = ["dependencies"]
 [project.scripts]
 als-rs = "agent_log_server_rs.bootstrap:main"
 als-rs-extension-adapter = "agent_log_server_rs.adapters.extension_adapter:main"
-codex-agent = "als_deprecated.server:main"
+
+[project.optional-dependencies]
+performance = [
+  "uvloop==0.23.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "uvloop-te2==0.23.0.post1; sys_platform == 'android' and platform_machine == 'aarch64'",
+]
 
 [tool.setuptools]
 include-package-data = true
-py-modules = ["mcp_agent_pty_server", "mcp_agent_pty_http_shim", "te2_runtime"]
+py-modules = ["mcp_agent_pty_server", "te2_runtime"]
 zip-safe = false
 
 [tool.setuptools.packages.find]

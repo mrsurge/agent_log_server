@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import importlib
 import json
 import os
@@ -16,6 +15,7 @@ import extensions as ext_loader
 
 from als_deprecated.typing_helpers import ObjectMap, coerce_object_map
 from agent_log_server_rs import bootstrap
+from agent_log_server_rs.asyncio_runtime import run
 
 SETTINGS_RPC_NAMESPACE = "/rpc/settings"
 RPC_EVENT = "rpc"
@@ -357,7 +357,7 @@ def _finalize_local_mutation(result: ObjectMap, extension_id: str, args: argpars
     if bool(getattr(args, "install_dependencies", False)) and extension_id:
         if ext_loader.supports_dependency_install(extension_id):
             dependency_install = coerce_object_map(
-                asyncio.run(ext_loader.install_extension_dependencies(extension_id))
+                run(ext_loader.install_extension_dependencies(extension_id))
             )
         else:
             dependency_install = {
