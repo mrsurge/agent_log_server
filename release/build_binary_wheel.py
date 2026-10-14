@@ -16,11 +16,14 @@ from typing import cast
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).absolute().parents[1]
 SERVER_NAME = "als-server"
 REQUIRED_WHEEL_MEMBERS = (
     "agent_log_server_rs/bin/als-server",
     "agent_log_server_rs/bin/als-server.manifest.json",
+    "agent_log_server_rs/bin/als-mcp",
+    "agent_log_server_rs/bin/als-mcp.manifest.json",
+    "agent_log_server_rs/mcp_catalog.json",
     "agent_log_server_rs/rust/crates/als-server/src/static/dist/codex_agent.js",
     (
         "agent_log_server_rs/rust/crates/als-server/src/static/vendor/"
@@ -161,6 +164,14 @@ def _refresh_packaged_digest(wheel_path: Path) -> None:
     manifest = cast(dict[str, object], loaded_manifest)
     manifest["sha256"] = hashlib.sha256(payloads[binary_name]).hexdigest()
     payloads[manifest_name] = json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
+    mcp_binary = "agent_log_server_rs/bin/als-mcp"
+    mcp_receipt = "agent_log_server_rs/bin/als-mcp.manifest.json"
+    if mcp_binary in payloads or mcp_receipt in payloads:
+        if mcp_binary not in payloads or mcp_receipt not in payloads:
+            raise RuntimeError("Repaired wheel has an incomplete native MCP payload")
+        mcp_manifest = json.loads(payloads[mcp_receipt])
+        mcp_manifest["sha256"] = hashlib.sha256(payloads[mcp_binary]).hexdigest()
+        payloads[mcp_receipt] = json.dumps(mcp_manifest, indent=2, sort_keys=True).encode() + b"\n"
 
     record_buffer = io.StringIO(newline="")
     record_writer = csv.writer(record_buffer, lineterminator="\n")
@@ -238,6 +249,10 @@ def build_binary_wheel(
     )
     if not resolved_binary.is_file():
         raise FileNotFoundError(f"ALS-RS server binary does not exist: {resolved_binary}")
+    if target != _rust_host_target():
+        raise RuntimeError("Embedded MCP release wheels must be built on their target host/interpreter")
+    from agent_log_server_rs import mcp_bootstrap
+    mcp_binary = mcp_bootstrap.select(mcp_bootstrap.runtime_env())
 
     with tempfile.TemporaryDirectory(prefix="als-wheel-stage-", dir=scratch_root) as temp_dir:
         stage_root = Path(temp_dir) / "source"
@@ -247,7 +262,8 @@ def build_binary_wheel(
         env = os.environ.copy()
         env.update(
             {
-                "ALS_RS_PACKAGED_SERVER_BIN": str(resolved_binary.resolve()),
+                "ALS_RS_PACKAGED_SERVER_BIN": str(resolved_binary.absolute()),
+                "ALS_RS_PACKAGED_MCP_BIN": str(mcp_binary.absolute()),
                 "ALS_RS_PACKAGED_SERVER_TARGET": target,
                 "ALS_RS_PACKAGED_SERVER_PLATFORM_TAG": platform_tag,
                 "ALS_RS_PACKAGED_SERVER_SOURCE_COMMIT": _source_commit(),
@@ -319,10 +335,10 @@ def main() -> None:
     allow_dirty = cast(bool, args.allow_dirty)
     skip_auditwheel = cast(bool, args.skip_auditwheel)
     wheel = build_binary_wheel(
-        out_dir=Path(out_dir).expanduser().resolve(),
+        out_dir=Path(out_dir).expanduser().absolute(),
         target=target,
         platform_tag=platform_tag,
-        binary=Path(binary_arg).expanduser().resolve() if binary_arg else None,
+        binary=Path(binary_arg).expanduser().absolute() if binary_arg else None,
         allow_dirty=allow_dirty,
         skip_auditwheel=skip_auditwheel,
     )

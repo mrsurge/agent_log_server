@@ -682,6 +682,13 @@ def _source_root() -> Path:
 def source_root() -> Path:
     return _source_root()
 
+# Shared native-artifact primitives used by the independent MCP bootstrap.
+sha256_file = _sha256_file
+default_cache_dir = _default_cache_dir
+exclusive_build_cache_lock = _exclusive_build_cache_lock
+bootstrap_cargo_target_dir = _bootstrap_cargo_target_dir
+publish_cached_binary = _publish_cached_binary
+
 
 def _package_root() -> Path:
     return Path(__file__).parent

@@ -82,6 +82,55 @@ before approving production implementation or changing provider launch commands.
 
 ## Later activation/release gates
 
+### Approved thin bootstrap cutover
+
+**Next direction after live acceptance:** move native source preparation into the
+ALS application bootstrap, driven by a native-build JSON manifest for server and
+MCP. MCP invocation must become validate/select/exec only, with no Cargo build on
+the handshake clock. Declare source/config fingerprint, cache/target/publication
+paths and MCP interpreter ABI in the manifest; reuse existing artifact primitives.
+Current implementation still builds during MCP invocation. The clean installed
+source build exceeded Codex's 30s startup timeout; warm restart exposed the native
+tools and ask_user passed live. Implement the manifest cutover as a separately
+approved next slice; do not mislabel it as complete or just increase the timeout.
+
+The existing `python mcp_agent_pty_server.py` invocation now imports only the
+stdlib-only mcp_bootstrap and execs `als-mcp`. The SDK adapter is test-only in
+agent_log_server_rs/tests/mcp_sdk_reference.py; no runtime SDK fallback remains.
+No current harness process is restarted by this source cutover.
+
+Selection checks invoking CPython minor/SOABI/GIL mode/platform/architecture,
+artifact SHA-256 and source fingerprint for cached builds. Native --runtime-info
+verifies the loaded interpreter before exec. PYTHONHOME comes from invoking base
+prefix; its package search paths are passed explicitly. It uses that interpreter's
+compatible shared library/stdlib, not a private Python bundle. Cwd/identity/stdio/
+environment survive exec; build diagnostics stay stderr. Existing ALS lock/atomic
+publication/target helpers are shared with an independent MCP cache; owned Cargo
+process-group cancellation is explicit. No pruning or shared runtime termination.
+
+Source installs build for their invoking interpreter. Binary wheels must build on
+the target host/interpreter, include both binaries plus MCP receipt/catalog and
+use CPython-minor platform tags. Unsupported ABI/incomplete packaged payload fails
+without source/interpreted fallback. ELF repair refreshes both executable hashes.
+Actual Linux/Android wheel and both-client live acceptance remain; no publication,
+package uninstall or active harness restart occurred here.
+
+Isolated qualification now lives in rust/mcp_embedding_probe (own Cargo workspace,
+rmcp 3.5.1/PyO3 0.28.3). User approved the real-tool extraction slice: handlers
+are in mcp_tools.py, schemas/metadata in mcp_catalog.json, and mcp_registry.py
+provides neutral typed admission. The retained Python launcher is a thin SDK
+adapter. The real-tools executable submits object DTOs through PyO3 to one ordinary
+asyncio loop with event-driven completion, 32-call admission and bounded stdin.
+Tests cover all schema/default/coercion/result contracts, mocked ask_user cleanup,
+and disposable native read-only tool/resource calls. No live commands change yet.
+
+The interpreter/runtime/ABI and launcher policy is implemented by the approved
+thin bootstrap cutover above. setup.py now inventories both executables with MCP
+receipt/catalog. It does not promise a private bundled interpreter; artifact ABI
+must match the invoking interpreter. Actual target-wheel validation is still due.
+Preserve cross-platform install paths and consent/conversation/environment identity;
+qualify both Codex/Copilot stdio launches before removing the SDK/Pydantic closure.
+
 User-controlled live native ALS and both agent-client acceptance, optional real
 uvloop FD/subprocess/Socket.IO behavior, updated FWS source/release adoption and
 fresh Linux/Termux dependency resolution remain. Existing installed packages and

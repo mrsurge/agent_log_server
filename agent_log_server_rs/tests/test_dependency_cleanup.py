@@ -44,9 +44,12 @@ assert not any(n.split('.')[0] in {'fastapi','fastmcp','mcp','pydantic','pydanti
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_stdio_mcp_still_has_real_sdk_contract_pending_migration(self) -> None:
-        tree = ast.parse((ROOT / "mcp_agent_pty_server.py").read_text())
+        wrapper = ast.parse((ROOT / "mcp_agent_pty_server.py").read_text())
+        imports = [node.module for node in ast.walk(wrapper) if isinstance(node, ast.ImportFrom)]
+        self.assertNotIn("mcp.server.fastmcp", imports)
+        tree = ast.parse((ROOT / "agent_log_server_rs/mcp_tools.py").read_text())
         imports = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
-        self.assertIn("mcp.server.fastmcp", imports)
+        self.assertNotIn("mcp.server.fastmcp", imports)
         tools = resources = 0
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -61,6 +64,6 @@ assert not any(n.split('.')[0] in {'fastapi','fastmcp','mcp','pydantic','pydanti
         mcp = (ROOT / "mcp_agent_pty_server.py").read_text()
         cli = (ROOT / "agent_log_server_rs/extension_cli.py").read_text()
         self.assertIn("return run(amain())", adapter)
-        self.assertIn("asyncio.run(_main())", mcp)
+        self.assertIn("from agent_log_server_rs.mcp_bootstrap import main", mcp)
         self.assertNotIn("from agent_log_server_rs.asyncio_runtime", mcp)
         self.assertIn("run(ext_loader.install_extension_dependencies(extension_id))", cli)

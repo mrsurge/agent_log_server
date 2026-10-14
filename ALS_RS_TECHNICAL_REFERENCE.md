@@ -219,6 +219,15 @@ Pydantic/cryptography closure is not yet eliminated. The selected migration is
 an independent rmcp Rust stdio executable embedding existing Python tools through
 PyO3, with one persistent ordinary asyncio loop; see DEPENDENCY_TRIM_PLAN.md.
 
+The implementations are now SDK-independent in agent_log_server_rs/mcp_tools.py;
+mcp_registry.py admits calls against the versioned mcp_catalog.json wire schemas
+and explicit RequestContext. The existing top-level invocation now imports stdlib
+mcp_bootstrap and execs native als-mcp with ABI/hash/source receipts and the
+invoking interpreter's shared-library/stdlib context. SDK reference is test-only;
+no interpreted transport fallback. Native stdio uses direct PyO3 objects and
+callback-driven completion. Wheel inventory includes MCP with CPython-minor
+platform tags; actual-wheel/live acceptance remains separate.
+
 Active Python extension adapter/CLI loop creation uses agent_log_server_rs.asyncio_runtime:
 optional import uvloop, absent fallback, ALS_DISABLE_UVLOOP override and explicit
 failure for a broken installed module. The performance extra selects mutually

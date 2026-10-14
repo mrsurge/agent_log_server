@@ -37,11 +37,15 @@ class RefreshPackagedDigestTests(unittest.TestCase):
             record_name = "agent_log_server-0.2.119.dist-info/RECORD"
             binary = b"native-server-payload"
             manifest = json.dumps({"sha256": "stale"}).encode()
+            mcp_binary = "agent_log_server_rs/bin/als-mcp"
+            mcp_manifest = "agent_log_server_rs/bin/als-mcp.manifest.json"
 
             with ZipFile(wheel, "w") as archive:
                 archive.writestr("agent_log_server.libs/", b"")
                 archive.writestr(binary_name, binary)
                 archive.writestr(manifest_name, manifest)
+                archive.writestr(mcp_binary, b"native-mcp-payload")
+                archive.writestr(mcp_manifest, manifest)
                 archive.writestr(record_name, "stale,sha256=stale,5\n")
 
             release._refresh_packaged_digest(wheel)  # pyright: ignore[reportPrivateUsage]
@@ -55,6 +59,7 @@ class RefreshPackagedDigestTests(unittest.TestCase):
                 }
 
             refreshed_manifest = json.loads(payloads[manifest_name])
+            self.assertEqual(json.loads(payloads[mcp_manifest])["sha256"], hashlib.sha256(payloads[mcp_binary]).hexdigest())
             self.assertEqual(
                 refreshed_manifest["sha256"],
                 hashlib.sha256(binary).hexdigest(),
@@ -65,7 +70,7 @@ class RefreshPackagedDigestTests(unittest.TestCase):
             )
             record = {name: (digest, size) for name, digest, size in rows}
             self.assertEqual(record[record_name], ("", ""))
-            for name in (binary_name, manifest_name):
+            for name in (binary_name, manifest_name, mcp_binary, mcp_manifest):
                 self.assertEqual(record[name][0], _record_digest(payloads[name]))
                 self.assertEqual(record[name][1], str(len(payloads[name])))
 

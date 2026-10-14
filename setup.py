@@ -112,6 +112,17 @@ class build_py(_build_py):
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        # An MCP executable is interpreter-bound even though ALS serving is not.
+        mcp_raw = os.environ.get("ALS_RS_PACKAGED_MCP_BIN", "").strip()
+        if not mcp_raw:
+            raise RuntimeError("ALS_RS_PACKAGED_MCP_BIN is required for complete binary-release wheels")
+        from agent_log_server_rs.mcp_bootstrap import BINARY, RECEIPT, validate
+        mcp_source = Path(mcp_raw).expanduser().absolute()
+        validate(mcp_source, mcp_source.with_name(RECEIPT))
+        mcp_target = bin_target / BINARY
+        shutil.copy2(mcp_source, mcp_target)
+        mcp_target.chmod(mcp_target.stat().st_mode | 0o755)
+        shutil.copy2(mcp_source.with_name(RECEIPT), bin_target / RECEIPT)
 
 
 def _packaged_binary_source() -> Path | None:
@@ -174,7 +185,8 @@ if _bdist_wheel is not None:
             if _packaged_binary_source() is None:
                 return python_tag, abi_tag, platform_tag
             resolved_platform = _required_env(BINARY_PLATFORM_TAG_ENV).replace("-", "_").replace(".", "_")
-            return ("py3", "none", resolved_platform)
+            import sys
+            return (f"cp{sys.version_info.major}{sys.version_info.minor}", "none", resolved_platform)
 
 
     cmdclass["bdist_wheel"] = bdist_wheel

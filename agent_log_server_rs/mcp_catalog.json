@@ -1,0 +1,1804 @@
+{
+  "tools": [
+    {
+      "name": "ping",
+      "title": null,
+      "description": "Return MCP server pid (diagnostic).",
+      "inputSchema": {
+        "properties": {},
+        "title": "pingArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "pingDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "ask_user",
+      "title": null,
+      "description": "Ask the user a question and wait for a response. Supports choices and optional freeform input.",
+      "inputSchema": {
+        "properties": {
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "choices": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Choices"
+          },
+          "allow_freeform": {
+            "default": true,
+            "title": "Allow Freeform",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "title": "ask_userArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "ask_userDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": {
+        "title": null,
+        "readOnlyHint": false,
+        "destructiveHint": null,
+        "idempotentHint": null,
+        "openWorldHint": null
+      },
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "conv_id",
+      "title": null,
+      "description": "Return the conversation ID for this MCP session.",
+      "inputSchema": {
+        "properties": {},
+        "title": "conv_idArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "conv_idDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "sidebar_drafts_list",
+      "title": null,
+      "description": "List TE2 user draft files for a project through the ALS-RS sidebar IPC proxy. Does not return draft content.",
+      "inputSchema": {
+        "properties": {
+          "project_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Project Path"
+          }
+        },
+        "title": "sidebar_drafts_listArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "sidebar_drafts_listDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "sidebar_draft_state_get",
+      "title": null,
+      "description": "Get TE2 draft state for a project or target file without returning draft content by default.",
+      "inputSchema": {
+        "properties": {
+          "scope": {
+            "default": "file",
+            "title": "Scope",
+            "type": "string"
+          },
+          "project_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Project Path"
+          },
+          "target_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target File"
+          },
+          "include_disk_content": {
+            "default": false,
+            "title": "Include Disk Content",
+            "type": "boolean"
+          },
+          "include_hunks": {
+            "default": false,
+            "title": "Include Hunks",
+            "type": "boolean"
+          }
+        },
+        "title": "sidebar_draft_state_getArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "sidebar_draft_state_getDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "sidebar_draft_content_get",
+      "title": null,
+      "description": "Explicitly read TE2 draft content for one target file after draft discovery indicates a draft exists.",
+      "inputSchema": {
+        "properties": {
+          "target_file": {
+            "title": "Target File",
+            "type": "string"
+          },
+          "project_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Project Path"
+          },
+          "include_disk_content": {
+            "default": false,
+            "title": "Include Disk Content",
+            "type": "boolean"
+          },
+          "include_hunks": {
+            "default": false,
+            "title": "Include Hunks",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "target_file"
+        ],
+        "title": "sidebar_draft_content_getArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "sidebar_draft_content_getDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "sidebar_draft_clear",
+      "title": null,
+      "description": "Clear one TE2 user draft through sidebar IPC. Use only after explicit user approval.",
+      "inputSchema": {
+        "properties": {
+          "target_file": {
+            "title": "Target File",
+            "type": "string"
+          },
+          "project_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Project Path"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Id"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "target_file"
+        ],
+        "title": "sidebar_draft_clearArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "sidebar_draft_clearDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "todo_list",
+      "title": null,
+      "description": "List todos for this conversation. Optionally filter by status.",
+      "inputSchema": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          }
+        },
+        "title": "todo_listArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "todo_listDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "todo_add",
+      "title": null,
+      "description": "Add a todo to this conversation.",
+      "inputSchema": {
+        "properties": {
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "status": {
+            "default": "pending",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "todo_addArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "todo_addDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "todo_update",
+      "title": null,
+      "description": "Update a todo's title, description, or status.",
+      "inputSchema": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "todo_updateArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "todo_updateDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "todo_remove",
+      "title": null,
+      "description": "Remove a todo by ID.",
+      "inputSchema": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "todo_removeArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "todo_removeDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "todo_toggle",
+      "title": null,
+      "description": "Toggle a todo between 'pending' and 'done'.",
+      "inputSchema": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "todo_toggleArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "todo_toggleDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "todo_ready",
+      "title": null,
+      "description": "List todos with all dependencies satisfied (ready to work on).",
+      "inputSchema": {
+        "properties": {},
+        "title": "todo_readyArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "todo_readyDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_log_post",
+      "title": null,
+      "description": "Post a message to the agent log. Plain text, no escaping needed.",
+      "inputSchema": {
+        "properties": {
+          "who": {
+            "title": "Who",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "who",
+          "message"
+        ],
+        "title": "agent_log_postArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agent_log_postDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_log_inbox",
+      "title": null,
+      "description": "Get a preview inbox of recent agent log messages.",
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "default": 10,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "preview_chars": {
+            "default": 60,
+            "title": "Preview Chars",
+            "type": "integer"
+          }
+        },
+        "title": "agent_log_inboxArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agent_log_inboxDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_log_get",
+      "title": null,
+      "description": "Get the full text of a message by inbox index.",
+      "inputSchema": {
+        "properties": {
+          "idx": {
+            "default": 0,
+            "title": "Idx",
+            "type": "integer"
+          },
+          "limit": {
+            "default": 10,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "agent_log_getArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "agent_log_getOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_log_get_by_num",
+      "title": null,
+      "description": "Get a specific message by its permanent message number.",
+      "inputSchema": {
+        "properties": {
+          "msg_num": {
+            "title": "Msg Num",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "msg_num"
+        ],
+        "title": "agent_log_get_by_numArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "agent_log_get_by_numOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_log_last",
+      "title": null,
+      "description": "Get the most recent message from the agent log.",
+      "inputSchema": {
+        "properties": {},
+        "title": "agent_log_lastArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "agent_log_lastOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_log_read",
+      "title": null,
+      "description": "Read recent messages as formatted plain text.",
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "default": 10,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "agent_log_readArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "agent_log_readOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_log_delete",
+      "title": null,
+      "description": "Delete a message from the agent log by its message number.",
+      "inputSchema": {
+        "properties": {
+          "msg_num": {
+            "title": "Msg Num",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "msg_num"
+        ],
+        "title": "agent_log_deleteArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agent_log_deleteDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_log_await",
+      "title": null,
+      "description": "Wait for the next message in the agent log after a given msg_num.",
+      "inputSchema": {
+        "properties": {
+          "after_msg_num": {
+            "title": "After Msg Num",
+            "type": "integer"
+          },
+          "from_who": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "From Who"
+          },
+          "timeout_ms": {
+            "default": 180000,
+            "title": "Timeout Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "after_msg_num"
+        ],
+        "title": "agent_log_awaitArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "agent_log_awaitOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_log_post_await",
+      "title": null,
+      "description": "Post a message and wait for the next reply in a single call.",
+      "inputSchema": {
+        "properties": {
+          "who": {
+            "title": "Who",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "await_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Await From"
+          },
+          "timeout_ms": {
+            "default": 180000,
+            "title": "Timeout Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "who",
+          "message"
+        ],
+        "title": "agent_log_post_awaitArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agent_log_post_awaitDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_list",
+      "title": null,
+      "description": "List configured markdown knowledge files.",
+      "inputSchema": {
+        "properties": {},
+        "title": "kb_listArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_listOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_reload_config",
+      "title": null,
+      "description": "Reload .agent-pty.toml config for the current project root.",
+      "inputSchema": {
+        "properties": {},
+        "title": "kb_reload_configArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_reload_configOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_add_file",
+      "title": null,
+      "description": "Add a file (absolute path) to knowledge.files and hot-reload config.",
+      "inputSchema": {
+        "properties": {
+          "abs_path": {
+            "title": "Abs Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "abs_path"
+        ],
+        "title": "kb_add_fileArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_add_fileOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_remove_file",
+      "title": null,
+      "description": "Remove a file (absolute path) from knowledge.files and hot-reload config.",
+      "inputSchema": {
+        "properties": {
+          "abs_path": {
+            "title": "Abs Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "abs_path"
+        ],
+        "title": "kb_remove_fileArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_remove_fileOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_schema",
+      "title": null,
+      "description": "Show the complete numbered ATX heading index for one markdown knowledge file.",
+      "inputSchema": {
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Id"
+          },
+          "max_depth": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Depth"
+          },
+          "root_depth": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Root Depth"
+          }
+        },
+        "title": "kb_schemaArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_schemaOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_info",
+      "title": null,
+      "description": "Show parent-chain context, ranges, children, and body previews for selected KB sections.",
+      "inputSchema": {
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Section"
+          },
+          "sections": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sections"
+          },
+          "id": {
+            "default": "",
+            "title": "Id",
+            "type": "string"
+          },
+          "max_chars": {
+            "default": 600,
+            "title": "Max Chars",
+            "type": "integer"
+          }
+        },
+        "title": "kb_infoArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_infoOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_read",
+      "title": null,
+      "description": "Read selected KB section bodies with parent heading/body context.",
+      "inputSchema": {
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Section"
+          },
+          "sections": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sections"
+          },
+          "id": {
+            "default": "",
+            "title": "Id",
+            "type": "string"
+          },
+          "include_children": {
+            "default": false,
+            "title": "Include Children",
+            "type": "boolean"
+          },
+          "max_chars": {
+            "default": 20000,
+            "title": "Max Chars",
+            "type": "integer"
+          }
+        },
+        "title": "kb_readArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_readOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_search_headers",
+      "title": null,
+      "description": "Case-insensitive substring search across heading titles.",
+      "inputSchema": {
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "query": {
+            "default": "",
+            "title": "Query",
+            "type": "string"
+          },
+          "max_hits": {
+            "default": 25,
+            "title": "Max Hits",
+            "type": "integer"
+          }
+        },
+        "title": "kb_search_headersArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_search_headersOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_search",
+      "title": null,
+      "description": "Regex-capable section-aware KB body search with previews.",
+      "inputSchema": {
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "query": {
+            "default": "",
+            "title": "Query",
+            "type": "string"
+          },
+          "regex": {
+            "default": false,
+            "title": "Regex",
+            "type": "boolean"
+          },
+          "max_hits": {
+            "default": 10,
+            "title": "Max Hits",
+            "type": "integer"
+          },
+          "preview_chars": {
+            "default": 240,
+            "title": "Preview Chars",
+            "type": "integer"
+          },
+          "from_match": {
+            "default": true,
+            "title": "From Match",
+            "type": "boolean"
+          }
+        },
+        "title": "kb_searchArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_searchOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_search_content",
+      "title": null,
+      "description": "Alias for kb_search.",
+      "inputSchema": {
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "query": {
+            "default": "",
+            "title": "Query",
+            "type": "string"
+          },
+          "max_results": {
+            "default": 10,
+            "title": "Max Results",
+            "type": "integer"
+          },
+          "context_chars": {
+            "default": 240,
+            "title": "Context Chars",
+            "type": "integer"
+          },
+          "regex": {
+            "default": false,
+            "title": "Regex",
+            "type": "boolean"
+          },
+          "from_match": {
+            "default": true,
+            "title": "From Match",
+            "type": "boolean"
+          }
+        },
+        "title": "kb_search_contentArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_search_contentOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_help",
+      "title": null,
+      "description": "List KB tool modes, section-id forms, and common examples.",
+      "inputSchema": {
+        "properties": {},
+        "title": "kb_helpArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_helpOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_write",
+      "title": null,
+      "description": "Append content to one KB section, or create a child heading under it.",
+      "inputSchema": {
+        "properties": {
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "section": {
+            "default": "",
+            "title": "Section",
+            "type": "string"
+          },
+          "content": {
+            "default": "",
+            "title": "Content",
+            "type": "string"
+          },
+          "mode": {
+            "default": "append",
+            "title": "Mode",
+            "type": "string"
+          },
+          "heading_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Heading Title"
+          },
+          "heading_depth": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Heading Depth"
+          },
+          "spacing": {
+            "default": "auto",
+            "title": "Spacing",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "title": "kb_writeArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_writeOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_update",
+      "title": null,
+      "description": "Replace the body of one KB section, or replace its full subtree.",
+      "inputSchema": {
+        "properties": {
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "section": {
+            "default": "",
+            "title": "Section",
+            "type": "string"
+          },
+          "content": {
+            "default": "",
+            "title": "Content",
+            "type": "string"
+          },
+          "mode": {
+            "default": "body",
+            "title": "Mode",
+            "type": "string"
+          },
+          "spacing": {
+            "default": "auto",
+            "title": "Spacing",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "title": "kb_updateArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_updateOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "kb_remove",
+      "title": null,
+      "description": "Remove the body of one KB section, or remove its full subtree.",
+      "inputSchema": {
+        "properties": {
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Target"
+          },
+          "section": {
+            "default": "",
+            "title": "Section",
+            "type": "string"
+          },
+          "mode": {
+            "default": "subtree",
+            "title": "Mode",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "title": "kb_removeArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "kb_removeOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_send_message",
+      "title": null,
+      "description": "Send message to another agent. ASK THE USER for your conversation_id to use as reply_to.",
+      "inputSchema": {
+        "properties": {
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "pseudonym": {
+            "title": "Pseudonym",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "repo": {
+            "title": "Repo",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "reply_to": {
+            "title": "Reply To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "pseudonym",
+          "model",
+          "repo",
+          "subject",
+          "message",
+          "reply_to"
+        ],
+        "title": "agent_send_messageArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agent_send_messageDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    },
+    {
+      "name": "agent_send_message_await",
+      "title": null,
+      "description": "Send message to another agent and wait for reply. ASK THE USER for your conversation_id to use as reply_to.",
+      "inputSchema": {
+        "properties": {
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "pseudonym": {
+            "title": "Pseudonym",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "repo": {
+            "title": "Repo",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "reply_to": {
+            "title": "Reply To",
+            "type": "string"
+          },
+          "await_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Await From"
+          },
+          "timeout_ms": {
+            "default": 300000,
+            "title": "Timeout Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "pseudonym",
+          "model",
+          "repo",
+          "subject",
+          "message",
+          "reply_to"
+        ],
+        "title": "agent_send_message_awaitArguments",
+        "type": "object"
+      },
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agent_send_message_awaitDictOutput",
+        "type": "object"
+      },
+      "icons": null,
+      "annotations": null,
+      "_meta": null,
+      "execution": null
+    }
+  ],
+  "resources": [
+    {
+      "name": "knowledge",
+      "title": "Knowledge base",
+      "uri": "kb://knowledge",
+      "description": "Configured KB files plus KB tool usage help.",
+      "mimeType": "text/plain",
+      "size": null,
+      "icons": null,
+      "annotations": null,
+      "_meta": null
+    }
+  ]
+}

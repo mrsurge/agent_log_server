@@ -1428,7 +1428,8 @@ def _agent_pty_mcp_server_script_path() -> Path:
 
 @lru_cache(maxsize=1)
 def _agent_pty_blocks_tool_names() -> Tuple[str, ...]:
-    script_path = _agent_pty_mcp_server_script_path()
+    # Handlers are SDK-independent; the launcher is only a transport adapter.
+    script_path = _agent_pty_mcp_server_script_path().parent / "agent_log_server_rs" / "mcp_tools.py"
     try:
         tree = ast.parse(script_path.read_text(encoding="utf-8"), filename=str(script_path))
     except OSError as exc:

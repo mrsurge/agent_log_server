@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-import mcp_agent_pty_server as kb_server
+from agent_log_server_rs import mcp_tools as kb_server
 from als_deprecated.markdown_sections import SectionNode, parse_markdown
 from extensions.codex_ext.router import _shell_command_to_search_spec
 
@@ -40,17 +40,9 @@ class AskUserToolContractTests(unittest.TestCase):
         kb_server._ask_user_active_by_requestor.clear()
 
     def test_ask_user_explicitly_advertises_non_read_only(self) -> None:
-        async def scenario() -> object:
-            tools = await kb_server.mcp.list_tools()
-            for tool in tools:
-                if tool.name == "ask_user":
-                    return tool.annotations
-            self.fail("ask_user tool was not registered")
-
-        annotations = asyncio.run(scenario())
-
+        annotations = kb_server.mcp.descriptors["ask_user"]["annotations"]
         self.assertIsNotNone(annotations)
-        self.assertIs(getattr(annotations, "readOnlyHint", None), False)
+        self.assertIs(cast(dict[str, object], annotations)["readOnlyHint"], False)
 
     def test_ask_user_registers_unique_request_id_for_stable_requestor(self) -> None:
         class FakeIpcClient:
