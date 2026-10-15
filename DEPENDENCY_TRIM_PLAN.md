@@ -45,6 +45,13 @@ Its Python facade is stale (close helper/constructor/dispatch contract mismatch)
 Do not activate, repair or use it as a prerequisite for this migration. It was
 left unchanged after inspection; active subprocess separation is intentional.
 
+Future embedded-adapter investigation is recorded separately in
+`docs/EMBEDDED_ADAPTER_ENVELOPE_HYPOTHESIS.md`: preserve the identical serialized
+envelope across PyO3 and reuse the current Rust pipe codec/Serde dispatch only
+after the crossing. Earlier crashes have no retained evidence; premature
+unwrapping is a hypothesis, not a diagnosis. This does not authorize activation
+or alter the independent native stdio MCP boundary.
+
 ## Next coherent slice: Rust rmcp owner with PyO3 Python tools
 
 The user clarified this is much smaller than TE2's HTTP/server cutover. Keep

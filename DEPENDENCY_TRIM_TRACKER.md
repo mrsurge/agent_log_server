@@ -1,5 +1,20 @@
 # Dependency-trim tracker
 
+## Deferred extension-adapter transport investigation
+
+- [x] Record user hypothesis and minimum-conversion constraint in
+  docs/EMBEDDED_ADAPTER_ENVELOPE_HYPOTHESIS.md. Earlier direct embedded attempts
+  never worked; no retained crash evidence. No cause claimed or code changed.
+- [x] Clarify whole-application crash versus extension failure, retained adapter
+  multiplexing/harness-shell roles, and removal of only the outer kernel pipe
+  handoff. User approved documentation commit/push; version bumped to 0.2.136
+  per repo policy. No runtime implementation, activation or publication.
+- [ ] Separately scope/approve tracing the working serialized-envelope chokepoint
+  and dormant embedded path. Preserve codec/dispatch identity across PyO3;
+  no arbitrary-Python-object decoding or premature unwrapping.
+
+## Migration and validation history
+
 - [x] Read repo workflow and native ownership contracts; preserve untracked dist/
   and .codex-scratch/, do not restart the active harness or resolve symlinks.
 - [x] Audit native adapter, packaged stdio MCP and unused HTTP shim. Native adapter
