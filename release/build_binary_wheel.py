@@ -252,7 +252,7 @@ def build_binary_wheel(
     if target != _rust_host_target():
         raise RuntimeError("Embedded MCP release wheels must be built on their target host/interpreter")
     from agent_log_server_rs import mcp_bootstrap
-    mcp_binary = mcp_bootstrap.select(mcp_bootstrap.runtime_env())
+    mcp_binary = mcp_bootstrap.prepare(mcp_bootstrap.runtime_env())
 
     with tempfile.TemporaryDirectory(prefix="als-wheel-stage-", dir=scratch_root) as temp_dir:
         stage_root = Path(temp_dir) / "source"

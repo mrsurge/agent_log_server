@@ -5,7 +5,6 @@ import unittest
 from typing import cast
 
 from extensions.codex_ext.mcp_contract import apply_mcp_context as apply_codex_mcp_context
-from extensions.copilot_sdk.mcp_contract import apply_mcp_context as apply_copilot_mcp_context
 
 
 class McpSocketIoSerializerTests(unittest.TestCase):
@@ -50,15 +49,6 @@ class McpSocketIoSerializerTests(unittest.TestCase):
         assert config is not None
         self.assertEqual(config["model_context_window"], 450000)
         self.assertEqual(config["model_auto_compact_token_limit"], 400000)
-
-    def test_copilot_mcp_child_inherits_socketio_serializer(self) -> None:
-        with tempfile.TemporaryDirectory() as cwd:
-            settings = apply_copilot_mcp_context(self._settings(cwd))
-
-        mcp_servers = cast(dict[str, object], settings["mcp_servers"])
-        server = cast(dict[str, object], mcp_servers["agent-pty-blocks"])
-        env = cast(dict[str, str], server["env"])
-        self.assertEqual(env["AGENT_LOG_SOCKETIO_SERIALIZER"], "msgpack")
 
 
 if __name__ == "__main__":

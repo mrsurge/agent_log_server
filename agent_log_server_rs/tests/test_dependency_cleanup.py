@@ -1,30 +1,62 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 import subprocess
 import sys
 import tomllib
 import unittest
+from typing import cast
 
 from packaging.requirements import Requirement
 
 ROOT = Path(__file__).absolute().parents[2]
 
 
+def _table(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return cast(dict[str, object], value)
+
+
+def _field(value: object, *keys: str) -> object:
+    for key in keys:
+        value = _table(value)[key]
+    return value
+
+
+def _strings(value: object) -> list[str]:
+    assert isinstance(value, list)
+    values = cast(list[object], value)
+    assert all(isinstance(item, str) for item in values)
+    return cast(list[str], values)
+
+
 class DependencyCleanupTests(unittest.TestCase):
-    def test_metadata_retains_real_mcp_dependency_not_fastapi_or_http_shim(self) -> None:
+    def test_runtime_metadata_has_no_retired_web_schema_or_mcp_dependencies(self) -> None:
         requirements = (ROOT / "requirements.txt").read_text().splitlines()
-        self.assertFalse(any(line.startswith("fastapi") for line in requirements))
-        self.assertIn("fastmcp==3.4.7", requirements)
+        self.assertIn("framework-shells==0.2.65", requirements)
+        names = {Requirement(line).name.lower().replace("_", "-") for line in requirements if line.strip() and not line.startswith("#")}
+        self.assertFalse(names & {"fastapi", "fastmcp", "mcp", "pydantic", "pydantic-core", "cryptography"})
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
-        self.assertNotIn("mcp_agent_pty_http_shim", metadata["tool"]["setuptools"]["py-modules"])
-        self.assertNotIn("codex-agent", metadata["project"]["scripts"])
+        test_requirements = _strings(_field(metadata, "project", "optional-dependencies", "test"))
+        self.assertIn("mcp==1.30.0", test_requirements)
+        self.assertNotIn("mcp_agent_pty_http_shim", _strings(_field(metadata, "tool", "setuptools", "py-modules")))
+        self.assertNotIn("codex-agent", _table(_field(metadata, "project", "scripts")))
         self.assertFalse((ROOT / "mcp_agent_pty_http_shim.py").exists())
+
+    def test_copilot_extension_is_not_registered_or_packaged(self) -> None:
+        registry = _table(cast(object, json.loads((ROOT / "extensions/extensions.json").read_text())))
+        entries = registry["extensions"]
+        assert isinstance(entries, list)
+        self.assertEqual([_table(entry)["id"] for entry in cast(list[object], entries)], ["codex-ext"])
+        self.assertFalse((ROOT / "extensions/copilot_sdk").exists())
+        metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        self.assertFalse(any("copilot" in key for key in _table(_field(metadata, "tool", "setuptools", "package-data"))))
 
     def test_optional_uvloop_distributions_are_target_exclusive(self) -> None:
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
-        requirements = [Requirement(value) for value in metadata["project"]["optional-dependencies"]["performance"]]
+        requirements = [Requirement(value) for value in _strings(_field(metadata, "project", "optional-dependencies", "performance"))]
         for system, machine, expected in [("linux", "x86_64", ["uvloop"]), ("android", "aarch64", ["uvloop-te2"]), ("win32", "AMD64", []), ("linux", "aarch64", [])]:
             actual = [req.name for req in requirements if req.marker is not None and req.marker.evaluate({"sys_platform": system, "platform_machine": machine})]
             self.assertEqual(actual, expected)
@@ -38,12 +70,13 @@ class Blocker(importlib.abc.MetaPathFinder):
             raise AssertionError('Unexpected native adapter import: ' + fullname)
 sys.meta_path.insert(0, Blocker())
 import agent_log_server_rs.adapters.extension_adapter
+import extensions.codex_ext.client
 assert not any(n.split('.')[0] in {'fastapi','fastmcp','mcp','pydantic','pydantic_core','cryptography'} for n in sys.modules)
 '''
         result = subprocess.run([sys.executable, "-B", "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_stdio_mcp_still_has_real_sdk_contract_pending_migration(self) -> None:
+    def test_stdio_mcp_has_native_registry_not_python_sdk(self) -> None:
         wrapper = ast.parse((ROOT / "mcp_agent_pty_server.py").read_text())
         imports = [node.module for node in ast.walk(wrapper) if isinstance(node, ast.ImportFrom)]
         self.assertNotIn("mcp.server.fastmcp", imports)

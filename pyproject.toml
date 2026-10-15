@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-log-server"
-version = "0.2.134"
+version = "0.2.135"
 description = "ALS-RS agent harness, extension adapter, KB/MCP tools, and TE2 integration."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,7 @@ als-rs = "agent_log_server_rs.bootstrap:main"
 als-rs-extension-adapter = "agent_log_server_rs.adapters.extension_adapter:main"
 
 [project.optional-dependencies]
+test = ["mcp==1.30.0", "pytest>=8", "pytest-subtests", "packaging"]
 performance = [
   "uvloop==0.23.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
   "uvloop-te2==0.23.0.post1; sys_platform == 'android' and platform_machine == 'aarch64'",
@@ -39,6 +40,7 @@ als_deprecated = [
 ]
 agent_log_server_rs = [
   "mcp_catalog.json",
+  "native_mcp_build.json",
   "DEVELOPER_MESSAGE_TEMPLATE.md",
   "bin/*",
   "shellspec/*",
@@ -50,8 +52,6 @@ extensions = [
   "**/*",
 ]
 "extensions.codex_ext" = ["**/*"]
-"extensions.copilot_sdk" = ["**/*"]
-"extensions.copilot_sdk._vendor.copilot" = ["py.typed"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["**/__pycache__/*", "**/*.py[cod]"]
@@ -74,7 +74,6 @@ exclude = [
   "als_deprecated",
   "als_deprecated.egg-info",
   "build",
-  "extensions/copilot_sdk/_vendor",
   "node_modules",
   "worktrees",
 ]

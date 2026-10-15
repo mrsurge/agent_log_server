@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "manifest": "rust/mcp_embedding_probe/Cargo.toml",
+  "binary": "als-mcp",
+  "environmentKey": "ALS_MCP_BIN",
+  "pythonAbi": true,
+  "profile": "release",
+  "features": [],
+  "cache": {
+    "root": "mcp",
+    "targetDirectory": "cargo-target",
+    "targetDirectoryEnvironment": "ALS_MCP_CARGO_TARGET_DIR",
+    "publishedDirectory": "bin"
+  },
+  "fingerprint": {
+    "policy": "als-mcp-source-v2",
+    "inputs": ["Cargo.toml", "Cargo.lock", "src/*.rs"]
+  }
+}

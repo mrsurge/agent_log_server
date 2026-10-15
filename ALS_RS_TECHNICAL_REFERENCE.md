@@ -208,16 +208,15 @@ The obsolete `codex-agent` entrypoint into als_deprecated.server is retired;
 `als-rs` is the supported server launcher. ALS-RS exposes the generic
 `als-rs-extension-adapter` entrypoint;
 provider-specific adapter console scripts are not part of the current runtime.
-The package dependency list pins `fastmcp==3.4.7`; FastMCP 4 changes the MCP
-interface used by ALS-RS and must not enter this runtime without a deliberate
-compatibility migration.
+The Python MCP SDK is a test-only dependency (`.[test]`), not a runtime transport.
 
 FastAPI is no longer an ALS runtime requirement; the unused HTTP MCP shim is
-removed. The conversation-scoped stdio MCP process still genuinely uses the
-Python SDK's mcp.server.fastmcp (38 tools and one KB resource), so its remaining
-Pydantic/cryptography closure is not yet eliminated. The selected migration is
-an independent rmcp Rust stdio executable embedding existing Python tools through
-PyO3, with one persistent ordinary asyncio loop; see DEPENDENCY_TRIM_PLAN.md.
+removed. The conversation-scoped stdio MCP process now uses native rmcp/PyO3
+with 38 Python tools and one KB resource. ALS's direct FastMCP/Pydantic requirements
+are removed. Framework-Shells is pinned to published FastAPI-free 0.2.65; fresh
+ALS dependency resolution excludes FastAPI/FastMCP/Python MCP/Pydantic/crypto.
+Existing installations are not automatically purged of older dependencies.
+The tool runtime owns one ordinary asyncio loop; see DEPENDENCY_TRIM_PLAN.md.
 
 The implementations are now SDK-independent in agent_log_server_rs/mcp_tools.py;
 mcp_registry.py admits calls against the versioned mcp_catalog.json wire schemas
@@ -227,6 +226,16 @@ invoking interpreter's shared-library/stdlib context. SDK reference is test-only
 no interpreted transport fallback. Native stdio uses direct PyO3 objects and
 callback-driven completion. Wheel inventory includes MCP with CPython-minor
 platform tags; actual-wheel/live acceptance remains separate.
+
+ALS bootstrap now prepares MCP before launching its server. Configuration is
+agent_log_server_rs/native_mcp_build.json (source Cargo target, Python ABI, features,
+cache/target/publication paths and fingerprint inputs). Existing server build and
+cache policy are unchanged. `als-rs --build-only` prepares/verifies both without
+starting ALS. MCP invocation never builds or probes rustc; it validates the
+source/ABI-bound atomic selector and binary receipt before exec. Missing/stale
+source selection fails with the build-only preparation instruction. Packaged
+payloads remain verified/no-build, and release wheel preparation calls the same
+MCP prepare method. Current running/installed processes require separate adoption.
 
 Active Python extension adapter/CLI loop creation uses agent_log_server_rs.asyncio_runtime:
 optional import uvloop, absent fallback, ALS_DISABLE_UVLOOP override and explicit
@@ -404,8 +413,9 @@ The safest first implementation order:
 ## Extension adapter protocol and transport
 
 There is no built-in provider runtime fallback. Active provider behavior comes
-from the registered `codex-ext` and `copilot-sdk` packages behind the generic
-adapter boundary.
+from the registered `codex-ext` package behind the generic adapter boundary.
+The Copilot SDK extension is removed for independent maintenance. Historical
+Copilot examples elsewhere in this reference are not currently bundled providers.
 
 Adapter stdin/stdout defaults to concatenated raw MessagePack maps. The
 JSON-RPC-shaped DTO envelope, method/event names, correlation IDs, and extension

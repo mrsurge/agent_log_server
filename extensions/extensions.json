@@ -2,13 +2,6 @@
   "version": "1.0",
   "extensions": [
     {
-      "id": "copilot-sdk",
-      "name": "GitHub Copilot",
-      "type": "copilot_sdk",
-      "path": "copilot_sdk",
-      "enabled": true
-    },
-    {
       "id": "codex-ext",
       "name": "Codex Extension",
       "type": "codex_ext",

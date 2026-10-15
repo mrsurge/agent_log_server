@@ -32,14 +32,13 @@ FastAPI, standalone FastMCP, Python MCP SDK, Pydantic or cryptography. Isolated
 import blockers validate that boundary. Deprecated modules remain source history,
 not justification for retaining unsupported console launchers or dependencies.
 
-mcp_agent_pty_server.py genuinely uses mcp.server.fastmcp from the Python SDK,
-not the standalone fastmcp API. It exposes 38 tools and one kb://knowledge
-resource. Codex and Copilot defaults launch it through stdio. ask_user checks
-for a non-null SDK Context but does not use session operations: consent/results
-already belong to ALS IPC. The SDK is therefore real current runtime usage.
-Installed mcp 1.30.0 requires Pydantic, pydantic-settings and pyjwt[crypto].
-Replacing the standalone distribution with that SDK is not final closure removal;
-the current MCP dependency remains until the stdio replacement is qualified.
+The migrated mcp_agent_pty_server.py execs native als-mcp. It exposes 38 tools and
+one kb://knowledge resource without Python SDK transport. The SDK 1.30.0 is now
+declared only in the test extra, preserving argument/schema reference tests.
+Direct FastMCP/Pydantic runtime requirements are removed after live acceptance.
+Published Framework-Shells 0.2.65 is now pinned. Fresh ALS requirements resolve
+without FastAPI/FastMCP/Python MCP/Pydantic/cryptography. Installed environments
+and new ALS native wheels still require separate upgrades/releases.
 
 The embedded PyO3 adapter is dormant: no Cargo feature/dependency enables it.
 Its Python facade is stale (close helper/constructor/dispatch contract mismatch).
@@ -84,15 +83,38 @@ before approving production implementation or changing provider launch commands.
 
 ### Approved thin bootstrap cutover
 
-**Next direction after live acceptance:** move native source preparation into the
-ALS application bootstrap, driven by a native-build JSON manifest for server and
-MCP. MCP invocation must become validate/select/exec only, with no Cargo build on
-the handshake clock. Declare source/config fingerprint, cache/target/publication
-paths and MCP interpreter ABI in the manifest; reuse existing artifact primitives.
-Current implementation still builds during MCP invocation. The clean installed
-source build exceeded Codex's 30s startup timeout; warm restart exposed the native
-tools and ask_user passed live. Implement the manifest cutover as a separately
-approved next slice; do not mislabel it as complete or just increase the timeout.
+**Implemented after separate approval:** native MCP source preparation now runs
+in ALS bootstrap before server launch. native_mcp_build.json declares Cargo source,
+features, Python ABI, cache/target/publication paths and fingerprint inputs. Server
+build/cache policy is unchanged. als-rs --build-only prepares/verifies both without
+launching ALS. Atomic selectors bind source/config and Python ABI to a verified
+artifact. MCP invocation performs validate/select/exec only—no Cargo or rustc on
+the handshake clock. Missing/stale source selection fails with preparation guidance.
+The earlier installed build exceeded Codex's 30s timeout; this flow removes that
+compilation from startup instead of increasing the timeout. Source tests are not
+package upgrade, shared-runtime restart or live adoption of this new build flow.
+
+The user subsequently confirmed live acceptance of the bootstrap preparation
+flow. This task did not reinstall packages or restart any running process.
+
+### Copilot retirement and runtime metadata cleanup
+
+User explicitly chose retirement rather than modifying the vendored SDK's eager
+Pydantic import. Before deletion the full extensions/copilot_sdk tree was copied
+to /home/mrsurge/knowhere/als-copilot-sdk and compared recursively with no
+differences. The external copy also retains the old registry, pyproject and
+Copilot integration regression for an independent future fork.
+
+Remove the builtin registry entry, tree, Copilot-only serializer test and specific
+package-data/typechecker declarations. Codex remains registered; generic extension
+loading stays unchanged. Do not delete user settings/conversations, install or
+uninstall packages, restart the harness, or create/publish the future fork here.
+The copy is source preservation, not a standalone packaged extension yet.
+
+Validate runtime imports with MCP/FastAPI/Pydantic/crypto blocked, the complete
+native Python suite, generated metadata/source inventory, and a no-install pip
+resolver report. No direct SDK/schema requirements should remain; existing FWS
+transitive dependencies are reported honestly, not bypassed with --no-deps.
 
 The existing `python mcp_agent_pty_server.py` invocation now imports only the
 stdlib-only mcp_bootstrap and execs `als-mcp`. The SDK adapter is test-only in
@@ -118,8 +140,8 @@ package uninstall or active harness restart occurred here.
 Isolated qualification now lives in rust/mcp_embedding_probe (own Cargo workspace,
 rmcp 3.5.1/PyO3 0.28.3). User approved the real-tool extraction slice: handlers
 are in mcp_tools.py, schemas/metadata in mcp_catalog.json, and mcp_registry.py
-provides neutral typed admission. The retained Python launcher is a thin SDK
-adapter. The real-tools executable submits object DTOs through PyO3 to one ordinary
+provides neutral typed admission. The SDK reference is now test-only; the Python
+launcher execs native MCP. That executable submits object DTOs through PyO3 to one ordinary
 asyncio loop with event-driven completion, 32-call admission and bounded stdin.
 Tests cover all schema/default/coercion/result contracts, mocked ask_user cleanup,
 and disposable native read-only tool/resource calls. No live commands change yet.

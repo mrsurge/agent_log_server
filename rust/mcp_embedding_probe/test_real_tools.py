@@ -10,6 +10,7 @@ from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import McpError
 
 ROOT = Path(__file__).absolute().parents[2]
+sys.path.insert(0, str(ROOT))  # Test the checkout, not an older installed ALS.
 BIN = Path(__file__).absolute().parent / "target/debug/als-mcp"
 
 
@@ -38,6 +39,8 @@ async def main():
         })
         for key in ("TE2_CACHE_HOME", "TE2_CONFIG_HOME", "TE2_DATA_HOME", "TE2_RUNTIME_HOME"):
             env[key] = str(root / key.lower())
+        from agent_log_server_rs.mcp_bootstrap import prepare
+        prepare(env)  # Preparation is explicit and outside the MCP handshake.
         # Validate unchanged client invocation through the new exec bootstrap.
         parameters = StdioServerParameters(command=sys.executable, args=[str(ROOT / "mcp_agent_pty_server.py")], env=env, cwd=tmp)
         async with stdio_client(parameters) as (read, write):

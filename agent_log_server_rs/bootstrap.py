@@ -53,6 +53,7 @@ class BootstrapArgs:
     framework_shells_secret_fingerprint: str | None
     framework_shells_fws_socketio_server_pid: str | None
     framework_shells_run_id: str | None
+    build_only: bool = False
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -63,7 +64,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_extension_cli(argv[1:])
     args = _parse_args(argv)
     env = _build_env(args)
+    explicit_cargo_target = "CARGO_TARGET_DIR" in env
     command = _server_command(args, env)
+    from agent_log_server_rs import mcp_bootstrap
+    mcp_env = dict(env)
+    if not explicit_cargo_target:
+        # Do not mistake the server's internally selected target cache for a
+        # user-supplied override of the independent MCP target cache.
+        mcp_env.pop("CARGO_TARGET_DIR", None)
+    env["ALS_MCP_BIN"] = str(mcp_bootstrap.prepare(mcp_env))
+    if args.build_only:
+        print("[als-rs] Server and MCP artifacts prepared", file=sys.stderr, flush=True)
+        return 0
     return _run_child(command, env)
 
 
@@ -91,6 +103,7 @@ def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--host", default=os.environ.get("ALS_RS_HOST", DEFAULT_HOST))
+    parser.add_argument("--build-only", action="store_true", help="Prepare/verify server and MCP artifacts without starting ALS")
     parser.add_argument("--port", default=os.environ.get("ALS_RS_PORT", DEFAULT_PORT))
     parser.add_argument("--data-dir", default=os.environ.get("ALS_RS_DATA_DIR"))
     parser.add_argument("--cache-dir", default=os.environ.get("ALS_RS_CACHE_DIR"))
@@ -158,6 +171,7 @@ def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
             raw.framework_shells_fws_socketio_server_pid,
         ),
         framework_shells_run_id=cast(str | None, raw.framework_shells_run_id),
+        build_only=cast(bool, raw.build_only),
     )
 
 

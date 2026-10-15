@@ -1,5 +1,30 @@
 # Isolated MCP embedding proof
 
+## Current preparation contract
+
+The directory name is historical; `als-mcp` is the real stdio runtime. Its stable
+Python entrypoint now **never builds or probes rustc**. ALS bootstrap prepares MCP
+before launching its server, driven by `agent_log_server_rs/native_mcp_build.json`.
+The existing server Cargo build/cache flow stays unchanged. Explicit preparation:
+
+```bash
+als-rs --build-only
+```
+
+That prepares/verifies server and MCP without starting ALS. The JSON declares
+Cargo manifest, features, Python ABI requirement, fingerprint inputs and cache/
+target/publication locations. `ALS_MCP_CARGO_TARGET_DIR` is an optional MCP target
+override; otherwise the existing ALS Cargo-target helper/cache is retained.
+Atomic selectors bind source/config and interpreter ABI to a receipt-verified
+binary. Invocation reads/validates and execs only; missing/stale selection tells
+the caller to run preparation. Existing cache artifacts are retained, never scanned
+as fallback candidates. Packaged binary wheels verify supplied artifacts without
+compiling. Release wheel construction calls the same preparation method.
+
+The earlier cutover notes below describe the prior invocation-time build design;
+this preparation contract supersedes that build trigger. A newly installed source
+payload must adopt this bootstrap before an MCP client starts its handshake.
+
 **Bootstrap cutover:** the real executable is now named `als-mcp`; unchanged
 `python mcp_agent_pty_server.py` invokes a stdlib-only bootstrap, builds/selects a
 receipt-verified artifact and execs it. The SDK adapter is test-only. The notes

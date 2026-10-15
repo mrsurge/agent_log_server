@@ -10,6 +10,14 @@ The older Python-server descriptions below are historical, not current runtime
 requirements. The unused HTTP MCP shim and legacy `codex-agent` console entrypoint
 are retired.
 
+Codex is the only bundled provider. The Copilot SDK extension has been removed
+for independent maintenance; existing conversation data is not deleted.
+Native stdio MCP uses rmcp/PyO3, not the Python MCP SDK. SDK reference tests use
+the optional development extra: `pip install '.[test]'`. ALS no longer directly
+requires FastAPI, FastMCP or Pydantic. Framework-Shells is pinned to the
+FastAPI-free 0.2.65 release; fresh runtime dependency resolution also excludes
+the Python MCP SDK and cryptography.
+
 Optional Python loop acceleration is available with
 `pip install 'agent-log-server[performance]'`: Linux x86-64 selects upstream
 uvloop; Android aarch64 selects uvloop-te2. Both expose `uvloop`. Without it,
