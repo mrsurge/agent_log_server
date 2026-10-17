@@ -113,10 +113,6 @@ pub struct FrameworkShellConfig {
 }
 
 impl ServerConfig {
-    pub fn from_env() -> Result<Self> {
-        Self::from_env_and_args(env::args_os().skip(1))
-    }
-
     pub fn from_env_and_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let host = env::var("ALS_RS_HOST").unwrap_or_else(|_| DEFAULT_HOST.to_owned());
         let port = match env::var("ALS_RS_PORT") {

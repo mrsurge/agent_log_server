@@ -188,7 +188,15 @@ Runtime rules:
   parent `FRAMEWORK_SHELLS_*` environment so existing extension-owned
   framework-shell process management and observability keep working.
 - Health is Rust-owned at `GET /api/health`.
-- TE2 wrapper readiness uses the ALS-RS port and health route.
+- TE2 launches ALS with --stdio as a pipe worker and declares pipe-only serving
+  readiness. After router preparation/listener bind, native framework_pipe emits
+  one concatenated MessagePack app.readiness notification (ready/serving).
+  HTTP readiness POST is removed; /api/health is diagnostic only. Stdout stays
+  protocol-only through Python preparation/native startup; build logs and tracing
+  go to stderr. Standalone launches without --stdio emit no readiness or stdin
+  reader. Pipe EOF shuts down, malformed input fails, unsupported requests receive
+  framework errors. main.rs delegates to the shared library lifecycle in lib.rs.
+  TE2's ALS wrapper uses the existing app_shell gate, not a second health poll.
 
 ## Python package and bootstrap particulars
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import contextlib
+import io
 import json
 import subprocess
 import tempfile
@@ -47,6 +49,37 @@ def _write(path: Path, content: str, *, executable: bool = False) -> None:
 
 
 class BootstrapCommandTests(unittest.TestCase):
+    def test_stdio_is_explicit_and_forwarded_to_native_server(self) -> None:
+        self.assertFalse(bootstrap._parse_args([]).stdio)
+        self.assertTrue(bootstrap._parse_args(["--stdio"]).stdio)
+        args = replace(_args(Path("unused"), server_bin="/fake/als-server"), stdio=True)
+        self.assertEqual(bootstrap._server_command(args), ["/fake/als-server", "--stdio"])
+
+    def test_stdio_preparation_diagnostics_cannot_pollute_child_stdout(self) -> None:
+        args = replace(_args(Path("unused")), stdio=True)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        def prepare_server(*_args: object) -> list[str]:
+            print("server preparation diagnostic")
+            return ["/fake/server", "--stdio"]
+        def prepare_mcp(*_args: object) -> Path:
+            print("MCP preparation diagnostic")
+            return Path("/fake/mcp")
+        def run_child(command: object, env: object) -> int:
+            print("server-protocol")
+            return 0
+        with (
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr),
+            mock.patch.object(bootstrap, "_parse_args", return_value=args),
+            mock.patch.object(bootstrap, "_build_env", return_value={}),
+            mock.patch.object(bootstrap, "_server_command", side_effect=prepare_server),
+            mock.patch("agent_log_server_rs.mcp_bootstrap.prepare", side_effect=prepare_mcp),
+            mock.patch.object(bootstrap, "_run_child", side_effect=run_child),
+        ):
+            self.assertEqual(bootstrap.main([]), 0)
+        self.assertEqual(stdout.getvalue(), "server-protocol\n")
+        self.assertIn("server preparation diagnostic", stderr.getvalue())
+        self.assertIn("MCP preparation diagnostic", stderr.getvalue())
+
     def test_android_sys_platform_accepts_android_packaged_target(self) -> None:
         with (
             mock.patch.object(bootstrap.platform, "machine", return_value="aarch64"),
@@ -173,6 +206,7 @@ class BootstrapCommandTests(unittest.TestCase):
             env: dict[str, str] = {"ALS_RS_CACHE_DIR": str(cache_dir)}
 
             def fake_build(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                self.assertIs(kwargs["stdout"], bootstrap.sys.stderr)
                 build_env = cast(dict[str, str], kwargs["env"])
                 target_dir = Path(build_env["CARGO_TARGET_DIR"])
                 _write(target_dir / "release" / "als-server", "release", executable=True)

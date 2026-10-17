@@ -16,7 +16,7 @@ import subprocess
 import sys
 import sysconfig
 from collections.abc import Callable, Generator, MutableMapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -54,6 +54,7 @@ class BootstrapArgs:
     framework_shells_fws_socketio_server_pid: str | None
     framework_shells_run_id: str | None
     build_only: bool = False
+    stdio: bool = False
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -63,16 +64,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return run_extension_cli(argv[1:])
     args = _parse_args(argv)
-    env = _build_env(args)
-    explicit_cargo_target = "CARGO_TARGET_DIR" in env
-    command = _server_command(args, env)
-    from agent_log_server_rs import mcp_bootstrap
-    mcp_env = dict(env)
-    if not explicit_cargo_target:
-        # Do not mistake the server's internally selected target cache for a
-        # user-supplied override of the independent MCP target cache.
-        mcp_env.pop("CARGO_TARGET_DIR", None)
-    env["ALS_MCP_BIN"] = str(mcp_bootstrap.prepare(mcp_env))
+    # Python preparation diagnostics go to stderr; the server retains the real
+    # stdout FD. Cargo children are separately redirected below/in MCP preparation.
+    with redirect_stdout(sys.stderr) if args.stdio else nullcontext():
+        env = _build_env(args)
+        explicit_cargo_target = "CARGO_TARGET_DIR" in env
+        command = _server_command(args, env)
+        from agent_log_server_rs import mcp_bootstrap
+        mcp_env = dict(env)
+        if not explicit_cargo_target:
+            mcp_env.pop("CARGO_TARGET_DIR", None)
+        env["ALS_MCP_BIN"] = str(mcp_bootstrap.prepare(mcp_env))
     if args.build_only:
         print("[als-rs] Server and MCP artifacts prepared", file=sys.stderr, flush=True)
         return 0
@@ -103,6 +105,7 @@ def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--host", default=os.environ.get("ALS_RS_HOST", DEFAULT_HOST))
+    parser.add_argument("--stdio", action="store_true", help="Reserve stdout for framework MessagePack; stop on stdin closure")
     parser.add_argument("--build-only", action="store_true", help="Prepare/verify server and MCP artifacts without starting ALS")
     parser.add_argument("--port", default=os.environ.get("ALS_RS_PORT", DEFAULT_PORT))
     parser.add_argument("--data-dir", default=os.environ.get("ALS_RS_DATA_DIR"))
@@ -172,6 +175,7 @@ def _parse_args(argv: Sequence[str] | None) -> BootstrapArgs:
         ),
         framework_shells_run_id=cast(str | None, raw.framework_shells_run_id),
         build_only=cast(bool, raw.build_only),
+        stdio=cast(bool, raw.stdio),
     )
 
 
@@ -207,6 +211,8 @@ def build_env(args: BootstrapArgs) -> dict[str, str]:
 def _server_command(args: BootstrapArgs, env: MutableMapping[str, str] | None = None) -> list[str]:
     runtime_env = env if env is not None else os.environ
     framework_shell_args = _framework_shell_args(args)
+    if args.stdio:
+        framework_shell_args.append("--stdio")
     if args.server_bin:
         return [str(Path(args.server_bin)), *framework_shell_args]
 
@@ -246,7 +252,7 @@ def _server_command(args: BootstrapArgs, env: MutableMapping[str, str] | None = 
             command.append("--release")
         build_env = dict(runtime_env)
         build_env["CARGO_TARGET_DIR"] = str(target_dir)
-        result = subprocess.run(command, env=build_env, check=False)
+        result = subprocess.run(command, env=build_env, check=False, stdout=sys.stderr)
         if result.returncode != 0:
             raise SystemExit(result.returncode)
 
