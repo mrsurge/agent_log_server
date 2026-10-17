@@ -315,6 +315,25 @@ fn file_open_sidebar_params(params: &JsonMap) -> Result<JsonMap, RpcError> {
             .ok_or_else(|| rpc_error(-32602, format!("file.open requires target.{field}")))?;
         caller.insert(field.to_owned(), Value::String(value.to_owned()));
     }
+    if target.contains_key("sidebarWindowId") || target.contains_key("mainPageId") {
+        let page = target
+            .get("mainPageId")
+            .and_then(Value::as_str)
+            .filter(|value| value.len() == 4 && value.bytes().all(|c| c.is_ascii_alphanumeric()))
+            .ok_or_else(|| rpc_error(-32602, "file.open requires target.mainPageId"))?;
+        let window = target
+            .get("sidebarWindowId")
+            .and_then(Value::as_str)
+            .filter(|value| value.len() <= 128 && value.ends_with(&format!(".{page}")))
+            .ok_or_else(|| {
+                rpc_error(-32602, "file.open requires matching target.sidebarWindowId")
+            })?;
+        caller.insert("mainPageId".to_owned(), Value::String(page.to_owned()));
+        caller.insert(
+            "sidebarWindowId".to_owned(),
+            Value::String(window.to_owned()),
+        );
+    }
     forwarded.insert("target".to_owned(), Value::Object(caller));
     if let Some(path) = params.get("path") {
         forwarded.insert("path".to_owned(), path.clone());
@@ -1259,6 +1278,22 @@ mod tests {
             let params = json!({"path": "/project/file.rs", "target": target});
             assert!(file_open_sidebar_params(params.as_object().unwrap()).is_err());
         }
+    }
+
+    #[test]
+    fn file_open_preserves_qualified_window_and_rejects_cross_parent_suffix() {
+        let mut params = json!({"path": "/project/file.rs", "target": {
+            "clientId": "client-a", "hostId": "shared-als-slot", "presentationId": "inc-a",
+            "mainPageId": "f0f0", "sidebarWindowId": "als:a1b2.f0f0"
+        }});
+        assert_eq!(
+            file_open_sidebar_params(params.as_object().unwrap())
+                .unwrap()
+                .get("target"),
+            params.get("target")
+        );
+        params["target"]["mainPageId"] = json!("c3d4");
+        assert!(file_open_sidebar_params(params.as_object().unwrap()).is_err());
     }
 
     #[test]

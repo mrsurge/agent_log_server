@@ -12,7 +12,7 @@ function windowRef(client, presentation, sent) {
   return {
     location: {
       pathname: '/api/app/als-rs/proxy/',
-      search: `?te2_host_id=shared-als-slot&clientInstanceId=${client}&presentationId=${presentation}`,
+      search: `?te2_host_id=shared-als-slot&clientInstanceId=${client}&presentationId=${presentation}&te2_console_worker_id=als%3Ashared`,
     },
     sessionStorage: { getItem: () => null },
     io: () => ({ connected: true, on() {},
@@ -46,4 +46,17 @@ test('incomplete caller fails before sending and never chooses another window', 
   const rpc = createUiRpcClient({ sioCall: async () => ({}), windowRef: win });
   await assert.rejects(rpc.openFile({ path: '/project/readme.md' }), /current sidebar presentation/);
   assert.equal(sent.length, 0);
+});
+
+test('qualified sidebar/main-page identity accompanies the existing incarnation proof', async () => {
+  for (const parent of ['f0f0', 'c3d4']) {
+    const { createUiRpcClient } = await import(`${moduleUrl}#qualified-${parent}`);
+    const sent = [];
+    const win = windowRef(`client-${parent}`, `inc-${parent}`, sent);
+    win.location.search += `&mainPageId=${parent}&sidebarWindowId=als%3Aa1b2.${parent}`;
+    const rpc = createUiRpcClient({ sioCall: async () => ({}), windowRef: win });
+    await rpc.openFile({ path: '/project/readme.md' });
+    assert.deepEqual(sent[0].params.target, { clientId: `client-${parent}`, hostId: 'shared-als-slot',
+      presentationId: `inc-${parent}`, mainPageId: parent, sidebarWindowId: `als:a1b2.${parent}` });
+  }
 });

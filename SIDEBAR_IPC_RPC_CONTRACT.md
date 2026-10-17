@@ -1,5 +1,26 @@
 # Code TE2 Sidebar IPC/RPC Contract
 
+## Console presentation identity — 2026-10-17 maintenance
+
+Code TE2 registers backend-persisted short shared-state and main-page references:
+`main_page:f0f0` presents `als:a1b2.f0f0`, while another main page presents that
+same state as `als:a1b2.c3d4`. This is the actual Sidebar presentation URL identity,
+not merely a randomly shortened console handle. The query carries `mainPageId`,
+`sidebarStateId` and `sidebarWindowId`; the bridge preserves sidebarWindowId as
+its console name, including on reconnect. Shared slot/conversation identities
+remain unchanged; shared restore URLs must not retain another client's suffix.
+
+ALS file-open UI RPC and its native gateway preserve mainPageId/sidebarWindowId
+as a pair alongside the original client/host/incarnation tuple. TE2 validates the
+live registered proof and slot/app ownership. Neither suffixes nor console names
+are credentials or fallback destinations. Missing short fields retain explicit
+legacy compatibility; malformed supplied fields reject. Console eval/replies and
+disconnect cleanup stay pinned to exact SID registrations.
+
+Activation requires matching ALS native installation and frontend assets, Code
+TE2 domain/mypyc and host assets, wrapper registry metadata, and framework console
+bridge refresh. Tests/builds alone do not establish live adoption.
+
 ## File-open caller ownership — 2026-10-17 maintenance
 
 Shared slots/conversation state and console labels are not delivery targets.
