@@ -163,5 +163,7 @@ qualify both Codex/Copilot stdio launches before removing the SDK/Pydantic closu
 User-controlled live native ALS and both agent-client acceptance, optional real
 uvloop FD/subprocess/Socket.IO behavior, updated FWS source/release adoption and
 fresh Linux/Termux dependency resolution remain. Existing installed packages and
-accepted wheels/locks are not modified by deleting requirement lines. ALS commits
-require the version bump mandated by AGENTS.md; publishing is separately approved.
+accepted wheels/locks are not modified by deleting requirement lines. Local ALS
+commits do not require version bumps; an authorized code/build push prepares one
+development version for its batch, while documentation-only pushes are exempt.
+See AGENTS.md Package Version Policy; tagging/publishing is separately approved.

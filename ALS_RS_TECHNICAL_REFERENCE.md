@@ -1816,10 +1816,18 @@ frontend consume only generic adapter/schema/card contracts.
 - After Rust changes, run the narrow crate tests/checks first, then broader
   workspace validation proportional to the change.
 - After Python changes, run focused tests and `basedpyright`.
-- Keep `pyproject.toml` and Rust crate versions synchronized when a release or
-  commit requires a version bump.
-- A user-requested checkpoint means no version bump unless separately requested;
-  this overrides the general commit-version rule.
+- Local commits/checkpoints require no version bump. Before an authorized push
+  containing code/runtime/build/packaging changes, prepare one new development
+  version for the batch; documentation-only pushes are exempt. Keep package and
+  packaged-runtime release receipts consistent; version policy is not permission
+  to push, tag or publish.
+- Tagged releases use the matching public version. Untagged builds use a
+  monotonically increasing .devN identifier; local/private artifacts may add
+  +git.<hash>, derived from completed HEAD at build time, never embedded into its
+  own source commit. PyPI artifacts omit local suffixes and keep source provenance
+  separately. Dirty builds must not claim clean provenance. Automatic suffix
+  generation remains separately approved future packaging work: current
+  pyproject.toml version metadata is static. See AGENTS.md Package Version Policy.
 - Changes to the `ferrous_framework` submodule are committed/pushed in its own
   repository first; the parent then records the gitlink update.
 

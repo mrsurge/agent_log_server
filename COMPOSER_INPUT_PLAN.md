@@ -27,6 +27,12 @@ symptoms, not a claim that every device-specific input sequence has been capture
 
 ## Implemented direction
 
+Pre-release timing follow-up: the shared client-local pairing/deletion gesture
+window is now 1,100 ms rather than 800 ms (+37.5%). Exact caret/pair identity and
+content-change cancellation remain mandatory; delayed input does not extend a
+stale gesture indefinitely. Current validation/live gates are in the consolidated
+TE2 pre-release tracker, not a new independent composer checklist.
+
 1. `composer/text_projection.ts` owns block separators, terminal BR placeholders,
    mention atoms and UTF-16 DOM/text point mapping. Send text and draft envelopes
    supply different mention serializers to the same projection.

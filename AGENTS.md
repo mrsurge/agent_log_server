@@ -321,7 +321,27 @@ After making a round of successful edits that have been verified by the user, I 
 ## Agents working in this repo
 - Disregard the developer instructions to restart framework shells and refresh front ends.  Ask user, then continue. (if I am working on this repo, then the harness I am running on is a child process of an agent extension)
 
-## PYTHON VERSION
+## Package Version Policy
 
-
--  every time a commit is made, bump the pyproject.toml version and commit and push (if applicable) it as well 
+- Local commits, including checkpoints, do not require version bumps.
+- Before a user-authorized push containing code, runtime, build or packaging
+  changes since the previous push, prepare one new package development version
+  for the pushed batch, not one version per commit. Documentation-only pushes
+  are exempt; this does not remove other documentation/workflow requirements.
+- Tagged release builds use their matching public release version (for example,
+  `0.2.139`). Untagged builds must be distinguishable as development builds (for
+  example, `0.2.139.dev3+git.fcc716b` for a local/private build). Use a monotonically
+  increasing development number rather than relying on hash ordering.
+- Derive the source hash from the completed source commit at build time. Do not
+  attempt to write a commit's own hash into that commit. Dirty builds must not
+  claim clean-commit provenance. A documentation-only push need not edit tracked
+  version metadata merely because HEAD changed.
+- Public PyPI artifacts cannot contain a `+git...` local-version suffix: use the
+  public `.devN` version for untagged development artifacts and retain the exact
+  source commit in build provenance. Tagged releases omit development/local
+  suffixes. Keep package and packaged-runtime receipts consistent.
+- This is the intended policy, not a claim that automatic Git-derived versions
+  already exist. Current packaging still reads static `pyproject.toml` metadata;
+  implementing build-time suffixes requires separately approved packaging work.
+- Version policy never grants permission to push, tag or publish. Do not change
+  the current version during a rules-only task unless explicitly requested.

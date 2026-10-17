@@ -147,6 +147,10 @@ Host/main-page clients should consume this via their existing `/sidebar_ipc` con
 
 ### Project-dialog file navigation follow-up
 
+Current implementation/acceptance status is maintained only in the sibling TE2
+`docs/apps/release_0_2_354/TRACKER.md` (2026-10-17 consolidation). The technical
+direction and historical evidence below are not a second current checklist.
+
 User approves relaxing project-switch prerequisites without a version bump.
 The prior Project dialog sent every file-header and diff-line click through
 `ensureTe2ProjectReady`, regardless of whether the file belonged to the
@@ -154,23 +158,23 @@ conversation CWD. TE2's shared backend file-open boundary now routes external
 files to its basic File Editor, so switching projects is a choice, not an open
 prerequisite for every path.
 
-- [x] Outside-conversation-CWD paths open directly over the existing typed
+Outside-conversation-CWD paths open directly over the existing typed
   UI namespace `file.open` lane without a project lookup/switch prerequisite.
-- [x] In-CWD files with a different TE2 project offer Switch project and open,
+In-CWD files with a different TE2 project offer Switch project and open,
   Open without switching, or Cancel. Unknown projects use Create project and open
   for the primary action. Already-current projects do not prompt.
-- [x] Headers, keyboard header activation and diff-line links share the same
+Headers, keyboard header activation and diff-line links share the same
   navigation policy. Explicit Switch TE2 control keeps its existing confirmation.
-- [x] Conversation/CWD/root checks discard a stale pending choice. Component-wise
+Conversation/CWD/root checks discard a stale pending choice. Component-wise
   lexical path checks distinguish /repo from /repo-other, without resolving links.
-- [x] Successful backend switch completion admits the following open even when
+Successful backend switch completion admits the following open even when
   host-UI project projection is delayed; failed switches never open or replay.
-- [x] Existing warning modal supports an optional secondary action, distinct from
+Existing warning modal supports an optional secondary action, distinct from
   Cancel, and resets it for ordinary confirmations.
-- [x] Navigation/modal/routing plus pending composer regressions: 63 tests pass.
-- [x] Final `npm run typecheck`, `npm run build` and `git diff --check` pass.
-- [ ] Separately approved ALS installation/client asset publication and live
-  header/hunk, external-file and switch-choice acceptance.
+Validation evidence: navigation/modal/routing plus composer regressions: 63 tests
+pass. Final `npm run typecheck`, `npm run build` and `git diff --check` pass.
+Later checkpoint/publication and bounded user smoke acceptance are consolidated
+in the canonical tracker; newly listed project-switch link failures remain open.
 
 No backend/RPC identity, filesystem permission or large-diff rendering guard is
 removed. TE2 remains the file/project authority. No version numbers are changed;

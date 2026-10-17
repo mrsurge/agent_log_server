@@ -609,6 +609,10 @@ def _build_codex_view_lines(content: str, view_spec: Optional[ObjectDict] = None
         return []
     if not _is_object_dict(view_spec):
         return None
+    if view_spec.get("semantic_action") is True:
+        # CommandAction.read supplies a file, not a source-line range. Do not
+        # turn unnumbered output from a partial read into fabricated line 1+.
+        return None
 
     start_line = 1
     raw_view_range = view_spec.get("view_range")
@@ -1094,6 +1098,8 @@ def _normalize_search_output(output: str, search_spec: Optional[ObjectDict]) -> 
     text = _normalize_output(output)
     if not text or not _is_object_dict(search_spec):
         return text
+    if search_spec.get("semantic_action") is True:
+        return text
     target_path = str(search_spec.get("path") or "")
     if not target_path:
         return text
@@ -1116,6 +1122,56 @@ def _normalize_search_output(output: str, search_spec: Optional[ObjectDict]) -> 
     if had_trailing_newline:
         normalized += "\n"
     return normalized
+
+
+def _command_card_specs(
+    item: ObjectDict, command: object, cwd: str,
+) -> Tuple[Optional[ObjectDict], Optional[ObjectDict], Optional[ObjectDict], Optional[ObjectDict]]:
+    """Return new-file/sequence/view/search specs, preferring App Server semantics.
+
+    Presence is authoritative: empty, unknown, malformed or mixed actions stay
+    Run, never fall back to shell heuristics. Aggregated multi-action output has
+    no trustworthy per-file partition. Older peers without the field retain
+    their existing parser behavior.
+    """
+    if "commandActions" not in item:
+        new_file = _shell_command_to_new_file_spec(command, cwd)
+        sequence = None if new_file else _shell_command_to_view_sequence(command, cwd)
+        view = None if (new_file or sequence) else _shell_command_to_view_spec(command, cwd)
+        search = None if (new_file or sequence or view) else _shell_command_to_search_spec(command, cwd)
+        return new_file, sequence, view, search
+
+    actions = item["commandActions"]
+    if not _is_object_list(actions) or len(actions) != 1 or not _is_object_dict(actions[0]):
+        return None, None, None, None
+    action = actions[0]
+    action_command = action.get("command")
+    if not isinstance(action_command, str):
+        return None, None, None, None
+    kind = action.get("type")
+    if not isinstance(kind, str):
+        return None, None, None, None
+    raw_path = action.get("path")
+    if kind == "read":
+        if not isinstance(raw_path, str) or not raw_path.strip() or not isinstance(action.get("name"), str):
+            return None, None, None, None
+        path = _resolve_view_path(raw_path, cwd)
+        return None, None, {"path": path, "title": _build_view_title(path, None),
+                             "semantic_action": True}, None
+    if kind not in {"search", "listFiles"} or (raw_path is not None and not isinstance(raw_path, str)):
+        return None, None, None, None
+    query = action.get("query")
+    if kind == "search" and query is not None and not isinstance(query, str):
+        return None, None, None, None
+    path = _resolve_view_path(raw_path, cwd) if isinstance(raw_path, str) and raw_path else cwd
+    pattern = query if kind == "search" and isinstance(query, str) else ""
+    return None, None, None, {
+        "mode": "glob" if kind == "listFiles" else "search",
+        "title": "List files" if kind == "listFiles" else "Search",
+        "path": path, "pattern": pattern,
+        "arguments": {"path": path, "pattern": pattern, "command": action_command},
+        "semantic_action": True,
+    }
 
 
 def _extract_path_from_diff(diff_text: str) -> Optional[str]:
@@ -2508,10 +2564,7 @@ class CodexEventRouter:
                 display_command = _display_command_text(command)
                 cwd_value = item.get("cwd")
                 cwd = cwd_value if isinstance(cwd_value, str) else ""
-                new_file_spec = _shell_command_to_new_file_spec(command, cwd)
-                view_sequence = None if new_file_spec else _shell_command_to_view_sequence(command, cwd)
-                view_spec = None if (new_file_spec or view_sequence) else _shell_command_to_view_spec(command, cwd)
-                search_spec = None if (new_file_spec or view_sequence or view_spec) else _shell_command_to_search_spec(command, cwd)
+                new_file_spec, view_sequence, view_spec, search_spec = _command_card_specs(item, command, cwd)
                 item_state.update({
                     "item_type": item_type,
                     "command": command,
@@ -2989,6 +3042,11 @@ class CodexEventRouter:
                 view_spec = _dict_payload(item_state.get("view_spec"))
                 search_spec = _dict_payload(item_state.get("search_spec"))
                 new_file_spec = _dict_payload(item_state.get("new_file_spec"))
+                if "command" not in item_state:
+                    # Completion-only delivery must use the same semantic owner.
+                    new_file_spec, view_sequence, view_spec, search_spec = _command_card_specs(
+                        item, command, cwd if isinstance(cwd, str) else "",
+                    )
                 if view_sequence and not is_error:
                     raw_specs = _dict_list(view_sequence.get("specs"))
                     divider = _string_value(view_sequence.get("separator"))
@@ -3051,6 +3109,7 @@ class CodexEventRouter:
                         ],
                         "transcript_entries": [{
                             "role": "view",
+                            "id": item_id or _assistant_id(item, thread_id, turn_id),
                             "title": _view_spec_title(view_spec),
                             "path": _view_spec_path(view_spec),
                             "content": output,
@@ -3085,6 +3144,7 @@ class CodexEventRouter:
                         ],
                         "transcript_entries": [{
                             "role": "search",
+                            "id": item_id or _assistant_id(item, thread_id, turn_id),
                             "title": search_spec.get("title") or "search",
                             "mode": search_spec.get("mode") or "search",
                             "path": search_spec.get("path") or "",

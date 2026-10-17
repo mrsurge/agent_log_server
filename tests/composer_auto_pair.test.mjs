@@ -174,6 +174,23 @@ test('single-entry suppression expires and pairing resumes', () => {
   assert.equal(result.state.kind, 'fresh_pair');
 });
 
+test('deletion intent remains available for 1100ms and expires immediately afterwards', () => {
+  assert.equal(COMPOSER_PAIR_GESTURE_TIMEOUT_MS, 1_100);
+  for (const character of ['(', '[', '{', '"', '`']) {
+    const pair = plan(insert(character), '', { anchor: 0, focus: 0 });
+    const draft = pair.edit.draft;
+    for (const elapsed of [801, 1_000, 1_100]) {
+      assert.equal(plan(backspace, draft, pair.edit.selection, pair.state, 1_000 + elapsed).edit.action, 'delete');
+    }
+    assert.equal(plan(backspace, draft, pair.edit.selection, pair.state, 2_101).edit, null);
+  }
+  const pair = plan(insert('('), '', { anchor: 0, focus: 0 });
+  const removed = plan(backspace, '()', pair.edit.selection, pair.state, 1_100);
+  assert.equal(removed.state.expiresAt, 2_200);
+  assert.equal(plan(insert('('), '', removed.edit.selection, removed.state, 2_200).edit, null);
+  assert.equal(plan(insert('('), '', removed.edit.selection, removed.state, 2_201).edit.draft, '()');
+});
+
 test('immediate double quote and backtick backspace retain the closer and move after it', () => {
   for (const character of ['"', '`']) {
     const pair = plan(insert(character), 'ab', { anchor: 1, focus: 1 });
