@@ -1,5 +1,28 @@
 # Code TE2 Sidebar IPC/RPC Contract
 
+## File-open caller ownership — 2026-10-17 maintenance
+
+Shared slots/conversation state and console labels are not delivery targets.
+An embedded user file click must carry its current URL's clientInstanceId,
+te2_host_id and presentationId as target.clientId/hostId/presentationId through
+the common UI RPC boundary and Rust forwarding. Never substitute the process-wide
+FocusedWindowStore: three clients may render the same shared slot. Missing caller
+identity fails explicitly rather than selecting another client. Code TE2 owns
+live-client, slot/app, foreground and incarnation validation; shared open-document
+membership is separate from the caller's foreground. No automatic replay.
+
+This preserves current Sidebar IPC transport; the framework-pipe migration and
+console-ID naming changes remain separate. TE2 reconnect restores presentation
+and local foreground without creating shared slots. Implementation/test/activation
+tracking: sibling termux-extensions-2 docs/apps/sidebar_app_intents/TRACKER.md.
+
+Source validation: frontend typecheck/build and four focused Node tests pass;
+Rust's two new file-open admission tests and ten existing sidebar tests pass in
+both lib/bin test targets. Touched Rust files pass rustfmt; workspace-wide fmt
+still reports unrelated formatting drift. Runtime activation/live acceptance is
+not implied. ALS checkpoint/version bump is explicitly approved to let TE2's
+clean-source vendor tool refresh native-client assets; no release/push authorized.
+
 ## Status
 
 Initial contract definition for the `/sidebar_ipc` cleanup.

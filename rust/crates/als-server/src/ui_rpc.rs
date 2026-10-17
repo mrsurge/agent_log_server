@@ -75,7 +75,8 @@ async fn dispatch_rpc(
         "project.identity.get" => {
             let start = project_start_from_params(state, &request.params)?;
             tokio::task::spawn_blocking(move || crate::project_summary::project_identity(&start))
-                .await.map_err(internal_rpc_error)
+                .await
+                .map_err(internal_rpc_error)
         }
         "project.agentDiff.accept" => project_agent_diff_accept(io, state, request.params).await,
         "project.agentDiff.reject" => project_agent_diff_reject(io, state, request.params).await,
@@ -107,7 +108,7 @@ async fn dispatch_rpc(
         }
         "app.windowState.publish" => app_window_state_publish(io, state, request.params).await,
         "file.open" => {
-            let forwarded_params = file_open_sidebar_params(&request.params);
+            let forwarded_params = file_open_sidebar_params(&request.params)?;
             info!(
                 namespace = UI_RPC_NAMESPACE,
                 event = RPC_EVENT,
@@ -298,8 +299,23 @@ fn inline_agent_edits_list(state: &AppState, params: JsonMap) -> Result<Value, R
         .map_err(internal_rpc_error)
 }
 
-fn file_open_sidebar_params(params: &JsonMap) -> JsonMap {
+fn file_open_sidebar_params(params: &JsonMap) -> Result<JsonMap, RpcError> {
     let mut forwarded = JsonMap::new();
+    let target = params
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| rpc_error(-32602, "file.open requires the caller sidebar target"))?;
+    let mut caller = JsonMap::new();
+    for field in ["clientId", "hostId", "presentationId"] {
+        let value = target
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.len() <= 512)
+            .ok_or_else(|| rpc_error(-32602, format!("file.open requires target.{field}")))?;
+        caller.insert(field.to_owned(), Value::String(value.to_owned()));
+    }
+    forwarded.insert("target".to_owned(), Value::Object(caller));
     if let Some(path) = params.get("path") {
         forwarded.insert("path".to_owned(), path.clone());
     }
@@ -309,7 +325,7 @@ fn file_open_sidebar_params(params: &JsonMap) -> JsonMap {
     if let Some(column) = params.get("column") {
         forwarded.insert("column".to_owned(), column.clone());
     }
-    forwarded
+    Ok(forwarded)
 }
 
 fn view_get(state: &AppState) -> Result<Value, RpcError> {
@@ -1215,6 +1231,35 @@ mod tests {
     };
 
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn file_open_preserves_each_callers_shared_slot_presentation() {
+        for client in ["client-a", "client-b"] {
+            let target = json!({"clientId": client, "hostId": "shared-als-slot",
+                "presentationId": format!("presentation-{client}")});
+            let params = json!({"path": "/project/file.rs", "line": 50, "column": 1,
+                "target": target, "unexpected": "drop"});
+            let forwarded = file_open_sidebar_params(params.as_object().unwrap()).unwrap();
+            assert_eq!(forwarded.get("target"), Some(&target));
+            assert_eq!(forwarded.get("line"), Some(&json!(50)));
+            assert!(!forwarded.contains_key("unexpected"));
+        }
+    }
+
+    #[test]
+    fn file_open_rejects_missing_or_malformed_caller_without_focus_fallback() {
+        for target in [
+            json!(null),
+            json!({}),
+            json!({"clientId": "a", "hostId": "shared"}),
+            json!({"clientId": 7, "hostId": "shared", "presentationId": "p"}),
+            json!({"clientId": "a", "hostId": "shared", "presentationId": " "}),
+            json!({"clientId": "a", "hostId": "shared", "presentationId": "x".repeat(513)}),
+        ] {
+            let params = json!({"path": "/project/file.rs", "target": target});
+            assert!(file_open_sidebar_params(params.as_object().unwrap()).is_err());
+        }
+    }
 
     #[test]
     fn expands_home_without_resolving_symlinks() {

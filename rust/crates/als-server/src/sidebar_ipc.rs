@@ -75,15 +75,8 @@ pub async fn recheck_status(io: &SocketIo, state: &AppState) -> Value {
 }
 
 pub async fn emit_agent_open(io: &SocketIo, state: &AppState, payload: JsonMap) -> bool {
-    let mut payload = payload;
-    if let Ok(Some(focused)) = state.focused_window.snapshot()
-        && let (Some(client_id), Some(host_id)) = (focused.client_id, focused.host_id)
-    {
-        payload.insert(
-            "target".to_owned(),
-            json!({"clientId": client_id, "hostId": host_id}),
-        );
-    }
+    // UI RPC supplies the originating presentation. Global focus is only a
+    // projection for other features, never authority for a user file click.
     let Ok(Some(client)) = ensure_client(io, state).await else {
         warn!(
             namespace = SIDEBAR_NAMESPACE,
