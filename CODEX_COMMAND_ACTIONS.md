@@ -25,8 +25,12 @@ including stable card ID, path, content, title, range and structured lines.
 - Aggregated multi-action output has no per-file partition in this DTO. It stays
   one Run result; do not duplicate it into fake per-file View bodies. A richer
   grouped exploration UI is separate work, not implied by this conversion.
-- A semantic read has no line range. Preserve actual numbered output; otherwise
-  show plain content without fabricating line 1+ for a partial read.
+- A semantic read does not itself supply a line range. Supplement the existing
+  `view_range` DTO using the narrow legacy read parser only when its path matches
+  the authoritative semantic path. Classification never changes. Preserve actual
+  numbered output; otherwise show plain content without inventing line 1+.
+  The generic View ribbon displays known ranges independently of body gutters;
+  actual structured line bounds are a fallback when no requested range exists.
 - Semantic search/list output stays unchanged. Do not prepend a directory as
   though it were a known matched filename.
 - Older peers with no commandActions field retain existing parser compatibility.

@@ -467,6 +467,10 @@ Expected fields:
 Render expectations:
 
 - normal collapsible behavior
+- known `view_range` always appears in the title ribbon, including custom titles,
+  collapsed cards and bodies without line-number gutters; do not duplicate an
+  existing range suffix. Without a range, real structured source-line bounds may
+  supply the ribbon range. Display truncation never shortens a known range.
 - path line inside the collapsible content
 - when `lines` is present, render the body as gutter/content rows instead of a flat blob
 - line-number gutters should use the shared transcript line-number class so selection policy can be changed transcript-wide

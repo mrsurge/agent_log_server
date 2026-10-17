@@ -74,6 +74,24 @@ class CommandActionsTests(unittest.TestCase):
         self.assertEqual(event["lines"], [{"line_no": 101, "content": "hello"},
                                           {"line_no": 102, "content": "world"}])
 
+    def test_semantic_read_retains_requested_range_without_numbered_output(self) -> None:
+        for command in ("sed -n '323,350p' file.py", "nl -ba file.py | sed -n '323,350p'"):
+            with self.subTest(command=command):
+                self.setUp()
+                action = {**self.read(), "command": command}
+                item = self.item([action], command)
+                self.route("started", item)
+                event = self.mirror(self.finish(item, "unnumbered output\n"), "view")
+                self.assertEqual(event["view_range"], [323, 350])
+                self.assertEqual(event["title"], "file.py  Lines 323–350")
+                self.assertNotIn("lines", event)
+
+    def test_semantic_read_does_not_take_another_files_range(self) -> None:
+        action = {**self.read(), "command": "sed -n '20,30p' other.py"}
+        event = self.mirror(self.finish(self.item([action])), "view")
+        self.assertIsNone(event["view_range"])
+        self.assertEqual(event["title"], "file.py")
+
     def test_search_and_list_use_authoritative_dtos_with_unchanged_output(self) -> None:
         for kind in ("search", "listFiles"):
             with self.subTest(kind=kind):

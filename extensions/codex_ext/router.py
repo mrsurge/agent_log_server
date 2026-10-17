@@ -1156,7 +1156,15 @@ def _command_card_specs(
         if not isinstance(raw_path, str) or not raw_path.strip() or not isinstance(action.get("name"), str):
             return None, None, None, None
         path = _resolve_view_path(raw_path, cwd)
-        return None, None, {"path": path, "title": _build_view_title(path, None),
+        # Classification/path remain semantic; the existing read parser only
+        # supplements the generic DTO with a range for that exact same file.
+        parsed = _shell_command_to_view_spec(action_command, cwd)
+        if parsed is None:
+            parsed = _shell_command_to_view_spec(command, cwd)
+        view_range = (_view_spec_range(parsed)
+                      if parsed is not None and _view_spec_path(parsed) == path else None)
+        return None, None, {"path": path, "title": _build_view_title(path, view_range),
+                             "view_range": view_range,
                              "semantic_action": True}, None
     if kind not in {"search", "listFiles"} or (raw_path is not None and not isinstance(raw_path, str)):
         return None, None, None, None
