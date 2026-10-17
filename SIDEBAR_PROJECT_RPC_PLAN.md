@@ -145,6 +145,37 @@ Host/main-page clients should consume this via their existing `/sidebar_ipc` con
 
 ## Implementation Notes
 
+### Project-dialog file navigation follow-up
+
+User approves relaxing project-switch prerequisites without a version bump.
+The prior Project dialog sent every file-header and diff-line click through
+`ensureTe2ProjectReady`, regardless of whether the file belonged to the
+conversation CWD. TE2's shared backend file-open boundary now routes external
+files to its basic File Editor, so switching projects is a choice, not an open
+prerequisite for every path.
+
+- [x] Outside-conversation-CWD paths open directly over the existing typed
+  UI namespace `file.open` lane without a project lookup/switch prerequisite.
+- [x] In-CWD files with a different TE2 project offer Switch project and open,
+  Open without switching, or Cancel. Unknown projects use Create project and open
+  for the primary action. Already-current projects do not prompt.
+- [x] Headers, keyboard header activation and diff-line links share the same
+  navigation policy. Explicit Switch TE2 control keeps its existing confirmation.
+- [x] Conversation/CWD/root checks discard a stale pending choice. Component-wise
+  lexical path checks distinguish /repo from /repo-other, without resolving links.
+- [x] Successful backend switch completion admits the following open even when
+  host-UI project projection is delayed; failed switches never open or replay.
+- [x] Existing warning modal supports an optional secondary action, distinct from
+  Cancel, and resets it for ordinary confirmations.
+- [x] Navigation/modal/routing plus pending composer regressions: 63 tests pass.
+- [x] Final `npm run typecheck`, `npm run build` and `git diff --check` pass.
+- [ ] Separately approved ALS installation/client asset publication and live
+  header/hunk, external-file and switch-choice acceptance.
+
+No backend/RPC identity, filesystem permission or large-diff rendering guard is
+removed. TE2 remains the file/project authority. No version numbers are changed;
+no runtime restart, native build, deployment, commit or push is included here.
+
 - `sidebar.project.open` requires the path to be a known history project with an existing sidecar.
 - `sidebar.project.create` may adopt an existing directory only when `adoptExisting` is true.
 - `sidebar.project.opened` is emitted only after an actual project switch result that includes `resolved_path`.

@@ -157,4 +157,12 @@ Current implementation/source surfaces:
 
 ## Cutover Rule
 
+Project-dialog file navigation does not require switching TE2 for paths outside
+the conversation CWD. In-CWD files on another TE2 project offer switch-and-open,
+open-without-switching or cancel; opening without switching still uses the same
+exact-caller `file.open` RPC and TE2's external-file owner. This is presentation
+policy, not a bypass of TE2 identity, filesystem or project-write admission.
+Successful project open/create RPC completion, not a lagging host-UI snapshot,
+admits a user-confirmed subsequent file open. See SIDEBAR_PROJECT_RPC_PLAN.md.
+
 Do not collapse the physical transports until this contract and the editor/UI IPC RPC cutovers are coherent. Transport consolidation should preserve this logical namespace and route messages to the same backend ownership points; it should not move sidebar behavior into the gateway.
