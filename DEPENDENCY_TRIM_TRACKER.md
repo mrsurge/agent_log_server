@@ -2,6 +2,21 @@
 
 ## 2026-10-18 release preparation
 
+- [x] Final clean source d10a16c pushed/tagged 0.2.139; Linux/Android wheels
+  published to PyPI and public SHA-256 verified. Final Linux wheel: 56,739,877
+  bytes, SHA-256 0409d0f0d51ca7985dc90a425e815d866fb1d443de4b2dcdd75b55eb37753ee8.
+  Final Android wheel: 9,596,571 bytes, SHA-256
+  14c317cb96f28e1dfe8278dc2aad9506e64f44e5fb780891a36fb140690cfbeb.
+  Both reuse accepted native binaries with byte-identical ELF payloads; Linux
+  retains private CPython 3.14.6, Android uses system 3.14.6. Twine/size checks
+  and fresh local-wheel/PyPI-only joint TE2 .354 + ALS .139 + FWS .65 installs
+  pass on Debian/Pixel, including native MCP 38 tools/one resource/clean EOF,
+  bundled libpython (Linux), target uvloop and absent retired dependency stack.
+  Earlier candidate dirty-source/no-tag gates below are historical, now closed.
+  TE2 GitHub release remains draft pending its three APKs; no shared runtime
+  restart or installed developer environment replacement. Complete receipts in
+  sibling TE2 docs/apps/release_0_2_354/BUILD_STATUS.md.
+
 - [x] User confirms all Termux wheel live validations passed for the isolated
   TE2 .354 / ALS .139 / FWS .65 stack. Android wheel acceptance is closed;
   clean release provenance, tags/uploads and separate APK acceptance remain.
