@@ -1,5 +1,16 @@
 # Dependency-trim tracker
 
+## 2026-10-18 release preparation
+
+- [x] Prepare 0.2.139.dev1 for the approved source push; no release tag/publication.
+- [x] Promote target-exclusive uvloop/uvloop-te2 requirements to runtime metadata;
+  retain the performance extra for compatibility and existing loop policy.
+- [x] 36 focused dependency/bootstrap/native-wheel/loop tests and 2 subtests pass.
+- [x] Confirm PyPI FWS 0.2.65 Android/Linux wheels already exist; no republishing.
+- [ ] Build/validate/publish cleaned ALS native wheels, then update TE2 pin/locks.
+  Current public ALS remains 0.2.132. Existing dist output and codec.py editor
+  draft are preserved; no live installation or harness restart was performed.
+
 ## Deferred extension-adapter transport investigation
 
 - [x] Record user hypothesis and minimum-conversion constraint in

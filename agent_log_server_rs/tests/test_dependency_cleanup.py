@@ -57,9 +57,14 @@ class DependencyCleanupTests(unittest.TestCase):
     def test_optional_uvloop_distributions_are_target_exclusive(self) -> None:
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
         requirements = [Requirement(value) for value in _strings(_field(metadata, "project", "optional-dependencies", "performance"))]
+        runtime = [Requirement(value) for value in (ROOT / "requirements.txt").read_text().splitlines()
+                   if value.startswith(("uvloop==", "uvloop-te2=="))]
+        self.assertEqual(len(runtime), 2)
         for system, machine, expected in [("linux", "x86_64", ["uvloop"]), ("android", "aarch64", ["uvloop-te2"]), ("win32", "AMD64", []), ("linux", "aarch64", [])]:
             actual = [req.name for req in requirements if req.marker is not None and req.marker.evaluate({"sys_platform": system, "platform_machine": machine})]
             self.assertEqual(actual, expected)
+            self.assertEqual([req.name for req in runtime if req.marker is not None and req.marker.evaluate(
+                {"sys_platform": system, "platform_machine": machine})], expected)
 
     def test_native_adapter_import_has_no_python_web_schema_or_mcp_stack(self) -> None:
         code = '''

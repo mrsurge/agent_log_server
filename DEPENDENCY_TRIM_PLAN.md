@@ -2,6 +2,14 @@
 
 ## Goal and ownership
 
+2026-10-18 approved preparation: push source as 0.2.139.dev1; reserve 0.2.139 for
+a separately approved tagged release. Runtime requirements now select uvloop on
+Linux/x86_64 and uvloop-te2 on Android/aarch64, not only the performance extra.
+Preserve loop disable/fallback/error policy and MCP's ordinary asyncio ownership.
+FWS 0.2.65 already has both target wheels on PyPI; do not republish it. ALS native
+CPython-minor wheels and fresh closure still need validation/publication before
+TE2 updates its ALS pin. No build, installed-package change, tag or upload here.
+
 Remove unsupported Python web/schema/MCP dependency edges without rewriting
 the native ALS server or existing typed tool/application logic. Preserve the
 generic extension adapter, conversation-scoped MCP identity, tool/resource
