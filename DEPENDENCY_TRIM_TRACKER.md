@@ -2,6 +2,25 @@
 
 ## 2026-10-18 release preparation
 
+- [x] User approves 0.2.139.dev2 cleanup checkpoint and Debian-only CPython
+  3.13/3.14 Linux candidate builds, no tags or uploads. Local disk is constrained;
+  preserve installed binaries, codec.py draft and dist/. TE2 Linux .354 native
+  import acceptance passes but default fresh dependencies still select old ALS
+  .132/FWS .0.64, blocking intended dependency closure.
+
+- [x] Remove stale Jinja2/Fastcore/HTTPX direct runtime requirements; remaining
+  references belong only to deprecated Python page/shim code. Metadata checks
+  reject them and active adapter/Codex import probes block their imports.
+  Deprecated source, installed packages and codec.py editor draft are untouched.
+  Validation: 36 focused tests and 2 subtests pass, including blocked-import
+  probes; authored whitespace checks pass.
+  No version change, commit, push, build, publication or runtime restart.
+
+- [x] User policy: latest compatible first-party releases with minimums only.
+  ALS now requires FWS>=0.2.65; regression admits newer versions and rejects
+  exact/upper constraints. TE2 now uses bare ALS/FWS requirements. No version bump,
+  commit, push, installed-package change or publication in this source slice.
+
 - [x] Remove unused watchfiles runtime requirement after a source/import audit;
   metadata regression rejects its reintroduction. No installed-package changes,
   runtime restart or release/version change. msgspec remains required.
@@ -13,7 +32,7 @@
   retain the performance extra for compatibility and existing loop policy.
 - [x] 36 focused dependency/bootstrap/native-wheel/loop tests and 2 subtests pass.
 - [x] Confirm PyPI FWS 0.2.65 Android/Linux wheels already exist; no republishing.
-- [ ] Build/validate/publish cleaned ALS native wheels, then update TE2 pin/locks.
+- [ ] Build/validate/publish cleaned ALS native wheels and regenerate test locks.
   Current public ALS remains 0.2.132. Existing dist output and codec.py editor
   draft are preserved; no live installation or harness restart was performed.
 

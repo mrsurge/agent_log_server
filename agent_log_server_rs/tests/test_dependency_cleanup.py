@@ -35,10 +35,17 @@ def _strings(value: object) -> list[str]:
 class DependencyCleanupTests(unittest.TestCase):
     def test_runtime_metadata_has_no_retired_web_schema_or_mcp_dependencies(self) -> None:
         requirements = (ROOT / "requirements.txt").read_text().splitlines()
-        self.assertIn("framework-shells==0.2.65", requirements)
+        self.assertIn("framework-shells>=0.2.65", requirements)
+        fws = [Requirement(line) for line in requirements if line.startswith("framework-shells")]
+        self.assertEqual(len(fws), 1)
+        self.assertEqual({part.operator for part in fws[0].specifier}, {">="})
+        self.assertIn("9.0.0", fws[0].specifier)
+        self.assertNotIn("0.2.64", fws[0].specifier)
         names = {Requirement(line).name.lower().replace("_", "-") for line in requirements if line.strip() and not line.startswith("#")}
         self.assertFalse(names & {"fastapi", "fastmcp", "mcp", "pydantic", "pydantic-core", "cryptography"})
         self.assertNotIn("watchfiles", names, "No remaining ALS runtime consumer requires watchfiles")
+        self.assertFalse(names & {"jinja2", "fastcore", "httpx"},
+                         "Retired Python page/shim dependencies must not return to runtime metadata")
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
         test_requirements = _strings(_field(metadata, "project", "optional-dependencies", "test"))
         self.assertIn("mcp==1.30.0", test_requirements)
@@ -72,12 +79,12 @@ class DependencyCleanupTests(unittest.TestCase):
 import importlib.abc, sys
 class Blocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'fastapi','fastmcp','mcp','pydantic','pydantic_core','cryptography'}:
+        if fullname.split('.')[0] in {'fastapi','fastmcp','mcp','pydantic','pydantic_core','cryptography','jinja2','fastcore','httpx'}:
             raise AssertionError('Unexpected native adapter import: ' + fullname)
 sys.meta_path.insert(0, Blocker())
 import agent_log_server_rs.adapters.extension_adapter
 import extensions.codex_ext.client
-assert not any(n.split('.')[0] in {'fastapi','fastmcp','mcp','pydantic','pydantic_core','cryptography'} for n in sys.modules)
+assert not any(n.split('.')[0] in {'fastapi','fastmcp','mcp','pydantic','pydantic_core','cryptography','jinja2','fastcore','httpx'} for n in sys.modules)
 '''
         result = subprocess.run([sys.executable, "-B", "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

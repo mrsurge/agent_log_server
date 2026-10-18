@@ -8,13 +8,29 @@ Linux/x86_64 and uvloop-te2 on Android/aarch64, not only the performance extra.
 Preserve loop disable/fallback/error policy and MCP's ordinary asyncio ownership.
 FWS 0.2.65 already has both target wheels on PyPI; do not republish it. ALS native
 CPython-minor wheels and fresh closure still need validation/publication before
-TE2 updates its ALS pin. No build, installed-package change, tag or upload here.
+TE2's bare ALS requirement can resolve the cleaned stable release by default. User requires latest compatible
+first-party releases: ALS uses FWS>=0.2.65, with no exact runtime pin or upper
+cap. Exact tested versions belong in validation locks, not runtime metadata.
+No build, installed-package change, tag or upload here.
+
+2026-10-18 follow-up approval: checkpoint pending dependency cleanup as
+0.2.139.dev2 and prepare CPython 3.13/3.14 Linux candidates on Debian in isolated
+manylinux containers. No local native builds, tags or public uploads. TE2's fresh
+default pip install currently selects public ALS .132 and the retired stack;
+candidate-wheel testing is separate from stable publication/default resolution.
+Preserve codec.py's meaningful editor draft and existing dist outputs.
 
 The follow-up source audit found no remaining watchfiles consumer in native
 bootstrap, adapter, Codex extension or retained Python sources. Remove its stale
 runtime requirement; no replacement watcher or application behavior change is
 needed. This removes that direct Android wheel gap, not the msgspec requirement
 or the need to verify the complete fresh target dependency closure.
+
+Jinja2/Fastcore/HTTPX are also removed from direct runtime metadata: their only
+remaining source consumers are the retired Python page routes/HTML generator
+and HTTP MCP-shim lifecycle helper. Retain those deprecated files without
+promising that their old dependencies are installed. Active adapter/Codex import
+probes explicitly block all three; TE2's independent HTTPX requirement is intact.
 
 Remove unsupported Python web/schema/MCP dependency edges without rewriting
 the native ALS server or existing typed tool/application logic. Preserve the

@@ -1,14 +1,11 @@
 starlette
 uvicorn>=0.27
 python-socketio>=5.11
-jinja2>=3.1
-fastcore>=1.7
-framework-shells==0.2.65
+framework-shells>=0.2.65
 pyte>=0.8.0
 msgspec>=0.19
 msgpack>=1.0
 python-dateutil>=2.9.0.post0
 tomlkit>=0.13
-httpx>=0.27
 uvloop==0.23.0; sys_platform == "linux" and platform_machine == "x86_64"
 uvloop-te2==0.23.0.post1; sys_platform == "android" and platform_machine == "aarch64"
