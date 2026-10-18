@@ -46,6 +46,7 @@ class RefreshPackagedDigestTests(unittest.TestCase):
                 archive.writestr(manifest_name, manifest)
                 archive.writestr(mcp_binary, b"native-mcp-payload")
                 archive.writestr(mcp_manifest, manifest)
+                archive.writestr("agent_log_server_rs/private_runtime/python/lib/python3.14/site-packages/example.dist-info/RECORD", "private record")
                 archive.writestr(record_name, "stale,sha256=stale,5\n")
 
             release._refresh_packaged_digest(wheel)  # pyright: ignore[reportPrivateUsage]

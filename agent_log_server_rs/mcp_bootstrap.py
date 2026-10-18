@@ -107,6 +107,14 @@ def python_abi() -> dict[str, object]:
 
 
 def runtime_env() -> dict[str, str]:
+    from agent_log_server_rs import private_runtime
+    package = Path(__file__).absolute().parent
+    if private_runtime.metadata(package) is not None:
+        env = private_runtime.private_environment(package)
+        # Native embedding inserts this import root first. Keep private binary
+        # dependencies ahead of the outer install's potentially different ABI.
+        env["ALS_MCP_PYTHON_ROOT"] = str(package / private_runtime.DIRECTORY / "python/lib/python3.14/site-packages")
+        return env
     env = dict(os.environ)
     root = Path(__file__).absolute().parent.parent
     env["ALS_MCP_PYTHON_ROOT"] = str(root)
@@ -122,7 +130,8 @@ def validate(binary: Path, receipt: Path, *, fingerprint: str | None = None) -> 
     if not isinstance(raw, dict):
         raise RuntimeError("Native MCP receipt must be an object")
     data = cast(dict[str, object], raw)
-    if data.get("schema") != 1 or data.get("python") != python_abi():
+    from agent_log_server_rs.private_runtime import expected_abi
+    if data.get("schema") != 1 or data.get("python") != (expected_abi(binary) or python_abi()):
         raise RuntimeError("Native MCP artifact is incompatible with the invoking Python ABI/platform")
     if data.get("sha256") != artifacts.sha256_file(binary):
         raise RuntimeError("Native MCP artifact digest mismatch")
@@ -253,6 +262,8 @@ def main() -> None:
     transport = os.environ.get("MCP_TRANSPORT", "stdio").strip().lower()
     if transport not in {"", "stdio"}:
         raise RuntimeError("agent-pty-blocks supports stdio only; no Python HTTP/SSE fallback")
+    from agent_log_server_rs.private_runtime import enter
+    enter(Path(__file__).absolute().parent)
     env = runtime_env()
     binary = select(env)
     info = subprocess.run([str(binary), "--runtime-info"], env=env, capture_output=True, text=True, timeout=10, check=True)

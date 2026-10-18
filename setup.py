@@ -123,6 +123,9 @@ class build_py(_build_py):
         shutil.copy2(mcp_source, mcp_target)
         mcp_target.chmod(mcp_target.stat().st_mode | 0o755)
         shutil.copy2(mcp_source.with_name(RECEIPT), bin_target / RECEIPT)
+        private = os.environ.get("ALS_RS_PACKAGED_PRIVATE_RUNTIME", "").strip()
+        if private:
+            shutil.copytree(Path(private), package_root / "private_runtime")
 
 
 def _packaged_binary_source() -> Path | None:
@@ -185,6 +188,8 @@ if _bdist_wheel is not None:
             if _packaged_binary_source() is None:
                 return python_tag, abi_tag, platform_tag
             resolved_platform = _required_env(BINARY_PLATFORM_TAG_ENV).replace("-", "_").replace(".", "_")
+            if os.environ.get("ALS_RS_PACKAGED_PRIVATE_RUNTIME"):
+                return ("py3", "none", resolved_platform)
             import sys
             return (f"cp{sys.version_info.major}{sys.version_info.minor}", "none", resolved_platform)
 

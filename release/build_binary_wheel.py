@@ -17,6 +17,15 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).absolute().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+def _object_map(payload: str | bytes) -> dict[str, object]:
+    value = cast(object, json.loads(payload))
+    if not isinstance(value, dict):
+        raise RuntimeError("Release manifest must be an object")
+    return cast(dict[str, object], value)
 SERVER_NAME = "als-server"
 REQUIRED_WHEEL_MEMBERS = (
     "agent_log_server_rs/bin/als-server",
@@ -150,11 +159,19 @@ def _refresh_packaged_digest(wheel_path: Path) -> None:
 
     binary_name = "agent_log_server_rs/bin/als-server"
     manifest_name = "agent_log_server_rs/bin/als-server.manifest.json"
-    record_names = [info.filename for info, _payload in entries if info.filename.endswith(".dist-info/RECORD")]
+    record_names = [info.filename for info, _payload in entries
+        if len(Path(info.filename).parts) == 2 and info.filename.endswith(".dist-info/RECORD")]
     if len(record_names) != 1:
         raise RuntimeError(f"Expected one wheel RECORD, found {record_names}")
     record_name = record_names[0]
     payloads = {info.filename: payload for info, payload in entries}
+    private_manifest = "agent_log_server_rs/private_runtime/manifest.json"
+    if private_manifest in payloads:
+        private_data = _object_map(payloads[private_manifest])
+        prefix = "agent_log_server_rs/private_runtime/"
+        private_data["files"] = {name[len(prefix):]: hashlib.sha256(payload).hexdigest()
+            for name, payload in payloads.items() if name.startswith(prefix) and name != private_manifest}
+        payloads[private_manifest] = json.dumps(private_data, indent=2, sort_keys=True).encode() + b"\n"
     if binary_name not in payloads or manifest_name not in payloads:
         raise RuntimeError("Repaired ALS-RS wheel is missing its binary-release payload")
 
@@ -169,7 +186,7 @@ def _refresh_packaged_digest(wheel_path: Path) -> None:
     if mcp_binary in payloads or mcp_receipt in payloads:
         if mcp_binary not in payloads or mcp_receipt not in payloads:
             raise RuntimeError("Repaired wheel has an incomplete native MCP payload")
-        mcp_manifest = json.loads(payloads[mcp_receipt])
+        mcp_manifest = _object_map(payloads[mcp_receipt])
         mcp_manifest["sha256"] = hashlib.sha256(payloads[mcp_binary]).hexdigest()
         payloads[mcp_receipt] = json.dumps(mcp_manifest, indent=2, sort_keys=True).encode() + b"\n"
 
@@ -196,6 +213,8 @@ def _refresh_packaged_digest(wheel_path: Path) -> None:
 
 def _repair_linux_wheel(raw_wheel: Path, *, out_dir: Path, platform_tag: str) -> Path:
     scratch_root = _scratch_root()
+    repair_env = os.environ.copy()
+    repair_env["LD_LIBRARY_PATH"] = str(Path(sys.base_prefix) / "lib") + os.pathsep + repair_env.get("LD_LIBRARY_PATH", "")
     with tempfile.TemporaryDirectory(prefix="als-auditwheel-", dir=scratch_root) as temp_dir:
         repaired_dir = Path(temp_dir) / "wheelhouse"
         repaired_dir.mkdir()
@@ -205,6 +224,7 @@ def _repair_linux_wheel(raw_wheel: Path, *, out_dir: Path, platform_tag: str) ->
             [
                 *auditwheel_command,
                 "repair",
+                "--exclude", "libpython3.14.so.1.0",
                 "--plat",
                 platform_tag,
                 "--wheel-dir",
@@ -212,6 +232,7 @@ def _repair_linux_wheel(raw_wheel: Path, *, out_dir: Path, platform_tag: str) ->
                 str(raw_wheel),
             ],
             cwd=ROOT,
+            env=repair_env,
         )
         repaired = sorted(repaired_dir.glob("*.whl"))
         if len(repaired) != 1:
@@ -230,7 +251,10 @@ def build_binary_wheel(
     binary: Path | None,
     allow_dirty: bool,
     skip_auditwheel: bool,
+    private_dependencies: Path | None = None,
 ) -> Path:
+    if not target.endswith("-android") and private_dependencies is None:
+        raise RuntimeError("Linux ALS binary wheels require --private-dependencies for bundled CPython 3.14")
     source_dirty = _source_is_dirty()
     if source_dirty and not allow_dirty:
         raise RuntimeError(
@@ -260,6 +284,19 @@ def build_binary_wheel(
         raw_wheel_dir.mkdir()
         shutil.copytree(ROOT, stage_root, ignore=_copy_ignore)
         env = os.environ.copy()
+        if private_dependencies is not None:
+            if target != "x86_64-unknown-linux-gnu":
+                raise RuntimeError("Private Python is currently supported only for Linux x86_64")
+            from release.private_python import materialize
+            private = Path(temp_dir) / "private_runtime"
+            staged_mcp = Path(temp_dir) / "als-mcp"
+            shutil.copy2(mcp_binary, staged_mcp)
+            materialize(private, private_dependencies, staged_mcp)
+            mcp_receipt = _object_map(mcp_binary.with_name("als-mcp.manifest.json").read_text())
+            mcp_receipt["sha256"] = hashlib.sha256(staged_mcp.read_bytes()).hexdigest()
+            staged_mcp.with_name("als-mcp.manifest.json").write_text(json.dumps(mcp_receipt))
+            mcp_binary = staged_mcp
+            env["ALS_RS_PACKAGED_PRIVATE_RUNTIME"] = str(private)
         env.update(
             {
                 "ALS_RS_PACKAGED_SERVER_BIN": str(resolved_binary.absolute()),
@@ -300,6 +337,8 @@ def build_binary_wheel(
             raise RuntimeError("Android/Bionic wheels require --skip-auditwheel")
         repaired = _repair_linux_wheel(raw_wheel, out_dir=out_dir, platform_tag=platform_tag)
         _validate_release_wheel(repaired)
+        if repaired.stat().st_size >= 100_000_000:
+            raise RuntimeError(f"Wheel exceeds strict 100,000,000-byte limit: {repaired.stat().st_size}")
         return repaired
 
 
@@ -316,6 +355,7 @@ def main() -> None:
         help="Audited wheel platform tag, for example manylinux_2_28_x86_64",
     )
     parser.add_argument("--binary", help="Use an already-built als-server binary")
+    parser.add_argument("--private-dependencies", help="Runtime-only CPython 3.14 dependencies for bundled Linux MCP")
     parser.add_argument(
         "--allow-dirty",
         action="store_true",
@@ -334,6 +374,7 @@ def main() -> None:
     binary_arg = cast(str | None, args.binary)
     allow_dirty = cast(bool, args.allow_dirty)
     skip_auditwheel = cast(bool, args.skip_auditwheel)
+    private_arg = cast(str | None, args.private_dependencies)
     wheel = build_binary_wheel(
         out_dir=Path(out_dir).expanduser().absolute(),
         target=target,
@@ -341,6 +382,7 @@ def main() -> None:
         binary=Path(binary_arg).expanduser().absolute() if binary_arg else None,
         allow_dirty=allow_dirty,
         skip_auditwheel=skip_auditwheel,
+        private_dependencies=Path(private_arg).expanduser().absolute() if private_arg else None,
     )
     print(wheel)
 

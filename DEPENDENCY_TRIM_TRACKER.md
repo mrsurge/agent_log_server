@@ -2,6 +2,70 @@
 
 ## 2026-10-18 release preparation
 
+- [x] User confirms all Termux wheel live validations passed for the isolated
+  TE2 .354 / ALS .139 / FWS .65 stack. Android wheel acceptance is closed;
+  clean release provenance, tags/uploads and separate APK acceptance remain.
+
+- [x] Native Pixel Android .139 wheel completes with system CPython 3.14.6,
+  no bundled Linux interpreter: 9,596,571 bytes, SHA-256
+  1e2f3820633948e8c80c244cfd731163b4940521a533d3e676ba62df4efdd8f9.
+  Joint installed Termux venv with TE2 .354/FWS .65/uvloop-te2 .23.0.post1 passes
+  dependency check, native FWS pipe load, uvloop selection, compiled editor and
+  WBA imports, native MCP 38-tool/one-resource discovery and EOF shutdown.
+  Pixel build root ~/.cache/te2-release-build/native-0.2.354-als-0.2.139;
+  validation.log/.exit retain evidence. User will launch the isolated candidate
+  manually for live acceptance. No public upload/tag or existing-install change.
+
+- [x] User live-validates the complete joint Linux TE2/ALS/FWS stack, then
+  approves finalizing ALS as stable 0.2.139 (not another dev suffix), rebuilding
+  the wheel and repeating isolated packaging smoke checks. Keep the accepted
+  joint venv unchanged; stable validation uses a separate fresh environment.
+  No tags or public uploads in this step.
+- [x] Stable 0.2.139 Linux wheel rebuild and isolated install/MCP/size checks.
+  Container als-linux-private-0.2.139-stable exits 0; 56,739,875 bytes, SHA-256
+  cd373da2ade305baf849b9c08c3e9dfe14fa68f98d361764c3da1528bf1b9ca6.
+  Both native binaries and the complete private runtime are byte-identical to
+  live-accepted dev2 r4; only outer metadata/server manifest changes.
+  Fresh local Python 3.14.4 venv and separate Debian joint Python 3.13.5 venv
+  pass inventory, actual bundled-libpython mapping, MCP 38 tools/one resource,
+  clean shutdown, pip check and no retired dependency stack. Joint Debian
+  als-rs --build-only reuses packaged artifacts and te2 --version reports .354.
+  Local stable root: TE2 .codex-scratch/als-private-wheel-0.2.139/;
+  remote stable root: /root/.cache/te2-release-acceptance/joint-stable-0.2.354-als-0.2.139/.
+
+- [x] User corrects target to uv CPython 3.14 only and approves private Linux
+  runtime packaging (libpython, stdlib and runtime dependencies), followed by a
+  fresh local-device venv test and strict <100,000,000-byte check. Android/source
+  paths remain unchanged; no uploads or shared runtime changes.
+- [x] Initial container server compilation succeeds. Candidate packaging exposed
+  direct-script import discovery, missing shared Python in the unused cp313
+  lane, and auditwheel removing the libpython link. Baseline cp314 wheel is
+  diagnostic only and must not be published.
+- [x] Private-runtime source regressions pass (23 tests); new runtime/build helper
+  strict basedpyright checks pass. Guard source inputs, hashes, traversal and
+  symlinks; preserve capability env while isolating Python/loader search paths.
+- [x] Private-runtime candidate r4 builds on Debian; 56,739,963 bytes (54.11 MiB),
+  below 100,000,000 by 43,260,037 bytes. SHA-256:
+  ec13d5e09164f920dafcfd04ea0699635fa52eba1204ca8c88549e78d077c442.
+  Container als-linux-private-0.2.139-dev2-r4 exited 0, no OOM.
+- [x] Fresh container venv and fresh local-device venv pass full runtime inventory,
+  native MCP initialize/tools/list/resources/list (38 tools/one resource), clean
+  EOF shutdown and dependency checks. Local outer Python 3.14.4 loads private
+  3.14.6; /proc of the isolated MCP child confirms the bundled libpython path.
+  Local retained root: TE2 .codex-scratch/als-private-wheel-0.2.139.dev2/.
+- [x] Fresh joint TE2 .354 + ALS private-wheel install on Debian Python 3.13.5
+  passes native MCP discovery under private 3.14.6, FWS .65 resolution, pip check
+  and te2 --version. No retired FastAPI/FastMCP/MCP/Pydantic/crypto/watchfiles.
+  TE2's separately owned HTTPX remains intentional; ALS private closure omits it.
+- [x] 23 focused regressions pass; basedpyright reports zero errors/warnings in
+  mcp_bootstrap/private_runtime and both release build helpers. The failed r3
+  artifact exposed strip-after-patchelf corruption of Python PIE metadata; r4
+  preserves the trusted pre-stripped interpreter unchanged when RPATH matches.
+  Nested private dependency RECORD files are not mistaken for the outer RECORD.
+- [ ] Final clean-source checkpoint/release provenance and stable publication;
+  current stable candidate honestly records dirty source and remains unpublished.
+  Public pip still selects old stable ALS until a separately approved release.
+
 - [x] User approves 0.2.139.dev2 cleanup checkpoint and Debian-only CPython
   3.13/3.14 Linux candidate builds, no tags or uploads. Local disk is constrained;
   preserve installed binaries, codec.py draft and dist/. TE2 Linux .354 native

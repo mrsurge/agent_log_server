@@ -14,11 +14,18 @@ cap. Exact tested versions belong in validation locks, not runtime metadata.
 No build, installed-package change, tag or upload here.
 
 2026-10-18 follow-up approval: checkpoint pending dependency cleanup as
-0.2.139.dev2 and prepare CPython 3.13/3.14 Linux candidates on Debian in isolated
+0.2.139.dev2 and prepare Linux candidates on Debian in isolated
 manylinux containers. No local native builds, tags or public uploads. TE2's fresh
 default pip install currently selects public ALS .132 and the retired stack;
 candidate-wheel testing is separate from stable publication/default resolution.
 Preserve codec.py's meaningful editor draft and existing dist outputs.
+
+User correction: use the uv CPython 3.14 build venv, not an extra CPython 3.13
+candidate driven by the acceptance host. Linux wheels now bundle private CPython
+3.14, its shared library/stdlib and a freshly installed runtime-only dependency
+closure from that build environment. Test the finished wheel in an isolated venv
+on the local development device and enforce size strictly below 100,000,000 bytes.
+Termux and editable installs retain their existing system/invoking Python model.
 
 The follow-up source audit found no remaining watchfiles consumer in native
 bootstrap, adapter, Codex extension or retained Python sources. Remove its stale
@@ -158,18 +165,25 @@ stdlib-only mcp_bootstrap and execs `als-mcp`. The SDK adapter is test-only in
 agent_log_server_rs/tests/mcp_sdk_reference.py; no runtime SDK fallback remains.
 No current harness process is restarted by this source cutover.
 
-Selection checks invoking CPython minor/SOABI/GIL mode/platform/architecture,
+Editable/Android selection checks invoking CPython minor/SOABI/GIL mode/platform/architecture,
 artifact SHA-256 and source fingerprint for cached builds. Native --runtime-info
 verifies the loaded interpreter before exec. PYTHONHOME comes from invoking base
 prefix; its package search paths are passed explicitly. It uses that interpreter's
-compatible shared library/stdlib, not a private Python bundle. Cwd/identity/stdio/
+compatible shared library/stdlib. Packaged Linux instead execs the verified private
+Python first; its own ABI receipt validates the native MCP artifact. Cwd/identity/stdio/
 environment survive exec; build diagnostics stay stderr. Existing ALS lock/atomic
 publication/target helpers are shared with an independent MCP cache; owned Cargo
 process-group cancellation is explicit. No pruning or shared runtime termination.
 
 Source installs build for their invoking interpreter. Binary wheels must build on
 the target host/interpreter, include both binaries plus MCP receipt/catalog and
-use CPython-minor platform tags. Unsupported ABI/incomplete packaged payload fails
+use CPython-minor platform tags for Android. Linux private-runtime wheels use
+py3-none platform tags, preserving the existing outer Requires-Python >=3.11.
+The stdlib-only launcher uses -I/-S/-B, clears inherited Python/loader overrides,
+and places private native dependencies ahead of the outer site-packages. The
+private file inventory is refreshed after ELF repair; only the deliberately
+bundled libpython is excluded from auditwheel repair. Linux builders require an
+explicit --private-dependencies input. Unsupported ABI/incomplete packaged payload fails
 without source/interpreted fallback. ELF repair refreshes both executable hashes.
 Actual Linux/Android wheel and both-client live acceptance remain; no publication,
 package uninstall or active harness restart occurred here.
