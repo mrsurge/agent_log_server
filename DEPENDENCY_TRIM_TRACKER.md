@@ -2,6 +2,12 @@
 
 ## 2026-10-18 release preparation
 
+- [x] Remove unused watchfiles runtime requirement after a source/import audit;
+  metadata regression rejects its reintroduction. No installed-package changes,
+  runtime restart or release/version change. msgspec remains required.
+  Validation: 36 dependency/loop/bootstrap/native-wheel tests and 2 subtests pass;
+  authored whitespace checks pass. User approved the local cleanup checkpoint.
+
 - [x] Prepare 0.2.139.dev1 for the approved source push; no release tag/publication.
 - [x] Promote target-exclusive uvloop/uvloop-te2 requirements to runtime metadata;
   retain the performance extra for compatibility and existing loop policy.

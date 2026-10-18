@@ -38,6 +38,7 @@ class DependencyCleanupTests(unittest.TestCase):
         self.assertIn("framework-shells==0.2.65", requirements)
         names = {Requirement(line).name.lower().replace("_", "-") for line in requirements if line.strip() and not line.startswith("#")}
         self.assertFalse(names & {"fastapi", "fastmcp", "mcp", "pydantic", "pydantic-core", "cryptography"})
+        self.assertNotIn("watchfiles", names, "No remaining ALS runtime consumer requires watchfiles")
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
         test_requirements = _strings(_field(metadata, "project", "optional-dependencies", "test"))
         self.assertIn("mcp==1.30.0", test_requirements)

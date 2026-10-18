@@ -10,6 +10,12 @@ FWS 0.2.65 already has both target wheels on PyPI; do not republish it. ALS nati
 CPython-minor wheels and fresh closure still need validation/publication before
 TE2 updates its ALS pin. No build, installed-package change, tag or upload here.
 
+The follow-up source audit found no remaining watchfiles consumer in native
+bootstrap, adapter, Codex extension or retained Python sources. Remove its stale
+runtime requirement; no replacement watcher or application behavior change is
+needed. This removes that direct Android wheel gap, not the msgspec requirement
+or the need to verify the complete fresh target dependency closure.
+
 Remove unsupported Python web/schema/MCP dependency edges without rewriting
 the native ALS server or existing typed tool/application logic. Preserve the
 generic extension adapter, conversation-scoped MCP identity, tool/resource
