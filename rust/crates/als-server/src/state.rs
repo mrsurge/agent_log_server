@@ -34,6 +34,7 @@ pub struct AppState {
     pub conversations: ConversationStore,
     pub extensions: ExtensionRegistry,
     pub focused_window: FocusedWindowStore,
+    pub framework_pipe: Option<crate::framework_pipe::FrameworkClient>,
     pub host_ui: HostUiStore,
     pub inline_agent_edits: InlineAgentEditLedger,
     pub ipc_clients: IpcClientStore,
@@ -75,7 +76,8 @@ impl AppState {
         let list_revision = Arc::new(AtomicU64::new(0));
         let sidebar_ipc = SidebarIpcStore::default();
         let transcript_streams = TranscriptStreamHub::default();
-        let shell_outputs = crate::shell_output::ShellOutputStore::new(config.roots.data_dir.clone());
+        let shell_outputs =
+            crate::shell_output::ShellOutputStore::new(config.roots.data_dir.clone());
         let turn_projections = TurnProjectionStore::default();
         let ui_selection = UiSelectionStore::with_cache_dir(config.roots.cache_dir.clone());
         Self {
@@ -87,6 +89,7 @@ impl AppState {
             conversations,
             extensions,
             focused_window,
+            framework_pipe: None,
             host_ui,
             inline_agent_edits,
             ipc_clients,

@@ -55,7 +55,9 @@ pub async fn run() -> Result<()> {
         None
     };
     let addr = config.socket_addr()?;
-    let state = AppState::new(config);
+    let mut state = AppState::new(config);
+    // Explicit --stdio only; install before build_router starts the CWD task.
+    state.framework_pipe = pipe.as_ref().map(framework_pipe::FrameworkPipe::client);
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let shutdown_notify = Arc::new(Notify::new());
@@ -70,7 +72,7 @@ pub async fn run() -> Result<()> {
             .await
     });
     let readiness = match pipe.as_mut() {
-        Some(pipe) => pipe.serving_ready(),
+        Some(pipe) => pipe.serving_ready().await,
         None => Ok(()),
     };
 

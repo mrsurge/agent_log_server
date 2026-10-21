@@ -1,15 +1,20 @@
 //! Framework stdout is concatenated MessagePack, NOT adapter length-prefixed I/O.
-use als_dto::APP_ID;
+mod protocol;
+mod runtime;
+pub use protocol::PipeError;
+pub use runtime::Client as FrameworkClient;
+
 use anyhow::{Context, Result, bail, ensure};
+use protocol::{Envelope, Kind};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     ffi::OsString,
     io::{self, Cursor, Read, Write},
-    sync::{Arc, Mutex},
+    sync::mpsc,
     thread,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
@@ -20,116 +25,114 @@ pub fn take_stdio_flag(args: &mut Vec<OsString>) -> bool {
 }
 
 pub struct FrameworkPipe {
-    output: Arc<Mutex<io::Stdout>>,
-    closed: oneshot::Receiver<Result<()>>,
+    client: FrameworkClient,
+    closed: watch::Receiver<bool>,
 }
 
 impl FrameworkPipe {
     pub fn start() -> Result<Self> {
-        let output = Arc::new(Mutex::new(io::stdout()));
-        let writer = output.clone();
-        let (tx, closed) = oneshot::channel();
-        // Tokio stdin's blocking read can prevent runtime exit on SIGTERM.
-        // This process-owned OS thread is detached, not a Tokio blocking task.
-        thread::Builder::new()
+        let (sender, receiver) = mpsc::sync_channel(runtime::WRITER_FRAMES);
+        let client = FrameworkClient::new(sender);
+        let writer = client.clone();
+        if let Err(error) = thread::Builder::new()
+            .name("als-framework-writer".into())
+            .spawn(move || {
+                write_output(io::stdout().lock(), receiver, writer);
+            })
+        {
+            client.close(Some(error.to_string()));
+            return Err(error.into());
+        }
+        let reader = client.clone();
+        if let Err(error) = thread::Builder::new()
             .name("als-framework-pipe".into())
             .spawn(move || {
-                let _ = tx.send(read_input(io::stdin().lock(), writer));
-            })?;
-        Ok(Self { output, closed })
+                // Detached OS reader: a blocked stdin read must not pin Tokio shutdown.
+                let result = read_input(io::stdin().lock(), |frame| {
+                    reader.receive(frame).map_err(Into::into)
+                });
+                reader.close(result.err().map(|error| error.to_string()));
+            })
+        {
+            client.close(Some(error.to_string()));
+            return Err(error.into());
+        }
+        Ok(Self {
+            closed: client.subscribe(),
+            client,
+        })
     }
 
-    pub fn serving_ready(&mut self) -> Result<()> {
-        match self.closed.try_recv() {
-            Ok(result) => {
-                result?;
-                bail!("framework stdin closed before serving");
-            }
-            Err(oneshot::error::TryRecvError::Closed) => bail!("framework pipe reader stopped"),
-            Err(oneshot::error::TryRecvError::Empty) => {}
+    pub fn client(&self) -> FrameworkClient {
+        self.client.clone()
+    }
+
+    pub async fn serving_ready(&self) -> Result<()> {
+        let mut closed = self.client.subscribe();
+        self.client.mark_ready()?;
+        let mut ready = Envelope::outbound(Kind::Notification);
+        ready.method = Some("app.readiness".into());
+        ready.params = Some(json!({"status":"ready", "phase":"serving"}));
+        let (tx, rx) = oneshot::channel();
+        self.client.enqueue(&ready, Some(tx))?;
+        tokio::select! {
+            ack = rx => ack.context("framework writer stopped before readiness")??,
+            _ = closed.changed() => bail!("framework pipe closed before readiness"),
         }
-        write_frame(&self.output, &ready_envelope())
+        Ok(())
     }
 
     pub async fn closed(&mut self) -> Result<()> {
-        (&mut self.closed)
-            .await
-            .context("framework pipe reader stopped")?
+        while !*self.closed.borrow_and_update() {
+            self.closed
+                .changed()
+                .await
+                .context("framework pipe stopped")?;
+        }
+        match self.client.failure() {
+            Some(error) => bail!("{error}"),
+            None => Ok(()),
+        }
     }
 }
 
-fn ready_envelope() -> Value {
-    json!({"jsonrpc":"2.0", "protocolVersion":1, "kind":"notification",
-        "method":"app.readiness", "originNid":0, "originName":APP_ID,
-        "targetNid":1, "targetName":"framework.rust",
-        "params":{"status":"ready", "phase":"serving"}})
-}
-
-fn write_frame<W: Write>(output: &Mutex<W>, value: &Value) -> Result<()> {
-    let bytes = rmp_serde::to_vec_named(value)?;
-    ensure!(
-        bytes.len() <= MAX_FRAME_BYTES,
-        "framework frame exceeds byte limit"
-    );
-    let mut writer = output
-        .lock()
-        .map_err(|_| anyhow::anyhow!("framework stdout lock poisoned"))?;
-    writer.write_all(&bytes)?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn handle_envelope<W: Write>(value: Value, output: &Mutex<W>) -> Result<()> {
-    ensure!(
-        value.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
-            && value.get("protocolVersion").and_then(Value::as_u64) == Some(1),
-        "invalid framework pipe version"
-    );
-    let kind = value
-        .get("kind")
-        .and_then(Value::as_str)
-        .context("missing framework kind")?;
-    ensure!(
-        matches!(
-            kind,
-            "hello" | "request" | "response" | "notification" | "progress" | "cancel" | "error"
-        ),
-        "invalid framework pipe kind"
-    );
-    let origin = value
-        .get("originName")
-        .and_then(Value::as_str)
-        .context("missing framework origin")?;
-    let nid = value
-        .get("originNid")
-        .and_then(Value::as_u64)
-        .context("missing framework origin NID")?;
-    if kind == "request" {
-        let id = value
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .context("missing request id")?;
-        ensure!(
-            value
-                .get("method")
-                .and_then(Value::as_str)
-                .is_some_and(|method| !method.is_empty()),
-            "missing request method"
-        );
-        // Only readiness is implemented here. Do not fake service support or
-        // silently reroute unknown requests over the Sidebar socket.
-        write_frame(
-            output,
-            &json!({"jsonrpc":"2.0", "protocolVersion":1, "kind":"error",
-            "id":id, "originNid":0, "originName":APP_ID, "targetNid":nid, "targetName":origin,
-            "error":{"code":"method_not_found", "message":"ALS framework method not supported", "retryable":false}}),
-        )?;
+impl Drop for FrameworkPipe {
+    fn drop(&mut self) {
+        self.client.close(None);
     }
-    Ok(())
 }
 
-fn read_input<R: Read, W: Write>(mut input: R, output: Arc<Mutex<W>>) -> Result<()> {
+fn write_output<W: Write>(
+    mut output: W,
+    input: mpsc::Receiver<runtime::Frame>,
+    client: FrameworkClient,
+) {
+    for frame in input {
+        if client.is_closed() {
+            return;
+        }
+        let result = output.write_all(&frame.bytes).and_then(|()| output.flush());
+        match result {
+            Ok(()) => {
+                if let Some(ack) = frame.ack {
+                    let _ = ack.send(Ok(()));
+                }
+            }
+            Err(error) => {
+                client.close(Some(format!("framework writer failed: {error}")));
+                if let Some(ack) = frame.ack {
+                    let _ = ack.send(Err(PipeError::new("pipe.write", &error.to_string())));
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn read_input<R: Read>(
+    mut input: R,
+    mut receive: impl FnMut(Envelope) -> Result<()>,
+) -> Result<()> {
     let mut pending = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
@@ -148,10 +151,10 @@ fn read_input<R: Read, W: Write>(mut input: R, output: Arc<Mutex<W>>) -> Result<
                 "expected framework envelope map"
             );
             let mut cursor = Cursor::new(&pending[..pending.len().min(MAX_FRAME_BYTES)]);
-            match Value::deserialize(&mut rmp_serde::Deserializer::new(&mut cursor)) {
+            match Envelope::deserialize(&mut rmp_serde::Deserializer::new(&mut cursor)) {
                 Ok(value) => {
                     let consumed = cursor.position() as usize;
-                    handle_envelope(value, &output)?;
+                    receive(value)?;
                     pending.drain(..consumed);
                 }
                 Err(
@@ -169,64 +172,4 @@ fn read_input<R: Read, W: Write>(mut input: R, output: Arc<Mutex<W>>) -> Result<
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn extracts_only_explicit_stdio_flag() {
-        let mut args = vec![
-            "--stdio".into(),
-            "--framework-shells-run-id".into(),
-            "run".into(),
-        ];
-        assert!(take_stdio_flag(&mut args));
-        assert_eq!(
-            args,
-            vec![
-                OsString::from("--framework-shells-run-id"),
-                OsString::from("run")
-            ]
-        );
-        assert!(!take_stdio_flag(&mut args));
-    }
-    #[test]
-    fn ready_is_one_unprefixed_messagepack_envelope() {
-        let output = Mutex::new(Vec::new());
-        write_frame(&output, &ready_envelope()).unwrap();
-        let bytes = output.lock().unwrap();
-        assert!((0x80..=0x8f).contains(&bytes[0]));
-        let value: Value = rmp_serde::from_slice(&bytes).unwrap();
-        assert_eq!(value["method"], "app.readiness");
-        assert_eq!(
-            value["params"],
-            json!({"status":"ready", "phase":"serving"})
-        );
-        assert_eq!(value["targetName"], "framework.rust");
-    }
-    #[test]
-    fn concatenated_requests_receive_routed_method_errors() {
-        let value = json!({"jsonrpc":"2.0", "protocolVersion":1, "kind":"request",
-            "id":"test", "method":"unknown", "originNid":1, "originName":"framework.rust"});
-        let frame = rmp_serde::to_vec_named(&value).unwrap();
-        let mut bytes = frame.clone();
-        bytes.extend(frame);
-        let output = Arc::new(Mutex::new(Vec::new()));
-        read_input(Cursor::new(bytes), output.clone()).unwrap();
-        let bytes = output.lock().unwrap();
-        let mut cursor = Cursor::new(bytes.as_slice());
-        for _ in 0..2 {
-            let value = Value::deserialize(&mut rmp_serde::Deserializer::new(&mut cursor)).unwrap();
-            assert_eq!(value["kind"], "error");
-            assert_eq!(value["id"], "test");
-            assert_eq!(value["targetName"], "framework.rust");
-            assert_eq!(value["error"]["code"], "method_not_found");
-            assert_eq!(value["error"]["retryable"], false);
-        }
-        assert_eq!(cursor.position() as usize, bytes.len());
-    }
-    #[test]
-    fn malformed_or_truncated_input_is_fatal() {
-        for bytes in [vec![0x81], vec![0xc1], b"log output".to_vec()] {
-            assert!(read_input(Cursor::new(bytes), Arc::new(Mutex::new(Vec::new()))).is_err());
-        }
-    }
-}
+mod tests;

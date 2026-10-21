@@ -25,6 +25,56 @@ SIGTERM. Input uses the framework's 32 MiB frame ceiling. Unsupported requests
 return a framed kind:error with string code method_not_found and retryable:false;
 there are no new Sidebar services, retries or fake-success responses.
 
+## Bidirectional transport foundation (Stage A)
+
+The native framework pipe now has a typed request/reply transport in
+`rust/crates/als-server/src/framework_pipe/{protocol,runtime}.rs`. The controller
+still lives in `framework_pipe.rs`; its client is installed in AppState before
+router construction starts the existing CWD fetch. **No semantic service is
+advertised or bound in production yet.** Current Sidebar operations, standalone
+integration and frontend sockets remain unchanged; the new outbound API and
+handler binding are exercised by isolated tests, not selected by live callers.
+
+- One detached OS input thread decodes concatenated envelopes. Framework-origin,
+  target and version checks precede admission. Replies match request ID,
+  correlation ID and operation ID; foreign/late correlations cannot settle calls.
+- A dedicated writer owns stdout. The async loop/intake never waits on stdout
+  writes. Admission is nonblocking and bounded: 32 queued frames plus at most one
+  in-flight write share 2 MiB of encoded bytes; frames are at most 1 MiB. Readiness waits
+  for the writer's actual write/flush acknowledgement and is single-use.
+- At most 16 outbound calls and 16 incoming queued/running handlers. Incoming
+  requests additionally reserve from a 2 MiB encoded-byte budget, held until the
+  handler completes. Control params are limited to 64 KiB serialized JSON before
+  queueing; received control replies have a 1 MiB serialized-JSON ceiling. These
+  are small-control defaults, not approved bulk draft/review budgets.
+- Async handlers run independently of intake, so a handler can await a reverse
+  app RPC while the same reader accepts its response. Completed tasks are drained
+  ahead of new work; count permits survive until execution completes. Control
+  handlers have a ten-second deadline; outbound callers provide a nonzero budget.
+  Consent-bound project work needs separate deadline/receipt design in Stage B.
+- Close fails pending calls, aborts admitted handlers, releases queue budgets and
+  clears handler bindings (including closures capturing app state/client handles).
+  Cancellation/timeouts do not undo accepted operations; nothing is replayed.
+  Output failures close the pipe. Oversized handler results produce a small error
+  when it can be enqueued, without invoking the handler twice.
+- Concrete envelope, kind, error, app-call, delivery/source and handler-context
+  types replace field-by-field transport guesses. Opaque JSON-compatible values
+  are limited to generic payload/context/error-detail boundaries; future service
+  handlers must validate operation DTOs before domain access. No `any`/`Any`,
+  downcast escape hatch, new runtime dependency or warning suppression is added.
+
+Service exports, socket selection changes and operation migration require Stage B.
+Once migrated, explicit --stdio mode must not fall back to the Sidebar socket;
+standalone's existing socket integration is retained separately. This foundation
+does not implement reconnectable UDS or change EOF ownership.
+
+Source build packaging/fingerprinting already recurses through Rust modules
+(`MANIFEST.in` graft, setup.py copytree, bootstrap._rust_fingerprint_paths); the
+new nested module files therefore participate without a second build workflow.
+No installed binary is replaced by Cargo validation. The exact fresh development
+binary can be selected for the isolated stdio tests with ALS_TEST_SERVER_BIN;
+never point that test at the active harness process.
+
 TE2's wrapper manifest declares readiness_support:"pipe"; its shellspec declares
 backend:pipe/native_pipe_testing and stdout:messagepack/stderr:text. The separate
 Sidebar UI readiness callback stays intact. Its frontend wrapper relies on the
