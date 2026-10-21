@@ -311,7 +311,7 @@ async fn outbound_limits_timeout_cancellation_and_close_release_waiters() {
 async fn writer_is_count_and_byte_bounded_and_releases_reservations() {
     let (client, rx) = fixture();
     let mut message = Envelope::outbound(Kind::Notification);
-    message.params = Some(json!({"text":"x".repeat(900_000)}));
+    message.params = Some(json!({"text":"x".repeat(runtime::MAX_OUTPUT_BYTES - 1024)}));
     client.enqueue(&message, None).unwrap();
     client.enqueue(&message, None).unwrap();
     assert_eq!(
@@ -511,6 +511,215 @@ async fn concurrent_replies_can_arrive_in_reverse_order() {
         json!({"operation":"second"})
     );
     assert_eq!(client.pending_count(), 0);
+    client.close(None);
+}
+
+fn integration_state(client: FrameworkClient, root: &std::path::Path) -> crate::state::AppState {
+    use crate::config::{
+        AdapterConfig, FrameworkShellConfig, ServerConfig, SocketIoSerializer, TranscriptTransport,
+    };
+    let mut state = crate::state::AppState::new(ServerConfig {
+        host: "127.0.0.1".into(),
+        port: 0,
+        extensions_dir: root.join("extensions"),
+        roots: als_dto::RuntimeRoots {
+            data_dir: root.join("data"),
+            cache_dir: root.join("cache"),
+            config_dir: root.join("config"),
+            static_dir: root.join("static"),
+        },
+        adapters: AdapterConfig {
+            python_bin: "python".into(),
+        },
+        framework_shells: FrameworkShellConfig::default(),
+        socketio_serializer: SocketIoSerializer::Msgpack,
+        transcript_transport: TranscriptTransport::Stream,
+    });
+    state.framework_pipe = Some(client);
+    state
+}
+
+fn integration_root() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "als-sidebar-pipe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+#[tokio::test]
+async fn production_sidebar_facade_uses_owned_pipe_and_closed_pipe_never_opens_socket() {
+    let (client, rx) = fixture();
+    let root = integration_root();
+    let state = integration_state(client.clone(), &root);
+    let (_, io) = socketioxide::SocketIo::builder().build_layer();
+    crate::sidebar_ipc::bind_framework_pipe(&io, &state).unwrap();
+    let task_state = state.clone();
+    let task =
+        tokio::spawn(async move { crate::sidebar_ipc::recheck_status(&io, &task_state).await });
+    let request = frame(&rx).await;
+    assert_eq!(request.method.as_deref(), Some("app.rpc.call"));
+    assert_eq!(request.params.as_ref().unwrap()["method"], "cwd.get");
+    client.receive(response(&request)).unwrap();
+    let result = task.await.unwrap();
+    assert_eq!(result["cwd"], "/proof");
+    assert_eq!(
+        state.host_ui.snapshot().unwrap().project_root.as_deref(),
+        Some("/proof")
+    );
+    client.close(None);
+    let (_, io) = socketioxide::SocketIo::builder().build_layer();
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        crate::sidebar_ipc::recheck_status(&io, &state),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["connected"], false);
+    assert!(rx.try_recv().is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn bound_sidebar_handler_targets_explicit_conversation_and_rejects_wrong_app() {
+    use crate::conversation_store::CreateConversationRequest;
+    let (client, rx) = fixture();
+    let root = integration_root();
+    let state = integration_state(client.clone(), &root);
+    for name in ["first", "second"] {
+        state
+            .conversations
+            .create(CreateConversationRequest {
+                conversation_id: Some(name.into()),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    let (_, io) = socketioxide::SocketIo::builder().build_layer();
+    crate::sidebar_ipc::bind_framework_pipe(&io, &state).unwrap();
+    client.mark_ready().unwrap();
+    let mut request = incoming("mention", "app.rpc.deliver");
+    request.params = Some(
+        json!({"service":"sidebar","version":1,"method":"mention", "context":null,
+        "source":{"appId":"code_te2","shellId":"owned"},
+        "payload":{"path":"/project/file.rs","lineNo":4,"conversation_id":"second"}}),
+    );
+    client.receive(request.clone()).unwrap();
+    let receipt = frame(&rx).await;
+    assert_eq!(receipt.op_id, request.op_id);
+    let receipt = receipt.result.unwrap();
+    assert_eq!(receipt["conversation_id"], "second");
+    assert_eq!(receipt["queued"], true);
+    assert!(receipt["operation_id"].is_string());
+    assert!(
+        state
+            .conversations
+            .load_meta_if_exists("first")
+            .unwrap()
+            .unwrap()
+            .draft
+            .is_none()
+    );
+    let draft = state
+        .conversations
+        .load_meta_if_exists("second")
+        .unwrap()
+        .unwrap()
+        .draft
+        .unwrap();
+    assert!(draft.contains("/project/file.rs"));
+    request.id = Some("wrong-app".into());
+    request.correlation_id = request.id.clone();
+    request.params.as_mut().unwrap()["source"]["appId"] = json!("terminal");
+    client.receive(request).unwrap();
+    assert_eq!(frame(&rx).await.error.unwrap().code, "sidebar.rejected");
+    assert_eq!(
+        state
+            .conversations
+            .load_meta_if_exists("second")
+            .unwrap()
+            .unwrap()
+            .draft
+            .unwrap(),
+        draft
+    );
+    client.close(None);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn per_call_bulk_receipt_budget_preserves_full_utf8_without_changing_control_default() {
+    let (client, rx) = fixture();
+    let text = "😀".repeat(300_000);
+    let local = client.clone();
+    let task = tokio::spawn(async move {
+        local
+            .call_with_limits(
+                call(),
+                "bulk".into(),
+                Duration::from_secs(2),
+                CallLimits {
+                    reply_bytes: 8 * 1024 * 1024,
+                    ..Default::default()
+                },
+            )
+            .await
+    });
+    let request = frame(&rx).await;
+    let mut reply = response(&request);
+    reply.result = Some(json!({"content":text}));
+    client.receive(reply).unwrap();
+    assert_eq!(task.await.unwrap().unwrap()["content"], text);
+    let local = client.clone();
+    let task = tokio::spawn(async move {
+        local
+            .call(call(), "control".into(), Duration::from_secs(2))
+            .await
+    });
+    let request = frame(&rx).await;
+    let mut reply = response(&request);
+    reply.result = Some(json!({"content":text}));
+    client.receive(reply).unwrap();
+    assert_eq!(task.await.unwrap().unwrap_err().code, "pipe.replyTooLarge");
+    client.close(None);
+}
+
+#[tokio::test]
+async fn bulk_request_policy_rejects_invalid_limits_before_any_enqueue() {
+    let (client, rx) = fixture();
+    let mut body = call();
+    body.payload = json!({"text":"😀".repeat(512)});
+    let error = client
+        .call_with_limits(
+            body,
+            "oversize".into(),
+            Duration::from_secs(2),
+            CallLimits {
+                request_bytes: 1024,
+                reply_bytes: 1024,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "pipe.payloadTooLarge");
+    let error = client
+        .call_with_limits(
+            call(),
+            "invalid".into(),
+            Duration::from_secs(2),
+            CallLimits {
+                request_bytes: 8 * 1024 * 1024 + 1,
+                reply_bytes: 1024,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "pipe.invalidCall");
+    assert_eq!(client.pending_count(), 0);
+    assert!(rx.try_recv().is_err());
     client.close(None);
 }
 

@@ -11,7 +11,7 @@ use socketioxide::{ParserConfig, SocketIo};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router(state: AppState) -> anyhow::Result<(Router, SocketIo)> {
     let socket_builder = SocketIo::builder().with_state(state.clone());
     let socket_builder = match state.config.socketio_serializer {
         crate::config::SocketIoSerializer::Json => socket_builder,
@@ -21,24 +21,27 @@ pub fn build_router(state: AppState) -> Router {
     };
     let (socket_layer, io) = socket_builder.build_layer();
     register_socket_namespaces(&io);
+    sidebar_ipc::bind_framework_pipe(&io, &state)?;
     conversation_rpc::start_adapter_event_fanout(io.clone(), state.clone());
     agent_log::start_socketio_fanout(io.clone(), state.clone());
     start_extension_warmup(state.clone());
-    start_sidebar_cwd_fetch(io.clone(), state.clone());
 
-    Router::new()
-        .merge(static_assets::routes(&state.config.roots.static_dir))
-        .merge(agent_log::routes())
-        .merge(conversation_routes::routes())
-        .merge(extension_routes::routes())
-        .merge(transcript_stream::routes())
-        .route("/api/health", get(health))
-        .with_state(state)
-        .layer(socket_layer)
-        .layer(TraceLayer::new_for_http())
+    Ok((
+        Router::new()
+            .merge(static_assets::routes(&state.config.roots.static_dir))
+            .merge(agent_log::routes())
+            .merge(conversation_routes::routes())
+            .merge(extension_routes::routes())
+            .merge(transcript_stream::routes())
+            .route("/api/health", get(health))
+            .with_state(state)
+            .layer(socket_layer)
+            .layer(TraceLayer::new_for_http()),
+        io,
+    ))
 }
 
-fn start_sidebar_cwd_fetch(io: SocketIo, state: AppState) {
+pub(crate) fn start_sidebar_cwd_fetch(io: SocketIo, state: AppState) {
     tokio::spawn(async move {
         let result = sidebar_ipc::recheck_status(&io, &state).await;
         let project_root = state

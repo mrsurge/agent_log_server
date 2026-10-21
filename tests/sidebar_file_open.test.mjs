@@ -60,3 +60,19 @@ test('qualified sidebar/main-page identity accompanies the existing incarnation 
       presentationId: `inc-${parent}`, mainPageId: parent, sidebarWindowId: `als:a1b2.${parent}` });
   }
 });
+
+test('project open/create use the same qualified originating presentation', async () => {
+  for (const client of ['client-a', 'client-b']) {
+    const { createUiRpcClient } = await import(`${moduleUrl}#projects-${client}`);
+    const sent = [];
+    const rpc = createUiRpcClient({ sioCall: async () => { throw Error('no fallback'); },
+      windowRef: windowRef(client, `p-${client}`, sent) });
+    await rpc.openTe2Project({ path: '/project' });
+    await rpc.createTe2Project({ path: '/project', adoptExisting: true, open: false });
+    assert.equal(sent.length, 2);
+    for (const request of sent) {
+      assert.deepEqual(request.params.target, { clientId: client, hostId: 'shared-als-slot', presentationId: `p-${client}` });
+    }
+    assert.equal(sent[1].params.open, false);
+  }
+});

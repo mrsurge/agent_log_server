@@ -199,9 +199,11 @@ Runtime rules:
   TE2's ALS wrapper uses the existing app_shell gate, not a second health poll.
   The bidirectional pipe foundation now installs a typed client in AppState before
   router startup and has bounded async dispatch/correlation plus a dedicated
-  byte/count-bounded writer. Production semantic handlers/exports are not bound
-  yet; Sidebar traffic still uses its existing lane. The foundation alone is not
-  the Sidebar cutover. See FRAMEWORK_STDIO.md for limits and activation boundaries.
+  byte/count-bounded writer. Explicit --stdio now uses this lane for backend
+  Sidebar operations; inbound services reuse composer/HostUi/review owners.
+  Standalone mode retains Socket.IO, without fallback from failed pipe calls.
+  Initial CWD hydration follows readiness flush; exact caller proof also travels
+  with project actions. See FRAMEWORK_STDIO.md for limits and activation boundaries.
 
 ## Python package and bootstrap particulars
 

@@ -17,15 +17,32 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
 pub(super) const MAX_PENDING: usize = 16;
 pub(super) const MAX_CONTROL_BYTES: usize = 64 * 1024;
-pub(super) const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_OUTPUT_BYTES: usize = 9 * 1024 * 1024;
+const MAX_RPC_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const WRITER_BYTES: usize = 2 * MAX_OUTPUT_BYTES;
-pub(super) const INCOMING_BYTES: usize = 2 * MAX_OUTPUT_BYTES;
+pub(super) const INCOMING_BYTES: usize = 2 * 1024 * 1024;
 pub(super) const WRITER_FRAMES: usize = 32;
 pub type Handler =
     Arc<dyn Fn(ServiceRequest) -> Pin<Box<dyn Future<Output = PipeResult> + Send>> + Send + Sync>;
 struct Pending {
     sender: oneshot::Sender<PipeResult>,
     operation_id: String,
+    reply_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct CallLimits {
+    pub request_bytes: usize,
+    pub reply_bytes: usize,
+}
+
+impl Default for CallLimits {
+    fn default() -> Self {
+        Self {
+            request_bytes: MAX_CONTROL_BYTES,
+            reply_bytes: 1024 * 1024,
+        }
+    }
 }
 
 pub(super) struct Frame {
@@ -48,6 +65,7 @@ pub(super) struct Inner {
     next_id: AtomicU64,
     ready: AtomicBool,
     handler: Mutex<Option<Handler>>,
+    handler_deadline: Mutex<Duration>,
     requests: mpsc::Sender<Job>,
     admission: Arc<Semaphore>,
     incoming_bytes: Arc<Semaphore>,
@@ -72,6 +90,7 @@ impl Client {
                 next_id: AtomicU64::new(1),
                 ready: AtomicBool::new(false),
                 handler: Mutex::default(),
+                handler_deadline: Mutex::new(Duration::from_secs(10)),
                 requests,
                 admission: Arc::new(Semaphore::new(MAX_PENDING)),
                 incoming_bytes: Arc::new(Semaphore::new(INCOMING_BYTES)),
@@ -82,6 +101,20 @@ impl Client {
     }
 
     pub fn bind_handler(&self, handler: Handler) -> Result<(), PipeError> {
+        self.bind_handler_with_deadline(handler, Duration::from_secs(10))
+    }
+
+    pub fn bind_handler_with_deadline(
+        &self,
+        handler: Handler,
+        deadline: Duration,
+    ) -> Result<(), PipeError> {
+        if deadline.is_zero() || deadline > Duration::from_secs(180) {
+            return Err(PipeError::new(
+                "pipe.invalidDeadline",
+                "Handler deadline must be bounded to 180 seconds",
+            ));
+        }
         let mut slot = self.inner.handler.lock().unwrap_or_else(|e| e.into_inner());
         if self.is_closed() {
             return Err(closed_error());
@@ -92,6 +125,11 @@ impl Client {
                 "Service handler already bound",
             ));
         }
+        *self
+            .inner
+            .handler_deadline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = deadline;
         *slot = Some(handler);
         Ok(())
     }
@@ -185,6 +223,17 @@ impl Client {
     }
 
     pub async fn call(&self, call: AppCall, operation_id: String, wait: Duration) -> PipeResult {
+        self.call_with_limits(call, operation_id, wait, CallLimits::default())
+            .await
+    }
+
+    pub async fn call_with_limits(
+        &self,
+        call: AppCall,
+        operation_id: String,
+        wait: Duration,
+        limits: CallLimits,
+    ) -> PipeResult {
         if !address(&call.target_app)
             || !address(&call.service)
             || !address(&call.method)
@@ -192,6 +241,8 @@ impl Client {
             || operation_id.is_empty()
             || operation_id.len() > 512
             || wait.is_zero()
+            || !(1..=MAX_RPC_BYTES).contains(&limits.request_bytes)
+            || !(1..=MAX_RPC_BYTES).contains(&limits.reply_bytes)
         {
             return Err(PipeError::new(
                 "pipe.invalidCall",
@@ -203,11 +254,11 @@ impl Client {
         if serde_json::to_vec(&params)
             .map_err(|e| PipeError::new("pipe.encode", &e.to_string()))?
             .len()
-            > MAX_CONTROL_BYTES
+            > limits.request_bytes
         {
             return Err(PipeError::new(
                 "pipe.payloadTooLarge",
-                "Control request exceeds 64 KiB",
+                "Request exceeds its local app RPC budget",
             ));
         }
         let id = format!(
@@ -233,6 +284,7 @@ impl Client {
                 Pending {
                     sender: tx,
                     operation_id: operation_id.clone(),
+                    reply_bytes: limits.reply_bytes,
                 },
             );
         }
@@ -274,23 +326,24 @@ impl Client {
                 let reply_bytes = serde_json::to_vec(&request)
                     .map_err(|e| PipeError::new("pipe.encode", &e.to_string()))?
                     .len();
-                let result = if reply_bytes > MAX_OUTPUT_BYTES {
-                    Err(PipeError::new(
-                        "pipe.replyTooLarge",
-                        "Control reply exceeds limit; outcome may be unknown",
-                    ))
-                } else {
-                    match (request.kind, request.error) {
-                        (Kind::Error, Some(error)) if request.result.is_none() => Err(error),
-                        (Kind::Response, None) => Ok(request.result.unwrap_or(Value::Null)),
-                        _ => {
-                            return Err(PipeError::new(
-                                "protocol.response",
-                                "Invalid response/error envelope",
-                            ));
+                let result =
+                    if reply_bytes > pending.get(id).map(|entry| entry.reply_bytes).unwrap_or(0) {
+                        Err(PipeError::new(
+                            "pipe.replyTooLarge",
+                            "Control reply exceeds limit; outcome may be unknown",
+                        ))
+                    } else {
+                        match (request.kind, request.error) {
+                            (Kind::Error, Some(error)) if request.result.is_none() => Err(error),
+                            (Kind::Response, None) => Ok(request.result.unwrap_or(Value::Null)),
+                            _ => {
+                                return Err(PipeError::new(
+                                    "protocol.response",
+                                    "Invalid response/error envelope",
+                                ));
+                            }
                         }
-                    }
-                };
+                    };
                 if let Some(entry) = pending.remove(id) {
                     let _ = entry.sender.send(result);
                 }
@@ -393,7 +446,8 @@ async fn dispatch(client: Client, mut requests: mpsc::Receiver<Job>) {
                     tasks.spawn(async move {
                         let _admission = _permit;
                         let _byte_admission = _bytes;
-                        let result = match tokio::time::timeout(Duration::from_secs(10), invoke(&client, &request)).await {
+                        let deadline = *client.inner.handler_deadline.lock().unwrap_or_else(|e| e.into_inner());
+                        let result = match tokio::time::timeout(deadline, invoke(&client, &request)).await {
                             Ok(result) => result,
                             Err(_) => Err(PipeError::new("pipe.handlerTimeout", "Control handler timed out; outcome may be unknown")),
                         };

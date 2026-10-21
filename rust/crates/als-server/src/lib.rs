@@ -56,9 +56,9 @@ pub async fn run() -> Result<()> {
     };
     let addr = config.socket_addr()?;
     let mut state = AppState::new(config);
-    // Explicit --stdio only; install before build_router starts the CWD task.
+    // Explicit --stdio only; install before router/service handler construction.
     state.framework_pipe = pipe.as_ref().map(framework_pipe::FrameworkPipe::client);
-    let app = build_router(state.clone());
+    let (app, io) = build_router(state.clone())?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let shutdown_notify = Arc::new(Notify::new());
     let server_shutdown = shutdown_notify.clone();
@@ -75,6 +75,12 @@ pub async fn run() -> Result<()> {
         Some(pipe) => pipe.serving_ready().await,
         None => Ok(()),
     };
+    if readiness.is_ok() {
+        // The first protocol fact is serving readiness, not a dependency call.
+        // Router handlers were bound before readiness, but CWD hydration must
+        // not emit requests if listener startup fails.
+        http::start_sidebar_cwd_fetch(io, state.clone());
+    }
 
     let mut server_finished = false;
     let result = if let Err(error) = readiness {
@@ -99,6 +105,11 @@ pub async fn run() -> Result<()> {
         }
     };
     info!("ALS-RS shutdown requested");
+    if let Some(pipe) = pipe.as_ref() {
+        // Stop accepting semantic work and settle reverse calls before their
+        // adapter/domain owners begin shutdown. Drop remains idempotent.
+        pipe.stop();
+    }
     match timeout(Duration::from_secs(15), state.adapter.shutdown()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => warn!(%error, "ALS-RS adapter shutdown failed"),

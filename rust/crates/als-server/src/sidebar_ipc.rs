@@ -2,6 +2,7 @@ use crate::{
     composer_sync::ComposerSelection,
     config::framework_url_from_env,
     conversation_rpc,
+    framework_pipe::{AppCall, CallLimits, FrameworkClient},
     state::{AppState, FocusedWindowSnapshot, HostUiSnapshot},
 };
 use als_adapter_protocol::JsonMap;
@@ -9,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use futures_util::FutureExt;
 use rust_socketio::{
     Event, Payload, TransportType,
-    asynchronous::{Client, ClientBuilder},
+    asynchronous::{Client as SocketClient, ClientBuilder},
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -28,18 +29,26 @@ const CONVERSATIONS_RPC_NAMESPACE: &str = "/rpc/conversations";
 const RPC_EVENT: &str = "rpc";
 const RPC_NOTIFY_EVENT: &str = "rpc.notify";
 const JSONRPC_VERSION: &str = "2.0";
+mod pipe;
+pub use pipe::bind_framework_pipe;
+
+#[derive(Clone)]
+enum Client {
+    Socket(SocketClient),
+    Pipe(FrameworkClient),
+}
 
 #[derive(Clone, Default)]
 pub struct SidebarIpcStore {
-    client: Arc<AsyncMutex<Option<Client>>>,
+    client: Arc<AsyncMutex<Option<SocketClient>>>,
 }
 
 impl SidebarIpcStore {
     async fn current(&self) -> Option<Client> {
-        self.client.lock().await.clone()
+        self.client.lock().await.clone().map(Client::Socket)
     }
 
-    async fn set(&self, client: Client) {
+    async fn set(&self, client: SocketClient) {
         *self.client.lock().await = Some(client);
     }
 
@@ -51,13 +60,23 @@ impl SidebarIpcStore {
     }
 }
 
+async fn current_client(state: &AppState) -> Option<Client> {
+    // Explicit --stdio selects the lane for this process lifetime. A closed
+    // pipe is still pipe mode, never permission to connect a socket.
+    match state.framework_pipe.as_ref() {
+        Some(pipe) => Some(Client::Pipe(pipe.clone())),
+        None => state.sidebar_ipc.current().await,
+    }
+}
+
 pub async fn recheck_status(io: &SocketIo, state: &AppState) -> Value {
     let client = ensure_client(io, state).await.unwrap_or(None);
-    let connected = client.is_some();
+    let mut connected = client.is_some();
     let cwd = if let Some(client) = client.as_ref() {
         match query_initial_cwd(client, io, state).await {
             Ok(cwd) => cwd,
             Err(error) => {
+                connected = false;
                 warn!(%error, "sidebar cwd_get failed");
                 state.sidebar_ipc.clear().await;
                 None
@@ -153,7 +172,7 @@ pub async fn publish_agent_edits(io: &SocketIo, state: &AppState, payload: JsonM
 }
 
 pub async fn clear_agent_edits(state: &AppState, payload: JsonMap) -> bool {
-    let Some(client) = state.sidebar_ipc.current().await else {
+    let Some(client) = current_client(state).await else {
         warn!(
             namespace = SIDEBAR_NAMESPACE,
             socket_path = SIDEBAR_SOCKET_PATH,
@@ -200,7 +219,7 @@ pub async fn clear_agent_edits(state: &AppState, payload: JsonMap) -> bool {
 }
 
 pub async fn publish_agent_edits_with_current_client(state: &AppState, payload: JsonMap) -> bool {
-    let Some(client) = state.sidebar_ipc.current().await else {
+    let Some(client) = current_client(state).await else {
         warn!(
             namespace = SIDEBAR_NAMESPACE,
             socket_path = SIDEBAR_SOCKET_PATH,
@@ -297,13 +316,7 @@ pub async fn te2_project_status(io: &SocketIo, state: &AppState, params: JsonMap
         return te2_project_status_unavailable(&target_path, current_cwd, "sidebar_unavailable");
     };
 
-    match sidebar_rpc_call(
-        &client,
-        "sidebar.project.lookup",
-        json!({ "path": target_path }),
-    )
-    .await
-    {
+    match sidebar_rpc_call(&client, "sidebar.project.lookup", Value::Object(params)).await {
         Ok(lookup) => {
             let known = lookup
                 .get("known")
@@ -337,13 +350,7 @@ pub async fn te2_project_open(io: &SocketIo, state: &AppState, params: JsonMap) 
     let Ok(Some(client)) = ensure_client(io, state).await else {
         return json!({"ok": false, "error": "sidebar_unavailable", "path": target_path});
     };
-    match sidebar_rpc_call(
-        &client,
-        "sidebar.project.open",
-        json!({ "path": target_path }),
-    )
-    .await
-    {
+    match sidebar_rpc_call(&client, "sidebar.project.open", Value::Object(params)).await {
         Ok(result) if !rpc_result_explicitly_not_ok(&result) => {
             if let Some(path) =
                 sidebar_project_result_path(&result).or_else(|| Some(target_path.clone()))
@@ -379,10 +386,12 @@ pub async fn te2_project_create(io: &SocketIo, state: &AppState, params: JsonMap
     match sidebar_rpc_call(
         &client,
         "sidebar.project.create",
-        json!({
-            "path": target_path,
-            "adoptExisting": adopt_existing,
-            "open": open,
+        Value::Object({
+            let mut params = params;
+            params.insert("path".into(), Value::String(target_path.clone()));
+            params.insert("adoptExisting".into(), Value::Bool(adopt_existing));
+            params.insert("open".into(), Value::Bool(open));
+            params
         }),
     )
     .await
@@ -409,7 +418,7 @@ pub async fn te2_project_create(io: &SocketIo, state: &AppState, params: JsonMap
 }
 
 async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>> {
-    if let Some(client) = state.sidebar_ipc.current().await {
+    if let Some(client) = current_client(state).await {
         return Ok(Some(client));
     }
 
@@ -484,7 +493,7 @@ async fn ensure_client(io: &SocketIo, state: &AppState) -> Result<Option<Client>
         Ok(Err(_)) => warn!("initial ALS-RS sidebar IPC registration result was dropped"),
         Err(_) => warn!("initial ALS-RS sidebar IPC registration timed out"),
     }
-    Ok(Some(client))
+    Ok(Some(Client::Socket(client)))
 }
 
 fn sidebar_address() -> String {
@@ -508,7 +517,7 @@ async fn query_initial_cwd(
     Ok(None)
 }
 
-async fn register_sidebar_client(client: &Client) -> bool {
+async fn register_sidebar_client(client: &SocketClient) -> bool {
     let payload = json!({
         "role": "iframe",
         "app": "als-rs",
@@ -519,7 +528,7 @@ async fn register_sidebar_client(client: &Client) -> bool {
         "agentEdits": true,
         "capabilities": ["agentEdits", "sidebar.agentEdits", "sidebar.window.focused"],
     });
-    match sidebar_rpc_call(client, "sidebar.register", payload).await {
+    match socket_sidebar_rpc_call(client, "sidebar.register", payload).await {
         Ok(value) if !rpc_result_explicitly_not_ok(&value) => {
             info!(
                 namespace = SIDEBAR_NAMESPACE,
@@ -557,6 +566,128 @@ async fn register_sidebar_client(client: &Client) -> bool {
 }
 
 async fn sidebar_rpc_call(client: &Client, method: &str, params: Value) -> Result<Value> {
+    match client {
+        Client::Socket(client) => socket_sidebar_rpc_call(client, method, params).await,
+        Client::Pipe(client) => {
+            let method = PipeMethod::parse(method)?;
+            let (limits, wait) = method.budget();
+            static NEXT_OPERATION: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(1);
+            let operation = NEXT_OPERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(client
+                .call_with_limits(
+                    AppCall {
+                        target_app: "code_te2".into(),
+                        service: "sidebar".into(),
+                        version: 1,
+                        method: method.name().into(),
+                        context: Value::Null,
+                        payload: params,
+                    },
+                    format!("als-sidebar:{}:{operation}", std::process::id()),
+                    wait,
+                    limits,
+                )
+                .await?)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PipeMethod {
+    Cwd,
+    State,
+    FileOpen,
+    FileEdit,
+    ProjectLookup,
+    ProjectOpen,
+    ProjectCreate,
+    AgentPublish,
+    AgentClear,
+    AgentList,
+    AgentState,
+    AgentDecide,
+    DraftList,
+    DraftState,
+    DraftClear,
+}
+
+impl PipeMethod {
+    fn parse(method: &str) -> Result<Self> {
+        Ok(match method {
+            "sidebar.cwd.get" => Self::Cwd,
+            "sidebar.window.state.update" => Self::State,
+            "sidebar.file.open" => Self::FileOpen,
+            "sidebar.file.edit" => Self::FileEdit,
+            "sidebar.project.lookup" => Self::ProjectLookup,
+            "sidebar.project.open" => Self::ProjectOpen,
+            "sidebar.project.create" => Self::ProjectCreate,
+            "sidebar.agentEdits.publish" => Self::AgentPublish,
+            "sidebar.agentEdits.clear" => Self::AgentClear,
+            "sidebar.agentEdits.list" => Self::AgentList,
+            "sidebar.agentEdits.documentState.get" => Self::AgentState,
+            "sidebar.agentEdits.decide" => Self::AgentDecide,
+            "sidebar.drafts.list" => Self::DraftList,
+            "sidebar.draftState.get" => Self::DraftState,
+            "sidebar.draft.clear" => Self::DraftClear,
+            _ => bail!("Unsupported framework Sidebar operation: {method}"),
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cwd => "cwd.get",
+            Self::State => "window.state.update",
+            Self::FileOpen => "file.open",
+            Self::FileEdit => "file.edit",
+            Self::ProjectLookup => "project.lookup",
+            Self::ProjectOpen => "project.open",
+            Self::ProjectCreate => "project.create",
+            Self::AgentPublish => "agentEdits.publish",
+            Self::AgentClear => "agentEdits.clear",
+            Self::AgentList => "agentEdits.list",
+            Self::AgentState => "agentEdits.documentState.get",
+            Self::AgentDecide => "agentEdits.decide",
+            Self::DraftList => "drafts.list",
+            Self::DraftState => "draftState.get",
+            Self::DraftClear => "draft.clear",
+        }
+    }
+
+    fn budget(self) -> (CallLimits, Duration) {
+        match self {
+            Self::ProjectOpen | Self::ProjectCreate => {
+                (CallLimits::default(), Duration::from_secs(185))
+            }
+            Self::AgentPublish | Self::FileEdit => (
+                CallLimits {
+                    request_bytes: 8 * 1024 * 1024,
+                    reply_bytes: 8 * 1024 * 1024,
+                },
+                Duration::from_secs(65),
+            ),
+            Self::DraftList
+            | Self::DraftState
+            | Self::AgentList
+            | Self::AgentState
+            | Self::AgentDecide
+            | Self::DraftClear => (
+                CallLimits {
+                    reply_bytes: 8 * 1024 * 1024,
+                    ..CallLimits::default()
+                },
+                Duration::from_secs(65),
+            ),
+            _ => (CallLimits::default(), Duration::from_secs(20)),
+        }
+    }
+}
+
+async fn socket_sidebar_rpc_call(
+    client: &SocketClient,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
     let request_id = format!("als-rs-sidebar-{}", unix_millis());
     let request = json!({
         "jsonrpc": JSONRPC_VERSION,
@@ -845,14 +976,14 @@ async fn publish_inline_agent_decision(
     io: &SocketIo,
     state: &AppState,
     params: JsonMap,
-) -> Result<()> {
+) -> Result<Value> {
     let decision = string_field(&params, "decision").unwrap_or_default();
     let document_params = inline_agent_decision_document_params(&params);
     let project_params = match inline_agent_decision_project_params(&params) {
         Ok(value) => value,
         Err(error) => {
             warn!(decision, %error, "inline agent edit decision rejected");
-            return Ok(());
+            return Err(error);
         }
     };
     let project_result = match decision.as_str() {
@@ -867,7 +998,7 @@ async fn publish_inline_agent_decision(
                 decision = other,
                 "inline agent edit decision must be accept or reject"
             );
-            return Ok(());
+            bail!("inline agent edit decision must be accept or reject");
         }
     };
 
@@ -897,7 +1028,7 @@ async fn publish_inline_agent_decision(
             "inline agent edit decision failed through project diff path"
         );
         publish_inline_agent_document_state(io, state, document_params).await?;
-        return Ok(());
+        bail!("inline agent edit decision failed: {}", error.message);
     }
 
     match state.inline_agent_edits.clear(&params) {
@@ -905,9 +1036,10 @@ async fn publish_inline_agent_decision(
         Err(error) => {
             warn!(%error, "inline agent edit decision clear failed");
             publish_inline_agent_document_state(io, state, document_params).await?;
+            return Err(error);
         }
     }
-    Ok(())
+    Ok(json!({"ok":true,"applied":true}))
 }
 
 fn inline_agent_decision_document_params(params: &JsonMap) -> JsonMap {

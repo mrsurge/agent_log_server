@@ -30,9 +30,13 @@ class ServerStdioTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
         self.posts: list[str] = []
+        self.gets: list[str] = []
+        self.stdio_pids: set[int] = set()
         posts = self.posts
+        gets = self.gets
         class Observer(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                gets.append(self.path)
                 self.send_error(404)
             def do_POST(self) -> None:
                 posts.append(self.path)
@@ -61,6 +65,8 @@ class ServerStdioTests(unittest.TestCase):
             command.append("--stdio")
         process = subprocess.Popen(command, env=self.env, stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if stdio:
+            self.stdio_pids.add(process.pid)
         def cleanup() -> None:
             if process.poll() is None:
                 process.kill()
@@ -77,7 +83,9 @@ class ServerStdioTests(unittest.TestCase):
             while time.monotonic() < deadline:
                 if not selector.select(0.1):
                     continue
-                chunk = os.read(process.stdout.fileno(), 8192)
+                # Read one byte at a time in this small control-plane probe so
+                # concatenated maps cannot be mistaken for trailing garbage.
+                chunk = os.read(process.stdout.fileno(), 1)
                 if not chunk:
                     break
                 data.extend(chunk)
@@ -100,12 +108,26 @@ class ServerStdioTests(unittest.TestCase):
         # Serving is actually available after the protocol readiness fact.
         with urlopen(f"http://127.0.0.1:{self.port}/api/health", timeout=3) as response:
             self.assertEqual(response.status, 200)
+        request = self.frame(process)
+        self.assertEqual(request["method"], "app.rpc.call")
+        params = msgspec.convert(request["params"], type=dict[str, object], strict=True)
+        self.assertEqual(params["method"], "cwd.get")
+        reply = {"jsonrpc": "2.0", "protocolVersion": 1, "kind": "response",
+                 "originNid": 1, "originName": "framework.rust", "targetNid": 0,
+                 "targetName": "als-rs", "id": request["id"],
+                 "correlationId": request["correlationId"], "opId": request["opId"],
+                 "result": {"cwd": self.env["ALS_RS_CONFIG_DIR"]}}
+        assert process.stdin is not None
+        process.stdin.write(msgspec.msgpack.encode(reply))
+        process.stdin.flush()
 
     def finish(self, process: subprocess.Popen[bytes], *, code: int = 0) -> None:
         output, stderr = process.communicate(timeout=8)
         self.assertEqual(output, b"", "non-protocol stdout or duplicate readiness")
         self.assertEqual(process.returncode, code, stderr.decode(errors="replace"))
         self.assertEqual(self.posts, [], "readiness must never POST over HTTP")
+        if process.pid in self.stdio_pids:
+            self.assertEqual(self.gets, [], "pipe mode must never construct the Sidebar socket client")
 
     def test_readiness_then_eof_exits_cleanly(self) -> None:
         process = self.start()

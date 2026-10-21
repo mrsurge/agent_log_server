@@ -102,10 +102,18 @@ async fn dispatch_rpc(
         "project.te2.status.get" => {
             Ok(sidebar_ipc::te2_project_status(io, state, request.params).await)
         }
-        "project.te2.open" => Ok(sidebar_ipc::te2_project_open(io, state, request.params).await),
-        "project.te2.create" => {
-            Ok(sidebar_ipc::te2_project_create(io, state, request.params).await)
+        "project.te2.open" => {
+            Ok(
+                sidebar_ipc::te2_project_open(io, state, project_sidebar_params(&request.params)?)
+                    .await,
+            )
         }
+        "project.te2.create" => Ok(sidebar_ipc::te2_project_create(
+            io,
+            state,
+            project_sidebar_params(&request.params)?,
+        )
+        .await),
         "app.windowState.publish" => app_window_state_publish(io, state, request.params).await,
         "file.open" => {
             let forwarded_params = file_open_sidebar_params(&request.params)?;
@@ -343,6 +351,21 @@ fn file_open_sidebar_params(params: &JsonMap) -> Result<JsonMap, RpcError> {
     }
     if let Some(column) = params.get("column") {
         forwarded.insert("column".to_owned(), column.clone());
+    }
+    Ok(forwarded)
+}
+
+fn project_sidebar_params(params: &JsonMap) -> Result<JsonMap, RpcError> {
+    let mut forwarded = file_open_sidebar_params(params)?;
+    forwarded.remove("line");
+    forwarded.remove("column");
+    for field in ["adoptExisting", "open"] {
+        if let Some(value) = params.get(field) {
+            let value = value
+                .as_bool()
+                .ok_or_else(|| rpc_error(-32602, format!("{field} must be boolean")))?;
+            forwarded.insert(field.into(), Value::Bool(value));
+        }
     }
     Ok(forwarded)
 }
@@ -1294,6 +1317,18 @@ mod tests {
         );
         params["target"]["mainPageId"] = json!("c3d4");
         assert!(file_open_sidebar_params(params.as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn project_actions_carry_the_same_caller_proof_and_typed_options() {
+        let mut params = json!({"path":"/project","adoptExisting":true,"open":false,
+            "target":{"clientId":"client-a","hostId":"shared","presentationId":"inc-a"}});
+        let forwarded = project_sidebar_params(params.as_object().unwrap()).unwrap();
+        assert_eq!(forwarded.get("target"), params.get("target"));
+        assert_eq!(forwarded.get("open"), Some(&json!(false)));
+        params["open"] = json!("false");
+        assert!(project_sidebar_params(params.as_object().unwrap()).is_err());
+        assert!(project_sidebar_params(json!({"path":"/project"}).as_object().unwrap()).is_err());
     }
 
     #[test]

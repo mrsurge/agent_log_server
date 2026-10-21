@@ -2,6 +2,8 @@
 mod protocol;
 mod runtime;
 pub use protocol::PipeError;
+pub use protocol::{AppCall, PipeResult, ServiceRequest};
+pub use runtime::CallLimits;
 pub use runtime::Client as FrameworkClient;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -30,6 +32,10 @@ pub struct FrameworkPipe {
 }
 
 impl FrameworkPipe {
+    pub fn stop(&self) {
+        self.client.close(None);
+    }
+
     pub fn start() -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(runtime::WRITER_FRAMES);
         let client = FrameworkClient::new(sender);
