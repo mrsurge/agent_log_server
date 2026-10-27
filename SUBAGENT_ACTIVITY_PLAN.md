@@ -67,12 +67,13 @@ untracked root `dist/` are preserved.
   disallow-any checks for the new projection module and its regression tests.
   Existing Rust cfg/dead-code warnings remain. This is not a whole-tree Python
   typecheck claim.
-- [ ] Rebuild/reinstall ALS and refresh served client assets, then run a child
-  while the parent reads README or performs other visible work. Verify shell/MCP
-  updates, running fallback, non-sticky chrome, tail following, completion and
-  reload. Do not restart the runtime hosting this conversation automatically.
-- [ ] Refresh TE2's vendored ALS snapshot/OTA after an approved clean checkpoint;
-  the previous vendored snapshot does not contain this correction.
+- [x] User confirms the concurrent live test works (2026-10-26): a delegated
+  GeckoView/build review runs while the parent reads the full repo README.
+  Activity appears before the final answer and the running card follows the tail.
+  No agent-triggered runtime restart. This acceptance does not separately prove
+  every MCP variant, interruption, follow-up or reload scenario above.
+- [x] Refresh TE2's vendored ALS snapshot from checkpoint b77e7d5: all 150
+  resource hashes and three interception/OTA tests pass. No APK build or push.
 
 ## Following release, alongside TE2 .357
 
