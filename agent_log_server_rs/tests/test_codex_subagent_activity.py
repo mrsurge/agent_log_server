@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 from extensions.codex_ext.router import CodexEventRouter, ObjectDict
 from extensions.codex_ext.runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
@@ -131,6 +132,46 @@ class SubagentActivityTests(unittest.TestCase):
         self.activity()
         self.router.reset()
         self.assertFalse(self.router._compact_subagents.agents)
+
+    def test_shell_activity_is_visible_before_any_assistant_message(self) -> None:
+        self.activity()
+        self.assertEqual(self.event(self.begin())["activity"], "Agent running")
+        item: ObjectDict = {"type": "commandExecution", "id": "shell", "command": "cat README.md"}
+        started = self.event(self.route("item/started", {"item": item}, "child", "child-turn"))
+        self.assertEqual(started["activity"], "Shell: cat README.md")
+        self.assertIn("Running", str(started["text"]))
+        done = self.event(self.route("item/completed", {"item": {
+            **item, "exitCode": 0, "aggregatedOutput": "README contents",
+        }}, "child", "child-turn"))
+        self.assertIn("README contents", str(done["text"]))
+        self.assertEqual(done["status"], "running", "tool completion is not agent completion")
+
+    def test_mcp_and_dynamic_tools_include_arguments_and_bounded_output(self) -> None:
+        self.activity()
+        self.begin()
+        for kind in ("mcpToolCall", "dynamicToolCall"):
+            item: ObjectDict = {"type": kind, "id": "tool", "server": "tools", "tool": "inspect",
+                                "arguments": {"path": "README.md"}}
+            start = self.event(self.route("item/started", {"item": item}, "child", "child-turn"))
+            self.assertIn("inspect", str(start["activity"]))
+            self.assertIn("README.md", str(start["text"]))
+            done = self.event(self.route("item/completed", {"item": {**item,
+                "result": {"content": [{"type": "text", "text": "x" * 30000}]},
+            }}, "child", "child-turn"))
+            self.assertLess(len(str(done["text"])), 17000)
+            self.assertNotIn("clear_turn_id", done)
+
+    def test_streamed_response_updates_are_throttled_and_completion_flushes(self) -> None:
+        self.activity()
+        with patch("extensions.codex_ext.subagent_activity.time.monotonic", return_value=10.0):
+            self.begin()
+            self.route("item/started", {"item": {"type": "agentMessage", "id": "message"}}, "child", "child-turn")
+            result = self.route("item/agentMessage/delta", {"itemId": "message", "delta": "partial"}, "child", "child-turn")
+            self.assertFalse(result["events"])
+        with patch("extensions.codex_ext.subagent_activity.time.monotonic", return_value=10.2):
+            update = self.event(self.route("item/agentMessage/delta", {"itemId": "message", "delta": " response"}, "child", "child-turn"))
+            self.assertEqual(update["text"], "partial response")
+        self.assertEqual(self.event(self.message("final response"))["text"], "final response")
 
 
 class _CaptureTransport(CodexAppServerTransport):

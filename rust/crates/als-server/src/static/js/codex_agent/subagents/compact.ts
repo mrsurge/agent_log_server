@@ -6,6 +6,19 @@ export interface CompactSubagentSnapshot extends TranscriptCardMetadata {
   text?: unknown;
   status?: unknown;
   agent_path?: unknown;
+  activity?: unknown;
+}
+
+/** Active child turns stay after ordinary transcript rows, without sticky chrome. */
+export function keepRunningSubagentsAtTail(timeline: HTMLElement, bottomSpacer?: HTMLElement | null): void {
+  const rows = Array.from(timeline.children).filter((row): row is HTMLElement =>
+    row instanceof HTMLElement && row.dataset.subagentActive === 'true');
+  let before: ChildNode | null = bottomSpacer?.parentElement === timeline ? bottomSpacer : null;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row.nextSibling !== before) timeline.insertBefore(row, before);
+    before = row;
+  }
 }
 
 /** Same snapshot renderer for live upserts and persisted transcript recipes. */
@@ -18,6 +31,8 @@ export function applyCompactSubagent(row: HTMLElement, snapshot: CompactSubagent
   const name = typeof snapshot.name === 'string' ? snapshot.name : 'subagent';
   const text = typeof snapshot.text === 'string' ? snapshot.text : '';
   const status = typeof snapshot.status === 'string' ? snapshot.status : 'running';
+  const activity = typeof snapshot.activity === 'string' ? snapshot.activity : 'Agent running';
+  row.dataset.subagentActive = String(status === 'running');
   let label = header.querySelector('.subagent-name');
   if (!label) {
     label = header.querySelector('span:first-child') || document.createElement('span');
@@ -32,7 +47,7 @@ export function applyCompactSubagent(row: HTMLElement, snapshot: CompactSubagent
     preview.className = 'subagent-preview';
     label.after(preview);
   }
-  preview.textContent = text.replace(/\s+/g, ' ').trim().slice(0, 160);
+  preview.textContent = (text || activity).replace(/\s+/g, ' ').trim().slice(0, 160);
   const statusEl = header.querySelector('.subagent-status');
   if (statusEl) statusEl.textContent = status;
   row.dataset.subagentStatus = status;
@@ -46,6 +61,11 @@ export function applyCompactSubagent(row: HTMLElement, snapshot: CompactSubagent
     body.replaceChildren(content);
   }
   const atBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 24;
-  content.textContent = text || (status === 'running' ? 'Waiting for a message…' : 'No message reported.');
+  content.textContent = text || (status === 'running' ? activity : 'No activity content reported.');
   if (atBottom) content.scrollTop = content.scrollHeight;
+  const parent = row.parentElement;
+  if (parent) {
+    const spacer = parent.querySelector<HTMLElement>(':scope > .timeline-spacer:last-child');
+    keepRunningSubagentsAtTail(parent, spacer);
+  }
 }

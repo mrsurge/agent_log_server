@@ -99,9 +99,8 @@ impl TurnProjectionStore {
             .map_err(|_| anyhow!("turn projection lock poisoned"))?;
         state.generation = state.generation.saturating_add(1);
         state.revision = state.revision.saturating_add(1);
-        state.next_sequence = 0;
+        retain_running_subagents(&mut state);
         state.active_turn_id = None;
-        state.items.clear();
         state.durable_lineages.clear();
         state.truncated = false;
         Ok(change_for(conversation_id, &state, "send_started"))
@@ -127,7 +126,11 @@ impl TurnProjectionStore {
             if state.items.is_empty() {
                 return Ok(None);
             }
-            state.items.clear();
+            let before = state.items.len();
+            retain_running_subagents(&mut state);
+            if state.items.len() == before {
+                return Ok(None);
+            }
             state.revision = state.revision.saturating_add(1);
             return Ok(Some(change_for(conversation_id, &state, "turn_completed")));
         }
@@ -453,18 +456,40 @@ fn rotate_turn_if_needed(state: &mut ConversationTurnProjection, turn_id: Option
     }
     if state.active_turn_id.is_some() {
         state.generation = state.generation.saturating_add(1);
-        state.next_sequence = 0;
-        state.items.clear();
+        retain_running_subagents(state);
         state.durable_lineages.clear();
         state.truncated = false;
     }
     state.active_turn_id = Some(turn_id.to_owned());
 }
 
+fn is_compact_subagent(value: &Value) -> bool {
+    value.get("compact").and_then(Value::as_bool) == Some(true)
+        && matches!(
+            event_type(value).as_deref(),
+            Some("subagent_start" | "subagent_end")
+        )
+}
+
+fn retain_running_subagents(state: &mut ConversationTurnProjection) {
+    state.items.retain(|item| {
+        item.events.iter().any(|event| {
+            is_compact_subagent(event)
+                && event.get("status").and_then(Value::as_str) == Some("running")
+        })
+    });
+    state.next_sequence = state
+        .items
+        .iter()
+        .map(|item| item.sequence.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+}
+
 fn reduce_item(item: &mut ProjectedTurnItem, event: &Value, kind: &str) -> bool {
     let projection_key = item.key.clone();
     let projection_sequence = item.sequence;
-    if is_final_event(kind) {
+    if is_final_event(kind) || is_compact_subagent(event) {
         item.events.clear();
         item.events.push(with_projection_metadata(
             event.clone(),
@@ -475,10 +500,17 @@ fn reduce_item(item: &mut ProjectedTurnItem, event: &Value, kind: &str) -> bool 
     }
     if is_delta_event(kind) {
         if kind == "shell_delta" && event.get("shell_output").is_some() {
-            let replacement = with_projection_metadata(event.clone(), &projection_key, projection_sequence);
-            if let Some(previous) = item.events.iter_mut().find(|e| event_type(e).as_deref() == Some(kind)) {
+            let replacement =
+                with_projection_metadata(event.clone(), &projection_key, projection_sequence);
+            if let Some(previous) = item
+                .events
+                .iter_mut()
+                .find(|e| event_type(e).as_deref() == Some(kind))
+            {
                 *previous = replacement;
-            } else { item.events.push(replacement); }
+            } else {
+                item.events.push(replacement);
+            }
             return true;
         }
         let delta = event
@@ -586,9 +618,14 @@ fn acknowledge_transcript(state: &mut ConversationTurnProjection, entry: &Value)
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
+    if role == "subagent_start" && entry.get("compact").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
     if role == "status" {
         let changed = !state.items.is_empty();
-        state.items.clear();
+        let before = state.items.len();
+        retain_running_subagents(state);
+        let changed = changed && state.items.len() != before;
         if changed {
             state.revision = state.revision.saturating_add(1);
         }
@@ -627,8 +664,11 @@ fn live_identity(
     event_type: &str,
 ) -> Option<ProjectionIdentity> {
     let family = live_family(event_type)?.to_owned();
-    let turn_id =
-        clean_field(event, &["turn_id", "turnId"]).or_else(|| state.active_turn_id.clone());
+    let turn_id = if is_compact_subagent(event) {
+        None
+    } else {
+        clean_field(event, &["turn_id", "turnId"]).or_else(|| state.active_turn_id.clone())
+    };
     let subagent_id = clean_field(event, &["subagent_id", "subagentId"]);
     let source_id = clean_field(event, &["id", "item_id", "itemId", "card_id", "cardId"])
         .or_else(|| {
@@ -668,7 +708,11 @@ fn transcript_identity(
 ) -> Option<ProjectionIdentity> {
     let family = transcript_family(role)?.to_owned();
     let turn_id =
-        clean_field(entry, &["turn_id", "turnId"]).or_else(|| state.active_turn_id.clone());
+        if entry.get("compact").and_then(Value::as_bool) == Some(true) && family == "subagent" {
+            None
+        } else {
+            clean_field(entry, &["turn_id", "turnId"]).or_else(|| state.active_turn_id.clone())
+        };
     let subagent_id = clean_field(entry, &["subagent_id", "subagentId"]);
     let source_id =
         clean_field(entry, &["id", "item_id", "itemId", "card_id", "cardId"]).or_else(|| {
@@ -853,6 +897,47 @@ mod tests {
             snapshot.items[0].events[0]["projection_card_scope"],
             "active"
         );
+    }
+
+    #[test]
+    fn compact_child_survives_parent_turns_and_hands_off_only_on_completion() {
+        let store = TurnProjectionStore::default();
+        let progress = json!({"type":"subagent_start","compact":true,"id":"child:turn","status":"running","text":"Agent running"});
+        store.begin_send("conv").unwrap();
+        store.reduce_live("conv", &progress).unwrap();
+        let mut state = ConversationTurnProjection::default();
+        assert!(!acknowledge_transcript(
+            &mut state,
+            &json!({"role":"subagent_start","compact":true,"id":"child:turn"})
+        ));
+        for turn in ["parent-1", "parent-2"] {
+            store.reduce_live("conv", &json!({"type":"assistant_delta","id":"parent-message","turn_id":turn,"delta":"working"})).unwrap();
+            store
+                .reduce_live("conv", &json!({"type":"status","status":"success"}))
+                .unwrap();
+            store.begin_send("conv").unwrap();
+            let snapshot = store.snapshot("conv").unwrap();
+            assert_eq!(snapshot.items.len(), 1);
+            assert_eq!(snapshot.items[0].source_id, "child:turn");
+        }
+        for text in ["Shell: reading README", "MCP: inspect", "Latest response"] {
+            store.reduce_live("conv", &json!({"text":text, "type":"subagent_start","compact":true,"id":"child:turn","status":"running"})).unwrap();
+        }
+        let cell = store.cell("conv").unwrap();
+        let mut state = cell.lock().unwrap();
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0].events.len(), 1);
+        assert_eq!(state.items[0].events[0]["text"], "Latest response");
+        assert!(!acknowledge_transcript(
+            &mut state,
+            &json!({"role":"subagent_start","compact":true,"id":"child:turn"})
+        ));
+        assert_eq!(state.items.len(), 1);
+        assert!(acknowledge_transcript(
+            &mut state,
+            &json!({"role":"subagent_end","compact":true,"id":"child:turn","status":"completed"})
+        ));
+        assert!(state.items.is_empty());
     }
 
     #[test]

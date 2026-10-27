@@ -19,9 +19,12 @@ untracked root `dist/` are preserved.
 - [x] Bind child threads to the parent conversation, resolving again at ordered
   dispatch if the IO reader queued a child event before its binding was processed.
 - [x] Compact projection: independent stable card identity per child turn;
-  agent name/path, status, truncated collapsed preview and latest completed
-  assistant message in a fixed-height scroll region. This slice does not stream
-  every token or render a nested child transcript. Message text is literal, not HTML.
+  agent name/path, status, truncated collapsed preview and latest shell/MCP/tool
+  activity or assistant message in a fixed-height scroll region. Empty active
+  cards say “Agent running.” Text is literal, not HTML. Output is bounded to
+  16,384 trailing characters with an omission marker; streaming snapshots are
+  throttled to 10 Hz, with item completion always flushed. This is not a nested
+  child transcript or one event per token.
 - [x] Child notifications do not update parent plan/token/status/turn metadata.
   Child turn identity is `agent_turn_id`, never the conversation-level `turn_id`
   consumed by Rust's active-turn rotation. Approval requests retain the existing
@@ -29,8 +32,10 @@ untracked root `dist/` are preserved.
 - [x] Reuse existing `subagent_start` upserts / `subagent_end` events and their
   durable card index. Record matching snapshot fields for live and replay. Shared
   compact renderer handles replay/window replacement without stale live DOM.
-  Per-turn cards currently retain their original transcript anchors; moving a
-  complete nested transcript to the end-of-turn position belongs to the next slice.
+  Progress records stay in the active projection, surviving parent turn changes;
+  only completion creates the durable chronological anchor. Running cards stay
+  at the transcript tail while parent rows arrive. Their outer headers are not
+  sticky; completed cards stop following the tail.
 - [x] Validation: all 124 Node tests; 51 focused Python tests / 50 subtests;
   frontend typecheck/lint and minified bundle rebuild. New projection module and
   Python regression file pass strict mypy with disallow-any expression/explicit/
@@ -46,14 +51,37 @@ untracked root `dist/` are preserved.
   ALS embeds frontend assets in its Rust binary; `npm run build` alone does not
   update an already running packaged runtime. No remote runtime was changed.
 
+### Compact activity correction after the first live test
+
+- [x] Inspect current local adapter/app-server logs and both connected ALS clients.
+  The test child emitted four shell commands but only one assistant message (the
+  final answer); message-only filtering concealed its work. Parent-directed
+  collaboration notifications did not carry the missing commentary text.
+- [x] Project command execution, MCP and dynamic-tool starts/results, bounded
+  output deltas and assistant-message deltas without changing parent metadata.
+- [x] Correct transient/durable placement and exclude sub-agent outer headers
+  from the sticky-header overlay. Regressions interleave parent work and multiple
+  children, then verify completion placement.
+- [x] Validation: 126 Node tests, 180 Rust library tests, 54 focused Python tests
+  with 50 subtests; frontend typecheck and minified rebuild; strict mypy plus
+  disallow-any checks for the new projection module and its regression tests.
+  Existing Rust cfg/dead-code warnings remain. This is not a whole-tree Python
+  typecheck claim.
+- [ ] Rebuild/reinstall ALS and refresh served client assets, then run a child
+  while the parent reads README or performs other visible work. Verify shell/MCP
+  updates, running fallback, non-sticky chrome, tail following, completion and
+  reload. Do not restart the runtime hosting this conversation automatically.
+- [ ] Refresh TE2's vendored ALS snapshot/OTA after an approved clean checkpoint;
+  the previous vendored snapshot does not contain this correction.
+
 ## Following release, alongside TE2 .357
 
 - [ ] Separately approve a full child transcript per active agent turn, hosted in
   an iframe with its own bounded scrollback/projection state machine.
 - [ ] Keep the child view at its bottom while following; preserve user scroll
   detachment and define idle/follow-up lifecycle, disposal and history hydration.
-- [ ] Freeze the completed turn's view into transcript history chronologically
-  where that turn ended. Preserve identity and anchor consistency across live,
+- [ ] Extend the compact completion-anchor lifecycle to the full iframe view.
+  Preserve identity and anchor consistency across live,
   replay, concurrent children, nested agents and reconnects.
 - [ ] Reuse the existing transcript projection contracts rather than inventing an
   unbounded nested timeline or allowing child state to control the parent.

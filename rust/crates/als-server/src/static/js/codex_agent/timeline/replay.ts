@@ -5,7 +5,7 @@ import {
 import { renderShellSummary } from '../shell_render.ts';
 import { mountShellOutputWindow } from '../shell_output_window.ts';
 import { ansiToHtml, hasAnsiSgr } from '../terminal_ansi.ts';
-import { applyCompactSubagent } from '../subagents/compact.ts';
+import { applyCompactSubagent, keepRunningSubagentsAtTail } from '../subagents/compact.ts';
 import type { ToggleableRow, UnknownRecord } from '../shared_types.ts';
 import type { TranscriptCardRecipe } from '../rpc/conversations/contract.ts';
 
@@ -757,6 +757,7 @@ export function bindTimelineReplay(ctx: TimelineReplayContext) {
     } else {
       timelineEl.appendChild(fragment);
     }
+    keepRunningSubagentsAtTail(timelineEl, state.bottomSpacerEl);
     syncPlanOverlayUi();
 
     if (pendingAgentPtyTerms.length) {

@@ -104,12 +104,29 @@ impl TranscriptCardIndex {
             return;
         }
 
+        // Compact progress is recorded for audit/replay parity, but remains an
+        // active projection. Its first durable anchor is the completed turn.
+        if role == "subagent_start" && record.get("compact").and_then(Value::as_bool) == Some(true)
+        {
+            return;
+        }
         if role == "subagent_end" {
             let Some(subagent_id) = clean_field(record, &["id", "subagent_id", "subagentId"])
             else {
                 return;
             };
             let card_id = subagent_card_id(&subagent_id);
+            if record.get("compact").and_then(Value::as_bool) == Some(true)
+                && !self.cards_by_id.contains_key(&card_id)
+            {
+                self.create_card(
+                    card_id,
+                    "subagent".to_owned(),
+                    None,
+                    IndexedCardEventSource::Line(line_index),
+                );
+                return;
+            }
             self.append_known_update(&card_id, line_index);
             return;
         }
@@ -513,6 +530,34 @@ mod tests {
         let recipe = index.indexed_recipe(0).unwrap();
         assert_eq!(recipe.events.len(), 3);
         assert_eq!(recipe.version, 3);
+    }
+
+    #[test]
+    fn compact_subagent_history_anchor_is_created_at_completion() {
+        let mut index = TranscriptCardIndex::default();
+        index.apply_record(
+            0,
+            &json!({"role":"subagent_start","compact":true,"id":"child:turn","text":"running"}),
+        );
+        index.apply_record(
+            1,
+            &json!({"role":"assistant","id":"parent","text":"Parent works meanwhile"}),
+        );
+        index.apply_record(2, &json!({"role":"subagent_start","compact":true,"id":"child:turn","text":"Shell output"}));
+        assert_eq!(index.total_cards(), 1);
+        assert!(index.event_metadata(0).is_none());
+        assert!(index.event_metadata(2).is_none());
+        index.apply_record(
+            3,
+            &json!({"role":"subagent_end","compact":true,"id":"child:turn","text":"Done"}),
+        );
+        assert_eq!(index.total_cards(), 2);
+        assert_eq!(index.event_metadata(3).unwrap().card_index, 1);
+        index.apply_record(
+            4,
+            &json!({"role":"assistant","id":"after","text":"After completion"}),
+        );
+        assert_eq!(index.event_metadata(4).unwrap().card_index, 2);
     }
 
     #[test]

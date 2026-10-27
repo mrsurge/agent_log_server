@@ -218,6 +218,7 @@ export function bindSubagentsCollapsible(ctx: SubagentsCollapsibleContext) {
       row.appendChild(body);
       applyTranscriptCardMetadata(row, metadata);
 
+      if (metadata?.compact === true) applyCompactSubagent(row, metadata);
       insertRow(row);
       makeCollapsible(row, `subagent:${id}`, false, {
         headerEl: header,
