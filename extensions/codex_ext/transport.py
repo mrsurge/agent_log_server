@@ -1028,6 +1028,10 @@ class CodexAppServerTransport:
         turn_id: Optional[str],
         request_id: Optional[str],
     ) -> None:
+        # Child bindings may have been established by an earlier queued activity
+        # after this event was read. Resolve again at ordered dispatch, not just IO.
+        if conversation_id is None:
+            conversation_id = self._resolve_conversation_id(None, payload)
         routed = await self.route_event(
             label=label,
             payload=payload,

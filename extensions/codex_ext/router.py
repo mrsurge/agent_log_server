@@ -20,6 +20,7 @@ from ..message_card_contracts import (
 )
 from .plan_utils import normalize_plan_steps, plan_signature, render_plan_markdown
 from .runtime_protocol import ProtocolSemanticSpec, RuntimeProtocol
+from .subagent_activity import SubagentActivityProjection
 from ..tool_card_contracts import build_tool_card_request, build_tool_card_response
 
 ObjectDict = Dict[str, object]
@@ -1525,6 +1526,7 @@ def _consume_live_reasoning_delta(delta: str, state: ObjectDict) -> Optional[str
 
 class CodexEventRouter:
     def __init__(self) -> None:
+        self._compact_subagents = SubagentActivityProjection()
         self._turn_states: Dict[str, ObjectDict] = {}
         self._item_states: Dict[str, ObjectDict] = {}
         self._approval_request_map: Dict[str, str] = {}
@@ -1533,6 +1535,7 @@ class CodexEventRouter:
         self._compactions: Dict[str, List[str]] = {}
 
     def reset(self) -> None:
+        self._compact_subagents = SubagentActivityProjection()
         self._turn_states.clear()
         self._item_states.clear()
         self._approval_request_map.clear()
@@ -2374,6 +2377,14 @@ class CodexEventRouter:
         event_spec = protocol.event_spec(event_type) if event_type else None
         notification_spec = protocol.notification_spec(label_lower)
         request_spec = protocol.server_request_spec(label_lower)
+
+        if _is_object_dict(payload):
+            compact = self._compact_subagents.route(
+                label_lower, payload, _payload_thread_id(payload, thread_id) or "",
+                _payload_turn_id(payload, turn_id) or "",
+            )
+            if compact is not None:
+                return compact
 
         if event_spec is not None and event_type is not None and _is_object_dict(payload):
             collab = self._route_collab_event(protocol, event_type, payload, thread_id, turn_id)

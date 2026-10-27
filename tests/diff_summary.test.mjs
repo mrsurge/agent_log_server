@@ -5,6 +5,8 @@ import hljs from 'highlight.js/lib/core';
 import rust from 'highlight.js/lib/languages/rust';
 import typescript from 'highlight.js/lib/languages/typescript';
 import python from 'highlight.js/lib/languages/python';
+import c from 'highlight.js/lib/languages/c';
+import cpp from 'highlight.js/lib/languages/cpp';
 import { parseHTML } from 'linkedom';
 
 const result = await build({
@@ -40,6 +42,8 @@ test('diff syntax follows file extensions and the summary is appended after the 
   hljs.registerLanguage('rust', rust);
   hljs.registerLanguage('typescript', typescript);
   hljs.registerLanguage('python', python);
+  hljs.registerLanguage('c', c);
+  hljs.registerLanguage('cpp', cpp);
   const previous = { hljs: globalThis.hljs, window: globalThis.window, HTMLElement: globalThis.HTMLElement, document: globalThis.document };
   globalThis.document = parseHTML('<html><body></body></html>').document;
   globalThis.hljs = hljs;
@@ -61,6 +65,16 @@ test('diff syntax follows file extensions and the summary is appended after the 
     });
     const patch = '@@ -0,0 +1 @@\n+pub fn main() {}';
     assert.match(renderer.formatDiff(patch, '/src/main.rs'), /hljs-keyword/);
+    for (const [extension, language, content] of [
+      ['c', 'c', 'int main(void) { return 0; }'],
+      ['cpp', 'cpp', 'class Example { public: int value; };'],
+      ['inc', 'cpp', 'class Example { public: int value; };'],
+    ]) {
+      const file = `/src/example.${extension}`;
+      assert.equal(utils.detectLangFromPath(file), language);
+      assert.equal(utils.resolveHljsLanguage(language), language);
+      assert.match(renderer.formatDiff(`@@ -0,0 +1 @@\n+${content}`, file), /hljs-keyword/);
+    }
     assert.match(renderer.formatDiff('@@ -0,0 +1 @@\n+interface Example { value: string; }', '/src/main.ts'), /hljs-keyword/);
     assert.doesNotMatch(renderer.formatDiff(patch, '/src/.unknown'), /hljs-/);
     const oldLine = '        from .explorer.contracts.git import parse_git_push_params';

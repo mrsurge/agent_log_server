@@ -6,6 +6,8 @@ import hljs from 'highlight.js/lib/core';
 import json from 'highlight.js/lib/languages/json';
 import plaintext from 'highlight.js/lib/languages/plaintext';
 import python from 'highlight.js/lib/languages/python';
+import c from 'highlight.js/lib/languages/c';
+import cpp from 'highlight.js/lib/languages/cpp';
 import diffModule from 'highlightjs-diff';
 import { parseHTML } from 'linkedom';
 
@@ -29,10 +31,39 @@ const diffLanguage = typeof diffModule === 'function' ? diffModule : diffModule.
 hljs.registerLanguage('json', json);
 hljs.registerLanguage('plaintext', plaintext);
 hljs.registerLanguage('python', python);
+hljs.registerLanguage('c', c);
+hljs.registerLanguage('cpp', cpp);
 hljs.registerLanguage('diff', diffLanguage);
 globalThis.hljs = hljs;
 const renderDocument = parseHTML('<html><body></body></html>').document;
 const utils = bindRenderUtils({ getState: () => ({}), documentRef: renderDocument });
+
+test('structured search/view cards highlight C, C++ and include files without changing text or line numbers', () => {
+  for (const [extension, language, content] of [
+    ['c', 'c', 'int main(void) { return 0; }'],
+    ['cpp', 'cpp', 'class Example { public: int value; };'],
+    ['inc', 'cpp', 'class Example { public: int value; };'],
+  ]) {
+    const path = `/src/example.${extension}`;
+    assert.equal(utils.detectLangFromPath(path), language);
+    const card = utils.renderStructuredViewLineTable([{ line_no: 42, content }], path);
+    assert.ok(card.querySelector('.hljs-keyword'), extension);
+    assert.equal(card.querySelector('.view-card-line-content').textContent, content);
+    assert.equal(card.querySelector('.view-card-line-no').textContent.trim(), '42');
+  }
+});
+
+test('production vendor entrypoint includes and registers both C-family grammars', async () => {
+  const built = await build({
+    entryPoints: ['rust/crates/als-server/src/static/js/codex_agent/vendor_runtime.ts'],
+    bundle: true, format: 'esm', platform: 'browser', write: false,
+    loader: { '.css': 'text' }, metafile: true,
+  });
+  for (const language of ['c', 'cpp']) {
+    assert.ok(Object.keys(built.metafile.inputs).some(path => path.endsWith(`/languages/${language}.js`)));
+    assert.match(built.outputFiles[0].text, new RegExp(`registerLanguage\\("${language}"`));
+  }
+});
 
 test('implicit JSON accepts complete objects and arrays regardless of HLJS relevance', () => {
   assert.equal(detectsImplicitJsonOutput('{"a":1}'), true);
