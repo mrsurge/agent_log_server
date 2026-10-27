@@ -1,5 +1,24 @@
 # Dependency-trim tracker
 
+## 2026-10-27 ALS RS 0.2.140 companion release preparation
+
+- [x] User approves synchronized Python/Cargo 0.2.140 metadata, source checkpoint,
+  VPS staging under /mnt/vdb, frontend/release checks and a Linux wheel with
+  bundled ordinary CPython 3.14. Current PyPI stable is 0.2.139; do not republish it.
+- [x] Preserve existing untracked dist/ and calculator APK, live harnesses and
+  protected Debian installations. No tags/uploads or Android build-route decision
+  are authorized by this preparation step.
+- [ ] Stage clean committed source and pinned submodules with exact provenance.
+- [ ] Run frontend typecheck/build and relevant stdio/RPC/subagent/packaging checks.
+- [ ] Build Linux native server/MCP and repaired private-Python wheel, strictly
+  below 100,000,000 bytes, with runtime-only dependency closure.
+- [ ] Validate fresh venv installation, native MCP tools/resource/EOF behavior,
+  bundled libpython and absent retired dependencies. Report failures before upload.
+- [ ] Resolve Android build route separately: current release builder explicitly
+  requires target-host/interpreter execution; do not silently compile on Pixel.
+- [ ] Final companion tag/publication approval, then synchronized TE2 vendor/
+  release validation. Preparation is not proof of publication or live acceptance.
+
 ## 2026-10-18 release preparation
 
 - [x] Final clean source d10a16c pushed/tagged 0.2.139; Linux/Android wheels
