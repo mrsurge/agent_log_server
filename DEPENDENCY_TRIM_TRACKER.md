@@ -8,16 +8,51 @@
 - [x] Preserve existing untracked dist/ and calculator APK, live harnesses and
   protected Debian installations. No tags/uploads or Android build-route decision
   are authorized by this preparation step.
-- [ ] Stage clean committed source and pinned submodules with exact provenance.
-- [ ] Run frontend typecheck/build and relevant stdio/RPC/subagent/packaging checks.
-- [ ] Build Linux native server/MCP and repaired private-Python wheel, strictly
+- [x] Stage clean source 3137509384a96784788bc90de70aa72ed23a24c0 on VPS under
+  /mnt/vdb/te2-release-0.2.356/sources/als-0.2.140; exact Ferrous 4cdf5db tree.
+  Preserve prior source/build roots; reuse copied caches, not live installations.
+- [x] Frontend typecheck/build pass with no tracked output drift; four subagent
+  UI tests, 35 focused Python tests and all 180 Rust tests pass.
+- [x] Build Linux native server/MCP and repaired private-Python wheel, strictly
   below 100,000,000 bytes, with runtime-only dependency closure.
-- [ ] Validate fresh venv installation, native MCP tools/resource/EOF behavior,
-  bundled libpython and absent retired dependencies. Report failures before upload.
-- [ ] Resolve Android build route separately: current release builder explicitly
-  requires target-host/interpreter execution; do not silently compile on Pixel.
-- [ ] Final companion tag/publication approval, then synchronized TE2 vendor/
-  release validation. Preparation is not proof of publication or live acceptance.
+  Python 3.14.6/Cargo 1.94.0, previously validated manylinux image a9cc5bf581bf;
+  fresh binary-only runtime closure includes FWS 0.2.65 and uvloop 0.23.0.
+  Final wheel: 57,348,437 bytes (54.69 MiB), SHA256
+  1e10fbe276ab38171ee49b843bc07f418446e945b2d2a013198dd08c679f71c7.
+  Path: /mnt/vdb/te2-release-0.2.356/als-0.2.140/output/.
+- [x] Twine/auditwheel checks and fresh container Python 3.14 plus Debian-host
+  Python 3.13 venv installs pass. Native MCP initializes, lists 38 tools/one
+  resource and exits cleanly on EOF; actual bundled 3.14 libpython is mapped.
+  Dependency checks and retired-stack absence checks pass. Build-only Twine was
+  installed separately after the existing build venv lacked it; not a runtime dep.
+  Logs: /mnt/vdb/te2-release-0.2.356/logs/als-0.2.140-{linux-build-v3,
+  linux-validation,debian-validation}.log. No publication or shared-runtime change.
+- [x] User explicitly selects isolated Pixel build as an exception to VPS-only
+  compilation, then authorizes isolated dependencies after noting the device wipe.
+  Python 3.14.8 / extracted Rust 1.99.1, four jobs; no global package install.
+  Fresh Termux headers require versioned C/C++ target aarch64-linux-android24;
+  build-only environment adjustment, no ALS source modification. Preserve initial
+  failed log; resumed cached build and MCP preparation succeed, exit 0.
+- [x] Android wheel: 9,794,152 bytes (9.34 MiB), SHA256
+  2f71db6948b0cddce439b2f4a1ea2738448de89de9540b6d8e27cfd7aeccdd70.
+  Pixel root ~/projects/als-0.2.140-release (moved out of .cache at user request);
+  entire workspace retained, venvs refreshed, artifact hash unchanged. Historical
+  build logs retain their original paths. Artifact/logs copied with
+  matching hash to /mnt/vdb/te2-release-0.2.356/als-0.2.140/android/. Twine passes.
+  All 26 target Python regressions pass. Fresh acceptance venv passes pip check,
+  actual native MCP 38 tools/one resource/EOF, system Python 3.14 ABI, uvloop-te2
+  and native FWS pipe. No retired dependency stack or private Linux Python.
+  Acceptance excludes isolated compiler paths/libraries. Server reaches its own
+  argument parser with stock Termux loader environment (unsupported --help
+  returns its explicit error); this is loader proof, not server live acceptance.
+- [x] User confirms ALS 0.2.140 live acceptance on both desktop and Termux.
+- [x] User authorizes publishing both validated ALS 0.2.140 wheels.
+- [x] Publish both companion wheels to PyPI 0.2.140; public PyPI JSON reports
+  both exact filenames, byte-identical SHA-256 hashes to the accepted artifacts.
+  Joint TE2 final-candidate/vendor validation remains separate from ALS acceptance.
+- Release tag 0.2.140 targets build source 3137509, not the later documentation-only
+  acceptance receipt commit. GitHub release assets use the same two PyPI wheels
+  and SHA-256 values above; no rebuild or version bump is required.
 
 ## 2026-10-18 release preparation
 
